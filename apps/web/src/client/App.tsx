@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
-import { Sidebar, TopNav, ConversationView, CodeBlock } from "@llteacher/ui";
-import type { SidebarSection, MessageData } from "@llteacher/ui";
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
+import { Sidebar, TopNav, ConversationView, renderToolPart } from "@llteacher/ui";
+import type { SidebarSection, MessageData, ToolPart } from "@llteacher/ui";
 
 /* ==========================================================================
    LLTeacher v2 — Chat-with-syllabus shell
@@ -58,94 +60,26 @@ const INITIAL_SECTIONS: SidebarSection[] = [
   { number: 5, title: "Hypothesis testing",        status: "pending"   },
 ];
 
-/* -- Sample conversation messages ------------------------------------------ */
-
-const INITIAL_MESSAGES: MessageData[] = [
-  {
-    id: "ai-1",
-    role: "ai",
-    content: (
-      <p>What do you think a hypothesis is, exactly?</p>
-    ),
-  },
-  {
-    id: "student-1",
-    role: "student",
-    content: "A guess about what's happening?",
-  },
-  {
-    id: "ai-2",
-    role: "ai",
-    content: (
-      <p>
-        Close. More specifically — a claim that can be tested. So if I
-        claimed this coin is fair, what would you do to test it?
-      </p>
-    ),
-  },
-  {
-    id: "student-2",
-    role: "student",
-    content: "Flip it a bunch of times and count heads?",
-  },
-  {
-    id: "ai-3",
-    role: "ai",
-    content: (
-      <p>
-        Exactly. Say you flip it 100 times and get 70 heads. Is that
-        suspicious?
-      </p>
-    ),
-  },
-  {
-    id: "student-3",
-    role: "student",
-    content: "Yeah, but I don't know how suspicious.",
-  },
-  {
-    id: "ai-4",
-    role: "ai",
-    content: (
-      <>
-        <p>
-          That&apos;s precisely what a p-value measures. It&apos;s the probability of
-          getting a result this extreme — or more — assuming the coin is
-          actually fair. If that probability is small, your data is suspicious.
-        </p>
-        <p>Want to compute one with R?</p>
-        <CodeBlock lang="r" output="[1] 47">
-{`flips <- rbinom(100, 1, 0.5)
-sum(flips)`}
-        </CodeBlock>
-      </>
-    ),
-  },
-  {
-    id: "student-4",
-    role: "student",
-    content: "So if I got 47 heads, that's not very suspicious?",
-  },
-  {
-    id: "ai-5",
-    role: "ai",
-    isStreaming: true,
-    content: (
-      <p>
-        Right. Now try running the same code but change 0.5 to 0.7 — what do
-        you get?
-      </p>
-    ),
-  },
-];
-
 /* ==========================================================================
    App — the root component
+
+   Chat state is owned by the AI SDK's useChat hook. We translate the
+   UIMessage[] it manages into the design system's MessageData[] for
+   ConversationView. Empty initial state — the student starts by typing.
    ========================================================================== */
 
 export default function App() {
   const { status: workerStatus, loading: workerLoading } = useWorkerStatus();
-  const [messages, setMessages] = useState<MessageData[]>(INITIAL_MESSAGES);
+
+  /* The AI SDK chat — owns messages + streaming state. */
+  const {
+    messages: aiMessages,
+    sendMessage,
+    status: chatStatus,
+  } = useChat({
+    transport: new DefaultChatTransport({ api: "/api/chat" }),
+  });
+
   const [sections, setSections] = useState<SidebarSection[]>(INITIAL_SECTIONS);
   const [currentSection, setCurrentSection] = useState(3);
   const [hintCount, setHintCount] = useState(3);
@@ -171,38 +105,62 @@ export default function App() {
     }
   }, [isSidebarCollapsed]);
 
+  /* Translate AI SDK UIMessages into the design system's MessageData. AI
+     messages get a ReactNode body assembled from their `parts` — text parts
+     become paragraphs, tool-* parts go through the renderToolPart registry
+     in @llteacher/ui/generative. Streaming state applies only to the last
+     AI message. */
+  const messages: MessageData[] = aiMessages.map((m, idx) => {
+    const isLast = idx === aiMessages.length - 1;
+    const isStreaming = isLast && chatStatus === "streaming";
+
+    if (m.role === "assistant") {
+      const content = (
+        <>
+          {m.parts.map((part, i) => {
+            if (part.type === "text") {
+              return <p key={`text-${m.id}-${i}`}>{part.text}</p>;
+            }
+            return renderToolPart(part as ToolPart, `tool-${m.id}-${i}`);
+          })}
+        </>
+      );
+      return {
+        id: m.id,
+        role: "ai" as const,
+        content,
+        isStreaming,
+      };
+    }
+
+    if (m.role === "user") {
+      const text = m.parts
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("");
+      return {
+        id: m.id,
+        role: "student" as const,
+        content: text,
+      };
+    }
+
+    /* system role messages — not user-facing in this UI; render empty */
+    return {
+      id: m.id,
+      role: "system" as const,
+      content: "",
+    };
+  });
+
   const handleSendMessage = (text: string) => {
-    /* Add the student message immediately */
-    const studentMsg: MessageData = {
-      id: `student-${Date.now()}`,
-      role: "student",
-      content: text,
-    };
-
-    /* Placeholder streaming AI response */
-    const aiMsg: MessageData = {
-      id: `ai-${Date.now()}`,
-      role: "ai",
-      isStreaming: true,
-      content: (
-        <p>Thinking about that — give me a moment…</p>
-      ),
-    };
-
-    setMessages((prev) => [...prev, studentMsg, aiMsg]);
+    sendMessage({ text });
     /* Each AI response counts as a hint — increments trigger the gold flash
        on the sidebar's hint-history-row count numeral. */
     setHintCount((n) => n + 1);
   };
 
   const handleSubmit = (sectionNumber: number) => {
-    const systemMsg: MessageData = {
-      id: `system-${Date.now()}`,
-      role: "system",
-      content: `· Section ${sectionNumber} submitted for grading ·`,
-    };
-    setMessages((prev) => [...prev, systemMsg]);
-
     /* Transition the section to submitted and trigger the gold-halo
        success animation on its ✓ indicator. The flag clears after the
        animation duration (~700ms) so the indicator settles into its

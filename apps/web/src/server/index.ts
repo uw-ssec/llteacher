@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { helloHandler } from "./routes/hello";
+import { chatHandler } from "./routes/chat";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -7,6 +8,7 @@ const app = new Hono<{ Bindings: Env }>();
 // to avoid Hono's prefix-stripping behavior that can cause /api/hello to not
 // match a sub-app's `/` handler.
 app.get("/api/hello", helloHandler);
+app.post("/api/chat", chatHandler);
 
 // Everything else: delegate to the static asset binding.
 // In dev, this proxies to Vite's pipeline (so HMR + source maps work).
