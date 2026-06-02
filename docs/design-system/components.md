@@ -232,3 +232,37 @@ The Heritage Gold pulsing dot loading indicator.
 ```
 
 Sizes: `"sm"`, `"md"`, `"lg"`. Reuses the `streaming-dot` CSS animation.
+
+---
+
+## Generative UI components
+
+Components rendered **inline inside an AI message** when the LLM calls a structured tool. The tool render registry in `packages/ui/src/generative/render.tsx` maps tool part types to these components. See [architecture/generative-ui.md](../architecture/generative-ui.md) for the end-to-end loop.
+
+### DefinitionCard
+
+A formal definition rendered as a poster-style typographic block with a custom hand-drawn SVG underline as its signature flourish. Produced by the LLM via the `showDefinition` tool — never instantiated by hand in app code (the tool render registry creates it from streamed tool args).
+
+```tsx
+<DefinitionCard
+  term="p-value"
+  body="The probability of observing a result this extreme — or more — assuming the null hypothesis is true."
+  isPartial={false}
+/>
+```
+
+Props: `term` (string), `body` (string), `isPartial` (boolean, default `false`).
+
+**Layout:** No card chrome (no border, no rounded panel). Subtle warm Heritage Gold wash at 4.5% opacity over the paper surface, 8px corner radius, soft warm shadow. Generous padding (`--space-6` all sides). Stacks vertically: term → signature SVG → body.
+
+**Term:** Geist Sans 600 at `--font-size-2xl` (31px), letter-spacing `-0.022em`, `--color-text`, tight line-height. The card's anchor element.
+
+**Signature underline:** A 120×8 SVG path drawn with a four-stop Bézier wave (`M2 5 Q 25 1, 50 4 T 95 3 T 118 4`), 1.8px stroke in `--color-accent-warm` (Heritage Gold), rounded caps. Animates on mount via `stroke-dashoffset` over 700ms after a 240ms delay — the AI body fade-in completes first, then the gold line traces itself in. Respects `prefers-reduced-motion`: the underline appears in its drawn state without animating.
+
+**Body:** Geist Sans regular at `--font-size-base`, `--leading-body` line-height, `--color-text`.
+
+**Streaming state (`isPartial`):** Renders the entire card at 50% opacity. The tool render registry passes `isPartial = part.state === "input-streaming"` so the card telegraphs "still being generated" while the LLM streams in the args. Becomes fully opaque when `part.state === "input-available"`.
+
+**Accessibility:** The `<aside>` element carries `aria-label={`Definition of ${term}`}`. All decorative SVG and ornaments use `aria-hidden="true"`. Text content uses semantic foreground tokens so contrast against the warm wash meets WCAG AA.
+
+**CSS hook:** `.definition-card`, `.definition-card--partial`, `.definition-card__term`, `.definition-card__signature`, `.definition-card__body` in `packages/ui/styles.css`.
