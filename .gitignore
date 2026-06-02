@@ -8,6 +8,11 @@ db.sqlite3
 db.sqlite3-journal
 media/
 
+# Project-specific
+*.env
+/.claude/
+/.agents/
+
 # Python
 *.py[cod]
 *$py.class

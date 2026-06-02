@@ -50,3 +50,12 @@ dev-dependencies = [
     "flake8",
     "mypy",
 ]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tool.pixi.pypi-dependencies]
+llteacher = { path = ".", editable = true }
+
+[tool.pixi.tasks]
