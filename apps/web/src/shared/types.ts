@@ -1,0 +1,17 @@
+export type HelloResponse = {
+  message: string;
+  ping_id: string;
+};
+
+// Cloudflare Worker bindings + secrets. Augmented in Phase 1+.
+declare global {
+  interface Env {
+    DATABASE_URL: string;
+    WORKOS_API_KEY: string;
+    WORKOS_CLIENT_ID: string;
+    OPENROUTER_API_KEY: string;
+    ASSETS: Fetcher;
+  }
+}
+
+export {};

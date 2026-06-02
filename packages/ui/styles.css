@@ -1,0 +1,1438 @@
+/* ==========================================================================
+   Google Fonts — Geist type system
+   Body / UI: Geist Sans  (modern, neutral-with-character, code-adjacent)
+   Code / meta: Geist Mono (pairs by design with Geist Sans)
+
+   CRITICAL ORDER: font @import must come before @import "tailwindcss"
+   ========================================================================== */
+
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap");
+
+@import "tailwindcss";
+
+/* ==========================================================================
+   LLTeacher Design System — v2 Chat-with-syllabus aesthetic
+   Three-tier token architecture for Tailwind 4 CSS-first configuration.
+
+   COLOR IDENTITY — University of Washington brand palette
+     Chrome surface     Husky Purple   #32006e  (top nav + sidebar — dominant)
+     Chrome hover       Spirit Purple  #4b2e83  (sidebar hover bg, active state)
+     AI-voice marker    Heritage Gold  #85754d  (AI tick + streaming pulse only)
+     Content ground     Warm neutrals  #FAFAF7  (main conversation column)
+
+   The three zones:
+     Top nav   → UW Husky Purple surface, 56px full-bleed
+     Sidebar   → UW Husky Purple surface, 240px wide
+     Main col  → Warm off-white (#FAFAF7) — comfortable reading ground
+
+   Per UW brand guidance, PRIMARY colors "should be used most often."
+   Husky Purple IS the primary. It now dominates the chrome.
+   See https://www.washington.edu/brand/graphic-elements/primary-color-palette/
+
+   Tier 1  Global raw values   (warm neutral scale + UW Purple + Heritage Gold)
+   Tier 2  Semantic aliases    (bg, surface, border, text, accent, accent-warm,
+                                nav-*, sidebar-*)
+   Tier 3  Component utilities (message layout, sidebar, composer, top-nav)
+
+   Dark mode seam: [data-theme="dark"] overrides Tier 2 only.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Tier 1 — Raw palette values
+   Warm off-white ground. UW Husky Purple as dominant accent. Heritage Gold
+   reserved for AI-voice markers (semantic moment, not decoration).
+   -------------------------------------------------------------------------- */
+
+:root {
+  /* Warm neutral scale — background and surfaces */
+  --raw-bg:              #FAFAF7;   /* warm off-white page ground */
+  --raw-surface:         #F2EFE9;   /* user message bubble, hover states */
+  --raw-surface-raised:  #F6F3ED;   /* sidebar background */
+  --raw-border:          #E5E1D8;   /* standard ruled border */
+  --raw-border-strong:   #D4CFC5;   /* stronger dividers */
+
+  /* Code surfaces */
+  --raw-code-bg:         #F4F1EA;   /* code block background */
+  --raw-code-output-bg:  #EDE9DF;   /* R output block — slightly darker */
+
+  /* Text scale — warm, not clinical black */
+  --raw-text:            #1A1A1A;   /* primary deep warm black */
+  --raw-text-secondary:  #6B6760;   /* warm gray for muted UI */
+  --raw-text-muted:      #94908A;   /* very muted — placeholders, metadata */
+
+  /* UW Husky Purple — primary brand / dominant chrome surface */
+  --raw-accent:          #32006e;   /* UW Husky Purple — top nav + sidebar bg */
+  --raw-accent-dark:     #4b2e83;   /* UW Spirit Purple — hover bg, active state */
+  --raw-accent-faint:    #EFEAF7;   /* very light lavender wash for selected states */
+  --raw-accent-deeper:   #26005A;   /* darker purple — nav bottom border */
+
+  /* UW Heritage Gold variants */
+  --raw-accent-warm:        #85754d;   /* UW Heritage Gold — AI-voice markers on paper */
+  --raw-accent-warm-hover:  #A08E60;   /* slightly brighter for hover */
+  --raw-gold-web:           #E8E3D3;   /* UW Husky Gold web — sidebar text on purple */
+  --raw-gold-print:         #B7A57A;   /* UW Husky Gold print — HW label, ✓ tick on purple */
+  --raw-spirit-gold:        #FFC700;   /* UW Spirit Gold — current-section ● indicator */
+
+  /* Semantic states */
+  --raw-error:    #C92A2A;
+  --raw-success:  #2B8A3E;
+  --raw-warning:  #E67700;
+
+  /* --------------------------------------------------------------------------
+     Typography scale — 1.250 ratio (Major Third), 16px base
+     -------------------------------------------------------------------------- */
+  --font-size-xs:    0.75rem;     /* 12px — mono labels, metadata */
+  --font-size-sm:    0.875rem;    /* 14px — sidebar items, captions */
+  --font-size-base:  1rem;        /* 16px — body, messages */
+  --font-size-lg:    1.25rem;     /* 20px */
+  --font-size-xl:    1.5625rem;   /* 25px */
+  --font-size-2xl:   1.9375rem;   /* 31px */
+
+  /* --------------------------------------------------------------------------
+     Line heights
+     -------------------------------------------------------------------------- */
+  --leading-tight:    1.3;
+  --leading-normal:   1.5;
+  --leading-body:     1.7;     /* message body — generous for readability */
+  --leading-code:     1.5;     /* code block */
+
+  /* --------------------------------------------------------------------------
+     Font weights
+     -------------------------------------------------------------------------- */
+  --weight-normal:    400;
+  --weight-medium:    500;
+  --weight-semibold:  600;
+
+  /* --------------------------------------------------------------------------
+     Font families — Geist system
+     -------------------------------------------------------------------------- */
+  --font-sans:  "Geist", "Helvetica Neue", Arial, sans-serif;
+  --font-mono:  "Geist Mono", "Menlo", "Courier New", monospace;
+
+  /* --------------------------------------------------------------------------
+     Spacing scale — 4px grid
+     -------------------------------------------------------------------------- */
+  --space-1:   0.25rem;
+  --space-2:   0.5rem;
+  --space-3:   0.75rem;
+  --space-4:   1rem;
+  --space-5:   1.25rem;
+  --space-6:   1.5rem;
+  --space-8:   2rem;
+  --space-10:  2.5rem;
+  --space-12:  3rem;
+  --space-16:  4rem;
+
+  /* --------------------------------------------------------------------------
+     Border radius
+     -------------------------------------------------------------------------- */
+  --radius-sm:   4px;
+  --radius-md:   8px;
+  --radius-lg:   12px;
+
+  /* Student message bubble — distinctive asymmetric radius */
+  --radius-msg-student-tl: 16px;
+  --radius-msg-student-tr: 16px;
+  --radius-msg-student-br: 4px;   /* the "pointing" corner */
+  --radius-msg-student-bl: 16px;
+
+  /* --------------------------------------------------------------------------
+     Layout
+     -------------------------------------------------------------------------- */
+  --sidebar-width:      240px;
+  --conversation-max:   720px;
+
+  /* --------------------------------------------------------------------------
+     Z-index
+     -------------------------------------------------------------------------- */
+  --z-sticky: 100;
+  --z-overlay: 200;
+}
+
+/* ==========================================================================
+   Tier 2 — Semantic aliases (light theme)
+   This block is the only thing that changes for dark mode.
+   ========================================================================== */
+
+:root {
+  /* Surfaces */
+  --color-bg:            var(--raw-bg);
+  --color-surface:       var(--raw-surface);
+  --color-surface-raised: var(--raw-surface-raised);
+  --color-code-bg:       var(--raw-code-bg);
+  --color-code-output-bg: var(--raw-code-output-bg);
+
+  /* Borders */
+  --color-border:        var(--raw-border);
+  --color-border-strong: var(--raw-border-strong);
+
+  /* Text */
+  --color-text:          var(--raw-text);
+  --color-text-secondary: var(--raw-text-secondary);
+  --color-text-muted:    var(--raw-text-muted);
+
+  /* Accent — UW Husky Purple, the dominant structural accent */
+  --color-accent:        var(--raw-accent);
+  --color-accent-hover:  var(--raw-accent-dark);
+  --color-accent-faint:  var(--raw-accent-faint);
+
+  /* Accent warm — UW Heritage Gold, reserved for AI-voice markers */
+  --color-accent-warm:        var(--raw-accent-warm);
+  --color-accent-warm-hover:  var(--raw-accent-warm-hover);
+
+  /* Semantic alias for the warm accent's intended use */
+  --color-stream:     var(--color-accent-warm);  /* streaming pulse */
+
+  /* Semantic states */
+  --color-error:   var(--raw-error);
+  --color-success: var(--raw-success);
+  --color-warning: var(--raw-warning);
+
+  /* --------------------------------------------------------------------------
+     Nav surface tokens — UW Husky Purple chrome (top navigation bar)
+     All text/bg pairs on #32006e verified ≥4.5:1 for normal-weight text.
+     -------------------------------------------------------------------------- */
+  --color-nav-bg:          var(--raw-accent);          /* Husky Purple — full-bleed bar */
+  --color-nav-text:        #FFFFFF;                    /* wordmark — white ~13:1 ✓ */
+  --color-nav-text-muted:  var(--raw-gold-web);        /* breadcrumb, affiliation tag ~11:1 ✓ */
+  --color-nav-border:      var(--raw-accent-deeper);   /* subtle 1px bottom rule */
+
+  /* --------------------------------------------------------------------------
+     Sidebar surface tokens — UW Husky Purple chrome (section progress rail)
+     Text/bg pairs on #32006e:
+       #FFFFFF  ~13:1 ✓ AAA   — current section title
+       #E8E3D3  ~11:1 ✓ AAA  — default section title (Husky Gold web)
+       #B7A57A  ~5.9:1 ✓ AA  — HW label, ✓ submitted tick
+       #FFC700  ~11.2:1 ✓ AAA — ● current indicator (Spirit Gold)
+       #9B8BB8  ~3.7:1  decorative only — submitted section text (status also
+                         reinforced by ✓ tick, so non-text exception applies)
+       #8B73B5  ~3.1:1  AA-large only — worker colophon, purely ambient
+     -------------------------------------------------------------------------- */
+  --color-sidebar-bg:           var(--raw-accent);          /* Husky Purple surface */
+  --color-sidebar-text:         var(--raw-gold-web);        /* Husky Gold web — default title */
+  --color-sidebar-text-current: #FFFFFF;                    /* white — current section title */
+  --color-sidebar-text-muted:   #9B8BB8;                    /* muted lavender — submitted title (decorative) */
+  --color-sidebar-text-faint:   #8B73B5;                    /* faint lavender — worker colophon (decorative) */
+  --color-sidebar-hover-bg:     var(--raw-accent-dark);     /* Spirit Purple — row hover fill */
+  --color-sidebar-divider:      var(--raw-accent-dark);     /* Spirit Purple — hr rule */
+  --color-sidebar-hw-label:     var(--raw-gold-print);      /* Husky Gold print — HW label */
+
+  /* Status indicator colors (used on purple bg) */
+  --color-status-submitted:     var(--raw-gold-print);      /* Husky Gold print — ✓ tick */
+  --color-status-current:       var(--raw-spirit-gold);     /* Spirit Gold — ● active dot */
+  --color-status-pending:       #6E5A9C;                    /* muted lavender — ○ outline (decorative) */
+
+  /* --------------------------------------------------------------------------
+     Focus ring override for elements on purple chrome surfaces.
+     The default :focus-visible ring uses --color-accent (#32006e Husky Purple),
+     which is invisible against the sidebar/top-nav purple backgrounds.
+     This token swaps it to Spirit Gold so the ring remains perceptible.
+     -------------------------------------------------------------------------- */
+  --color-focus-chrome:         var(--raw-spirit-gold);     /* #FFC700 Spirit Gold — focus ring on purple bg */
+}
+
+/* ==========================================================================
+   Dark theme — architect tokens, not applied by default.
+   Apply by setting data-theme="dark" on <html>.
+   ========================================================================== */
+
+[data-theme="dark"] {
+  --color-bg:            #1A1A1A;
+  --color-surface:       #222220;
+  --color-surface-raised: #272724;
+  --color-code-bg:       #1E1D1B;
+  --color-code-output-bg: #232220;
+
+  --color-border:        #2E2C28;
+  --color-border-strong: #3A3834;
+
+  --color-text:          #FAFAF7;
+  --color-text-secondary: #B5B0AA;
+  --color-text-muted:    #7A7570;
+
+  /* UW Accent Lavender on dark — UW's own purple designed for dark contexts */
+  --color-accent:        #C5B4E3;   /* UW Accent Lavender */
+  --color-accent-hover:  #D4C8EC;   /* lighter for hover */
+  --color-accent-faint:  #2A2335;   /* dark mauve wash */
+
+  /* UW Husky Gold (print value) — works as the warm marker on dark */
+  --color-accent-warm:        #B7A57A;   /* UW Husky Gold */
+  --color-accent-warm-hover:  #C8B88C;
+
+  --color-stream:     var(--color-accent-warm);
+}
+
+/* ==========================================================================
+   Tailwind 4 @theme — register semantic tokens as Tailwind utilities
+   ========================================================================== */
+
+@theme {
+  /* Font families */
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  /* Text colors */
+  --color-text:           var(--color-text);
+  --color-text-secondary: var(--color-text-secondary);
+  --color-text-muted:     var(--color-text-muted);
+
+  /* Surface colors */
+  --color-bg:             var(--color-bg);
+  --color-surface:        var(--color-surface);
+  --color-surface-raised: var(--color-surface-raised);
+  --color-code-bg:        var(--color-code-bg);
+
+  /* Border colors */
+  --color-border:         var(--color-border);
+  --color-border-strong:  var(--color-border-strong);
+
+  /* Accent — UW Husky Purple (primary) */
+  --color-accent:         var(--color-accent);
+  --color-accent-hover:   var(--color-accent-hover);
+  --color-accent-faint:   var(--color-accent-faint);
+
+  /* Focus ring override — Spirit Gold for elements on purple chrome */
+  --color-focus-chrome:   var(--color-focus-chrome);
+
+  /* Accent warm — UW Heritage Gold (AI-voice markers) */
+  --color-accent-warm:        var(--color-accent-warm);
+  --color-accent-warm-hover:  var(--color-accent-warm-hover);
+  --color-stream:             var(--color-stream);
+
+  /* Semantic states */
+  --color-error:   var(--color-error);
+  --color-success: var(--color-success);
+  --color-warning: var(--color-warning);
+}
+
+/* ==========================================================================
+   Base resets and document defaults
+   ========================================================================== */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--leading-body);
+  color: var(--color-text);
+  background-color: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Focus ring — thin UW Husky Purple, no glow */
+:focus-visible {
+  outline: 1.5px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Focus ring override — Spirit Gold for elements on Husky Purple chrome.
+   The default #32006e ring is invisible on the purple sidebar/top-nav bg. */
+.sidebar :focus-visible,
+.top-nav :focus-visible {
+  outline-color: var(--color-focus-chrome);
+}
+
+/* Composer textarea — suppress any focus outline. The composer's focus state
+   is communicated by the .composer-wrap:focus-within border (Heritage Gold) +
+   the gold caret + the enter ↵ hint. A focus ring on the textarea itself
+   would be a second redundant focus indicator.
+   This rule lives OUTSIDE @layer components so it wins the cascade against
+   the unlayered global :focus-visible above. */
+.composer-textarea:focus,
+.composer-textarea:focus-visible {
+  outline: none;
+}
+
+/* ==========================================================================
+   App shell layout — sidebar + main conversation column
+   ========================================================================== */
+
+@layer components {
+
+  /* -------------------------------------------------------------------------
+     .page-frame — the outermost container for the three-zone vertical shell:
+       [top-nav full-bleed 56px]
+       [sidebar 240px] [main conversation max 720px]
+     ------------------------------------------------------------------------- */
+  .page-frame {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* -------------------------------------------------------------------------
+     .top-nav — full-bleed UW Husky Purple header bar.
+     Three zones: wordmark (left) · breadcrumb (center) · user chip (right).
+     56px tall. 1px bottom rule in a deeper purple.
+     ------------------------------------------------------------------------- */
+  .top-nav {
+    display: flex;
+    align-items: center;
+    height: 56px;
+    flex-shrink: 0;
+    padding-inline: var(--space-6);
+    background-color: var(--color-nav-bg);
+    border-block-end: 1px solid var(--color-nav-border);
+    z-index: var(--z-sticky);
+  }
+
+  .top-nav__wordmark-group {
+    display: flex;
+    align-items: baseline;
+    gap: 0;
+    flex-shrink: 0;
+  }
+
+  .top-nav__wordmark {
+    font-family: var(--font-sans);
+    font-size: 17px;
+    font-weight: var(--weight-semibold);
+    letter-spacing: -0.01em;
+    color: var(--color-nav-text);
+    line-height: 1;
+  }
+
+  .top-nav__tag {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: var(--weight-normal);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--color-nav-text-muted);
+    margin-inline-start: 0.5em;
+    line-height: 1;
+  }
+
+  .top-nav__breadcrumb {
+    flex: 1;
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    font-weight: var(--weight-normal);
+    letter-spacing: 0.1em;
+    font-variant: small-caps;
+    color: var(--color-nav-text-muted);
+    line-height: 1;
+    /* prevent overflow into the flanking zones */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding-inline: var(--space-4);
+  }
+
+  .top-nav__user-group {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+  }
+
+  .top-nav__user-chip {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+  }
+
+  .top-nav__user-initials {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background-color: #B7A57A;   /* Husky Gold print chip */
+    color: #32006e;               /* Husky Purple initials */
+    font-family: var(--font-sans);
+    font-size: 11px;
+    font-weight: var(--weight-semibold);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .top-nav__user-chevron {
+    color: var(--color-nav-text-muted);
+    font-size: 16px;
+    line-height: 1;
+    transition: transform 140ms ease-out;
+    user-select: none;
+  }
+
+  /* -------------------------------------------------------------------------
+     .app-shell — the sidebar + main row below the top nav
+     ------------------------------------------------------------------------- */
+  .app-shell {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+    background-color: var(--color-bg);
+  }
+
+  /* -------------------------------------------------------------------------
+     .sidebar — the section progress rail on UW Husky Purple.
+     Not a thread list. Not navigation. A homework syllabus.
+     Surface: #32006e — same purple as the top nav for unified chrome.
+     ------------------------------------------------------------------------- */
+  .sidebar {
+    width: var(--sidebar-width);
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    background-color: var(--color-sidebar-bg);
+    border-inline-end: none;   /* no warm border — chrome is self-contained */
+    overflow-y: auto;
+    overflow-x: hidden;        /* prevents text reflow flicker during collapse */
+    padding: var(--space-6) var(--space-4);
+    transition:
+      width 240ms ease-out,
+      padding-inline 240ms ease-out;
+  }
+
+  /* Collapsed rail — 64px wide, only indicators + icons visible.
+     The width animates; text and labels are display:none for clean reflow. */
+  .sidebar--collapsed {
+    width: 64px;
+    padding-inline: var(--space-2);
+  }
+
+  .sidebar--collapsed .sidebar__hw-label,
+  .sidebar--collapsed .section-item__number,
+  .sidebar--collapsed .section-item__title,
+  .sidebar--collapsed .hint-history-row__label,
+  .sidebar--collapsed .submit-action__body,
+  .sidebar--collapsed .sidebar__worker {
+    display: none;
+  }
+
+  /* Indicator-only rows when collapsed — center the indicator in the rail */
+  .sidebar--collapsed .section-item {
+    justify-content: center;
+    gap: 0;
+    padding-inline: 0;
+  }
+
+  /* Hint history collapses to a vertical icon + count stack */
+  .sidebar--collapsed .hint-history-row {
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding-inline: 0;
+  }
+  .sidebar--collapsed .hint-history-row__count {
+    margin-inline-start: 0;
+  }
+
+  /* Submit button collapses to just the paper plane glyph */
+  .sidebar--collapsed .submit-action {
+    justify-content: center;
+    gap: 0;
+    padding: var(--space-2);
+  }
+
+  /* Collapse toggle — small chevron at the top-right of the expanded sidebar,
+     centered when the sidebar is collapsed. */
+  .sidebar__top {
+    display: flex;
+    justify-content: flex-end;
+    margin-block-end: var(--space-3);
+    flex-shrink: 0;
+  }
+
+  .sidebar--collapsed .sidebar__top {
+    justify-content: center;
+  }
+
+  .sidebar__collapse-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    background: none;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    color: var(--color-sidebar-text);
+    padding: 0;
+    transition:
+      background-color 120ms ease-out,
+      color 120ms ease-out;
+  }
+
+  .sidebar__collapse-toggle:hover {
+    background-color: var(--color-sidebar-hover-bg);
+    color: #FFFFFF;
+  }
+
+  .sidebar__collapse-toggle:focus-visible {
+    outline-color: var(--color-focus-chrome);
+    outline-offset: 2px;
+  }
+
+  .sidebar__hw-label {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    font-weight: var(--weight-medium);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--color-sidebar-hw-label);   /* Husky Gold print — warm metal in purple */
+    margin-block-end: var(--space-4);
+    line-height: var(--leading-tight);
+  }
+
+  .sidebar__section-list {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 var(--space-4) 0;
+  }
+
+  .sidebar__divider {
+    border: none;
+    border-block-start: 1px solid var(--color-sidebar-divider);
+    margin-block: var(--space-4);
+  }
+
+  .sidebar__utility {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    font-size: var(--font-size-sm);
+    color: var(--color-sidebar-text);
+  }
+
+  /* -------------------------------------------------------------------------
+     .hint-history-row — three-column row: indicator · label · count.
+     Echoes .section-item rhythm: small square mark · readable text · meta.
+     ------------------------------------------------------------------------- */
+  .hint-history-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    width: 100%;
+    padding: var(--space-1-5, 0.375rem) var(--space-2);
+    cursor: pointer;
+    background: none;
+    border: none;
+    border-radius: var(--radius-sm);
+    transition: background-color 120ms ease-out;
+    text-align: left;
+  }
+
+  .hint-history-row:hover {
+    background-color: var(--color-sidebar-hover-bg);   /* Spirit Purple */
+  }
+
+  .hint-history-row__indicator {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 8px;
+    color: var(--raw-gold-print);    /* Husky Gold print — matches ✓ ticks */
+    width: 14px;
+    text-align: center;
+    line-height: 1;
+    margin-block-start: 0.15em;   /* optical alignment with title baseline */
+  }
+
+  .hint-history-row__label {
+    font-family: var(--font-sans);
+    font-size: var(--font-size-sm);
+    color: var(--color-sidebar-text);    /* #E8E3D3 Husky Gold web — same as section titles */
+    line-height: var(--leading-normal);
+    position: relative;
+    transition: color 120ms ease-out;
+  }
+
+  /* Hover underline on label only — reuses the section-item pattern */
+  .hint-history-row__label::after {
+    content: "";
+    position: absolute;
+    bottom: -1px;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background-color: var(--raw-gold-print);   /* Husky Gold print */
+    transform: scaleX(0);
+    transform-origin: left;
+    transition: transform 120ms ease-out;
+  }
+
+  .hint-history-row:hover .hint-history-row__label {
+    color: #FFFFFF;
+  }
+
+  .hint-history-row:hover .hint-history-row__label::after {
+    transform: scaleX(1);
+  }
+
+  .hint-history-row__count {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);   /* 12px */
+    color: var(--raw-gold-print);     /* Husky Gold print — same family as HW label */
+    margin-inline-start: auto;        /* right-aligned within the row */
+    line-height: 1;
+    margin-block-start: 0.1em;        /* optical alignment */
+  }
+
+  .sidebar__spacer {
+    flex: 1;
+  }
+
+  .sidebar__worker {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    color: var(--color-sidebar-text-faint);   /* ~3.1:1 — ambient colophon only */
+    letter-spacing: 0.04em;
+    border-block-start: 1px solid var(--color-sidebar-divider);
+    padding-block-start: var(--space-4);
+    margin-block-start: var(--space-4);
+  }
+
+  /* -------------------------------------------------------------------------
+     .section-item — a single row in the sidebar progress list.
+     Sits on Husky Purple (#32006e) background.
+     Hover bg: Spirit Purple (#4b2e83) — one step lighter.
+     Hover underline: Husky Gold print (#B7A57A) — must contrast on purple bg.
+     ------------------------------------------------------------------------- */
+  .section-item {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    padding: var(--space-1-5, 0.375rem) var(--space-2);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: background-color 120ms ease-out;
+  }
+
+  .section-item:hover {
+    background-color: var(--color-sidebar-hover-bg);   /* Spirit Purple */
+  }
+
+  .section-item__indicator {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    width: 14px;
+    text-align: center;
+    line-height: 1;
+    margin-block-start: 0.15em;  /* optical alignment */
+  }
+
+  /* ✓ submitted — Husky Gold print (~5.9:1 on purple ✓ AA) */
+  .section-item__indicator--submitted {
+    color: var(--color-status-submitted);
+  }
+
+  /* ● current — Spirit Gold bright (#FFC700, ~11.2:1 on purple ✓ AAA) */
+  .section-item__indicator--current {
+    color: var(--color-status-current);
+  }
+
+  /* ○ pending — muted lavender outline (#6E5A9C) — decorative indicator */
+  .section-item__indicator--pending {
+    color: var(--color-status-pending);
+  }
+
+  /* Section N number — same color as title, Geist Mono */
+  .section-item__number {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    color: var(--color-sidebar-text);   /* matches default title color */
+    flex-shrink: 0;
+  }
+
+  .section-item__title {
+    font-family: var(--font-sans);
+    font-size: var(--font-size-sm);
+    color: var(--color-sidebar-text);   /* #E8E3D3 Husky Gold web ~11:1 ✓ */
+    line-height: var(--leading-normal);
+    position: relative;
+    transition: color 120ms ease-out;
+  }
+
+  /* Hover underline: Husky Gold print — must contrast on purple bg */
+  .section-item__title::after {
+    content: "";
+    position: absolute;
+    bottom: -1px;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background-color: var(--color-sidebar-hw-label);   /* #B7A57A Husky Gold print */
+    transform: scaleX(0);
+    transform-origin: left;
+    transition: transform 120ms ease-out;
+  }
+
+  .section-item:hover .section-item__title {
+    color: #FFFFFF;
+  }
+
+  .section-item:hover .section-item__title::after {
+    transform: scaleX(1);
+  }
+
+  /* Current — white text, 500 weight */
+  .section-item--current .section-item__title {
+    color: var(--color-sidebar-text-current);   /* #FFFFFF ~13:1 ✓ */
+    font-weight: var(--weight-medium);
+  }
+
+  /* Also update the Section N number for the current section to match */
+  .section-item--current .section-item__number {
+    color: var(--color-sidebar-text-current);
+  }
+
+  /* Submitted — muted lavender; status also reinforced by ✓ tick */
+  .section-item--submitted .section-item__title {
+    color: var(--color-sidebar-text-muted);   /* #9B8BB8 ~3.7:1 — decorative exception */
+  }
+
+  .section-item--submitted .section-item__number {
+    color: var(--color-sidebar-text-muted);
+  }
+
+  /* -------------------------------------------------------------------------
+     .submit-action — bordered button with two-line typography.
+     The highest-leverage action in the homework. Gets real visual weight
+     without violating the "no vivid filled pills" principle.
+
+     Rest:   transparent bg, 1px Husky Gold print border, Gold web text
+     Hover:  Spirit Purple fill, Spirit Gold border, white text, arrow +4px
+     Active: deeper purple fill, scale(0.99) tactile feedback
+     ------------------------------------------------------------------------- */
+  .submit-action {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.4em;
+    width: 100%;
+    font-family: var(--font-sans);
+    font-size: var(--font-size-sm);
+    font-weight: var(--weight-medium);
+    color: var(--color-sidebar-text);   /* #E8E3D3 Husky Gold web */
+    text-decoration: none;
+    cursor: pointer;
+    background: transparent;
+    border: 1px solid var(--raw-gold-print);   /* Husky Gold print — structural metal */
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-sm);           /* 4px — sharp, matches HW label register */
+    transition:
+      background-color 140ms ease-out,
+      border-color     140ms ease-out,
+      color            140ms ease-out;
+    text-align: left;
+  }
+
+  .submit-action:hover {
+    background-color: var(--color-sidebar-hover-bg);   /* Spirit Purple #4b2e83 */
+    border-color: var(--raw-spirit-gold);              /* Spirit Gold on hover */
+    color: #FFFFFF;
+  }
+
+  .submit-action:active {
+    background-color: var(--raw-accent-deeper);   /* #26005A deeper purple */
+    transform: scale(0.99);
+    transition-duration: 100ms;
+  }
+
+  .submit-action__arrow {
+    display: inline-block;
+    flex-shrink: 0;
+    color: var(--raw-gold-print);    /* Husky Gold print at rest */
+    margin-block-start: 0.1em;       /* optical alignment to label baseline */
+    transition: transform 140ms ease-out, color 140ms ease-out;
+  }
+
+  .submit-action:hover .submit-action__arrow {
+    transform: translateX(4px);
+    color: #FFFFFF;
+  }
+
+  /* Two-line typographic body inside the button */
+  .submit-action__body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2em;
+  }
+
+  .submit-action__label {
+    line-height: var(--leading-tight);
+  }
+
+  .submit-action__meta {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);   /* 12px */
+    font-weight: var(--weight-normal);
+    font-variant: small-caps;
+    letter-spacing: 0.06em;
+    color: #8B73B5;                   /* faint lavender — same as worker colophon */
+    line-height: 1;
+    transition: color 140ms ease-out;
+  }
+
+  .submit-action:hover .submit-action__meta {
+    color: rgba(255, 255, 255, 0.65);   /* soften the meta line on hover */
+  }
+
+  /* -------------------------------------------------------------------------
+     .conversation-column — main content zone
+     Single-column scrolling conversation, max 720px, centered.
+     ------------------------------------------------------------------------- */
+  .conversation-column {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    /* Entrance fade on load */
+    animation: conversation-enter 240ms ease-out both;
+  }
+
+  @keyframes conversation-enter {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .conversation-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding-block: var(--space-6);
+  }
+
+  .conversation-inner {
+    max-width: var(--conversation-max);
+    margin-inline: auto;
+    padding-inline: var(--space-8);
+  }
+
+  /* -------------------------------------------------------------------------
+     .breadcrumb — tiny mono location marker at top of main column
+     "STATS 311 · HW 3 · Section 3 P-VALUES"
+     ------------------------------------------------------------------------- */
+  .breadcrumb {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    font-weight: var(--weight-normal);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    font-variant: small-caps;
+    padding-block-end: var(--space-6);
+    border-block-end: 1px solid var(--color-border);
+    margin-block-end: var(--space-6);
+  }
+
+  /* -------------------------------------------------------------------------
+     .message — a single turn in the conversation
+     ------------------------------------------------------------------------- */
+
+  /* AI message — no fill, no border. Pure text. */
+  .message--ai {
+    margin-block-end: var(--space-8);
+    position: relative;
+  }
+
+  .message__ai-body {
+    font-family: var(--font-sans);
+    font-size: var(--font-size-base);
+    line-height: var(--leading-body);
+    color: var(--color-text);
+  }
+
+  .message__ai-body p + p {
+    margin-block-start: var(--space-4);
+  }
+
+  .message__ai-body p {
+    margin: 0;
+  }
+
+  /* Student message — right-aligned bubble with distinctive corner radius */
+  .message--student {
+    display: flex;
+    justify-content: flex-end;
+    margin-block-end: var(--space-6);
+  }
+
+  .message__student-bubble {
+    background-color: var(--color-surface);
+    border-radius:
+      var(--radius-msg-student-tl)
+      var(--radius-msg-student-tr)
+      var(--radius-msg-student-br)
+      var(--radius-msg-student-bl);
+    padding: var(--space-3) var(--space-4);
+    max-width: 80%;
+    font-family: var(--font-sans);
+    font-size: var(--font-size-base);
+    line-height: var(--leading-body);
+    color: var(--color-text);
+  }
+
+  /* System message — centered, very small, muted, small caps */
+  .message--system {
+    text-align: center;
+    margin-block: var(--space-4);
+  }
+
+  .message__system-text {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    font-variant: small-caps;
+  }
+
+  /* -------------------------------------------------------------------------
+     .code-block — monospace code with optional output slot
+     No rounded corners. Thin top and bottom rules. Language label top-right.
+     ------------------------------------------------------------------------- */
+  .code-block {
+    position: relative;
+    margin-block: var(--space-5);
+    background-color: var(--color-code-bg);
+    border-block-start: 1px solid var(--color-border);
+    border-block-end: 1px solid var(--color-border);
+  }
+
+  .code-block__header {
+    display: flex;
+    justify-content: flex-end;
+    padding: var(--space-2) var(--space-3);
+    border-block-end: 1px solid var(--color-border);
+  }
+
+  .code-block__lang {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    font-variant: small-caps;
+  }
+
+  .code-block__pre {
+    margin: 0;
+    padding: var(--space-3) var(--space-4);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-sm);
+    line-height: var(--leading-code);
+    color: var(--color-text);
+    overflow-x: auto;
+    white-space: pre;
+    tab-size: 2;
+  }
+
+  .code-block__output {
+    background-color: var(--color-code-output-bg);
+    border-block-start: 1px solid var(--color-border);
+  }
+
+  .code-block__output-header {
+    display: flex;
+    justify-content: flex-end;
+    padding: var(--space-1) var(--space-3);
+    border-block-end: 1px solid var(--color-border);
+  }
+
+  .code-block__output-label {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    font-variant: small-caps;
+  }
+
+  .code-block__output-pre {
+    margin: 0;
+    padding: var(--space-2) var(--space-4);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-sm);
+    line-height: var(--leading-code);
+    color: var(--color-text-secondary);
+    white-space: pre;
+    overflow-x: auto;
+  }
+
+  /* -------------------------------------------------------------------------
+     .composer — the sticky compose input at the bottom
+     ------------------------------------------------------------------------- */
+  .composer-zone {
+    flex-shrink: 0;
+    background-color: var(--color-bg);
+    border-block-start: 1px solid var(--color-border);
+    padding: var(--space-4) var(--space-8);
+  }
+
+  .composer-inner {
+    max-width: var(--conversation-max);
+    margin-inline: auto;
+  }
+
+  /* The composer is the threshold between the student's world (purple) and
+     the AI's world (gold). On focus we reveal Heritage Gold — semantically
+     "the AI is listening" — not the dark Husky Purple which reads as black
+     on the warm cream background. */
+  .composer-wrap {
+    position: relative;
+    background-color: var(--color-surface-raised);
+    border-radius: 14px;
+    /* 1.5px transparent border reserves layout space so focus doesn't shift */
+    border: 1.5px solid transparent;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+    -webkit-tap-highlight-color: transparent;
+    transition:
+      border-color 180ms ease-out,
+      box-shadow 180ms ease-out;
+  }
+
+  .composer-wrap:hover:not(:focus-within) {
+    /* Subtle "this is available" signal without yet committing to focus */
+    box-shadow: 0 1px 5px rgba(0, 0, 0, 0.08);
+  }
+
+  .composer-wrap:focus-within {
+    border-color: var(--color-accent-warm);     /* Heritage Gold — AI is listening */
+    box-shadow:
+      0 0 0 4px rgba(133, 117, 77, 0.07),       /* soft warm halo */
+      0 2px 8px rgba(0, 0, 0, 0.04);            /* slight depth lift */
+  }
+
+  .composer-body {
+    display: flex;
+    align-items: flex-end;
+    padding: var(--space-3) var(--space-4);
+    gap: var(--space-3);
+  }
+
+  .composer-textarea {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    resize: none;
+    font-family: var(--font-sans);
+    font-size: var(--font-size-base);
+    line-height: var(--leading-normal);
+    color: var(--color-text);
+    /* Heritage Gold caret — the cursor itself carries the AI-voice mark */
+    caret-color: var(--color-accent-warm);
+    min-height: 1.5rem;
+    max-height: 12rem;
+    overflow-y: auto;
+    field-sizing: content;
+  }
+
+  .composer-textarea::placeholder {
+    color: var(--color-text-muted);
+    font-style: normal;
+  }
+
+  .composer-hint {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    /* Heritage Gold — matches the focus border, so the "enter ↵" hint reads
+       as part of the same AI-listening vocabulary. */
+    color: var(--color-accent-warm);
+    flex-shrink: 0;
+    margin-block-end: 2px;
+    opacity: 0;
+    transition: opacity 120ms ease-out;
+    pointer-events: none;
+    user-select: none;
+  }
+
+  .composer-wrap:focus-within .composer-hint {
+    opacity: 1;
+  }
+
+  /* -------------------------------------------------------------------------
+     Utility — Badge (tiny small-caps mono label, no pill fill)
+     ------------------------------------------------------------------------- */
+  .badge {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-variant: small-caps;
+    color: var(--color-text-muted);
+    line-height: 1.4;
+  }
+
+  .badge--accent {
+    color: var(--color-accent);
+  }
+
+  .badge--outlined {
+    border: 1px solid currentColor;
+    padding: 0 0.375rem;
+    border-radius: 2px;
+  }
+
+  /* -------------------------------------------------------------------------
+     Utility — Button
+     Text-link or minimal outlined. Never a vivid filled pill.
+     ------------------------------------------------------------------------- */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3em;
+    font-family: var(--font-sans);
+    font-size: var(--font-size-sm);
+    font-weight: var(--weight-medium);
+    color: var(--color-text-secondary);
+    text-decoration: none;
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+    transition: color 120ms ease-out;
+  }
+
+  .btn:hover {
+    color: var(--color-text);
+  }
+
+  .btn--accent {
+    color: var(--color-accent);
+  }
+
+  .btn--accent:hover {
+    color: var(--color-accent-hover);
+  }
+
+  .btn--outlined {
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .btn--outlined:hover {
+    border-color: var(--color-text-muted);
+  }
+
+  .btn:disabled,
+  .btn[aria-disabled="true"] {
+    opacity: 0.4;
+    pointer-events: none;
+  }
+
+  /* -------------------------------------------------------------------------
+     Utility — Input (smaller-scale, matches composer styling)
+     ------------------------------------------------------------------------- */
+  .input-field {
+    display: block;
+    width: 100%;
+    background-color: var(--color-surface-raised);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+    font-family: var(--font-sans);
+    font-size: var(--font-size-base);
+    color: var(--color-text);
+    outline: none;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    transition: border-color 180ms ease-out;
+  }
+
+  .input-field::placeholder {
+    color: var(--color-text-muted);
+  }
+
+  .input-field:focus {
+    border-color: var(--color-accent);
+  }
+
+  .input-field--error {
+    border-color: var(--color-error);
+  }
+}
+
+/* ==========================================================================
+   Streaming indicator — three Heritage Gold dots in a staggered opacity wave.
+   The AI is "thinking" while the wave runs; on completion the dots are removed.
+   ========================================================================== */
+
+@keyframes llteacher-stream-wave {
+  0%, 100% {
+    opacity: 0.25;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.streaming-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: middle;
+  margin-inline-start: 0.4em;
+}
+
+.streaming-dot > span {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--color-stream);   /* UW Heritage Gold */
+  animation: llteacher-stream-wave 1.4s ease-in-out infinite;
+}
+
+.streaming-dot > span:nth-child(2) {
+  animation-delay: 200ms;
+}
+
+.streaming-dot > span:nth-child(3) {
+  animation-delay: 400ms;
+}
+
+/* ==========================================================================
+   AI message entrance — the body fades in on first mount.
+   Runs once per message (CSS animations don't repeat without remount).
+   ========================================================================== */
+
+@keyframes llteacher-ai-body-appear {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.message--ai .message__ai-body {
+  animation: llteacher-ai-body-appear 280ms ease-out backwards;
+}
+
+/* ==========================================================================
+   Section-submit success — gold halo blooms outward from the ✓ when a
+   section transitions from current to submitted.
+   The animation runs once via a transient .section-item__indicator--just-submitted
+   class applied by the consumer for ~800ms after submission.
+   ========================================================================== */
+
+@keyframes llteacher-submit-success {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 199, 0, 0.55);
+    transform: scale(0.7);
+  }
+  40% {
+    transform: scale(1.25);
+  }
+  100% {
+    box-shadow: 0 0 0 12px rgba(255, 199, 0, 0);
+    transform: scale(1);
+  }
+}
+
+.section-item__indicator--just-submitted {
+  animation: llteacher-submit-success 700ms ease-out;
+  border-radius: 50%;
+}
+
+/* ==========================================================================
+   Submit affordance — quiet breathing of the "READY TO TURN IN" meta line.
+   Long, gentle cycle so it draws the eye without competing with content.
+   ========================================================================== */
+
+@keyframes llteacher-meta-breathe {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 0.95; }
+}
+
+/* Selector specificity must beat the in-layer rule; we keep this unlayered. */
+.submit-action .submit-action__meta {
+  animation: llteacher-meta-breathe 3.6s ease-in-out infinite;
+}
+
+/* Pause the breathing on hover so the hover color shift reads cleanly. */
+.submit-action:hover .submit-action__meta {
+  animation-play-state: paused;
+}
+
+/* ==========================================================================
+   Hint-history count flash — when the count increments, the numeral briefly
+   brightens to Spirit Gold and scales up, then settles back into Husky Gold.
+   Triggered by the consumer applying .hint-history-row__count--flash for ~600ms.
+   ========================================================================== */
+
+@keyframes llteacher-hint-flash {
+  0% {
+    color: var(--raw-spirit-gold);
+    transform: scale(1.25);
+  }
+  60% {
+    color: var(--raw-spirit-gold);
+  }
+  100% {
+    color: var(--raw-gold-print);
+    transform: scale(1);
+  }
+}
+
+.hint-history-row__count--flash {
+  animation: llteacher-hint-flash 600ms ease-out;
+}
+
+/* ==========================================================================
+   Reduced-motion respect — disable animation-heavy effects for users who
+   prefer reduced motion. Keep the dots visible at full opacity so the AI
+   "thinking" state still reads.
+   ========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .streaming-dot > span {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ==========================================================================
+   Spinner — Heritage Gold pulsing dot (reusable loading state)
+   ========================================================================== */
+
+@keyframes llteacher-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* Screen-reader-only utility */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  white-space: nowrap;
+  border-width: 0;
+}

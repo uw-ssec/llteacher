@@ -115,3 +115,17 @@ cython_debug/
 
 # Django specific
 staticfiles/
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# apps/web + apps/admin — un-ignore TS source lib directories the Python `lib/` pattern above matches by accident
+!apps/web/src/lib/
+!apps/web/src/lib/**
+!apps/admin/src/lib/
+!apps/admin/src/lib/**
+
+# Turborepo monorepo
+node_modules/
+.turbo/
+.turbo-cache/

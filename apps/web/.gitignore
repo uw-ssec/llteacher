@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.dev.vars
+.wrangler/
+.vite/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+*.config.d.ts
+*.config.js
+*.log
+.DS_Store
+coverage/
