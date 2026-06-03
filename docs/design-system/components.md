@@ -26,7 +26,9 @@ The full-bleed UW Husky Purple header bar. 56px tall. Three zones: wordmark (lef
 />
 ```
 
-Props: `course`, `term`, `homework`, `userInitials`.
+Props: `course`, `term`, `homework`, `userInitials`, `admin` (optional boolean).
+
+**`admin` mode (since `bd5c825`):** when `true`, the affiliation tag in the wordmark zone swaps its leading bullet for a Heritage Gold dot with a soft glow ring, and the tag text becomes `Admin · University of Washington`. The Heritage Gold dot is the at-a-glance "you are in the instructor console" cue across the bar — the admin app uses this mode while the student app omits the prop. The `homework` prop is repurposed in admin to carry the trailing breadcrumb segment (`Instructor Console · Homeworks`, etc.) — the existing uppercase transform handles casing. See [admin-console.md](../architecture/admin-console.md#topnav-admin-mode).
 
 **Left zone:** "LLteacher" wordmark in Geist Sans 600, 17px, white. Followed by "· University of Washington" affiliation tag in Geist Mono 11px, `#E8E3D3` Husky Gold web, uppercase, letter-spacing 0.1em.
 
