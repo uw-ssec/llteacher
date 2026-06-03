@@ -1,7 +1,9 @@
-import { pgTable, uuid, text, timestamp } from "drizzle-orm/pg-core";
+// Schema barrel. Drizzle-kit reads this file to discover all tables and
+// relations; app code imports tables and inferred types from here.
+//
+// Domain modules live under ./schema/. Add new modules as separate files,
+// then re-export them below.
 
-export const pings = pgTable("pings", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  message: text("message").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+export * from "./schema/pings";
+export * from "./schema/identity";
+export * from "./schema/content";
