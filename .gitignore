@@ -129,6 +129,8 @@ staticfiles/
 !apps/web/src/lib/**
 !apps/admin/src/lib/
 !apps/admin/src/lib/**
+!apps/admin/src/client/lib/
+!apps/admin/src/client/lib/**
 
 # Turborepo monorepo
 node_modules/
