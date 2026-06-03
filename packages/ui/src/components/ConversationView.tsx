@@ -69,6 +69,13 @@ export function ConversationView({
     setDraft("");
   };
 
+  /* Composer history: the student's most recent 10 sent messages, oldest→newest.
+     Derived from the conversation messages already in props — no separate store. */
+  const composerHistory = messages
+    .filter((m): m is StudentMessageData => m.role === "student")
+    .map((m) => m.content)
+    .slice(-10);
+
   return (
     <div className="conversation-column">
       {/* Scrollable message area */}
@@ -110,6 +117,7 @@ export function ConversationView({
         value={draft}
         onChange={setDraft}
         onSubmit={handleSubmit}
+        history={composerHistory}
       />
     </div>
   );

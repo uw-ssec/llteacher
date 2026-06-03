@@ -28,9 +28,16 @@
    with a Run button (WebR) — no mode switch, no state to remember.
 
    Controlled component — accepts `value` and `onChange`.
+
+   Shell-style history navigation:
+   - Up arrow at the first line walks backward through prior student messages
+   - Down arrow at the last line walks forward; past the newest restores the
+     in-progress draft (which may be empty)
+   - Edits to a recalled message are discarded the next time the user navigates
+   - History is supplied by the parent (already-sent messages, oldest→newest)
    -------------------------------------------------------------------------- */
 
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useState } from "react";
 
 export interface ComposerProps {
   value: string;
@@ -38,6 +45,20 @@ export interface ComposerProps {
   onSubmit: (value: string) => void;
   disabled?: boolean;
   placeholder?: string;
+  /** Prior student messages, oldest→newest. Up/Down navigate this list. */
+  history?: string[];
+}
+
+/* Cursor is on the first visual line iff there's no newline before it and no
+   selection is active. Mirrors how shells decide to recall history. */
+function isAtFirstLine(ta: HTMLTextAreaElement): boolean {
+  if (ta.selectionStart !== ta.selectionEnd) return false;
+  return !ta.value.slice(0, ta.selectionStart).includes("\n");
+}
+
+function isAtLastLine(ta: HTMLTextAreaElement): boolean {
+  if (ta.selectionStart !== ta.selectionEnd) return false;
+  return !ta.value.slice(ta.selectionEnd).includes("\n");
 }
 
 export function Composer({
@@ -46,8 +67,26 @@ export function Composer({
   onSubmit,
   disabled = false,
   placeholder = "Ask, explore, or push back…",
+  history,
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  /* History navigation state. `historyIndex === null` means the user is on
+     their in-progress draft (the bottom of the stack). `savedDraft` preserves
+     that draft while the user walks back through history so we can restore it
+     when they walk past the newest item. */
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  const [savedDraft, setSavedDraft] = useState("");
+
+  /* When historyIndex changes, place the cursor at end of the new text so the
+     next Up/Down sits at an edge by default — a recalled multi-line message
+     lets the user walk up through its lines before reaching further history. */
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const end = ta.value.length;
+    ta.setSelectionRange(end, end);
+  }, [historyIndex]);
 
   /* Auto-resize fallback for browsers without field-sizing: content support */
   useEffect(() => {
@@ -69,7 +108,49 @@ export function Composer({
       const trimmed = value.trim();
       if (trimmed && !disabled) {
         onSubmit(trimmed);
+        /* Reset history nav so the next message starts on a fresh draft slot */
+        setHistoryIndex(null);
+        setSavedDraft("");
       }
+      return;
+    }
+
+    if (disabled || !history || history.length === 0) return;
+
+    const ta = e.currentTarget;
+
+    if (e.key === "ArrowUp" && isAtFirstLine(ta)) {
+      if (historyIndex === null) {
+        /* Entering history from the draft slot — stash the draft and jump
+           to the newest item. */
+        setSavedDraft(value);
+        const newIndex = history.length - 1;
+        setHistoryIndex(newIndex);
+        onChange(history[newIndex]);
+        e.preventDefault();
+      } else if (historyIndex > 0) {
+        const newIndex = historyIndex - 1;
+        setHistoryIndex(newIndex);
+        onChange(history[newIndex]);
+        e.preventDefault();
+      }
+      /* At index 0 (oldest), Up is a no-op — let the default arrow behavior
+         run (which does nothing in a single-line textarea anyway). */
+      return;
+    }
+
+    if (e.key === "ArrowDown" && isAtLastLine(ta)) {
+      if (historyIndex === null) return;
+      const newIndex = historyIndex + 1;
+      if (newIndex >= history.length) {
+        /* Past the newest item — restore the saved draft. */
+        setHistoryIndex(null);
+        onChange(savedDraft);
+      } else {
+        setHistoryIndex(newIndex);
+        onChange(history[newIndex]);
+      }
+      e.preventDefault();
     }
   };
 
