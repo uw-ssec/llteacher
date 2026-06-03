@@ -146,9 +146,6 @@ export function renderToolPart(part: ToolPart, key: string): ReactNode {
 
 The `part.state` machine has four values from the AI SDK: `input-streaming`, `input-available`, `output-available`, `output-error`. The registry passes `isPartial = part.state === "input-streaming"` so renderers can show a streaming-in-progress state (the DefinitionCard renders at reduced opacity).
 
-!!! note "Temporary diagnostic"
-    A `console.log("[generative-ui] tool part:", ...)` was added during initial debugging to trace tool-call wiring. It logs every tool-prefixed part it sees. Remove once tool wiring is stable.
-
 ### DefinitionCard
 
 `packages/ui/src/generative/DefinitionCard.tsx`. Three props: `term`, `body`, `isPartial`. Renders with no card chrome — a subtle warm gold wash background, a large display term in Geist Sans 600 at `--font-size-2xl`, and a custom SVG underline in Heritage Gold that draws itself in via `stroke-dashoffset` animation. Respects `prefers-reduced-motion` (underline appears in final state without animating).

@@ -28,22 +28,6 @@ export interface ToolPart {
 }
 
 export function renderToolPart(part: ToolPart, key: string): ReactNode {
-  /* Temporary diagnostic — logs every tool-* part the registry sees so we
-     can tell whether the model is calling the tool at all, and what state
-     the part is in. Remove once the demo is stable. */
-  if (
-    typeof window !== "undefined" &&
-    typeof part.type === "string" &&
-    part.type.startsWith("tool-")
-  ) {
-    // eslint-disable-next-line no-console
-    console.log("[generative-ui] tool part:", {
-      type: part.type,
-      state: part.state,
-      input: part.input,
-    });
-  }
-
   if (part.type === "tool-showDefinition") {
     const input = (part.input ?? {}) as Partial<{ term: string; body: string }>;
     /* Don't render anything until we have at least a term to anchor the card */
