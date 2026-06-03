@@ -23,13 +23,18 @@ export interface TopNavProps {
   course: string;
   /** Term string, e.g. "Autumn 2026" */
   term: string;
-  /** Homework label, e.g. "HW 3 · Probability and Distributions" */
+  /** Trailing breadcrumb segment. Student app: homework name. Admin app:
+      the current view label (e.g. "HOMEWORKS", "LLM CONFIGS"). */
   homework: string;
   /** Two-letter user initials for the avatar chip */
   userInitials: string;
+  /** Admin mode: swaps the affiliation tag's leading bullet for a
+      Heritage Gold dot + "Admin" label. The dot is the at-a-glance
+      "you are in the instructor console" cue across the bar. */
+  admin?: boolean;
 }
 
-export function TopNav({ course, term, homework, userInitials }: TopNavProps) {
+export function TopNav({ course, term, homework, userInitials, admin = false }: TopNavProps) {
   const [menuOpen, setMenuOpen] = useState(false);
 
   const breadcrumbText = `${course.toUpperCase()} · ${term.toUpperCase()} · ${homework.toUpperCase()}`;
@@ -39,8 +44,18 @@ export function TopNav({ course, term, homework, userInitials }: TopNavProps) {
       {/* Left: wordmark + affiliation */}
       <div className="top-nav__wordmark-group">
         <span className="top-nav__wordmark">LLteacher</span>
-        <span className="top-nav__tag" aria-label="University of Washington">
-          · University of Washington
+        <span
+          className={admin ? "top-nav__tag top-nav__tag--admin" : "top-nav__tag"}
+          aria-label={admin ? "Admin, University of Washington" : "University of Washington"}
+        >
+          {admin ? (
+            <>
+              <span className="top-nav__admin-dot" aria-hidden="true" />
+              Admin · University of Washington
+            </>
+          ) : (
+            "· University of Washington"
+          )}
         </span>
       </div>
 
