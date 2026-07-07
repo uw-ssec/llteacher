@@ -12,6 +12,7 @@ media/
 *.env
 /.claude/
 /.agents/
+/.superpowers/
 
 # Python
 *.py[cod]
