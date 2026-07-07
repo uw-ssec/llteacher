@@ -19,6 +19,7 @@ import {
   streamText,
   convertToModelMessages,
   jsonSchema,
+  stepCountIs,
   type UIMessage,
   type ToolSet,
 } from "ai";
@@ -32,9 +33,15 @@ Be warm, curious, and patient. Prefer questions over assertions.`;
 
 /* Tool catalog typed as ToolSet. We use the AI SDK's jsonSchema() helper
    instead of Zod here — Zod's deeply parameterized types collide with the
-   ToolSet generic inference (TS2589). Display-only tools have no `execute`
-   callback; their args stream to the client and are rendered by the
-   registry in @llteacher/ui/generative. */
+   ToolSet generic inference (TS2589).
+
+   Display tools (like showDefinition) render args on the client via the
+   registry in @llteacher/ui/generative. They still ship a server-side
+   `execute` that returns a sentinel: without a tool result the conversation
+   history becomes invalid the moment the user sends a second message (the
+   model sees an assistant message with an unanswered tool call and either
+   refuses or emits nothing). The sentinel also lets the model continue with
+   follow-up text in the same turn via stopWhen below. */
 const TOOLS: ToolSet = {
   showDefinition: {
     description:
@@ -56,6 +63,10 @@ const TOOLS: ToolSet = {
       },
       required: ["term", "body"],
       additionalProperties: false,
+    }),
+    execute: async ({ term }: { term: string; body: string }) => ({
+      status: "displayed" as const,
+      term,
     }),
   },
 };
@@ -86,6 +97,10 @@ export async function chatHandler(c: Context<{ Bindings: Env }>) {
     system: SYSTEM_PROMPT,
     messages: convertToModelMessages(messages),
     tools: TOOLS,
+    /* Allow up to 5 steps so the model can call a display tool and then
+       continue with the follow-up Socratic question in the same turn.
+       Without this, streamText stops the moment a tool call is emitted. */
+    stopWhen: stepCountIs(5),
   });
 
   return result.toUIMessageStreamResponse();

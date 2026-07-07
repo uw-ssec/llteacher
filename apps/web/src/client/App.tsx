@@ -153,6 +153,20 @@ export default function App() {
     };
   });
 
+  /* While the request is in flight but no tokens have streamed yet, the AI
+     SDK has no assistant message in `aiMessages` -- so the streaming dots
+     have nothing to attach to. Append a synthetic placeholder so the user
+     sees the AI is thinking; it drops out the moment the first real part
+     arrives and chatStatus transitions to "streaming". */
+  if (chatStatus === "submitted") {
+    messages.push({
+      id: "__pending__",
+      role: "ai" as const,
+      content: null,
+      isStreaming: true,
+    });
+  }
+
   const handleSendMessage = (text: string) => {
     sendMessage({ text });
     /* Each AI response counts as a hint — increments trigger the gold flash
