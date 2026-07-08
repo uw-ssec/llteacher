@@ -1,5 +1,5 @@
 # Use Python 3.12 slim image as base
-FROM python:3.12-slim as base
+FROM python:3.15-rc-alpine as base
 
 # Declare volume for database persistence
 VOLUME ["/data"]
