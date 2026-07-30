@@ -1,0 +1,4 @@
+DATABASE_URL="postgresql://user:password@host.neon.tech/llteacher?sslmode=require"
+WORKOS_API_KEY="sk_test_placeholder"
+WORKOS_CLIENT_ID="client_placeholder"
+OPENROUTER_API_KEY="sk-or-v1-placeholder"

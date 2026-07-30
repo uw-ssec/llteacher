@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": false,
+    "emitDeclarationOnly": true,
+    "outDir": "./dist/.tsbuildinfo-worker",
+    "types": ["@cloudflare/workers-types"],
+    "lib": ["ES2022", "WebWorker"]
+  },
+  "include": ["src/server", "src/shared", "src/db", "src/lib"]
+}

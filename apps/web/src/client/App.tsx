@@ -1,0 +1,228 @@
+import { useEffect, useState } from "react";
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
+import { Sidebar, TopNav, ConversationView, renderToolPart } from "@llteacher/ui";
+import type { SidebarSection, MessageData, ToolPart } from "@llteacher/ui";
+
+/* ==========================================================================
+   LLTeacher v2 — Chat-with-syllabus shell
+   Section 3 P-Values — STATS 311, Homework 3
+
+   Three-zone vertical shell:
+     [TOP NAV — UW Husky Purple, full-bleed 56px]
+     [Sidebar 240px UW Husky Purple] [Conversation max 720px paper]
+
+   The top nav carries branding, course/term/homework context, and the user
+   account menu. The sidebar carries the homework syllabus (section progress)
+   for the current homework only — not generic thread history.
+
+   Purple is the chrome. Heritage Gold is the AI's voice. Paper is the content.
+   ========================================================================== */
+
+/* -- Worker status ping ---------------------------------------------------- */
+
+type HelloResponse = { message: string; ping_id: string };
+
+function useWorkerStatus() {
+  const [status, setStatus] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/hello")
+      .then((r) => {
+        if (!r.ok) throw new Error(`status ${r.status}`);
+        return r.json() as Promise<HelloResponse>;
+      })
+      .then((data) => {
+        setStatus(data.ping_id.slice(0, 8));
+        setLoading(false);
+      })
+      .catch(() => {
+        setStatus(null);
+        setLoading(false);
+      });
+  }, []);
+
+  return { status, loading };
+}
+
+/* -- Homework sections fixture data ---------------------------------------- */
+
+/** localStorage key for the sidebar collapsed preference. Namespaced so it
+    doesn't collide with future preference keys (`llteacher:*`). */
+const SIDEBAR_COLLAPSED_KEY = "llteacher:sidebar-collapsed";
+
+const INITIAL_SECTIONS: SidebarSection[] = [
+  { number: 1, title: "Random variables",          status: "submitted" },
+  { number: 2, title: "Probability distributions", status: "submitted" },
+  { number: 3, title: "P-values",                  status: "current"   },
+  { number: 4, title: "Confidence intervals",      status: "pending"   },
+  { number: 5, title: "Hypothesis testing",        status: "pending"   },
+];
+
+/* ==========================================================================
+   App — the root component
+
+   Chat state is owned by the AI SDK's useChat hook. We translate the
+   UIMessage[] it manages into the design system's MessageData[] for
+   ConversationView. Empty initial state — the student starts by typing.
+   ========================================================================== */
+
+export default function App() {
+  const { status: workerStatus, loading: workerLoading } = useWorkerStatus();
+
+  /* The AI SDK chat — owns messages + streaming state. */
+  const {
+    messages: aiMessages,
+    sendMessage,
+    status: chatStatus,
+  } = useChat({
+    transport: new DefaultChatTransport({ api: "/api/chat" }),
+  });
+
+  const [sections, setSections] = useState<SidebarSection[]>(INITIAL_SECTIONS);
+  const [currentSection, setCurrentSection] = useState(3);
+  const [hintCount, setHintCount] = useState(3);
+  const [justSubmittedSection, setJustSubmittedSection] = useState<number | null>(null);
+  /* Sidebar collapse persists across reloads via localStorage. Lazy initializer
+     reads on first render; the effect below writes whenever the state changes. */
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
+    } catch {
+      /* Private mode / disabled storage — fall back to default expanded state */
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(isSidebarCollapsed));
+    } catch {
+      /* localStorage may throw (private mode quota, etc.) — silently ignore */
+    }
+  }, [isSidebarCollapsed]);
+
+  /* Translate AI SDK UIMessages into the design system's MessageData. AI
+     messages get a ReactNode body assembled from their `parts` — text parts
+     become paragraphs, tool-* parts go through the renderToolPart registry
+     in @llteacher/ui/generative. Streaming state applies only to the last
+     AI message. */
+  const messages: MessageData[] = aiMessages.map((m, idx) => {
+    const isLast = idx === aiMessages.length - 1;
+    const isStreaming = isLast && chatStatus === "streaming";
+
+    if (m.role === "assistant") {
+      const content = (
+        <>
+          {m.parts.map((part, i) => {
+            if (part.type === "text") {
+              return <p key={`text-${m.id}-${i}`}>{part.text}</p>;
+            }
+            return renderToolPart(part as ToolPart, `tool-${m.id}-${i}`);
+          })}
+        </>
+      );
+      return {
+        id: m.id,
+        role: "ai" as const,
+        content,
+        isStreaming,
+      };
+    }
+
+    if (m.role === "user") {
+      const text = m.parts
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("");
+      return {
+        id: m.id,
+        role: "student" as const,
+        content: text,
+      };
+    }
+
+    /* system role messages — not user-facing in this UI; render empty */
+    return {
+      id: m.id,
+      role: "system" as const,
+      content: "",
+    };
+  });
+
+  /* While the request is in flight but no tokens have streamed yet, the AI
+     SDK has no assistant message in `aiMessages` -- so the streaming dots
+     have nothing to attach to. Append a synthetic placeholder so the user
+     sees the AI is thinking; it drops out the moment the first real part
+     arrives and chatStatus transitions to "streaming". */
+  if (chatStatus === "submitted") {
+    messages.push({
+      id: "__pending__",
+      role: "ai" as const,
+      content: null,
+      isStreaming: true,
+    });
+  }
+
+  const handleSendMessage = (text: string) => {
+    sendMessage({ text });
+    /* Each AI response counts as a hint — increments trigger the gold flash
+       on the sidebar's hint-history-row count numeral. */
+    setHintCount((n) => n + 1);
+  };
+
+  const handleSubmit = (sectionNumber: number) => {
+    /* Transition the section to submitted and trigger the gold-halo
+       success animation on its ✓ indicator. The flag clears after the
+       animation duration (~700ms) so the indicator settles into its
+       normal submitted state. */
+    setSections((prev) =>
+      prev.map((s) =>
+        s.number === sectionNumber ? { ...s, status: "submitted" as const } : s,
+      ),
+    );
+    setJustSubmittedSection(sectionNumber);
+    setTimeout(() => setJustSubmittedSection(null), 800);
+  };
+
+  return (
+    <div className="page-frame">
+      {/* Top nav — UW Husky Purple full-bleed bar */}
+      <TopNav
+        course="STATS 311"
+        term="Autumn 2026"
+        homework="HW 3 · Probability and Distributions"
+        userInitials="AC"
+      />
+
+      {/* Sidebar + main row */}
+      <div className="app-shell">
+        {/* Left rail — homework section progress on UW Husky Purple */}
+        <Sidebar
+          hwNumber={3}
+          hwTitle="Probability and Distributions"
+          sections={sections}
+          currentSection={currentSection}
+          hintCount={hintCount}
+          justSubmittedSection={justSubmittedSection}
+          isCollapsed={isSidebarCollapsed}
+          onToggleCollapse={() => setIsSidebarCollapsed((c) => !c)}
+          onSectionSelect={setCurrentSection}
+          onSubmit={handleSubmit}
+          workerStatus={workerStatus}
+          workerLoading={workerLoading}
+        />
+
+        {/* Main conversation column — warm paper surface */}
+        <ConversationView
+          breadcrumb="STATS 311 · HW 3 · Section 3 P-VALUES"
+          messages={messages}
+          onSendMessage={handleSendMessage}
+        />
+      </div>
+    </div>
+  );
+}

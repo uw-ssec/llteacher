@@ -8,6 +8,12 @@ db.sqlite3
 db.sqlite3-journal
 media/
 
+# Project-specific
+*.env
+/.claude/
+/.agents/
+/.superpowers/
+
 # Python
 *.py[cod]
 *$py.class
@@ -115,3 +121,22 @@ cython_debug/
 
 # Django specific
 staticfiles/
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# apps/web + apps/admin — un-ignore TS source lib directories the Python `lib/` pattern above matches by accident
+!apps/web/src/lib/
+!apps/web/src/lib/**
+!apps/admin/src/lib/
+!apps/admin/src/lib/**
+!apps/admin/src/client/lib/
+!apps/admin/src/client/lib/**
+
+# Turborepo monorepo
+node_modules/
+.turbo/
+.turbo-cache/
+
+# Local meeting notes (not for the shared repo)
+/docs/notes/

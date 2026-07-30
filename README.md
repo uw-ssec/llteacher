@@ -1,6 +1,49 @@
 # LLTeacher v2
 
+> **Turborepo monorepo.** TypeScript / React 19 / Vite / Tailwind 4 / Cloudflare Workers stack.
+> Two workspaces today: `apps/web` (student-facing, port 2311) and `apps/admin` (instructor console, port 2312).
+> Django legacy (`apps/accounts`, `apps/conversations`, `apps/homeworks`, `apps/llm`, plus `src/`, `services/`)
+> remains the source of truth until cutover.
+> See `docs/superpowers/plans/2026-06-01-llteacher-fullstack-port.md`.
+
 AI-assisted educational platform for teachers and students.
+
+## Monorepo layout
+
+```
+llteacher/
+├── package.json              # root — npm workspaces + Turborepo task runner
+├── turbo.json                # task pipeline (build, dev, typecheck, test)
+├── pyproject.toml            # root — uv workspaces for Django apps
+│
+├── apps/
+│   ├── web/                  # TS workspace: student-facing app (port 2311)
+│   ├── admin/                # TS workspace: instructor console (port 2312)
+│   ├── accounts/             # Django legacy: user model + auth
+│   ├── conversations/        # Django legacy: AI conversation + submission
+│   ├── homeworks/            # Django legacy: homework + section CRUD
+│   └── llm/                  # Django legacy: LLM config + provider
+│
+├── src/llteacher/            # Django project root
+├── services/                 # Django service layer (uv workspace)
+└── docs/design-system/       # shared design system docs
+```
+
+The two manifest systems coexist in `apps/`: each TS workspace has a `package.json` (npm reads these), each Django workspace has a `pyproject.toml` (uv reads these). Neither tool sees the other's apps.
+
+### Common commands (from repo root)
+
+```bash
+npm install                # install all TS workspaces
+npx turbo dev              # boot all dev servers (web on 2311, admin on 2312)
+npx turbo build            # build all TS workspaces
+npx turbo typecheck        # tsc -b across all TS workspaces
+npx turbo test             # run all TS test suites
+```
+
+Or scope to one workspace: `npm run dev --workspace=llteacher-web`.
+
+The Django stack still uses its own commands (`uv run python run_tests.py`, `python manage.py runserver`) and is unaffected by Turborepo.
 
 ## 🚀 Project Status
 

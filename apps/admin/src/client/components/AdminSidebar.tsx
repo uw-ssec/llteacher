@@ -1,0 +1,147 @@
+/* --------------------------------------------------------------------------
+   AdminSidebar — instructor's left rail.
+
+   Replaces the student syllabus rail with admin navigation: the catalog
+   sections (Homeworks, Submissions, LLM Configs, Students) plus quick
+   actions. Same UW Husky Purple surface as the student sidebar so the
+   brand reads as one product; different content so an instructor knows
+   they're in the console.
+   -------------------------------------------------------------------------- */
+
+import {
+  BookOpen,
+  CaretDoubleLeft,
+  CaretDoubleRight,
+  ClipboardText,
+  Sparkle,
+  Users,
+  Plus,
+} from "@phosphor-icons/react";
+
+export type AdminNavKey = "homeworks" | "submissions" | "llm-configs" | "students";
+
+export type AdminSidebarProps = {
+  active: AdminNavKey;
+  onNavigate: (key: AdminNavKey) => void;
+  onNewHomework: () => void;
+  onNewLLMConfig: () => void;
+  /** When true, the sidebar collapses to a 64px rail showing only icons. */
+  isCollapsed?: boolean;
+  /** Called when the collapse toggle is clicked. */
+  onToggleCollapse?: () => void;
+};
+
+type NavItem = {
+  key: AdminNavKey;
+  label: string;
+  icon: React.ReactNode;
+  description: string;
+};
+
+const NAV_ITEMS: NavItem[] = [
+  { key: "homeworks",    label: "Homeworks",   icon: <BookOpen size={15} weight="regular" />,      description: "Course assignments" },
+  { key: "submissions",  label: "Submissions", icon: <ClipboardText size={15} weight="regular" />, description: "Student work" },
+  { key: "llm-configs",  label: "LLM configs", icon: <Sparkle size={15} weight="regular" />,       description: "Tutor models" },
+  { key: "students",     label: "Students",    icon: <Users size={15} weight="regular" />,         description: "Course roster" },
+];
+
+export function AdminSidebar({
+  active,
+  onNavigate,
+  onNewHomework,
+  onNewLLMConfig,
+  isCollapsed = false,
+  onToggleCollapse,
+}: AdminSidebarProps) {
+  return (
+    <aside
+      className={isCollapsed ? "sidebar admin-sidebar sidebar--collapsed" : "sidebar admin-sidebar"}
+      aria-label="Admin navigation"
+    >
+      {/* Collapse toggle — chevron points toward the edge the rail will move toward */}
+      <div className="sidebar__top">
+        <button
+          className="sidebar__collapse-toggle"
+          type="button"
+          aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-expanded={!isCollapsed}
+          onClick={onToggleCollapse}
+        >
+          {isCollapsed
+            ? <CaretDoubleRight size={14} weight="regular" />
+            : <CaretDoubleLeft size={14} weight="regular" />}
+        </button>
+      </div>
+
+      <div className="admin-sidebar__label">
+        <span className="admin-sidebar__label-dot" aria-hidden="true" />
+        <span className="admin-sidebar__label-text">CATALOG</span>
+      </div>
+
+      <nav className="admin-sidebar__nav">
+        <ul className="admin-sidebar__nav-list">
+          {NAV_ITEMS.map((item) => {
+            const isActive = item.key === active;
+            return (
+              <li key={item.key}>
+                <button
+                  type="button"
+                  className={
+                    isActive
+                      ? "admin-sidebar__nav-item admin-sidebar__nav-item--active"
+                      : "admin-sidebar__nav-item"
+                  }
+                  onClick={() => onNavigate(item.key)}
+                  aria-current={isActive ? "page" : undefined}
+                  aria-label={isCollapsed ? item.label : undefined}
+                  title={isCollapsed ? item.label : undefined}
+                >
+                  <span className="admin-sidebar__nav-icon" aria-hidden="true">
+                    {item.icon}
+                  </span>
+                  <span className="admin-sidebar__nav-text">
+                    <span className="admin-sidebar__nav-label">{item.label}</span>
+                    <span className="admin-sidebar__nav-desc">{item.description}</span>
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </nav>
+
+      <div className="admin-sidebar__divider" />
+
+      <div className="admin-sidebar__quick">
+        <div className="admin-sidebar__quick-label">QUICK ACTIONS</div>
+        <button
+          type="button"
+          className="admin-sidebar__quick-action"
+          onClick={onNewHomework}
+          aria-label={isCollapsed ? "New homework" : undefined}
+          title={isCollapsed ? "New homework" : undefined}
+        >
+          <Plus size={13} weight="bold" aria-hidden="true" />
+          <span className="admin-sidebar__quick-action-label">New homework</span>
+        </button>
+        <button
+          type="button"
+          className="admin-sidebar__quick-action"
+          onClick={onNewLLMConfig}
+          aria-label={isCollapsed ? "New LLM config" : undefined}
+          title={isCollapsed ? "New LLM config" : undefined}
+        >
+          <Plus size={13} weight="bold" aria-hidden="true" />
+          <span className="admin-sidebar__quick-action-label">New LLM config</span>
+        </button>
+      </div>
+
+      <div className="admin-sidebar__spacer" />
+
+      <div className="admin-sidebar__meta">
+        <span className="admin-sidebar__meta-dot" aria-hidden="true" />
+        <span className="admin-sidebar__meta-text">admin · port 2312</span>
+      </div>
+    </aside>
+  );
+}
