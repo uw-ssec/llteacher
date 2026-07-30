@@ -137,3 +137,6 @@ staticfiles/
 node_modules/
 .turbo/
 .turbo-cache/
+
+# Local meeting notes (not for the shared repo)
+/docs/notes/
