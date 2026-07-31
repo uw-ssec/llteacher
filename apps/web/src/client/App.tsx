@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
+import { useNavigate } from "react-router";
 import { Sidebar, TopNav, ConversationView, renderToolPart } from "@llteacher/ui";
 import type { SidebarSection, MessageData, ToolPart } from "@llteacher/ui";
 import { useAuth } from "./components/AuthProvider";
@@ -71,7 +72,8 @@ const INITIAL_SECTIONS: SidebarSection[] = [
 
 export default function App() {
   const { status: workerStatus, loading: workerLoading } = useWorkerStatus();
-  const { logout } = useAuth();
+  const { isAuthenticated, login, logout } = useAuth();
+  const navigate = useNavigate();
 
   /* The AI SDK chat — owns messages + streaming state. */
   const {
@@ -198,6 +200,9 @@ export default function App() {
         term="Autumn 2026"
         homework="HW 3 · Probability and Distributions"
         userInitials="AC"
+        isAuthenticated={isAuthenticated}
+        onLogin={login}
+        onProfileClick={() => navigate("/profile")}
         onLogout={logout}
       />
 

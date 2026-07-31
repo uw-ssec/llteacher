@@ -32,7 +32,14 @@ export interface TopNavProps {
       Heritage Gold dot + "Admin" label. The dot is the at-a-glance
       "you are in the instructor console" cue across the bar. */
   admin?: boolean;
-  /** When provided, the user-chip dropdown shows a "Log out" action. */
+  /** Whether the current visitor has an active session. Governs whether
+      the dropdown offers "Log in" or "Profile" + "Log out". */
+  isAuthenticated?: boolean;
+  /** Shown as "Log in" when `isAuthenticated` is false. */
+  onLogin?: () => void;
+  /** Shown as "Profile" when `isAuthenticated` is true. */
+  onProfileClick?: () => void;
+  /** Shown as "Log out" when `isAuthenticated` is true. */
   onLogout?: () => void;
 }
 
@@ -42,6 +49,9 @@ export function TopNav({
   homework,
   userInitials,
   admin = false,
+  isAuthenticated = false,
+  onLogin,
+  onProfileClick,
   onLogout,
 }: TopNavProps) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -91,16 +101,38 @@ export function TopNav({
             <CaretRight size={14} weight="regular" />
           </span>
         </button>
-        {menuOpen && onLogout && (
+        {menuOpen && (onLogin || onProfileClick || onLogout) && (
           <div className="top-nav__user-menu" role="menu">
-            <button
-              className="top-nav__user-menu-item"
-              role="menuitem"
-              type="button"
-              onClick={onLogout}
-            >
-              Log out
-            </button>
+            {!isAuthenticated && onLogin && (
+              <button
+                className="top-nav__user-menu-item"
+                role="menuitem"
+                type="button"
+                onClick={onLogin}
+              >
+                Log in
+              </button>
+            )}
+            {isAuthenticated && onProfileClick && (
+              <button
+                className="top-nav__user-menu-item"
+                role="menuitem"
+                type="button"
+                onClick={onProfileClick}
+              >
+                Profile
+              </button>
+            )}
+            {isAuthenticated && onLogout && (
+              <button
+                className="top-nav__user-menu-item"
+                role="menuitem"
+                type="button"
+                onClick={onLogout}
+              >
+                Log out
+              </button>
+            )}
           </div>
         )}
       </div>
