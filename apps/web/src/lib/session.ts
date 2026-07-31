@@ -65,6 +65,33 @@ export async function unsealSession(
   cookieValue: string,
   key: CryptoKey,
 ): Promise<SessionPayload | null> {
+  const payload = await decryptAndValidateShape(cookieValue, key);
+  if (!payload) return null;
+  if (payload.expiresAt < Date.now()) return null;
+  return payload;
+}
+
+/**
+ * Like `unsealSession`, but does not reject a payload solely because
+ * `expiresAt` has passed -- it still requires the AES-GCM decrypt to succeed
+ * and the shape to be valid, so a tampered, garbage, or wrong-key cookie is
+ * still rejected. This exists ONLY for logout: the local session cookie's
+ * 7-day TTL is independent of the WorkOS-side session's lifetime, so an
+ * expired local cookie shouldn't stop us from recovering `workosSessionId`
+ * to revoke the WorkOS session on the way out. Never use this for
+ * authorization -- `authMiddleware` must keep using `unsealSession`.
+ */
+export async function unsealSessionIgnoringExpiry(
+  cookieValue: string,
+  key: CryptoKey,
+): Promise<SessionPayload | null> {
+  return decryptAndValidateShape(cookieValue, key);
+}
+
+async function decryptAndValidateShape(
+  cookieValue: string,
+  key: CryptoKey,
+): Promise<SessionPayload | null> {
   try {
     const combined = new Uint8Array(Buffer.from(cookieValue, "base64url"));
     if (combined.length <= IV_BYTES) return null;
@@ -79,7 +106,6 @@ export async function unsealSession(
     ) {
       return null;
     }
-    if (payload.expiresAt < Date.now()) return null;
     return payload;
   } catch {
     // Tampered, malformed, or wrong key -- all treated as "no session".

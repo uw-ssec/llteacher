@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { auth } from "./auth";
-import { SESSION_COOKIE_NAME } from "../../lib/session";
+import {
+  SESSION_COOKIE_NAME,
+  createSessionPayload,
+  loadSessionKey,
+  sealSession,
+} from "../../lib/session";
 import { OAUTH_STATE_COOKIE, OAUTH_VERIFIER_COOKIE } from "../../lib/oauth-state";
 
 const TEST_ENV = {
@@ -239,6 +244,31 @@ describe("POST /logout", () => {
     expect(res.status).toBe(302);
     expect(getLogoutUrl).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: "session_xyz" }),
+    );
+    expect(res.headers.get("location")).toContain("workos.com");
+    const setCookie = res.headers.get("set-cookie") ?? "";
+    expect(setCookie).toContain(`${SESSION_COOKIE_NAME}=;`);
+  });
+
+  it("still revokes the WorkOS session and redirects through WorkOS logout when the local session has expired", async () => {
+    const key = await loadSessionKey(TEST_ENV);
+    const expiredPayload = createSessionPayload(
+      "user-1",
+      "workos-1",
+      Date.now() - 1000 * 60 * 60 * 24 * 30,
+      "session_expired_but_still_live",
+    );
+    const sealed = await sealSession(expiredPayload, key);
+
+    const res = await auth.request(
+      "/logout",
+      { method: "POST", headers: { cookie: `${SESSION_COOKIE_NAME}=${sealed}` } },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(302);
+    expect(getLogoutUrl).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "session_expired_but_still_live" }),
     );
     expect(res.headers.get("location")).toContain("workos.com");
     const setCookie = res.headers.get("set-cookie") ?? "";

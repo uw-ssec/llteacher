@@ -12,6 +12,7 @@ import {
   createSessionPayload,
   loadSessionKey,
   sealSession,
+  unsealSessionIgnoringExpiry,
 } from "../../lib/session";
 import {
   OAUTH_STATE_COOKIE,
@@ -134,19 +135,37 @@ export async function callbackHandler(c: Context<{ Bindings: Env }>) {
 
 export async function logoutHandler(c: Context<AppEnv>) {
   const session = await extractSession(c);
+  const workosSessionId = session?.workosSessionId ?? (await recoverWorkosSessionId(c));
   deleteCookie(c, SESSION_COOKIE_NAME, { path: "/" });
 
-  if (session?.workosSessionId) {
+  if (workosSessionId) {
     const workos = getWorkOS(c.env.WORKOS_API_KEY);
     const origin = c.req.header("origin") ?? new URL(c.req.url).origin;
     const logoutUrl = workos.userManagement.getLogoutUrl({
-      sessionId: session.workosSessionId,
+      sessionId: workosSessionId,
       returnTo: `${origin}/`,
     });
     return c.redirect(logoutUrl);
   }
 
   return c.redirect("/");
+}
+
+/**
+ * Fallback for logout only: `extractSession` (via `unsealSession`) returns
+ * null for an expired local session cookie, but the WorkOS-side session may
+ * still be alive -- its lifetime isn't tied to our 7-day local cookie TTL.
+ * Re-reads the raw cookie and decrypts it while ignoring expiry, purely to
+ * recover `workosSessionId` so we can still revoke the WorkOS session on the
+ * way out. A tampered/garbage/wrong-key cookie still yields undefined here
+ * (unsealSessionIgnoringExpiry only skips the expiry check, not decryption).
+ */
+async function recoverWorkosSessionId(c: Context<AppEnv>): Promise<string | undefined> {
+  const cookieValue = getCookie(c, SESSION_COOKIE_NAME);
+  if (!cookieValue) return undefined;
+  const key = await loadSessionKey(c.env);
+  const payload = await unsealSessionIgnoringExpiry(cookieValue, key);
+  return payload?.workosSessionId;
 }
 
 function decodeSessionId(accessToken: string): string | undefined {
