@@ -8,8 +8,14 @@ import {
 } from "../../lib/session";
 import type { AppEnv } from "../context";
 
-/** Routes under these prefixes never require a session. */
-const PUBLIC_API_PREFIXES = ["/api/auth/"];
+/** Exact paths that never require a session. Deliberately a closed set
+ *  (not a prefix match) -- a new /api/auth/* endpoint must be added here
+ *  explicitly, so it can't silently become public by sharing the prefix. */
+const PUBLIC_API_PATHS = new Set([
+  "/api/auth/login",
+  "/api/auth/callback",
+  "/api/auth/logout",
+]);
 
 export async function authMiddleware(c: Context<AppEnv>, next: Next) {
   const session = await extractSession(c);
@@ -19,7 +25,7 @@ export async function authMiddleware(c: Context<AppEnv>, next: Next) {
 
   const path = c.req.path;
   const isApiRoute = path.startsWith("/api/");
-  const isPublicApiRoute = PUBLIC_API_PREFIXES.some((prefix) => path.startsWith(prefix));
+  const isPublicApiRoute = PUBLIC_API_PATHS.has(path);
   if (isApiRoute && !isPublicApiRoute && !session) {
     return c.json({ error: "Unauthorized" }, 401);
   }

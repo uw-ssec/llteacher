@@ -64,4 +64,9 @@ describe("authMiddleware", () => {
     const res = await buildApp().request("/api/auth/login", {}, TEST_ENV);
     expect(res.status).toBe(200);
   });
+
+  it("requires a session for an /api/auth/* path that is not login, callback, or logout", async () => {
+    const res = await buildApp().request("/api/auth/some-future-endpoint", {}, TEST_ENV);
+    expect(res.status).toBe(401);
+  });
 });
