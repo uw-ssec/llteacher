@@ -13,6 +13,7 @@ import {
   loadSessionKey,
   sealSession,
 } from "../../lib/session";
+import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "../utils/errors";
 
 // TODO(#11): move to Organization.allowedDomains once multi-org provisioning
 // lands; v0 is single-tenant UW.
@@ -46,38 +47,45 @@ export async function callbackHandler(c: Context<{ Bindings: Env }>) {
     return c.text("Sign-in failed. Please try again.", 401);
   }
 
-  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
-  const db = makeDb(c.env.DATABASE_URL);
+  try {
+    const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
+    const db = makeDb(c.env.DATABASE_URL);
 
-  const domainCheck = DomainAllowlistService.validateEmailDomain(
-    workosUser.email,
-    DEFAULT_ALLOWED_DOMAINS,
-  );
-  if (!domainCheck.allowed) {
-    const emailBlindIndex = await cipher.computeBlindIndex(
-      IdentityCipher.normalizeEmail(workosUser.email),
+    const domainCheck = DomainAllowlistService.validateEmailDomain(
+      workosUser.email,
+      DEFAULT_ALLOWED_DOMAINS,
     );
-    const grandfathered = await DomainAllowlistService.checkGrandfathering(emailBlindIndex, db);
-    if (!grandfathered) {
-      return c.html(disallowedDomainPage(domainCheck.reason ?? "Domain not allowed"), 403);
+    if (!domainCheck.allowed) {
+      const emailBlindIndex = await cipher.computeBlindIndex(
+        IdentityCipher.normalizeEmail(workosUser.email),
+      );
+      const grandfathered = await DomainAllowlistService.checkGrandfathering(emailBlindIndex, db);
+      if (!grandfathered) {
+        return c.html(disallowedDomainPage(domainCheck.reason ?? "Domain not allowed"), 403);
+      }
     }
+
+    const { userId } = await new UserIdentityService(cipher, db).createOrClaimUser(workosUser);
+
+    const sessionKey = await loadSessionKey(c.env);
+    const payload = createSessionPayload(userId, workosUser.id);
+    const sealed = await sealSession(payload, sessionKey);
+
+    setCookie(c, SESSION_COOKIE_NAME, sealed, {
+      httpOnly: true,
+      secure: c.req.url.startsWith("https://"),
+      sameSite: "Lax",
+      path: "/",
+      maxAge: SESSION_TTL_SECONDS,
+    });
+
+    return c.redirect("/");
+  } catch (err) {
+    // DB down, misconfigured secrets, etc. -- never surface the real error
+    // (e.g. a connection string) to the browser mid-login.
+    logServerError("callbackHandler", err);
+    return c.html(signInUnavailablePage(), 503);
   }
-
-  const { userId } = await new UserIdentityService(cipher, db).createOrClaimUser(workosUser);
-
-  const sessionKey = await loadSessionKey(c.env);
-  const payload = createSessionPayload(userId, workosUser.id);
-  const sealed = await sealSession(payload, sessionKey);
-
-  setCookie(c, SESSION_COOKIE_NAME, sealed, {
-    httpOnly: true,
-    secure: c.req.url.startsWith("https://"),
-    sameSite: "Lax",
-    path: "/",
-    maxAge: SESSION_TTL_SECONDS,
-  });
-
-  return c.redirect("/");
 }
 
 export async function logoutHandler(c: Context<{ Bindings: Env }>) {
@@ -92,6 +100,10 @@ function callbackUrl(c: Context<{ Bindings: Env }>): string {
 
 function disallowedDomainPage(reason: string): string {
   return `<!doctype html><html><body><h1>Access Denied</h1><p>${escapeHtml(reason)}</p></body></html>`;
+}
+
+function signInUnavailablePage(): string {
+  return `<!doctype html><html><body><h1>Sign-in failed</h1><p>${escapeHtml(SERVICE_UNAVAILABLE_MESSAGE)}</p></body></html>`;
 }
 
 function escapeHtml(value: string): string {

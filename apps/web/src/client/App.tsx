@@ -72,7 +72,7 @@ const INITIAL_SECTIONS: SidebarSection[] = [
 
 export default function App() {
   const { status: workerStatus, loading: workerLoading } = useWorkerStatus();
-  const { isAuthenticated, login, logout } = useAuth();
+  const { isAuthenticated, error: authError, login, logout } = useAuth();
   const navigate = useNavigate();
 
   /* The AI SDK chat — owns messages + streaming state. */
@@ -205,6 +205,12 @@ export default function App() {
         onProfileClick={() => navigate("/profile")}
         onLogout={logout}
       />
+
+      {authError && (
+        <div role="alert" className="auth-error-banner">
+          Login failed. Please try again later.
+        </div>
+      )}
 
       {/* Sidebar + main row */}
       <div className="app-shell">

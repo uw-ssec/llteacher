@@ -7,11 +7,11 @@ import { AuthProvider, useAuth } from "./AuthProvider";
 afterEach(cleanup);
 
 function Probe() {
-  const { isAuthenticated, loading, logout } = useAuth();
+  const { isAuthenticated, loading, error, logout } = useAuth();
   if (loading) return <span>loading</span>;
   return (
     <div>
-      <span>{isAuthenticated ? "authed" : "anon"}</span>
+      <span>{error ? "error" : isAuthenticated ? "authed" : "anon"}</span>
       <button onClick={() => logout()}>logout</button>
     </div>
   );
@@ -50,6 +50,34 @@ describe("AuthProvider / useAuth", () => {
       </AuthProvider>,
     );
     await waitFor(() => screen.getByText("anon"));
+  });
+
+  it("reports an error (not merely anonymous) when /api/profile fails with a 5xx", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "nope" }), { status: 503 })),
+    );
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    );
+    await waitFor(() => screen.getByText("error"));
+  });
+
+  it("reports an error when the request itself fails (network down)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("network down");
+      }),
+    );
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    );
+    await waitFor(() => screen.getByText("error"));
   });
 
   it("logout posts to /api/auth/logout", async () => {

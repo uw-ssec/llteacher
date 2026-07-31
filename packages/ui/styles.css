@@ -379,6 +379,20 @@ body {
   }
 
   /* -------------------------------------------------------------------------
+     .auth-error-banner — shown when the session check itself fails (backend
+     unavailable), distinct from "not logged in". Error red, not decorative.
+     ------------------------------------------------------------------------- */
+  .auth-error-banner {
+    flex-shrink: 0;
+    padding: var(--space-2) var(--space-4);
+    background-color: #FDECEC;
+    color: #8A1F11;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    text-align: center;
+  }
+
+  /* -------------------------------------------------------------------------
      .top-nav — full-bleed UW Husky Purple header bar.
      Three zones: wordmark (left) · breadcrumb (center) · user chip (right).
      56px tall. 1px bottom rule in a deeper purple.

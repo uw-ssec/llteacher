@@ -3,6 +3,9 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 interface AuthState {
   isAuthenticated: boolean;
   loading: boolean;
+  /** True when the session check itself failed (backend/DB unavailable) --
+   *  distinct from `isAuthenticated: false`, which means "no session." */
+  error: boolean;
   login: () => void;
   logout: () => Promise<void>;
 }
@@ -12,15 +15,32 @@ const AuthContext = createContext<AuthState | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     fetch("/api/profile")
       .then((res) => {
-        if (!cancelled) setIsAuthenticated(res.ok);
+        if (cancelled) return;
+        if (res.status === 401) {
+          setIsAuthenticated(false);
+          setError(false);
+        } else if (res.ok) {
+          setIsAuthenticated(true);
+          setError(false);
+        } else {
+          // Any other status (5xx, etc.) means the backend couldn't tell us
+          // whether the session is valid -- surface that, don't silently
+          // treat it as "logged out."
+          setIsAuthenticated(false);
+          setError(true);
+        }
       })
       .catch(() => {
-        if (!cancelled) setIsAuthenticated(false);
+        if (!cancelled) {
+          setIsAuthenticated(false);
+          setError(true);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -41,7 +61,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ isAuthenticated, loading, login, logout }}>
+    <AuthContext.Provider value={{ isAuthenticated, loading, error, login, logout }}>
       {children}
     </AuthContext.Provider>
   );

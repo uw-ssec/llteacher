@@ -5,9 +5,19 @@ import { loginHandler, callbackHandler, logoutHandler } from "./routes/auth";
 import { getProfileHandler, patchProfileHandler } from "./routes/profile";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
+import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "./utils/errors";
 import type { AppEnv } from "./context";
 
 const app = new Hono<AppEnv>();
+
+// Catches anything thrown by middleware/handlers that isn't already handled
+// locally -- e.g. a DB connection failure in rolesMiddleware or a profile
+// route. Logs the real error server-side; the client only ever sees the
+// generic message, never DB connection strings or driver internals.
+app.onError((err, c) => {
+  logServerError("server", err);
+  return c.json({ error: SERVICE_UNAVAILABLE_MESSAGE }, 503);
+});
 
 // Session gate for every /api/* route except /api/auth/*.
 app.use("/api/*", authMiddleware);

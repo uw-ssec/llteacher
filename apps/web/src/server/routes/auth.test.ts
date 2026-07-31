@@ -20,16 +20,24 @@ vi.mock("../../lib/workos", () => ({
   }),
 }));
 
+type InsertImpl = (...args: unknown[]) => unknown;
+
+const defaultInsertImpl: InsertImpl = () => ({
+  values: () => ({ returning: async () => [{ id: "new-user-1" }] }),
+});
+let dbInsertImpl: InsertImpl = defaultInsertImpl;
+
 vi.mock("../../db/client", () => ({
   makeDb: () => ({
     query: { users: { findFirst: async () => undefined } },
-    insert: () => ({ values: () => ({ returning: async () => [{ id: "new-user-1" }] }) }),
+    insert: (...args: unknown[]) => dbInsertImpl(...args),
   }),
 }));
 
 beforeEach(() => {
   authenticateWithCode.mockReset();
   getAuthorizationUrl.mockClear();
+  dbInsertImpl = defaultInsertImpl;
 });
 
 describe("GET /login", () => {
@@ -71,6 +79,29 @@ describe("GET /callback", () => {
     const setCookie = res.headers.get("set-cookie") ?? "";
     expect(setCookie).toContain(SESSION_COOKIE_NAME);
     expect(setCookie).toContain("HttpOnly");
+  });
+
+  it("shows a generic error page (and logs the real error) when provisioning fails", async () => {
+    authenticateWithCode.mockResolvedValue({
+      user: { id: "workos_1", email: "cdcore@uw.edu", firstName: "Cordero" },
+    });
+    const dbError = new Error("connection refused: ECONNREFUSED");
+    dbInsertImpl = () => {
+      throw dbError;
+    };
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await auth.request("/callback?code=good", {}, TEST_ENV);
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("set-cookie")).toBeNull();
+    const body = await res.text();
+    expect(body).toMatch(/try again later/i);
+    expect(body).not.toMatch(/ECONNREFUSED/);
+    expect(consoleSpy).toHaveBeenCalledWith(expect.anything(), dbError);
+
+    consoleSpy.mockRestore();
+    dbInsertImpl = defaultInsertImpl;
   });
 });
 
