@@ -5,6 +5,7 @@ import { useNavigate } from "react-router";
 import { Sidebar, TopNav, ConversationView, renderToolPart } from "@llteacher/ui";
 import type { SidebarSection, MessageData, ToolPart } from "@llteacher/ui";
 import { useAuth } from "./components/AuthProvider";
+import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
 
 /* ==========================================================================
    LLTeacher v2 — Chat-with-syllabus shell
@@ -72,7 +73,7 @@ const INITIAL_SECTIONS: SidebarSection[] = [
 
 export default function App() {
   const { status: workerStatus, loading: workerLoading } = useWorkerStatus();
-  const { isAuthenticated, error: authError, login, logout } = useAuth();
+  const { isAuthenticated, loading: authLoading, error: authError, login, logout } = useAuth();
   const navigate = useNavigate();
 
   /* The AI SDK chat — owns messages + streaming state. */
@@ -192,6 +193,13 @@ export default function App() {
     setTimeout(() => setJustSubmittedSection(null), 800);
   };
 
+  /* Anonymous visitors get a minimal placeholder, not the fixture course
+     demo below -- see UnauthenticatedHome for why this isn't the full
+     branded landing page. While the session check is in flight, render
+     nothing rather than flashing one state then the other. */
+  if (authLoading) return null;
+  if (!isAuthenticated) return <UnauthenticatedHome onLogin={login} error={authError} />;
+
   return (
     <div className="page-frame">
       {/* Top nav — UW Husky Purple full-bleed bar */}
@@ -205,12 +213,6 @@ export default function App() {
         onProfileClick={() => navigate("/profile")}
         onLogout={logout}
       />
-
-      {authError && (
-        <div role="alert" className="auth-error-banner">
-          Login failed. Please try again later.
-        </div>
-      )}
 
       {/* Sidebar + main row */}
       <div className="app-shell">

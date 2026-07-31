@@ -393,6 +393,40 @@ body {
   }
 
   /* -------------------------------------------------------------------------
+     .unauthenticated-home — minimal placeholder for anonymous visitors.
+     Deliberately plain; #55 owns the real branded landing page.
+     ------------------------------------------------------------------------- */
+  .unauthenticated-home {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-4);
+    height: 100vh;
+    background-color: #32006e;
+    color: #FFFFFF;
+    font-family: var(--font-sans);
+  }
+
+  .unauthenticated-home h1 {
+    font-size: 32px;
+    font-weight: var(--weight-semibold);
+    margin: 0;
+  }
+
+  .unauthenticated-home button {
+    padding: var(--space-2) var(--space-4);
+    background-color: #FFFFFF;
+    color: #32006e;
+    border: none;
+    border-radius: 6px;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    font-weight: var(--weight-semibold);
+    cursor: pointer;
+  }
+
+  /* -------------------------------------------------------------------------
      .top-nav — full-bleed UW Husky Purple header bar.
      Three zones: wordmark (left) · breadcrumb (center) · user chip (right).
      56px tall. 1px bottom rule in a deeper purple.
