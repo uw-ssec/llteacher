@@ -11,6 +11,10 @@ import { importAesGcmKey } from "./crypto/keys";
 export interface SessionPayload {
   userId: string;
   workosUserId: string;
+  /** WorkOS AuthKit session id (the `sid` claim on the access token JWT).
+   *  Absent for sessions created before this field existed. Used solely to
+   *  build the WorkOS logout URL -- never used for authorization. */
+  workosSessionId?: string;
   issuedAt: number;
   expiresAt: number;
 }
@@ -24,10 +28,12 @@ export function createSessionPayload(
   userId: string,
   workosUserId: string,
   now: number = Date.now(),
+  workosSessionId?: string,
 ): SessionPayload {
   return {
     userId,
     workosUserId,
+    workosSessionId,
     issuedAt: now,
     expiresAt: now + SESSION_TTL_SECONDS * 1000,
   };

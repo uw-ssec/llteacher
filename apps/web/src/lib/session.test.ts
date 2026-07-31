@@ -22,6 +22,20 @@ describe("sealSession / unsealSession", () => {
     expect(unsealed).toEqual(payload);
   });
 
+  it("round-trips workosSessionId when present", async () => {
+    const payload = createSessionPayload("user-1", "workos-1", undefined, "session_abc");
+    const sealed = await sealSession(payload, key);
+    const unsealed = await unsealSession(sealed, key);
+    expect(unsealed?.workosSessionId).toBe("session_abc");
+  });
+
+  it("round-trips with workosSessionId absent (backward compatible)", async () => {
+    const payload = createSessionPayload("user-1", "workos-1");
+    const sealed = await sealSession(payload, key);
+    const unsealed = await unsealSession(sealed, key);
+    expect(unsealed?.workosSessionId).toBeUndefined();
+  });
+
   it("produces a different cookie value each time (random IV)", async () => {
     const payload = createSessionPayload("user-1", "workos-1");
     const a = await sealSession(payload, key);

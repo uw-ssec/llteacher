@@ -217,6 +217,33 @@ describe("POST /logout", () => {
     const setCookie = res.headers.get("set-cookie") ?? "";
     expect(setCookie).toContain(`${SESSION_COOKIE_NAME}=;`);
   });
+
+  it("redirects through the WorkOS logout URL when the session has a workosSessionId", async () => {
+    authenticateWithCode.mockResolvedValue({
+      user: { id: "workos_1", email: "cdcore@uw.edu", firstName: "Cordero" },
+      accessToken: fakeAccessToken("session_xyz"),
+    });
+    const { path, headers } = await loginThenBuildCallbackRequest();
+    const callbackRes = await auth.request(path, { headers }, TEST_ENV);
+    const sessionCookie = (callbackRes.headers.get("set-cookie") ?? "")
+      .split(", ")
+      .map((c) => c.split(";")[0])
+      .find((c) => c.startsWith(`${SESSION_COOKIE_NAME}=`));
+
+    const res = await auth.request(
+      "/logout",
+      { method: "POST", headers: { cookie: sessionCookie ?? "" } },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(302);
+    expect(getLogoutUrl).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "session_xyz" }),
+    );
+    expect(res.headers.get("location")).toContain("workos.com");
+    const setCookie = res.headers.get("set-cookie") ?? "";
+    expect(setCookie).toContain(`${SESSION_COOKIE_NAME}=;`);
+  });
 });
 
 /** A JWT with a `sid` claim, unsigned -- callbackHandler only decodes it

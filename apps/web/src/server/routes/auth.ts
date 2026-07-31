@@ -21,6 +21,9 @@ import {
   generatePkceVerifier,
   computeCodeChallenge,
 } from "../../lib/oauth-state";
+import { decodeJwt } from "jose";
+import { extractSession } from "../middleware/auth";
+import type { AppEnv } from "../context";
 import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "../utils/errors";
 
 // TODO(#11): move to Organization.allowedDomains once multi-org provisioning
@@ -75,6 +78,7 @@ export async function callbackHandler(c: Context<{ Bindings: Env }>) {
 
   const workos = getWorkOS(c.env.WORKOS_API_KEY);
   let workosUser: { id: string; email: string; firstName?: string | null };
+  let workosSessionId: string | undefined;
   try {
     const result = await workos.userManagement.authenticateWithCode({
       clientId: c.env.WORKOS_CLIENT_ID,
@@ -82,6 +86,7 @@ export async function callbackHandler(c: Context<{ Bindings: Env }>) {
       codeVerifier: verifier,
     });
     workosUser = result.user;
+    workosSessionId = decodeSessionId(result.accessToken);
   } catch {
     return c.text("Sign-in failed. Please try again.", 401);
   }
@@ -107,7 +112,7 @@ export async function callbackHandler(c: Context<{ Bindings: Env }>) {
     const { userId } = await new UserIdentityService(cipher, db).createOrClaimUser(workosUser);
 
     const sessionKey = await loadSessionKey(c.env);
-    const payload = createSessionPayload(userId, workosUser.id);
+    const payload = createSessionPayload(userId, workosUser.id, undefined, workosSessionId);
     const sealed = await sealSession(payload, sessionKey);
 
     setCookie(c, SESSION_COOKIE_NAME, sealed, {
@@ -127,9 +132,30 @@ export async function callbackHandler(c: Context<{ Bindings: Env }>) {
   }
 }
 
-export async function logoutHandler(c: Context<{ Bindings: Env }>) {
+export async function logoutHandler(c: Context<AppEnv>) {
+  const session = await extractSession(c);
   deleteCookie(c, SESSION_COOKIE_NAME, { path: "/" });
+
+  if (session?.workosSessionId) {
+    const workos = getWorkOS(c.env.WORKOS_API_KEY);
+    const origin = c.req.header("origin") ?? new URL(c.req.url).origin;
+    const logoutUrl = workos.userManagement.getLogoutUrl({
+      sessionId: session.workosSessionId,
+      returnTo: `${origin}/`,
+    });
+    return c.redirect(logoutUrl);
+  }
+
   return c.redirect("/");
+}
+
+function decodeSessionId(accessToken: string): string | undefined {
+  try {
+    const claims = decodeJwt(accessToken);
+    return typeof claims.sid === "string" ? claims.sid : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function callbackUrl(c: Context<{ Bindings: Env }>): string {
