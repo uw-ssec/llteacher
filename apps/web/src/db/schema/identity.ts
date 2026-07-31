@@ -62,6 +62,10 @@ export const organizations = pgTable(
     requiresFerpa: boolean("requires_ferpa").notNull().default(true),
     requiresHipaa: boolean("requires_hipaa").notNull().default(false),
     dataResidency: text("data_residency"),
+    allowedDomains: text("allowed_domains")
+      .array()
+      .notNull()
+      .default(sql`ARRAY['uw.edu']::text[]`),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

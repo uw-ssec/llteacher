@@ -27,10 +27,6 @@ import { extractSession } from "../middleware/auth";
 import type { AppEnv } from "../context";
 import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "../utils/errors";
 
-// TODO(#11): move to Organization.allowedDomains once multi-org provisioning
-// lands; v0 is single-tenant UW.
-const DEFAULT_ALLOWED_DOMAINS = ["uw.edu"];
-
 export async function loginHandler(c: Context<{ Bindings: Env }>) {
   const workos = getWorkOS(c.env.WORKOS_API_KEY);
   const secureCookie = c.req.url.startsWith("https://");
@@ -80,6 +76,7 @@ export async function callbackHandler(c: Context<{ Bindings: Env }>) {
   const workos = getWorkOS(c.env.WORKOS_API_KEY);
   let workosUser: { id: string; email: string; firstName?: string | null };
   let workosSessionId: string | undefined;
+  let workosOrganizationId: string | undefined;
   try {
     const result = await workos.userManagement.authenticateWithCode({
       clientId: c.env.WORKOS_CLIENT_ID,
@@ -87,6 +84,7 @@ export async function callbackHandler(c: Context<{ Bindings: Env }>) {
       codeVerifier: verifier,
     });
     workosUser = result.user;
+    workosOrganizationId = result.organizationId;
     workosSessionId = decodeSessionId(result.accessToken);
   } catch {
     return c.text("Sign-in failed. Please try again.", 401);
@@ -96,9 +94,13 @@ export async function callbackHandler(c: Context<{ Bindings: Env }>) {
     const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
     const db = makeDb(c.env.DATABASE_URL);
 
+    const allowedDomains = await DomainAllowlistService.resolveAllowedDomains(
+      workosOrganizationId,
+      db,
+    );
     const domainCheck = DomainAllowlistService.validateEmailDomain(
       workosUser.email,
-      DEFAULT_ALLOWED_DOMAINS,
+      allowedDomains,
     );
     if (!domainCheck.allowed) {
       const emailBlindIndex = await cipher.computeBlindIndex(

@@ -59,3 +59,42 @@ describe("DomainAllowlistService.checkGrandfathering", () => {
     expect(await DomainAllowlistService.checkGrandfathering(fakeBlindIndex(), db)).toBe(false);
   });
 });
+
+describe("DomainAllowlistService.resolveAllowedDomains", () => {
+  it("returns the org's allowedDomains when the org is found", async () => {
+    const db = {
+      query: {
+        organizations: {
+          findFirst: async () => ({ id: "org1", allowedDomains: ["cs.uw.edu", "uw.edu"] }),
+        },
+      },
+    } as unknown as Db;
+    expect(await DomainAllowlistService.resolveAllowedDomains("workos_org_1", db)).toEqual([
+      "cs.uw.edu",
+      "uw.edu",
+    ]);
+  });
+
+  it("falls back to the default when organizationId is undefined (single-tenant dev)", async () => {
+    const db = { query: { organizations: { findFirst: async () => undefined } } } as unknown as Db;
+    expect(await DomainAllowlistService.resolveAllowedDomains(undefined, db)).toEqual(
+      DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS,
+    );
+  });
+
+  it("falls back to the default when no org matches the workosOrganizationId", async () => {
+    const db = { query: { organizations: { findFirst: async () => undefined } } } as unknown as Db;
+    expect(await DomainAllowlistService.resolveAllowedDomains("unknown_org", db)).toEqual(
+      DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS,
+    );
+  });
+
+  it("falls back to the default when the org row has an empty allowedDomains array", async () => {
+    const db = {
+      query: { organizations: { findFirst: async () => ({ id: "org1", allowedDomains: [] }) } },
+    } as unknown as Db;
+    expect(await DomainAllowlistService.resolveAllowedDomains("workos_org_1", db)).toEqual(
+      DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS,
+    );
+  });
+});
