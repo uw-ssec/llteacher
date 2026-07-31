@@ -11,6 +11,10 @@ declare global {
     WORKOS_CLIENT_ID: string;
     OPENROUTER_API_KEY: string;
     ASSETS: Fetcher;
+    // Auth (M1): sealed session cookie key + IdentityCipher keys.
+    SESSION_SECRET: string;
+    ENCRYPTION_KEY: string;
+    BLIND_INDEX_KEY: string;
   }
 }
 
