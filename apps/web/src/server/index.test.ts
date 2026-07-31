@@ -64,4 +64,9 @@ describe("app composition", () => {
 
     consoleSpy.mockRestore();
   });
+
+  it("denies an unauthenticated request to the mounted homeworks route with 401 (before the guard even runs)", async () => {
+    const res = await app.request("/api/courses/course-a/homeworks", {}, ENV);
+    expect(res.status).toBe(401);
+  });
 });
