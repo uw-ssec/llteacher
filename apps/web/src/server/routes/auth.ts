@@ -1,5 +1,5 @@
 import { Hono, type Context } from "hono";
-import { setCookie, deleteCookie } from "hono/cookie";
+import { setCookie, getCookie, deleteCookie } from "hono/cookie";
 import { getWorkOS } from "../../lib/workos";
 import { makeDb } from "../../db/client";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
@@ -13,6 +13,14 @@ import {
   loadSessionKey,
   sealSession,
 } from "../../lib/session";
+import {
+  OAUTH_STATE_COOKIE,
+  OAUTH_VERIFIER_COOKIE,
+  OAUTH_TTL_SECONDS,
+  generateState,
+  generatePkceVerifier,
+  computeCodeChallenge,
+} from "../../lib/oauth-state";
 import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "../utils/errors";
 
 // TODO(#11): move to Organization.allowedDomains once multi-org provisioning
@@ -21,18 +29,48 @@ const DEFAULT_ALLOWED_DOMAINS = ["uw.edu"];
 
 export async function loginHandler(c: Context<{ Bindings: Env }>) {
   const workos = getWorkOS(c.env.WORKOS_API_KEY);
+  const secureCookie = c.req.url.startsWith("https://");
+
+  const state = generateState();
+  const verifier = generatePkceVerifier();
+  const codeChallenge = await computeCodeChallenge(verifier);
+
+  const oauthCookieOptions = {
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: "Lax" as const,
+    path: "/",
+    maxAge: OAUTH_TTL_SECONDS,
+  };
+  setCookie(c, OAUTH_STATE_COOKIE, state, oauthCookieOptions);
+  setCookie(c, OAUTH_VERIFIER_COOKIE, verifier, oauthCookieOptions);
+
   const authorizationUrl = workos.userManagement.getAuthorizationUrl({
     clientId: c.env.WORKOS_CLIENT_ID,
     redirectUri: callbackUrl(c),
     provider: "authkit",
+    state,
+    codeChallenge,
+    codeChallengeMethod: "S256",
   });
   return c.redirect(authorizationUrl);
 }
 
 export async function callbackHandler(c: Context<{ Bindings: Env }>) {
   const code = c.req.query("code");
+  const returnedState = c.req.query("state");
+  const expectedState = getCookie(c, OAUTH_STATE_COOKIE);
+  const verifier = getCookie(c, OAUTH_VERIFIER_COOKIE);
+  deleteCookie(c, OAUTH_STATE_COOKIE, { path: "/" });
+  deleteCookie(c, OAUTH_VERIFIER_COOKIE, { path: "/" });
+
   if (!code) {
     return c.text("Missing authorization code", 400);
+  }
+  if (!expectedState || !returnedState || returnedState !== expectedState) {
+    // Missing/mismatched state means either a login-CSRF attempt or a stale
+    // (expired-cookie) round trip -- both get the same generic response.
+    return c.text("Invalid or expired sign-in request. Please try again.", 400);
   }
 
   const workos = getWorkOS(c.env.WORKOS_API_KEY);
@@ -41,6 +79,7 @@ export async function callbackHandler(c: Context<{ Bindings: Env }>) {
     const result = await workos.userManagement.authenticateWithCode({
       clientId: c.env.WORKOS_CLIENT_ID,
       code,
+      codeVerifier: verifier,
     });
     workosUser = result.user;
   } catch {
