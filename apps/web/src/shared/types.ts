@@ -1,3 +1,5 @@
+import type { CourseRole } from "../server/middleware/roles";
+
 export type HelloResponse = {
   message: string;
   ping_id: string;
@@ -7,7 +9,7 @@ export interface ProfileWithStats {
   userId: string;
   email: string;
   displayName: string | null;
-  role: string | null;
+  role: CourseRole | null;
   courseCount: number;
   instructorStats?: { homeworksCreated: number };
   studentStats?: { submissionsCount: number };
