@@ -12,7 +12,7 @@ export interface ProfileWithStats {
   role: CourseRole | null;
   courseCount: number;
   instructorStats?: { homeworksCreated: number };
-  studentStats?: { submissionsCount: number };
+  studentStats?: { submissionsCount: number; completedSections: number };
 }
 
 // Cloudflare Worker bindings + secrets. Augmented in Phase 1+.

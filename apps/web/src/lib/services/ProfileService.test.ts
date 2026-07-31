@@ -50,7 +50,7 @@ describe("ProfileService.getProfileWithStats", () => {
     expect(profile.studentStats).toBeUndefined();
   });
 
-  it("stubs student stats to zero (no submissions table yet)", async () => {
+  it("stubs student stats to zero (no submissions/conversations table yet)", async () => {
     const cipher = new IdentityCipher(keys);
     const encryptedEmail = await cipher.encryptString("student@uw.edu");
     const db = {
@@ -64,7 +64,7 @@ describe("ProfileService.getProfileWithStats", () => {
     } as unknown as Db;
 
     const profile = await new ProfileService(cipher, db).getProfileWithStats("u2");
-    expect(profile.studentStats).toEqual({ submissionsCount: 0 });
+    expect(profile.studentStats).toEqual({ submissionsCount: 0, completedSections: 0 });
     expect(profile.instructorStats).toBeUndefined();
   });
 

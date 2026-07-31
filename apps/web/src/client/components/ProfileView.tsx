@@ -46,6 +46,7 @@ export function ProfileView() {
         <section>
           <h2>Student stats</h2>
           <p>Submissions: {profile.studentStats.submissionsCount}</p>
+          <p>Completed sections: {profile.studentStats.completedSections}</p>
         </section>
       )}
 

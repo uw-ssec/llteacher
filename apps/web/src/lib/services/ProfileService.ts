@@ -45,9 +45,12 @@ export class ProfileService {
       profile.instructorStats = { homeworksCreated: createdHomeworks.length };
     } else if (primaryRole === "student") {
       // TODO: real submission/completion counts once the conversation +
-      // submission tables land (multi-tenant-data-model.md §6.3, M2).
-      // No per-student runtime data exists in the schema yet.
-      profile.studentStats = { submissionsCount: 0 };
+      // submission tables land (multi-tenant-data-model.md §6.3, M2). No
+      // per-student runtime data exists in the schema yet -- issues
+      // #12/#13 explicitly gate this on M2. Both fields are stubbed
+      // together (rather than omitting completedSections) so the response
+      // type honestly reflects what M1 can compute today.
+      profile.studentStats = { submissionsCount: 0, completedSections: 0 };
     }
 
     return profile;

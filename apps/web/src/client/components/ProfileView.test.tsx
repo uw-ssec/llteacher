@@ -33,6 +33,28 @@ describe("ProfileView", () => {
     expect(screen.getByText(/Homeworks created: 3/)).toBeTruthy();
   });
 
+  it("renders student stats including completedSections", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              userId: "u2",
+              email: "student@uw.edu",
+              displayName: null,
+              role: "student",
+              courseCount: 1,
+              studentStats: { submissionsCount: 4, completedSections: 2 },
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    render(<ProfileView />);
+    await waitFor(() => screen.getByText(/Completed sections: 2/));
+  });
+
   it("shows a fallback message when the profile fails to load", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 401 })));
     render(<ProfileView />);
