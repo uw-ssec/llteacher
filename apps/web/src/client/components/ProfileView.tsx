@@ -1,15 +1,6 @@
 import { useEffect, useState } from "react";
 import { ProfileEditForm } from "./ProfileEditForm";
-
-interface ProfileWithStats {
-  userId: string;
-  email: string;
-  displayName: string | null;
-  role: string | null;
-  courseCount: number;
-  instructorStats?: { homeworksCreated: number };
-  studentStats?: { submissionsCount: number };
-}
+import type { ProfileWithStats } from "../../shared/types";
 
 export function ProfileView() {
   const [profile, setProfile] = useState<ProfileWithStats | null>(null);

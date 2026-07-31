@@ -3,16 +3,7 @@ import { courseMemberships, homeworks, users } from "../../db/schema";
 import type { Db } from "../../db/client";
 import type { IdentityCipher } from "../crypto/identity-cipher";
 import type { CourseRole } from "../../server/middleware/roles";
-
-export interface ProfileWithStats {
-  userId: string;
-  email: string;
-  displayName: string | null;
-  role: CourseRole | null;
-  courseCount: number;
-  instructorStats?: { homeworksCreated: number };
-  studentStats?: { submissionsCount: number };
-}
+import type { ProfileWithStats } from "../../shared/types";
 
 export class ProfileService {
   constructor(

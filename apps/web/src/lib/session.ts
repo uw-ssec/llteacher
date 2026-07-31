@@ -6,6 +6,8 @@
  * is issue #95's concern).
  */
 
+import { importAesGcmKey } from "./crypto/keys";
+
 export interface SessionPayload {
   userId: string;
   workosUserId: string;
@@ -38,13 +40,7 @@ export async function loadSessionKey(env: Env): Promise<CryptoKey> {
       "SESSION_SECRET must be set (apps/web/.dev.vars locally; the deployed secrets store in prod).",
     );
   }
-  return crypto.subtle.importKey(
-    "raw",
-    new Uint8Array(Buffer.from(secret, "base64")),
-    { name: "AES-GCM" },
-    false,
-    ["encrypt", "decrypt"],
-  );
+  return importAesGcmKey(secret);
 }
 
 export async function sealSession(payload: SessionPayload, key: CryptoKey): Promise<string> {

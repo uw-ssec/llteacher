@@ -1,4 +1,5 @@
 import type { IdentityCipherKeys } from "./crypto/identity-cipher";
+import { importAesGcmKey } from "./crypto/keys";
 
 /** v0 ships a single active encryption key id. Rotation tooling lands
  *  when key rotation is actually needed (see identity-cipher.ts header). */
@@ -19,13 +20,7 @@ export async function loadIdentityCipherKeys(env: Env): Promise<IdentityCipherKe
     );
   }
 
-  const encryptionKey = await crypto.subtle.importKey(
-    "raw",
-    new Uint8Array(Buffer.from(encryptionKeyB64, "base64")),
-    { name: "AES-GCM" },
-    false,
-    ["encrypt", "decrypt"],
-  );
+  const encryptionKey = await importAesGcmKey(encryptionKeyB64);
   const blindIndexKey = await crypto.subtle.importKey(
     "raw",
     new Uint8Array(Buffer.from(blindIndexKeyB64, "base64")),

@@ -3,6 +3,16 @@ export type HelloResponse = {
   ping_id: string;
 };
 
+export interface ProfileWithStats {
+  userId: string;
+  email: string;
+  displayName: string | null;
+  role: string | null;
+  courseCount: number;
+  instructorStats?: { homeworksCreated: number };
+  studentStats?: { submissionsCount: number };
+}
+
 // Cloudflare Worker bindings + secrets. Augmented in Phase 1+.
 declare global {
   interface Env {

@@ -69,14 +69,4 @@ export class UserIdentityService {
 
     return { userId: created.id, isNew: true };
   }
-
-  async decryptUserForDisplay(
-    row: typeof users.$inferSelect,
-  ): Promise<{ id: string; email: string; displayName: string | null }> {
-    return {
-      id: row.id,
-      email: await this.cipher.decryptString(row.email),
-      displayName: row.displayName ? await this.cipher.decryptString(row.displayName) : null,
-    };
-  }
 }

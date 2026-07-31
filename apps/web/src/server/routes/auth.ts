@@ -99,11 +99,15 @@ function callbackUrl(c: Context<{ Bindings: Env }>): string {
 }
 
 function disallowedDomainPage(reason: string): string {
-  return `<!doctype html><html><body><h1>Access Denied</h1><p>${escapeHtml(reason)}</p></body></html>`;
+  return errorPage("Access Denied", reason);
 }
 
 function signInUnavailablePage(): string {
-  return `<!doctype html><html><body><h1>Sign-in failed</h1><p>${escapeHtml(SERVICE_UNAVAILABLE_MESSAGE)}</p></body></html>`;
+  return errorPage("Sign-in failed", SERVICE_UNAVAILABLE_MESSAGE);
+}
+
+function errorPage(title: string, message: string): string {
+  return `<!doctype html><html><body><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></body></html>`;
 }
 
 function escapeHtml(value: string): string {

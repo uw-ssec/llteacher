@@ -97,29 +97,3 @@ describe("UserIdentityService.createOrClaimUser", () => {
     expect(await cipher.decryptString(updatedValues?.email as never)).toBe("cdcore@uw.edu");
   });
 });
-
-describe("UserIdentityService.decryptUserForDisplay", () => {
-  it("round-trips encrypted email and display name", async () => {
-    const cipher = new IdentityCipher(keys);
-    const db = {} as unknown as Db;
-    const row = {
-      id: "u1",
-      email: await cipher.encryptString("cdcore@uw.edu"),
-      displayName: await cipher.encryptString("Cordero"),
-    };
-    const displayed = await new UserIdentityService(cipher, db).decryptUserForDisplay(
-      row as never,
-    );
-    expect(displayed).toEqual({ id: "u1", email: "cdcore@uw.edu", displayName: "Cordero" });
-  });
-
-  it("returns null displayName when the row has none", async () => {
-    const cipher = new IdentityCipher(keys);
-    const db = {} as unknown as Db;
-    const row = { id: "u1", email: await cipher.encryptString("cdcore@uw.edu"), displayName: null };
-    const displayed = await new UserIdentityService(cipher, db).decryptUserForDisplay(
-      row as never,
-    );
-    expect(displayed.displayName).toBeNull();
-  });
-});

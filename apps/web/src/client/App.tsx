@@ -209,7 +209,6 @@ export default function App() {
         homework="HW 3 · Probability and Distributions"
         userInitials="AC"
         isAuthenticated={isAuthenticated}
-        onLogin={login}
         onProfileClick={() => navigate("/profile")}
         onLogout={logout}
       />
