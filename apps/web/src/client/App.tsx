@@ -3,6 +3,7 @@ import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { Sidebar, TopNav, ConversationView, renderToolPart } from "@llteacher/ui";
 import type { SidebarSection, MessageData, ToolPart } from "@llteacher/ui";
+import { useAuth } from "./components/AuthProvider";
 
 /* ==========================================================================
    LLTeacher v2 — Chat-with-syllabus shell
@@ -70,6 +71,7 @@ const INITIAL_SECTIONS: SidebarSection[] = [
 
 export default function App() {
   const { status: workerStatus, loading: workerLoading } = useWorkerStatus();
+  const { logout } = useAuth();
 
   /* The AI SDK chat — owns messages + streaming state. */
   const {
@@ -196,6 +198,7 @@ export default function App() {
         term="Autumn 2026"
         homework="HW 3 · Probability and Distributions"
         userInitials="AC"
+        onLogout={logout}
       />
 
       {/* Sidebar + main row */}

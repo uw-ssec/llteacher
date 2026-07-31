@@ -32,9 +32,18 @@ export interface TopNavProps {
       Heritage Gold dot + "Admin" label. The dot is the at-a-glance
       "you are in the instructor console" cue across the bar. */
   admin?: boolean;
+  /** When provided, the user-chip dropdown shows a "Log out" action. */
+  onLogout?: () => void;
 }
 
-export function TopNav({ course, term, homework, userInitials, admin = false }: TopNavProps) {
+export function TopNav({
+  course,
+  term,
+  homework,
+  userInitials,
+  admin = false,
+  onLogout,
+}: TopNavProps) {
   const [menuOpen, setMenuOpen] = useState(false);
 
   const breadcrumbText = `${course.toUpperCase()} · ${term.toUpperCase()} · ${homework.toUpperCase()}`;
@@ -82,6 +91,18 @@ export function TopNav({ course, term, homework, userInitials, admin = false }: 
             <CaretRight size={14} weight="regular" />
           </span>
         </button>
+        {menuOpen && onLogout && (
+          <div className="top-nav__user-menu" role="menu">
+            <button
+              className="top-nav__user-menu-item"
+              role="menuitem"
+              type="button"
+              onClick={onLogout}
+            >
+              Log out
+            </button>
+          </div>
+        )}
       </div>
     </header>
   );
