@@ -3,12 +3,15 @@ import { helloHandler } from "./routes/hello";
 import { chatHandler } from "./routes/chat";
 import { loginHandler, callbackHandler, logoutHandler } from "./routes/auth";
 import { authMiddleware } from "./middleware/auth";
+import { rolesMiddleware } from "./middleware/roles";
 import type { AppEnv } from "./context";
 
 const app = new Hono<AppEnv>();
 
 // Session gate for every /api/* route except /api/auth/*.
 app.use("/api/*", authMiddleware);
+// Resolves course_memberships once per request for authenticated users.
+app.use("/api/*", rolesMiddleware);
 
 // API routes — registered directly on `app` rather than via app.route(prefix, sub)
 // to avoid Hono's prefix-stripping behavior that can cause /api/hello to not
