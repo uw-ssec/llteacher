@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { helloHandler } from "./routes/hello";
 import { chatHandler } from "./routes/chat";
 import { loginHandler, callbackHandler, logoutHandler } from "./routes/auth";
+import { getProfileHandler, patchProfileHandler } from "./routes/profile";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import type { AppEnv } from "./context";
@@ -21,6 +22,8 @@ app.post("/api/chat", chatHandler);
 app.get("/api/auth/login", loginHandler);
 app.get("/api/auth/callback", callbackHandler);
 app.post("/api/auth/logout", logoutHandler);
+app.get("/api/profile", getProfileHandler);
+app.patch("/api/profile", patchProfileHandler);
 
 // Everything else: delegate to the static asset binding.
 // In dev, this proxies to Vite's pipeline (so HMR + source maps work).
