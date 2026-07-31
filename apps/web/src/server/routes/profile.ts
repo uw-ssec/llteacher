@@ -19,11 +19,11 @@ export async function patchProfileHandler(c: Context<AppEnv>) {
   const session = c.get("session");
   if (!session) return c.json({ error: "Unauthorized" }, 401);
 
-  const body = await c.req.json<{ displayName?: string }>();
-  const displayName = body.displayName?.trim();
-  if (!displayName) {
+  const body = await c.req.json<{ displayName?: unknown }>();
+  if (typeof body.displayName !== "string" || body.displayName.trim().length === 0) {
     return c.json({ error: "displayName is required" }, 400);
   }
+  const displayName = body.displayName.trim();
 
   const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
   const db = makeDb(c.env.DATABASE_URL);

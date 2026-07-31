@@ -75,6 +75,19 @@ describe("PATCH /api/profile", () => {
     expect(res.status).toBe(400);
   });
 
+  it("returns 400 (not a 500/503) when displayName is not a string", async () => {
+    const res = await buildApp(SESSION).request(
+      "/api/profile",
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: 1 }),
+      },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+  });
+
   it("updates and returns the new display name", async () => {
     updateDisplayName.mockResolvedValue({ displayName: "New Name" });
     const res = await buildApp(SESSION).request(
