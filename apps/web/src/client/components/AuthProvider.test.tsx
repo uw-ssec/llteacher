@@ -80,7 +80,7 @@ describe("AuthProvider / useAuth", () => {
     await waitFor(() => screen.getByText("error"));
   });
 
-  it("logout posts to /api/auth/logout", async () => {
+  it("logout submits a hidden form (top-level POST navigation), not a fetch", async () => {
     const fetchMock = vi.fn(async (url: string) => {
       if (url === "/api/profile") {
         return new Response(JSON.stringify({ userId: "u1" }), { status: 200 });
@@ -88,6 +88,13 @@ describe("AuthProvider / useAuth", () => {
       return new Response(null, { status: 204 });
     });
     vi.stubGlobal("fetch", fetchMock);
+
+    // fetch()-based logout POSTs follow the server's redirect as a
+    // background request -- the browser never navigates, so WorkOS's
+    // session cookie is never cleared. Logout must instead submit a real
+    // <form> so the browser follows the 302 as a top-level navigation.
+    const submitSpy = vi.spyOn(HTMLFormElement.prototype, "submit").mockImplementation(() => {});
+
     render(
       <AuthProvider>
         <Probe />
@@ -95,9 +102,18 @@ describe("AuthProvider / useAuth", () => {
     );
     await waitFor(() => screen.getByText("authed"));
     await userEvent.click(screen.getByText("logout"));
-    expect(fetchMock).toHaveBeenCalledWith(
+
+    const form = document.querySelector("form");
+    expect(form).not.toBeNull();
+    expect(form?.method).toBe("post");
+    expect(form?.action).toMatch(/\/api\/auth\/logout$/);
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalledWith(
       "/api/auth/logout",
       expect.objectContaining({ method: "POST" }),
     );
+
+    submitSpy.mockRestore();
+    form?.remove();
   });
 });

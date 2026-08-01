@@ -106,7 +106,11 @@ export async function callbackHandler(c: Context<{ Bindings: Env }>) {
       const emailBlindIndex = await cipher.computeBlindIndex(
         IdentityCipher.normalizeEmail(workosUser.email),
       );
-      const grandfathered = await DomainAllowlistService.checkGrandfathering(emailBlindIndex, db);
+      const grandfathered = await DomainAllowlistService.checkGrandfathering(
+        workosUser.id,
+        emailBlindIndex,
+        db,
+      );
       if (!grandfathered) {
         return c.html(disallowedDomainPage(domainCheck.reason ?? "Domain not allowed"), 403);
       }

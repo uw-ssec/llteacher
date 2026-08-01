@@ -5,6 +5,13 @@ import type { IdentityCipher } from "../crypto/identity-cipher";
 import type { CourseRole } from "../../server/middleware/roles";
 import type { ProfileWithStats } from "../../shared/types";
 
+/** Highest-privilege-first ordering used to derive a deterministic
+ *  "primary role" for a user with multiple course memberships. Postgres
+ *  gives no row-ordering guarantee without an explicit ORDER BY, so picking
+ *  `memberships[0]` would make the primary role flicker across requests for
+ *  any multi-role user (e.g. instructor in one course, student in another). */
+const ROLE_PRIORITY: CourseRole[] = ["admin", "instructor", "ta", "student", "observer"];
+
 export class ProfileService {
   constructor(
     private readonly cipher: IdentityCipher,
@@ -25,7 +32,8 @@ export class ProfileService {
     const memberships = await this.db.query.courseMemberships.findMany({
       where: eq(courseMemberships.userId, userId),
     });
-    const primaryRole = (memberships[0]?.role ?? null) as CourseRole | null;
+    const primaryRole =
+      ROLE_PRIORITY.find((role) => memberships.some((m) => m.role === role)) ?? null;
 
     const profile: ProfileWithStats = {
       userId: user.id,

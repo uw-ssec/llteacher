@@ -14,7 +14,7 @@ interface AuthState {
   error: boolean;
   role: CourseRole | null;
   login: () => void;
-  logout: () => Promise<void>;
+  logout: () => void;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -64,11 +64,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.location.href = "/api/auth/login";
   };
 
-  const logout = async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
-    setIsAuthenticated(false);
-    setRole(null);
-    window.location.href = "/";
+  // The logout route is POST-only and issues a redirect to WorkOS's own
+  // logout URL. A fetch()-based POST follows that redirect as a background
+  // request -- the browser's top-level location never navigates, so the
+  // WorkOS session cookie is never cleared and `returnTo` never fires.
+  // Submitting a real (hidden) form makes this a top-level navigation, so
+  // the browser follows the 302 natively and actually lands on WorkOS's
+  // logout flow / returnTo target.
+  const logout = () => {
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = "/api/auth/logout";
+    document.body.appendChild(form);
+    form.submit();
   };
 
   return (

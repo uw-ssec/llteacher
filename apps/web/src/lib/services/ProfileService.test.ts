@@ -68,6 +68,40 @@ describe("ProfileService.getProfileWithStats", () => {
     expect(profile.instructorStats).toBeUndefined();
   });
 
+  it("picks the highest-privilege role deterministically, regardless of findMany row order", async () => {
+    const cipher = new IdentityCipher(keys);
+    const encryptedEmail = await cipher.encryptString("multi@uw.edu");
+
+    const makeDb = (memberships: Array<{ id: string; role: string }>) =>
+      ({
+        query: {
+          users: {
+            findFirst: async () => ({ id: "u3", email: encryptedEmail, displayName: null }),
+          },
+          courseMemberships: {
+            findMany: async () =>
+              memberships.map((m) => ({ ...m, userId: "u3", courseId: "c1" })),
+          },
+          homeworks: { findMany: async () => [] },
+        },
+      }) as unknown as Db;
+
+    const instructorFirst = makeDb([
+      { id: "m1", role: "instructor" },
+      { id: "m2", role: "student" },
+    ]);
+    const studentFirst = makeDb([
+      { id: "m2", role: "student" },
+      { id: "m1", role: "instructor" },
+    ]);
+
+    const profileA = await new ProfileService(cipher, instructorFirst).getProfileWithStats("u3");
+    const profileB = await new ProfileService(cipher, studentFirst).getProfileWithStats("u3");
+
+    expect(profileA.role).toBe("instructor");
+    expect(profileB.role).toBe("instructor");
+  });
+
   it("throws when the user does not exist", async () => {
     const cipher = new IdentityCipher(keys);
     const db = { query: { users: { findFirst: async () => undefined } } } as unknown as Db;

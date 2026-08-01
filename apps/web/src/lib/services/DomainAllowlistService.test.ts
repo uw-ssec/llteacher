@@ -7,6 +7,15 @@ function fakeBlindIndex(): BlindIndex {
   return new Uint8Array(32) as BlindIndex;
 }
 
+/** findFirst is called in a fixed order by checkGrandfathering: first by
+ *  workosUserId, then (only if that misses/is pending) by emailBlindIndex.
+ *  Tests supply results for each call in that order via a queue. Mirrors
+ *  UserIdentityService.test.ts's queuedFindFirst helper. */
+function queuedFindFirst(...results: unknown[]): () => Promise<unknown> {
+  const queue = [...results];
+  return async () => queue.shift();
+}
+
 describe("DomainAllowlistService.validateEmailDomain", () => {
   it("allows an exact-match domain", () => {
     expect(DomainAllowlistService.validateEmailDomain("cdcore@uw.edu", ["uw.edu"])).toEqual({
@@ -40,23 +49,72 @@ describe("DomainAllowlistService.validateEmailDomain", () => {
 });
 
 describe("DomainAllowlistService.checkGrandfathering", () => {
-  it("returns true for an existing, non-pending user", async () => {
+  it("returns true for an existing, non-pending user found by workosUserId", async () => {
     const db = {
-      query: { users: { findFirst: async () => ({ id: "u1", isPending: false }) } },
+      query: { users: { findFirst: queuedFindFirst({ id: "u1", isPending: false }) } },
     } as unknown as Db;
-    expect(await DomainAllowlistService.checkGrandfathering(fakeBlindIndex(), db)).toBe(true);
+    expect(
+      await DomainAllowlistService.checkGrandfathering("workos_1", fakeBlindIndex(), db),
+    ).toBe(true);
   });
 
-  it("returns false when no user matches", async () => {
-    const db = { query: { users: { findFirst: async () => undefined } } } as unknown as Db;
-    expect(await DomainAllowlistService.checkGrandfathering(fakeBlindIndex(), db)).toBe(false);
+  it("returns false when no user matches either lookup", async () => {
+    const db = {
+      query: { users: { findFirst: queuedFindFirst(undefined, undefined) } },
+    } as unknown as Db;
+    expect(
+      await DomainAllowlistService.checkGrandfathering("workos_1", fakeBlindIndex(), db),
+    ).toBe(false);
   });
 
-  it("returns false for a pending (roster-only) user", async () => {
+  it("returns false for a pending (roster-only) user found by both lookups", async () => {
     const db = {
-      query: { users: { findFirst: async () => ({ id: "u1", isPending: true }) } },
+      query: {
+        users: {
+          findFirst: queuedFindFirst({ id: "u1", isPending: true }, { id: "u1", isPending: true }),
+        },
+      },
     } as unknown as Db;
-    expect(await DomainAllowlistService.checkGrandfathering(fakeBlindIndex(), db)).toBe(false);
+    expect(
+      await DomainAllowlistService.checkGrandfathering("workos_1", fakeBlindIndex(), db),
+    ).toBe(false);
+  });
+
+  it("grandfathers an existing user by workosUserId even when their new email's blind index matches no row, and short-circuits (does not query by email)", async () => {
+    let findFirstCalls = 0;
+    const db = {
+      query: {
+        users: {
+          findFirst: async () => {
+            findFirstCalls++;
+            return { id: "existing-user-1", isPending: false };
+          },
+        },
+      },
+    } as unknown as Db;
+
+    const result = await DomainAllowlistService.checkGrandfathering(
+      "workos_1",
+      fakeBlindIndex(),
+      db,
+    );
+
+    expect(result).toBe(true);
+    expect(findFirstCalls).toBe(1);
+  });
+
+  it("falls back to the emailBlindIndex lookup when no user matches workosUserId", async () => {
+    const db = {
+      query: {
+        users: {
+          findFirst: queuedFindFirst(undefined, { id: "existing-user-2", isPending: false }),
+        },
+      },
+    } as unknown as Db;
+
+    expect(
+      await DomainAllowlistService.checkGrandfathering("unknown_workos_id", fakeBlindIndex(), db),
+    ).toBe(true);
   });
 });
 
@@ -96,5 +154,20 @@ describe("DomainAllowlistService.resolveAllowedDomains", () => {
     expect(await DomainAllowlistService.resolveAllowedDomains("workos_org_1", db)).toEqual(
       DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS,
     );
+  });
+
+  it("falls back to the default (does not throw) when the organizations lookup errors -- e.g. a missing migration column", async () => {
+    const db = {
+      query: {
+        organizations: {
+          findFirst: async () => {
+            throw new Error('column "allowed_domains" does not exist');
+          },
+        },
+      },
+    } as unknown as Db;
+    await expect(
+      DomainAllowlistService.resolveAllowedDomains("workos_org_1", db),
+    ).resolves.toEqual(DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS);
   });
 });
