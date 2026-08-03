@@ -15,7 +15,7 @@
      #B7A57A (Husky Gold print): ~5.9:1 ✓ AA
    -------------------------------------------------------------------------- */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CaretRight } from "@phosphor-icons/react";
 
 export interface TopNavProps {
@@ -55,6 +55,42 @@ export function TopNav({
   onLogout,
 }: TopNavProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const userGroupRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  const closeMenu = () => setMenuOpen(false);
+
+  // Click-outside-to-close.
+  useEffect(() => {
+    if (!menuOpen) return;
+    function handlePointerDown(e: MouseEvent) {
+      if (userGroupRef.current && !userGroupRef.current.contains(e.target as Node)) {
+        closeMenu();
+      }
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [menuOpen]);
+
+  // Escape-to-close, with focus returned to the trigger -- the disclosure
+  // is a plain button + list of links (not a full ARIA menu widget, which
+  // would also need arrow-key navigation this 2-item menu doesn't warrant).
+  useEffect(() => {
+    if (!menuOpen) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        closeMenu();
+        triggerRef.current?.focus();
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [menuOpen]);
+
+  const selectItem = (handler?: () => void) => {
+    closeMenu();
+    handler?.();
+  };
 
   const breadcrumbText = `${course.toUpperCase()} · ${term.toUpperCase()} · ${homework.toUpperCase()}`;
 
@@ -83,12 +119,17 @@ export function TopNav({
         {breadcrumbText}
       </div>
 
-      {/* Right: user menu chip */}
-      <div className="top-nav__user-group">
+      {/* Right: user menu chip -- a plain disclosure (button + list of
+          links), not an ARIA menu widget: this 2-item menu doesn't warrant
+          arrow-key navigation, but it does need Escape and click-outside
+          to close, which the effects above provide. */}
+      <div className="top-nav__user-group" ref={userGroupRef}>
         <button
+          ref={triggerRef}
           className="top-nav__user-chip"
           type="button"
           aria-label="Account menu"
+          aria-haspopup="true"
           aria-expanded={menuOpen}
           onClick={() => setMenuOpen((prev) => !prev)}
         >
@@ -102,13 +143,12 @@ export function TopNav({
           </span>
         </button>
         {menuOpen && (onLogin || onProfileClick || onLogout) && (
-          <div className="top-nav__user-menu" role="menu">
+          <div className="top-nav__user-menu">
             {!isAuthenticated && onLogin && (
               <button
                 className="top-nav__user-menu-item"
-                role="menuitem"
                 type="button"
-                onClick={onLogin}
+                onClick={() => selectItem(onLogin)}
               >
                 Log in
               </button>
@@ -116,9 +156,8 @@ export function TopNav({
             {isAuthenticated && onProfileClick && (
               <button
                 className="top-nav__user-menu-item"
-                role="menuitem"
                 type="button"
-                onClick={onProfileClick}
+                onClick={() => selectItem(onProfileClick)}
               >
                 Profile
               </button>
@@ -126,9 +165,8 @@ export function TopNav({
             {isAuthenticated && onLogout && (
               <button
                 className="top-nav__user-menu-item"
-                role="menuitem"
                 type="button"
-                onClick={onLogout}
+                onClick={() => selectItem(onLogout)}
               >
                 Log out
               </button>
