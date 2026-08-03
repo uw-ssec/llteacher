@@ -2,3 +2,9 @@ DATABASE_URL="postgresql://user:password@host.neon.tech/llteacher?sslmode=requir
 WORKOS_API_KEY="sk_test_placeholder"
 WORKOS_CLIENT_ID="client_placeholder"
 OPENROUTER_API_KEY="sk-or-v1-placeholder"
+
+# Auth (M1): 32-byte keys, base64-encoded. Generate with:
+#   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+SESSION_SECRET="base64-encoded-32-byte-key"
+ENCRYPTION_KEY="base64-encoded-32-byte-key"
+BLIND_INDEX_KEY="base64-encoded-32-byte-key"

@@ -379,6 +379,54 @@ body {
   }
 
   /* -------------------------------------------------------------------------
+     .auth-error-banner — shown when the session check itself fails (backend
+     unavailable), distinct from "not logged in". Error red, not decorative.
+     ------------------------------------------------------------------------- */
+  .auth-error-banner {
+    flex-shrink: 0;
+    padding: var(--space-2) var(--space-4);
+    background-color: #FDECEC;
+    color: #8A1F11;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    text-align: center;
+  }
+
+  /* -------------------------------------------------------------------------
+     .unauthenticated-home — minimal placeholder for anonymous visitors.
+     Deliberately plain; #55 owns the real branded landing page.
+     ------------------------------------------------------------------------- */
+  .unauthenticated-home {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-4);
+    height: 100vh;
+    background-color: #32006e;
+    color: #FFFFFF;
+    font-family: var(--font-sans);
+  }
+
+  .unauthenticated-home h1 {
+    font-size: 32px;
+    font-weight: var(--weight-semibold);
+    margin: 0;
+  }
+
+  .unauthenticated-home button {
+    padding: var(--space-2) var(--space-4);
+    background-color: #FFFFFF;
+    color: #32006e;
+    border: none;
+    border-radius: 6px;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    font-weight: var(--weight-semibold);
+    cursor: pointer;
+  }
+
+  /* -------------------------------------------------------------------------
      .top-nav — full-bleed UW Husky Purple header bar.
      Three zones: wordmark (left) · breadcrumb (center) · user chip (right).
      56px tall. 1px bottom rule in a deeper purple.
@@ -439,9 +487,39 @@ body {
   }
 
   .top-nav__user-group {
+    position: relative;
     flex-shrink: 0;
     display: flex;
     align-items: center;
+  }
+
+  .top-nav__user-menu {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    min-width: 120px;
+    background-color: #FFFFFF;
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.24);
+    overflow: hidden;
+    z-index: 10;
+  }
+
+  .top-nav__user-menu-item {
+    display: block;
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    background: none;
+    border: none;
+    text-align: left;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    color: #32006e;
+    cursor: pointer;
+  }
+
+  .top-nav__user-menu-item:hover {
+    background-color: #F4F1E8;
   }
 
   .top-nav__user-chip {

@@ -1,0 +1,1 @@
+ALTER TABLE "organizations" ADD COLUMN "allowed_domains" text[] DEFAULT ARRAY['uw.edu']::text[] NOT NULL;

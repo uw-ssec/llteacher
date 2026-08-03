@@ -1,14 +1,43 @@
 import { Hono } from "hono";
 import { helloHandler } from "./routes/hello";
 import { chatHandler } from "./routes/chat";
+import { loginHandler, callbackHandler, logoutHandler } from "./routes/auth";
+import { getProfileHandler, patchProfileHandler } from "./routes/profile";
+import { listHomeworksHandler, createHomeworkHandler } from "./routes/homeworks";
+import { authMiddleware } from "./middleware/auth";
+import { rolesMiddleware } from "./middleware/roles";
+import { requireCourseMember, requireInstructorOf } from "./utils/guards";
+import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "./utils/errors";
+import type { AppEnv } from "./context";
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<AppEnv>();
+
+// Catches anything thrown by middleware/handlers that isn't already handled
+// locally -- e.g. a DB connection failure in rolesMiddleware or a profile
+// route. Logs the real error server-side; the client only ever sees the
+// generic message, never DB connection strings or driver internals.
+app.onError((err, c) => {
+  logServerError("server", err);
+  return c.json({ error: SERVICE_UNAVAILABLE_MESSAGE }, 503);
+});
+
+// Session gate for every /api/* route except /api/auth/*.
+app.use("/api/*", authMiddleware);
+// Resolves course_memberships once per request for authenticated users.
+app.use("/api/*", rolesMiddleware);
 
 // API routes — registered directly on `app` rather than via app.route(prefix, sub)
 // to avoid Hono's prefix-stripping behavior that can cause /api/hello to not
 // match a sub-app's `/` handler.
 app.get("/api/hello", helloHandler);
 app.post("/api/chat", chatHandler);
+app.get("/api/auth/login", loginHandler);
+app.get("/api/auth/callback", callbackHandler);
+app.post("/api/auth/logout", logoutHandler);
+app.get("/api/profile", getProfileHandler);
+app.patch("/api/profile", patchProfileHandler);
+app.get("/api/courses/:courseId/homeworks", requireCourseMember()(listHomeworksHandler));
+app.post("/api/courses/:courseId/homeworks", requireInstructorOf()(createHomeworkHandler));
 
 // Everything else: delegate to the static asset binding.
 // In dev, this proxies to Vite's pipeline (so HMR + source maps work).

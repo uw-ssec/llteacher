@@ -96,8 +96,19 @@ const devApiProxy: Plugin = {
 
         res.statusCode = response.status;
         response.headers.forEach((value, key) => {
+          // Set-Cookie is forwarded separately below -- Headers.forEach
+          // yields one call per cookie (never comma-joined), but Node's
+          // setHeader replaces rather than appends on repeat calls with a
+          // string value, so a second Set-Cookie here would silently drop
+          // the first (e.g. the OAuth state + PKCE verifier cookies set
+          // together by /api/auth/login).
+          if (key.toLowerCase() === "set-cookie") return;
           res.setHeader(key, value);
         });
+        const setCookies = response.headers.getSetCookie?.() ?? [];
+        if (setCookies.length > 0) {
+          res.setHeader("set-cookie", setCookies);
+        }
 
         if (!response.body) {
           res.end();

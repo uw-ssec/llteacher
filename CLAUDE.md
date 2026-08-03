@@ -73,3 +73,7 @@ To run the code in testing mode we can use `--settings=src.llteacher.settings` i
 ## Implementation Progress
 
 - ✅ SectionDetailView (Homeworks app)
+
+## Code Style
+
+- Concise, simple solutions; if a simpler way exists, propose it.

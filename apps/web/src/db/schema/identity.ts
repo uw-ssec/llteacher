@@ -27,6 +27,10 @@ import { blindIndex, encryptedText } from "../types/encrypted";
 
 // ---------- Enums ----------
 
+// Authoritative role vocabulary. apps/admin can't import this Drizzle
+// schema across the app boundary, so packages/ui/src/auth/courseRole.ts
+// hand-mirrors these values for the admin client; apps/web/src/lib/
+// courseRoleParity.test.ts asserts the two stay in sync.
 export const courseRoleEnum = pgEnum("course_role", [
   "instructor",
   "ta",
@@ -62,6 +66,10 @@ export const organizations = pgTable(
     requiresFerpa: boolean("requires_ferpa").notNull().default(true),
     requiresHipaa: boolean("requires_hipaa").notNull().default(false),
     dataResidency: text("data_residency"),
+    allowedDomains: text("allowed_domains")
+      .array()
+      .notNull()
+      .default(sql`ARRAY['uw.edu']::text[]`),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

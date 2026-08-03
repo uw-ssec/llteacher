@@ -27,6 +27,15 @@ import {
   SUBMISSIONS_HW_003,
   CURRENT_TEACHER,
 } from "./lib/fixtures";
+import { useAuth, type CourseRole } from "./components/AuthProvider";
+import { UnauthenticatedAdmin } from "./components/UnauthenticatedAdmin";
+import { Forbidden } from "./components/Forbidden";
+
+const INSTRUCTOR_ROLES: ReadonlySet<CourseRole> = new Set<CourseRole>([
+  "instructor",
+  "ta",
+  "admin",
+]);
 
 /* localStorage key for the admin sidebar collapsed preference. Namespaced
    separately from the student app — different surface, different user,
@@ -49,6 +58,9 @@ const NAV_BREADCRUMB: Record<View["kind"], string> = {
 };
 
 export default function App() {
+  const { isAuthenticated, loading: authLoading, error: authError, role, login, logout } =
+    useAuth();
+
   const [view, setView] = useState<View>({ kind: "homeworks" });
 
   /* Sidebar collapse persists across reloads via localStorage. Lazy
@@ -91,6 +103,10 @@ export default function App() {
     .join("")
     .slice(0, 2);
 
+  if (authLoading) return null;
+  if (!isAuthenticated) return <UnauthenticatedAdmin onLogin={login} error={authError} />;
+  if (!role || !INSTRUCTOR_ROLES.has(role)) return <Forbidden />;
+
   return (
     <div className="app-shell-vertical">
       {/* Shared TopNav with admin mode. The Heritage Gold dot + "Admin"
@@ -102,6 +118,8 @@ export default function App() {
         homework={NAV_BREADCRUMB[view.kind]}
         userInitials={initials}
         admin
+        isAuthenticated={isAuthenticated}
+        onLogout={logout}
       />
 
       <div className="app-shell">
