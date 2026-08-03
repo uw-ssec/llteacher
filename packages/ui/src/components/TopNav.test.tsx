@@ -67,10 +67,12 @@ describe("TopNav account menu", () => {
     expect(screen.queryByText("Profile")).toBeNull();
   });
 
-  it("marks the trigger's popup state via aria-expanded/aria-haspopup, not a menu role", async () => {
+  it("marks the trigger's popup state via aria-expanded only -- no aria-haspopup, no menu role", async () => {
     renderAuthed();
     const trigger = screen.getByRole("button", { name: "Account menu" });
-    expect(trigger.getAttribute("aria-haspopup")).toBe("true");
+    // aria-haspopup maps to "menu pop-up button" and promises an arrow-key
+    // model this 2-item disclosure doesn't implement -- must stay absent.
+    expect(trigger.hasAttribute("aria-haspopup")).toBe(false);
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
 
     await userEvent.click(trigger);

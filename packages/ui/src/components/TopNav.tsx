@@ -129,7 +129,6 @@ export function TopNav({
           className="top-nav__user-chip"
           type="button"
           aria-label="Account menu"
-          aria-haspopup="true"
           aria-expanded={menuOpen}
           onClick={() => setMenuOpen((prev) => !prev)}
         >

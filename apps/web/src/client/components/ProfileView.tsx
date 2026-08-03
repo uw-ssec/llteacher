@@ -36,15 +36,21 @@ export function ProfileView() {
   }, [isAuthenticated, reloadKey]);
 
   const handleSave = async (displayName: string) => {
-    const res = await fetch("/api/profile", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ displayName }),
-    });
-    if (res.ok) {
-      setSaveError(false);
-      setReloadKey((k) => k + 1);
-    } else {
+    try {
+      const res = await fetch("/api/profile", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName }),
+      });
+      if (res.ok) {
+        setSaveError(false);
+        setReloadKey((k) => k + 1);
+      } else {
+        setSaveError(true);
+      }
+    } catch {
+      // Transport failure (offline, DNS, connection reset) -- not an HTTP
+      // error response, so it never reaches the `res.ok` check above.
       setSaveError(true);
     }
   };
