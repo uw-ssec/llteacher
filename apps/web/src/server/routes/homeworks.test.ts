@@ -177,4 +177,19 @@ describe("POST /api/courses/:courseId/homeworks", () => {
     expect(res.status).toBe(400);
     expect(insertHomework).not.toHaveBeenCalled();
   });
+
+  it("returns 403 (not an unguarded throw) when authContext is missing -- guard-composition regression coverage", async () => {
+    insertHomework.mockReset();
+    const res = await buildApp(undefined).request(
+      "/api/courses/course-a/homeworks",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "New HW", description: "desc", dueDate: "2026-12-01" }),
+      },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(403);
+    expect(insertHomework).not.toHaveBeenCalled();
+  });
 });

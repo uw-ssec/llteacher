@@ -5,7 +5,7 @@ import { makeDb } from "../../db/client";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { DomainAllowlistService } from "../../lib/services/DomainAllowlistService";
-import { UserIdentityService } from "../../lib/services/UserIdentityService";
+import { UserIdentityService, type WorkOSProfile } from "../../lib/services/UserIdentityService";
 import {
   SESSION_COOKIE_NAME,
   SESSION_TTL_SECONDS,
@@ -27,7 +27,7 @@ import { extractSession } from "../middleware/auth";
 import type { AppEnv } from "../context";
 import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "../utils/errors";
 
-export async function loginHandler(c: Context<{ Bindings: Env }>) {
+export async function loginHandler(c: Context<AppEnv>) {
   const workos = getWorkOS(c.env.WORKOS_API_KEY);
   const secureCookie = c.req.url.startsWith("https://");
 
@@ -56,7 +56,7 @@ export async function loginHandler(c: Context<{ Bindings: Env }>) {
   return c.redirect(authorizationUrl);
 }
 
-export async function callbackHandler(c: Context<{ Bindings: Env }>) {
+export async function callbackHandler(c: Context<AppEnv>) {
   const code = c.req.query("code");
   const returnedState = c.req.query("state");
   const expectedState = getCookie(c, OAUTH_STATE_COOKIE);
@@ -74,7 +74,7 @@ export async function callbackHandler(c: Context<{ Bindings: Env }>) {
   }
 
   const workos = getWorkOS(c.env.WORKOS_API_KEY);
-  let workosUser: { id: string; email: string; firstName?: string | null };
+  let workosUser: WorkOSProfile;
   let workosSessionId: string | undefined;
   let workosOrganizationId: string | undefined;
   try {
@@ -183,7 +183,7 @@ function decodeSessionId(accessToken: string): string | undefined {
   }
 }
 
-function callbackUrl(c: Context<{ Bindings: Env }>): string {
+function callbackUrl(c: Context<AppEnv>): string {
   const origin = c.req.header("origin") ?? new URL(c.req.url).origin;
   return `${origin}/api/auth/callback`;
 }
@@ -210,7 +210,7 @@ function escapeHtml(value: string): string {
 
 // Sub-app preserved for direct unit testing; production routing happens via
 // app.get/post("/api/auth/...", ...) in server/index.ts (see hello.ts).
-export const auth = new Hono<{ Bindings: Env }>();
+export const auth = new Hono<AppEnv>();
 auth.get("/login", loginHandler);
 auth.get("/callback", callbackHandler);
 auth.post("/logout", logoutHandler);

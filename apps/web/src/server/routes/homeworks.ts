@@ -31,12 +31,14 @@ export async function listHomeworksHandler(c: Context<AppEnv>) {
 
 export async function createHomeworkHandler(c: Context<AppEnv>) {
   const courseId = c.req.param("courseId");
-  const authContext = c.get("authContext") as AuthContext;
+  const authContext = c.get("authContext") as AuthContext | undefined;
 
-  // requireInstructorOf already verified courseId is present (it 403s
-  // otherwise); narrowed again here so TS knows courseId is a definite
-  // string, not `string | undefined`, by the time it's used in .values().
-  if (!courseId) {
+  // requireInstructorOf already verified courseId is present and
+  // authContext exists (it 403s otherwise); guarded again here -- mirrors
+  // listHomeworksHandler -- so a dropped/reordered guard fails closed with
+  // a 403 instead of throwing past this point (unguarded .memberships
+  // access) into the generic 503 handler.
+  if (!authContext || !courseId) {
     return c.json({ error: "Course access denied" }, 403);
   }
 
