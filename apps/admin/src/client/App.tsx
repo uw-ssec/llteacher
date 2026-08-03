@@ -27,11 +27,15 @@ import {
   SUBMISSIONS_HW_003,
   CURRENT_TEACHER,
 } from "./lib/fixtures";
-import { useAuth } from "./components/AuthProvider";
+import { useAuth, type CourseRole } from "./components/AuthProvider";
 import { UnauthenticatedAdmin } from "./components/UnauthenticatedAdmin";
 import { Forbidden } from "./components/Forbidden";
 
-const INSTRUCTOR_ROLES = new Set(["instructor", "ta", "admin"]);
+const INSTRUCTOR_ROLES: ReadonlySet<CourseRole> = new Set<CourseRole>([
+  "instructor",
+  "ta",
+  "admin",
+]);
 
 /* localStorage key for the admin sidebar collapsed preference. Namespaced
    separately from the student app — different surface, different user,

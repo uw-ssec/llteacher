@@ -27,6 +27,10 @@ import { blindIndex, encryptedText } from "../types/encrypted";
 
 // ---------- Enums ----------
 
+// Authoritative role vocabulary. apps/admin can't import this Drizzle
+// schema across the app boundary, so packages/ui/src/auth/courseRole.ts
+// hand-mirrors these values for the admin client; apps/web/src/lib/
+// courseRoleParity.test.ts asserts the two stay in sync.
 export const courseRoleEnum = pgEnum("course_role", [
   "instructor",
   "ta",

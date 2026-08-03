@@ -52,3 +52,6 @@ export type { DefinitionCardProps, ToolPart } from "./generative";
 
 export { createAuthProvider } from "./auth/createAuthProvider";
 export type { AuthSessionState, AuthProviderOptions } from "./auth/createAuthProvider";
+
+export { COURSE_ROLES, parseCourseRole } from "./auth/courseRole";
+export type { CourseRole } from "./auth/courseRole";

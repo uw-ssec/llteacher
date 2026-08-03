@@ -6,7 +6,8 @@
   "description": "LLteacher shared design system — UW Husky Purple chrome, Heritage Gold AI markers, Geist type system. Consumed by apps/web and apps/admin.",
   "exports": {
     ".": "./src/index.ts",
-    "./styles.css": "./styles.css"
+    "./styles.css": "./styles.css",
+    "./auth/courseRole": "./src/auth/courseRole.ts"
   },
   "scripts": {
     "typecheck": "tsc -b",

@@ -9,8 +9,23 @@ import type { ProfileWithStats } from "../../shared/types";
  *  "primary role" for a user with multiple course memberships. Postgres
  *  gives no row-ordering guarantee without an explicit ORDER BY, so picking
  *  `memberships[0]` would make the primary role flicker across requests for
- *  any multi-role user (e.g. instructor in one course, student in another). */
-const ROLE_PRIORITY: CourseRole[] = ["admin", "instructor", "ta", "student", "observer"];
+ *  any multi-role user (e.g. instructor in one course, student in another).
+ *
+ *  `satisfies Record<CourseRole, number>` makes this exhaustive against the
+ *  enum at compile time -- adding a role to course_role without ranking it
+ *  here fails to compile, instead of the new role silently never being
+ *  selected as primary. */
+const ROLE_PRIORITY_RANK = {
+  admin: 0,
+  instructor: 1,
+  ta: 2,
+  student: 3,
+  observer: 4,
+} satisfies Record<CourseRole, number>;
+
+const ROLE_PRIORITY = (Object.keys(ROLE_PRIORITY_RANK) as CourseRole[]).sort(
+  (a, b) => ROLE_PRIORITY_RANK[a] - ROLE_PRIORITY_RANK[b],
+);
 
 export class ProfileService {
   constructor(

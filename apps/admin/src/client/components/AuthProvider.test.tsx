@@ -2,7 +2,7 @@
 // Common session/login/logout/unmount behavior is covered by
 // @llteacher/ui's createAuthProvider.test.tsx -- this file only checks
 // admin's one divergence point: parsing `role` off /api/profile.
-import { describe, it, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup } from "@testing-library/react";
 import { AuthProvider, useAuth } from "./AuthProvider";
 
@@ -50,5 +50,20 @@ describe("AuthProvider / useAuth (admin)", () => {
       </AuthProvider>,
     );
     await waitFor(() => screen.getByText("authed:none"));
+  });
+
+  it("denies (null) and warns on an unrecognized role instead of trusting it through", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => profileResponse("grader")));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    );
+    await waitFor(() => screen.getByText("authed:none"));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("grader"));
+
+    warnSpy.mockRestore();
   });
 });
