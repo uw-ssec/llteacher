@@ -44,3 +44,11 @@ export type { SpinnerProps, SpinnerSize } from "./components/Spinner";
 
 export { DefinitionCard, renderToolPart } from "./generative";
 export type { DefinitionCardProps, ToolPart } from "./generative";
+
+/* -- Auth session -----------------------------------------------------------
+   Shared session-fetch-on-mount + login/logout for apps/web and apps/admin.
+   Each app wraps createAuthProvider() in its own AuthProvider.tsx to get a
+   typed useAuth() -- see apps/web and apps/admin's components/AuthProvider.tsx. */
+
+export { createAuthProvider } from "./auth/createAuthProvider";
+export type { AuthSessionState, AuthProviderOptions } from "./auth/createAuthProvider";
