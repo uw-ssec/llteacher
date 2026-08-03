@@ -4,16 +4,19 @@ import * as schema from "./schema";
 import type { Db } from "./client";
 
 /**
- * Test-only DB client for Vitest integration tests that need a real
- * Postgres connection.
+ * DB client for anything that runs as a plain Node process rather than
+ * inside the Cloudflare Worker -- Vitest integration tests and the
+ * `db:seed` script (`apps/web/scripts/seed.ts`).
  *
  * Production code (`makeDb` in client.ts) uses @neondatabase/serverless's
  * HTTP driver -- the only driver that works inside a Cloudflare Worker (no
  * raw TCP sockets there). That driver speaks Neon's HTTP proxy protocol and
  * cannot reach a plain Postgres server, so it can't be pointed at the local
- * or CI pgvector container Vitest runs against. This client uses
- * node-postgres (`pg`, already a devDependency for the drizzle-kit CLI)
- * over a real TCP connection instead.
+ * or CI pgvector container. This client uses node-postgres (`pg`, already a
+ * devDependency for the drizzle-kit CLI, which has the same constraint)
+ * over a real TCP connection instead -- works against local/CI Postgres
+ * *and* a real Neon database, since Neon also speaks plain Postgres wire
+ * protocol over TCP+SSL, not just HTTP.
  *
  * The result is cast to `Db` at the boundary: both are drizzle-orm
  * PgDatabase instances over the same `schema`, differing only in a
@@ -24,7 +27,7 @@ import type { Db } from "./client";
  * behavior is identical -- this cast reflects verified compatibility, not
  * a hidden risk.
  */
-export function makeTestDb(databaseUrl: string): Db {
+export function makeNodeDb(databaseUrl: string): Db {
   const pool = new Pool({ connectionString: databaseUrl });
   return drizzle(pool, { schema }) as unknown as Db;
 }

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
-import { makeTestDb } from "../testClient";
+import { makeNodeDb } from "../nodeClient";
 import type { Db } from "../client";
 import {
   conversations,
@@ -24,7 +24,7 @@ describe.skipIf(!DATABASE_URL)("conversations + messages schema", () => {
   let homeworkId: string;
 
   beforeAll(async () => {
-    db = makeTestDb(DATABASE_URL!);
+    db = makeNodeDb(DATABASE_URL!);
     const [org] = await db
       .insert(organizations)
       .values({
