@@ -9,7 +9,17 @@ import "@llteacher/ui/styles.css";
 const router = createBrowserRouter([
   { path: "/", element: <App /> },
   { path: "/profile", element: <ProfileView /> },
+  { path: "*", element: <NotFound /> },
 ]);
+
+function NotFound() {
+  return (
+    <div className="not-found">
+      <h1>Page not found</h1>
+      <a href="/">Go home</a>
+    </div>
+  );
+}
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

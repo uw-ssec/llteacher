@@ -26,6 +26,7 @@ export function ProfileEditForm({ initialDisplayName, onSave }: ProfileEditFormP
         label="Display name"
         value={displayName}
         onChange={(e) => setDisplayName(e.target.value)}
+        disabled={saving}
       />
       <Button type="submit" disabled={saving}>
         {saving ? "Saving…" : "Save"}
