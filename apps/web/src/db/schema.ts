@@ -7,3 +7,4 @@
 export * from "./schema/pings";
 export * from "./schema/identity";
 export * from "./schema/content";
+export * from "./schema/runtime";
