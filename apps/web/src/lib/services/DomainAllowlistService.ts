@@ -19,7 +19,12 @@ export class DomainAllowlistService {
   static readonly DEFAULT_ALLOWED_DOMAINS = ["uw.edu"];
 
   static validateEmailDomain(email: string, allowedDomains: string[]): DomainCheckResult {
-    const domain = email.split("@")[1]?.toLowerCase();
+    const atIndex = email.lastIndexOf("@");
+    const atCount = email.split("@").length - 1;
+    if (atCount !== 1 || atIndex === 0) {
+      return { allowed: false, reason: "Invalid email format" };
+    }
+    const domain = email.slice(atIndex + 1).toLowerCase();
     if (!domain) {
       return { allowed: false, reason: "Invalid email format" };
     }
@@ -59,32 +64,39 @@ export class DomainAllowlistService {
   }
 
   /** Resolves the allowed-domains policy for the organization the WorkOS
-   *  user authenticated into. Falls back to DEFAULT_ALLOWED_DOMAINS when no
-   *  organizationId was present on the auth response, or no local
-   *  `organizations` row matches it yet (single-tenant v0 dev path).
+   *  user authenticated into. Falls back to DEFAULT_ALLOWED_DOMAINS only for
+   *  the legitimate "no policy configured" cases: no organizationId was
+   *  present on the auth response, or no local `organizations` row matches
+   *  it yet (single-tenant v0 dev path).
    *
-   *  Also falls back to the default -- rather than throwing -- if the
-   *  lookup itself errors (e.g. the `organizations.allowedDomains` column
-   *  from a migration in this same batch hasn't been applied yet). Without
-   *  this, a missing migration turns into a total login outage for every
-   *  org-scoped user instead of everyone safely getting the single-tenant
-   *  default. */
+   *  An org row with `allowedDomains = []` is an explicit "block all
+   *  provisioning for this org" and is returned as-is -- validateEmailDomain
+   *  denies everything against an empty list. This is distinct from no row
+   *  existing at all, which uses the default.
+   *
+   *  A lookup error (e.g. the `organizations.allowedDomains` column from a
+   *  migration in this same batch hasn't been applied yet) is NOT treated
+   *  as "no policy configured" -- it rethrows so the caller fails closed
+   *  (callbackHandler's catch renders the 503 sign-in-unavailable page)
+   *  rather than silently admitting the default domains for an org whose
+   *  real policy may be narrower. */
   static async resolveAllowedDomains(
     organizationId: string | undefined,
     db: Db,
   ): Promise<string[]> {
-    if (organizationId) {
-      try {
-        const org = await db.query.organizations.findFirst({
-          where: eq(organizations.workosOrganizationId, organizationId),
-        });
-        if (org?.allowedDomains && org.allowedDomains.length > 0) {
-          return org.allowedDomains;
-        }
-      } catch (err) {
-        logServerError("DomainAllowlistService.resolveAllowedDomains", err);
-      }
+    if (!organizationId) return DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS;
+
+    let org;
+    try {
+      org = await db.query.organizations.findFirst({
+        where: eq(organizations.workosOrganizationId, organizationId),
+      });
+    } catch (err) {
+      logServerError("DomainAllowlistService.resolveAllowedDomains", err);
+      throw err;
     }
-    return DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS;
+
+    if (!org) return DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS;
+    return org.allowedDomains;
   }
 }

@@ -141,4 +141,40 @@ describe("POST /api/courses/:courseId/homeworks", () => {
     );
     expect(res.status).toBe(400);
   });
+
+  it("returns 400 (not 503) for an unparseable dueDate", async () => {
+    insertHomework.mockReset();
+    const membership = { id: "membership-1", userId: "u1", courseId: "course-a", role: "instructor" } as unknown as AuthContext["memberships"][number];
+    const res = await buildApp(
+      fakeAuthContext({ isInstructorOf: (id) => id === "course-a", memberships: [membership] }),
+    ).request(
+      "/api/courses/course-a/homeworks",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "New HW", description: "desc", dueDate: "banana" }),
+      },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+    expect(insertHomework).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 (not 503) for a malformed JSON body", async () => {
+    insertHomework.mockReset();
+    const membership = { id: "membership-1", userId: "u1", courseId: "course-a", role: "instructor" } as unknown as AuthContext["memberships"][number];
+    const res = await buildApp(
+      fakeAuthContext({ isInstructorOf: (id) => id === "course-a", memberships: [membership] }),
+    ).request(
+      "/api/courses/course-a/homeworks",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "not json",
+      },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+    expect(insertHomework).not.toHaveBeenCalled();
+  });
 });

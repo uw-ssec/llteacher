@@ -41,6 +41,22 @@ describe("DomainAllowlistService.validateEmailDomain", () => {
     );
   });
 
+  it("rejects an address with two @ signs even if the second segment is allowed", () => {
+    expect(
+      DomainAllowlistService.validateEmailDomain("attacker@uw.edu@evil.com", ["uw.edu"]).allowed,
+    ).toBe(false);
+  });
+
+  it("rejects an address with no local part", () => {
+    expect(DomainAllowlistService.validateEmailDomain("@uw.edu", ["uw.edu"]).allowed).toBe(false);
+  });
+
+  it("rejects an address with three @ signs", () => {
+    expect(
+      DomainAllowlistService.validateEmailDomain("a@b@c@uw.edu", ["uw.edu"]).allowed,
+    ).toBe(false);
+  });
+
   it("is case-insensitive", () => {
     expect(DomainAllowlistService.validateEmailDomain("cdcore@UW.EDU", ["uw.edu"]).allowed).toBe(
       true,
@@ -147,16 +163,14 @@ describe("DomainAllowlistService.resolveAllowedDomains", () => {
     );
   });
 
-  it("falls back to the default when the org row has an empty allowedDomains array", async () => {
+  it("returns the empty array as-is (deny all) when the org row has an explicit empty allowedDomains -- distinct from no row at all", async () => {
     const db = {
       query: { organizations: { findFirst: async () => ({ id: "org1", allowedDomains: [] }) } },
     } as unknown as Db;
-    expect(await DomainAllowlistService.resolveAllowedDomains("workos_org_1", db)).toEqual(
-      DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS,
-    );
+    expect(await DomainAllowlistService.resolveAllowedDomains("workos_org_1", db)).toEqual([]);
   });
 
-  it("falls back to the default (does not throw) when the organizations lookup errors -- e.g. a missing migration column", async () => {
+  it("fails closed (throws) when the organizations lookup errors -- e.g. a missing migration column -- rather than widening to the default", async () => {
     const db = {
       query: {
         organizations: {
@@ -166,8 +180,8 @@ describe("DomainAllowlistService.resolveAllowedDomains", () => {
         },
       },
     } as unknown as Db;
-    await expect(
-      DomainAllowlistService.resolveAllowedDomains("workos_org_1", db),
-    ).resolves.toEqual(DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS);
+    await expect(DomainAllowlistService.resolveAllowedDomains("workos_org_1", db)).rejects.toThrow(
+      'column "allowed_domains" does not exist',
+    );
   });
 });

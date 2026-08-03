@@ -1,8 +1,9 @@
 import { eq } from "drizzle-orm";
-import { users } from "../../db/schema";
+import { courseMemberships, users } from "../../db/schema";
 import type { Db } from "../../db/client";
 import { IdentityCipher } from "../crypto/identity-cipher";
 import type { BlindIndex } from "../../db/types/encrypted";
+import { logServerError } from "../../server/utils/errors";
 
 export interface WorkOSProfile {
   id: string;
@@ -121,8 +122,13 @@ export class UserIdentityService {
 
     const currentEmail = await this.cipher.decryptString(existing.email);
     if (currentEmail !== normalizedEmail) {
-      updates.email = await this.cipher.encryptString(normalizedEmail);
-      updates.emailBlindIndex = emailBlindIndex;
+      const canClaim = await this.claimEmailBlindIndex(existing, emailBlindIndex);
+      if (canClaim) {
+        updates.email = await this.cipher.encryptString(normalizedEmail);
+        updates.emailBlindIndex = emailBlindIndex;
+      }
+      // else: another non-pending user already owns this email. Keep the
+      // old email on `existing` -- see claimEmailBlindIndex for details.
     }
 
     if (netid && !existing.netidBlindIndex) {
@@ -132,6 +138,68 @@ export class UserIdentityService {
 
     await this.db.update(users).set(updates).where(eq(users.id, existing.id));
     return { userId: existing.id, isNew: false };
+  }
+
+  /** The `users_email_blind_index_uq` unique index means `existing` cannot
+   *  take over `emailBlindIndex` while another row already holds it -- e.g.
+   *  a roster sync created a *pending* row for the user's new address before
+   *  they renamed their WorkOS account to it. Returns whether `existing` is
+   *  now free to claim the blind index.
+   *
+   *  Pending holder: absorb its course memberships onto `existing` one at a
+   *  time (each move is its own statement, and the pending row is deleted
+   *  last) so a crash mid-merge leaves memberships intact on one row or the
+   *  other, never orphaned. neon-http has no interactive transactions, so
+   *  this sequencing -- rather than a single atomic transaction -- is what
+   *  keeps a partial failure recoverable.
+   *
+   *  Non-pending holder: a second real account already owns the email.
+   *  Fail this part of the reconcile gracefully (log, keep the old email)
+   *  rather than throwing the whole login into the 503 path. */
+  private async claimEmailBlindIndex(
+    existing: typeof users.$inferSelect,
+    emailBlindIndex: BlindIndex,
+  ): Promise<boolean> {
+    const holder = await this.db.query.users.findFirst({
+      where: eq(users.emailBlindIndex, emailBlindIndex),
+    });
+    if (!holder || holder.id === existing.id) return true;
+
+    if (!holder.isPending) {
+      logServerError(
+        "UserIdentityService.reconcileExisting",
+        new Error(
+          `user ${existing.id} cannot claim email already owned by non-pending user ${holder.id}`,
+        ),
+      );
+      return false;
+    }
+
+    const [pendingMemberships, existingMemberships] = await Promise.all([
+      this.db.query.courseMemberships.findMany({
+        where: eq(courseMemberships.userId, holder.id),
+      }),
+      this.db.query.courseMemberships.findMany({
+        where: eq(courseMemberships.userId, existing.id),
+      }),
+    ]);
+    const existingCourseIds = new Set(existingMemberships.map((m) => m.courseId));
+
+    for (const membership of pendingMemberships) {
+      if (existingCourseIds.has(membership.courseId)) {
+        // existing is already enrolled in this course -- drop the
+        // duplicate rather than violating course_memberships_user_course_uq.
+        await this.db.delete(courseMemberships).where(eq(courseMemberships.id, membership.id));
+      } else {
+        await this.db
+          .update(courseMemberships)
+          .set({ userId: existing.id })
+          .where(eq(courseMemberships.id, membership.id));
+      }
+    }
+
+    await this.db.delete(users).where(eq(users.id, holder.id));
+    return true;
   }
 }
 

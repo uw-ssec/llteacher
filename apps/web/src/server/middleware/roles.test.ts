@@ -72,4 +72,26 @@ describe("rolesMiddleware", () => {
     const body = (await res.json()) as { authContext: unknown };
     expect(body.authContext).toBeNull();
   });
+
+  it("skips the membership query on PUBLIC_API_PATHS (e.g. logout) even with a session present", async () => {
+    findManyCalls = 0;
+    const app = new Hono<AppEnv>();
+    app.use("*", async (c, next) => {
+      const session: SessionPayload = { userId: "u1", workosUserId: "w1", issuedAt: 0, expiresAt: 0 };
+      c.set("session", session);
+      await next();
+    });
+    app.use("*", rolesMiddleware);
+    app.post("/api/auth/logout", (c) => c.json({ authContext: c.get("authContext") ?? null }));
+
+    const res = await app.request(
+      "/api/auth/logout",
+      { method: "POST" },
+      { DATABASE_URL: "ignored" } as Env,
+    );
+    const body = (await res.json()) as { authContext: unknown };
+
+    expect(body.authContext).toBeNull();
+    expect(findManyCalls).toBe(0);
+  });
 });

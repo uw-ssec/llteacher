@@ -40,7 +40,12 @@ export async function createHomeworkHandler(c: Context<AppEnv>) {
     return c.json({ error: "Course access denied" }, 403);
   }
 
-  const body = await c.req.json<CreateHomeworkBody>();
+  let body: CreateHomeworkBody;
+  try {
+    body = await c.req.json<CreateHomeworkBody>();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
   if (
     typeof body.title !== "string" ||
     body.title.trim().length === 0 ||
@@ -48,6 +53,11 @@ export async function createHomeworkHandler(c: Context<AppEnv>) {
     typeof body.dueDate !== "string"
   ) {
     return c.json({ error: "title, description, and dueDate are required" }, 400);
+  }
+
+  const dueDate = new Date(body.dueDate);
+  if (Number.isNaN(dueDate.getTime())) {
+    return c.json({ error: "dueDate must be a valid date" }, 400);
   }
 
   const membership = authContext.memberships.find((m) => m.courseId === courseId);
@@ -67,7 +77,7 @@ export async function createHomeworkHandler(c: Context<AppEnv>) {
       createdById: membership.id,
       title: body.title.trim(),
       description: body.description,
-      dueDate: new Date(body.dueDate),
+      dueDate,
     })
     .returning({ id: homeworks.id });
 

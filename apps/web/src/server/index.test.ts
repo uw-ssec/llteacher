@@ -69,4 +69,39 @@ describe("app composition", () => {
     const res = await app.request("/api/courses/course-a/homeworks", {}, ENV);
     expect(res.status).toBe(401);
   });
+
+  it("logout succeeds even when the membership query would reject (skips rolesMiddleware entirely)", async () => {
+    findMany.mockRejectedValue(new Error("connection refused: ECONNREFUSED"));
+
+    const key = await loadSessionKey(ENV);
+    const sealed = await sealSession(createSessionPayload("u1", "w1"), key);
+
+    const res = await app.request(
+      "/api/auth/logout",
+      { method: "POST", headers: { cookie: `${SESSION_COOKIE_NAME}=${sealed}` } },
+      ENV,
+    );
+
+    expect(res.status).not.toBe(503);
+    expect(findMany).not.toHaveBeenCalled();
+    expect(res.headers.get("set-cookie")).toMatch(new RegExp(`${SESSION_COOKIE_NAME}=;`));
+  });
+
+  it("a route that genuinely needs roles still 503s under the same DB outage", async () => {
+    const dbError = new Error("connection refused: ECONNREFUSED");
+    findMany.mockRejectedValue(dbError);
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const key = await loadSessionKey(ENV);
+    const sealed = await sealSession(createSessionPayload("u1", "w1"), key);
+
+    const res = await app.request(
+      "/api/courses/course-a/homeworks",
+      { headers: { cookie: `${SESSION_COOKIE_NAME}=${sealed}` } },
+      ENV,
+    );
+
+    expect(res.status).toBe(503);
+    consoleSpy.mockRestore();
+  });
 });

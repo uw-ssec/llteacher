@@ -19,7 +19,12 @@ export async function patchProfileHandler(c: Context<AppEnv>) {
   const session = c.get("session");
   if (!session) return c.json({ error: "Unauthorized" }, 401);
 
-  const body = await c.req.json<{ displayName?: unknown }>();
+  let body: { displayName?: unknown };
+  try {
+    body = await c.req.json<{ displayName?: unknown }>();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
   if (typeof body.displayName !== "string" || body.displayName.trim().length === 0) {
     return c.json({ error: "displayName is required" }, 400);
   }

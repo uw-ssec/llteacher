@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { IdentityCipher, type IdentityCipherKeys } from "../crypto/identity-cipher";
 import { UserIdentityService } from "./UserIdentityService";
+import { courseMemberships } from "../../db/schema";
 import type { Db } from "../../db/client";
 
 let keys: IdentityCipherKeys;
@@ -197,5 +198,118 @@ describe("UserIdentityService.createOrClaimUser", () => {
     expect(updatedValues?.workosUserId).toBe("workos_1");
     expect(await cipher.decryptString(updatedValues?.email as never)).toBe("cdcore@uw.edu");
     expect(await cipher.decryptString(updatedValues?.netid as never)).toBe("cdcore");
+  });
+
+  it("email change onto a pending row's address merges memberships and deletes the pending row", async () => {
+    const cipher = new IdentityCipher(keys);
+    const staleEncryptedEmail = await cipher.encryptString("old-address@uw.edu");
+    const membershipUpdates: Record<string, unknown>[] = [];
+    const membershipDeletes: unknown[] = [];
+    const userDeletes: unknown[] = [];
+    let finalUserUpdate: Record<string, unknown> | undefined;
+
+    const pendingMembership = { id: "m-pending-only", courseId: "course-A" };
+    const duplicateMembership = { id: "m-duplicate", courseId: "course-B" };
+    const existingMembership = { id: "m-existing", courseId: "course-B" };
+
+    const db = {
+      query: {
+        users: {
+          findFirst: queuedFindFirst(
+            {
+              id: "existing-user-1",
+              isPending: false,
+              email: staleEncryptedEmail,
+              netidBlindIndex: new Uint8Array(32),
+            },
+            { id: "pending-user-1", isPending: true },
+          ),
+        },
+        courseMemberships: {
+          findMany: queuedFindFirst([pendingMembership, duplicateMembership], [
+            existingMembership,
+          ]),
+        },
+      },
+      update: (table: unknown) => {
+        if (table === courseMemberships) {
+          return {
+            set: (v: Record<string, unknown>) => ({
+              where: async () => {
+                membershipUpdates.push(v);
+              },
+            }),
+          };
+        }
+        return {
+          set: (v: Record<string, unknown>) => {
+            finalUserUpdate = v;
+            return { where: async () => undefined };
+          },
+        };
+      },
+      delete: (table: unknown) => ({
+        where: async () => {
+          if (table === courseMemberships) membershipDeletes.push(table);
+          else userDeletes.push(table);
+        },
+      }),
+    } as unknown as Db;
+
+    const result = await new UserIdentityService(cipher, db).createOrClaimUser({
+      id: "workos_1",
+      email: "newname@uw.edu",
+      firstName: "Cordero",
+    });
+
+    expect(result).toEqual({ userId: "existing-user-1", isNew: false });
+    // course-A only existed on the pending row -- moved onto existing-user-1.
+    expect(membershipUpdates).toEqual([{ userId: "existing-user-1" }]);
+    // course-B existed on both -- the pending row's duplicate is dropped,
+    // not the row that already had it.
+    expect(membershipDeletes).toHaveLength(1);
+    // Pending row itself is deleted last.
+    expect(userDeletes).toHaveLength(1);
+    expect(await cipher.decryptString(finalUserUpdate?.email as never)).toBe("newname@uw.edu");
+    expect(finalUserUpdate?.emailBlindIndex).toBeInstanceOf(Uint8Array);
+  });
+
+  it("email change onto an address already owned by a non-pending user keeps the old email and still logs in", async () => {
+    const cipher = new IdentityCipher(keys);
+    const staleEncryptedEmail = await cipher.encryptString("old-address@uw.edu");
+    let finalUserUpdate: Record<string, unknown> | undefined;
+
+    const db = {
+      query: {
+        users: {
+          findFirst: queuedFindFirst(
+            {
+              id: "existing-user-1",
+              isPending: false,
+              email: staleEncryptedEmail,
+              netidBlindIndex: new Uint8Array(32),
+            },
+            { id: "other-user-2", isPending: false },
+          ),
+        },
+      },
+      update: () => ({
+        set: (v: Record<string, unknown>) => {
+          finalUserUpdate = v;
+          return { where: async () => undefined };
+        },
+      }),
+    } as unknown as Db;
+
+    const result = await new UserIdentityService(cipher, db).createOrClaimUser({
+      id: "workos_1",
+      email: "newname@uw.edu",
+      firstName: "Cordero",
+    });
+
+    expect(result).toEqual({ userId: "existing-user-1", isNew: false });
+    expect(finalUserUpdate?.email).toBeUndefined();
+    expect(finalUserUpdate?.emailBlindIndex).toBeUndefined();
+    expect(finalUserUpdate?.lastLoginAt).toBeInstanceOf(Date);
   });
 });

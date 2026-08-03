@@ -4,6 +4,7 @@ import { makeDb } from "../../db/client";
 import { courseMemberships, courseRoleEnum } from "../../db/schema";
 import type { SessionPayload } from "../../lib/session";
 import type { AppEnv } from "../context";
+import { PUBLIC_API_PATHS } from "./auth";
 
 export type CourseRole = (typeof courseRoleEnum.enumValues)[number];
 type Membership = typeof courseMemberships.$inferSelect;
@@ -18,10 +19,13 @@ export interface AuthContext {
 
 /** Loads course_memberships once per request (not per guard) and attaches
  *  role-check helpers to the context. No-ops when authMiddleware found no
- *  session -- that case is already a 401 for protected routes. */
+ *  session -- that case is already a 401 for protected routes -- and on
+ *  PUBLIC_API_PATHS, where roles are meaningless (most importantly logout,
+ *  which must be able to clear the session cookie even if the database is
+ *  down). */
 export async function rolesMiddleware(c: Context<AppEnv>, next: Next) {
   const session = c.get("session");
-  if (!session) {
+  if (!session || PUBLIC_API_PATHS.has(c.req.path)) {
     await next();
     return;
   }

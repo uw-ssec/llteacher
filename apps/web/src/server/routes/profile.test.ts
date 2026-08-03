@@ -115,4 +115,19 @@ describe("PATCH /api/profile", () => {
     );
     expect(res.status).toBe(401);
   });
+
+  it("returns 400 (not 503) for a malformed JSON body", async () => {
+    updateDisplayName.mockReset();
+    const res = await buildApp(SESSION).request(
+      "/api/profile",
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: "not json",
+      },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+    expect(updateDisplayName).not.toHaveBeenCalled();
+  });
 });

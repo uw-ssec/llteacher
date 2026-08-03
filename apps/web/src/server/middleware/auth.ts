@@ -10,8 +10,11 @@ import type { AppEnv } from "../context";
 
 /** Exact paths that never require a session. Deliberately a closed set
  *  (not a prefix match) -- a new /api/auth/* endpoint must be added here
- *  explicitly, so it can't silently become public by sharing the prefix. */
-const PUBLIC_API_PATHS = new Set([
+ *  explicitly, so it can't silently become public by sharing the prefix.
+ *  Also used by rolesMiddleware to skip its course_memberships query on
+ *  these paths -- roles are meaningless there, and logout in particular
+ *  must not depend on the database. */
+export const PUBLIC_API_PATHS = new Set([
   "/api/auth/login",
   "/api/auth/callback",
   "/api/auth/logout",
