@@ -79,9 +79,13 @@ export async function workosWebhookHandler(c: Context<AppEnv>) {
           ),
         );
       }
+    } else {
+      // Acknowledged, not processed -- see the module doc comment above
+      // for why this isn't an error. Logged (not just silently ack'd) so
+      // an operator can see what WorkOS is actually sending, e.g. to scope
+      // a future pass that handles more event types.
+      console.log(`[workosWebhookHandler] acknowledged unhandled event type: ${event.event}`);
     }
-    // Every other event type: acknowledged, not processed. See the module
-    // doc comment above for why this isn't an error.
   } catch (err) {
     // A genuine failure processing a *verified* event (DB down, etc.) --
     // the one case that should surface as a server error and let WorkOS's

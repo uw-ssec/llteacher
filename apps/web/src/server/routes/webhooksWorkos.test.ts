@@ -176,6 +176,22 @@ describe("POST /api/webhooks/workos", () => {
     expect(deactivateByWorkosUserId).not.toHaveBeenCalled();
   });
 
+  it("logs (not just silently acknowledges) an unhandled event type", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const payload = {
+      id: "event_3",
+      event: "user.updated",
+      createdAt: new Date().toISOString(),
+      data: userDeletedEvent("workos_1").data,
+    };
+    const req = await signedRequest(payload);
+
+    await webhooksWorkos.request("/", req, TEST_ENV);
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("user.updated"));
+    logSpy.mockRestore();
+  });
+
   it("returns 500 (not 401 or a silent failure) when a verified event fails to process", async () => {
     deactivateByWorkosUserId.mockRejectedValue(new Error("connection refused: ECONNREFUSED"));
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
