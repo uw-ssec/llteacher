@@ -27,6 +27,11 @@ jobs:
 
     env:
       DATABASE_URL: postgres://llteacher:dev@localhost:5432/llteacher
+      # Also read by the "Test" step below (scripts/seed.test.ts calls the
+      # seed script itself) -- not just the smoke-test step -- so these live
+      # at job level like DATABASE_URL, not scoped to one step.
+      ENCRYPTION_KEY: ${{ secrets.CI_SEED_ENCRYPTION_KEY }}
+      BLIND_INDEX_KEY: ${{ secrets.CI_SEED_BLIND_INDEX_KEY }}
 
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +53,10 @@ jobs:
       - name: Apply Drizzle migrations
         working-directory: apps/web
         run: npm run db:migrate
+
+      - name: Seed smoke test
+        working-directory: apps/web
+        run: npm run db:seed -- --reset
 
       - name: Typecheck
         run: npm run typecheck

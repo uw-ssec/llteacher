@@ -8,5 +8,5 @@
     "types": ["@cloudflare/workers-types"],
     "lib": ["ES2022", "WebWorker"]
   },
-  "include": ["src/server", "src/shared", "src/db", "src/lib"]
+  "include": ["src/server", "src/shared", "src/db", "src/lib", "scripts"]
 }

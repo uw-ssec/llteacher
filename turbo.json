@@ -25,7 +25,8 @@
     },
     "test": {
       "dependsOn": ["^build"],
-      "outputs": ["coverage/**"]
+      "outputs": ["coverage/**"],
+      "env": ["DATABASE_URL", "ENCRYPTION_KEY", "BLIND_INDEX_KEY"]
     },
     "lint": {
       "outputs": []

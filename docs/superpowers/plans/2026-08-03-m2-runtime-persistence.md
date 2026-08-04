@@ -16,7 +16,7 @@
 - Migrations are additive/forward-only; `npm run db:migrate` run twice against the same DB must succeed.
 - Routes (`apps/web/src/server/routes/*.ts`) must not import `db.select`/`db.insert`/table objects/`drizzle-orm` query helpers directly once a repository exists for that aggregate — they call repository functions instead.
 - Follow existing schema idioms exactly: `pgEnum` for closed vocabularies, `check(name, sql\`...\`)` with `num_nonnulls()` for polymorphic single-scope columns, `uniqueIndex(...).where(...)` for partial uniqueness, `timestamp(..., { withTimezone: true })`, `relations()` exported alongside every table.
-- CI (`.github/workflows/test.yml`) runs `npm run db:migrate` against a real `pgvector/pgvector:pg16` service, then `npm run typecheck`, then `npm test`, with `DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher` set at job level — so integration tests that use a real `Db` client work in CI without extra wiring. Locally, `DATABASE_URL` must be exported in the shell (separate from `apps/web/.dev.vars`, which only feeds the Wrangler dev server, not Vitest) — integration test suites use `describe.skipIf(!process.env.DATABASE_URL)` so `npm test` still passes for a contributor with no local Postgres.
+- CI (`.github/workflows/test.yml`) runs `npm run db:migrate` against a real `pgvector/pgvector:pg16` service, then `npm run typecheck`, then `npm test`, with `DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher` set at job level. `npm test` runs through Turbo (`turbo run test`), and Turbo 2.x strict-mode env handling strips `DATABASE_URL` from the child process unless the `test` task explicitly lists it — `turbo.json`'s `test` task must declare `"env": ["DATABASE_URL", "ENCRYPTION_KEY", "BLIND_INDEX_KEY"]` or every real-DB integration test silently reports "skipped" in CI, not "passed" (this bit the epic itself during Phase 5 — see resolved design decision 11). Locally, `DATABASE_URL` must be exported in the shell (separate from `apps/web/.dev.vars`, which only feeds the Wrangler dev server, not Vitest) — integration test suites use `describe.skipIf(!process.env.DATABASE_URL)` so `npm test` still passes for a contributor with no local Postgres.
 
 ## Resolved Design Decisions (record in PR descriptions)
 
@@ -29,6 +29,8 @@
 7. **Submission timestamp**: single `submitted_at timestamp notNull defaultNow()`, no separate `created_at`. A submission row's existence *is* the submit event (matches Django's `auto_now_add` behavior) — a separate `created_at` would always equal `submitted_at` and add nothing.
 8. **Audit-event append-only enforcement**: DB-level `REVOKE UPDATE, DELETE` grants are deferred — the current setup uses one Postgres role for all Neon connections, so a revoke would need a dedicated low-privilege app role first (infra work, not this epic). For M2, append-only is enforced at the application layer: `repositories/auditEvents.ts` exports only `recordAuditEvent` (insert), no update/delete function exists anywhere in the codebase for that table. Documented in a comment above the `auditEvents` table definition; a follow-up infra issue should add the DB grant.
 9. **Real-DB test/seed driver** (discovered during Phase 1 execution, not anticipated by any issue text): `makeDb()` in `db/client.ts` uses `@neondatabase/serverless`'s HTTP driver, which speaks Neon's proxy protocol and **cannot connect to a plain Postgres server at all** — not a local quirk, it fails identically against the CI Postgres service. It's the right driver for production (the only one that works inside a Cloudflare Worker, no raw TCP), but wrong for anything that runs as a plain Node process. Added `apps/web/src/db/nodeClient.ts` (`makeNodeDb`), a `drizzle-orm/node-postgres` + `pg` client — `pg` was already a devDependency for the same reason on the `drizzle-kit` CLI — cast to the same `Db` type at the boundary (verified-safe: both are Drizzle `PgDatabase` instances over the same schema, and no code in this codebase uses raw `.execute()`, the one place the underlying HKT type param could matter). All real-DB integration tests (Phases 1–4) and the seed script itself (Phase 5) use `makeNodeDb`, not `makeDb` — production route code (`hello.ts`, `homeworks.ts`, etc.) is unaffected and keeps using `makeDb`.
+10. **`scripts/` wasn't wired into either tool** (discovered during Phase 5 execution): `vitest.config.ts`'s `include` only matched `src/**/*.test.ts`, so `scripts/seed.test.ts` silently collected zero tests until `"scripts/**/*.test.ts"` was added. Separately, `npm run typecheck` (`tsc -b`) never covered `scripts/seed.ts` either — none of the three tsconfig project references (`tsconfig.json` → `src/client` only; `tsconfig.node.json` → build-tooling config files only; `tsconfig.worker.json` → `src/server`/`src/shared`/`src/db`/`src/lib`) listed `scripts`. Added `"scripts"` to `tsconfig.worker.json`'s `include` (not `tsconfig.node.json` — `scripts/seed.ts` imports from `src/db` and `src/lib`, which are files owned by the worker project; TS project references require the importing file to live in the same project as what it imports, or a `references` edge between them). This is also what caught a real unused-import bug (`homeworks` in `seed.test.ts`) that had been invisible to `npm run typecheck` the whole time.
+11. **`turbo run test` was silently discarding `DATABASE_URL` from every task, in CI too** (discovered during Phase 5 execution — the most consequential finding in this epic, broader than the seed script itself). Turbo 2.x defaults every task to strict env mode: only env vars explicitly listed in `turbo.json`'s `globalEnv` or a task's own `env`/`passThroughEnv` reach the child process; everything else is stripped, regardless of whether it's set in the parent shell or (as in CI) at the GitHub Actions job level. `turbo.json` had no such declaration for the `test` task. Consequence: **every real-DB integration test written in Phases 1–4** (`runtime.test.ts`, `conversations.test.ts`, `submissions.test.ts`) has been silently reporting "skipped," never "passed," in CI's `Test` step this whole time — CI was never actually proving the schema constraints, cascade behavior, or cross-org isolation it looked like it was proving. Root-cause-found by deliberately reproducing CI's exact invocation shape (`export DATABASE_URL=...; npm test` from repo root, matching a GitHub Actions job-level `env:` block) instead of trusting the local ad-hoc `DATABASE_URL=... npx vitest run <file>` invocations used throughout earlier phases, which bypass Turbo entirely and so never surfaced this. Fixed by adding `"env": ["DATABASE_URL", "ENCRYPTION_KEY", "BLIND_INDEX_KEY"]` to the `test` task in `turbo.json`. Verified fixed by rerunning the same reproduction and confirming all 3 real-DB suites (30 tests) flip from skipped to passed. **Action item for whoever reviews this PR**: re-run this epic's CI once merged and confirm the `Test` step's log actually shows `runtime.test.ts`, `conversations.test.ts`, and `submissions.test.ts` passing (not skipped) — that log line is the actual proof this fix works in the real CI environment, not just this reproduction.
 
 ---
 
@@ -2032,6 +2034,8 @@ git commit -m "docs(web): document routes-vs-repositories convention (#16)"
 - Modify: `apps/web/package.json` (add `db:seed` script + `tsx` devDependency if not already present)
 - Modify: `apps/web/README.md` (document seed users + `--reset`)
 - Modify: `.github/workflows/test.yml` (run seed as a smoke test after migrations)
+- Modify: `apps/web/vitest.config.ts` (add `"scripts/**/*.test.ts"` to `include` — otherwise `seed.test.ts` silently collects zero tests, see resolved design decision 10)
+- Modify: `apps/web/tsconfig.worker.json` (add `"scripts"` to `include` — otherwise `npm run typecheck` never covers `seed.ts` at all, see decision 10)
 - Test: `apps/web/scripts/seed.test.ts` (real DB, `describe.skipIf`)
 
 **Interfaces:**
@@ -2369,14 +2373,20 @@ matches (`teacher1@test.com`, etc.) — see `docs/architecture/multi-tenant-data
 
 - [ ] **Step 6: Wire into CI as a smoke test**
 
-Edit `.github/workflows/test.yml`, insert after the "Apply Drizzle migrations" step and before "Typecheck":
+Edit `.github/workflows/test.yml`. Add `ENCRYPTION_KEY`/`BLIND_INDEX_KEY` to the job-level `env:` block alongside `DATABASE_URL` (not scoped to one step) — the later "Test" step also needs them, since `scripts/seed.test.ts` itself calls the seed script and would otherwise skip in CI even after the turbo `env` fix from decision 11:
+
+```yaml
+    env:
+      DATABASE_URL: postgres://llteacher:dev@localhost:5432/llteacher
+      ENCRYPTION_KEY: ${{ secrets.CI_SEED_ENCRYPTION_KEY }}
+      BLIND_INDEX_KEY: ${{ secrets.CI_SEED_BLIND_INDEX_KEY }}
+```
+
+Then insert after the "Apply Drizzle migrations" step and before "Typecheck":
 
 ```yaml
       - name: Seed smoke test
         working-directory: apps/web
-        env:
-          ENCRYPTION_KEY: ${{ secrets.CI_SEED_ENCRYPTION_KEY }}
-          BLIND_INDEX_KEY: ${{ secrets.CI_SEED_BLIND_INDEX_KEY }}
         run: npm run db:seed -- --reset
 ```
 
