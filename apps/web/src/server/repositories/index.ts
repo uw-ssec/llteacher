@@ -1,5 +1,6 @@
 export * from "./scope";
 export * from "./pings";
+export * from "./users";
 export * from "./homeworks";
 export * from "./conversations";
 export * from "./submissions";

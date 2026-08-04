@@ -1,7 +1,7 @@
 import type { Context, Next } from "hono";
-import { eq } from "drizzle-orm";
 import { makeDb } from "../../db/client";
 import { courseMemberships, courseRoleEnum } from "../../db/schema";
+import { listMembershipsForUser } from "../repositories/users";
 import type { SessionPayload } from "../../lib/session";
 import type { AppEnv } from "../context";
 import { PUBLIC_API_PATHS } from "./auth";
@@ -31,9 +31,7 @@ export async function rolesMiddleware(c: Context<AppEnv>, next: Next) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
-  const memberships = await db.query.courseMemberships.findMany({
-    where: eq(courseMemberships.userId, session.userId),
-  });
+  const memberships = await listMembershipsForUser(db, session.userId);
 
   const authContext: AuthContext = {
     session,
