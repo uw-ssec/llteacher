@@ -1,8 +1,10 @@
 import { relations, sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   index,
   integer,
+  jsonb,
   pgEnum,
   pgTable,
   text,
@@ -50,6 +52,24 @@ export const credentialProviderEnum = pgEnum("credential_provider", [
   "local",
   "canvas",
   "workos",
+]);
+
+// Why a membership was dropped (issue #142). Distinguishing "this
+// deactivation dropped it" from "dropped for any other reason" (e.g. a
+// future Canvas roster removal, #32/#74) is what lets a later reactivation
+// (UserIdentityService.reconcileExisting, #95's self-healing) restore only
+// the memberships its own deactivation cascade touched -- restoring
+// indiscriminately would incorrectly resurrect a membership that was
+// dropped because the student was actually unenrolled from the course.
+export const membershipDropReasonEnum = pgEnum("membership_drop_reason", [
+  "roster_removal",
+  "user_deprovisioned",
+]);
+
+export const webhookEventStatusEnum = pgEnum("webhook_event_status", [
+  "processed",
+  "skipped",
+  "failed",
 ]);
 
 // ---------- Organizations ----------
@@ -140,6 +160,24 @@ export const users = pgTable(
   ],
 );
 
+// ---------- WorkOSWebhookEvent ----------
+// Append-only log of verified WorkOS webhook deliveries (issue #95's
+// event-persistence requirement). Keyed by WorkOS's own event id, not a
+// surrogate uuid -- the primary key IS the idempotency guard for events
+// whose handler logic isn't independently idempotent (e.g. user.updated).
+// status starts as the outcome of the first processing attempt: "processed"
+// (handled), "skipped" (acknowledged, out of v0 scope), or "failed" (a
+// genuine processing error -- NOT dedup'd, so a WorkOS retry reprocesses it
+// rather than being silently swallowed forever).
+
+export const workosWebhookEvents = pgTable("workos_webhook_events", {
+  id: text("id").primaryKey(),
+  eventType: text("event_type").notNull(),
+  payload: jsonb("payload").notNull(),
+  status: webhookEventStatusEnum("status").notNull(),
+  receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // ---------- Courses ----------
 // Projection of a Canvas course, scoped to one Organization.
 // last_synced_at tracks freshness of the Canvas-derived fields.
@@ -193,6 +231,7 @@ export const courseMemberships = pgTable(
       .notNull()
       .defaultNow(),
     droppedAt: timestamp("dropped_at", { withTimezone: true }),
+    droppedReason: membershipDropReasonEnum("dropped_reason"),
     lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -207,6 +246,10 @@ export const courseMemberships = pgTable(
       .on(t.canvasEnrollmentId)
       .where(sql`${t.canvasEnrollmentId} IS NOT NULL`),
     index("course_memberships_course_idx").on(t.courseId),
+    check(
+      "course_memberships_dropped_reason_requires_dropped_at",
+      sql`${t.droppedReason} IS NULL OR ${t.droppedAt} IS NOT NULL`,
+    ),
   ],
 );
 

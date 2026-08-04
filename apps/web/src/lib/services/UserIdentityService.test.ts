@@ -101,12 +101,17 @@ describe("UserIdentityService.createOrClaimUser", () => {
         insertCalls++;
         return { values: () => ({ returning: async () => [{ id: "should-not-happen" }] }) };
       },
-      update: () => ({
-        set: (v: Record<string, unknown>) => {
-          updatedValues = v;
-          return { where: async () => undefined };
-        },
-      }),
+      update: (table: unknown) => {
+        if (table === courseMemberships) {
+          return { set: () => ({ where: async () => undefined }) };
+        }
+        return {
+          set: (v: Record<string, unknown>) => {
+            updatedValues = v;
+            return { where: async () => undefined };
+          },
+        };
+      },
     } as unknown as Db;
 
     const result = await new UserIdentityService(cipher, db).createOrClaimUser(WORKOS_USER);
@@ -125,6 +130,7 @@ describe("UserIdentityService.createOrClaimUser", () => {
     const cipher = new IdentityCipher(keys);
     const encryptedEmail = await cipher.encryptString("cdcore@uw.edu");
     let updatedValues: Record<string, unknown> | undefined;
+    let membershipRestore: Record<string, unknown> | undefined;
     const db = {
       query: {
         users: {
@@ -138,12 +144,22 @@ describe("UserIdentityService.createOrClaimUser", () => {
           }),
         },
       },
-      update: () => ({
-        set: (v: Record<string, unknown>) => {
-          updatedValues = v;
-          return { where: async () => undefined };
-        },
-      }),
+      update: (table: unknown) => {
+        if (table === courseMemberships) {
+          return {
+            set: (v: Record<string, unknown>) => {
+              membershipRestore = v;
+              return { where: async () => undefined };
+            },
+          };
+        }
+        return {
+          set: (v: Record<string, unknown>) => {
+            updatedValues = v;
+            return { where: async () => undefined };
+          },
+        };
+      },
     } as unknown as Db;
 
     const result = await new UserIdentityService(cipher, db).createOrClaimUser(WORKOS_USER);
@@ -155,6 +171,10 @@ describe("UserIdentityService.createOrClaimUser", () => {
     // unrelated login.
     expect(updatedValues?.isActive).toBe(true);
     expect(result.sessionEpoch).toBe(4);
+    // #142: reactivation also restores memberships this deactivation
+    // dropped -- the mock can't express the droppedReason WHERE predicate,
+    // but proves the restore write itself clears both columns.
+    expect(membershipRestore).toEqual({ droppedAt: null, droppedReason: null });
   });
 
   it("re-encrypts email when it changed on the WorkOS side since the last login", async () => {
@@ -173,12 +193,17 @@ describe("UserIdentityService.createOrClaimUser", () => {
           }),
         },
       },
-      update: () => ({
-        set: (v: Record<string, unknown>) => {
-          updatedValues = v;
-          return { where: async () => undefined };
-        },
-      }),
+      update: (table: unknown) => {
+        if (table === courseMemberships) {
+          return { set: () => ({ where: async () => undefined }) };
+        }
+        return {
+          set: (v: Record<string, unknown>) => {
+            updatedValues = v;
+            return { where: async () => undefined };
+          },
+        };
+      },
     } as unknown as Db;
 
     const result = await new UserIdentityService(cipher, db).createOrClaimUser(WORKOS_USER);
@@ -306,7 +331,12 @@ describe("UserIdentityService.createOrClaimUser", () => {
 
     expect(result).toEqual({ userId: "existing-user-1", isNew: false, sessionEpoch: 0 });
     // course-A only existed on the pending row -- moved onto existing-user-1.
-    expect(membershipUpdates).toEqual([{ userId: "existing-user-1" }]);
+    // Second entry is #142's unconditional reactivation-restore write (see
+    // the mock's courseMemberships branch above), not another merge.
+    expect(membershipUpdates).toEqual([
+      { userId: "existing-user-1" },
+      { droppedAt: null, droppedReason: null },
+    ]);
     // course-B existed on both -- the pending row's duplicate is dropped,
     // not the row that already had it.
     expect(membershipDeletes).toHaveLength(1);
@@ -336,12 +366,17 @@ describe("UserIdentityService.createOrClaimUser", () => {
           ),
         },
       },
-      update: () => ({
-        set: (v: Record<string, unknown>) => {
-          finalUserUpdate = v;
-          return { where: async () => undefined };
-        },
-      }),
+      update: (table: unknown) => {
+        if (table === courseMemberships) {
+          return { set: () => ({ where: async () => undefined }) };
+        }
+        return {
+          set: (v: Record<string, unknown>) => {
+            finalUserUpdate = v;
+            return { where: async () => undefined };
+          },
+        };
+      },
     } as unknown as Db;
 
     const result = await new UserIdentityService(cipher, db).createOrClaimUser({
@@ -354,5 +389,109 @@ describe("UserIdentityService.createOrClaimUser", () => {
     expect(finalUserUpdate?.email).toBeUndefined();
     expect(finalUserUpdate?.emailBlindIndex).toBeUndefined();
     expect(finalUserUpdate?.lastLoginAt).toBeInstanceOf(Date);
+  });
+});
+
+describe("UserIdentityService.handleEmailUpdated (#142)", () => {
+  it("re-encrypts the email and refreshes the blind index when it actually changed", async () => {
+    const cipher = new IdentityCipher(keys);
+    const staleEncryptedEmail = await cipher.encryptString("old-address@uw.edu");
+    let updatedValues: Record<string, unknown> | undefined;
+    const db = {
+      query: {
+        users: {
+          findFirst: queuedFindFirst({
+            id: "existing-user-1",
+            email: staleEncryptedEmail,
+          }),
+        },
+      },
+      update: () => ({
+        set: (v: Record<string, unknown>) => {
+          updatedValues = v;
+          return { where: async () => undefined };
+        },
+      }),
+    } as unknown as Db;
+
+    const result = await new UserIdentityService(cipher, db).handleEmailUpdated(
+      "workos_1",
+      "new-address@uw.edu",
+    );
+
+    expect(result).toEqual({ updated: true });
+    expect(await cipher.decryptString(updatedValues?.email as never)).toBe("new-address@uw.edu");
+    expect(updatedValues?.emailBlindIndex).toBeInstanceOf(Uint8Array);
+  });
+
+  it("is idempotent: no-ops when the email hasn't actually changed (duplicate delivery)", async () => {
+    const cipher = new IdentityCipher(keys);
+    const encryptedEmail = await cipher.encryptString("same@uw.edu");
+    let updateCalls = 0;
+    const db = {
+      query: {
+        users: { findFirst: queuedFindFirst({ id: "existing-user-1", email: encryptedEmail }) },
+      },
+      update: () => {
+        updateCalls++;
+        return { set: () => ({ where: async () => undefined }) };
+      },
+    } as unknown as Db;
+
+    const result = await new UserIdentityService(cipher, db).handleEmailUpdated(
+      "workos_1",
+      "same@uw.edu",
+    );
+
+    expect(result).toEqual({ updated: false });
+    expect(updateCalls).toBe(0);
+  });
+
+  it("no-ops for a workosUserId this app never provisioned", async () => {
+    const cipher = new IdentityCipher(keys);
+    let updateCalls = 0;
+    const db = {
+      query: { users: { findFirst: queuedFindFirst(undefined) } },
+      update: () => {
+        updateCalls++;
+        return { set: () => ({ where: async () => undefined }) };
+      },
+    } as unknown as Db;
+
+    const result = await new UserIdentityService(cipher, db).handleEmailUpdated(
+      "workos_unknown",
+      "whoever@uw.edu",
+    );
+
+    expect(result).toEqual({ updated: false });
+    expect(updateCalls).toBe(0);
+  });
+
+  it("does not overwrite the email when the new address is already owned by another non-pending user", async () => {
+    const cipher = new IdentityCipher(keys);
+    const staleEncryptedEmail = await cipher.encryptString("old-address@uw.edu");
+    let updateCalls = 0;
+    const db = {
+      query: {
+        users: {
+          findFirst: queuedFindFirst(
+            { id: "existing-user-1", email: staleEncryptedEmail },
+            { id: "other-user-2", isPending: false },
+          ),
+        },
+      },
+      update: () => {
+        updateCalls++;
+        return { set: () => ({ where: async () => undefined }) };
+      },
+    } as unknown as Db;
+
+    const result = await new UserIdentityService(cipher, db).handleEmailUpdated(
+      "workos_1",
+      "already-taken@uw.edu",
+    );
+
+    expect(result).toEqual({ updated: false });
+    expect(updateCalls).toBe(0);
   });
 });

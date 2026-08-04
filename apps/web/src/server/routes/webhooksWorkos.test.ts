@@ -9,8 +9,24 @@ const TEST_ENV = {
   DATABASE_URL: "ignored",
 } as Env;
 
+const webhookEventFindFirst = vi.fn();
+const webhookEventInsertValues = vi.fn();
+const webhookEventOnConflictDoUpdate = vi.fn().mockResolvedValue(undefined);
+
 vi.mock("../../db/client", () => ({
-  makeDb: () => ({}),
+  makeDb: () => ({
+    query: {
+      workosWebhookEvents: {
+        findFirst: (...args: unknown[]) => webhookEventFindFirst(...args),
+      },
+    },
+    insert: () => ({
+      values: (v: Record<string, unknown>) => {
+        webhookEventInsertValues(v);
+        return { onConflictDoUpdate: (...args: unknown[]) => webhookEventOnConflictDoUpdate(...args) };
+      },
+    }),
+  }),
 }));
 
 const deactivateByWorkosUserId = vi.fn();
@@ -21,6 +37,23 @@ vi.mock("../repositories/users", () => ({
 const recordAuditEvent = vi.fn();
 vi.mock("../repositories/auditEvents", () => ({
   recordAuditEvent: (...args: unknown[]) => recordAuditEvent(...args),
+}));
+
+vi.mock("../../lib/secrets-loader", () => ({
+  loadIdentityCipherKeys: async () => ({
+    encryptionKey: {},
+    blindIndexKey: {},
+    encryptionKeyId: "k1",
+  }),
+}));
+
+const handleEmailUpdated = vi.fn();
+vi.mock("../../lib/services/UserIdentityService", () => ({
+  UserIdentityService: class {
+    handleEmailUpdated(...args: unknown[]) {
+      return handleEmailUpdated(...args);
+    }
+  },
 }));
 
 /** Signs a payload the same way WorkOS itself would, using the real SDK's
@@ -38,15 +71,15 @@ async function signedRequest(payload: unknown, secret = WEBHOOK_SECRET, timestam
   };
 }
 
-function userDeletedEvent(workosUserId: string) {
+function userEvent(id: string, event: string, overrides: Record<string, unknown> = {}) {
   return {
-    id: "event_1",
-    event: "user.deleted",
+    id,
+    event,
     createdAt: new Date().toISOString(),
     data: {
       object: "user",
-      id: workosUserId,
-      email: "deleted@uw.edu",
+      id: "workos_1",
+      email: "user@uw.edu",
       emailVerified: true,
       profilePictureUrl: null,
       firstName: null,
@@ -57,13 +90,22 @@ function userDeletedEvent(workosUserId: string) {
       updatedAt: new Date().toISOString(),
       externalId: null,
       metadata: {},
+      ...overrides,
     },
   };
+}
+
+function userDeletedEvent(workosUserId: string) {
+  return userEvent("event_1", "user.deleted", { id: workosUserId });
 }
 
 beforeEach(() => {
   deactivateByWorkosUserId.mockReset();
   recordAuditEvent.mockReset();
+  handleEmailUpdated.mockReset();
+  webhookEventFindFirst.mockReset().mockResolvedValue(undefined);
+  webhookEventInsertValues.mockReset();
+  webhookEventOnConflictDoUpdate.mockReset().mockResolvedValue(undefined);
 });
 
 describe("POST /api/webhooks/workos", () => {
@@ -137,9 +179,12 @@ describe("POST /api/webhooks/workos", () => {
       "org-b",
       expect.objectContaining({ action: "user.deprovisioned", targetType: "user", targetId: "user-1" }),
     );
+    expect(webhookEventInsertValues).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "event_1", eventType: "user.deleted", status: "processed" }),
+    );
   });
 
-  it("is idempotent: a duplicate delivery for an already-deactivated user is a 200 no-op with no audit write", async () => {
+  it("is idempotent by construction: a duplicate delivery for an already-deactivated user is a 200 no-op with no audit write", async () => {
     deactivateByWorkosUserId.mockResolvedValue(null);
     const payload = userDeletedEvent("workos_1");
     const req = await signedRequest(payload);
@@ -162,37 +207,31 @@ describe("POST /api/webhooks/workos", () => {
   });
 
   it("acknowledges an event type outside v0 scope with 200 instead of erroring", async () => {
-    const payload = {
-      id: "event_2",
-      event: "user.updated",
-      createdAt: new Date().toISOString(),
-      data: userDeletedEvent("workos_1").data,
-    };
+    const payload = userEvent("event_2", "organization_membership.deleted");
     const req = await signedRequest(payload);
 
     const res = await webhooksWorkos.request("/", req, TEST_ENV);
 
     expect(res.status).toBe(200);
     expect(deactivateByWorkosUserId).not.toHaveBeenCalled();
+    expect(handleEmailUpdated).not.toHaveBeenCalled();
   });
 
-  it("logs (not just silently acknowledges) an unhandled event type", async () => {
+  it("logs (not just silently acknowledges) an unhandled event type, and records it as skipped", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    const payload = {
-      id: "event_3",
-      event: "user.updated",
-      createdAt: new Date().toISOString(),
-      data: userDeletedEvent("workos_1").data,
-    };
+    const payload = userEvent("event_3", "organization_membership.deleted");
     const req = await signedRequest(payload);
 
     await webhooksWorkos.request("/", req, TEST_ENV);
 
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("user.updated"));
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("organization_membership.deleted"));
+    expect(webhookEventInsertValues).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "skipped" }),
+    );
     logSpy.mockRestore();
   });
 
-  it("returns 500 (not 401 or a silent failure) when a verified event fails to process", async () => {
+  it("returns 500 (not 401 or a silent failure) when a verified event fails to process, and records it as failed", async () => {
     deactivateByWorkosUserId.mockRejectedValue(new Error("connection refused: ECONNREFUSED"));
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const payload = userDeletedEvent("workos_1");
@@ -204,7 +243,86 @@ describe("POST /api/webhooks/workos", () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).not.toMatch(/ECONNREFUSED/);
     expect(consoleSpy).toHaveBeenCalled();
+    expect(webhookEventInsertValues).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "failed" }),
+    );
 
     consoleSpy.mockRestore();
+  });
+
+  describe("user.updated (#142)", () => {
+    it("re-encrypts email + refreshes the blind index via UserIdentityService", async () => {
+      handleEmailUpdated.mockResolvedValue({ updated: true });
+      const payload = userEvent("event_4", "user.updated", { email: "new@uw.edu" });
+      const req = await signedRequest(payload);
+
+      const res = await webhooksWorkos.request("/", req, TEST_ENV);
+
+      expect(res.status).toBe(200);
+      expect(handleEmailUpdated).toHaveBeenCalledWith("workos_1", "new@uw.edu");
+      expect(webhookEventInsertValues).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "event_4", eventType: "user.updated", status: "processed" }),
+      );
+    });
+
+    it("returns 500 and records failed when re-encryption fails", async () => {
+      handleEmailUpdated.mockRejectedValue(new Error("db down"));
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const payload = userEvent("event_5", "user.updated", { email: "new@uw.edu" });
+      const req = await signedRequest(payload);
+
+      const res = await webhooksWorkos.request("/", req, TEST_ENV);
+
+      expect(res.status).toBe(500);
+      expect(webhookEventInsertValues).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "failed" }),
+      );
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe("event persistence / replay dedup (#95, #142)", () => {
+    it("skips reprocessing a duplicate delivery already recorded as processed", async () => {
+      webhookEventFindFirst.mockResolvedValue({ id: "event_1", status: "processed" });
+      const payload = userDeletedEvent("workos_1");
+      const req = await signedRequest(payload);
+
+      const res = await webhooksWorkos.request("/", req, TEST_ENV);
+      const body = (await res.json()) as { received: boolean; duplicate?: boolean };
+
+      expect(res.status).toBe(200);
+      expect(body.duplicate).toBe(true);
+      expect(deactivateByWorkosUserId).not.toHaveBeenCalled();
+      expect(webhookEventInsertValues).not.toHaveBeenCalled();
+    });
+
+    it("skips reprocessing a duplicate delivery already recorded as skipped", async () => {
+      webhookEventFindFirst.mockResolvedValue({ id: "event_2", status: "skipped" });
+      const payload = userEvent("event_2", "organization_membership.deleted");
+      const req = await signedRequest(payload);
+
+      const res = await webhooksWorkos.request("/", req, TEST_ENV);
+      const body = (await res.json()) as { duplicate?: boolean };
+
+      expect(res.status).toBe(200);
+      expect(body.duplicate).toBe(true);
+    });
+
+    it("DOES reprocess a delivery whose prior attempt was recorded as failed (retry, not permanently skipped)", async () => {
+      webhookEventFindFirst.mockResolvedValue({ id: "event_1", status: "failed" });
+      deactivateByWorkosUserId.mockResolvedValue(null);
+      const payload = userDeletedEvent("workos_1");
+      const req = await signedRequest(payload);
+
+      const res = await webhooksWorkos.request("/", req, TEST_ENV);
+      const body = (await res.json()) as { duplicate?: boolean };
+
+      expect(res.status).toBe(200);
+      expect(body.duplicate).toBeUndefined();
+      expect(deactivateByWorkosUserId).toHaveBeenCalledWith(expect.anything(), "workos_1");
+      expect(webhookEventInsertValues).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "processed" }),
+      );
+    });
   });
 });

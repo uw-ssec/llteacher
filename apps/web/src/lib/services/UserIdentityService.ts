@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { courseMemberships, users } from "../../db/schema";
 import type { Db } from "../../db/client";
 import { IdentityCipher } from "../crypto/identity-cipher";
@@ -151,7 +151,67 @@ export class UserIdentityService {
     }
 
     await this.db.update(users).set(updates).where(eq(users.id, existing.id));
+
+    // Self-healing membership restore (#142): a completed WorkOS login for
+    // this identity is proof of re-authorization, so restore only the
+    // memberships *this account's own deprovisioning* dropped -- never a
+    // membership dropped for an unrelated reason (e.g. a genuine Canvas
+    // roster removal), which must stay dropped. The droppedReason tag
+    // written by deactivateByWorkosUserId is what makes that distinction
+    // possible; restoring on droppedAt alone would be indiscriminate.
+    await this.db
+      .update(courseMemberships)
+      .set({ droppedAt: null, droppedReason: null })
+      .where(
+        and(
+          eq(courseMemberships.userId, existing.id),
+          eq(courseMemberships.droppedReason, "user_deprovisioned"),
+        ),
+      );
+
     return { userId: existing.id, isNew: false, sessionEpoch: existing.sessionEpoch };
+  }
+
+  /** Re-encrypts the stored email and refreshes its blind index in response
+   *  to a WorkOS `user.updated` webhook (#142) -- the same write path a
+   *  login's reconcileExisting uses, without requiring the user to actually
+   *  log in again. Reuses claimEmailBlindIndex so a stale pending row
+   *  already squatting on the new email is absorbed the same way a login
+   *  would absorb it, rather than failing the update.
+   *
+   *  No-ops (returns updated: false) for an unknown workosUserId (the
+   *  webhook fired before this user's first login, or for an account this
+   *  app never provisioned), when the email hasn't actually changed
+   *  (duplicate delivery -- idempotent by construction, no dedup table
+   *  needed for this event type either), or when claimEmailBlindIndex
+   *  can't free the blind index (logged there). Deliberately does not
+   *  touch netid, matching reconcileExisting's convention of only ever
+   *  filling a missing netid, never overwriting one on an email change. */
+  async handleEmailUpdated(
+    workosUserId: string,
+    newEmail: string,
+  ): Promise<{ updated: boolean }> {
+    const existing = await this.db.query.users.findFirst({
+      where: eq(users.workosUserId, workosUserId),
+    });
+    if (!existing) return { updated: false };
+
+    const normalizedEmail = IdentityCipher.normalizeEmail(newEmail);
+    const currentEmail = await this.cipher.decryptString(existing.email);
+    if (currentEmail === normalizedEmail) return { updated: false };
+
+    const emailBlindIndex = await this.cipher.computeBlindIndex(normalizedEmail);
+    const canClaim = await this.claimEmailBlindIndex(existing, emailBlindIndex);
+    if (!canClaim) return { updated: false };
+
+    await this.db
+      .update(users)
+      .set({
+        email: await this.cipher.encryptString(normalizedEmail),
+        emailBlindIndex,
+      })
+      .where(eq(users.id, existing.id));
+    return { updated: true };
   }
 
   /** The `users_email_blind_index_uq` unique index means `existing` cannot
