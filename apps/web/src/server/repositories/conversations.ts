@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { conversations, messages } from "../../db/schema";
+import { conversations, messages, sections, homeworks, courseMemberships } from "../../db/schema";
 import type { CourseScope } from "./scope";
 
 export async function listConversationsForOwner(
@@ -24,6 +24,29 @@ export async function createConversation(
   scope: CourseScope,
   input: { ownerUserId: string; sectionId: string | null; kind: "section" | "tutor"; title: string },
 ) {
+  // Neither ownerUserId nor sectionId is guaranteed to belong to `scope`'s
+  // course just because the caller says so -- both are caller-supplied
+  // UUIDs. Verify membership and section scope before writing, or a
+  // mismatched id gets a conversation minted into the wrong course.
+  const [membership] = await db
+    .select({ id: courseMemberships.id })
+    .from(courseMemberships)
+    .where(and(eq(courseMemberships.userId, input.ownerUserId), eq(courseMemberships.courseId, scope)));
+  if (!membership) {
+    throw new Error("Owner is not a member of this course scope");
+  }
+
+  if (input.sectionId) {
+    const [section] = await db
+      .select({ id: sections.id })
+      .from(sections)
+      .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
+      .where(and(eq(sections.id, input.sectionId), eq(homeworks.courseId, scope)));
+    if (!section) {
+      throw new Error("Section not found in this course scope");
+    }
+  }
+
   const [created] = await db
     .insert(conversations)
     .values({ courseId: scope, ...input })

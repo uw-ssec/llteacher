@@ -348,6 +348,34 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
     ).rejects.toThrow();
   });
 
+  it("blocks deleting a grader's membership while their human-graded grade exists", async () => {
+    // Own conversation, distinct from the shared `conversationAId` fixture --
+    // submissions.conversation_id is unique, and an earlier test already
+    // submitted against that one.
+    const [conv] = await db
+      .insert(conversations)
+      .values({ ownerUserId: userAId, courseId: courseAId, sectionId: null, kind: "tutor", title: "grader-restrict-test" })
+      .returning({ id: conversations.id });
+    const [sub] = await db
+      .insert(submissions)
+      .values({ conversationId: conv.id, organizationId: orgAId })
+      .returning({ id: submissions.id });
+    const [membership] = await db
+      .select({ id: courseMemberships.id })
+      .from(courseMemberships)
+      .where(eq(courseMemberships.courseId, courseAId));
+    await db.insert(grades).values({
+      submissionId: sub.id,
+      organizationId: orgAId,
+      gradedByAi: false,
+      graderMembershipId: membership.id,
+    });
+
+    await expect(
+      db.delete(courseMemberships).where(eq(courseMemberships.id, membership.id)),
+    ).rejects.toThrow();
+  });
+
   it("cascade-deletes submission (and its grades) when the conversation is deleted", async () => {
     const [conv] = await db
       .insert(conversations)

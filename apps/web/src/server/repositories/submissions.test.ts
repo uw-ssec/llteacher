@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
-import { organizations, courses, users, conversations } from "../../db/schema";
+import { organizations, courses, users, conversations, courseMemberships } from "../../db/schema";
 import { orgScope } from "./scope";
 import { createSubmission, getSubmissionByConversation, recordGrade } from "./submissions";
 
@@ -16,6 +16,7 @@ describe.skipIf(!DATABASE_URL)("submissions repository", () => {
   let courseBId: string;
   let userAId: string;
   let userBId: string;
+  let membershipBId: string;
 
   beforeAll(async () => {
     db = makeNodeDb(DATABASE_URL!);
@@ -33,7 +34,11 @@ describe.skipIf(!DATABASE_URL)("submissions repository", () => {
         .insert(users)
         .values({ email: emailBytes as never, emailBlindIndex: emailBytes as never })
         .returning({ id: users.id });
-      return { orgId: org.id, courseId: course.id, userId: user.id };
+      const [membership] = await db
+        .insert(courseMemberships)
+        .values({ userId: user.id, courseId: course.id, role: "instructor" })
+        .returning({ id: courseMemberships.id });
+      return { orgId: org.id, courseId: course.id, userId: user.id, membershipId: membership.id };
     }
     const a = await seed("a");
     orgAId = a.orgId;
@@ -43,6 +48,7 @@ describe.skipIf(!DATABASE_URL)("submissions repository", () => {
     orgBId = b.orgId;
     courseBId = b.courseId;
     userBId = b.userId;
+    membershipBId = b.membershipId;
   });
 
   afterAll(async () => {
@@ -91,5 +97,22 @@ describe.skipIf(!DATABASE_URL)("submissions repository", () => {
       score: 0.9,
     });
     expect(grade.gradedByAi).toBe(true);
+  });
+
+  it("createSubmission rejects a conversation that belongs to a different org's course", async () => {
+    const conversationId = await newConversation(courseBId, userBId);
+    await expect(createSubmission(db, orgScope(orgAId), conversationId)).rejects.toThrow();
+  });
+
+  it("recordGrade rejects a graderMembershipId that isn't a member of the submission's course", async () => {
+    const conversationId = await newConversation(courseAId, userAId);
+    const sub = await createSubmission(db, orgScope(orgAId), conversationId);
+    await expect(
+      recordGrade(db, orgScope(orgAId), {
+        submissionId: sub.id,
+        gradedByAi: false,
+        graderMembershipId: membershipBId,
+      }),
+    ).rejects.toThrow();
   });
 });

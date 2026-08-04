@@ -172,6 +172,13 @@ export const submissions = pgTable(
 // N:1 from submission (AI-first, instructor override allowed as a second
 // row). CHECK enforces exactly one of (graded_by_ai, grader_membership_id
 // set) -- an AI grade can never carry a human grader FK and vice versa.
+// grader_membership_id is ON DELETE RESTRICT, not SET NULL: Postgres runs
+// SET NULL as a real UPDATE on the referencing row, which the consistency
+// CHECK below would then reject for any human-graded grade (graded_by_ai =
+// false, grader_membership_id about to become NULL) -- restrict makes that
+// state unreachable instead of making the delete crash on it. A grader's
+// membership can't be deleted while they have recorded grades; a future
+// retention story handles reassignment/anonymization explicitly.
 
 export const grades = pgTable(
   "grades",
@@ -185,7 +192,7 @@ export const grades = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     graderMembershipId: uuid("grader_membership_id").references(
       () => courseMemberships.id,
-      { onDelete: "set null" },
+      { onDelete: "restrict" },
     ),
     gradedByAi: boolean("graded_by_ai").notNull().default(false),
     score: doublePrecision("score"),

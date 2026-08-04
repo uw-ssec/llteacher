@@ -43,6 +43,13 @@
       "when": 1785802218063,
       "tag": "0005_fresh_thunderbolt_ross",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1785820963085,
+      "tag": "0006_grades_grader_membership_restrict",
+      "breakpoints": true
     }
   ]
 }

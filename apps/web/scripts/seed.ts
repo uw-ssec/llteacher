@@ -3,28 +3,19 @@ import { makeNodeDb } from "../src/db/nodeClient";
 import type { Db } from "../src/db/client";
 import * as schema from "../src/db/schema";
 import { IdentityCipher } from "../src/lib/crypto/identity-cipher";
+import { loadIdentityCipherKeys } from "../src/lib/secrets-loader";
 
+// Routed through the same loadIdentityCipherKeys() the Worker uses (not a
+// hand-rolled key import) so seeded PII is encrypted under the app's actual
+// active key id -- decryptString hard-fails on any other id, which silently
+// broke every seeded user's roster/profile view until this was routed
+// through the shared loader.
 async function loadCipher(): Promise<IdentityCipher> {
-  const encKeyB64 = process.env.ENCRYPTION_KEY;
-  const blindKeyB64 = process.env.BLIND_INDEX_KEY;
-  if (!encKeyB64 || !blindKeyB64) {
+  if (!process.env.ENCRYPTION_KEY || !process.env.BLIND_INDEX_KEY) {
     throw new Error("ENCRYPTION_KEY and BLIND_INDEX_KEY must be set to run the seed script");
   }
-  const encryptionKey = await crypto.subtle.importKey(
-    "raw",
-    Buffer.from(encKeyB64, "base64"),
-    { name: "AES-GCM" },
-    false,
-    ["encrypt", "decrypt"],
-  );
-  const blindIndexKey = await crypto.subtle.importKey(
-    "raw",
-    Buffer.from(blindKeyB64, "base64"),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  return new IdentityCipher({ encryptionKey, blindIndexKey, encryptionKeyId: "seed" });
+  const keys = await loadIdentityCipherKeys(process.env as unknown as Env);
+  return new IdentityCipher(keys);
 }
 
 interface SeedUserSpec {
@@ -83,26 +74,33 @@ const MESSAGE_PATTERNS: Array<(sectionTitle: string) => SeedMessageSpec[]> = [
   ],
 ];
 
+function assertLocalOrForced(databaseUrl: string, forced: boolean) {
+  const { hostname } = new URL(databaseUrl);
+  const isLocal = hostname === "localhost" || hostname === "127.0.0.1" || hostname.endsWith(".local");
+  if (!isLocal && !forced) {
+    throw new Error(
+      `Refusing to run --reset against non-local DATABASE_URL host "${hostname}" without --force. ` +
+        `--reset wipes every row in the seed org's subtree; re-run with --force only if you are ` +
+        `certain this database is disposable.`,
+    );
+  }
+}
+
 async function reset(db: Db) {
-  // Reverse dependency order.
-  await db.delete(schema.citations);
-  await db.delete(schema.grades);
-  await db.delete(schema.submissions);
-  await db.delete(schema.llmCallLogs);
-  await db.delete(schema.messages);
-  await db.delete(schema.conversations);
-  await db.delete(schema.studentProfiles);
-  await db.delete(schema.sectionSolutions);
-  await db.delete(schema.sections);
-  await db.delete(schema.homeworks);
-  await db.delete(schema.llmConfigs);
-  await db.delete(schema.courseMemberships);
-  await db.delete(schema.courses);
+  // Deleting the seed org cascades through courses -> homeworks -> sections
+  // -> everything org-anchored (course_memberships, conversations, messages,
+  // submissions, grades, citations, llm_call_logs, student_profiles,
+  // llm_configs, prompt_templates, audit_events) -- see the FK onDelete
+  // chains in db/schema/{content,runtime}.ts. Scoping to the seed-org slug,
+  // rather than deleting every row in each table, is what keeps this safe to
+  // run alongside other orgs' data (including other test suites' fixtures).
   await db.delete(schema.organizations).where(eq(schema.organizations.slug, "seed-org"));
   // isPending=true, not false: seeded accounts are pending rows (nobody has
   // ever logged into them via WorkOS). Deleting isPending=false would wipe
   // real users who've actually signed in -- the opposite of what --reset
-  // should ever touch.
+  // should ever touch. Users aren't in the org's cascade tree by design (an
+  // org being deleted must never delete real user rows), so they need this
+  // separate, still-scoped delete.
   await db.delete(schema.users).where(eq(schema.users.isPending, true));
 }
 
@@ -111,22 +109,32 @@ async function seed() {
   if (!databaseUrl) throw new Error("DATABASE_URL not set");
 
   const shouldReset = process.argv.includes("--reset");
+  const forced = process.argv.includes("--force");
   const cipher = await loadCipher();
   const db = makeNodeDb(databaseUrl);
 
   if (shouldReset) {
+    assertLocalOrForced(databaseUrl, forced);
     console.log("Resetting seeded data...");
     await reset(db);
   }
 
-  const [org] = await db
-    .insert(schema.organizations)
-    .values({
-      slug: "seed-org",
-      name: "Seed University Statistics",
-      workosOrganizationId: "seed-workos-org",
-    })
-    .returning();
+  let org: typeof schema.organizations.$inferSelect;
+  try {
+    [org] = await db
+      .insert(schema.organizations)
+      .values({
+        slug: "seed-org",
+        name: "Seed University Statistics",
+        workosOrganizationId: "seed-workos-org",
+      })
+      .returning();
+  } catch (e) {
+    if (e instanceof Error && "code" in e && e.code === "23505") {
+      throw new Error("already seeded -- use --reset to wipe and re-seed");
+    }
+    throw e;
+  }
 
   const [course] = await db
     .insert(schema.courses)

@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
-import { organizations, courses, users, courseMemberships } from "../../db/schema";
+import { organizations, courses, users, courseMemberships, homeworks, sections } from "../../db/schema";
 import { courseScope } from "./scope";
 import {
   listConversationsForOwner,
@@ -18,6 +18,8 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
   let courseAId: string;
   let courseBId: string;
   let userId: string;
+  let otherUserId: string;
+  let sectionBId: string;
 
   beforeAll(async () => {
     db = makeNodeDb(DATABASE_URL!);
@@ -43,6 +45,31 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     userId = user.id;
     await db.insert(courseMemberships).values({ userId, courseId: courseAId, role: "student" });
     await db.insert(courseMemberships).values({ userId, courseId: courseBId, role: "student" });
+
+    // A second user who is only ever a member of course B -- used to prove
+    // createConversation rejects an ownerUserId with no membership in the
+    // scoped course.
+    const otherEmailBytes = crypto.getRandomValues(new Uint8Array(32));
+    const [otherUser] = await db
+      .insert(users)
+      .values({ email: otherEmailBytes as never, emailBlindIndex: otherEmailBytes as never })
+      .returning({ id: users.id });
+    otherUserId = otherUser.id;
+    await db.insert(courseMemberships).values({ userId: otherUserId, courseId: courseBId, role: "student" });
+
+    const [membershipB] = await db
+      .select({ id: courseMemberships.id })
+      .from(courseMemberships)
+      .where(and(eq(courseMemberships.userId, userId), eq(courseMemberships.courseId, courseBId)));
+    const [hwB] = await db
+      .insert(homeworks)
+      .values({ courseId: courseBId, createdById: membershipB.id, title: "h", description: "d", dueDate: new Date() })
+      .returning({ id: homeworks.id });
+    const [sectionB] = await db
+      .insert(sections)
+      .values({ homeworkId: hwB.id, order: 1, title: "s", content: "c" })
+      .returning({ id: sections.id });
+    sectionBId = sectionB.id;
   });
 
   it("createConversation + listConversationsForOwner round-trips a tutor conversation", async () => {
@@ -97,6 +124,28 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       parts: [{ type: "text", text: "hello" }],
     });
     expect(msg.conversationId).toBe(created.id);
+  });
+
+  it("rejects an ownerUserId that is not a member of the scoped course", async () => {
+    await expect(
+      createConversation(db, courseScope(courseAId), {
+        ownerUserId: otherUserId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Should not be created",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("rejects a sectionId that belongs to a different course", async () => {
+    await expect(
+      createConversation(db, courseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: sectionBId,
+        kind: "section",
+        title: "Should not be created",
+      }),
+    ).rejects.toThrow();
   });
 
   afterAll(async () => {
