@@ -1,7 +1,7 @@
 import { Hono, type Context } from "hono";
-import { eq } from "drizzle-orm";
 import { makeDb } from "../../db/client";
-import { homeworks } from "../../db/schema";
+import { listHomeworksForCourse, createHomework } from "../repositories/homeworks";
+import { courseScope } from "../repositories/scope";
 import { requireCourseMember, requireInstructorOf } from "../utils/guards";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
@@ -25,7 +25,7 @@ export async function listHomeworksHandler(c: Context<AppEnv>) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
-  const rows = await db.query.homeworks.findMany({ where: eq(homeworks.courseId, courseId) });
+  const rows = await listHomeworksForCourse(db, courseScope(courseId));
   return c.json({ homeworks: rows });
 }
 
@@ -72,16 +72,12 @@ export async function createHomeworkHandler(c: Context<AppEnv>) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
-  const [created] = await db
-    .insert(homeworks)
-    .values({
-      courseId,
-      createdById: membership.id,
-      title: body.title.trim(),
-      description: body.description,
-      dueDate,
-    })
-    .returning({ id: homeworks.id });
+  const created = await createHomework(db, courseScope(courseId), {
+    createdById: membership.id,
+    title: body.title.trim(),
+    description: body.description,
+    dueDate,
+  });
 
   return c.json({ id: created.id }, 201);
 }
