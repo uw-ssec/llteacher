@@ -15,7 +15,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { courseMemberships, courses, organizations, users } from "./identity";
-import { materialChunks, sections } from "./content";
+import { llmConfigs, llmProviderEnum, materialChunks, sections } from "./content";
 
 // ---------- Enums ----------
 
@@ -280,5 +280,149 @@ export const citationsRelations = relations(citations, ({ one }) => ({
   materialChunk: one(materialChunks, {
     fields: [citations.materialChunkId],
     references: [materialChunks.id],
+  }),
+}));
+
+// ---------- LLMCallLog ----------
+// 1:1 per message. conversation_id is denormalized (reachable via
+// message -> conversation, but the M8 analytics query shape is
+// "calls by conversation" and "calls by org+time" -- avoid a join for both).
+
+export const llmCallLogs = pgTable(
+  "llm_call_logs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    messageId: uuid("message_id")
+      .notNull()
+      .unique()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    llmConfigId: uuid("llm_config_id").references(() => llmConfigs.id, {
+      onDelete: "set null",
+    }),
+    provider: llmProviderEnum("provider").notNull(),
+    model: text("model").notNull(),
+    providerRequestId: text("provider_request_id"),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    costCents: integer("cost_cents"),
+    latencyMs: integer("latency_ms"),
+    errorFlag: boolean("error_flag").notNull().default(false),
+    occurredAt: timestamp("occurred_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("llm_call_logs_org_time_idx").on(t.organizationId, t.occurredAt),
+    index("llm_call_logs_conversation_idx").on(t.conversationId),
+  ],
+);
+
+// ---------- StudentProfile ----------
+// Derived/regenerable state, NOT authoritative -- safe to truncate and
+// rebuild from raw conversations. See docs/architecture/multi-tenant-data-model.md
+// §3.2 StudentProfile. computed_at is null until the first computation job runs.
+
+export const studentProfiles = pgTable(
+  "student_profiles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    summary: text("summary"),
+    masterySignals: jsonb("mastery_signals"),
+    computedAt: timestamp("computed_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("student_profiles_user_course_uq").on(t.userId, t.courseId),
+    index("student_profiles_org_idx").on(t.organizationId),
+  ],
+);
+
+// ---------- AuditEvent ----------
+// Append-only. No update/delete function exists for this table anywhere in
+// the repository layer (repositories/auditEvents.ts exports only
+// recordAuditEvent) -- that is the M2 enforcement mechanism. DB-level
+// REVOKE UPDATE, DELETE grants need a dedicated low-privilege app role and
+// are tracked as follow-up infra work, not part of this migration.
+
+export const auditEvents = pgTable(
+  "audit_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    actorUserId: uuid("actor_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    action: text("action").notNull(),
+    targetType: text("target_type").notNull(),
+    targetId: uuid("target_id").notNull(),
+    ip: text("ip"),
+    requestMetadata: jsonb("request_metadata"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("audit_events_org_time_idx").on(t.organizationId, t.occurredAt),
+    index("audit_events_actor_time_idx").on(t.actorUserId, t.occurredAt),
+    index("audit_events_target_idx").on(t.targetType, t.targetId),
+  ],
+);
+
+// ---------- Relations ----------
+
+export const llmCallLogsRelations = relations(llmCallLogs, ({ one }) => ({
+  message: one(messages, {
+    fields: [llmCallLogs.messageId],
+    references: [messages.id],
+  }),
+  conversation: one(conversations, {
+    fields: [llmCallLogs.conversationId],
+    references: [conversations.id],
+  }),
+  organization: one(organizations, {
+    fields: [llmCallLogs.organizationId],
+    references: [organizations.id],
+  }),
+  llmConfig: one(llmConfigs, {
+    fields: [llmCallLogs.llmConfigId],
+    references: [llmConfigs.id],
+  }),
+}));
+
+export const studentProfilesRelations = relations(studentProfiles, ({ one }) => ({
+  user: one(users, {
+    fields: [studentProfiles.userId],
+    references: [users.id],
+  }),
+  course: one(courses, {
+    fields: [studentProfiles.courseId],
+    references: [courses.id],
+  }),
+}));
+
+export const auditEventsRelations = relations(auditEvents, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [auditEvents.organizationId],
+    references: [organizations.id],
+  }),
+  actor: one(users, {
+    fields: [auditEvents.actorUserId],
+    references: [users.id],
   }),
 }));

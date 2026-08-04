@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { makeNodeDb } from "../nodeClient";
 import type { Db } from "../client";
 import {
@@ -16,6 +16,9 @@ import {
   citations,
   courseMaterials,
   materialChunks,
+  llmCallLogs,
+  studentProfiles,
+  auditEvents,
 } from "../schema";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -362,5 +365,131 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
     const remainingGrades = await db.select().from(grades).where(eq(grades.submissionId, sub.id));
     expect(remainingSubs).toHaveLength(0);
     expect(remainingGrades).toHaveLength(0);
+  });
+});
+
+describe.skipIf(!DATABASE_URL)("llm_call_logs, student_profiles, audit_events schema", () => {
+  let db: Db;
+  let orgId: string;
+  let courseId: string;
+  let userId: string;
+  let conversationId: string;
+
+  beforeAll(async () => {
+    db = makeNodeDb(DATABASE_URL!);
+    const [org] = await db
+      .insert(organizations)
+      .values({ slug: `tel-${crypto.randomUUID()}`, name: "Tel Org", workosOrganizationId: `w-${crypto.randomUUID()}` })
+      .returning({ id: organizations.id });
+    orgId = org.id;
+    const [course] = await db
+      .insert(courses)
+      .values({ organizationId: orgId, code: "T", term: "T", title: "T" })
+      .returning({ id: courses.id });
+    courseId = course.id;
+    const emailBytes = crypto.getRandomValues(new Uint8Array(32));
+    const [user] = await db
+      .insert(users)
+      .values({ email: emailBytes as never, emailBlindIndex: emailBytes as never })
+      .returning({ id: users.id });
+    userId = user.id;
+    const [conv] = await db
+      .insert(conversations)
+      .values({ ownerUserId: userId, courseId, sectionId: null, kind: "tutor", title: "t" })
+      .returning({ id: conversations.id });
+    conversationId = conv.id;
+  });
+
+  afterAll(async () => {
+    await db.delete(organizations).where(eq(organizations.id, orgId));
+  });
+
+  it("rejects a second llm_call_log for the same message", async () => {
+    const [msg] = await db
+      .insert(messages)
+      .values({ conversationId, role: "assistant", parts: [{ type: "text", text: "hi" }] })
+      .returning({ id: messages.id });
+    await db.insert(llmCallLogs).values({
+      messageId: msg.id,
+      conversationId,
+      organizationId: orgId,
+      provider: "anthropic",
+      model: "claude-sonnet",
+    });
+    await expect(
+      db.insert(llmCallLogs).values({
+        messageId: msg.id,
+        conversationId,
+        organizationId: orgId,
+        provider: "anthropic",
+        model: "claude-sonnet",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("cascade-deletes the llm_call_log when its message is deleted", async () => {
+    const [msg2] = await db
+      .insert(messages)
+      .values({ conversationId, role: "assistant", parts: [{ type: "text", text: "x" }] })
+      .returning({ id: messages.id });
+    await db.insert(llmCallLogs).values({
+      messageId: msg2.id,
+      conversationId,
+      organizationId: orgId,
+      provider: "openai",
+      model: "gpt",
+    });
+    await db.delete(messages).where(eq(messages.id, msg2.id));
+    const remaining = await db.select().from(llmCallLogs).where(eq(llmCallLogs.messageId, msg2.id));
+    expect(remaining).toHaveLength(0);
+  });
+
+  it("rejects a second student_profile for the same (user, course)", async () => {
+    await db.insert(studentProfiles).values({ userId, courseId, organizationId: orgId });
+    await expect(
+      db.insert(studentProfiles).values({ userId, courseId, organizationId: orgId }),
+    ).rejects.toThrow();
+  });
+
+  it("sums cost_cents across llm_call_logs for a conversation correctly", async () => {
+    const [m1] = await db
+      .insert(messages)
+      .values({ conversationId, role: "assistant", parts: [{ type: "text", text: "a" }] })
+      .returning({ id: messages.id });
+    const [m2] = await db
+      .insert(messages)
+      .values({ conversationId, role: "assistant", parts: [{ type: "text", text: "b" }] })
+      .returning({ id: messages.id });
+    await db.insert(llmCallLogs).values([
+      { messageId: m1.id, conversationId, organizationId: orgId, provider: "openai", model: "gpt", costCents: 3 },
+      { messageId: m2.id, conversationId, organizationId: orgId, provider: "openai", model: "gpt", costCents: 4 },
+    ]);
+    const [{ total }] = await db
+      .select({ total: sql<number>`sum(${llmCallLogs.costCents})` })
+      .from(llmCallLogs)
+      .where(eq(llmCallLogs.conversationId, conversationId));
+    expect(Number(total)).toBeGreaterThanOrEqual(7);
+  });
+
+  it("allows a nullable actorUserId (system-initiated audit event) and survives actor deletion", async () => {
+    const [event] = await db
+      .insert(auditEvents)
+      .values({ organizationId: orgId, actorUserId: null, action: "system_sync", targetType: "course", targetId: courseId })
+      .returning({ id: auditEvents.id });
+    expect(event.id).toBeDefined();
+
+    const emailBytes = crypto.getRandomValues(new Uint8Array(32));
+    const [actor] = await db
+      .insert(users)
+      .values({ email: emailBytes as never, emailBlindIndex: emailBytes as never })
+      .returning({ id: users.id });
+    const [event2] = await db
+      .insert(auditEvents)
+      .values({ organizationId: orgId, actorUserId: actor.id, action: "viewed", targetType: "submission", targetId: crypto.randomUUID() })
+      .returning({ id: auditEvents.id });
+
+    await db.delete(users).where(eq(users.id, actor.id));
+    const [survived] = await db.select().from(auditEvents).where(eq(auditEvents.id, event2.id));
+    expect(survived.actorUserId).toBeNull();
   });
 });
