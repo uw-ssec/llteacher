@@ -134,18 +134,28 @@ export class UserIdentityService {
     // another device isn't invalidated by an unrelated login elsewhere.
     const updates: Record<string, unknown> = { isActive: true, lastLoginAt: new Date() };
 
+    // emailAccepted gates the NetID backfill below (#146): netid/netidBlindIndex
+    // are derived from this same normalizedEmail, so writing them when the
+    // email claim was denied would cross-link this user to a NetID derived
+    // from an address they don't actually own -- either cross-linking two
+    // real identities under one NetID blind index, or colliding with the
+    // other account's netidBlindIndex (unique index) and 503-ing every
+    // subsequent login attempt.
     const currentEmail = await this.cipher.decryptString(existing.email);
-    if (currentEmail !== normalizedEmail) {
+    let emailAccepted = currentEmail === normalizedEmail;
+    if (!emailAccepted) {
       const canClaim = await this.claimEmailBlindIndex(existing, emailBlindIndex);
       if (canClaim) {
         updates.email = await this.cipher.encryptString(normalizedEmail);
         updates.emailBlindIndex = emailBlindIndex;
+        emailAccepted = true;
       }
       // else: another non-pending user already owns this email. Keep the
-      // old email on `existing` -- see claimEmailBlindIndex for details.
+      // old email (and don't derive a NetID from it) on `existing` -- see
+      // claimEmailBlindIndex for details.
     }
 
-    if (netid && !existing.netidBlindIndex) {
+    if (emailAccepted && netid && !existing.netidBlindIndex) {
       updates.netid = await this.cipher.encryptString(netid);
       updates.netidBlindIndex = netidBlindIndex;
     }

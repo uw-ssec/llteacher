@@ -200,9 +200,19 @@ export const grades = pgTable(
     // no graded submissions is NOT automatically deletable, though --
     // llm_call_logs' own RESTRICT FKs (below) form a second, independent
     // gate on the same cascade path, and most conversations have at least
-    // one logged LLM call whether or not they were ever graded. The same
-    // diamond applies to org deletion, which cascades through this same
-    // courses -> conversations -> submissions chain.
+    // one logged LLM call whether or not they were ever graded.
+    //
+    // This gate does NOT apply to organization deletion (#138, correcting
+    // a wrong claim made here twice before): organizationId below is its
+    // own direct CASCADE straight to `organizations`, created earlier
+    // (migration 0004) than the courses->conversations->submissions chain
+    // this RESTRICT sits at the bottom of. Postgres fires FK triggers in
+    // constraint-creation order, so DELETE FROM organizations cascades
+    // this table away directly before the deeper chain ever reaches this
+    // RESTRICT -- deleting an org silently erases its grades and
+    // llm_call_logs, with no gate. Verified empirically; see the doc link
+    // above for the full mechanism and what a real org-offboarding flow
+    // would need to add.
     submissionId: uuid("submission_id")
       .notNull()
       .references(() => submissions.id, { onDelete: "restrict" }),

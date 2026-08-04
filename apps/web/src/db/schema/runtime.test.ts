@@ -262,10 +262,10 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
   });
 
   afterAll(async () => {
-    // grades.submission_id is ON DELETE RESTRICT (#133) -- org deletion
-    // cascades courses -> conversations -> submissions, and that cascade
-    // would otherwise abort on any submission this suite graded. Clear
-    // grades first so the org cascade has nothing left to block it.
+    // Not load-bearing (#138): grades.organization_id is its own direct
+    // CASCADE to organizations, so deleting the org would clear these rows
+    // on its own without this pre-clear -- kept anyway as harmless
+    // defense-in-depth / a self-documenting delete order.
     await db.delete(grades).where(eq(grades.organizationId, orgAId));
     await db.delete(grades).where(eq(grades.organizationId, orgBId));
     await db.delete(organizations).where(eq(organizations.id, orgAId));
@@ -538,9 +538,10 @@ describe.skipIf(!DATABASE_URL)("llm_call_logs, student_profiles, audit_events sc
   });
 
   afterAll(async () => {
-    // llm_call_logs' FKs are ON DELETE RESTRICT (#133) -- clear them first
-    // so the org cascade (courses -> conversations -> messages) has nothing
-    // left to block it.
+    // Not load-bearing (#138): llm_call_logs.organization_id is its own
+    // direct CASCADE to organizations, so deleting the org would clear
+    // these rows on its own without this pre-clear -- kept anyway as
+    // harmless defense-in-depth / a self-documenting delete order.
     await db.delete(llmCallLogs).where(eq(llmCallLogs.organizationId, orgId));
     await db.delete(organizations).where(eq(organizations.id, orgId));
   });

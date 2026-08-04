@@ -120,15 +120,14 @@ async function reset(db: Db, cipher: IdentityCipher) {
     .where(eq(schema.organizations.slug, "seed-org"));
 
   if (org) {
-    // grades.submission_id and llm_call_logs' FKs are ON DELETE RESTRICT
-    // (#133), and the org's cascade to courses/conversations/submissions
-    // (created in early migrations) fires before the org's own direct
-    // organization_id cascades to grades/llm_call_logs (created later) ever
-    // get a chance to -- see the #138 correction in
-    // docs/architecture/multi-tenant-data-model.md §3.5 Q5. So deleting the
-    // seed org while it has any grade or logged LLM call (from local
-    // chatting/grading against seeded data) aborts with a raw FK error.
-    // Clear both explicitly, scoped to this org, before the org delete.
+    // Not load-bearing (#138): grades.organization_id and
+    // llm_call_logs.organization_id are each their own direct CASCADE to
+    // organizations, so deleting the org below would clear these rows on
+    // its own even without this pre-clear -- deleting an org silently
+    // cascades away its grades and LLM call logs, it is never blocked by
+    // them (see the #138 correction in
+    // docs/architecture/multi-tenant-data-model.md §3.5 Q5). Kept anyway
+    // as harmless defense-in-depth and a self-documenting delete order.
     await db.delete(schema.grades).where(eq(schema.grades.organizationId, org.id));
     await db.delete(schema.llmCallLogs).where(eq(schema.llmCallLogs.organizationId, org.id));
   }

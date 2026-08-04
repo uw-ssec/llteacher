@@ -3,7 +3,7 @@ import { execSync } from "node:child_process";
 import { eq } from "drizzle-orm";
 import { makeNodeDb } from "../src/db/nodeClient";
 import type { Db } from "../src/db/client";
-import { organizations, users, submissions, messages, grades, llmCallLogs } from "../src/db/schema";
+import { organizations, courses, users, conversations, submissions, messages, grades, llmCallLogs } from "../src/db/schema";
 import { IdentityCipher } from "../src/lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../src/lib/secrets-loader";
 
@@ -63,14 +63,16 @@ describe.skipIf(!CAN_SEED)("db:seed script", () => {
   // block the event loop synchronously and so never actually let vitest's
   // timeout timer fire), this test awaits DB calls around the execSync,
   // which genuinely exposes it to the ~10s tsx process-start cost.
-  it("--reset succeeds after a grade and an llm_call_log exist under the seed org (#138)", async () => {
+  it("--reset succeeds after a grade and an llm_call_log exist under the seed org", async () => {
     const [org] = await db.select().from(organizations).where(eq(organizations.slug, "seed-org"));
     const [sub] = await db.select().from(submissions).where(eq(submissions.organizationId, org.id)).limit(1);
     const [msg] = await db.select().from(messages).where(eq(messages.conversationId, sub.conversationId)).limit(1);
 
     // Simulates "a developer chatted against / graded the seeded data
-    // locally" -- the exact scenario #138 found reset() breaking under,
-    // since grades.submission_id and llm_call_logs' FKs are RESTRICT.
+    // locally" before running --reset. Not a RESTRICT-avoidance regression
+    // test (#138: org deletion was never blocked by these -- see below for
+    // the test that actually asserts that) -- this just confirms reset()
+    // keeps working when the seed org has real data hanging off it.
     await db.insert(grades).values({ submissionId: sub.id, organizationId: org.id, gradedByAi: true });
     await db.insert(llmCallLogs).values({
       messageId: msg.id,
@@ -87,4 +89,64 @@ describe.skipIf(!CAN_SEED)("db:seed script", () => {
     const [reseededOrg] = await db.select().from(organizations).where(eq(organizations.slug, "seed-org"));
     expect(reseededOrg.id).not.toBe(org.id);
   }, 20_000);
+
+  // The actual #138 regression test: asserts the *documented* behavior
+  // (org deletion cascades grades/llm_call_logs away) directly against the
+  // database, independent of reset()'s own defense-in-depth pre-clearing --
+  // the test above would pass even if that pre-clearing were reverted,
+  // since the org delete itself never needed it to succeed.
+  it("deleting an organization directly cascades away its grades and llm_call_logs, it is not blocked by them (#138)", async () => {
+    const emailBytes = crypto.getRandomValues(new Uint8Array(32));
+    const [org] = await db
+      .insert(organizations)
+      .values({
+        slug: `cascade-check-${crypto.randomUUID()}`,
+        name: "Cascade Check Org",
+        workosOrganizationId: `w-${crypto.randomUUID()}`,
+      })
+      .returning({ id: organizations.id });
+    const [course] = await db
+      .insert(courses)
+      .values({ organizationId: org.id, code: "CC", term: "T", title: "T" })
+      .returning({ id: courses.id });
+    const [user] = await db
+      .insert(users)
+      .values({ email: emailBytes as never, emailBlindIndex: emailBytes as never })
+      .returning({ id: users.id });
+    const [conv] = await db
+      .insert(conversations)
+      .values({ ownerUserId: user.id, courseId: course.id, kind: "tutor", title: "cascade-check" })
+      .returning({ id: conversations.id });
+    const [msg] = await db
+      .insert(messages)
+      .values({ conversationId: conv.id, role: "user", parts: [{ type: "text", text: "hi" }] })
+      .returning({ id: messages.id });
+    const [sub] = await db
+      .insert(submissions)
+      .values({ conversationId: conv.id, organizationId: org.id })
+      .returning({ id: submissions.id });
+    const [grade] = await db
+      .insert(grades)
+      .values({ submissionId: sub.id, organizationId: org.id, gradedByAi: true })
+      .returning({ id: grades.id });
+    const [log] = await db
+      .insert(llmCallLogs)
+      .values({
+        messageId: msg.id,
+        conversationId: conv.id,
+        organizationId: org.id,
+        provider: "anthropic",
+        model: "claude-sonnet",
+      })
+      .returning({ id: llmCallLogs.id });
+
+    await expect(db.delete(organizations).where(eq(organizations.id, org.id))).resolves.not.toThrow();
+
+    const remainingGrades = await db.select().from(grades).where(eq(grades.id, grade.id));
+    const remainingLogs = await db.select().from(llmCallLogs).where(eq(llmCallLogs.id, log.id));
+    expect(remainingGrades).toHaveLength(0);
+    expect(remainingLogs).toHaveLength(0);
+
+    await db.delete(users).where(eq(users.id, user.id));
+  });
 });

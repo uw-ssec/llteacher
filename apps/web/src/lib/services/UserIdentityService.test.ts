@@ -390,6 +390,59 @@ describe("UserIdentityService.createOrClaimUser", () => {
     expect(finalUserUpdate?.emailBlindIndex).toBeUndefined();
     expect(finalUserUpdate?.lastLoginAt).toBeInstanceOf(Date);
   });
+
+  it("does NOT backfill a NetID derived from a denied email claim (#146)", async () => {
+    // Regression for #146: the test above masks this bug because its
+    // `existing` row already has a netidBlindIndex set, so the
+    // `!existing.netidBlindIndex` guard is already false regardless of
+    // whether the email claim succeeds. This fixture leaves netidBlindIndex
+    // null/missing -- the only shape that actually exercises the bug (a
+    // NetID derived from newname@uw.edu getting written even though the
+    // email claim for newname@uw.edu was denied).
+    const cipher = new IdentityCipher(keys);
+    const staleEncryptedEmail = await cipher.encryptString("old-address@uw.edu");
+    let finalUserUpdate: Record<string, unknown> | undefined;
+
+    const db = {
+      query: {
+        users: {
+          findFirst: queuedFindFirst(
+            {
+              id: "existing-user-1",
+              isPending: false,
+              sessionEpoch: 0,
+              email: staleEncryptedEmail,
+              netidBlindIndex: null,
+            },
+            { id: "other-user-2", isPending: false },
+          ),
+        },
+      },
+      update: (table: unknown) => {
+        if (table === courseMemberships) {
+          return { set: () => ({ where: async () => undefined }) };
+        }
+        return {
+          set: (v: Record<string, unknown>) => {
+            finalUserUpdate = v;
+            return { where: async () => undefined };
+          },
+        };
+      },
+    } as unknown as Db;
+
+    const result = await new UserIdentityService(cipher, db).createOrClaimUser({
+      id: "workos_1",
+      email: "newname@uw.edu",
+      firstName: "Cordero",
+    });
+
+    expect(result).toEqual({ userId: "existing-user-1", isNew: false, sessionEpoch: 0 });
+    expect(finalUserUpdate?.email).toBeUndefined();
+    expect(finalUserUpdate?.emailBlindIndex).toBeUndefined();
+    expect(finalUserUpdate?.netid).toBeUndefined();
+    expect(finalUserUpdate?.netidBlindIndex).toBeUndefined();
+  });
 });
 
 describe("UserIdentityService.handleEmailUpdated (#142)", () => {
