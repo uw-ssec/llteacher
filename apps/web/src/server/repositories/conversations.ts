@@ -54,6 +54,11 @@ export async function createConversation(
   return created;
 }
 
+// Enforces CourseScope only -- any member of the course can soft-delete any
+// other student's conversation by UUID, since ownerUserId isn't checked.
+// Not yet exploitable (no route calls this), but see ARCHITECTURE.md's "Row
+// Ownership (Within a Scope)" section and issue #134: when M3 wires a route
+// to this, it should grow a requesterId parameter for that check.
 export async function softDeleteConversation(db: Db, scope: CourseScope, conversationId: string) {
   return db
     .update(conversations)
@@ -61,6 +66,12 @@ export async function softDeleteConversation(db: Db, scope: CourseScope, convers
     .where(and(eq(conversations.id, conversationId), eq(conversations.courseId, scope)));
 }
 
+// Same CourseScope-only gap as softDeleteConversation above -- see
+// ARCHITECTURE.md's "Row Ownership (Within a Scope)" section and #134.
+// The wrong-scope Error here (generic 503 once a route wires this up, vs.
+// the more honest 404) and the non-transactional check-then-insert are
+// left as-is for the same reason -- both get tightened together with the
+// ownership work when #134 lands, not as a standalone fix now.
 export async function appendMessage(
   db: Db,
   scope: CourseScope,
@@ -70,7 +81,13 @@ export async function appendMessage(
   const [owned] = await db
     .select({ id: conversations.id })
     .from(conversations)
-    .where(and(eq(conversations.id, conversationId), eq(conversations.courseId, scope)));
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        eq(conversations.courseId, scope),
+        eq(conversations.isDeleted, false),
+      ),
+    );
   if (!owned) {
     throw new Error("Conversation not found in this course scope");
   }

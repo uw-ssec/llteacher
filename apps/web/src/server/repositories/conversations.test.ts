@@ -3,7 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import { organizations, courses, users, courseMemberships, homeworks, sections } from "../../db/schema";
-import { courseScope } from "./scope";
+import { unsafeCourseScope } from "./scope";
 import {
   listConversationsForOwner,
   createConversation,
@@ -15,6 +15,8 @@ const DATABASE_URL = process.env.DATABASE_URL;
 
 describe.skipIf(!DATABASE_URL)("conversations repository", () => {
   let db: Db;
+  let orgAId: string;
+  let orgBId: string;
   let courseAId: string;
   let courseBId: string;
   let userId: string;
@@ -32,10 +34,14 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
         .insert(courses)
         .values({ organizationId: org.id, code: "C", term: "T", title: "T" })
         .returning({ id: courses.id });
-      return course.id;
+      return { orgId: org.id, courseId: course.id };
     }
-    courseAId = await makeCourse("a");
-    courseBId = await makeCourse("b");
+    const a = await makeCourse("a");
+    orgAId = a.orgId;
+    courseAId = a.courseId;
+    const b = await makeCourse("b");
+    orgBId = b.orgId;
+    courseBId = b.courseId;
 
     const emailBytes = crypto.getRandomValues(new Uint8Array(32));
     const [user] = await db
@@ -73,62 +79,94 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
   });
 
   it("createConversation + listConversationsForOwner round-trips a tutor conversation", async () => {
-    await createConversation(db, courseScope(courseAId), {
+    await createConversation(db, unsafeCourseScope(courseAId), {
       ownerUserId: userId,
       sectionId: null,
       kind: "tutor",
       title: "My tutor chat",
     });
-    const rows = await listConversationsForOwner(db, courseScope(courseAId), userId);
+    const rows = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId);
     expect(rows.map((r) => r.title)).toContain("My tutor chat");
   });
 
   it("a course-A scope never returns a conversation created under course B", async () => {
-    await createConversation(db, courseScope(courseBId), {
+    await createConversation(db, unsafeCourseScope(courseBId), {
       ownerUserId: userId,
       sectionId: null,
       kind: "tutor",
       title: "Course B chat",
     });
-    const rows = await listConversationsForOwner(db, courseScope(courseAId), userId);
+    const rows = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId);
     expect(rows.map((r) => r.title)).not.toContain("Course B chat");
   });
 
   it("excludes soft-deleted conversations by default, includes them with includeDeleted", async () => {
-    const created = await createConversation(db, courseScope(courseAId), {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
       ownerUserId: userId,
       sectionId: null,
       kind: "tutor",
       title: "To be deleted",
     });
-    await softDeleteConversation(db, courseScope(courseAId), created.id);
+    await softDeleteConversation(db, unsafeCourseScope(courseAId), created.id);
 
-    const defaultRows = await listConversationsForOwner(db, courseScope(courseAId), userId);
+    const defaultRows = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId);
     expect(defaultRows.map((r) => r.id)).not.toContain(created.id);
 
-    const withDeleted = await listConversationsForOwner(db, courseScope(courseAId), userId, {
+    const withDeleted = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId, {
       includeDeleted: true,
     });
     expect(withDeleted.map((r) => r.id)).toContain(created.id);
   });
 
   it("appendMessage adds a message to a conversation within the given scope", async () => {
-    const created = await createConversation(db, courseScope(courseAId), {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
       ownerUserId: userId,
       sectionId: null,
       kind: "tutor",
       title: "Chat with messages",
     });
-    const msg = await appendMessage(db, courseScope(courseAId), created.id, {
+    const msg = await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
       role: "user",
       parts: [{ type: "text", text: "hello" }],
     });
     expect(msg.conversationId).toBe(created.id);
   });
 
+  it("appendMessage rejects a conversation scoped to a different course", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Wrong-scope append target",
+    });
+    await expect(
+      appendMessage(db, unsafeCourseScope(courseBId), created.id, {
+        role: "user",
+        parts: [{ type: "text", text: "hello" }],
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("appendMessage rejects a soft-deleted conversation", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Soft-deleted append target",
+    });
+    await softDeleteConversation(db, unsafeCourseScope(courseAId), created.id);
+
+    await expect(
+      appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+        role: "user",
+        parts: [{ type: "text", text: "hello" }],
+      }),
+    ).rejects.toThrow();
+  });
+
   it("rejects an ownerUserId that is not a member of the scoped course", async () => {
     await expect(
-      createConversation(db, courseScope(courseAId), {
+      createConversation(db, unsafeCourseScope(courseAId), {
         ownerUserId: otherUserId,
         sectionId: null,
         kind: "tutor",
@@ -139,7 +177,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
 
   it("rejects a sectionId that belongs to a different course", async () => {
     await expect(
-      createConversation(db, courseScope(courseAId), {
+      createConversation(db, unsafeCourseScope(courseAId), {
         ownerUserId: userId,
         sectionId: sectionBId,
         kind: "section",
@@ -149,7 +187,13 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
   });
 
   afterAll(async () => {
-    await db.delete(courses).where(eq(courses.id, courseAId));
-    await db.delete(courses).where(eq(courses.id, courseBId));
+    // Deleting the orgs cascades courses (and everything under them); a
+    // direct courses delete alone leaves the parent organizations rows
+    // behind (courses don't own their org), and neither one touches
+    // `users`, which never cascades from a course/org by design.
+    await db.delete(organizations).where(eq(organizations.id, orgAId));
+    await db.delete(organizations).where(eq(organizations.id, orgBId));
+    await db.delete(users).where(eq(users.id, userId));
+    await db.delete(users).where(eq(users.id, otherUserId));
   });
 });

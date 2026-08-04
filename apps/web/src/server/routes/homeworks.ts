@@ -1,7 +1,7 @@
 import { Hono, type Context } from "hono";
 import { makeDb } from "../../db/client";
 import { listHomeworksForCourse, createHomework } from "../repositories/homeworks";
-import { courseScope } from "../repositories/scope";
+import { courseScopeFromAuthContext } from "../repositories/scope";
 import { requireCourseMember, requireInstructorOf } from "../utils/guards";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
@@ -20,12 +20,13 @@ export async function listHomeworksHandler(c: Context<AppEnv>) {
   // handler is reached via the guarded production route; guarded
   // defensively here too (mirrors createHomeworkHandler below) so the
   // handler is never reachable unauthorized even if wired up unguarded.
-  if (!authContext || !courseId || !authContext.isMemberOf(courseId)) {
+  const scope = authContext && courseId ? courseScopeFromAuthContext(authContext, courseId) : null;
+  if (!scope) {
     return c.json({ error: "Course access denied" }, 403);
   }
 
   const db = makeDb(c.env.DATABASE_URL);
-  const rows = await listHomeworksForCourse(db, courseScope(courseId));
+  const rows = await listHomeworksForCourse(db, scope);
   return c.json({ homeworks: rows });
 }
 
@@ -63,7 +64,8 @@ export async function createHomeworkHandler(c: Context<AppEnv>) {
   }
 
   const membership = authContext.memberships.find((m) => m.courseId === courseId);
-  if (!membership) {
+  const scope = courseScopeFromAuthContext(authContext, courseId);
+  if (!membership || !scope) {
     // requireInstructorOf already verified isInstructorOf(courseId), which
     // is derived from this same memberships list, so this should be
     // unreachable -- guarded defensively rather than trusting that
@@ -72,7 +74,7 @@ export async function createHomeworkHandler(c: Context<AppEnv>) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
-  const created = await createHomework(db, courseScope(courseId), {
+  const created = await createHomework(db, scope, {
     createdById: membership.id,
     title: body.title.trim(),
     description: body.description,

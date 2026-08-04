@@ -9,6 +9,7 @@ jobs:
   web:
     name: apps/web — typecheck, migrate, test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     services:
       postgres:
@@ -27,11 +28,6 @@ jobs:
 
     env:
       DATABASE_URL: postgres://llteacher:dev@localhost:5432/llteacher
-      # Also read by the "Test" step below (scripts/seed.test.ts calls the
-      # seed script itself) -- not just the smoke-test step -- so these live
-      # at job level like DATABASE_URL, not scoped to one step.
-      ENCRYPTION_KEY: ${{ secrets.CI_SEED_ENCRYPTION_KEY }}
-      BLIND_INDEX_KEY: ${{ secrets.CI_SEED_BLIND_INDEX_KEY }}
 
     steps:
       - uses: actions/checkout@v4
@@ -43,6 +39,17 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # Ephemeral, generated per run -- not repo secrets. The seed script's
+      # encrypted output never needs to survive past this job (the DB is
+      # torn down with the runner), so there's nothing to lose by not
+      # persisting these, and it removes both the "add two repo secrets
+      # before CI goes green" step and the fork-PR failure mode (secrets
+      # aren't available to fork PR runs by default).
+      - name: Generate ephemeral seed encryption keys
+        run: |
+          echo "ENCRYPTION_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+          echo "BLIND_INDEX_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
 
       - name: Install psql
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client

@@ -262,6 +262,12 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
   });
 
   afterAll(async () => {
+    // grades.submission_id is ON DELETE RESTRICT (#133) -- org deletion
+    // cascades courses -> conversations -> submissions, and that cascade
+    // would otherwise abort on any submission this suite graded. Clear
+    // grades first so the org cascade has nothing left to block it.
+    await db.delete(grades).where(eq(grades.organizationId, orgAId));
+    await db.delete(grades).where(eq(grades.organizationId, orgBId));
     await db.delete(organizations).where(eq(organizations.id, orgAId));
     await db.delete(organizations).where(eq(organizations.id, orgBId));
   });
@@ -376,7 +382,7 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
     ).rejects.toThrow();
   });
 
-  it("cascade-deletes submission (and its grades) when the conversation is deleted", async () => {
+  it("cascade-deletes an ungraded submission when its conversation is deleted", async () => {
     const [conv] = await db
       .insert(conversations)
       .values({ ownerUserId: userAId, courseId: courseAId, sectionId: null, kind: "tutor", title: "cascade-test" })
@@ -385,14 +391,50 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
       .insert(submissions)
       .values({ conversationId: conv.id, organizationId: orgAId })
       .returning({ id: submissions.id });
-    await db.insert(grades).values({ submissionId: sub.id, organizationId: orgAId, gradedByAi: true });
 
     await db.delete(conversations).where(eq(conversations.id, conv.id));
 
     const remainingSubs = await db.select().from(submissions).where(eq(submissions.id, sub.id));
-    const remainingGrades = await db.select().from(grades).where(eq(grades.submissionId, sub.id));
     expect(remainingSubs).toHaveLength(0);
-    expect(remainingGrades).toHaveLength(0);
+  });
+
+  it("blocks deleting a conversation (and cascading to its submission) while the submission has a grade", async () => {
+    // grades.submission_id is ON DELETE RESTRICT (not CASCADE) precisely so
+    // this cascade path can't silently erase a grade -- see the schema
+    // comment on `grades` and issue #133. AI-graded or human-graded, either
+    // one blocks: a recorded grade is the FERPA education record the gate
+    // protects, not specifically the human-grader provenance.
+    const [conv] = await db
+      .insert(conversations)
+      .values({ ownerUserId: userAId, courseId: courseAId, sectionId: null, kind: "tutor", title: "cascade-block-test" })
+      .returning({ id: conversations.id });
+    const [sub] = await db
+      .insert(submissions)
+      .values({ conversationId: conv.id, organizationId: orgAId })
+      .returning({ id: submissions.id });
+    await db.insert(grades).values({ submissionId: sub.id, organizationId: orgAId, gradedByAi: true });
+
+    await expect(db.delete(conversations).where(eq(conversations.id, conv.id))).rejects.toThrow();
+  });
+
+  it("blocks deleting a user while their submission has a grade (user-deletion cascade gate)", async () => {
+    const emailBytes = crypto.getRandomValues(new Uint8Array(32));
+    const [freshUser] = await db
+      .insert(users)
+      .values({ email: emailBytes as never, emailBlindIndex: emailBytes as never })
+      .returning({ id: users.id });
+    await db.insert(courseMemberships).values({ userId: freshUser.id, courseId: courseAId, role: "student" });
+    const [conv] = await db
+      .insert(conversations)
+      .values({ ownerUserId: freshUser.id, courseId: courseAId, sectionId: null, kind: "tutor", title: "user-delete-gate-test" })
+      .returning({ id: conversations.id });
+    const [sub] = await db
+      .insert(submissions)
+      .values({ conversationId: conv.id, organizationId: orgAId })
+      .returning({ id: submissions.id });
+    await db.insert(grades).values({ submissionId: sub.id, organizationId: orgAId, gradedByAi: true });
+
+    await expect(db.delete(users).where(eq(users.id, freshUser.id))).rejects.toThrow();
   });
 });
 
@@ -429,6 +471,10 @@ describe.skipIf(!DATABASE_URL)("llm_call_logs, student_profiles, audit_events sc
   });
 
   afterAll(async () => {
+    // llm_call_logs' FKs are ON DELETE RESTRICT (#133) -- clear them first
+    // so the org cascade (courses -> conversations -> messages) has nothing
+    // left to block it.
+    await db.delete(llmCallLogs).where(eq(llmCallLogs.organizationId, orgId));
     await db.delete(organizations).where(eq(organizations.id, orgId));
   });
 
@@ -455,7 +501,7 @@ describe.skipIf(!DATABASE_URL)("llm_call_logs, student_profiles, audit_events sc
     ).rejects.toThrow();
   });
 
-  it("cascade-deletes the llm_call_log when its message is deleted", async () => {
+  it("blocks deleting a message (and its conversation) while an llm_call_log still references it", async () => {
     const [msg2] = await db
       .insert(messages)
       .values({ conversationId, role: "assistant", parts: [{ type: "text", text: "x" }] })
@@ -467,9 +513,9 @@ describe.skipIf(!DATABASE_URL)("llm_call_logs, student_profiles, audit_events sc
       provider: "openai",
       model: "gpt",
     });
-    await db.delete(messages).where(eq(messages.id, msg2.id));
-    const remaining = await db.select().from(llmCallLogs).where(eq(llmCallLogs.messageId, msg2.id));
-    expect(remaining).toHaveLength(0);
+
+    await expect(db.delete(messages).where(eq(messages.id, msg2.id))).rejects.toThrow();
+    await expect(db.delete(conversations).where(eq(conversations.id, conversationId))).rejects.toThrow();
   });
 
   it("rejects a second student_profile for the same (user, course)", async () => {

@@ -62,7 +62,8 @@ export const conversations = pgTable(
       .defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
-      .defaultNow(),
+      .defaultNow()
+      .$onUpdate(() => new Date()),
   },
   (t) => [
     // Matches issue #2's literal (ownerUserId, kind, courseId) column order
@@ -73,10 +74,16 @@ export const conversations = pgTable(
       t.courseId,
     ),
     index("conversations_course_kind_idx").on(t.courseId, t.kind),
-    // At most one active section-conversation per (user, section). Combined
-    // with submissions.conversation_id's own uniqueness (added in #14), this
-    // transitively caps submissions at one per (user, section) too --
-    // resolves data-model doc §3.5 open question 1.
+    // conversations_owner_section_active_uq (below) leads with owner_user_id,
+    // so it can't serve "all conversations on this section" (instructor
+    // roster views) or the section-delete cascade -- both need section_id
+    // leading. Found in PR #127 review, #135.
+    index("conversations_section_idx").on(t.sectionId),
+    // At most one active section-conversation per (user, section) -- the
+    // active-conversation case only, not a transitive cap on submissions
+    // per (user, section): a soft-delete-and-recreate cycle can still
+    // accumulate more than one `submissions` row for the same section. See
+    // #128 for that gap and why it's deliberately unresolved in M2.
     uniqueIndex("conversations_owner_section_active_uq")
       .on(t.ownerUserId, t.sectionId)
       .where(sql`${t.kind} = 'section' AND ${t.isDeleted} = false`),
@@ -184,9 +191,16 @@ export const grades = pgTable(
   "grades",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    // ON DELETE RESTRICT, not CASCADE: submissions.conversation_id (and
+    // conversations.owner_user_id above it) still cascade, so a grade is
+    // the choke point that stops "delete a user" from silently erasing
+    // their FERPA education records. Deleting a user with a graded
+    // submission is blocked until that grade is explicitly handled (see
+    // docs/architecture/multi-tenant-data-model.md §3.5 Q5) -- a user with
+    // only ungraded submissions can still be deleted normally.
     submissionId: uuid("submission_id")
       .notNull()
-      .references(() => submissions.id, { onDelete: "cascade" }),
+      .references(() => submissions.id, { onDelete: "restrict" }),
     organizationId: uuid("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
@@ -205,6 +219,9 @@ export const grades = pgTable(
   (t) => [
     index("grades_org_idx").on(t.organizationId),
     index("grades_submission_idx").on(t.submissionId),
+    // grader_membership_id is a RESTRICT FK cascade path (#133) and the
+    // lookup for "all grades by this grader" -- found in PR #127 review, #135.
+    index("grades_grader_membership_idx").on(t.graderMembershipId),
     check(
       "grades_grader_consistency_chk",
       sql`(${t.gradedByAi} = true AND ${t.graderMembershipId} IS NULL)
@@ -242,9 +259,21 @@ export const citations = pgTable(
   (t) => [
     index("citations_org_idx").on(t.organizationId),
     index("citations_material_chunk_idx").on(t.materialChunkId),
+    // message_id/grade_id are both the primary render-time lookup ("citations
+    // for this message/grade") and cascade-delete FK paths -- found in PR
+    // #127 review, #135.
+    index("citations_message_idx").on(t.messageId),
+    index("citations_grade_idx").on(t.gradeId),
     check(
       "citations_single_source_chk",
       sql`num_nonnulls(${t.messageId}, ${t.gradeId}) = 1`,
+    ),
+    // Both null (no span -- citation covers the whole chunk) or both set
+    // and sane; a half-set span is as meaningless as a backwards one.
+    check(
+      "citations_span_range_chk",
+      sql`(${t.spanStart} IS NULL AND ${t.spanEnd} IS NULL)
+          OR (${t.spanStart} >= 0 AND ${t.spanEnd} >= 0 AND ${t.spanStart} <= ${t.spanEnd})`,
     ),
   ],
 );
@@ -294,18 +323,29 @@ export const citationsRelations = relations(citations, ({ one }) => ({
 // 1:1 per message. conversation_id is denormalized (reachable via
 // message -> conversation, but the M8 analytics query shape is
 // "calls by conversation" and "calls by org+time" -- avoid a join for both).
+// Both FKs are ON DELETE RESTRICT, not CASCADE: this is the org's LLM
+// cost/telemetry accounting, and a user-deletion cascade reaching it here
+// (via conversation_id, the FK actually walked when a conversation is
+// deleted -- message_id would fire too late to matter, since the
+// conversation_id cascade would already have removed the row) would
+// silently shrink that accounting. Same reasoning as grades.submission_id
+// above; see docs/architecture/multi-tenant-data-model.md §3.5 Q5.
 
 export const llmCallLogs = pgTable(
   "llm_call_logs",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    // Nullable, not notNull: a call that errors before the assistant
+    // message is persisted (provider timeout, malformed response) has
+    // nothing to attach to yet -- error_flag rows may have a null
+    // message_id. unique() still holds; Postgres doesn't treat multiple
+    // NULLs as duplicates under a unique constraint.
     messageId: uuid("message_id")
-      .notNull()
       .unique()
-      .references(() => messages.id, { onDelete: "cascade" }),
+      .references(() => messages.id, { onDelete: "restrict" }),
     conversationId: uuid("conversation_id")
       .notNull()
-      .references(() => conversations.id, { onDelete: "cascade" }),
+      .references(() => conversations.id, { onDelete: "restrict" }),
     organizationId: uuid("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
@@ -327,6 +367,9 @@ export const llmCallLogs = pgTable(
   (t) => [
     index("llm_call_logs_org_time_idx").on(t.organizationId, t.occurredAt),
     index("llm_call_logs_conversation_idx").on(t.conversationId),
+    // SET NULL path (config deletion/rotation) and the "usage by config"
+    // query shape -- found in PR #127 review, #135.
+    index("llm_call_logs_config_idx").on(t.llmConfigId),
   ],
 );
 

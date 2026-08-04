@@ -15,13 +15,20 @@ vi.mock("../../db/client", () => ({
   }),
 }));
 
+// Derives hasRole/isMemberOf/isInstructorOf from `memberships` the same way
+// rolesMiddleware does in production, so a test that sets `memberships` gets
+// consistent predicates for free -- callers can still override any
+// individual predicate to test a mismatch (e.g. isInstructorOf true but no
+// matching membership row).
 function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
+  const memberships = overrides.memberships ?? [];
   return {
     session: { userId: "u1", workosUserId: "w1", issuedAt: 0, expiresAt: 0 },
-    memberships: [],
-    hasRole: () => false,
-    isMemberOf: () => false,
-    isInstructorOf: () => false,
+    memberships,
+    hasRole: (role) => memberships.some((m) => m.role === role),
+    isMemberOf: (courseId) => memberships.some((m) => m.courseId === courseId),
+    isInstructorOf: (courseId) =>
+      memberships.some((m) => m.courseId === courseId && (m.role === "instructor" || m.role === "admin")),
     ...overrides,
   };
 }

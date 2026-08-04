@@ -2,8 +2,8 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
-import { organizations, courses, users, conversations, courseMemberships } from "../../db/schema";
-import { orgScope } from "./scope";
+import { organizations, courses, users, conversations, courseMemberships, grades } from "../../db/schema";
+import { unsafeOrgScope } from "./scope";
 import { createSubmission, getSubmissionByConversation, recordGrade } from "./submissions";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -52,6 +52,10 @@ describe.skipIf(!DATABASE_URL)("submissions repository", () => {
   });
 
   afterAll(async () => {
+    // grades.submission_id is ON DELETE RESTRICT (#133) -- clear grades
+    // first so the org cascade has nothing left to block it.
+    await db.delete(grades).where(eq(grades.organizationId, orgAId));
+    await db.delete(grades).where(eq(grades.organizationId, orgBId));
     await db.delete(organizations).where(eq(organizations.id, orgAId));
     await db.delete(organizations).where(eq(organizations.id, orgBId));
   });
@@ -70,28 +74,32 @@ describe.skipIf(!DATABASE_URL)("submissions repository", () => {
 
   it("createSubmission writes under the given org scope", async () => {
     const conversationId = await newConversation(courseAId, userAId);
-    const created = await createSubmission(db, orgScope(orgAId), conversationId);
+    const created = await createSubmission(db, unsafeOrgScope(orgAId), conversationId);
     expect(created.organizationId).toBe(orgAId);
   });
 
   it("getSubmissionByConversation scoped to org B returns nothing for an org-A conversation", async () => {
     const conversationId = await newConversation(courseAId, userAId);
-    await createSubmission(db, orgScope(orgAId), conversationId);
-    const result = await getSubmissionByConversation(db, orgScope(orgBId), conversationId);
+    await createSubmission(db, unsafeOrgScope(orgAId), conversationId);
+    const result = await getSubmissionByConversation(db, unsafeOrgScope(orgBId), conversationId);
     expect(result).toBeUndefined();
   });
 
   it("cross-org isolation: creating submissions under both orgs, an org-A-scoped list never includes org-B rows", async () => {
     const conversationId = await newConversation(courseBId, userBId);
-    await createSubmission(db, orgScope(orgBId), conversationId);
-    const found = await getSubmissionByConversation(db, orgScope(orgAId), conversationId);
+    await createSubmission(db, unsafeOrgScope(orgBId), conversationId);
+    const found = await getSubmissionByConversation(db, unsafeOrgScope(orgAId), conversationId);
     expect(found).toBeUndefined();
   });
 
-  it("recordGrade writes an AI grade with no grader and a human grade rejects graded_by_ai=true with a grader set", async () => {
+  // The graded_by_ai=true + grader_membership_id-set rejection is a DB
+  // CHECK, exercised at the schema level in runtime.test.ts ("rejects a
+  // grade that is both graded_by_ai and has a grader_membership_id") --
+  // not repeated here since recordGrade does no such validation itself.
+  it("recordGrade writes an AI grade with no grader", async () => {
     const conversationId = await newConversation(courseBId, userBId);
-    const sub = await createSubmission(db, orgScope(orgBId), conversationId);
-    const grade = await recordGrade(db, orgScope(orgBId), {
+    const sub = await createSubmission(db, unsafeOrgScope(orgBId), conversationId);
+    const grade = await recordGrade(db, unsafeOrgScope(orgBId), {
       submissionId: sub.id,
       gradedByAi: true,
       score: 0.9,
@@ -101,14 +109,14 @@ describe.skipIf(!DATABASE_URL)("submissions repository", () => {
 
   it("createSubmission rejects a conversation that belongs to a different org's course", async () => {
     const conversationId = await newConversation(courseBId, userBId);
-    await expect(createSubmission(db, orgScope(orgAId), conversationId)).rejects.toThrow();
+    await expect(createSubmission(db, unsafeOrgScope(orgAId), conversationId)).rejects.toThrow();
   });
 
   it("recordGrade rejects a graderMembershipId that isn't a member of the submission's course", async () => {
     const conversationId = await newConversation(courseAId, userAId);
-    const sub = await createSubmission(db, orgScope(orgAId), conversationId);
+    const sub = await createSubmission(db, unsafeOrgScope(orgAId), conversationId);
     await expect(
-      recordGrade(db, orgScope(orgAId), {
+      recordGrade(db, unsafeOrgScope(orgAId), {
         submissionId: sub.id,
         gradedByAi: false,
         graderMembershipId: membershipBId,

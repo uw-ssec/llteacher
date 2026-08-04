@@ -258,7 +258,11 @@ async function seed() {
         pattern(section.title).map((m) => ({ conversationId: conv.id, role: m.role, parts: m.parts })),
       );
 
-      if (Math.random() < 0.6) {
+      // Deterministic, not Math.random() < 0.6 -- matches the Django
+      // reference's `i % 5 < 3` shape (3-of-5 submitted) so seeded data is
+      // reproducible run to run instead of drifting between 4-vs-5
+      // submissions across runs.
+      if ((conversationCount - 1) % 5 < 3) {
         await db.insert(schema.submissions).values({ conversationId: conv.id, organizationId: org.id });
         submissionCount++;
       }
