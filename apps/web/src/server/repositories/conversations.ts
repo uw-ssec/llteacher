@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { conversations, messages, sections, homeworks, courseMemberships } from "../../db/schema";
 import type { CourseScope } from "./scope";
@@ -28,10 +28,21 @@ export async function createConversation(
   // course just because the caller says so -- both are caller-supplied
   // UUIDs. Verify membership and section scope before writing, or a
   // mismatched id gets a conversation minted into the wrong course.
+  // droppedAt IS NULL matches listMembershipsForUser (#139) -- a dropped
+  // membership must not be able to originate new conversations either.
+  // Both throws below are plain Error, not yet a typed not-found error
+  // mapped to 404 at the route layer -- tracked in #141, to land when #5
+  // wires a real route to this function.
   const [membership] = await db
     .select({ id: courseMemberships.id })
     .from(courseMemberships)
-    .where(and(eq(courseMemberships.userId, input.ownerUserId), eq(courseMemberships.courseId, scope)));
+    .where(
+      and(
+        eq(courseMemberships.userId, input.ownerUserId),
+        eq(courseMemberships.courseId, scope),
+        isNull(courseMemberships.droppedAt),
+      ),
+    );
   if (!membership) {
     throw new Error("Owner is not a member of this course scope");
   }
@@ -69,9 +80,15 @@ export async function softDeleteConversation(db: Db, scope: CourseScope, convers
 // Same CourseScope-only gap as softDeleteConversation above -- see
 // ARCHITECTURE.md's "Row Ownership (Within a Scope)" section and #134.
 // The wrong-scope Error here (generic 503 once a route wires this up, vs.
-// the more honest 404) and the non-transactional check-then-insert are
-// left as-is for the same reason -- both get tightened together with the
-// ownership work when #134 lands, not as a standalone fix now.
+// the more honest 404 -- tracked in #141) and the non-transactional
+// check-then-insert are left as-is for now -- all three get tightened
+// together with the ownership work when #134/#141 land, not as a
+// standalone fix now.
+// Also: this never bumps conversations.updatedAt ($onUpdate only fires on
+// an UPDATE to the conversations row itself, and appendMessage only
+// inserts into messages) -- fine today since nothing reads updatedAt for
+// "recently active" ordering yet, but note it here for whenever something
+// does (#140).
 export async function appendMessage(
   db: Db,
   scope: CourseScope,

@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { courseMemberships } from "../../db/schema";
 
@@ -8,14 +8,15 @@ import { courseMemberships } from "../../db/schema";
  *  Still routed through the repository layer so no route/middleware
  *  imports Drizzle directly, per the convention in apps/web/ARCHITECTURE.md.
  *
- *  Caveat: does not filter on `droppedAt` -- a dropped membership (roster
- *  removal via Canvas sync) is still returned and counts as active for
- *  every AuthContext predicate (`isMemberOf`, `isInstructorOf`, `hasRole`)
- *  derived from it. Pre-existing M1 behavior, not something this function
- *  introduced; flagged here so a future consumer doesn't inherit it
- *  silently. */
+ *  Enforced: filters `droppedAt IS NULL`. This is the sole feed into every
+ *  AuthContext predicate (`isMemberOf`, `isInstructorOf`, `hasRole`) and,
+ *  via `courseScopeFromAuthContext`, every scope-guarded repository call --
+ *  a dropped membership (roster removal, e.g. from a future Canvas sync)
+ *  must not still count as active access. No `includeDropped` escape hatch
+ *  yet since nothing needs one; add it if/when an instructor roster view
+ *  needs to see dropped rows too. */
 export async function listMembershipsForUser(db: Db, userId: string) {
   return db.query.courseMemberships.findMany({
-    where: eq(courseMemberships.userId, userId),
+    where: and(eq(courseMemberships.userId, userId), isNull(courseMemberships.droppedAt)),
   });
 }

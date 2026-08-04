@@ -3,7 +3,7 @@ import { execSync } from "node:child_process";
 import { eq } from "drizzle-orm";
 import { makeNodeDb } from "../src/db/nodeClient";
 import type { Db } from "../src/db/client";
-import { organizations, users } from "../src/db/schema";
+import { organizations, users, submissions, messages, grades, llmCallLogs } from "../src/db/schema";
 import { IdentityCipher } from "../src/lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../src/lib/secrets-loader";
 
@@ -58,4 +58,33 @@ describe.skipIf(!CAN_SEED)("db:seed script", () => {
       execSync("npx tsx scripts/seed.ts", { cwd: __dirname + "/..", stdio: "pipe" }),
     ).toThrowError(/already seeded -- use --reset/);
   });
+
+  // 20s, not the 5s default: unlike the execSync-only tests above (which
+  // block the event loop synchronously and so never actually let vitest's
+  // timeout timer fire), this test awaits DB calls around the execSync,
+  // which genuinely exposes it to the ~10s tsx process-start cost.
+  it("--reset succeeds after a grade and an llm_call_log exist under the seed org (#138)", async () => {
+    const [org] = await db.select().from(organizations).where(eq(organizations.slug, "seed-org"));
+    const [sub] = await db.select().from(submissions).where(eq(submissions.organizationId, org.id)).limit(1);
+    const [msg] = await db.select().from(messages).where(eq(messages.conversationId, sub.conversationId)).limit(1);
+
+    // Simulates "a developer chatted against / graded the seeded data
+    // locally" -- the exact scenario #138 found reset() breaking under,
+    // since grades.submission_id and llm_call_logs' FKs are RESTRICT.
+    await db.insert(grades).values({ submissionId: sub.id, organizationId: org.id, gradedByAi: true });
+    await db.insert(llmCallLogs).values({
+      messageId: msg.id,
+      conversationId: msg.conversationId,
+      organizationId: org.id,
+      provider: "anthropic",
+      model: "claude-sonnet",
+    });
+
+    expect(() =>
+      execSync("npx tsx scripts/seed.ts --reset", { cwd: __dirname + "/..", stdio: "pipe" }),
+    ).not.toThrow();
+
+    const [reseededOrg] = await db.select().from(organizations).where(eq(organizations.slug, "seed-org"));
+    expect(reseededOrg.id).not.toBe(org.id);
+  }, 20_000);
 });

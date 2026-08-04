@@ -21,6 +21,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
   let courseBId: string;
   let userId: string;
   let otherUserId: string;
+  let droppedUserId: string;
   let sectionBId: string;
 
   beforeAll(async () => {
@@ -62,6 +63,22 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       .returning({ id: users.id });
     otherUserId = otherUser.id;
     await db.insert(courseMemberships).values({ userId: otherUserId, courseId: courseBId, role: "student" });
+
+    // A third user with a *dropped* membership in course A -- used to prove
+    // createConversation rejects a dropped owner even though a membership
+    // row technically still exists (#139).
+    const droppedEmailBytes = crypto.getRandomValues(new Uint8Array(32));
+    const [droppedUser] = await db
+      .insert(users)
+      .values({ email: droppedEmailBytes as never, emailBlindIndex: droppedEmailBytes as never })
+      .returning({ id: users.id });
+    droppedUserId = droppedUser.id;
+    await db.insert(courseMemberships).values({
+      userId: droppedUserId,
+      courseId: courseAId,
+      role: "student",
+      droppedAt: new Date(),
+    });
 
     const [membershipB] = await db
       .select({ id: courseMemberships.id })
@@ -175,6 +192,17 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     ).rejects.toThrow();
   });
 
+  it("rejects a dropped owner even though a membership row exists (#139)", async () => {
+    await expect(
+      createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: droppedUserId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Should not be created",
+      }),
+    ).rejects.toThrow();
+  });
+
   it("rejects a sectionId that belongs to a different course", async () => {
     await expect(
       createConversation(db, unsafeCourseScope(courseAId), {
@@ -195,5 +223,6 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     await db.delete(organizations).where(eq(organizations.id, orgBId));
     await db.delete(users).where(eq(users.id, userId));
     await db.delete(users).where(eq(users.id, otherUserId));
+    await db.delete(users).where(eq(users.id, droppedUserId));
   });
 });

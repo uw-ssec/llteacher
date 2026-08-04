@@ -1,9 +1,15 @@
-import { eq } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 import { makeNodeDb } from "../src/db/nodeClient";
 import type { Db } from "../src/db/client";
 import * as schema from "../src/db/schema";
 import { IdentityCipher } from "../src/lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../src/lib/secrets-loader";
+
+// Thrown for expected, user-actionable misconfiguration (missing env var,
+// unsafe --reset target, already seeded) -- distinguished from an
+// unexpected bug so the top-level catch can print just the message instead
+// of a full stack trace (found in PR #127 round-2 review, #140).
+class SeedUsageError extends Error {}
 
 // Routed through the same loadIdentityCipherKeys() the Worker uses (not a
 // hand-rolled key import) so seeded PII is encrypted under the app's actual
@@ -12,7 +18,7 @@ import { loadIdentityCipherKeys } from "../src/lib/secrets-loader";
 // through the shared loader.
 async function loadCipher(): Promise<IdentityCipher> {
   if (!process.env.ENCRYPTION_KEY || !process.env.BLIND_INDEX_KEY) {
-    throw new Error("ENCRYPTION_KEY and BLIND_INDEX_KEY must be set to run the seed script");
+    throw new SeedUsageError("ENCRYPTION_KEY and BLIND_INDEX_KEY must be set to run the seed script");
   }
   const keys = await loadIdentityCipherKeys(process.env as unknown as Env);
   return new IdentityCipher(keys);
@@ -74,39 +80,93 @@ const MESSAGE_PATTERNS: Array<(sectionTitle: string) => SeedMessageSpec[]> = [
   ],
 ];
 
+// node-postgres's connection-string parser (pg-connection-string) copies
+// every query param into its config object *before* falling back to the
+// URL's own authority hostname -- a `host` (or `hostaddr`) query param
+// silently overrides where the TCP connection actually goes.
+// postgres://localhost/db?host=ep-prod.neon.tech passes a naive
+// `new URL(...).hostname` check while actually connecting to
+// ep-prod.neon.tech. Query params win here, matching pg's own precedence
+// (found in PR #127 round-2 review, #140).
+function resolveEffectiveHostname(databaseUrl: string): string {
+  const url = new URL(databaseUrl);
+  return url.searchParams.get("host") ?? url.searchParams.get("hostaddr") ?? url.hostname;
+}
+
 function assertLocalOrForced(databaseUrl: string, forced: boolean) {
-  const { hostname } = new URL(databaseUrl);
-  const isLocal = hostname === "localhost" || hostname === "127.0.0.1" || hostname.endsWith(".local");
+  const hostname = resolveEffectiveHostname(databaseUrl);
+  // *.local dropped from the allowlist: it's ambiguous whether it means
+  // "my own machine" (mDNS/Bonjour, safe) or "some other host on a
+  // corporate AD network" (not necessarily disposable) -- nothing in this
+  // repo's documented dev/CI setup relies on it, so requiring --force for
+  // it too is strictly safer, not a regression.
+  const isLocal = hostname === "localhost" || hostname === "127.0.0.1";
   if (!isLocal && !forced) {
-    throw new Error(
+    throw new SeedUsageError(
       `Refusing to run --reset against non-local DATABASE_URL host "${hostname}" without --force. ` +
         `--reset wipes every row in the seed org's subtree; re-run with --force only if you are ` +
         `certain this database is disposable.`,
     );
   }
+  if (forced) {
+    console.log(`--force set: proceeding against DATABASE_URL host "${hostname}".`);
+  }
 }
 
-async function reset(db: Db) {
+async function reset(db: Db, cipher: IdentityCipher) {
+  const [org] = await db
+    .select({ id: schema.organizations.id })
+    .from(schema.organizations)
+    .where(eq(schema.organizations.slug, "seed-org"));
+
+  if (org) {
+    // grades.submission_id and llm_call_logs' FKs are ON DELETE RESTRICT
+    // (#133), and the org's cascade to courses/conversations/submissions
+    // (created in early migrations) fires before the org's own direct
+    // organization_id cascades to grades/llm_call_logs (created later) ever
+    // get a chance to -- see the #138 correction in
+    // docs/architecture/multi-tenant-data-model.md §3.5 Q5. So deleting the
+    // seed org while it has any grade or logged LLM call (from local
+    // chatting/grading against seeded data) aborts with a raw FK error.
+    // Clear both explicitly, scoped to this org, before the org delete.
+    await db.delete(schema.grades).where(eq(schema.grades.organizationId, org.id));
+    await db.delete(schema.llmCallLogs).where(eq(schema.llmCallLogs.organizationId, org.id));
+  }
+
   // Deleting the seed org cascades through courses -> homeworks -> sections
   // -> everything org-anchored (course_memberships, conversations, messages,
-  // submissions, grades, citations, llm_call_logs, student_profiles,
-  // llm_configs, prompt_templates, audit_events) -- see the FK onDelete
-  // chains in db/schema/{content,runtime}.ts. Scoping to the seed-org slug,
-  // rather than deleting every row in each table, is what keeps this safe to
-  // run alongside other orgs' data (including other test suites' fixtures).
+  // submissions, citations, student_profiles, llm_configs, prompt_templates,
+  // audit_events) -- see the FK onDelete chains in
+  // db/schema/{content,runtime}.ts. Scoping to the seed-org slug, rather
+  // than deleting every row in each table, is what keeps this safe to run
+  // alongside other orgs' data (including other test suites' fixtures).
   await db.delete(schema.organizations).where(eq(schema.organizations.slug, "seed-org"));
-  // isPending=true, not false: seeded accounts are pending rows (nobody has
-  // ever logged into them via WorkOS). Deleting isPending=false would wipe
-  // real users who've actually signed in -- the opposite of what --reset
-  // should ever touch. Users aren't in the org's cascade tree by design (an
-  // org being deleted must never delete real user rows), so they need this
-  // separate, still-scoped delete.
-  await db.delete(schema.users).where(eq(schema.users.isPending, true));
+  // Scoped to the known seed users' own email blind indexes, not just
+  // isPending=true globally (found in PR #127 round-2 review, #140):
+  // isPending=true was only ever a proxy for "seeded", and once any real
+  // invite/roster-provisioning flow creates pending users of its own (e.g.
+  // #60's NRPS roster sync), `--reset --force` on a shared DB would wipe
+  // those too. isPending=true stays as a second, redundant guard -- it
+  // should never diverge from the blind-index scoping for genuinely seeded
+  // rows, but costs nothing to keep. Users aren't in the org's cascade tree
+  // by design (an org being deleted must never delete real user rows), so
+  // they need this separate, still-scoped delete.
+  const seedEmailBlindIndexes = await Promise.all(
+    SEED_USERS.map((spec) => cipher.computeBlindIndex(IdentityCipher.normalizeEmail(spec.email))),
+  );
+  await db
+    .delete(schema.users)
+    .where(
+      and(
+        eq(schema.users.isPending, true),
+        or(...seedEmailBlindIndexes.map((bi) => eq(schema.users.emailBlindIndex, bi))),
+      ),
+    );
 }
 
 async function seed() {
   const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) throw new Error("DATABASE_URL not set");
+  if (!databaseUrl) throw new SeedUsageError("DATABASE_URL not set");
 
   const shouldReset = process.argv.includes("--reset");
   const forced = process.argv.includes("--force");
@@ -116,7 +176,7 @@ async function seed() {
   if (shouldReset) {
     assertLocalOrForced(databaseUrl, forced);
     console.log("Resetting seeded data...");
-    await reset(db);
+    await reset(db, cipher);
   }
 
   let org: typeof schema.organizations.$inferSelect;
@@ -131,7 +191,7 @@ async function seed() {
       .returning();
   } catch (e) {
     if (e instanceof Error && "code" in e && e.code === "23505") {
-      throw new Error("already seeded -- use --reset to wipe and re-seed");
+      throw new SeedUsageError("already seeded -- use --reset to wipe and re-seed");
     }
     throw e;
   }
@@ -276,6 +336,13 @@ async function seed() {
 }
 
 seed().catch((e) => {
-  console.error(e);
+  // SeedUsageError is expected/user-actionable -- the message alone is the
+  // useful part; a full stack trace is noise. Anything else is an
+  // unexpected bug, where the stack trace is exactly what's needed.
+  if (e instanceof SeedUsageError) {
+    console.error(e.message);
+  } else {
+    console.error(e);
+  }
   process.exit(1);
 });

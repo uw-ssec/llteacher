@@ -354,6 +354,73 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
     ).rejects.toThrow();
   });
 
+  it("rejects a citation with a half-set span, allows both-null and both-set spans (#140)", async () => {
+    const [msg] = await db
+      .insert(messages)
+      .values({ conversationId: conversationAId, role: "user", parts: [{ type: "text", text: "span-test" }] })
+      .returning({ id: messages.id });
+    const [membership] = await db
+      .select({ id: courseMemberships.id })
+      .from(courseMemberships)
+      .where(eq(courseMemberships.courseId, courseAId));
+    const [material] = await db
+      .insert(courseMaterials)
+      .values({ courseId: courseAId, uploadedById: membership.id, sourceType: "pdf", title: "m" })
+      .returning({ id: courseMaterials.id });
+    const [chunk] = await db
+      .insert(materialChunks)
+      .values({ materialId: material.id, ordinal: 0, text: "t", tokenCount: 1 })
+      .returning({ id: materialChunks.id });
+
+    // Half-set: span_end NULL makes `span_end >= 0` evaluate to SQL NULL,
+    // which a naive range-only CHECK would silently pass -- see the schema
+    // comment on citations_span_range_chk. Both halves of the half-set case
+    // are checked, since the equality clause is symmetric. messageId (a
+    // real row), not gradeId, is the single-source column used throughout
+    // -- a fake gradeId would fail on the FK before the span CHECK is even
+    // reached.
+    await expect(
+      db.insert(citations).values({
+        messageId: msg.id,
+        materialChunkId: chunk.id,
+        organizationId: orgAId,
+        spanStart: 5,
+        spanEnd: null,
+      }),
+    ).rejects.toThrow();
+
+    await expect(
+      db.insert(citations).values({
+        messageId: msg.id,
+        materialChunkId: chunk.id,
+        organizationId: orgAId,
+        spanStart: null,
+        spanEnd: 5,
+      }),
+    ).rejects.toThrow();
+
+    // Both-null and both-set (sane) spans are still allowed.
+    await expect(
+      db.insert(citations).values({
+        messageId: msg.id,
+        materialChunkId: chunk.id,
+        organizationId: orgAId,
+        spanStart: null,
+        spanEnd: null,
+      }),
+    ).resolves.toBeDefined();
+
+    await expect(
+      db.insert(citations).values({
+        messageId: msg.id,
+        materialChunkId: chunk.id,
+        organizationId: orgAId,
+        spanStart: 5,
+        spanEnd: 10,
+      }),
+    ).resolves.toBeDefined();
+  });
+
   it("blocks deleting a grader's membership while their human-graded grade exists", async () => {
     // Own conversation, distinct from the shared `conversationAId` fixture --
     // submissions.conversation_id is unique, and an earlier test already

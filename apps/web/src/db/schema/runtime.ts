@@ -196,8 +196,13 @@ export const grades = pgTable(
     // the choke point that stops "delete a user" from silently erasing
     // their FERPA education records. Deleting a user with a graded
     // submission is blocked until that grade is explicitly handled (see
-    // docs/architecture/multi-tenant-data-model.md §3.5 Q5) -- a user with
-    // only ungraded submissions can still be deleted normally.
+    // docs/architecture/multi-tenant-data-model.md §3.5 Q5). A user with
+    // no graded submissions is NOT automatically deletable, though --
+    // llm_call_logs' own RESTRICT FKs (below) form a second, independent
+    // gate on the same cascade path, and most conversations have at least
+    // one logged LLM call whether or not they were ever graded. The same
+    // diamond applies to org deletion, which cascades through this same
+    // courses -> conversations -> submissions chain.
     submissionId: uuid("submission_id")
       .notNull()
       .references(() => submissions.id, { onDelete: "restrict" }),
@@ -270,10 +275,16 @@ export const citations = pgTable(
     ),
     // Both null (no span -- citation covers the whole chunk) or both set
     // and sane; a half-set span is as meaningless as a backwards one.
+    // The equality clause is required, not redundant with the range clause
+    // below: with span_end NULL, `span_end >= 0` evaluates to SQL NULL, and
+    // Postgres CHECK constraints treat a NULL result as passing (only FALSE
+    // rejects a row) -- so (5, NULL) silently passed this CHECK without it
+    // (found in PR #127 round-2 review, #140).
     check(
       "citations_span_range_chk",
-      sql`(${t.spanStart} IS NULL AND ${t.spanEnd} IS NULL)
-          OR (${t.spanStart} >= 0 AND ${t.spanEnd} >= 0 AND ${t.spanStart} <= ${t.spanEnd})`,
+      sql`(${t.spanStart} IS NULL) = (${t.spanEnd} IS NULL)
+          AND (${t.spanStart} IS NULL
+            OR (${t.spanStart} >= 0 AND ${t.spanEnd} >= 0 AND ${t.spanStart} <= ${t.spanEnd}))`,
     ),
   ],
 );

@@ -71,6 +71,13 @@
       "when": 1785822699664,
       "tag": "0009_minor_cleanups_from_review",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1785865761901,
+      "tag": "0010_round2_span_check_fix",
+      "breakpoints": true
     }
   ]
 }
