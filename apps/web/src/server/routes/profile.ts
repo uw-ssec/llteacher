@@ -3,6 +3,9 @@ import { makeDb } from "../../db/client";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { ProfileService } from "../../lib/services/ProfileService";
+import { getOrgScopesForUser } from "../repositories/users";
+import { AUDIT_ACTIONS, auditBestEffort } from "../utils/audit";
+import { logServerError } from "../utils/errors";
 import type { AppEnv } from "../context";
 
 export async function getProfileHandler(c: Context<AppEnv>) {
@@ -36,6 +39,21 @@ export async function patchProfileHandler(c: Context<AppEnv>) {
     session.userId,
     displayName,
   );
+
+  // Best-effort (#147): an audit-write failure must not fail a profile
+  // update that already succeeded.
+  try {
+    const orgScopes = await getOrgScopesForUser(db, session.userId);
+    await auditBestEffort(db, orgScopes, {
+      actorUserId: session.userId,
+      action: AUDIT_ACTIONS.PROFILE_UPDATED,
+      targetType: "user",
+      targetId: session.userId,
+    });
+  } catch (err) {
+    logServerError("patchProfileHandler", err);
+  }
+
   return c.json(updated);
 }
 

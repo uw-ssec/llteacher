@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
-import { listMembershipsForUser, getUserActivationState, deactivateByWorkosUserId } from "./users";
+import {
+  listMembershipsForUser,
+  getUserActivationState,
+  deactivateByWorkosUserId,
+  getOrgScopesForUser,
+} from "./users";
 import type { Db } from "../../db/client";
 import { makeNodeDb } from "../../db/nodeClient";
 import { organizations, courses, users, courseMemberships } from "../../db/schema";
@@ -184,9 +189,10 @@ describe.skipIf(!DATABASE_URL)("deactivateByWorkosUserId / getUserActivationStat
     expect(membership?.droppedReason).toBe("user_deprovisioned");
   });
 
-  it("is idempotent: a second call on an already-deactivated user is a no-op, not a double-bump", async () => {
+  it("is idempotent: a second call on an already-deactivated user does not double-bump the epoch, but still returns org scopes for a retry to audit-log against (#151)", async () => {
     const result = await deactivateByWorkosUserId(db, workosUserId);
-    expect(result).toBeNull();
+    expect(result?.userId).toBe(userId);
+    expect(result?.orgScopes).toEqual([orgId]);
 
     const state = await getUserActivationState(db, userId);
     expect(state?.sessionEpoch).toBe(1);
@@ -271,3 +277,89 @@ describe.skipIf(!DATABASE_URL)(
     });
   },
 );
+
+describe.skipIf(!DATABASE_URL)("getOrgScopesForUser (#147, real DB)", () => {
+  let db: Db;
+  let orgId: string;
+  let courseAId: string;
+  let courseBId: string;
+  let userId: string;
+
+  beforeAll(async () => {
+    db = makeNodeDb(DATABASE_URL!);
+    const [org] = await db
+      .insert(organizations)
+      .values({
+        slug: `orgscopes-${crypto.randomUUID()}`,
+        name: "Org Scopes Test Org",
+        workosOrganizationId: `w-${crypto.randomUUID()}`,
+      })
+      .returning({ id: organizations.id });
+    orgId = org.id;
+    const [courseA] = await db
+      .insert(courses)
+      .values({ organizationId: orgId, code: "A", term: "T", title: "T" })
+      .returning({ id: courses.id });
+    courseAId = courseA.id;
+    const [courseB] = await db
+      .insert(courses)
+      .values({ organizationId: orgId, code: "B", term: "T", title: "T" })
+      .returning({ id: courses.id });
+    courseBId = courseB.id;
+
+    const emailBytes = crypto.getRandomValues(new Uint8Array(32));
+    const [user] = await db
+      .insert(users)
+      .values({ email: emailBytes as never, emailBlindIndex: emailBytes as never })
+      .returning({ id: users.id });
+    userId = user.id;
+
+    // Two active memberships in the same org, via two different courses --
+    // selectDistinct must collapse this to one org scope, not two.
+    await db.insert(courseMemberships).values({ userId, courseId: courseAId, role: "student" });
+    await db.insert(courseMemberships).values({ userId, courseId: courseBId, role: "student" });
+  });
+
+  afterAll(async () => {
+    await db.delete(organizations).where(eq(organizations.id, orgId));
+    await db.delete(users).where(eq(users.id, userId));
+  });
+
+  it("returns the org once, deduped across two course memberships in the same org", async () => {
+    const scopes = await getOrgScopesForUser(db, userId);
+    expect(scopes).toEqual([orgId]);
+  });
+
+  it("returns an empty array for a user with no course memberships", async () => {
+    const emailBytes = crypto.getRandomValues(new Uint8Array(32));
+    const [freshUser] = await db
+      .insert(users)
+      .values({ email: emailBytes as never, emailBlindIndex: emailBytes as never })
+      .returning({ id: users.id });
+
+    const scopes = await getOrgScopesForUser(db, freshUser.id);
+    expect(scopes).toEqual([]);
+
+    await db.delete(users).where(eq(users.id, freshUser.id));
+  });
+
+  it("excludes a dropped membership's org when it's the user's only membership there", async () => {
+    const emailBytes = crypto.getRandomValues(new Uint8Array(32));
+    const [freshUser] = await db
+      .insert(users)
+      .values({ email: emailBytes as never, emailBlindIndex: emailBytes as never })
+      .returning({ id: users.id });
+    await db.insert(courseMemberships).values({
+      userId: freshUser.id,
+      courseId: courseAId,
+      role: "student",
+      droppedAt: new Date(),
+      droppedReason: "roster_removal",
+    });
+
+    const scopes = await getOrgScopesForUser(db, freshUser.id);
+    expect(scopes).toEqual([]);
+
+    await db.delete(users).where(eq(users.id, freshUser.id));
+  });
+});

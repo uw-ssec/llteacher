@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { eq } from "drizzle-orm";
 import { IdentityCipher, type IdentityCipherKeys } from "../crypto/identity-cipher";
 import { UserIdentityService } from "./UserIdentityService";
-import { courseMemberships } from "../../db/schema";
+import { organizations, courses, users, courseMemberships } from "../../db/schema";
+import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 
 let keys: IdentityCipherKeys;
@@ -546,5 +548,191 @@ describe("UserIdentityService.handleEmailUpdated (#142)", () => {
 
     expect(result).toEqual({ updated: false });
     expect(updateCalls).toBe(0);
+  });
+});
+
+const DATABASE_URL = process.env.DATABASE_URL;
+
+// #152: the two mock-only gaps a live-DB mutation-testing pass found.
+// Neither is a bug in shipped code -- deactivation selectivity and epoch
+// revocation are already pinned by real-DB tests elsewhere (users.test.ts)
+// -- these are the two paths that were only ever exercised against mocks
+// whose `where` clauses are no-ops, so a regression in the real WHERE
+// predicates would pass the whole suite undetected.
+describe.skipIf(!DATABASE_URL)("UserIdentityService selective reactivation (#142, #152, real DB)", () => {
+  let db: Db;
+  let cipher: IdentityCipher;
+  let orgId: string;
+  let courseAId: string;
+  let courseBId: string;
+  let userId: string;
+  const workosUserId = `workos-${crypto.randomUUID()}`;
+  const email = "reactivation-test@uw.edu";
+
+  beforeAll(async () => {
+    db = makeNodeDb(DATABASE_URL!);
+    cipher = new IdentityCipher(keys);
+
+    const [org] = await db
+      .insert(organizations)
+      .values({ slug: `reactivate-${crypto.randomUUID()}`, name: "Reactivate Test Org", workosOrganizationId: `w-${crypto.randomUUID()}` })
+      .returning({ id: organizations.id });
+    orgId = org.id;
+    const [courseA] = await db
+      .insert(courses)
+      .values({ organizationId: orgId, code: "A", term: "T", title: "T" })
+      .returning({ id: courses.id });
+    courseAId = courseA.id;
+    const [courseB] = await db
+      .insert(courses)
+      .values({ organizationId: orgId, code: "B", term: "T", title: "T" })
+      .returning({ id: courses.id });
+    courseBId = courseB.id;
+
+    const encryptedEmail = await cipher.encryptString(email);
+    const emailBlindIndex = await cipher.computeBlindIndex(email);
+    const [user] = await db
+      .insert(users)
+      .values({
+        workosUserId,
+        email: encryptedEmail,
+        emailBlindIndex,
+        isActive: false,
+        sessionEpoch: 3,
+      })
+      .returning({ id: users.id });
+    userId = user.id;
+
+    // Dropped by this account's own deprovisioning -- must be restored.
+    await db.insert(courseMemberships).values({
+      userId,
+      courseId: courseAId,
+      role: "student",
+      droppedAt: new Date(),
+      droppedReason: "user_deprovisioned",
+    });
+    // Dropped for an unrelated reason (e.g. a Canvas roster removal) --
+    // must NOT be restored just because the same user later logs back in.
+    await db.insert(courseMemberships).values({
+      userId,
+      courseId: courseBId,
+      role: "student",
+      droppedAt: new Date(),
+      droppedReason: "roster_removal",
+    });
+  });
+
+  afterAll(async () => {
+    await db.delete(organizations).where(eq(organizations.id, orgId));
+    await db.delete(users).where(eq(users.id, userId));
+  });
+
+  it("restores only the membership dropped by this account's own deprovisioning, not the one dropped for an unrelated reason", async () => {
+    const result = await new UserIdentityService(cipher, db).createOrClaimUser({
+      id: workosUserId,
+      email,
+      firstName: null,
+    });
+
+    expect(result.userId).toBe(userId);
+    expect(result.isNew).toBe(false);
+    expect(result.sessionEpoch).toBe(3); // login never touches sessionEpoch
+
+    const [membershipA] = await db
+      .select()
+      .from(courseMemberships)
+      .where(eq(courseMemberships.courseId, courseAId));
+    expect(membershipA.droppedAt).toBeNull();
+    expect(membershipA.droppedReason).toBeNull();
+
+    const [membershipB] = await db
+      .select()
+      .from(courseMemberships)
+      .where(eq(courseMemberships.courseId, courseBId));
+    expect(membershipB.droppedAt).not.toBeNull();
+    expect(membershipB.droppedReason).toBe("roster_removal");
+
+    const [reactivatedUser] = await db.select().from(users).where(eq(users.id, userId));
+    expect(reactivatedUser.isActive).toBe(true);
+  });
+});
+
+describe.skipIf(!DATABASE_URL)("UserIdentityService.handleEmailUpdated (#142, #152, real DB)", () => {
+  let db: Db;
+  let cipher: IdentityCipher;
+  const userAWorkosId = `workos-${crypto.randomUUID()}`;
+  const userBWorkosId = `workos-${crypto.randomUUID()}`;
+  let userAId: string;
+  let userBId: string;
+
+  beforeAll(async () => {
+    db = makeNodeDb(DATABASE_URL!);
+    cipher = new IdentityCipher(keys);
+
+    const emailA = "handleupdate-a@uw.edu";
+    const encryptedA = await cipher.encryptString(emailA);
+    const blindA = await cipher.computeBlindIndex(emailA);
+    const [userA] = await db
+      .insert(users)
+      .values({ workosUserId: userAWorkosId, email: encryptedA, emailBlindIndex: blindA })
+      .returning({ id: users.id });
+    userAId = userA.id;
+
+    const emailB = "handleupdate-b@uw.edu";
+    const encryptedB = await cipher.encryptString(emailB);
+    const blindB = await cipher.computeBlindIndex(emailB);
+    const [userB] = await db
+      .insert(users)
+      .values({ workosUserId: userBWorkosId, email: encryptedB, emailBlindIndex: blindB })
+      .returning({ id: users.id });
+    userBId = userB.id;
+  });
+
+  afterAll(async () => {
+    await db.delete(users).where(eq(users.id, userAId));
+    await db.delete(users).where(eq(users.id, userBId));
+  });
+
+  it("is idempotent: no-ops against real Postgres when the email hasn't actually changed", async () => {
+    const result = await new UserIdentityService(cipher, db).handleEmailUpdated(
+      userAWorkosId,
+      "handleupdate-a@uw.edu",
+    );
+    expect(result).toEqual({ updated: false });
+
+    const [row] = await db.select().from(users).where(eq(users.id, userAId));
+    expect(await cipher.decryptString(row.email)).toBe("handleupdate-a@uw.edu");
+  });
+
+  it("re-encrypts and refreshes the blind index against real Postgres when the email changed", async () => {
+    const result = await new UserIdentityService(cipher, db).handleEmailUpdated(
+      userAWorkosId,
+      "handleupdate-a-new@uw.edu",
+    );
+    expect(result).toEqual({ updated: true });
+
+    const [row] = await db.select().from(users).where(eq(users.id, userAId));
+    expect(await cipher.decryptString(row.email)).toBe("handleupdate-a-new@uw.edu");
+    // The blind index must actually match the new email -- not just any
+    // non-null value -- since it's how login reconciliation finds this
+    // row again next time.
+    expect(row.emailBlindIndex).toEqual(await cipher.computeBlindIndex("handleupdate-a-new@uw.edu"));
+  });
+
+  it("does not overwrite the email when the new address collides with another non-pending user (unique-constraint interaction)", async () => {
+    // userA attempts to change to userB's real, already-claimed email.
+    const result = await new UserIdentityService(cipher, db).handleEmailUpdated(
+      userAWorkosId,
+      "handleupdate-b@uw.edu",
+    );
+    expect(result).toEqual({ updated: false });
+
+    const [rowA] = await db.select().from(users).where(eq(users.id, userAId));
+    // Still the previous test's value, not userB's email and not
+    // colliding with the unique emailBlindIndex constraint.
+    expect(await cipher.decryptString(rowA.email)).toBe("handleupdate-a-new@uw.edu");
+
+    const [rowB] = await db.select().from(users).where(eq(users.id, userBId));
+    expect(await cipher.decryptString(rowB.email)).toBe("handleupdate-b@uw.edu");
   });
 });

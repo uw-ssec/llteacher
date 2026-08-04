@@ -66,7 +66,17 @@ export const membershipDropReasonEnum = pgEnum("membership_drop_reason", [
   "user_deprovisioned",
 ]);
 
+// "claimed" (#151) is the transient state between an insert-first
+// onConflictDoNothing-style claim and the final status a handler settles
+// into. Its purpose is purely to make claiming atomic: a concurrent
+// duplicate delivery's claim attempt targets rows NOT in "failed" state
+// (see claimWebhookEvent, repositories/webhookEvents.ts) via a single
+// INSERT ... ON CONFLICT ... DO UPDATE ... WHERE statement, so two racing
+// deliveries for a brand-new event id can't both win. A row should never
+// be observed sitting in "claimed" for long -- it settles to
+// processed/skipped/failed by the same request that claimed it.
 export const webhookEventStatusEnum = pgEnum("webhook_event_status", [
+  "claimed",
   "processed",
   "skipped",
   "failed",

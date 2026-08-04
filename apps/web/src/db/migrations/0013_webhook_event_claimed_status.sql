@@ -1,0 +1,1 @@
+ALTER TYPE "public"."webhook_event_status" ADD VALUE 'claimed' BEFORE 'processed';

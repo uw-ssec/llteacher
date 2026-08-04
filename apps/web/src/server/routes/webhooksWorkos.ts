@@ -3,10 +3,11 @@ import { getWorkOS } from "../../lib/workos";
 import { makeDb } from "../../db/client";
 import { deactivateByWorkosUserId } from "../repositories/users";
 import { recordAuditEvent } from "../repositories/auditEvents";
-import { findWebhookEvent, recordWebhookEvent } from "../repositories/webhookEvents";
+import { claimWebhookEvent, recordWebhookEvent } from "../repositories/webhookEvents";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { UserIdentityService } from "../../lib/services/UserIdentityService";
+import { AUDIT_ACTIONS } from "../utils/audit";
 import { logServerError } from "../utils/errors";
 import type { AppEnv } from "../context";
 
@@ -38,11 +39,29 @@ import type { AppEnv } from "../context";
  *  WHERE-clause guard remains a second, redundant safety net for
  *  user.deleted specifically. A prior "failed" status is NOT treated as a
  *  duplicate, so a genuine processing failure gets reprocessed on WorkOS's
- *  retry rather than being silently skipped forever. */
+ *  retry rather than being silently skipped forever. recordWebhookEvent
+ *  (#150) redacts email/name/photo out of the stored payload -- this
+ *  handler passes event.data through as-is, the redaction happens at the
+ *  repository write boundary, not here.
+ *
+ *  Dedup is an atomic claim (#151, claimWebhookEvent), not a separate
+ *  find-then-later-insert -- two concurrent identical deliveries can't
+ *  both pass the check before either has written anything. */
 export async function workosWebhookHandler(c: Context<AppEnv>) {
   const sigHeader = c.req.header("workos-signature");
   if (!sigHeader) {
     return c.json({ error: "Missing signature" }, 401);
+  }
+
+  // #151: an unset WORKOS_WEBHOOK_SECRET makes every webhook fail signature
+  // verification below and 401 -- fails closed, so not a security issue,
+  // but with nothing to distinguish it from a genuinely invalid signature
+  // an operator has no way to tell "misconfigured" from "someone's
+  // hammering this endpoint with garbage." Logged distinctly so it shows
+  // up as a config problem, not routine auth noise; still 401 either way.
+  if (!c.env.WORKOS_WEBHOOK_SECRET) {
+    logServerError("workosWebhookHandler", new Error("WORKOS_WEBHOOK_SECRET is not configured"));
+    return c.json({ error: "Invalid signature" }, 401);
   }
 
   // c.req.text() consumes the request body stream -- read it exactly once,
@@ -76,17 +95,23 @@ export async function workosWebhookHandler(c: Context<AppEnv>) {
 
   const db = makeDb(c.env.DATABASE_URL);
 
-  const existingEvent = await findWebhookEvent(db, event.id);
-  if (existingEvent && existingEvent.status !== "failed") {
+  // #151: atomic claim replaces a separate find-then-later-insert dedup
+  // check, which left a TOCTOU window where two concurrent identical
+  // deliveries could both pass the check before either had written
+  // anything. See claimWebhookEvent's doc comment for the exact race it
+  // closes and why a "claimed" status exists.
+  const claimed = await claimWebhookEvent(db, { id: event.id, eventType: event.event });
+  if (!claimed) {
     return c.json({ received: true, duplicate: true });
   }
 
   let status: "processed" | "skipped" = "processed";
   try {
     if (event.event === "user.deleted") {
-      // Idempotent by construction (see deactivateByWorkosUserId): a
-      // duplicate delivery -- WorkOS retries on failure -- finds no active
-      // user on the second attempt and is a harmless no-op.
+      // #151: deactivateByWorkosUserId no longer short-circuits to null
+      // just because the user was already inactive -- a retry (this
+      // delivery, after a prior attempt's audit write failed) still needs
+      // real org scopes back so the audit actually gets written this time.
       const result = await deactivateByWorkosUserId(db, event.data.id);
       if (result) {
         // The webhook payload carries no org context -- audit against
@@ -96,7 +121,7 @@ export async function workosWebhookHandler(c: Context<AppEnv>) {
           result.orgScopes.map((scope) =>
             recordAuditEvent(db, scope, {
               actorUserId: null,
-              action: "user.deprovisioned",
+              action: AUDIT_ACTIONS.USER_DEPROVISIONED,
               targetType: "user",
               targetId: result.userId,
             }),
@@ -104,11 +129,24 @@ export async function workosWebhookHandler(c: Context<AppEnv>) {
         );
       }
     } else if (event.event === "user.updated") {
-      const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
-      await new UserIdentityService(cipher, db).handleEmailUpdated(
-        event.data.id,
-        event.data.email,
-      );
+      // #151: a missing/blank email is a poison message otherwise --
+      // IdentityCipher.normalizeEmail calls .trim() on it unconditionally,
+      // so a null/undefined email throws, which without this guard would
+      // 500 -> "failed" -> WorkOS retries the exact same poison payload
+      // until its retry schedule exhausts, never succeeding. Treated as
+      // out-of-scope-for-this-handler (skipped), not a processing error.
+      if (typeof event.data.email === "string" && event.data.email.trim().length > 0) {
+        const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
+        await new UserIdentityService(cipher, db).handleEmailUpdated(
+          event.data.id,
+          event.data.email,
+        );
+      } else {
+        console.log(
+          `[workosWebhookHandler] user.updated event ${event.id} has no usable email -- skipped, not processed`,
+        );
+        status = "skipped";
+      }
     } else {
       // Acknowledged, not processed -- see the module doc comment above
       // for why this isn't an error. Logged (not just silently ack'd) so

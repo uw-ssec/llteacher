@@ -13,10 +13,10 @@ vi.mock("../../db/client", () => ({
   makeDb: () => ({}),
 }));
 
-const findWebhookEvent = vi.fn();
+const claimWebhookEvent = vi.fn();
 const recordWebhookEvent = vi.fn().mockResolvedValue(undefined);
 vi.mock("../repositories/webhookEvents", () => ({
-  findWebhookEvent: (...args: unknown[]) => findWebhookEvent(...args),
+  claimWebhookEvent: (...args: unknown[]) => claimWebhookEvent(...args),
   recordWebhookEvent: (...args: unknown[]) => recordWebhookEvent(...args),
 }));
 
@@ -62,6 +62,17 @@ async function signedRequest(payload: unknown, secret = WEBHOOK_SECRET, timestam
   };
 }
 
+/** Flips the last character of the signature hex to a value guaranteed to
+ *  differ from the original -- `.replace(/.$/, "0")` (the prior version of
+ *  this helper) was a silent no-op whenever the signature already happened
+ *  to end in "0" (~1/16 of the time for a hex digest), making the test that
+ *  used it flaky. */
+function tamperSignature(sigHeader: string): string {
+  const lastChar = sigHeader.at(-1);
+  const replacement = lastChar === "0" ? "1" : "0";
+  return sigHeader.slice(0, -1) + replacement;
+}
+
 function userEvent(id: string, event: string, overrides: Record<string, unknown> = {}) {
   return {
     id,
@@ -94,7 +105,7 @@ beforeEach(() => {
   deactivateByWorkosUserId.mockReset();
   recordAuditEvent.mockReset();
   handleEmailUpdated.mockReset();
-  findWebhookEvent.mockReset().mockResolvedValue(undefined);
+  claimWebhookEvent.mockReset().mockResolvedValue(true);
   recordWebhookEvent.mockReset().mockResolvedValue(undefined);
 });
 
@@ -109,10 +120,31 @@ describe("POST /api/webhooks/workos", () => {
     expect(deactivateByWorkosUserId).not.toHaveBeenCalled();
   });
 
+  it("returns 401 (and logs a distinct config error, not routine auth noise) when WORKOS_WEBHOOK_SECRET is unset (#151)", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const payload = userDeletedEvent("workos_1");
+    const req = await signedRequest(payload);
+
+    const res = await webhooksWorkos.request(
+      "/",
+      req,
+      { ...TEST_ENV, WORKOS_WEBHOOK_SECRET: undefined } as unknown as Env,
+    );
+
+    expect(res.status).toBe(401);
+    expect(deactivateByWorkosUserId).not.toHaveBeenCalled();
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ message: expect.stringContaining("WORKOS_WEBHOOK_SECRET") }),
+    );
+
+    consoleSpy.mockRestore();
+  });
+
   it("returns 401 for a tampered signature", async () => {
     const payload = userDeletedEvent("workos_1");
     const req = await signedRequest(payload);
-    req.headers["workos-signature"] = req.headers["workos-signature"].replace(/.$/, "0");
+    req.headers["workos-signature"] = tamperSignature(req.headers["workos-signature"]);
     const res = await webhooksWorkos.request("/", req, TEST_ENV);
     expect(res.status).toBe(401);
     expect(deactivateByWorkosUserId).not.toHaveBeenCalled();
@@ -175,15 +207,29 @@ describe("POST /api/webhooks/workos", () => {
     );
   });
 
-  it("is idempotent by construction: a duplicate delivery for an already-deactivated user is a 200 no-op with no audit write", async () => {
-    deactivateByWorkosUserId.mockResolvedValue(null);
+  it("re-emits the deprovisioning audit on a retry, even though the user is already deactivated (#151)", async () => {
+    // The exact scenario #151 fixes: a first delivery deactivated the user
+    // and cascaded memberships, but its audit write failed (status stayed
+    // "failed", so claimWebhookEvent lets this retry through). The real
+    // deactivateByWorkosUserId no longer returns null just because the
+    // user is already inactive -- it recomputes org scopes so the audit
+    // can actually be written this time.
+    deactivateByWorkosUserId.mockResolvedValue({
+      userId: "user-1",
+      orgScopes: ["org-a"],
+    });
     const payload = userDeletedEvent("workos_1");
     const req = await signedRequest(payload);
 
     const res = await webhooksWorkos.request("/", req, TEST_ENV);
 
     expect(res.status).toBe(200);
-    expect(recordAuditEvent).not.toHaveBeenCalled();
+    expect(recordAuditEvent).toHaveBeenCalledTimes(1);
+    expect(recordAuditEvent).toHaveBeenCalledWith(
+      expect.anything(),
+      "org-a",
+      expect.objectContaining({ action: "user.deprovisioned", targetId: "user-1" }),
+    );
   });
 
   it("returns 200 with no-op for a workosUserId we've never seen", async () => {
@@ -195,6 +241,7 @@ describe("POST /api/webhooks/workos", () => {
 
     expect(res.status).toBe(200);
     expect(deactivateByWorkosUserId).toHaveBeenCalledWith(expect.anything(), "workos_unknown");
+    expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 
   it("acknowledges an event type outside v0 scope with 200 instead of erroring", async () => {
@@ -243,7 +290,7 @@ describe("POST /api/webhooks/workos", () => {
     consoleSpy.mockRestore();
   });
 
-  describe("user.updated (#142)", () => {
+  describe("user.updated (#142, #151)", () => {
     it("re-encrypts email + refreshes the blind index via UserIdentityService", async () => {
       handleEmailUpdated.mockResolvedValue({ updated: true });
       const payload = userEvent("event_4", "user.updated", { email: "new@uw.edu" });
@@ -274,11 +321,44 @@ describe("POST /api/webhooks/workos", () => {
       );
       consoleSpy.mockRestore();
     });
+
+    it("treats a missing email as skipped, not a processing failure (#151 poison-message guard)", async () => {
+      const payload = userEvent("event_6", "user.updated", { email: null });
+      const req = await signedRequest(payload);
+
+      const res = await webhooksWorkos.request("/", req, TEST_ENV);
+
+      expect(res.status).toBe(200);
+      expect(handleEmailUpdated).not.toHaveBeenCalled();
+      expect(recordWebhookEvent).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ id: "event_6", status: "skipped" }),
+      );
+    });
+
+    it("treats a blank email as skipped, not a processing failure (#151)", async () => {
+      const payload = userEvent("event_7", "user.updated", { email: "   " });
+      const req = await signedRequest(payload);
+
+      const res = await webhooksWorkos.request("/", req, TEST_ENV);
+
+      expect(res.status).toBe(200);
+      expect(handleEmailUpdated).not.toHaveBeenCalled();
+      expect(recordWebhookEvent).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ status: "skipped" }),
+      );
+    });
+
+    it("would have thrown without the guard: sanity check that IdentityCipher.normalizeEmail rejects a missing email", async () => {
+      const { IdentityCipher } = await import("../../lib/crypto/identity-cipher");
+      expect(() => IdentityCipher.normalizeEmail(undefined as unknown as string)).toThrow();
+    });
   });
 
-  describe("event persistence / replay dedup (#95, #142)", () => {
-    it("skips reprocessing a duplicate delivery already recorded as processed", async () => {
-      findWebhookEvent.mockResolvedValue({ id: "event_1", status: "processed" });
+  describe("event claim / replay dedup (#95, #142, #151)", () => {
+    it("skips reprocessing when claimWebhookEvent reports the event already claimed/processed", async () => {
+      claimWebhookEvent.mockResolvedValue(false);
       const payload = userDeletedEvent("workos_1");
       const req = await signedRequest(payload);
 
@@ -291,20 +371,8 @@ describe("POST /api/webhooks/workos", () => {
       expect(recordWebhookEvent).not.toHaveBeenCalled();
     });
 
-    it("skips reprocessing a duplicate delivery already recorded as skipped", async () => {
-      findWebhookEvent.mockResolvedValue({ id: "event_2", status: "skipped" });
-      const payload = userEvent("event_2", "organization_membership.deleted");
-      const req = await signedRequest(payload);
-
-      const res = await webhooksWorkos.request("/", req, TEST_ENV);
-      const body = (await res.json()) as { duplicate?: boolean };
-
-      expect(res.status).toBe(200);
-      expect(body.duplicate).toBe(true);
-    });
-
-    it("DOES reprocess a delivery whose prior attempt was recorded as failed (retry, not permanently skipped)", async () => {
-      findWebhookEvent.mockResolvedValue({ id: "event_1", status: "failed" });
+    it("processes the event when claimWebhookEvent reports the claim won (fresh event or retry-after-failed)", async () => {
+      claimWebhookEvent.mockResolvedValue(true);
       deactivateByWorkosUserId.mockResolvedValue(null);
       const payload = userDeletedEvent("workos_1");
       const req = await signedRequest(payload);
@@ -315,6 +383,10 @@ describe("POST /api/webhooks/workos", () => {
       expect(res.status).toBe(200);
       expect(body.duplicate).toBeUndefined();
       expect(deactivateByWorkosUserId).toHaveBeenCalledWith(expect.anything(), "workos_1");
+      expect(claimWebhookEvent).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ id: "event_1", eventType: "user.deleted" }),
+      );
       expect(recordWebhookEvent).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ status: "processed" }),
