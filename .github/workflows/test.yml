@@ -5,6 +5,19 @@ on:
   push:
     branches: [llteacher01]
 
+# Duplicate jobs otherwise run per PR-synchronize push and the branch push
+# it corresponds to (#148) -- cancel the stale one instead of burning runner
+# minutes on both.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default GITHUB_TOKEN scope was previously unset (repo default, broader
+# than this workflow needs) -- explicit read-only since nothing here writes
+# to the repo (#148).
+permissions:
+  contents: read
+
 jobs:
   web:
     name: apps/web — typecheck, migrate, test
@@ -70,3 +83,20 @@ jobs:
 
       - name: Test
         run: npm test
+
+      # Neither turbo's typecheck task nor any prior step here actually
+      # compiles apps/web's or apps/admin's own production bundle -- "dependsOn
+      # ^build" only builds *upstream* workspace deps, never the package
+      # itself (#148). Without this, a build break only surfaces at deploy
+      # time.
+      - name: Build
+        run: npm run build
+
+      # Validates the Worker config (wrangler.jsonc) and the bundle just
+      # produced by the Build step above against the declared
+      # compatibility_date, without actually publishing (#148). Nothing had
+      # ever run `wrangler deploy` against this Worker before this check
+      # existed, so whether it deploys at all was unverified.
+      - name: Dry-run deploy (apps/web)
+        working-directory: apps/web
+        run: npx wrangler deploy --dry-run
