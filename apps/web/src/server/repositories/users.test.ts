@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
-import { listMembershipsForUser } from "./users";
+import { listMembershipsForUser, getUserActivationState, deactivateByWorkosUserId } from "./users";
 import type { Db } from "../../db/client";
 import { makeNodeDb } from "../../db/nodeClient";
 import { organizations, courses, users, courseMemberships } from "../../db/schema";
@@ -90,5 +90,67 @@ describe.skipIf(!DATABASE_URL)("listMembershipsForUser droppedAt filtering (#139
     expect(isInstructorOf(droppedCourseId)).toBe(false);
     expect(isMemberOf(activeCourseId)).toBe(true);
     expect(isInstructorOf(activeCourseId)).toBe(true);
+  });
+});
+
+describe.skipIf(!DATABASE_URL)("deactivateByWorkosUserId / getUserActivationState (#95, real DB)", () => {
+  let db: Db;
+  let orgId: string;
+  let courseId: string;
+  let userId: string;
+  const workosUserId = `workos-${crypto.randomUUID()}`;
+
+  beforeAll(async () => {
+    db = makeNodeDb(DATABASE_URL!);
+    const [org] = await db
+      .insert(organizations)
+      .values({ slug: `deact-${crypto.randomUUID()}`, name: "Deactivation Test Org", workosOrganizationId: `w-${crypto.randomUUID()}` })
+      .returning({ id: organizations.id });
+    orgId = org.id;
+    const [course] = await db
+      .insert(courses)
+      .values({ organizationId: orgId, code: "C", term: "T", title: "T" })
+      .returning({ id: courses.id });
+    courseId = course.id;
+
+    const emailBytes = crypto.getRandomValues(new Uint8Array(32));
+    const [user] = await db
+      .insert(users)
+      .values({ workosUserId, email: emailBytes as never, emailBlindIndex: emailBytes as never })
+      .returning({ id: users.id });
+    userId = user.id;
+    await db.insert(courseMemberships).values({ userId, courseId, role: "student" });
+  });
+
+  afterAll(async () => {
+    await db.delete(organizations).where(eq(organizations.id, orgId));
+    await db.delete(users).where(eq(users.id, userId));
+  });
+
+  it("getUserActivationState returns the fresh-user defaults", async () => {
+    const state = await getUserActivationState(db, userId);
+    expect(state).toEqual({ isActive: true, sessionEpoch: 0 });
+  });
+
+  it("deactivateByWorkosUserId flips isActive false, bumps sessionEpoch, and returns the user's org scopes", async () => {
+    const result = await deactivateByWorkosUserId(db, workosUserId);
+    expect(result?.userId).toBe(userId);
+    expect(result?.orgScopes).toEqual([orgId]);
+
+    const state = await getUserActivationState(db, userId);
+    expect(state).toEqual({ isActive: false, sessionEpoch: 1 });
+  });
+
+  it("is idempotent: a second call on an already-deactivated user is a no-op, not a double-bump", async () => {
+    const result = await deactivateByWorkosUserId(db, workosUserId);
+    expect(result).toBeNull();
+
+    const state = await getUserActivationState(db, userId);
+    expect(state?.sessionEpoch).toBe(1);
+  });
+
+  it("returns null for an unknown workosUserId", async () => {
+    const result = await deactivateByWorkosUserId(db, `workos-unknown-${crypto.randomUUID()}`);
+    expect(result).toBeNull();
   });
 });

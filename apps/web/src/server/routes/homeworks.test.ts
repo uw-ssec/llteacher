@@ -23,7 +23,7 @@ vi.mock("../../db/client", () => ({
 function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
   const memberships = overrides.memberships ?? [];
   return {
-    session: { userId: "u1", workosUserId: "w1", issuedAt: 0, expiresAt: 0 },
+    session: { userId: "u1", workosUserId: "w1", sessionEpoch: 0, issuedAt: 0, expiresAt: 0 },
     memberships,
     hasRole: (role) => memberships.some((m) => m.role === role),
     isMemberOf: (courseId) => memberships.some((m) => m.courseId === courseId),

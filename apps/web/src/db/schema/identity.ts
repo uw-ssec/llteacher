@@ -2,6 +2,7 @@ import { relations, sql } from "drizzle-orm";
 import {
   boolean,
   index,
+  integer,
   pgEnum,
   pgTable,
   text,
@@ -93,6 +94,19 @@ export const organizations = pgTable(
 // plaintext; they enable equality lookup without decryption (login
 // reconciliation, "find user by netid" admin search, URL-with-netid routes).
 // display_name has no blind index -- we never look users up by display name.
+//
+// is_active / session_epoch (issue #95): sessions are stateless sealed
+// cookies with no server-side store (see lib/session.ts), so revoking one
+// user's access before their 7-day cookie naturally expires needs a value
+// the server can check against. session_epoch is stamped into every sealed
+// cookie at login; a WorkOS deprovisioning webhook flips is_active to false
+// and increments session_epoch, so every cookie issued before that moment
+// stops matching (rolesMiddleware enforces the comparison via
+// repositories/users.ts) while the account's PII is retained, not deleted --
+// deactivation, not erasure, per #51's retention rules. A later successful
+// WorkOS login is itself proof of re-authorization and clears is_active back
+// to true (see UserIdentityService.createOrClaimUser) without touching
+// session_epoch, so stale pre-deactivation cookies stay invalid.
 
 export const users = pgTable(
   "users",
@@ -105,6 +119,8 @@ export const users = pgTable(
     netidBlindIndex: blindIndex("netid_blind_index"),
     displayName: encryptedText("display_name"),
     isPending: boolean("is_pending").notNull().default(false),
+    isActive: boolean("is_active").notNull().default(true),
+    sessionEpoch: integer("session_epoch").notNull().default(0),
     lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()

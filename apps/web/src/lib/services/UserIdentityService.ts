@@ -14,6 +14,11 @@ export interface WorkOSProfile {
 export interface ProvisioningResult {
   userId: string;
   isNew: boolean;
+  /** Current users.session_epoch, to stamp into the session cookie (#95).
+   *  Login never changes this value itself -- only a WorkOS deprovisioning
+   *  webhook bumps it -- it's just read back here so the freshly-issued
+   *  cookie matches whatever the DB currently holds. */
+  sessionEpoch: number;
 }
 
 /** Wires the previously-unused IdentityCipher into a real write path.
@@ -71,10 +76,11 @@ export class UserIdentityService {
           netid: encryptedNetid,
           netidBlindIndex,
           isPending: false,
+          isActive: true,
           lastLoginAt: new Date(),
         })
         .where(eq(users.id, byEmail.id));
-      return { userId: byEmail.id, isNew: false };
+      return { userId: byEmail.id, isNew: false, sessionEpoch: byEmail.sessionEpoch };
     }
 
     if (byEmail && !byEmail.isPending) {
@@ -83,9 +89,9 @@ export class UserIdentityService {
       // Attach it rather than failing the unique workosUserId constraint.
       await this.db
         .update(users)
-        .set({ workosUserId: workosUser.id, lastLoginAt: new Date() })
+        .set({ workosUserId: workosUser.id, isActive: true, lastLoginAt: new Date() })
         .where(eq(users.id, byEmail.id));
-      return { userId: byEmail.id, isNew: false };
+      return { userId: byEmail.id, isNew: false, sessionEpoch: byEmail.sessionEpoch };
     }
 
     const encryptedEmail = await this.cipher.encryptString(normalizedEmail);
@@ -106,9 +112,9 @@ export class UserIdentityService {
         isPending: false,
         lastLoginAt: new Date(),
       })
-      .returning({ id: users.id });
+      .returning({ id: users.id, sessionEpoch: users.sessionEpoch });
 
-    return { userId: created.id, isNew: true };
+    return { userId: created.id, isNew: true, sessionEpoch: created.sessionEpoch };
   }
 
   private async reconcileExisting(
@@ -118,7 +124,15 @@ export class UserIdentityService {
     netid: string | null,
     netidBlindIndex: BlindIndex | null,
   ): Promise<ProvisioningResult> {
-    const updates: Record<string, unknown> = { lastLoginAt: new Date() };
+    // isActive: true unconditionally, even if it was already true -- a
+    // completed WorkOS OAuth round trip for this exact identity is itself
+    // proof of current authorization (#95). This is what makes a WorkOS
+    // deprovisioning webhook self-healing: if the same identity later logs
+    // in again legitimately, access is restored without any app-side
+    // intervention. sessionEpoch is deliberately NOT touched here -- only
+    // the deactivation webhook bumps it -- so an existing valid session on
+    // another device isn't invalidated by an unrelated login elsewhere.
+    const updates: Record<string, unknown> = { isActive: true, lastLoginAt: new Date() };
 
     const currentEmail = await this.cipher.decryptString(existing.email);
     if (currentEmail !== normalizedEmail) {
@@ -137,7 +151,7 @@ export class UserIdentityService {
     }
 
     await this.db.update(users).set(updates).where(eq(users.id, existing.id));
-    return { userId: existing.id, isNew: false };
+    return { userId: existing.id, isNew: false, sessionEpoch: existing.sessionEpoch };
   }
 
   /** The `users_email_blind_index_uq` unique index means `existing` cannot

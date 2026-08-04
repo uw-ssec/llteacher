@@ -13,11 +13,17 @@ import type { AppEnv } from "../context";
  *  explicitly, so it can't silently become public by sharing the prefix.
  *  Also used by rolesMiddleware to skip its course_memberships query on
  *  these paths -- roles are meaningless there, and logout in particular
- *  must not depend on the database. */
+ *  must not depend on the database.
+ *
+ *  /api/webhooks/workos (#95) belongs here too: it's a server-to-server
+ *  call from WorkOS, which never carries our session cookie -- it proves
+ *  itself via a signature over the request body instead. "Public" here
+ *  means "no user session required," not "no auth at all." */
 export const PUBLIC_API_PATHS = new Set([
   "/api/auth/login",
   "/api/auth/callback",
   "/api/auth/logout",
+  "/api/webhooks/workos",
 ]);
 
 export async function authMiddleware(c: Context<AppEnv>, next: Next) {

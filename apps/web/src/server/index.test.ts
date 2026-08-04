@@ -18,12 +18,20 @@ const ENV = {
 } as unknown as Env;
 
 const findMany = vi.fn();
+const findFirst = vi.fn();
 vi.mock("../db/client", () => ({
-  makeDb: () => ({ query: { courseMemberships: { findMany: (...args: unknown[]) => findMany(...args) } } }),
+  makeDb: () => ({
+    query: {
+      courseMemberships: { findMany: (...args: unknown[]) => findMany(...args) },
+      users: { findFirst: (...args: unknown[]) => findFirst(...args) },
+    },
+  }),
 }));
 
 beforeEach(() => {
   findMany.mockReset();
+  findFirst.mockReset();
+  findFirst.mockResolvedValue({ isActive: true, sessionEpoch: 0 });
 });
 
 describe("app composition", () => {
@@ -49,7 +57,7 @@ describe("app composition", () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const key = await loadSessionKey(ENV);
-    const sealed = await sealSession(createSessionPayload("u1", "w1"), key);
+    const sealed = await sealSession(createSessionPayload("u1", "w1", 0), key);
 
     const res = await app.request(
       "/api/hello",
@@ -74,7 +82,7 @@ describe("app composition", () => {
     findMany.mockRejectedValue(new Error("connection refused: ECONNREFUSED"));
 
     const key = await loadSessionKey(ENV);
-    const sealed = await sealSession(createSessionPayload("u1", "w1"), key);
+    const sealed = await sealSession(createSessionPayload("u1", "w1", 0), key);
 
     const res = await app.request(
       "/api/auth/logout",
@@ -84,6 +92,7 @@ describe("app composition", () => {
 
     expect(res.status).not.toBe(503);
     expect(findMany).not.toHaveBeenCalled();
+    expect(findFirst).not.toHaveBeenCalled();
     expect(res.headers.get("set-cookie")).toMatch(new RegExp(`${SESSION_COOKIE_NAME}=;`));
   });
 
@@ -93,7 +102,7 @@ describe("app composition", () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const key = await loadSessionKey(ENV);
-    const sealed = await sealSession(createSessionPayload("u1", "w1"), key);
+    const sealed = await sealSession(createSessionPayload("u1", "w1", 0), key);
 
     const res = await app.request(
       "/api/courses/course-a/homeworks",

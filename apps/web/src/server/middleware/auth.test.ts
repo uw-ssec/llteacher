@@ -35,6 +35,7 @@ describe("authMiddleware", () => {
     const expired = createSessionPayload(
       "user-1",
       "workos-1",
+      7,
       Date.now() - 1000 * 60 * 60 * 24 * 30,
     );
     const sealed = await sealSession(expired, key);
@@ -48,7 +49,7 @@ describe("authMiddleware", () => {
 
   it("attaches the session and allows the request through when valid", async () => {
     const key = await loadSessionKey(TEST_ENV);
-    const payload = createSessionPayload("user-1", "workos-1");
+    const payload = createSessionPayload("user-1", "workos-1", 7);
     const sealed = await sealSession(payload, key);
     const res = await buildApp().request(
       "/api/protected",

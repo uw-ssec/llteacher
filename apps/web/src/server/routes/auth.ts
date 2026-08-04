@@ -116,10 +116,12 @@ export async function callbackHandler(c: Context<AppEnv>) {
       }
     }
 
-    const { userId } = await new UserIdentityService(cipher, db).createOrClaimUser(workosUser);
+    const { userId, sessionEpoch } = await new UserIdentityService(cipher, db).createOrClaimUser(
+      workosUser,
+    );
 
     const sessionKey = await loadSessionKey(c.env);
-    const payload = createSessionPayload(userId, workosUser.id, undefined, workosSessionId);
+    const payload = createSessionPayload(userId, workosUser.id, sessionEpoch, undefined, workosSessionId);
     const sealed = await sealSession(payload, sessionKey);
 
     setCookie(c, SESSION_COOKIE_NAME, sealed, {

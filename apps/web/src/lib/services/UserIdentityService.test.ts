@@ -38,14 +38,14 @@ describe("UserIdentityService.createOrClaimUser", () => {
       insert: () => ({
         values: (v: Record<string, unknown>) => {
           insertedValues.push(v);
-          return { returning: async () => [{ id: "new-user-1" }] };
+          return { returning: async () => [{ id: "new-user-1", sessionEpoch: 0 }] };
         },
       }),
     } as unknown as Db;
 
     const result = await new UserIdentityService(cipher, db).createOrClaimUser(WORKOS_USER);
 
-    expect(result).toEqual({ userId: "new-user-1", isNew: true });
+    expect(result).toEqual({ userId: "new-user-1", isNew: true, sessionEpoch: 0 });
     expect(insertedValues).toHaveLength(1);
     const storedEmail = insertedValues[0].email as Uint8Array;
     expect(Buffer.from(storedEmail).includes("cdcore@uw.edu")).toBe(false);
@@ -64,7 +64,7 @@ describe("UserIdentityService.createOrClaimUser", () => {
       insert: () => ({
         values: (v: Record<string, unknown>) => {
           insertedValues.push(v);
-          return { returning: async () => [{ id: "new-user-2" }] };
+          return { returning: async () => [{ id: "new-user-2", sessionEpoch: 0 }] };
         },
       }),
     } as unknown as Db;
@@ -90,6 +90,8 @@ describe("UserIdentityService.createOrClaimUser", () => {
           findFirst: queuedFindFirst({
             id: "existing-user-1",
             isPending: false,
+            isActive: true,
+            sessionEpoch: 3,
             email: encryptedEmail,
             netidBlindIndex: new Uint8Array(32),
           }),
@@ -109,13 +111,50 @@ describe("UserIdentityService.createOrClaimUser", () => {
 
     const result = await new UserIdentityService(cipher, db).createOrClaimUser(WORKOS_USER);
 
-    expect(result).toEqual({ userId: "existing-user-1", isNew: false });
+    expect(result).toEqual({ userId: "existing-user-1", isNew: false, sessionEpoch: 3 });
     expect(insertCalls).toBe(0);
     expect(updatedValues?.lastLoginAt).toBeInstanceOf(Date);
+    expect(updatedValues?.isActive).toBe(true);
     // Email on WorkOS's side is unchanged, and netidBlindIndex is already
     // set -- no re-encryption needed for either field.
     expect(updatedValues?.email).toBeUndefined();
     expect(updatedValues?.netid).toBeUndefined();
+  });
+
+  it("reactivates a previously-deactivated user on a successful login (#95 self-healing)", async () => {
+    const cipher = new IdentityCipher(keys);
+    const encryptedEmail = await cipher.encryptString("cdcore@uw.edu");
+    let updatedValues: Record<string, unknown> | undefined;
+    const db = {
+      query: {
+        users: {
+          findFirst: queuedFindFirst({
+            id: "existing-user-1",
+            isPending: false,
+            isActive: false,
+            sessionEpoch: 4,
+            email: encryptedEmail,
+            netidBlindIndex: new Uint8Array(32),
+          }),
+        },
+      },
+      update: () => ({
+        set: (v: Record<string, unknown>) => {
+          updatedValues = v;
+          return { where: async () => undefined };
+        },
+      }),
+    } as unknown as Db;
+
+    const result = await new UserIdentityService(cipher, db).createOrClaimUser(WORKOS_USER);
+
+    // A completed WorkOS OAuth round trip is itself proof of current
+    // authorization -- login clears isActive back to true, but must NOT
+    // touch sessionEpoch (only the deactivation webhook does that), or an
+    // existing valid session on another device would be invalidated by an
+    // unrelated login.
+    expect(updatedValues?.isActive).toBe(true);
+    expect(result.sessionEpoch).toBe(4);
   });
 
   it("re-encrypts email when it changed on the WorkOS side since the last login", async () => {
@@ -128,6 +167,7 @@ describe("UserIdentityService.createOrClaimUser", () => {
           findFirst: queuedFindFirst({
             id: "existing-user-1",
             isPending: false,
+            sessionEpoch: 0,
             email: staleEncryptedEmail,
             netidBlindIndex: new Uint8Array(32),
           }),
@@ -143,7 +183,7 @@ describe("UserIdentityService.createOrClaimUser", () => {
 
     const result = await new UserIdentityService(cipher, db).createOrClaimUser(WORKOS_USER);
 
-    expect(result).toEqual({ userId: "existing-user-1", isNew: false });
+    expect(result).toEqual({ userId: "existing-user-1", isNew: false, sessionEpoch: 0 });
     expect(await cipher.decryptString(updatedValues?.email as never)).toBe("cdcore@uw.edu");
     expect(updatedValues?.emailBlindIndex).toBeInstanceOf(Uint8Array);
   });
@@ -180,7 +220,7 @@ describe("UserIdentityService.createOrClaimUser", () => {
     const db = {
       query: {
         users: {
-          findFirst: queuedFindFirst(undefined, { id: "pending-user-1", isPending: true }),
+          findFirst: queuedFindFirst(undefined, { id: "pending-user-1", isPending: true, sessionEpoch: 0 }),
         },
       },
       update: () => ({
@@ -193,8 +233,9 @@ describe("UserIdentityService.createOrClaimUser", () => {
 
     const result = await new UserIdentityService(cipher, db).createOrClaimUser(WORKOS_USER);
 
-    expect(result).toEqual({ userId: "pending-user-1", isNew: false });
+    expect(result).toEqual({ userId: "pending-user-1", isNew: false, sessionEpoch: 0 });
     expect(updatedValues?.isPending).toBe(false);
+    expect(updatedValues?.isActive).toBe(true);
     expect(updatedValues?.workosUserId).toBe("workos_1");
     expect(await cipher.decryptString(updatedValues?.email as never)).toBe("cdcore@uw.edu");
     expect(await cipher.decryptString(updatedValues?.netid as never)).toBe("cdcore");
@@ -219,6 +260,7 @@ describe("UserIdentityService.createOrClaimUser", () => {
             {
               id: "existing-user-1",
               isPending: false,
+              sessionEpoch: 0,
               email: staleEncryptedEmail,
               netidBlindIndex: new Uint8Array(32),
             },
@@ -262,7 +304,7 @@ describe("UserIdentityService.createOrClaimUser", () => {
       firstName: "Cordero",
     });
 
-    expect(result).toEqual({ userId: "existing-user-1", isNew: false });
+    expect(result).toEqual({ userId: "existing-user-1", isNew: false, sessionEpoch: 0 });
     // course-A only existed on the pending row -- moved onto existing-user-1.
     expect(membershipUpdates).toEqual([{ userId: "existing-user-1" }]);
     // course-B existed on both -- the pending row's duplicate is dropped,
@@ -286,6 +328,7 @@ describe("UserIdentityService.createOrClaimUser", () => {
             {
               id: "existing-user-1",
               isPending: false,
+              sessionEpoch: 0,
               email: staleEncryptedEmail,
               netidBlindIndex: new Uint8Array(32),
             },
@@ -307,7 +350,7 @@ describe("UserIdentityService.createOrClaimUser", () => {
       firstName: "Cordero",
     });
 
-    expect(result).toEqual({ userId: "existing-user-1", isNew: false });
+    expect(result).toEqual({ userId: "existing-user-1", isNew: false, sessionEpoch: 0 });
     expect(finalUserUpdate?.email).toBeUndefined();
     expect(finalUserUpdate?.emailBlindIndex).toBeUndefined();
     expect(finalUserUpdate?.lastLoginAt).toBeInstanceOf(Date);

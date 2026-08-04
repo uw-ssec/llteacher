@@ -36,7 +36,7 @@ function buildApp(session: SessionPayload | undefined) {
   return app;
 }
 
-const SESSION: SessionPayload = { userId: "u1", workosUserId: "w1", issuedAt: 0, expiresAt: 0 };
+const SESSION: SessionPayload = { userId: "u1", workosUserId: "w1", sessionEpoch: 0, issuedAt: 0, expiresAt: 0 };
 
 describe("GET /api/profile", () => {
   it("returns 401 without a session", async () => {

@@ -30,7 +30,7 @@ vi.mock("../../lib/workos", () => ({
 type InsertImpl = (...args: unknown[]) => unknown;
 
 const defaultInsertImpl: InsertImpl = () => ({
-  values: () => ({ returning: async () => [{ id: "new-user-1" }] }),
+  values: () => ({ returning: async () => [{ id: "new-user-1", sessionEpoch: 0 }] }),
 });
 let dbInsertImpl: InsertImpl = defaultInsertImpl;
 let dbFindFirstImpl: (...args: unknown[]) => Promise<unknown> = async () => undefined;
@@ -255,6 +255,7 @@ describe("POST /logout", () => {
     const expiredPayload = createSessionPayload(
       "user-1",
       "workos-1",
+      0,
       Date.now() - 1000 * 60 * 60 * 24 * 30,
       "session_expired_but_still_live",
     );

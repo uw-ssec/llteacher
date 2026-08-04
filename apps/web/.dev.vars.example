@@ -8,3 +8,7 @@ OPENROUTER_API_KEY="sk-or-v1-placeholder"
 SESSION_SECRET="base64-encoded-32-byte-key"
 ENCRYPTION_KEY="base64-encoded-32-byte-key"
 BLIND_INDEX_KEY="base64-encoded-32-byte-key"
+
+# Webhook signing secret from the WorkOS dashboard's Webhooks/Endpoints
+# page (issue #95) -- not a key you generate yourself.
+WORKOS_WEBHOOK_SECRET="whsec_placeholder"
