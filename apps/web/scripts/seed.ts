@@ -47,6 +47,42 @@ const TUTOR_BASE_PROMPT =
   "outright -- ask guiding questions that help the student discover the " +
   "reasoning themselves. Keep responses concise and encouraging.";
 
+// Three message shapes, cycled across seeded conversations to demonstrate
+// the variety AI SDK's parts jsonb carries -- the spirit of Django's old
+// student/ai/code/code_execution message_type split, expressed through
+// part.type instead of a separate content_type column (see M2 design
+// decision #2: content_type -> parts jsonb).
+type SeedMessageSpec = { role: "user" | "assistant" | "system"; parts: unknown };
+
+const MESSAGE_PATTERNS: Array<(sectionTitle: string) => SeedMessageSpec[]> = [
+  (sectionTitle) => [
+    { role: "user", parts: [{ type: "text", text: `I need help getting started on ${sectionTitle}.` }] },
+    { role: "assistant", parts: [{ type: "text", text: "What have you tried so far?" }] },
+  ],
+  () => [
+    {
+      role: "user",
+      parts: [
+        {
+          type: "text",
+          text: "Here's what I have so far:\n\n```python\nx = [1, 2, 3]\nprint(x[0])\n```\n\nIs this right?",
+        },
+      ],
+    },
+    { role: "assistant", parts: [{ type: "text", text: "Close! What does `x[0]` return for a list starting at index 0?" }] },
+  ],
+  () => [
+    { role: "user", parts: [{ type: "text", text: "Can you run this for me?" }] },
+    {
+      role: "assistant",
+      parts: [
+        { type: "tool-call", toolCallId: "seed-call-1", toolName: "execute_python", args: { code: "sum([1, 2, 3])" } },
+        { type: "tool-result", toolCallId: "seed-call-1", toolName: "execute_python", result: { stdout: "6\n", error: null } },
+      ],
+    },
+  ],
+];
+
 async function reset(db: Db) {
   // Reverse dependency order.
   await db.delete(schema.citations);
@@ -155,11 +191,12 @@ async function seed() {
       sections: [
         { title: "Working with Dictionaries", content: "# Dictionaries\n\nGrade management." },
         { title: "List Comprehensions", content: "# List Comprehensions\n\nFilter product data." },
+        { title: "Summarizing Data with Pandas", content: "# Pandas\n\nGroup and summarize a dataset." },
       ],
     },
   ];
 
-  const sectionIdsByHomework: string[][] = [];
+  const sectionsByHomework: Array<Array<{ id: string; title: string }>> = [];
   for (const hwSpec of homeworkSpecs) {
     const [hw] = await db
       .insert(schema.homeworks)
@@ -173,7 +210,7 @@ async function seed() {
       })
       .returning();
 
-    const sectionIds: string[] = [];
+    const sections: Array<{ id: string; title: string }> = [];
     for (let i = 0; i < hwSpec.sections.length; i++) {
       const [section] = await db
         .insert(schema.sections)
@@ -183,33 +220,35 @@ async function seed() {
         sectionId: section.id,
         content: `Model solution for ${hwSpec.sections[i].title}.`,
       });
-      sectionIds.push(section.id);
+      sections.push({ id: section.id, title: hwSpec.sections[i].title });
     }
-    sectionIdsByHomework.push(sectionIds);
+    sectionsByHomework.push(sections);
   }
 
   const studentHandles = ["student1", "student2", "student3"];
   let conversationCount = 0;
   let submissionCount = 0;
+  let patternIndex = 0;
   for (const studentHandle of studentHandles) {
-    for (const sectionIds of sectionIdsByHomework) {
-      const sectionId = sectionIds[0];
+    for (const sections of sectionsByHomework) {
+      const section = sections[0];
       const [conv] = await db
         .insert(schema.conversations)
         .values({
           ownerUserId: userIds[studentHandle],
           courseId: course.id,
-          sectionId,
+          sectionId: section.id,
           kind: "section",
           title: `${studentHandle}'s conversation`,
         })
         .returning();
       conversationCount++;
 
-      await db.insert(schema.messages).values([
-        { conversationId: conv.id, role: "user", parts: [{ type: "text", text: "I need help getting started." }] },
-        { conversationId: conv.id, role: "assistant", parts: [{ type: "text", text: "What have you tried so far?" }] },
-      ]);
+      const pattern = MESSAGE_PATTERNS[patternIndex % MESSAGE_PATTERNS.length];
+      patternIndex++;
+      await db.insert(schema.messages).values(
+        pattern(section.title).map((m) => ({ conversationId: conv.id, role: m.role, parts: m.parts })),
+      );
 
       if (Math.random() < 0.6) {
         await db.insert(schema.submissions).values({ conversationId: conv.id, organizationId: org.id });
