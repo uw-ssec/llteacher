@@ -4,6 +4,20 @@ Status: research draft (branch `cdcore/chore/research`)
 Author: Cordero Core, SSE Center
 Context: evaluating LLteacher as the shared base for the four UW CDI AI tutoring projects (LLteacher / Stats, Polya / Civil-Mech Eng, AI-PFTS / Econ, Clinical Informatics).
 
+## Implementation status
+
+§6.1 (Identity & Tenancy) and §6.2 (Content & Configuration) landed with the M1 auth milestone. **§6.3 (Runtime — Conversation, Grading, Audit) landed with the M2 epic** ([#18](https://github.com/uw-ssec/llteacher/issues/18)): `conversations`, `messages`, `submissions`, `grades`, `citations`, `llm_call_logs`, `student_profiles`, `audit_events` all exist as Drizzle schema in `apps/web/src/db/schema/runtime.ts`, plus an org/course-scoped repository layer and a TypeScript seed script. Full implementation plan, including every deviation from this doc's design and the reasoning behind each: [docs/superpowers/plans/2026-08-03-m2-runtime-persistence.md](../superpowers/plans/2026-08-03-m2-runtime-persistence.md).
+
+§3.5 open design questions, status after M2:
+1. **Conversation uniqueness** — resolved. A partial unique index enforces at most one active section-conversation per (user, section); see the plan doc's decision #1. **Caveat found during M2 review**: this does not fully replicate `Submission.clean()`'s guarantee across a soft-delete-and-recreate cycle — a student can currently accumulate more than one `submissions` row for the same section if their conversation is soft-deleted and a new one created for the same section. Tracked as a known gap, not yet fixed.
+2. **Prompt template inheritance** — unchanged from this doc; not touched by M2.
+3. **Material chunk storage** — unchanged; pgvector as designed.
+4. **Migration of Sara's live data** — not started.
+5. **Hard-delete path** — not started; M2's `conversations`/`messages`/`submissions` all cascade-delete on their parent, no FERPA-specific hard-delete flow yet.
+6. **Canvas role mapping precedence** — unchanged from M1.
+
+M2 also intentionally diverges from this doc in two places: `conversations`/`messages` do **not** carry a denormalized `organization_id` (they scope via `course_id` instead — see the plan doc's decision 4/5), and `Message.content_type` was dropped in favor of an AI-SDK-shaped `parts` jsonb column rather than the `role`/`content_type` split described in §3.2 (plan doc decision 2).
+
 ---
 
 ## 0. Decisions Locked In (rev 3)
