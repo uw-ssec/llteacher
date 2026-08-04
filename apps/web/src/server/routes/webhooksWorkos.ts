@@ -1,10 +1,9 @@
 import { Hono, type Context } from "hono";
-import { eq } from "drizzle-orm";
 import { getWorkOS } from "../../lib/workos";
 import { makeDb } from "../../db/client";
-import { workosWebhookEvents } from "../../db/schema";
 import { deactivateByWorkosUserId } from "../repositories/users";
 import { recordAuditEvent } from "../repositories/auditEvents";
+import { findWebhookEvent, recordWebhookEvent } from "../repositories/webhookEvents";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { UserIdentityService } from "../../lib/services/UserIdentityService";
@@ -77,9 +76,7 @@ export async function workosWebhookHandler(c: Context<AppEnv>) {
 
   const db = makeDb(c.env.DATABASE_URL);
 
-  const existingEvent = await db.query.workosWebhookEvents.findFirst({
-    where: eq(workosWebhookEvents.id, event.id),
-  });
+  const existingEvent = await findWebhookEvent(db, event.id);
   if (existingEvent && existingEvent.status !== "failed") {
     return c.json({ received: true, duplicate: true });
   }
@@ -120,13 +117,12 @@ export async function workosWebhookHandler(c: Context<AppEnv>) {
       status = "skipped";
     }
 
-    await db
-      .insert(workosWebhookEvents)
-      .values({ id: event.id, eventType: event.event, payload: event.data, status })
-      .onConflictDoUpdate({
-        target: workosWebhookEvents.id,
-        set: { status },
-      });
+    await recordWebhookEvent(db, {
+      id: event.id,
+      eventType: event.event,
+      payload: event.data,
+      status,
+    });
   } catch (err) {
     // A genuine failure processing a *verified* event (DB down, etc.) --
     // the one case that should surface as a server error and let WorkOS's
@@ -134,11 +130,12 @@ export async function workosWebhookHandler(c: Context<AppEnv>) {
     // best-effort: if even that write fails, don't let it mask the real
     // 500 the caller needs to see.
     logServerError("workosWebhookHandler", err);
-    await db
-      .insert(workosWebhookEvents)
-      .values({ id: event.id, eventType: event.event, payload: event.data, status: "failed" })
-      .onConflictDoUpdate({ target: workosWebhookEvents.id, set: { status: "failed" } })
-      .catch(() => {});
+    await recordWebhookEvent(db, {
+      id: event.id,
+      eventType: event.event,
+      payload: event.data,
+      status: "failed",
+    }).catch(() => {});
     return c.json({ error: "Internal error" }, 500);
   }
 

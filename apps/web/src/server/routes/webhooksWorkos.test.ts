@@ -9,24 +9,15 @@ const TEST_ENV = {
   DATABASE_URL: "ignored",
 } as Env;
 
-const webhookEventFindFirst = vi.fn();
-const webhookEventInsertValues = vi.fn();
-const webhookEventOnConflictDoUpdate = vi.fn().mockResolvedValue(undefined);
-
 vi.mock("../../db/client", () => ({
-  makeDb: () => ({
-    query: {
-      workosWebhookEvents: {
-        findFirst: (...args: unknown[]) => webhookEventFindFirst(...args),
-      },
-    },
-    insert: () => ({
-      values: (v: Record<string, unknown>) => {
-        webhookEventInsertValues(v);
-        return { onConflictDoUpdate: (...args: unknown[]) => webhookEventOnConflictDoUpdate(...args) };
-      },
-    }),
-  }),
+  makeDb: () => ({}),
+}));
+
+const findWebhookEvent = vi.fn();
+const recordWebhookEvent = vi.fn().mockResolvedValue(undefined);
+vi.mock("../repositories/webhookEvents", () => ({
+  findWebhookEvent: (...args: unknown[]) => findWebhookEvent(...args),
+  recordWebhookEvent: (...args: unknown[]) => recordWebhookEvent(...args),
 }));
 
 const deactivateByWorkosUserId = vi.fn();
@@ -103,9 +94,8 @@ beforeEach(() => {
   deactivateByWorkosUserId.mockReset();
   recordAuditEvent.mockReset();
   handleEmailUpdated.mockReset();
-  webhookEventFindFirst.mockReset().mockResolvedValue(undefined);
-  webhookEventInsertValues.mockReset();
-  webhookEventOnConflictDoUpdate.mockReset().mockResolvedValue(undefined);
+  findWebhookEvent.mockReset().mockResolvedValue(undefined);
+  recordWebhookEvent.mockReset().mockResolvedValue(undefined);
 });
 
 describe("POST /api/webhooks/workos", () => {
@@ -179,7 +169,8 @@ describe("POST /api/webhooks/workos", () => {
       "org-b",
       expect.objectContaining({ action: "user.deprovisioned", targetType: "user", targetId: "user-1" }),
     );
-    expect(webhookEventInsertValues).toHaveBeenCalledWith(
+    expect(recordWebhookEvent).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ id: "event_1", eventType: "user.deleted", status: "processed" }),
     );
   });
@@ -225,7 +216,8 @@ describe("POST /api/webhooks/workos", () => {
     await webhooksWorkos.request("/", req, TEST_ENV);
 
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("organization_membership.deleted"));
-    expect(webhookEventInsertValues).toHaveBeenCalledWith(
+    expect(recordWebhookEvent).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ status: "skipped" }),
     );
     logSpy.mockRestore();
@@ -243,7 +235,8 @@ describe("POST /api/webhooks/workos", () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).not.toMatch(/ECONNREFUSED/);
     expect(consoleSpy).toHaveBeenCalled();
-    expect(webhookEventInsertValues).toHaveBeenCalledWith(
+    expect(recordWebhookEvent).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ status: "failed" }),
     );
 
@@ -260,7 +253,8 @@ describe("POST /api/webhooks/workos", () => {
 
       expect(res.status).toBe(200);
       expect(handleEmailUpdated).toHaveBeenCalledWith("workos_1", "new@uw.edu");
-      expect(webhookEventInsertValues).toHaveBeenCalledWith(
+      expect(recordWebhookEvent).toHaveBeenCalledWith(
+        expect.anything(),
         expect.objectContaining({ id: "event_4", eventType: "user.updated", status: "processed" }),
       );
     });
@@ -274,7 +268,8 @@ describe("POST /api/webhooks/workos", () => {
       const res = await webhooksWorkos.request("/", req, TEST_ENV);
 
       expect(res.status).toBe(500);
-      expect(webhookEventInsertValues).toHaveBeenCalledWith(
+      expect(recordWebhookEvent).toHaveBeenCalledWith(
+        expect.anything(),
         expect.objectContaining({ status: "failed" }),
       );
       consoleSpy.mockRestore();
@@ -283,7 +278,7 @@ describe("POST /api/webhooks/workos", () => {
 
   describe("event persistence / replay dedup (#95, #142)", () => {
     it("skips reprocessing a duplicate delivery already recorded as processed", async () => {
-      webhookEventFindFirst.mockResolvedValue({ id: "event_1", status: "processed" });
+      findWebhookEvent.mockResolvedValue({ id: "event_1", status: "processed" });
       const payload = userDeletedEvent("workos_1");
       const req = await signedRequest(payload);
 
@@ -293,11 +288,11 @@ describe("POST /api/webhooks/workos", () => {
       expect(res.status).toBe(200);
       expect(body.duplicate).toBe(true);
       expect(deactivateByWorkosUserId).not.toHaveBeenCalled();
-      expect(webhookEventInsertValues).not.toHaveBeenCalled();
+      expect(recordWebhookEvent).not.toHaveBeenCalled();
     });
 
     it("skips reprocessing a duplicate delivery already recorded as skipped", async () => {
-      webhookEventFindFirst.mockResolvedValue({ id: "event_2", status: "skipped" });
+      findWebhookEvent.mockResolvedValue({ id: "event_2", status: "skipped" });
       const payload = userEvent("event_2", "organization_membership.deleted");
       const req = await signedRequest(payload);
 
@@ -309,7 +304,7 @@ describe("POST /api/webhooks/workos", () => {
     });
 
     it("DOES reprocess a delivery whose prior attempt was recorded as failed (retry, not permanently skipped)", async () => {
-      webhookEventFindFirst.mockResolvedValue({ id: "event_1", status: "failed" });
+      findWebhookEvent.mockResolvedValue({ id: "event_1", status: "failed" });
       deactivateByWorkosUserId.mockResolvedValue(null);
       const payload = userDeletedEvent("workos_1");
       const req = await signedRequest(payload);
@@ -320,7 +315,8 @@ describe("POST /api/webhooks/workos", () => {
       expect(res.status).toBe(200);
       expect(body.duplicate).toBeUndefined();
       expect(deactivateByWorkosUserId).toHaveBeenCalledWith(expect.anything(), "workos_1");
-      expect(webhookEventInsertValues).toHaveBeenCalledWith(
+      expect(recordWebhookEvent).toHaveBeenCalledWith(
+        expect.anything(),
         expect.objectContaining({ status: "processed" }),
       );
     });
