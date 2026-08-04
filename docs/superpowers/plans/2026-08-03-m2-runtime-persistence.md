@@ -1216,6 +1216,16 @@ Replace `apps/web/src/server/routes/hello.test.ts`:
 import { describe, it, expect, vi } from "vitest";
 import { hello } from "./hello";
 
+// makeDb() itself is mocked too (not just createPing) -- hello.ts calls
+// makeDb(c.env.DATABASE_URL) unconditionally before createPing, and the
+// real @neondatabase/serverless neon() throws synchronously on a
+// non-URL-shaped connection string, before createPing (mocked below) ever
+// gets a chance to run. (Caught by actually running this test during
+// Phase 4 execution -- mocking only the repository left makeDb live.)
+vi.mock("../../db/client", () => ({
+  makeDb: () => ({}),
+}));
+
 vi.mock("../repositories/pings", () => ({
   createPing: async () => ({ id: "00000000-0000-0000-0000-000000000001", message: "mocked" }),
 }));
