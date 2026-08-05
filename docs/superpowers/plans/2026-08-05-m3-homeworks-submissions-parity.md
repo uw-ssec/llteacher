@@ -283,14 +283,25 @@ export function planSectionDiff(
         : hadSolution && hasSolution
           ? "update"
           : "delete";
-    toUpdate.push({
-      id: s.id,
-      title: s.title,
-      content: s.content,
-      order: s.order,
-      solutionContent: s.solutionContent,
-      solutionAction,
-    });
+    // Only rows with an actual change belong in toUpdate -- a section
+    // resubmitted byte-identical to its existing row (same title/content/
+    // order, solutionAction "none") must NOT appear, or the "updates a
+    // section whose id matches an existing row" test above (which expects
+    // s2 -- byte-identical in that fixture -- absent from toUpdate) fails.
+    const titleChanged = prior.title !== s.title;
+    const contentChanged = prior.content !== s.content;
+    const orderChanged = prior.order !== s.order;
+    const solutionChanged = solutionAction !== "none";
+    if (titleChanged || contentChanged || orderChanged || solutionChanged) {
+      toUpdate.push({
+        id: s.id,
+        title: s.title,
+        content: s.content,
+        order: s.order,
+        solutionContent: s.solutionContent,
+        solutionAction,
+      });
+    }
   }
 
   const toDelete: SectionDeletePlan[] = existing
