@@ -1146,7 +1146,12 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
   it("returns sections + status for a course member (student payload has no editableBy)", async () => {
     findFirstHomework.mockReset().mockResolvedValue({
       id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
-      dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+      // dueDate must be in the PAST for the "past_due" assertion below to be
+      // reachable at all -- deriveHomeworkStatus only returns "past_due" when
+      // releasedAt has passed AND dueDate has passed (caught during Task 5
+      // implementation: an earlier draft of this fixture used a future
+      // dueDate, making the assertion impossible to satisfy).
+      dueDate: new Date("2020-01-02"), llmConfigId: null, publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
     });
     findManySections.mockReset().mockResolvedValue([
       { id: "s1", title: "Sec 1", content: "c1", order: 1, solution: null, createdAt: new Date(), updatedAt: new Date() },
