@@ -118,8 +118,8 @@ describe("planSectionDiff", () => {
       { id: "s3", title: "Conditional prob", content: "c3", order: 3, solutionContent: "sol3 text" },
     ]);
     expect(plan.toUpdate).toEqual([
-      { id: "s1", title: "Sample spaces (revised)", content: "c1-new", order: 1, solutionContent: "sol text" },
-      { id: "s3", title: "Conditional prob", content: "c3", order: 3, solutionContent: "sol3 text" },
+      { id: "s1", title: "Sample spaces (revised)", content: "c1-new", order: 1, solutionContent: "sol text", solutionAction: "update" },
+      { id: "s3", title: "Conditional prob", content: "c3", order: 3, solutionContent: "sol3 text", solutionAction: "update" },
     ]);
     expect(plan.toCreate).toEqual([]);
     expect(plan.toDelete).toEqual([]);
