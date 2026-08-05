@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
-import { listHomeworksHandler, createHomeworkHandler, getHomeworkDetailHandler } from "./homeworks";
+import {
+  listHomeworksHandler,
+  createHomeworkHandler,
+  getHomeworkDetailHandler,
+  updateHomeworkHandler,
+} from "./homeworks";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 
@@ -22,6 +27,24 @@ vi.mock("../../db/client", () => ({
     insert: (...args: unknown[]) => insertHomework(...args),
   }),
 }));
+
+// updateHomeworkHandler's constraint-violation (422) and unresolvable-cycle
+// paths originate deep inside updateHomework's transaction/batch logic
+// (planSectionDiff + resolveSectionWrites) -- reaching them through the
+// db-client mock above would mean simulating that whole internal call
+// graph. Mocking the repository function directly instead lets each test
+// drive updateHomework's return/throw contract in one line, while
+// `importOriginal` keeps every other exported repository function (used by
+// the handlers above) running against their real implementation over the
+// already-mocked db client.
+const updateHomeworkMock = vi.fn();
+vi.mock("../repositories/homeworks", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../repositories/homeworks")>();
+  return {
+    ...actual,
+    updateHomework: (...args: unknown[]) => updateHomeworkMock(...args),
+  };
+});
 
 // Derives hasRole/isMemberOf/isInstructorOf from `memberships` the same way
 // rolesMiddleware does in production, so a test that sets `memberships` gets
@@ -50,6 +73,7 @@ function buildApp(authContext: AuthContext | undefined) {
   app.get("/api/courses/:courseId/homeworks", (c) => listHomeworksHandler(c));
   app.post("/api/courses/:courseId/homeworks", (c) => createHomeworkHandler(c));
   app.get("/api/courses/:courseId/homeworks/:homeworkId", (c) => getHomeworkDetailHandler(c));
+  app.patch("/api/courses/:courseId/homeworks/:homeworkId", (c) => updateHomeworkHandler(c));
   return app;
 }
 
@@ -258,5 +282,57 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
     const body = (await res.json()) as { editableBy?: boolean };
     expect(body.editableBy).toBe(true);
+  });
+});
+
+describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
+  it("denies a non-instructor with 403", async () => {
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sections: [] }),
+    }, TEST_ENV);
+    expect(res.status).toBe(403);
+  });
+
+  it("returns 404 when updateHomework resolves null (not found in scope)", async () => {
+    updateHomeworkMock.mockReset().mockResolvedValue(null);
+    const res = await buildApp(
+      // isMemberOf must also hold, matching createHomeworkHandler's tests
+      // above -- courseScopeFromAuthContext (used by both handlers) mints a
+      // scope from isMemberOf, not isInstructorOf; in production a course
+      // membership row is what backs both predicates, but the fakeAuthContext
+      // test double lets them diverge, so each override must be set explicitly.
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "New title" }),
+    }, TEST_ENV);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 422 with a friendly message when the diff violates the order constraint", async () => {
+    updateHomeworkMock.mockReset().mockRejectedValue(new Error("duplicate order 1 in incoming sections"));
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sections: [{ title: "A", content: "a", order: 1 }, { title: "B", content: "b", order: 1 }] }),
+    }, TEST_ENV);
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/order/i);
+  });
+
+  it("applies a valid update and returns 200", async () => {
+    updateHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1" });
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Updated" }),
+    }, TEST_ENV);
+    expect(res.status).toBe(200);
   });
 });

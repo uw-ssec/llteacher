@@ -3,7 +3,12 @@ import { helloHandler } from "./routes/hello";
 import { chatHandler } from "./routes/chat";
 import { loginHandler, callbackHandler, logoutHandler } from "./routes/auth";
 import { getProfileHandler, patchProfileHandler } from "./routes/profile";
-import { listHomeworksHandler, createHomeworkHandler, getHomeworkDetailHandler } from "./routes/homeworks";
+import {
+  listHomeworksHandler,
+  createHomeworkHandler,
+  getHomeworkDetailHandler,
+  updateHomeworkHandler,
+} from "./routes/homeworks";
 import { workosWebhookHandler } from "./routes/webhooksWorkos";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
@@ -43,6 +48,10 @@ app.post("/api/courses/:courseId/homeworks", requireInstructorOf()(createHomewor
 app.get(
   "/api/courses/:courseId/homeworks/:homeworkId",
   requireCourseMember()(getHomeworkDetailHandler),
+);
+app.patch(
+  "/api/courses/:courseId/homeworks/:homeworkId",
+  requireInstructorOf()(updateHomeworkHandler),
 );
 
 // Everything else: delegate to the static asset binding.
