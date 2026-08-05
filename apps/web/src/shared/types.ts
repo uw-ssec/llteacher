@@ -15,6 +15,69 @@ export interface ProfileWithStats {
   studentStats?: { submissionsCount: number; completedSections: number };
 }
 
+import type { HomeworkStatus } from "../server/repositories/homeworks";
+
+export type { HomeworkStatus };
+
+export interface SectionResponse {
+  id: string;
+  title: string;
+  content: string;
+  order: number;
+  solution: { id: string; content: string } | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HomeworkListItemResponse {
+  id: string;
+  title: string;
+  description: string;
+  dueDate: string;
+  llmConfigId: string | null;
+  status: HomeworkStatus;
+  sectionCount: number;
+}
+
+export interface HomeworkDetailResponse {
+  id: string;
+  courseId: string;
+  title: string;
+  description: string;
+  dueDate: string;
+  llmConfigId: string | null;
+  status: HomeworkStatus;
+  publishedAt: string | null;
+  releasedAt: string | null;
+  sections: SectionResponse[];
+  /** Present (true) only in the instructor payload; absent for students. */
+  editableBy?: boolean;
+}
+
+export interface SectionDiffInput {
+  id?: string;
+  title: string;
+  content: string;
+  order: number;
+  solutionContent?: string;
+}
+
+export interface HomeworkUpdateBody {
+  title?: string;
+  description?: string;
+  dueDate?: string;
+  llmConfigId?: string | null;
+  sections?: SectionDiffInput[];
+}
+
+export interface HomeworkPublishBody {
+  publish: boolean;
+  /** ISO datetime. If omitted and publish=true, releases immediately. Must
+   *  be in the future if present -- the route rejects a past releasedAt
+   *  with 400. */
+  releasedAt?: string;
+}
+
 // Cloudflare Worker bindings + secrets. Augmented in Phase 1+.
 declare global {
   interface Env {
