@@ -6,6 +6,7 @@ import { Sidebar, TopNav, ConversationView, renderToolPart } from "@llteacher/ui
 import type { SidebarSection, MessageData, ToolPart } from "@llteacher/ui";
 import { useAuth } from "./components/AuthProvider";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
+import type { StudentHomeworkListResponse } from "../shared/types";
 
 /* ==========================================================================
    LLTeacher v2 — Chat-with-syllabus shell
@@ -49,19 +50,52 @@ function useWorkerStatus() {
   return { status, loading };
 }
 
-/* -- Homework sections fixture data ---------------------------------------- */
+/* -- Student homework data -------------------------------------------------- */
 
 /** localStorage key for the sidebar collapsed preference. Namespaced so it
     doesn't collide with future preference keys (`llteacher:*`). */
 const SIDEBAR_COLLAPSED_KEY = "llteacher:sidebar-collapsed";
 
-const INITIAL_SECTIONS: SidebarSection[] = [
-  { number: 1, title: "Random variables",          status: "submitted" },
-  { number: 2, title: "Probability distributions", status: "submitted" },
-  { number: 3, title: "P-values",                  status: "current"   },
-  { number: 4, title: "Confidence intervals",      status: "pending"   },
-  { number: 5, title: "Hypothesis testing",        status: "pending"   },
-];
+/** Fetches the current student's homework list and adapts it into the
+    Sidebar's section shape. SidebarSection's status union ("submitted" |
+    "current" | "pending") has no direct equivalent for "not_started" /
+    "overdue" / "in_progress_overdue" -- those all map onto "pending" for
+    now; a richer Sidebar status vocabulary is a @llteacher/ui change out of
+    scope for this issue. */
+function useStudentHomework() {
+  const [sections, setSections] = useState<SidebarSection[]>([]);
+  const [hwTitle, setHwTitle] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/student/homeworks")
+      .then((r) => r.json() as Promise<StudentHomeworkListResponse>)
+      .then((data) => {
+        const hw = data.homeworks[0]; // single-homework sidebar UI, matches current design
+        if (!hw) {
+          setLoading(false);
+          return;
+        }
+        setHwTitle(hw.title);
+        setSections(
+          hw.sections.map((s) => ({
+            number: s.order,
+            title: s.title,
+            status:
+              s.status === "submitted"
+                ? ("submitted" as const)
+                : s.status === "in_progress"
+                  ? ("current" as const)
+                  : ("pending" as const),
+          })),
+        );
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
+  return { sections, setSections, hwTitle, loading };
+}
 
 /* ==========================================================================
    App — the root component
@@ -85,7 +119,7 @@ export default function App() {
     transport: new DefaultChatTransport({ api: "/api/chat" }),
   });
 
-  const [sections, setSections] = useState<SidebarSection[]>(INITIAL_SECTIONS);
+  const { sections, setSections, hwTitle } = useStudentHomework();
   const [currentSection, setCurrentSection] = useState(3);
   const [hintCount, setHintCount] = useState(3);
   const [justSubmittedSection, setJustSubmittedSection] = useState<number | null>(null);
@@ -218,7 +252,7 @@ export default function App() {
         {/* Left rail — homework section progress on UW Husky Purple */}
         <Sidebar
           hwNumber={3}
-          hwTitle="Probability and Distributions"
+          hwTitle={hwTitle}
           sections={sections}
           currentSection={currentSection}
           hintCount={hintCount}
