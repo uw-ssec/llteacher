@@ -6,6 +6,7 @@ import {
   getHomeworkDetailHandler,
   updateHomeworkHandler,
   deleteHomeworkHandler,
+  publishHomeworkHandler,
 } from "./homeworks";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
@@ -40,12 +41,14 @@ vi.mock("../../db/client", () => ({
 // already-mocked db client.
 const updateHomeworkMock = vi.fn();
 const deleteHomeworkMock = vi.fn();
+const publishHomeworkMock = vi.fn();
 vi.mock("../repositories/homeworks", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../repositories/homeworks")>();
   return {
     ...actual,
     updateHomework: (...args: unknown[]) => updateHomeworkMock(...args),
     deleteHomework: (...args: unknown[]) => deleteHomeworkMock(...args),
+    updateHomeworkPublishState: (...args: unknown[]) => publishHomeworkMock(...args),
   };
 });
 
@@ -78,6 +81,7 @@ function buildApp(authContext: AuthContext | undefined) {
   app.get("/api/courses/:courseId/homeworks/:homeworkId", (c) => getHomeworkDetailHandler(c));
   app.patch("/api/courses/:courseId/homeworks/:homeworkId", (c) => updateHomeworkHandler(c));
   app.delete("/api/courses/:courseId/homeworks/:homeworkId", (c) => deleteHomeworkHandler(c));
+  app.patch("/api/courses/:courseId/homeworks/:homeworkId/publish", (c) => publishHomeworkHandler(c));
   return app;
 }
 
@@ -366,5 +370,52 @@ describe("DELETE /api/courses/:courseId/homeworks/:homeworkId", () => {
       fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
     ).request("/api/courses/course-a/homeworks/hw-1", { method: "DELETE" }, TEST_ENV);
     expect(res.status).toBe(204);
+  });
+});
+
+describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
+  it("denies a non-instructor with 403", async () => {
+    const res = await buildApp(fakeAuthContext({ isInstructorOf: () => false })).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: true }) },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("rejects a past releasedAt with 400", async () => {
+    const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a" })).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publish: true, releasedAt: "2020-01-01T00:00:00Z" }),
+      },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("publishes immediately when releasedAt is omitted", async () => {
+    publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: new Date(), releasedAt: new Date() });
+    // isMemberOf required alongside isInstructorOf -- this test reaches
+    // courseScopeFromAuthContext (the 400/past-releasedAt test above does
+    // not, since that check runs before scope minting). Same gap found in
+    // Tasks 5/6/7; fixed proactively here before dispatch.
+    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: true }) },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("un-publishes (draft) when publish=false", async () => {
+    publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
+    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: false }) },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
   });
 });

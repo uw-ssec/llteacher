@@ -9,6 +9,7 @@ import {
   getHomeworkDetailHandler,
   updateHomeworkHandler,
   deleteHomeworkHandler,
+  publishHomeworkHandler,
 } from "./routes/homeworks";
 import { workosWebhookHandler } from "./routes/webhooksWorkos";
 import { authMiddleware } from "./middleware/auth";
@@ -57,6 +58,10 @@ app.patch(
 app.delete(
   "/api/courses/:courseId/homeworks/:homeworkId",
   requireInstructorOf()(deleteHomeworkHandler),
+);
+app.patch(
+  "/api/courses/:courseId/homeworks/:homeworkId/publish",
+  requireInstructorOf()(publishHomeworkHandler),
 );
 
 // Everything else: delegate to the static asset binding.

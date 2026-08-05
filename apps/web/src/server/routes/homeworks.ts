@@ -1,11 +1,11 @@
 import { Hono, type Context } from "hono";
 import { makeDb } from "../../db/client";
-import { listHomeworksForCourse, createHomework, getHomeworkById, deriveHomeworkStatus, updateHomework, deleteHomework } from "../repositories/homeworks";
+import { listHomeworksForCourse, createHomework, getHomeworkById, deriveHomeworkStatus, updateHomework, deleteHomework, updateHomeworkPublishState } from "../repositories/homeworks";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import { requireCourseMember, requireInstructorOf } from "../utils/guards";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
-import type { HomeworkDetailResponse, HomeworkUpdateBody, SectionResponse } from "../../shared/types";
+import type { HomeworkDetailResponse, HomeworkPublishBody, HomeworkUpdateBody, SectionResponse } from "../../shared/types";
 
 interface CreateHomeworkBody {
   title?: unknown;
@@ -216,6 +216,45 @@ export async function deleteHomeworkHandler(c: Context<AppEnv>) {
   return c.body(null, 204);
 }
 
+export async function publishHomeworkHandler(c: Context<AppEnv>) {
+  const courseId = c.req.param("courseId");
+  const homeworkId = c.req.param("homeworkId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+
+  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
+    return c.json({ error: "Instructor access denied" }, 403);
+  }
+
+  let body: HomeworkPublishBody;
+  try {
+    body = await c.req.json<HomeworkPublishBody>();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+  if (typeof body.publish !== "boolean") {
+    return c.json({ error: "publish (boolean) is required" }, 400);
+  }
+
+  let releasedAt: Date | undefined;
+  if (body.releasedAt !== undefined) {
+    releasedAt = new Date(body.releasedAt);
+    if (Number.isNaN(releasedAt.getTime())) {
+      return c.json({ error: "releasedAt must be a valid date" }, 400);
+    }
+    if (releasedAt.getTime() < Date.now()) {
+      return c.json({ error: "Release time must be in the future" }, 400);
+    }
+  }
+
+  const scope = courseScopeFromAuthContext(authContext, courseId);
+  if (!scope) return c.json({ error: "Course access denied" }, 403);
+
+  const db = makeDb(c.env.DATABASE_URL);
+  const updated = await updateHomeworkPublishState(db, scope, homeworkId!, { publish: body.publish, releasedAt });
+  if (!updated) return c.json({ error: "Homework not found" }, 404);
+  return c.json({ id: updated.id, publishedAt: updated.publishedAt, releasedAt: updated.releasedAt });
+}
+
 // Sub-app preserved for direct unit testing; production routing happens via
 // app.get/post("/api/courses/:courseId/homeworks", ...) in server/index.ts.
 export const homeworksRoutes = new Hono<AppEnv>();
@@ -224,3 +263,4 @@ homeworksRoutes.post("/", requireInstructorOf()(createHomeworkHandler));
 homeworksRoutes.get("/:homeworkId", requireCourseMember()(getHomeworkDetailHandler));
 homeworksRoutes.patch("/:homeworkId", requireInstructorOf()(updateHomeworkHandler));
 homeworksRoutes.delete("/:homeworkId", requireInstructorOf()(deleteHomeworkHandler));
+homeworksRoutes.patch("/:homeworkId/publish", requireInstructorOf()(publishHomeworkHandler));
