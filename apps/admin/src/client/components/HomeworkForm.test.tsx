@@ -68,4 +68,17 @@ describe("HomeworkForm", () => {
     const focusable = Array.from(fieldset.querySelectorAll("input, textarea, button"));
     expect(focusable[0]).toBe(title);
   });
+
+  it("shows a friendly error and does not throw when onSubmit rejects", async () => {
+    const onSubmit = vi.fn().mockRejectedValue(new Error("network error"));
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
+    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
+    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, { target: { value: "Sec 1" } });
+    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, { target: { value: "c" } });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    await waitFor(() => expect(screen.getByText(/failed to save/i)).toBeTruthy());
+  });
 });
