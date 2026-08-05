@@ -3,7 +3,7 @@ import { helloHandler } from "./routes/hello";
 import { chatHandler } from "./routes/chat";
 import { loginHandler, callbackHandler, logoutHandler } from "./routes/auth";
 import { getProfileHandler, patchProfileHandler } from "./routes/profile";
-import { listHomeworksHandler, createHomeworkHandler } from "./routes/homeworks";
+import { listHomeworksHandler, createHomeworkHandler, getHomeworkDetailHandler } from "./routes/homeworks";
 import { workosWebhookHandler } from "./routes/webhooksWorkos";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
@@ -40,6 +40,10 @@ app.get("/api/profile", getProfileHandler);
 app.patch("/api/profile", patchProfileHandler);
 app.get("/api/courses/:courseId/homeworks", requireCourseMember()(listHomeworksHandler));
 app.post("/api/courses/:courseId/homeworks", requireInstructorOf()(createHomeworkHandler));
+app.get(
+  "/api/courses/:courseId/homeworks/:homeworkId",
+  requireCourseMember()(getHomeworkDetailHandler),
+);
 
 // Everything else: delegate to the static asset binding.
 // In dev, this proxies to Vite's pipeline (so HMR + source maps work).

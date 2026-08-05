@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
-import { listHomeworksHandler, createHomeworkHandler } from "./homeworks";
+import { listHomeworksHandler, createHomeworkHandler, getHomeworkDetailHandler } from "./homeworks";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 
@@ -8,9 +8,17 @@ const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
 
 const findManyHomeworks = vi.fn();
 const insertHomework = vi.fn();
+const findFirstHomework = vi.fn();
+const findManySections = vi.fn();
 vi.mock("../../db/client", () => ({
   makeDb: () => ({
-    query: { homeworks: { findMany: (...args: unknown[]) => findManyHomeworks(...args) } },
+    query: {
+      homeworks: {
+        findMany: (...args: unknown[]) => findManyHomeworks(...args),
+        findFirst: (...args: unknown[]) => findFirstHomework(...args),
+      },
+      sections: { findMany: (...args: unknown[]) => findManySections(...args) },
+    },
     insert: (...args: unknown[]) => insertHomework(...args),
   }),
 }));
@@ -41,6 +49,7 @@ function buildApp(authContext: AuthContext | undefined) {
   });
   app.get("/api/courses/:courseId/homeworks", (c) => listHomeworksHandler(c));
   app.post("/api/courses/:courseId/homeworks", (c) => createHomeworkHandler(c));
+  app.get("/api/courses/:courseId/homeworks/:homeworkId", (c) => getHomeworkDetailHandler(c));
   return app;
 }
 
@@ -198,5 +207,56 @@ describe("POST /api/courses/:courseId/homeworks", () => {
     );
     expect(res.status).toBe(403);
     expect(insertHomework).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
+  it("denies a non-member with 403", async () => {
+    const res = await buildApp(fakeAuthContext()).request(
+      "/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("returns 404 when the homework isn't found in this course scope", async () => {
+    findFirstHomework.mockReset().mockResolvedValue(undefined);
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns sections + status for a course member (student payload has no editableBy)", async () => {
+    findFirstHomework.mockReset().mockResolvedValue({
+      // dueDate is deliberately in the past (not 2099) -- deriveHomeworkStatus
+      // (Task 3) returns "past_due" only when dueDate has already passed;
+      // publishedAt/releasedAt in the past alone would otherwise yield "active".
+      id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
+      dueDate: new Date("2020-01-02"), llmConfigId: null, publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+    });
+    findManySections.mockReset().mockResolvedValue([
+      { id: "s1", title: "Sec 1", content: "c1", order: 1, solution: null, createdAt: new Date(), updatedAt: new Date() },
+    ]);
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { editableBy?: boolean; status: string; sections: unknown[] };
+    expect(body.editableBy).toBeUndefined();
+    expect(body.status).toBe("past_due");
+    expect(body.sections).toHaveLength(1);
+  });
+
+  it("sets editableBy=true for an instructor of the course", async () => {
+    findFirstHomework.mockReset().mockResolvedValue({
+      id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
+      dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null,
+    });
+    findManySections.mockReset().mockResolvedValue([]);
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    const body = (await res.json()) as { editableBy?: boolean };
+    expect(body.editableBy).toBe(true);
   });
 });

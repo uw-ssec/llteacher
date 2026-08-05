@@ -1,10 +1,11 @@
 import { Hono, type Context } from "hono";
 import { makeDb } from "../../db/client";
-import { listHomeworksForCourse, createHomework } from "../repositories/homeworks";
+import { listHomeworksForCourse, createHomework, getHomeworkById, deriveHomeworkStatus } from "../repositories/homeworks";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import { requireCourseMember, requireInstructorOf } from "../utils/guards";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
+import type { HomeworkDetailResponse, SectionResponse } from "../../shared/types";
 
 interface CreateHomeworkBody {
   title?: unknown;
@@ -84,8 +85,55 @@ export async function createHomeworkHandler(c: Context<AppEnv>) {
   return c.json({ id: created.id }, 201);
 }
 
+export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
+  const courseId = c.req.param("courseId");
+  const homeworkId = c.req.param("homeworkId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+
+  // requireCourseMember already verified isMemberOf(courseId) when this
+  // handler is reached via the guarded production route; guarded
+  // defensively here too (mirrors listHomeworksHandler above).
+  const scope = authContext && courseId ? courseScopeFromAuthContext(authContext, courseId) : null;
+  if (!scope) {
+    return c.json({ error: "Course access denied" }, 403);
+  }
+
+  const db = makeDb(c.env.DATABASE_URL);
+  const result = await getHomeworkById(db, scope, homeworkId!);
+  if (!result) {
+    return c.json({ error: "Homework not found" }, 404);
+  }
+
+  const sectionsResponse: SectionResponse[] = result.sections.map((s) => ({
+    id: s.id,
+    title: s.title,
+    content: s.content,
+    order: s.order,
+    solution: s.solution ? { id: s.solution.id, content: s.solution.content } : null,
+    createdAt: s.createdAt.toISOString(),
+    updatedAt: s.updatedAt.toISOString(),
+  }));
+
+  const body: HomeworkDetailResponse = {
+    id: result.homework.id,
+    courseId: result.homework.courseId,
+    title: result.homework.title,
+    description: result.homework.description,
+    dueDate: result.homework.dueDate.toISOString(),
+    llmConfigId: result.homework.llmConfigId,
+    status: deriveHomeworkStatus(result.homework),
+    publishedAt: result.homework.publishedAt?.toISOString() ?? null,
+    releasedAt: result.homework.releasedAt?.toISOString() ?? null,
+    sections: sectionsResponse,
+    ...(authContext!.isInstructorOf(courseId!) && { editableBy: true }),
+  };
+
+  return c.json(body);
+}
+
 // Sub-app preserved for direct unit testing; production routing happens via
 // app.get/post("/api/courses/:courseId/homeworks", ...) in server/index.ts.
 export const homeworksRoutes = new Hono<AppEnv>();
 homeworksRoutes.get("/", requireCourseMember()(listHomeworksHandler));
 homeworksRoutes.post("/", requireInstructorOf()(createHomeworkHandler));
+homeworksRoutes.get("/:homeworkId", requireCourseMember()(getHomeworkDetailHandler));
