@@ -1298,7 +1298,12 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
   it("returns 404 when updateHomework resolves null (not found in scope)", async () => {
     updateHomeworkMock.mockReset().mockResolvedValue(null);
     const res = await buildApp(
-      fakeAuthContext({ isInstructorOf: (id) => id === "course-a" }),
+      // isMemberOf must also be true: the handler mints scope via
+      // courseScopeFromAuthContext, which requires isMemberOf(courseId),
+      // not just isInstructorOf(courseId) -- caught during Task 6
+      // implementation (as literally given, this test 403'd regardless of
+      // a correct implementation, since scope minting failed first).
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
     ).request("/api/courses/course-a/homeworks/hw-1", {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "New title" }),
@@ -1309,7 +1314,7 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
   it("returns 422 with a friendly message when the diff violates the order constraint", async () => {
     updateHomeworkMock.mockReset().mockRejectedValue(new Error("duplicate order 1 in incoming sections"));
     const res = await buildApp(
-      fakeAuthContext({ isInstructorOf: (id) => id === "course-a" }),
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
     ).request("/api/courses/course-a/homeworks/hw-1", {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({ sections: [{ title: "A", content: "a", order: 1 }, { title: "B", content: "b", order: 1 }] }),
@@ -1322,7 +1327,7 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
   it("applies a valid update and returns 200", async () => {
     updateHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1" });
     const res = await buildApp(
-      fakeAuthContext({ isInstructorOf: (id) => id === "course-a" }),
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
     ).request("/api/courses/course-a/homeworks/hw-1", {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "Updated" }),
