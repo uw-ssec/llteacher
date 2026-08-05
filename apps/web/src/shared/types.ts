@@ -27,6 +27,11 @@ declare global {
     SESSION_SECRET: string;
     ENCRYPTION_KEY: string;
     BLIND_INDEX_KEY: string;
+    // WorkOS webhook signing secret (issue #95) -- one per WorkOS
+    // project/environment, not per-org: WorkOS webhooks are configured
+    // once in the dashboard as a single Endpoint delivering events for
+    // every organization under that project.
+    WORKOS_WEBHOOK_SECRET: string;
   }
 }
 

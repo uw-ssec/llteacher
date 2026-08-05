@@ -1,7 +1,10 @@
 import { relations, sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   index,
+  integer,
+  jsonb,
   pgEnum,
   pgTable,
   text,
@@ -51,6 +54,34 @@ export const credentialProviderEnum = pgEnum("credential_provider", [
   "workos",
 ]);
 
+// Why a membership was dropped (issue #142). Distinguishing "this
+// deactivation dropped it" from "dropped for any other reason" (e.g. a
+// future Canvas roster removal, #32/#74) is what lets a later reactivation
+// (UserIdentityService.reconcileExisting, #95's self-healing) restore only
+// the memberships its own deactivation cascade touched -- restoring
+// indiscriminately would incorrectly resurrect a membership that was
+// dropped because the student was actually unenrolled from the course.
+export const membershipDropReasonEnum = pgEnum("membership_drop_reason", [
+  "roster_removal",
+  "user_deprovisioned",
+]);
+
+// "claimed" (#151) is the transient state between an insert-first
+// onConflictDoNothing-style claim and the final status a handler settles
+// into. Its purpose is purely to make claiming atomic: a concurrent
+// duplicate delivery's claim attempt targets rows NOT in "failed" state
+// (see claimWebhookEvent, repositories/webhookEvents.ts) via a single
+// INSERT ... ON CONFLICT ... DO UPDATE ... WHERE statement, so two racing
+// deliveries for a brand-new event id can't both win. A row should never
+// be observed sitting in "claimed" for long -- it settles to
+// processed/skipped/failed by the same request that claimed it.
+export const webhookEventStatusEnum = pgEnum("webhook_event_status", [
+  "claimed",
+  "processed",
+  "skipped",
+  "failed",
+]);
+
 // ---------- Organizations ----------
 // Top-level tenant. 1:1 with a WorkOS Organization (auth tenant).
 // Optionally bound to a Canvas Account / sub-account (data tenant).
@@ -93,6 +124,19 @@ export const organizations = pgTable(
 // plaintext; they enable equality lookup without decryption (login
 // reconciliation, "find user by netid" admin search, URL-with-netid routes).
 // display_name has no blind index -- we never look users up by display name.
+//
+// is_active / session_epoch (issue #95): sessions are stateless sealed
+// cookies with no server-side store (see lib/session.ts), so revoking one
+// user's access before their 7-day cookie naturally expires needs a value
+// the server can check against. session_epoch is stamped into every sealed
+// cookie at login; a WorkOS deprovisioning webhook flips is_active to false
+// and increments session_epoch, so every cookie issued before that moment
+// stops matching (rolesMiddleware enforces the comparison via
+// repositories/users.ts) while the account's PII is retained, not deleted --
+// deactivation, not erasure, per #51's retention rules. A later successful
+// WorkOS login is itself proof of re-authorization and clears is_active back
+// to true (see UserIdentityService.createOrClaimUser) without touching
+// session_epoch, so stale pre-deactivation cookies stay invalid.
 
 export const users = pgTable(
   "users",
@@ -105,6 +149,8 @@ export const users = pgTable(
     netidBlindIndex: blindIndex("netid_blind_index"),
     displayName: encryptedText("display_name"),
     isPending: boolean("is_pending").notNull().default(false),
+    isActive: boolean("is_active").notNull().default(true),
+    sessionEpoch: integer("session_epoch").notNull().default(0),
     lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -123,6 +169,24 @@ export const users = pgTable(
       .where(sql`${t.netidBlindIndex} IS NOT NULL`),
   ],
 );
+
+// ---------- WorkOSWebhookEvent ----------
+// Append-only log of verified WorkOS webhook deliveries (issue #95's
+// event-persistence requirement). Keyed by WorkOS's own event id, not a
+// surrogate uuid -- the primary key IS the idempotency guard for events
+// whose handler logic isn't independently idempotent (e.g. user.updated).
+// status starts as the outcome of the first processing attempt: "processed"
+// (handled), "skipped" (acknowledged, out of v0 scope), or "failed" (a
+// genuine processing error -- NOT dedup'd, so a WorkOS retry reprocesses it
+// rather than being silently swallowed forever).
+
+export const workosWebhookEvents = pgTable("workos_webhook_events", {
+  id: text("id").primaryKey(),
+  eventType: text("event_type").notNull(),
+  payload: jsonb("payload").notNull(),
+  status: webhookEventStatusEnum("status").notNull(),
+  receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 // ---------- Courses ----------
 // Projection of a Canvas course, scoped to one Organization.
@@ -177,6 +241,7 @@ export const courseMemberships = pgTable(
       .notNull()
       .defaultNow(),
     droppedAt: timestamp("dropped_at", { withTimezone: true }),
+    droppedReason: membershipDropReasonEnum("dropped_reason"),
     lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -191,6 +256,10 @@ export const courseMemberships = pgTable(
       .on(t.canvasEnrollmentId)
       .where(sql`${t.canvasEnrollmentId} IS NOT NULL`),
     index("course_memberships_course_idx").on(t.courseId),
+    check(
+      "course_memberships_dropped_reason_requires_dropped_at",
+      sql`${t.droppedReason} IS NULL OR ${t.droppedAt} IS NOT NULL`,
+    ),
   ],
 );
 

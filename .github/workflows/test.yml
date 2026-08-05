@@ -5,10 +5,24 @@ on:
   push:
     branches: [llteacher01]
 
+# Duplicate jobs otherwise run per PR-synchronize push and the branch push
+# it corresponds to (#148) -- cancel the stale one instead of burning runner
+# minutes on both.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default GITHUB_TOKEN scope was previously unset (repo default, broader
+# than this workflow needs) -- explicit read-only since nothing here writes
+# to the repo (#148).
+permissions:
+  contents: read
+
 jobs:
   web:
     name: apps/web — typecheck, migrate, test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     services:
       postgres:
@@ -39,6 +53,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Ephemeral, generated per run -- not repo secrets. The seed script's
+      # encrypted output never needs to survive past this job (the DB is
+      # torn down with the runner), so there's nothing to lose by not
+      # persisting these, and it removes both the "add two repo secrets
+      # before CI goes green" step and the fork-PR failure mode (secrets
+      # aren't available to fork PR runs by default).
+      - name: Generate ephemeral seed encryption keys
+        run: |
+          echo "ENCRYPTION_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+          echo "BLIND_INDEX_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+
       - name: Install psql
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
 
@@ -49,8 +74,29 @@ jobs:
         working-directory: apps/web
         run: npm run db:migrate
 
+      - name: Seed smoke test
+        working-directory: apps/web
+        run: npm run db:seed -- --reset
+
       - name: Typecheck
         run: npm run typecheck
 
       - name: Test
         run: npm test
+
+      # Neither turbo's typecheck task nor any prior step here actually
+      # compiles apps/web's or apps/admin's own production bundle -- "dependsOn
+      # ^build" only builds *upstream* workspace deps, never the package
+      # itself (#148). Without this, a build break only surfaces at deploy
+      # time.
+      - name: Build
+        run: npm run build
+
+      # Validates the Worker config (wrangler.jsonc) and the bundle just
+      # produced by the Build step above against the declared
+      # compatibility_date, without actually publishing (#148). Nothing had
+      # ever run `wrangler deploy` against this Worker before this check
+      # existed, so whether it deploys at all was unverified.
+      - name: Dry-run deploy (apps/web)
+        working-directory: apps/web
+        run: npx wrangler deploy --dry-run

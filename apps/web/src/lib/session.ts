@@ -1,9 +1,11 @@
 /**
  * Stateless sealed session cookie: AES-256-GCM over a small JSON payload.
  * No server-side session store -- the sealed cookie *is* the session.
- * Rotating SESSION_SECRET invalidates every active session (acceptable
- * per issue #8; a revocation mechanism for single-user logout-everywhere
- * is issue #95's concern).
+ * Rotating SESSION_SECRET invalidates every active session; sessionEpoch
+ * (issue #95) is the finer-grained, single-user version of that same idea --
+ * rolesMiddleware compares the cookie's sessionEpoch against the live value
+ * on the user row on every request, so a WorkOS deprovisioning webhook can
+ * revoke one user's already-issued cookies without touching anyone else's.
  */
 
 import { importAesGcmKey } from "./crypto/keys";
@@ -15,6 +17,13 @@ export interface SessionPayload {
    *  Absent for sessions created before this field existed. Used solely to
    *  build the WorkOS logout URL -- never used for authorization. */
   workosSessionId?: string;
+  /** Snapshot of users.session_epoch at login time (issue #95). Required,
+   *  not optional -- a cookie sealed before this field existed has no valid
+   *  value to fall back to, and treating "missing" as "always valid" would
+   *  defeat the whole revocation mechanism. Shipping this rejects every
+   *  pre-existing session once, the same one-time effect as rotating
+   *  SESSION_SECRET. */
+  sessionEpoch: number;
   issuedAt: number;
   expiresAt: number;
 }
@@ -27,6 +36,7 @@ const IV_BYTES = 12;
 export function createSessionPayload(
   userId: string,
   workosUserId: string,
+  sessionEpoch: number,
   now: number = Date.now(),
   workosSessionId?: string,
 ): SessionPayload {
@@ -34,6 +44,7 @@ export function createSessionPayload(
     userId,
     workosUserId,
     workosSessionId,
+    sessionEpoch,
     issuedAt: now,
     expiresAt: now + SESSION_TTL_SECONDS * 1000,
   };
@@ -102,7 +113,8 @@ async function decryptAndValidateShape(
     if (
       typeof payload.userId !== "string" ||
       typeof payload.workosUserId !== "string" ||
-      typeof payload.expiresAt !== "number"
+      typeof payload.expiresAt !== "number" ||
+      typeof payload.sessionEpoch !== "number"
     ) {
       return null;
     }

@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { courseMemberships, users } from "../../db/schema";
 import type { Db } from "../../db/client";
 import { IdentityCipher } from "../crypto/identity-cipher";
@@ -14,6 +14,11 @@ export interface WorkOSProfile {
 export interface ProvisioningResult {
   userId: string;
   isNew: boolean;
+  /** Current users.session_epoch, to stamp into the session cookie (#95).
+   *  Login never changes this value itself -- only a WorkOS deprovisioning
+   *  webhook bumps it -- it's just read back here so the freshly-issued
+   *  cookie matches whatever the DB currently holds. */
+  sessionEpoch: number;
 }
 
 /** Wires the previously-unused IdentityCipher into a real write path.
@@ -71,10 +76,11 @@ export class UserIdentityService {
           netid: encryptedNetid,
           netidBlindIndex,
           isPending: false,
+          isActive: true,
           lastLoginAt: new Date(),
         })
         .where(eq(users.id, byEmail.id));
-      return { userId: byEmail.id, isNew: false };
+      return { userId: byEmail.id, isNew: false, sessionEpoch: byEmail.sessionEpoch };
     }
 
     if (byEmail && !byEmail.isPending) {
@@ -83,9 +89,9 @@ export class UserIdentityService {
       // Attach it rather than failing the unique workosUserId constraint.
       await this.db
         .update(users)
-        .set({ workosUserId: workosUser.id, lastLoginAt: new Date() })
+        .set({ workosUserId: workosUser.id, isActive: true, lastLoginAt: new Date() })
         .where(eq(users.id, byEmail.id));
-      return { userId: byEmail.id, isNew: false };
+      return { userId: byEmail.id, isNew: false, sessionEpoch: byEmail.sessionEpoch };
     }
 
     const encryptedEmail = await this.cipher.encryptString(normalizedEmail);
@@ -106,9 +112,9 @@ export class UserIdentityService {
         isPending: false,
         lastLoginAt: new Date(),
       })
-      .returning({ id: users.id });
+      .returning({ id: users.id, sessionEpoch: users.sessionEpoch });
 
-    return { userId: created.id, isNew: true };
+    return { userId: created.id, isNew: true, sessionEpoch: created.sessionEpoch };
   }
 
   private async reconcileExisting(
@@ -118,26 +124,104 @@ export class UserIdentityService {
     netid: string | null,
     netidBlindIndex: BlindIndex | null,
   ): Promise<ProvisioningResult> {
-    const updates: Record<string, unknown> = { lastLoginAt: new Date() };
+    // isActive: true unconditionally, even if it was already true -- a
+    // completed WorkOS OAuth round trip for this exact identity is itself
+    // proof of current authorization (#95). This is what makes a WorkOS
+    // deprovisioning webhook self-healing: if the same identity later logs
+    // in again legitimately, access is restored without any app-side
+    // intervention. sessionEpoch is deliberately NOT touched here -- only
+    // the deactivation webhook bumps it -- so an existing valid session on
+    // another device isn't invalidated by an unrelated login elsewhere.
+    const updates: Record<string, unknown> = { isActive: true, lastLoginAt: new Date() };
 
+    // emailAccepted gates the NetID backfill below (#146): netid/netidBlindIndex
+    // are derived from this same normalizedEmail, so writing them when the
+    // email claim was denied would cross-link this user to a NetID derived
+    // from an address they don't actually own -- either cross-linking two
+    // real identities under one NetID blind index, or colliding with the
+    // other account's netidBlindIndex (unique index) and 503-ing every
+    // subsequent login attempt.
     const currentEmail = await this.cipher.decryptString(existing.email);
-    if (currentEmail !== normalizedEmail) {
+    let emailAccepted = currentEmail === normalizedEmail;
+    if (!emailAccepted) {
       const canClaim = await this.claimEmailBlindIndex(existing, emailBlindIndex);
       if (canClaim) {
         updates.email = await this.cipher.encryptString(normalizedEmail);
         updates.emailBlindIndex = emailBlindIndex;
+        emailAccepted = true;
       }
       // else: another non-pending user already owns this email. Keep the
-      // old email on `existing` -- see claimEmailBlindIndex for details.
+      // old email (and don't derive a NetID from it) on `existing` -- see
+      // claimEmailBlindIndex for details.
     }
 
-    if (netid && !existing.netidBlindIndex) {
+    if (emailAccepted && netid && !existing.netidBlindIndex) {
       updates.netid = await this.cipher.encryptString(netid);
       updates.netidBlindIndex = netidBlindIndex;
     }
 
     await this.db.update(users).set(updates).where(eq(users.id, existing.id));
-    return { userId: existing.id, isNew: false };
+
+    // Self-healing membership restore (#142): a completed WorkOS login for
+    // this identity is proof of re-authorization, so restore only the
+    // memberships *this account's own deprovisioning* dropped -- never a
+    // membership dropped for an unrelated reason (e.g. a genuine Canvas
+    // roster removal), which must stay dropped. The droppedReason tag
+    // written by deactivateByWorkosUserId is what makes that distinction
+    // possible; restoring on droppedAt alone would be indiscriminate.
+    await this.db
+      .update(courseMemberships)
+      .set({ droppedAt: null, droppedReason: null })
+      .where(
+        and(
+          eq(courseMemberships.userId, existing.id),
+          eq(courseMemberships.droppedReason, "user_deprovisioned"),
+        ),
+      );
+
+    return { userId: existing.id, isNew: false, sessionEpoch: existing.sessionEpoch };
+  }
+
+  /** Re-encrypts the stored email and refreshes its blind index in response
+   *  to a WorkOS `user.updated` webhook (#142) -- the same write path a
+   *  login's reconcileExisting uses, without requiring the user to actually
+   *  log in again. Reuses claimEmailBlindIndex so a stale pending row
+   *  already squatting on the new email is absorbed the same way a login
+   *  would absorb it, rather than failing the update.
+   *
+   *  No-ops (returns updated: false) for an unknown workosUserId (the
+   *  webhook fired before this user's first login, or for an account this
+   *  app never provisioned), when the email hasn't actually changed
+   *  (duplicate delivery -- idempotent by construction, no dedup table
+   *  needed for this event type either), or when claimEmailBlindIndex
+   *  can't free the blind index (logged there). Deliberately does not
+   *  touch netid, matching reconcileExisting's convention of only ever
+   *  filling a missing netid, never overwriting one on an email change. */
+  async handleEmailUpdated(
+    workosUserId: string,
+    newEmail: string,
+  ): Promise<{ updated: boolean }> {
+    const existing = await this.db.query.users.findFirst({
+      where: eq(users.workosUserId, workosUserId),
+    });
+    if (!existing) return { updated: false };
+
+    const normalizedEmail = IdentityCipher.normalizeEmail(newEmail);
+    const currentEmail = await this.cipher.decryptString(existing.email);
+    if (currentEmail === normalizedEmail) return { updated: false };
+
+    const emailBlindIndex = await this.cipher.computeBlindIndex(normalizedEmail);
+    const canClaim = await this.claimEmailBlindIndex(existing, emailBlindIndex);
+    if (!canClaim) return { updated: false };
+
+    await this.db
+      .update(users)
+      .set({
+        email: await this.cipher.encryptString(normalizedEmail),
+        emailBlindIndex,
+      })
+      .where(eq(users.id, existing.id));
+    return { updated: true };
   }
 
   /** The `users_email_blind_index_uq` unique index means `existing` cannot

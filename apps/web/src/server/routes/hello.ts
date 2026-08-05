@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { makeDb } from "../../db/client";
-import { pings } from "../../db/schema";
+import { createPing } from "../repositories/pings";
 import type { HelloResponse } from "../../shared/types";
 
 export async function helloHandler(c: Context<{ Bindings: Env }>) {
@@ -16,10 +16,7 @@ export async function helloHandler(c: Context<{ Bindings: Env }>) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
-  const [row] = await db
-    .insert(pings)
-    .values({ message: "Hello from Hono + Drizzle + Neon." })
-    .returning();
+  const row = await createPing(db, "Hello from Hono + Drizzle + Neon.");
   const resp: HelloResponse = {
     message: row.message,
     ping_id: row.id,

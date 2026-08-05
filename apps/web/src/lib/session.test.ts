@@ -17,28 +17,35 @@ beforeAll(async () => {
 
 describe("sealSession / unsealSession", () => {
   it("round-trips a valid payload", async () => {
-    const payload = createSessionPayload("user-1", "workos-1");
+    const payload = createSessionPayload("user-1", "workos-1", 7);
     const sealed = await sealSession(payload, key);
     const unsealed = await unsealSession(sealed, key);
     expect(unsealed).toEqual(payload);
   });
 
+  it("round-trips sessionEpoch", async () => {
+    const payload = createSessionPayload("user-1", "workos-1", 7);
+    const sealed = await sealSession(payload, key);
+    const unsealed = await unsealSession(sealed, key);
+    expect(unsealed?.sessionEpoch).toBe(7);
+  });
+
   it("round-trips workosSessionId when present", async () => {
-    const payload = createSessionPayload("user-1", "workos-1", undefined, "session_abc");
+    const payload = createSessionPayload("user-1", "workos-1", 7, undefined, "session_abc");
     const sealed = await sealSession(payload, key);
     const unsealed = await unsealSession(sealed, key);
     expect(unsealed?.workosSessionId).toBe("session_abc");
   });
 
   it("round-trips with workosSessionId absent (backward compatible)", async () => {
-    const payload = createSessionPayload("user-1", "workos-1");
+    const payload = createSessionPayload("user-1", "workos-1", 7);
     const sealed = await sealSession(payload, key);
     const unsealed = await unsealSession(sealed, key);
     expect(unsealed?.workosSessionId).toBeUndefined();
   });
 
   it("produces a different cookie value each time (random IV)", async () => {
-    const payload = createSessionPayload("user-1", "workos-1");
+    const payload = createSessionPayload("user-1", "workos-1", 7);
     const a = await sealSession(payload, key);
     const b = await sealSession(payload, key);
     expect(a).not.toBe(b);
@@ -48,14 +55,29 @@ describe("sealSession / unsealSession", () => {
     const payload = createSessionPayload(
       "user-1",
       "workos-1",
+      7,
       Date.now() - 1000 * 60 * 60 * 24 * 30,
     );
     const sealed = await sealSession(payload, key);
     expect(await unsealSession(sealed, key)).toBeNull();
   });
 
+  it("rejects a payload missing sessionEpoch (pre-#95 cookie shape)", async () => {
+    const payload = createSessionPayload("user-1", "workos-1", 7);
+    const legacyPayload = { ...payload } as Partial<typeof payload>;
+    delete legacyPayload.sessionEpoch;
+    const data = new TextEncoder().encode(JSON.stringify(legacyPayload));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, data));
+    const combined = new Uint8Array(iv.length + ciphertext.length);
+    combined.set(iv, 0);
+    combined.set(ciphertext, iv.length);
+    const sealed = Buffer.from(combined).toString("base64url");
+    expect(await unsealSession(sealed, key)).toBeNull();
+  });
+
   it("rejects a tampered cookie value", async () => {
-    const payload = createSessionPayload("user-1", "workos-1");
+    const payload = createSessionPayload("user-1", "workos-1", 7);
     const sealed = await sealSession(payload, key);
     const tampered = sealed.slice(0, -2) + (sealed.slice(-2) === "AA" ? "BB" : "AA");
     expect(await unsealSession(tampered, key)).toBeNull();
@@ -65,7 +87,7 @@ describe("sealSession / unsealSession", () => {
     const otherKey = await loadSessionKey({
       SESSION_SECRET: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
     } as Env);
-    const payload = createSessionPayload("user-1", "workos-1");
+    const payload = createSessionPayload("user-1", "workos-1", 7);
     const sealed = await sealSession(payload, key);
     expect(await unsealSession(sealed, otherKey)).toBeNull();
   });
@@ -77,7 +99,7 @@ describe("sealSession / unsealSession", () => {
 
 describe("unsealSessionIgnoringExpiry", () => {
   it("round-trips a valid, non-expired payload", async () => {
-    const payload = createSessionPayload("user-1", "workos-1", undefined, "session_abc");
+    const payload = createSessionPayload("user-1", "workos-1", 7, undefined, "session_abc");
     const sealed = await sealSession(payload, key);
     const unsealed = await unsealSessionIgnoringExpiry(sealed, key);
     expect(unsealed).toEqual(payload);
@@ -87,6 +109,7 @@ describe("unsealSessionIgnoringExpiry", () => {
     const payload = createSessionPayload(
       "user-1",
       "workos-1",
+      7,
       Date.now() - 1000 * 60 * 60 * 24 * 30,
       "session_expired_but_still_live",
     );
@@ -96,7 +119,7 @@ describe("unsealSessionIgnoringExpiry", () => {
   });
 
   it("still rejects a tampered cookie value", async () => {
-    const payload = createSessionPayload("user-1", "workos-1");
+    const payload = createSessionPayload("user-1", "workos-1", 7);
     const sealed = await sealSession(payload, key);
     const tampered = sealed.slice(0, -2) + (sealed.slice(-2) === "AA" ? "BB" : "AA");
     expect(await unsealSessionIgnoringExpiry(tampered, key)).toBeNull();
@@ -106,7 +129,7 @@ describe("unsealSessionIgnoringExpiry", () => {
     const otherKey = await loadSessionKey({
       SESSION_SECRET: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
     } as Env);
-    const payload = createSessionPayload("user-1", "workos-1");
+    const payload = createSessionPayload("user-1", "workos-1", 7);
     const sealed = await sealSession(payload, key);
     expect(await unsealSessionIgnoringExpiry(sealed, otherKey)).toBeNull();
   });

@@ -6,6 +6,9 @@ import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { DomainAllowlistService } from "../../lib/services/DomainAllowlistService";
 import { UserIdentityService, type WorkOSProfile } from "../../lib/services/UserIdentityService";
+import { getOrgScopeByWorkosOrgId } from "../repositories/organizations";
+import { getOrgScopesForUser } from "../repositories/users";
+import { AUDIT_ACTIONS, auditBestEffort } from "../utils/audit";
 import {
   SESSION_COOKIE_NAME,
   SESSION_TTL_SECONDS,
@@ -116,10 +119,29 @@ export async function callbackHandler(c: Context<AppEnv>) {
       }
     }
 
-    const { userId } = await new UserIdentityService(cipher, db).createOrClaimUser(workosUser);
+    const { userId, isNew, sessionEpoch } = await new UserIdentityService(
+      cipher,
+      db,
+    ).createOrClaimUser(workosUser);
+
+    // Best-effort (#147): a login/provisioning audit gap must never block
+    // sign-in. Scoped via the WorkOS org the user just authenticated into
+    // (getOrgScopesForUser, the course-membership-derived lookup used
+    // elsewhere in this file, can't be used here -- a brand-new user has no
+    // memberships yet). No-ops if no local org row matches (single-tenant
+    // v0 dev path), same fallback DomainAllowlistService already makes.
+    const orgScope = await getOrgScopeByWorkosOrgId(db, workosOrganizationId);
+    if (orgScope) {
+      await auditBestEffort(db, [orgScope], {
+        actorUserId: userId,
+        action: isNew ? AUDIT_ACTIONS.USER_PROVISIONED : AUDIT_ACTIONS.USER_LOGIN,
+        targetType: "user",
+        targetId: userId,
+      });
+    }
 
     const sessionKey = await loadSessionKey(c.env);
-    const payload = createSessionPayload(userId, workosUser.id, undefined, workosSessionId);
+    const payload = createSessionPayload(userId, workosUser.id, sessionEpoch, undefined, workosSessionId);
     const sealed = await sealSession(payload, sessionKey);
 
     setCookie(c, SESSION_COOKIE_NAME, sealed, {
@@ -143,6 +165,28 @@ export async function logoutHandler(c: Context<AppEnv>) {
   const session = await extractSession(c);
   const workosSessionId = session?.workosSessionId ?? (await recoverWorkosSessionId(c));
   deleteCookie(c, SESSION_COOKIE_NAME, { path: "/" });
+
+  // Best-effort and defensively wrapped (#147): logout must clear the
+  // local cookie and still redirect to WorkOS's own sign-out even if the
+  // DB is unreachable -- rolesMiddleware's PUBLIC_API_PATHS carve-out for
+  // this route exists for exactly that reason. Only audited when a valid
+  // (non-expired) session was present; the rare expired-cookie-but-still-
+  // WorkOS-logging-out edge case recoverWorkosSessionId handles has no
+  // app-side session to audit against anyway.
+  if (session) {
+    try {
+      const db = makeDb(c.env.DATABASE_URL);
+      const orgScopes = await getOrgScopesForUser(db, session.userId);
+      await auditBestEffort(db, orgScopes, {
+        actorUserId: session.userId,
+        action: AUDIT_ACTIONS.USER_LOGOUT,
+        targetType: "user",
+        targetId: session.userId,
+      });
+    } catch (err) {
+      logServerError("logoutHandler", err);
+    }
+  }
 
   if (workosSessionId) {
     const workos = getWorkOS(c.env.WORKOS_API_KEY);

@@ -2,8 +2,11 @@ import type { IdentityCipherKeys } from "./crypto/identity-cipher";
 import { importAesGcmKey } from "./crypto/keys";
 
 /** v0 ships a single active encryption key id. Rotation tooling lands
- *  when key rotation is actually needed (see identity-cipher.ts header). */
-const ACTIVE_KEY_ID = "k1";
+ *  when key rotation is actually needed (see identity-cipher.ts header).
+ *  Exported so anything constructing an IdentityCipher outside the Worker
+ *  (e.g. scripts/seed.ts) encrypts under the same key id the app decrypts
+ *  with -- decryptString hard-fails on an unrecognized key id. */
+export const ACTIVE_KEY_ID = "k1";
 
 export async function loadIdentityCipherKeys(env: Env): Promise<IdentityCipherKeys> {
   const encryptionKeyB64 = env.ENCRYPTION_KEY;

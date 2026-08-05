@@ -22,6 +22,83 @@
       "when": 1785540410379,
       "tag": "0002_flimsy_lord_tyger",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1785790305190,
+      "tag": "0003_famous_hannibal_king",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785802062422,
+      "tag": "0004_thick_spyke",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1785802218063,
+      "tag": "0005_fresh_thunderbolt_ross",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1785820963085,
+      "tag": "0006_grades_grader_membership_restrict",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1785821821871,
+      "tag": "0007_gate_user_deletion_cascade",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1785822316758,
+      "tag": "0008_scope_helper_and_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1785822699664,
+      "tag": "0009_minor_cleanups_from_review",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1785865761901,
+      "tag": "0010_round2_span_check_fix",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1785869611185,
+      "tag": "0011_user_deactivation_session_epoch",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1785872850220,
+      "tag": "0012_webhook_events_and_membership_cascade",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1785885597306,
+      "tag": "0013_webhook_event_claimed_status",
+      "breakpoints": true
     }
   ]
 }

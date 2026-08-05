@@ -1,6 +1,7 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 import { getProfileHandler, patchProfileHandler } from "./profile";
+import { auditEvents } from "../../db/schema";
 import type { SessionPayload } from "../../lib/session";
 import type { AppEnv } from "../context";
 
@@ -10,7 +11,43 @@ const TEST_ENV = {
   DATABASE_URL: "ignored",
 } as Env;
 
-vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
+// #147: patchProfileHandler audits every successful update. auditInserts
+// captures those writes (db.insert(auditEvents, ...), dispatched by table
+// the same way auth.test.ts's mock does); dbOrgScopesForUser feeds
+// getOrgScopesForUser's selectDistinct query.
+let auditInserts: Record<string, unknown>[] = [];
+let dbOrgScopesForUser: string[] = [];
+let auditInsertError: Error | null = null;
+
+vi.mock("../../db/client", () => ({
+  makeDb: () => ({
+    insert: (table: unknown) => {
+      if (table === auditEvents) {
+        return {
+          values: (v: Record<string, unknown>) => {
+            if (auditInsertError) throw auditInsertError;
+            auditInserts.push(v);
+            return { returning: async () => [{ id: "audit-1", ...v }] };
+          },
+        };
+      }
+      throw new Error("unexpected insert in profile.test.ts mock");
+    },
+    selectDistinct: () => ({
+      from: () => ({
+        innerJoin: () => ({
+          where: async () => dbOrgScopesForUser.map((organizationId) => ({ organizationId })),
+        }),
+      }),
+    }),
+  }),
+}));
+
+beforeEach(() => {
+  auditInserts = [];
+  dbOrgScopesForUser = [];
+  auditInsertError = null;
+});
 
 const getProfileWithStats = vi.fn();
 const updateDisplayName = vi.fn();
@@ -36,7 +73,7 @@ function buildApp(session: SessionPayload | undefined) {
   return app;
 }
 
-const SESSION: SessionPayload = { userId: "u1", workosUserId: "w1", issuedAt: 0, expiresAt: 0 };
+const SESSION: SessionPayload = { userId: "u1", workosUserId: "w1", sessionEpoch: 0, issuedAt: 0, expiresAt: 0 };
 
 describe("GET /api/profile", () => {
   it("returns 401 without a session", async () => {
@@ -101,6 +138,57 @@ describe("PATCH /api/profile", () => {
     );
     expect(res.status).toBe(200);
     expect(updateDisplayName).toHaveBeenCalledWith("u1", "New Name");
+  });
+
+  it("audits profile.updated (#147) against every org the user belongs to", async () => {
+    dbOrgScopesForUser = ["org-a", "org-b"];
+    updateDisplayName.mockResolvedValue({ displayName: "New Name" });
+
+    const res = await buildApp(SESSION).request(
+      "/api/profile",
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "New Name" }),
+      },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(200);
+    expect(auditInserts).toHaveLength(2);
+    expect(auditInserts.map((a) => a.organizationId).sort()).toEqual(["org-a", "org-b"]);
+    for (const insert of auditInserts) {
+      expect(insert).toMatchObject({
+        actorUserId: "u1",
+        action: "profile.updated",
+        targetType: "user",
+        targetId: "u1",
+      });
+    }
+  });
+
+  it("still returns the updated profile even if the audit write fails", async () => {
+    updateDisplayName.mockResolvedValue({ displayName: "New Name" });
+    dbOrgScopesForUser = ["org-a"];
+    auditInsertError = new Error("connection refused: ECONNREFUSED");
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await buildApp(SESSION).request(
+      "/api/profile",
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "New Name" }),
+      },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { displayName: string };
+    expect(body.displayName).toBe("New Name");
+    expect(consoleSpy).toHaveBeenCalledWith(expect.anything(), auditInsertError);
+
+    consoleSpy.mockRestore();
   });
 
   it("returns 401 without a session", async () => {
