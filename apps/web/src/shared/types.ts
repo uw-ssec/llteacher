@@ -16,8 +16,14 @@ export interface ProfileWithStats {
 }
 
 import type { HomeworkStatus } from "../server/repositories/homeworks";
+import type { SectionStatusType, StudentHomeworkSummary } from "../server/repositories/studentHomeworks";
 
 export type { HomeworkStatus };
+export type { SectionStatusType, StudentHomeworkSummary };
+
+export interface StudentHomeworkListResponse {
+  homeworks: StudentHomeworkSummary[];
+}
 
 export interface SectionResponse {
   id: string;
