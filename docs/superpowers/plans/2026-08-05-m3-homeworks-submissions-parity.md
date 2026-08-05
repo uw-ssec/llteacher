@@ -26,7 +26,8 @@
 3. **Conversation FK cascade policy (#19)**: kept as-is. `conversations.sectionId` already has `onDelete: "cascade"` (set in M2) — deleting a section (directly, or via a homework delete/edit-diff) cascades to delete its conversations, messages, and submissions. Documented here rather than re-opened as a schema question; changing it would be a new M2-scope schema decision, out of scope for this epic.
 4. **Auto-submit-overdue (#22)**: explicitly deferred. No Cloudflare Cron Trigger added. `SectionStatus` for an overdue in-progress section is `"in_progress_overdue"` (matches Django), not auto-transitioned to `"submitted"`.
 5. **Homework status model (#94)**: two new nullable timestamp columns, `publishedAt` and `releasedAt`, added to `homeworks`. Status is derived **on read** (no scheduled job): no `publishedAt` → `"draft"`; `releasedAt` in the future → `"scheduled"`; `releasedAt` passed and `dueDate` in the future → `"active"`; `releasedAt` passed and `dueDate` passed → `"past_due"`. `"archived"` (a 5th value already present in `apps/admin`'s fixture-era `Homework.status` type) has no producing feature anywhere in this milestone — the derivation function has an explicit comment marking it unreachable, plus a pointer to file a follow-up issue (confirm with the requester before actually creating it — issue creation needs sign-off per this session's action rules) rather than silently dropping the state.
-6. **`updateHomework` uses `db.batch()`, not `db.transaction()`, with server-generated ids for new sections/solutions** (found during Task 3 implementation, before any code was committed): the plan originally called for `db.transaction(async (tx) => {...})`, but production routes construct `db` via `makeDb()` — the `@neondatabase/serverless` **neon-http** driver, required because this app deploys to Cloudflare Workers (no raw outbound TCP). neon-http's `.transaction()` unconditionally throws (`"No transactions support in neon-http driver"`); confirmed at `node_modules/drizzle-orm/neon-http/session.js`, and no code in this repo calls `db.transaction()` anywhere else. neon-http *does* support `db.batch([...])`: multiple statements sent in one HTTP round-trip, executed as a single real transaction server-side (all-or-nothing, same rollback guarantee as a normal transaction) — the correct primitive for this driver. The one wrinkle: batch statements are packaged before any of them run, so a later statement can't consume an earlier statement's `RETURNING` result the way sequential transaction code could. Fixed by generating each new section's (and its solution's) id via `crypto.randomUUID()` in the repository function itself, before building the batch, and inserting with that id explicit rather than relying on `sections.id`'s `defaultRandom()` — both statements in the batch then reference the same known id with no ordering dependency between them. (`crypto.randomUUID()` is a standard global in both the Workers runtime and modern Node, no import needed.)
+6. **`updateHomework` branches on driver capability at runtime: `db.batch()` in production, a real `db.transaction()` for real-DB tests, with server-generated ids for new sections/solutions** (found during Task 3 implementation, before any code was committed; refined twice as the full picture emerged). The plan originally called for `db.transaction(async (tx) => {...})` unconditionally, but production routes construct `db` via `makeDb()` — the `@neondatabase/serverless` **neon-http** driver, required because this app deploys to Cloudflare Workers (no raw outbound TCP). neon-http's `.transaction()` unconditionally throws (`"No transactions support in neon-http driver"`); confirmed at `node_modules/drizzle-orm/neon-http/session.js`, and no code in this repo calls `db.transaction()` anywhere else. neon-http *does* support `db.batch([...])`: multiple statements sent in one HTTP round-trip, executed as a single real transaction server-side (all-or-nothing, same rollback guarantee as a normal transaction). The wrinkle: batch statements are packaged before any of them run, so a later statement can't consume an earlier statement's `RETURNING` result the way sequential transaction code could — fixed by generating each new section's (and its solution's) id via `crypto.randomUUID()` in the repository function itself, before building the batch, and inserting with that id explicit rather than relying on `sections.id`'s `defaultRandom()`.
+   Switching to `db.batch()` alone wasn't the end of it: real-DB tests use `makeNodeDb` (node-postgres driver, needed because neon-http can't reach a plain Postgres server at all — see M2's decision 9), and node-postgres has the *opposite* gap — it supports `db.transaction()` but has no `.batch()` at runtime, despite `nodeClient.ts`'s cast making the shared `Db` type claim otherwise. Naively falling back to "wrap the same statements in a node-postgres transaction" doesn't give real atomicity either: Drizzle query-builder objects (`db.insert(...)`, etc.) are bound to whichever executor built them, so statements built against the outer `db` and merely awaited inside a `tx` callback would run on a different pooled connection than the transaction, not inside it. Resolved by keeping `resolveSectionWrites`'s reorder-resolution *algorithm* identical on both paths (it never touches `db` directly, only the three callback params) and branching only on *how a resolved write executes*: `updateHomework` feature-detects `typeof db.batch === "function"` and either (a) collects query-builder objects built against `db` into an array for one `db.batch()` call, or (b) opens a real `db.transaction()` and awaits each write immediately against `tx`. This means real-DB tests exercise the exact same ordering logic production runs — only the execution mechanics differ, not the logic being verified. (`crypto.randomUUID()` is a standard global in both the Workers runtime and modern Node, no import needed.)
 7. **Reordering existing sections resolved via dependency-ordered application with cycle-breaking scratch bumps, not a schema change** (found during Task 3 implementation): `sections_homework_order_uq` is a plain (non-deferrable) unique index — Postgres checks it immediately after each statement, whether inside `db.transaction()` or `db.batch()`. Naively applying every reordered section's `UPDATE` in plan order can collide mid-batch (e.g. swapping two sections' orders, or shifting a range when a section is inserted in the middle). Fixed at the application level, not by making the constraint deferrable (which would need a new migration and wasn't confirmed compatible with the installed Drizzle version) or by hand-writing non-generated migration SQL: `updateHomework` builds a dependency graph of "this section wants to move into order slot N," applies any move whose target slot is currently unoccupied (repeating in passes, since freeing one slot often unblocks another — this alone resolves plain shifts/insertions with zero scratch values, verified by hand-tracing an insert-in-the-middle scenario), and only when a genuine cycle remains (every remaining move's target is held by another remaining move) bumps one section in the cycle to a scratch order value not used by anyone in the homework, breaking the cycle so the pass-based resolution can finish. If no scratch value exists in `[1, 20]` (only possible when a homework already has all 20 allowed sections and the diff is a full cyclic rotation touching every one of them at once), `updateHomework` throws a descriptive error that the existing `/order|section/i` route-layer regex (Task 6) already maps to a 422 asking the instructor to reorder in two smaller steps — an explicitly accepted, narrow edge case rather than a silent failure.
 
 ---
@@ -333,6 +334,7 @@ git commit -m "feat(homeworks): pure section-diff planner (#19)"
 **Files:**
 - Modify: `apps/web/src/server/repositories/homeworks.ts`
 - Test: `apps/web/src/server/repositories/homeworks.test.ts` (new file — none existed before; the route test file `routes/homeworks.test.ts` is separate)
+- Modify (doc comment only): `apps/web/src/db/nodeClient.ts` — its existing comment justifying the `as unknown as Db` cast says "no code in this codebase uses raw `.execute()`... this cast reflects verified compatibility, not a hidden risk." `updateHomework` is the first code to reference a driver-capability method (`db.batch`) that genuinely differs between the two drivers, not just the common query-builder surface the comment was written about. Add one sentence noting that `db.batch` specifically is feature-detected at the call site (`typeof db.batch === "function"`), never called unconditionally, so the cast's underlying claim ("nothing calls a method whose behavior differs by driver") still holds -- without this note, the next person to add a `.batch()` call elsewhere could easily miss that node-postgres doesn't have one and hit the exact same silent trap this task did.
 
 **Interfaces:**
 - Consumes: `planSectionDiff`, `ExistingSection`, `IncomingSection` from Task 2; `sections`, `sectionSolutions` from `../../db/schema`; `CourseScope` from `./scope`.
@@ -517,13 +519,13 @@ type BatchStatement = Parameters<Db["batch"]>[0][number];
  *  remains (every remaining move's target is held by another remaining
  *  move). See Resolved Design Decision 7 for the full reasoning and a
  *  hand-traced example of both the zero-bump and one-bump cases. */
-function resolveSectionWrites(
+async function resolveSectionWrites(
   existingSections: ExistingSection[],
   deletedIds: Set<string>,
   plan: ReturnType<typeof planSectionDiff>,
-  pushSectionInsert: (id: string, order: number, title: string, content: string) => void,
-  pushSectionUpdate: (id: string, order: number, title: string, content: string) => void,
-  pushSolutionWrites: (sectionId: string, action: SectionUpdatePlan["solutionAction"], content: string | undefined) => void,
+  pushSectionInsert: (id: string, order: number, title: string, content: string) => Promise<void> | void,
+  pushSectionUpdate: (id: string, order: number, title: string, content: string) => Promise<void> | void,
+  pushSolutionWrites: (sectionId: string, action: SectionUpdatePlan["solutionAction"], content: string | undefined) => Promise<void> | void,
 ) {
   type PendingWrite =
     | { kind: "update"; id: string; targetOrder: number; title: string; content: string; solutionAction: SectionUpdatePlan["solutionAction"]; solutionContent?: string }
@@ -545,8 +547,8 @@ function resolveSectionWrites(
     if (prior.order === upd.order) {
       // No collision possible -- write it immediately, it never competes
       // for a slot with anything else in this diff.
-      pushSectionUpdate(upd.id, upd.order, upd.title, upd.content);
-      pushSolutionWrites(upd.id, upd.solutionAction, upd.solutionContent);
+      await pushSectionUpdate(upd.id, upd.order, upd.title, upd.content);
+      await pushSolutionWrites(upd.id, upd.solutionAction, upd.solutionContent);
     } else {
       pending.push({ kind: "update", id: upd.id, targetOrder: upd.order, title: upd.title, content: upd.content, solutionAction: upd.solutionAction, solutionContent: upd.solutionContent });
     }
@@ -557,15 +559,15 @@ function resolveSectionWrites(
 
   const placed = new Set<PendingWrite>();
 
-  function apply(write: PendingWrite) {
+  async function apply(write: PendingWrite) {
     if (write.kind === "create") {
-      pushSectionInsert(write.id, write.targetOrder, write.title, write.content);
+      await pushSectionInsert(write.id, write.targetOrder, write.title, write.content);
       if (write.solutionContent !== undefined) {
-        pushSolutionWrites(write.id, "create", write.solutionContent);
+        await pushSolutionWrites(write.id, "create", write.solutionContent);
       }
     } else {
-      pushSectionUpdate(write.id, write.targetOrder, write.title, write.content);
-      pushSolutionWrites(write.id, write.solutionAction, write.solutionContent);
+      await pushSectionUpdate(write.id, write.targetOrder, write.title, write.content);
+      await pushSolutionWrites(write.id, write.solutionAction, write.solutionContent);
       const prevOrder = livePosition.get(write.id);
       if (prevOrder !== undefined) currentOccupant.delete(prevOrder);
     }
@@ -574,21 +576,21 @@ function resolveSectionWrites(
     placed.add(write);
   }
 
-  function runPasses() {
+  async function runPasses() {
     let progress = true;
     while (progress) {
       progress = false;
       for (const write of pending) {
         if (placed.has(write)) continue;
         if (!currentOccupant.has(write.targetOrder)) {
-          apply(write);
+          await apply(write);
           progress = true;
         }
       }
     }
   }
 
-  runPasses();
+  await runPasses();
 
   while (pending.some((w) => !placed.has(w))) {
     const stillOpen = pending.filter((w) => !placed.has(w));
@@ -609,21 +611,30 @@ function resolveSectionWrites(
     // a create could ever be the thing left stuck.
     const stuck = stillOpen.find((w): w is Extract<PendingWrite, { kind: "update" }> => w.kind === "update")!;
     const stuckCurrentOrder = livePosition.get(stuck.id)!;
-    pushSectionUpdate(stuck.id, scratch, existingById.get(stuck.id)!.title, existingById.get(stuck.id)!.content);
+    await pushSectionUpdate(stuck.id, scratch, existingById.get(stuck.id)!.title, existingById.get(stuck.id)!.content);
     currentOccupant.delete(stuckCurrentOrder);
     currentOccupant.set(scratch, stuck.id);
     livePosition.set(stuck.id, scratch);
-    runPasses();
+    await runPasses();
   }
 }
 
-/** Applies planSectionDiff's plan (Task 2) via db.batch() (see Resolved
- *  Design Decision 6 -- production's neon-http driver has no
- *  db.transaction() support) alongside any top-level homework field
- *  updates. Returns null if `id` isn't found in `scope` (caller maps that
- *  to 404). Throws for constraint violations (duplicate/out-of-range
- *  order) and for the unresolvable-cycle edge case above, both uncaught --
- *  the route layer (Task 6) catches and maps those to a 422. */
+/** Applies planSectionDiff's plan (Task 2) atomically alongside any
+ *  top-level homework field updates. Branches on driver capability at
+ *  runtime (see Resolved Design Decision 6): production's neon-http driver
+ *  supports `db.batch()` but not `db.transaction()`; the node-postgres
+ *  driver real-DB tests use (`makeNodeDb`) is the mirror image --
+ *  `db.transaction()` works, `db.batch` doesn't exist at runtime despite
+ *  the shared `Db` type claiming it does. Feature-detect via
+ *  `typeof db.batch === "function"` (a missing method is a TypeError at
+ *  the call site, not something to try/catch). `resolveSectionWrites`'s
+ *  ordering algorithm is identical either way -- only whether a resolved
+ *  write defers into a batch array or executes immediately against `tx`
+ *  differs, so real-DB tests exercise the same logic production runs.
+ *  Returns null if `id` isn't found in `scope` (caller maps that to 404).
+ *  Throws for constraint violations (duplicate/out-of-range order) and for
+ *  the unresolvable-cycle edge case, both uncaught -- the route layer
+ *  (Task 6) catches and maps those to a 422. */
 export async function updateHomework(
   db: Db,
   scope: CourseScope,
@@ -635,20 +646,19 @@ export async function updateHomework(
   });
   if (!existingHomework) return null;
 
-  const statements: BatchStatement[] = [];
-
   const topLevelFields = {
     ...(input.title !== undefined && { title: input.title }),
     ...(input.description !== undefined && { description: input.description }),
     ...(input.dueDate !== undefined && { dueDate: input.dueDate }),
     ...(input.llmConfigId !== undefined && { llmConfigId: input.llmConfigId }),
   };
-  if (Object.keys(topLevelFields).length > 0) {
-    statements.push(db.update(homeworks).set({ ...topLevelFields, updatedAt: new Date() }).where(eq(homeworks.id, id)));
-  }
 
+  // Read-then-plan happens outside either write path -- it's a SELECT, not
+  // a mutation, so there's nothing to keep atomic about it yet.
+  let existingSections: ExistingSection[] = [];
+  let plan: ReturnType<typeof planSectionDiff> | null = null;
   if (input.sections) {
-    const existingSections: ExistingSection[] = (
+    existingSections = (
       await db.query.sections.findMany({
         where: eq(sections.homeworkId, id),
         with: { solution: true },
@@ -660,48 +670,89 @@ export async function updateHomework(
       content: s.content,
       solutionId: s.solution?.id ?? null,
     }));
+    plan = planSectionDiff(existingSections, input.sections);
+  }
 
-    const plan = planSectionDiff(existingSections, input.sections);
-    const deletedIds = new Set(plan.toDelete.map((d) => d.id));
-
-    // Deletes first -- unconditionally safe, and immediately frees their
-    // order slots for anything else in this diff that wants to reuse them.
-    for (const del of plan.toDelete) {
-      statements.push(db.delete(sections).where(eq(sections.id, del.id)));
+  if (typeof db.batch === "function") {
+    // Production path: neon-http. Collect query-builder objects (built
+    // against `db`) and execute them all as one atomic HTTP round-trip.
+    const statements: BatchStatement[] = [];
+    if (Object.keys(topLevelFields).length > 0) {
+      statements.push(db.update(homeworks).set({ ...topLevelFields, updatedAt: new Date() }).where(eq(homeworks.id, id)));
     }
-
-    resolveSectionWrites(
-      existingSections,
-      deletedIds,
-      plan,
-      (sectionId, order, title, content) => {
-        statements.push(db.insert(sections).values({ id: sectionId, homeworkId: id, title, content, order }));
-      },
-      (sectionId, order, title, content) => {
-        statements.push(db.update(sections).set({ title, content, order, updatedAt: new Date() }).where(eq(sections.id, sectionId)));
-      },
-      (sectionId, action, content) => {
-        if (action === "create") {
-          statements.push(db.insert(sectionSolutions).values({ sectionId, content: content! }));
-        } else if (action === "update") {
-          statements.push(db.update(sectionSolutions).set({ content: content!, updatedAt: new Date() }).where(eq(sectionSolutions.sectionId, sectionId)));
-        } else if (action === "delete") {
-          statements.push(db.delete(sectionSolutions).where(eq(sectionSolutions.sectionId, sectionId)));
-        }
-      },
-    );
+    if (plan) {
+      const deletedIds = new Set(plan.toDelete.map((d) => d.id));
+      for (const del of plan.toDelete) {
+        statements.push(db.delete(sections).where(eq(sections.id, del.id)));
+      }
+      await resolveSectionWrites(
+        existingSections,
+        deletedIds,
+        plan,
+        (sectionId, order, title, content) => {
+          statements.push(db.insert(sections).values({ id: sectionId, homeworkId: id, title, content, order }));
+        },
+        (sectionId, order, title, content) => {
+          statements.push(db.update(sections).set({ title, content, order, updatedAt: new Date() }).where(eq(sections.id, sectionId)));
+        },
+        (sectionId, action, content) => {
+          if (action === "create") {
+            statements.push(db.insert(sectionSolutions).values({ sectionId, content: content! }));
+          } else if (action === "update") {
+            statements.push(db.update(sectionSolutions).set({ content: content!, updatedAt: new Date() }).where(eq(sectionSolutions.sectionId, sectionId)));
+          } else if (action === "delete") {
+            statements.push(db.delete(sectionSolutions).where(eq(sectionSolutions.sectionId, sectionId)));
+          }
+        },
+      );
+    }
+    if (statements.length > 0) {
+      // db.batch() requires a non-empty tuple type in some Drizzle
+      // versions -- verify against the installed drizzle-orm's neon-http
+      // batch() signature (check node_modules/drizzle-orm/neon-http/
+      // session.d.ts or let TypeScript's error on this call guide the
+      // exact expected type) and adjust the cast if needed.
+      await db.batch(statements as [BatchStatement, ...BatchStatement[]]);
+    }
+    return { id };
   }
 
-  if (statements.length > 0) {
-    // db.batch() requires a non-empty tuple type in some Drizzle versions --
-    // verify against the installed drizzle-orm's neon-http batch() signature
-    // (check node_modules/drizzle-orm/neon-http/session.d.ts or let
-    // TypeScript's error on this call guide the exact expected type) and
-    // adjust the `statements` array's declared type/cast if needed.
-    await db.batch(statements as [BatchStatement, ...BatchStatement[]]);
-  }
-
-  return { id };
+  // Test/dev path: node-postgres (makeNodeDb) has no runtime db.batch().
+  // A real db.transaction() gives the same all-or-nothing guarantee
+  // through a different Drizzle primitive -- every write executes
+  // immediately against `tx` rather than deferring into an array.
+  return db.transaction(async (tx) => {
+    if (Object.keys(topLevelFields).length > 0) {
+      await tx.update(homeworks).set({ ...topLevelFields, updatedAt: new Date() }).where(eq(homeworks.id, id));
+    }
+    if (plan) {
+      const deletedIds = new Set(plan.toDelete.map((d) => d.id));
+      for (const del of plan.toDelete) {
+        await tx.delete(sections).where(eq(sections.id, del.id));
+      }
+      await resolveSectionWrites(
+        existingSections,
+        deletedIds,
+        plan,
+        async (sectionId, order, title, content) => {
+          await tx.insert(sections).values({ id: sectionId, homeworkId: id, title, content, order });
+        },
+        async (sectionId, order, title, content) => {
+          await tx.update(sections).set({ title, content, order, updatedAt: new Date() }).where(eq(sections.id, sectionId));
+        },
+        async (sectionId, action, content) => {
+          if (action === "create") {
+            await tx.insert(sectionSolutions).values({ sectionId, content: content! });
+          } else if (action === "update") {
+            await tx.update(sectionSolutions).set({ content: content!, updatedAt: new Date() }).where(eq(sectionSolutions.sectionId, sectionId));
+          } else if (action === "delete") {
+            await tx.delete(sectionSolutions).where(eq(sectionSolutions.sectionId, sectionId));
+          }
+        },
+      );
+    }
+    return { id };
+  });
 }
 ```
 
