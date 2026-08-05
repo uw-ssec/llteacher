@@ -5,6 +5,7 @@ import {
   createHomeworkHandler,
   getHomeworkDetailHandler,
   updateHomeworkHandler,
+  deleteHomeworkHandler,
 } from "./homeworks";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
@@ -38,11 +39,13 @@ vi.mock("../../db/client", () => ({
 // the handlers above) running against their real implementation over the
 // already-mocked db client.
 const updateHomeworkMock = vi.fn();
+const deleteHomeworkMock = vi.fn();
 vi.mock("../repositories/homeworks", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../repositories/homeworks")>();
   return {
     ...actual,
     updateHomework: (...args: unknown[]) => updateHomeworkMock(...args),
+    deleteHomework: (...args: unknown[]) => deleteHomeworkMock(...args),
   };
 });
 
@@ -74,6 +77,7 @@ function buildApp(authContext: AuthContext | undefined) {
   app.post("/api/courses/:courseId/homeworks", (c) => createHomeworkHandler(c));
   app.get("/api/courses/:courseId/homeworks/:homeworkId", (c) => getHomeworkDetailHandler(c));
   app.patch("/api/courses/:courseId/homeworks/:homeworkId", (c) => updateHomeworkHandler(c));
+  app.delete("/api/courses/:courseId/homeworks/:homeworkId", (c) => deleteHomeworkHandler(c));
   return app;
 }
 
@@ -334,5 +338,33 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
       body: JSON.stringify({ title: "Updated" }),
     }, TEST_ENV);
     expect(res.status).toBe(200);
+  });
+});
+
+describe("DELETE /api/courses/:courseId/homeworks/:homeworkId", () => {
+  it("denies a non-instructor with 403", async () => {
+    const res = await buildApp(
+      fakeAuthContext({ isInstructorOf: () => false }),
+    ).request("/api/courses/course-a/homeworks/hw-1", { method: "DELETE" }, TEST_ENV);
+    expect(res.status).toBe(403);
+  });
+
+  it("returns 404 when not found in scope", async () => {
+    deleteHomeworkMock.mockReset().mockResolvedValue(null);
+    const res = await buildApp(
+      // isMemberOf must also be true -- courseScopeFromAuthContext requires
+      // it independent of isInstructorOf (same gap found and fixed in Tasks
+      // 5/6's test fixtures; fixed proactively here before dispatch).
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", { method: "DELETE" }, TEST_ENV);
+    expect(res.status).toBe(404);
+  });
+
+  it("deletes and returns 204", async () => {
+    deleteHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1" });
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", { method: "DELETE" }, TEST_ENV);
+    expect(res.status).toBe(204);
   });
 });

@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { makeDb } from "../../db/client";
-import { listHomeworksForCourse, createHomework, getHomeworkById, deriveHomeworkStatus, updateHomework } from "../repositories/homeworks";
+import { listHomeworksForCourse, createHomework, getHomeworkById, deriveHomeworkStatus, updateHomework, deleteHomework } from "../repositories/homeworks";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import { requireCourseMember, requireInstructorOf } from "../utils/guards";
 import type { AuthContext } from "../middleware/roles";
@@ -199,6 +199,23 @@ export async function updateHomeworkHandler(c: Context<AppEnv>) {
   }
 }
 
+export async function deleteHomeworkHandler(c: Context<AppEnv>) {
+  const courseId = c.req.param("courseId");
+  const homeworkId = c.req.param("homeworkId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+
+  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
+    return c.json({ error: "Instructor access denied" }, 403);
+  }
+  const scope = courseScopeFromAuthContext(authContext, courseId);
+  if (!scope) return c.json({ error: "Course access denied" }, 403);
+
+  const db = makeDb(c.env.DATABASE_URL);
+  const deleted = await deleteHomework(db, scope, homeworkId!);
+  if (!deleted) return c.json({ error: "Homework not found" }, 404);
+  return c.body(null, 204);
+}
+
 // Sub-app preserved for direct unit testing; production routing happens via
 // app.get/post("/api/courses/:courseId/homeworks", ...) in server/index.ts.
 export const homeworksRoutes = new Hono<AppEnv>();
@@ -206,3 +223,4 @@ homeworksRoutes.get("/", requireCourseMember()(listHomeworksHandler));
 homeworksRoutes.post("/", requireInstructorOf()(createHomeworkHandler));
 homeworksRoutes.get("/:homeworkId", requireCourseMember()(getHomeworkDetailHandler));
 homeworksRoutes.patch("/:homeworkId", requireInstructorOf()(updateHomeworkHandler));
+homeworksRoutes.delete("/:homeworkId", requireInstructorOf()(deleteHomeworkHandler));
