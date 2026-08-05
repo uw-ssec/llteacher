@@ -713,7 +713,7 @@ git commit -m "feat(homeworks): getHomeworkById/updateHomework/deleteHomework/pu
 
 **Interfaces:**
 - Consumes: `HomeworkStatus` from `../server/repositories/homeworks`.
-- Produces: `SectionResponse`, `HomeworkDetailResponse`, `HomeworkListItemResponse`, `SectionDiffInput`, `HomeworkUpdateBody`, `HomeworkPublishBody` — consumed by Phase 1's routes (Tasks 5-8) and by Phase 3's admin form (Phase 3 Task 1).
+- Produces: `SectionResponse`, `HomeworkDetailResponse`, `HomeworkListItemResponse`, `SectionDiffInput`, `HomeworkUpdateBody`, `HomeworkPublishBody` — consumed by Phase 1's routes (Tasks 5-8) and by Phase 3's admin form (Task 12).
 
 - [ ] **Step 1: Add the DTOs**
 
@@ -1321,7 +1321,7 @@ git commit -m "feat(homeworks): PATCH /:homeworkId/publish draft/publish/schedul
 
 ## Phase 2 — Issue #20: Student homework list + section progress
 
-### Task 1: Repository — enrollment-scoped student homework query + section status
+### Task 9: Repository — enrollment-scoped student homework query + section status
 
 **Files:**
 - Create: `apps/web/src/server/repositories/studentHomeworks.ts`
@@ -1510,7 +1510,7 @@ git commit -m "feat(student): enrollment-scoped homework list + section status d
 
 ---
 
-### Task 2: Shared DTO + route — `GET /api/student/homeworks`
+### Task 10: Shared DTO + route — `GET /api/student/homeworks`
 
 **Files:**
 - Modify: `apps/web/src/shared/types.ts`
@@ -1518,7 +1518,7 @@ git commit -m "feat(student): enrollment-scoped homework list + section status d
 - Modify: `apps/web/src/server/index.ts`
 
 **Interfaces:**
-- Consumes: `getStudentHomeworksForUser` (Task 1); `requireRole` (existing guard).
+- Consumes: `getStudentHomeworksForUser` (Task 9); `requireRole` (existing guard).
 - Produces: `studentHomeworksHandler(c)`, mounted at `GET /api/student/homeworks`.
 
 - [ ] **Step 1: Add the DTO**
@@ -1644,13 +1644,13 @@ git commit -m "feat(student): GET /api/student/homeworks route (#20)"
 
 ---
 
-### Task 3: Client — wire `App.tsx` to the real endpoint
+### Task 11: Client — wire `App.tsx` to the real endpoint
 
 **Files:**
 - Modify: `apps/web/src/client/App.tsx`
 
 **Interfaces:**
-- Consumes: `GET /api/student/homeworks` (Task 2); existing `Sidebar`/`SidebarSection` from `@llteacher/ui`.
+- Consumes: `GET /api/student/homeworks` (Task 10); existing `Sidebar`/`SidebarSection` from `@llteacher/ui`.
 - Produces: no new exports — `App` component behavior change only.
 
 - [ ] **Step 1: Replace the `INITIAL_SECTIONS` fixture with a fetch hook**
@@ -1727,7 +1727,7 @@ git commit -m "feat(student): wire sidebar to real homework/section data, drop I
 
 ## Phase 3 — Issue #21: Admin homework create/edit form
 
-### Task 1: `computeSectionDiff` — client-side mirror of the server diff
+### Task 12: `computeSectionDiff` — client-side mirror of the server diff
 
 **Files:**
 - Create: `apps/admin/src/client/lib/computeSectionDiff.ts`, `.test.ts`
@@ -1823,7 +1823,7 @@ git commit -m "feat(admin): client-side section diff mirroring the server's diff
 
 ---
 
-### Task 2: Extend admin fixtures/types to match the real schema (interim, until Task 4 wires the real fetch)
+### Task 13: Extend admin fixtures/types to match the real schema (interim, until Task 15 wires the real fetch)
 
 **Files:**
 - Modify: `apps/admin/src/client/lib/fixtures.ts`
@@ -1857,14 +1857,14 @@ git commit -m "feat(admin): add SectionDetail type for the homework form (#21)"
 
 ---
 
-### Task 3: `HomeworkForm` component (field array, validation, publish tab)
+### Task 14: `HomeworkForm` component (field array, validation, publish tab)
 
 **Files:**
 - Create: `apps/admin/src/client/components/HomeworkForm.tsx`, `.test.tsx`
 - Modify: `apps/admin/package.json` (add `react-hook-form` dependency if not already present — check first)
 
 **Interfaces:**
-- Consumes: `computeSectionDiff` (Task 1), `SectionDetail` (Task 2), `LLMConfig` (existing fixtures type).
+- Consumes: `computeSectionDiff` (Task 12), `SectionDetail` (Task 13), `LLMConfig` (existing fixtures type).
 - Produces: `HomeworkForm` component, `HomeworkFormProps`, `HomeworkFormValues` — consumed by Task 5's `HomeworkCreateView`/`HomeworkEditView`.
 
 - [ ] **Step 1: Confirm `react-hook-form` is available**
@@ -2108,14 +2108,14 @@ git commit -m "feat(admin): HomeworkForm with section field array, publish tab, 
 
 ---
 
-### Task 4: `HomeworkCreateView` / `HomeworkEditView` wired to the real API
+### Task 15: `HomeworkCreateView` / `HomeworkEditView` wired to the real API
 
 **Files:**
 - Create: `apps/admin/src/client/views/HomeworkCreateView.tsx`, `apps/admin/src/client/views/HomeworkEditView.tsx`
 - Modify: `apps/admin/src/client/App.tsx` (route the "New homework" button, add `edit-homework`/`create-homework` view states)
 
 **Interfaces:**
-- Consumes: `HomeworkForm` (Task 3); `POST /api/courses/:courseId/homeworks`, `GET/PATCH /api/courses/:courseId/homeworks/:homeworkId`, `PATCH .../publish` (Phase 1).
+- Consumes: `HomeworkForm` (Task 14); `POST /api/courses/:courseId/homeworks`, `GET/PATCH /api/courses/:courseId/homeworks/:homeworkId`, `PATCH .../publish` (Phase 1).
 - Produces: `HomeworkCreateView`, `HomeworkEditView` components.
 
 - [ ] **Step 1: Implement `HomeworkCreateView`**
@@ -2277,7 +2277,7 @@ git commit -m "feat(admin): wire New/Edit homework to the real CRUD + publish AP
 
 ## Phase 4 — Issue #22: Section submission flow
 
-### Task 1: Repository — owner-checked submission upsert
+### Task 16: Repository — owner-checked submission upsert
 
 **Files:**
 - Modify: `apps/web/src/server/repositories/submissions.ts`
@@ -2359,7 +2359,7 @@ git commit -m "feat(submissions): owner-checked submit/resubmit upsert (#22)"
 
 ---
 
-### Task 2: Route — `POST /api/conversations/:id/submit`
+### Task 17: Route — `POST /api/conversations/:id/submit`
 
 **Files:**
 - Create: `apps/web/src/server/routes/submissions.ts`, `.test.ts`
@@ -2367,7 +2367,7 @@ git commit -m "feat(submissions): owner-checked submit/resubmit upsert (#22)"
 - Modify: `apps/web/src/shared/types.ts`
 
 **Interfaces:**
-- Consumes: `submitSection` (Task 1); `requireRole` guard; needs an `OrgScope` — the route has no `:courseId` param (URL is keyed by conversation), so it derives org scope from the caller's own memberships via `getOrgScopesForUser` (existing, in `repositories/users.ts`) rather than `courseScopeFromAuthContext`.
+- Consumes: `submitSection` (Task 16); `requireRole` guard; needs an `OrgScope` — the route has no `:courseId` param (URL is keyed by conversation), so it derives org scope from the caller's own memberships via `getOrgScopesForUser` (existing, in `repositories/users.ts`) rather than `courseScopeFromAuthContext`.
 
 - [ ] **Step 1: Add `SubmissionResponse` DTO**
 
@@ -2476,7 +2476,7 @@ export async function submitSectionHandler(c: Context<AppEnv>) {
   // A student's conversation belongs to exactly one org via its course;
   // getOrgScopesForUser (existing, repositories/users.ts) returns every org
   // scope reachable through the caller's own non-dropped memberships --
-  // submitSection's own conversation-ownership check (Task 1) is what
+  // submitSection's own conversation-ownership check (Task 16) is what
   // actually narrows this to the right one, this is just picking an org to
   // scope the query by (a student only ever belongs to one org in the
   // current single-org-per-user model this repo assumes elsewhere).
@@ -2519,7 +2519,7 @@ git commit -m "feat(submissions): POST /api/conversations/:id/submit route (#22)
 
 ---
 
-### Task 3: Client — replace the fake submit `setTimeout` with a real call
+### Task 18: Client — replace the fake submit `setTimeout` with a real call
 
 **Files:**
 - Modify: `apps/web/src/client/App.tsx`
@@ -2566,7 +2566,7 @@ git commit -m "feat(student): wire section submit to the real API, drop fake set
 
 ## Phase 5 — Issue #23: Submissions dashboard
 
-### Task 1: Repository — roster × section aggregation
+### Task 19: Repository — roster × section aggregation
 
 **Files:**
 - Modify: `apps/web/src/server/repositories/submissions.ts`
@@ -2760,13 +2760,13 @@ git commit -m "feat(submissions): roster x section aggregation for the dashboard
 
 ---
 
-### Task 2: Shared DTO + route — `GET /api/courses/:courseId/homeworks/:homeworkId/submissions`
+### Task 20: Shared DTO + route — `GET /api/courses/:courseId/homeworks/:homeworkId/submissions`
 
 **Files:**
 - Modify: `apps/web/src/shared/types.ts`, `apps/web/src/server/routes/submissions.ts`, `.test.ts`, `apps/web/src/server/index.ts`
 
 **Interfaces:**
-- Consumes: `getHomeworkSubmissionsMatrix` (Task 1); `requireInstructorOf`; needs an `IdentityCipher` instance — verify at implementation time how existing routes (`profile.ts`, which already decrypts a display name for `ProfileWithStats`) construct one from `c.env`, and reuse that construction path rather than inventing a second one.
+- Consumes: `getHomeworkSubmissionsMatrix` (Task 19); `requireInstructorOf`; needs an `IdentityCipher` instance — verify at implementation time how existing routes (`profile.ts`, which already decrypts a display name for `ProfileWithStats`) construct one from `c.env`, and reuse that construction path rather than inventing a second one.
 
 - [ ] **Step 1: Add DTOs**
 
@@ -2839,14 +2839,14 @@ git commit -m "feat(submissions): GET .../submissions dashboard route (#23)"
 
 ---
 
-### Task 3: Client — wire `SubmissionsView` to the real per-homework data, fix the always-HW-003 bug
+### Task 21: Client — wire `SubmissionsView` to the real per-homework data, fix the always-HW-003 bug
 
 **Files:**
 - Modify: `apps/admin/src/client/App.tsx`
 - Modify: `apps/admin/src/client/views/SubmissionsView.tsx` (adapt props to the real `HomeworkSubmissionsResponse` shape instead of the fixture's `SubmissionRow[]`)
 
 **Interfaces:**
-- Consumes: `GET /api/courses/:courseId/homeworks/:homeworkId/submissions` (Task 2).
+- Consumes: `GET /api/courses/:courseId/homeworks/:homeworkId/submissions` (Task 20).
 
 - [ ] **Step 1: Fetch real data keyed by the open homework's id**
 
@@ -2907,7 +2907,7 @@ git commit -m "fix(admin): submissions view now fetches real per-homework data i
 
 No new code — this phase runs epic #24's own end-to-end acceptance checklist (already written in its issue body) against the fully-integrated result of Phases 1-5, and formally closes out the milestone.
 
-### Task 1: Run the epic's acceptance checklist
+### Task 22: Run the epic's acceptance checklist
 
 **Files:** none (verification only).
 
@@ -2934,4 +2934,4 @@ Confirm every child issue (#19, #20, #21, #22, #23, #94) is assigned to the requ
 
 - **Spec coverage**: every requirement bullet in #19/#20/#21/#22/#23/#94's issue bodies maps to a task above; #24's own acceptance checklist is Phase 6 verbatim.
 - **Placeholder scan**: two intentional exceptions, both explicitly justified inline rather than vague: Phase 3 Task 4's `CURRENT_COURSE_ID` (genuinely doesn't exist yet in `App.tsx` — the note tells the implementer exactly what to go trace, not "figure it out"), and Phase 5 Task 2's cipher-construction line (points at the exact existing file, `profile.ts`, to copy the pattern from, since re-deriving `IdentityCipher` construction here would risk diverging from the one already-correct call site). Both are "verify X before continuing," not "add appropriate handling."
-- **Type consistency check**: `HomeworkStatus` (Phase 1) flows unchanged into `HomeworkDetailResponse`/`HomeworkListItemResponse` (Phase 1) and `HomeworkFormInitialData.status` (Phase 3). `SectionDiffInput`/`IncomingSection` field names (`title`, `content`, `order`, `solutionContent`, optional `id`) are identical across `planSectionDiff` (Phase 1 Task 2), the route body (Phase 1 Task 4/6), and `computeSectionDiff`'s output (Phase 3 Task 1) — verified by re-reading each signature during this pass. `SectionStatusType` (Phase 2) is distinct from `HomeworkStatus` (Phase 1) — deliberately two different enums (section-level vs. homework-level), not a naming collision.
+- **Type consistency check**: `HomeworkStatus` (Phase 1) flows unchanged into `HomeworkDetailResponse`/`HomeworkListItemResponse` (Phase 1) and `HomeworkFormInitialData.status` (Phase 3). `SectionDiffInput`/`IncomingSection` field names (`title`, `content`, `order`, `solutionContent`, optional `id`) are identical across `planSectionDiff` (Task 2), the route body (Tasks 4/6), and `computeSectionDiff`'s output (Task 12) — verified by re-reading each signature during this pass. `SectionStatusType` (Phase 2) is distinct from `HomeworkStatus` (Phase 1) — deliberately two different enums (section-level vs. homework-level), not a naming collision.
