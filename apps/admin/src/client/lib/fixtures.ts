@@ -47,6 +47,11 @@ export type SectionSummary = {
   submissionsCount: number;
 };
 
+export type SectionDetail = SectionSummary & {
+  content: string;
+  solutionContent?: string;
+};
+
 export type Homework = {
   id: string;
   /** Display index for the catalog ID badge — `HW·003` */
