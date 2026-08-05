@@ -2669,15 +2669,59 @@ git commit -m "feat(admin): wire New/Edit homework to the real CRUD + publish AP
 
 - [ ] **Step 1: Write the failing tests**
 
+The existing `submissions.test.ts` (read it first) already has a `describe.skipIf(!DATABASE_URL)("submissions repository", ...)` block with a `beforeAll` seeding `orgAId`/`courseAId`/`userAId`/`userBId`/etc., and a `newConversation(courseId, ownerUserId)` helper that creates a fresh homework+section+conversation. Add the `submitSection` tests as a **new nested `describe` inside that same outer block** (after the existing `it(...)` calls, before the closing `});`), reusing those same fixtures/helper rather than re-seeding:
+
 ```ts
-// apps/web/src/server/repositories/submissions.test.ts — add describe block
+// apps/web/src/server/repositories/submissions.test.ts — add this import:
+import { submitSection } from "./submissions";
+// (add alongside the existing "./submissions" import: createSubmission, getSubmissionByConversation, recordGrade, submitSection)
+
+// ...then, inside the existing describe.skipIf(!DATABASE_URL)("submissions repository", ...) block,
+// after the last existing it(...) and before its closing "});":
+
 describe("submitSection", () => {
-  // Uses the same real-DB seed pattern as Phase 1 Task 3 Step 5.
-  it("creates a submission on first submit", async () => { /* ... */ });
-  it("resubmit updates submittedAt and returns isResubmission=true", async () => { /* ... */ });
-  it("rejects when requesterId does not own the conversation", async () => { /* ... */ });
-  it("rejects a soft-deleted conversation", async () => { /* ... */ });
-  it("rejects a tutor-kind conversation (no section)", async () => { /* ... */ });
+  it("creates a submission on first submit", async () => {
+    const conversationId = await newConversation(courseAId, userAId);
+    const result = await submitSection(db, unsafeOrgScope(orgAId), conversationId, userAId);
+    expect(result.conversationId).toBe(conversationId);
+    expect(result.isResubmission).toBe(false);
+    expect(result.submittedAt).toBeInstanceOf(Date);
+  });
+
+  it("resubmit updates submittedAt and returns isResubmission=true", async () => {
+    const conversationId = await newConversation(courseAId, userAId);
+    const first = await submitSection(db, unsafeOrgScope(orgAId), conversationId, userAId);
+    const second = await submitSection(db, unsafeOrgScope(orgAId), conversationId, userAId);
+    expect(second.id).toBe(first.id); // same row, updated -- not a duplicate
+    expect(second.isResubmission).toBe(true);
+  });
+
+  it("rejects when requesterId does not own the conversation", async () => {
+    const conversationId = await newConversation(courseAId, userAId);
+    await expect(
+      submitSection(db, unsafeOrgScope(orgAId), conversationId, userBId),
+    ).rejects.toThrow();
+  });
+
+  it("rejects a soft-deleted conversation", async () => {
+    const conversationId = await newConversation(courseAId, userAId);
+    await softDeleteConversation(db, unsafeCourseScope(courseAId), conversationId);
+    await expect(
+      submitSection(db, unsafeOrgScope(orgAId), conversationId, userAId),
+    ).rejects.toThrow();
+  });
+
+  it("rejects a tutor-kind conversation (no section)", async () => {
+    const tutorConv = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userAId,
+      sectionId: null,
+      kind: "tutor",
+      title: "tutor chat",
+    });
+    await expect(
+      submitSection(db, unsafeOrgScope(orgAId), tutorConv.id, userAId),
+    ).rejects.toThrow();
+  });
 });
 ```
 
@@ -2956,33 +3000,196 @@ git commit -m "feat(student): wire section submit to the real API, drop fake set
 - Consumes: `IdentityCipher` (`apps/web/src/lib/crypto/identity-cipher.ts`) for decrypting `displayName`/`email`; `courseMemberships`, `sections`, `conversations`, `submissions`.
 - Produces: `getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId): Promise<HomeworkSubmissionsResponse>`.
 
-- [ ] **Step 1: Write the failing aggregation test (fixture-driven, not real-DB — isolates the aggregation logic from decryption/DB wiring)**
+- [ ] **Step 1: Write the failing aggregation test (real-DB, since it needs the real `IdentityCipher` round-trip and real Postgres aggregation)**
+
+Add these imports to `submissions.test.ts` alongside the existing ones:
 
 ```ts
-// apps/web/src/server/repositories/submissions.test.ts — new describe block
-describe("getHomeworkSubmissionsMatrix aggregation", () => {
+import { getHomeworkSubmissionsMatrix } from "./submissions";
+import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
+import { IdentityCipher } from "../../lib/crypto/identity-cipher";
+import { createHomework, updateHomework, getHomeworkById } from "./homeworks";
+```
+
+Add this **new, separate** `describe.skipIf(!DATABASE_URL)` block (not nested inside the existing "submissions repository" block, since it needs its own richer fixture: a homework with sections, a course roster, and a cipher — the existing block's fixtures are minimal single-conversation setups that don't fit this shape):
+
+```ts
+// apps/web/src/server/repositories/submissions.test.ts — new top-level block
+describe.skipIf(!DATABASE_URL)("getHomeworkSubmissionsMatrix (real DB)", () => {
+  async function seedMatrixFixture() {
+    const db = makeNodeDb(DATABASE_URL!);
+    const [org] = await db.insert(organizations).values({
+      slug: `m3-test-19-${crypto.randomUUID()}`, name: "M3 Test Org 19", workosOrganizationId: `wo-19-${crypto.randomUUID()}`,
+    }).returning();
+    const [course] = await db.insert(courses).values({
+      organizationId: org!.id, code: "TEST19", term: "Test", title: "Test Course 19",
+    }).returning();
+
+    const cipher = new IdentityCipher(await loadIdentityCipherKeys({
+      ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+      BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+    } as Env));
+
+    async function seedStudent(displayName: string, email: string) {
+      const [user] = await db.insert(users).values({
+        email: await cipher.encryptString(email),
+        emailBlindIndex: await cipher.computeBlindIndex(IdentityCipher.normalizeEmail(email)),
+        displayName: await cipher.encryptString(displayName),
+      }).returning();
+      const [membership] = await db.insert(courseMemberships).values({
+        userId: user!.id, courseId: course!.id, role: "student",
+      }).returning();
+      return { user: user!, membership: membership! };
+    }
+
+    const studentA = await seedStudent("Student Active", "active@test.example");
+    const studentB = await seedStudent("Student Inactive", "inactive@test.example");
+    const studentC = await seedStudent("Student Partial", "partial@test.example");
+
+    const [instructorUser] = await db.insert(users).values({
+      email: crypto.getRandomValues(new Uint8Array(32)) as never,
+      emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+    }).returning();
+    const [instructorMembership] = await db.insert(courseMemberships).values({
+      userId: instructorUser!.id, courseId: course!.id, role: "instructor",
+    }).returning();
+
+    const scope = unsafeCourseScope(course!.id);
+    const hw = await createHomework(db, scope, {
+      createdById: instructorMembership!.id, title: "Matrix HW", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    await updateHomework(db, scope, hw!.id, {
+      sections: [
+        { title: "Section 1", content: "c1", order: 1 },
+        { title: "Section 2", content: "c2", order: 2 },
+      ],
+    });
+    const withSections = await getHomeworkById(db, scope, hw!.id);
+    const section1 = withSections!.sections.find((s) => s.title === "Section 1")!;
+    const section2 = withSections!.sections.find((s) => s.title === "Section 2")!;
+
+    // Student A: 2 conversations on section 1 (one soft-deleted), 1 submitted -> active.
+    const [convA1] = await db.insert(conversations).values({
+      ownerUserId: studentA.user.id, courseId: course!.id, sectionId: section1.id, kind: "section", title: "a1",
+    }).returning();
+    await db.insert(conversations).values({
+      ownerUserId: studentA.user.id, courseId: course!.id, sectionId: section1.id, kind: "section", title: "a2-deleted",
+      isDeleted: true, deletedAt: new Date(),
+    });
+    await createSubmission(db, unsafeOrgScope(org!.id), convA1!.id);
+
+    // Student B: no conversations at all -> no_interaction.
+
+    // Student C: 1 conversation on section 2, not submitted -> partial.
+    await db.insert(conversations).values({
+      ownerUserId: studentC.user.id, courseId: course!.id, sectionId: section2.id, kind: "section", title: "c1",
+    });
+
+    return { db, org: org!, course: course!, cipher, scope, homeworkId: hw!.id, section1, section2, studentA, studentB, studentC };
+  }
+
   it("computes participation status and section cells for a 3-student x 2-section fixture", async () => {
-    // Student A: 2 conversations on section 1, 1 submitted -> active
-    // Student B: 0 conversations -> no_interaction
-    // Student C: 1 conversation on section 1, not submitted -> partial
-    // (Full real-DB seed + assertions follow the Phase 1 Task 3 Step 5
-    // pattern; asserts matrix shape, per-student participationStatus,
-    // per-section SubmissionCell.status, and that a soft-deleted
-    // conversation still counts toward conversationCount with
-    // hasDeletedConversation=true on that cell.)
+    const { db, org, cipher, scope, homeworkId, section1, studentA, studentB, studentC } = await seedMatrixFixture();
+
+    const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId);
+
+    expect(matrix).not.toBeNull();
+    expect(matrix!.sectionHeaders).toHaveLength(2);
+    expect(matrix!.students).toHaveLength(3);
+
+    const rowA = matrix!.students.find((s) => s.studentId === studentA.user.id)!;
+    const rowB = matrix!.students.find((s) => s.studentId === studentB.user.id)!;
+    const rowC = matrix!.students.find((s) => s.studentId === studentC.user.id)!;
+
+    expect(rowA.participationStatus).toBe("active");
+    expect(rowA.totalConversations).toBe(2); // includes the soft-deleted one
+    const rowASection1Cell = rowA.sections.find((c) => c.sectionId === section1.id)!;
+    expect(rowASection1Cell.status).toBe("submitted");
+    expect(rowASection1Cell.hasDeletedConversation).toBe(true);
+    expect(rowASection1Cell.conversationCount).toBe(2);
+
+    expect(rowB.participationStatus).toBe("no_interaction");
+    expect(rowB.totalConversations).toBe(0);
+
+    expect(rowC.participationStatus).toBe("partial");
+    expect(rowC.totalConversations).toBe(1);
+
+    expect(matrix!.aggregateStats).toEqual({
+      totalStudents: 3, activeStudents: 2, inactiveStudents: 1, totalSubmissions: 1, submissionRate: 67,
+    });
+
+    await db.delete(organizations).where(eq(organizations.id, org.id));
   });
 
   it("returns plaintext displayName/email, never ciphertext", async () => {
-    // Asserts a seeded user's encrypted displayName round-trips to the
-    // same plaintext string via the real IdentityCipher, and that the raw
-    // ciphertext bytes never appear anywhere in the JSON-serialized response.
+    const { db, org, cipher, scope, homeworkId, studentA } = await seedMatrixFixture();
+
+    const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId);
+    const rowA = matrix!.students.find((s) => s.studentId === studentA.user.id)!;
+
+    expect(rowA.displayName).toBe("Student Active");
+    expect(rowA.email).toBe("active@test.example");
+
+    const serialized = JSON.stringify(matrix);
+    // The raw encrypted column value for studentA's email/displayName must
+    // never appear in the serialized response -- fetch it directly and
+    // confirm its ciphertext bytes (base64'd for a substring check) aren't
+    // present anywhere in the output.
+    const [rawUser] = await db.select({ email: users.email }).from(users).where(eq(users.id, studentA.user.id));
+    const ciphertextBase64 = Buffer.from(rawUser!.email).toString("base64");
+    expect(serialized).not.toContain(ciphertextBase64);
+
+    await db.delete(organizations).where(eq(organizations.id, org.id));
   });
 
-  it("scopes roster to course_memberships, excludes a student not enrolled in this course", async () => { /* ... */ });
+  it("scopes roster to course_memberships, excludes a student not enrolled in this course", async () => {
+    const { db, org, cipher, scope, homeworkId } = await seedMatrixFixture();
+    const [outsideUser] = await db.insert(users).values({
+      email: crypto.getRandomValues(new Uint8Array(32)) as never,
+      emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+    }).returning();
+    // Enrolled in a *different* course under the same org, not this homework's course.
+    const [otherCourse] = await db.insert(courses).values({
+      organizationId: org.id, code: "OTHER", term: "Test", title: "Other Course",
+    }).returning();
+    await db.insert(courseMemberships).values({ userId: outsideUser!.id, courseId: otherCourse!.id, role: "student" });
 
-  it("uses at most 4 db round-trips (roster, homework+sections, conversations, submissions) -- no N+1", async () => {
-    // Spy on a query-counting wrapper around the mocked db object; assert
-    // call count regardless of student/section count in the fixture.
+    const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId);
+    expect(matrix!.students.find((s) => s.studentId === outsideUser!.id)).toBeUndefined();
+    expect(matrix!.students).toHaveLength(3); // unchanged from the base fixture
+
+    await db.delete(organizations).where(eq(organizations.id, org.id));
+  });
+
+  it("uses at most 4 db query round-trips (roster, homework+sections, conversations, submissions) -- no N+1", async () => {
+    const { db, org, cipher, scope, homeworkId } = await seedMatrixFixture();
+
+    let queryCount = 0;
+    const targets: Array<[object, string]> = [
+      [db.query.homeworks, "findFirst"],
+      [db.query.courseMemberships, "findMany"],
+      [db.query.conversations, "findMany"],
+      [db.query.submissions, "findMany"],
+    ];
+    const originals = targets.map(([obj, key]) => (obj as Record<string, unknown>)[key]);
+    // If Drizzle's query-builder methods turn out not to be plain writable
+    // own-properties (rare, but depends on the installed version), wrap
+    // `db.query` itself in a Proxy counting `get` calls on `findFirst`/
+    // `findMany` instead -- same intent, different mechanism.
+    targets.forEach(([obj, key], i) => {
+      (obj as Record<string, unknown>)[key] = (...args: unknown[]) => {
+        queryCount++;
+        return (originals[i] as (...a: unknown[]) => unknown).apply(obj, args);
+      };
+    });
+    try {
+      await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId);
+    } finally {
+      targets.forEach(([obj, key], i) => { (obj as Record<string, unknown>)[key] = originals[i]; });
+    }
+    expect(queryCount).toBeLessThanOrEqual(4);
+
+    await db.delete(organizations).where(eq(organizations.id, org.id));
   });
 });
 ```
@@ -3072,7 +3279,12 @@ export async function getHomeworkSubmissionsMatrix(
     const cells: SubmissionCell[] = [];
     let totalConversations = 0;
     let submissionCount = 0;
-    let lastActivityAt: Date | null = null;
+    // Student-level "latest activity across every section" -- distinct from
+    // each cell's OWN lastActivityAt below. An earlier draft of this
+    // function used one shared variable for both, which meant a later
+    // section's cell incorrectly inherited an earlier section's activity
+    // timestamp (the cumulative max-so-far, not that section's own).
+    let studentLastActivityAt: Date | null = null;
 
     for (const section of [...homework.sections].sort((a, b) => a.order - b.order)) {
       const convosForCell = allConversations.filter((c) => c.sectionId === section.id && c.ownerUserId === membership.userId);
@@ -3082,15 +3294,18 @@ export async function getHomeworkSubmissionsMatrix(
 
       totalConversations += convosForCell.length;
       if (submitted) submissionCount++;
+
+      let cellLastActivityAt: Date | null = null;
       for (const c of convosForCell) {
-        if (!lastActivityAt || c.updatedAt > lastActivityAt) lastActivityAt = c.updatedAt;
+        if (!cellLastActivityAt || c.updatedAt > cellLastActivityAt) cellLastActivityAt = c.updatedAt;
+        if (!studentLastActivityAt || c.updatedAt > studentLastActivityAt) studentLastActivityAt = c.updatedAt;
       }
 
       cells.push({
         sectionId: section.id,
         status: submitted ? "submitted" : activeConvo ? "in_progress" : "missing",
         conversationCount: convosForCell.length,
-        lastActivityAt: lastActivityAt?.toISOString() ?? null,
+        lastActivityAt: cellLastActivityAt?.toISOString() ?? null,
         hasDeletedConversation: hasDeleted,
       });
     }
@@ -3159,25 +3374,66 @@ export type HomeworkSubmissionsResponse = HomeworkSubmissionsMatrix;
 
 - [ ] **Step 2: Write the failing route test**
 
+Add these to the top of `routes/submissions.test.ts` (Task 17's file — this task extends it, doesn't replace it): `getHomeworkSubmissionsMatrixMock = vi.fn()` and a `vi.mock("../repositories/submissions", ...)` entry for it alongside the existing `submitSection` mock (merge into the same `vi.mock` call for that module — vitest only honors one `vi.mock` factory per module path). Reuse the existing `fakeAuthContext`/`TEST_ENV` helpers already in the file (Task 17).
+
 ```ts
 describe("GET /api/courses/:courseId/homeworks/:homeworkId/submissions", () => {
-  it("denies a non-instructor with 403", async () => { /* ... */ });
-  it("denies a student with 403", async () => { /* ... */ });
-  it("returns the matrix for an instructor of the course", async () => { /* ... */ });
+  function buildSubmissionsApp(authContext: AuthContext | undefined) {
+    const app = new Hono<AppEnv>();
+    app.use("*", async (c, next) => { if (authContext) c.set("authContext", authContext); await next(); });
+    app.get("/api/courses/:courseId/homeworks/:homeworkId/submissions", (c) => getHomeworkSubmissionsHandler(c));
+    return app;
+  }
+
+  it("denies a non-instructor with 403", async () => {
+    const res = await buildSubmissionsApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
+    ).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+    expect(res.status).toBe(403);
+  });
+
+  it("denies a student with 403", async () => {
+    const res = await buildSubmissionsApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false, hasRole: (r) => r === "student" }),
+    ).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+    expect(res.status).toBe(403);
+  });
+
+  it("returns the matrix for an instructor of the course", async () => {
+    getHomeworkSubmissionsMatrixMock.mockReset().mockResolvedValue({
+      homeworkId: "hw-1", homeworkTitle: "HW 1", homeworkDueDate: "2099-01-01T00:00:00.000Z",
+      sectionHeaders: [], students: [],
+      aggregateStats: { totalStudents: 0, activeStudents: 0, inactiveStudents: 0, totalSubmissions: 0, submissionRate: 0 },
+    });
+    const res = await buildSubmissionsApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { homeworkId: string };
+    expect(body.homeworkId).toBe("hw-1");
+  });
+
+  it("returns 404 when the homework isn't found in scope", async () => {
+    getHomeworkSubmissionsMatrixMock.mockReset().mockResolvedValue(null);
+    const res = await buildSubmissionsApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+    expect(res.status).toBe(404);
+  });
 });
 ```
 
 - [ ] **Step 3: Run to verify it fails.** Run: `npx vitest run src/server/routes/submissions.test.ts` — expect FAIL.
 
-- [ ] **Step 4: Implement (construct the cipher exactly as `profile.ts` already does — inspect that file first)**
+- [ ] **Step 4: Implement**
 
 ```ts
-// apps/web/src/server/routes/submissions.ts
+// apps/web/src/server/routes/submissions.ts — add to the existing file (Task 17)
 import { getHomeworkSubmissionsMatrix } from "../repositories/submissions";
 import { requireInstructorOf } from "../utils/guards";
 import { courseScopeFromAuthContext } from "../repositories/scope";
-// import whatever profile.ts uses to build an IdentityCipher from c.env —
-// confirm the exact helper name/import path at implementation time.
+import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
+import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 
 export async function getHomeworkSubmissionsHandler(c: Context<AppEnv>) {
   const courseId = c.req.param("courseId");
@@ -3190,7 +3446,10 @@ export async function getHomeworkSubmissionsHandler(c: Context<AppEnv>) {
   if (!scope) return c.json({ error: "Course access denied" }, 403);
 
   const db = makeDb(c.env.DATABASE_URL);
-  const cipher = /* loadIdentityCipher(c.env) — matching profile.ts's construction */;
+  // Constructed exactly as profile.ts's getProfileHandler/patchProfileHandler
+  // already do -- the one existing precedent for building a cipher from
+  // c.env at the route layer.
+  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
   const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId!);
   if (!matrix) return c.json({ error: "Homework not found" }, 404);
   return c.json(matrix);
