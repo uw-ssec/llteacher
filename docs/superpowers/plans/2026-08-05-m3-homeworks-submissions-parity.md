@@ -2261,18 +2261,26 @@ Expected: if absent, run `npm install react-hook-form --workspace=apps/admin` be
 
 ```tsx
 // apps/admin/src/client/components/HomeworkForm.test.tsx
-import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+// Note: @testing-library/jest-dom is NOT installed anywhere in this repo, so
+// `.toBeInTheDocument()` is unavailable -- use `.toBeTruthy()` instead
+// (matches the convention already used elsewhere, e.g. AuthProvider.test.tsx).
+// Also: this repo's vitest config has no `globals: true`, so testing-library's
+// automatic per-test cleanup never fires without an explicit
+// `afterEach(cleanup)` -- omitting it leaks DOM nodes across tests in this file.
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { HomeworkForm } from "./HomeworkForm";
 
 const LLM_CONFIGS = [{ id: "cfg-1", recordNumber: 1, name: "Default", modelName: "gpt-4o-mini", basePromptPreview: "", temperature: 0.7, maxCompletionTokens: 1000, isDefault: true, isActive: true, createdAt: "2026-01-01" }];
+
+afterEach(cleanup);
 
 describe("HomeworkForm", () => {
   it("requires a title and at least one section before submit", async () => {
     const onSubmit = vi.fn();
     render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
-    await waitFor(() => expect(screen.getByText(/title required/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/title required/i)).toBeTruthy());
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
@@ -2311,7 +2319,7 @@ describe("HomeworkForm", () => {
     render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
     for (let i = 0; i < 21; i++) fireEvent.click(screen.getByRole("button", { name: /add section/i }));
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
-    await waitFor(() => expect(screen.getByText(/20 sections/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/20 sections/i)).toBeTruthy());
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
@@ -2338,7 +2346,7 @@ describe("HomeworkForm", () => {
 
 ```tsx
 // apps/admin/src/client/components/HomeworkForm.tsx
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import { useForm, useFieldArray } from "react-hook-form";
 import type { LLMConfig, SectionDetail } from "../lib/fixtures";
 import { computeSectionDiff, type FormSection } from "../lib/computeSectionDiff";
@@ -2395,16 +2403,37 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
 
   useUnsavedChangesGuard(isDirty);
 
-  const submit = handleSubmit(async (values) => {
+  // The MAX_SECTIONS check must run *before* react-hook-form's own field
+  // validation: each section's title/content are `required`, so 21 freshly
+  // `append()`-ed (empty) sections would otherwise fail per-field validation
+  // first and never reach a values-based length check inside handleSubmit's
+  // success callback. Checking `fields.length` directly (from useFieldArray,
+  // always in sync with the array) sidesteps that -- found while
+  // implementing this task, when the "rejects submit past 20 sections" test
+  // failed against the length-check-inside-handleSubmit version above.
+  const onValid = handleSubmit(async (values) => {
     if (values.sections.length === 0) { setSubmitError("At least 1 section is required"); return; }
-    if (values.sections.length > MAX_SECTIONS) { setSubmitError(`No more than ${MAX_SECTIONS} sections`); return; }
     setSubmitError(null);
+    // Uncontrolled `register`-ed textareas fall back to the DOM's actual
+    // value ("") when a section's solutionContent was left untouched, even
+    // though it was appended as `undefined` -- normalize back to undefined
+    // so an empty optional field doesn't get treated as "has a solution".
+    const sections = values.sections.map((s) => ({ ...s, solutionContent: s.solutionContent || undefined }));
     await onSubmit({
       title: values.title, description: values.description, dueDate: values.dueDate,
-      llmConfigId: values.llmConfigId, sections: computeSectionDiff(values.sections),
+      llmConfigId: values.llmConfigId, sections: computeSectionDiff(sections),
       publish: values.publish, releasedAt: values.releasedAt,
     });
   });
+
+  const submit = (e: FormEvent<HTMLFormElement>) => {
+    if (fields.length > MAX_SECTIONS) {
+      e.preventDefault();
+      setSubmitError(`No more than ${MAX_SECTIONS} sections`);
+      return;
+    }
+    void onValid(e);
+  };
 
   return (
     <form onSubmit={submit} noValidate>
@@ -2482,12 +2511,14 @@ function useUnsavedChangesGuard(isDirty: boolean) {
 }
 ```
 
-- [ ] **Step 5: Run to verify it passes.** Run: `npx vitest run src/client/components/HomeworkForm.test.tsx` — expect PASS, all 6 tests.
+- [ ] **Step 5: Run to verify it passes.** Run: `npx vitest run src/client/components/HomeworkForm.test.tsx` — expect PASS, all 5 tests.
 
 - [ ] **Step 6: Commit**
 
+Note: this is an npm workspaces monorepo with a single root lockfile -- there is no `apps/admin/package-lock.json`. If `react-hook-form` needed installing in Step 1, stage the root `package-lock.json` instead.
+
 ```bash
-git add apps/admin/src/client/components/HomeworkForm.tsx apps/admin/src/client/components/HomeworkForm.test.tsx apps/admin/package.json apps/admin/package-lock.json
+git add apps/admin/src/client/components/HomeworkForm.tsx apps/admin/src/client/components/HomeworkForm.test.tsx apps/admin/package.json package-lock.json
 git commit -m "feat(admin): HomeworkForm with section field array, publish tab, validation (#21, #94)"
 ```
 
