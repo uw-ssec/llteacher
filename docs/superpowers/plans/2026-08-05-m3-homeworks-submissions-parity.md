@@ -1991,7 +1991,12 @@ import type { StudentHomeworkListResponse } from "../../shared/types";
 
 export async function studentHomeworksHandler(c: Context<AppEnv>) {
   const authContext = c.get("authContext") as AuthContext | undefined;
-  if (!authContext) {
+  // Defensive re-check of the requireRole(["student"]) guard already applied
+  // in index.ts -- matches the belt-and-suspenders pattern every handler in
+  // routes/homeworks.ts already uses (caught during Task 10 implementation:
+  // without the hasRole check here, calling this handler directly, as the
+  // unit tests do, would let a non-student authContext through).
+  if (!authContext || !authContext.hasRole("student")) {
     return c.json({ error: "Course access denied" }, 403);
   }
   const db = makeDb(c.env.DATABASE_URL);
