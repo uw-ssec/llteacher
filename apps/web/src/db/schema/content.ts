@@ -165,6 +165,16 @@ export const homeworks = pgTable(
     llmConfigId: uuid("llm_config_id").references(() => llmConfigs.id, {
       onDelete: "set null",
     }),
+    // Draft/publish state (#94). Both null = draft (deliberate deviation from
+    // Django parity, which made homeworks visible immediately on creation).
+    // publishedAt is set the moment an instructor hits "publish" in the admin
+    // UI; releasedAt is the (possibly future) instant the homework actually
+    // becomes visible to students. Status is derived on read from these two
+    // plus dueDate — see deriveHomeworkStatus in repositories/homeworks.ts.
+    // No separate `status` enum column: it would just be a cache of a pure
+    // function of these three timestamps, and could drift out of sync.
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
     title: text("title").notNull(),
     description: text("description").notNull(),
     dueDate: timestamp("due_date", { withTimezone: true }).notNull(),
