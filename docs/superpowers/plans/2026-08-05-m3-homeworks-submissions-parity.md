@@ -1452,7 +1452,10 @@ describe("DELETE /api/courses/:courseId/homeworks/:homeworkId", () => {
   it("returns 404 when not found in scope", async () => {
     deleteHomeworkMock.mockReset().mockResolvedValue(null);
     const res = await buildApp(
-      fakeAuthContext({ isInstructorOf: (id) => id === "course-a" }),
+      // isMemberOf must also be true -- courseScopeFromAuthContext requires
+      // it independent of isInstructorOf (same gap found and fixed in Tasks
+      // 5/6's test fixtures; fixed proactively here before dispatch).
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
     ).request("/api/courses/course-a/homeworks/hw-1", { method: "DELETE" }, TEST_ENV);
     expect(res.status).toBe(404);
   });
@@ -1460,7 +1463,7 @@ describe("DELETE /api/courses/:courseId/homeworks/:homeworkId", () => {
   it("deletes and returns 204", async () => {
     deleteHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1" });
     const res = await buildApp(
-      fakeAuthContext({ isInstructorOf: (id) => id === "course-a" }),
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
     ).request("/api/courses/course-a/homeworks/hw-1", { method: "DELETE" }, TEST_ENV);
     expect(res.status).toBe(204);
   });
@@ -1543,7 +1546,11 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
 
   it("publishes immediately when releasedAt is omitted", async () => {
     publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: new Date(), releasedAt: new Date() });
-    const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a" })).request(
+    // isMemberOf required alongside isInstructorOf -- this test reaches
+    // courseScopeFromAuthContext (the 400/past-releasedAt test above does
+    // not, since that check runs before scope minting). Same gap found in
+    // Tasks 5/6/7; fixed proactively here before dispatch.
+    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
       "/api/courses/course-a/homeworks/hw-1/publish",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: true }) },
       TEST_ENV,
@@ -1553,7 +1560,7 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
 
   it("un-publishes (draft) when publish=false", async () => {
     publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
-    const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a" })).request(
+    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
       "/api/courses/course-a/homeworks/hw-1/publish",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: false }) },
       TEST_ENV,
