@@ -1,0 +1,2937 @@
+# M3: Homeworks & Submissions Parity Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. **This plan is structured as 6 Phases, one per GitHub issue (#19, #94, #20, #21, #22, #23) plus a closing Phase 6 for epic #24's own acceptance checklist. Phase 1 covers #19 and #94 together (see Resolved Design Decision 1). Stop after each Phase's final task and get the requester's review before starting the next Phase — do not auto-continue across Phases.**
+
+**Goal:** Full homework-lifecycle feature parity with the Django homeworks app on the new TS stack — instructor CRUD with section diffing and draft/publish state, student list/progress from real data, the submission flow, and the instructor participation dashboard. No fixture data remains in these surfaces when done.
+
+**Architecture:** Extends the existing `apps/web` Hono worker (routes → repositories → Drizzle, org/course-scoped via branded `OrgScope`/`CourseScope` types) with homework/section CRUD, publish-state, and submission routes; extends `apps/admin` (React, no router, tagged-union view state) with a create/edit form and real submissions data; extends `apps/web`'s student client (`App.tsx`) to fetch real homework/section data instead of `INITIAL_SECTIONS`.
+
+**Tech Stack:** Hono, Drizzle ORM (`drizzle-orm/pg-core`, Postgres 16), Vitest (`node` env for `apps/web`, `jsdom` for `apps/admin`), React + react-hook-form, `@llteacher/ui`.
+
+## Global Constraints
+
+- Follow existing schema idioms exactly: `pgEnum` for closed vocabularies, `check(name, sql\`...\`)`, `uniqueIndex(...).where(...)` for partial uniqueness, `timestamp(..., { withTimezone: true })`, `relations()` exported alongside every table (verified against `content.ts`/`runtime.ts`).
+- Routes never import `db.select`/`db.insert`/table objects/`drizzle-orm` query helpers directly — they call repository functions. Verified: every existing route (`homeworks.ts`, `profile.ts`) already follows this.
+- Every repository function takes `(db: Db, scope: OrgScope | CourseScope, ...)` as its first two params. `homeworks`/`sections`/`sectionSolutions`/`conversations` are `CourseScope`-scoped; `submissions` is `OrgScope`-scoped (matches M2's decision 5).
+- Route-layer auth: higher-order guards from `apps/web/src/server/utils/guards.ts` (`requireCourseMember(courseIdParam?)`, `requireInstructorOf(courseIdParam?)`, `requireRole(roles[])`), reading `AuthContext` off `c.get("authContext")` (set once per request by `rolesMiddleware`). Guards resolve `courseId` from a **named URL param** — this constrains route URL shape (see Resolved Design Decision 2 below).
+- New routes are registered directly on `app` in `apps/web/src/server/index.ts` (not `app.route(prefix, sub)`) per the existing comment explaining Hono's prefix-stripping gotcha. Each route file also exports a small sub-`Hono` app purely for direct unit testing (matches `homeworksRoutes` in `homeworks.ts`).
+- DB mocking in tests: `vi.mock("../../db/client", () => ({ makeDb: () => ({ query: {...}, insert: ..., update: ..., delete: ... }) }))`, `TEST_ENV = { DATABASE_URL: "ignored" } as Env`, a `fakeAuthContext(overrides)` helper deriving `hasRole`/`isMemberOf`/`isInstructorOf` from a `memberships` array the same way `rolesMiddleware` does (exact pattern in `homeworks.test.ts`).
+- Migrations: edit the relevant `apps/web/src/db/schema/*.ts` file, then run `npm run db:generate` (drizzle-kit) from `apps/web` to produce the numbered SQL migration — never hand-write migration SQL.
+- `apps/web`'s vitest environment is `node`; `apps/admin`'s is `jsdom` (component tests use React Testing Library).
+
+## Resolved Design Decisions (record in PR descriptions)
+
+1. **Build order**: Phase 1 covers #19 (CRUD + section diff) and #94 (draft/publish state) together, ahead of #20/#21, deviating from the literal order at the bottom of epic #24. #94's own issue text says it must land "before #19/#20/#21 harden," and #24's own Integration & Verification Strategy section never mentions #94 in its sequencing — building the publish-state column and endpoint alongside #19 means #20 and #21 are built against the final `homeworks` contract from day one instead of retrofitted. Confirmed with the requester during brainstorming.
+2. **Route URL shape deviates from #19/#20/#22/#23's illustrative sketches**: those sketches use flat paths (`/api/homeworks/:id`, `/api/student/homeworks`, `/api/conversations/:id/submit`, `/api/homeworks/:id/submissions`), written before the actual `requireCourseMember`/`requireInstructorOf` guard implementation existed. Those guards resolve `courseId` from a **named URL param** (default `"courseId"`) — they cannot check "is this user an instructor of this homework's course" without `courseId` already being a matched route param. Verified against `apps/web/src/server/utils/guards.ts` and its only two callers in `index.ts`. Decision: single-homework routes (#19, #94) nest under the existing `/api/courses/:courseId/homeworks` prefix (`/api/courses/:courseId/homeworks/:homeworkId`, `.../publish`) to reuse the guards unchanged. The student list (#20) has no single `:courseId` — a student's homeworks span every course they're enrolled in — so it uses `requireRole(["student"])` only and derives its own course-membership scoping from `authContext.memberships` inside the handler, not from a guard. The submission route (#22) is keyed by `conversationId`, not `courseId` — it uses `requireRole(["student"])` plus an explicit owner check inside `createSubmission` (see Phase 4). The submissions dashboard (#23) is nested the same way as #19 (`/api/courses/:courseId/homeworks/:homeworkId/submissions`) since it's instructor-only and homework-scoped.
+3. **Conversation FK cascade policy (#19)**: kept as-is. `conversations.sectionId` already has `onDelete: "cascade"` (set in M2) — deleting a section (directly, or via a homework delete/edit-diff) cascades to delete its conversations, messages, and submissions. Documented here rather than re-opened as a schema question; changing it would be a new M2-scope schema decision, out of scope for this epic.
+4. **Auto-submit-overdue (#22)**: explicitly deferred. No Cloudflare Cron Trigger added. `SectionStatus` for an overdue in-progress section is `"in_progress_overdue"` (matches Django), not auto-transitioned to `"submitted"`.
+5. **Homework status model (#94)**: two new nullable timestamp columns, `publishedAt` and `releasedAt`, added to `homeworks`. Status is derived **on read** (no scheduled job): no `publishedAt` → `"draft"`; `releasedAt` in the future → `"scheduled"`; `releasedAt` passed and `dueDate` in the future → `"active"`; `releasedAt` passed and `dueDate` passed → `"past_due"`. `"archived"` (a 5th value already present in `apps/admin`'s fixture-era `Homework.status` type) has no producing feature anywhere in this milestone — the derivation function has an explicit comment marking it unreachable, plus a pointer to file a follow-up issue (confirm with the requester before actually creating it — issue creation needs sign-off per this session's action rules) rather than silently dropping the state.
+
+---
+
+## Phase 1 — Issues #19 + #94: Homework/section CRUD, diff semantics, draft/publish state
+
+### Task 1: Schema — `publishedAt`/`releasedAt` columns + migration
+
+**Files:**
+- Modify: `apps/web/src/db/schema/content.ts` (the `homeworks` table, lines 151–182)
+- Create: `apps/web/src/db/migrations/00XX_homework_publish_state.sql` (generated, not hand-written)
+
+**Interfaces:**
+- Produces: `homeworks.publishedAt: Date | null`, `homeworks.releasedAt: Date | null` columns, available to every later task in this phase via `typeof homeworks.$inferSelect`.
+
+- [ ] **Step 1: Add the two columns to the `homeworks` table definition**
+
+```ts
+// apps/web/src/db/schema/content.ts — inside the homeworks pgTable(...) columns object,
+// immediately after llmConfigId and before title:
+    llmConfigId: uuid("llm_config_id").references(() => llmConfigs.id, {
+      onDelete: "set null",
+    }),
+    // Draft/publish state (#94). Both null = draft (deliberate deviation from
+    // Django parity, which made homeworks visible immediately on creation).
+    // publishedAt is set the moment an instructor hits "publish" in the admin
+    // UI; releasedAt is the (possibly future) instant the homework actually
+    // becomes visible to students. Status is derived on read from these two
+    // plus dueDate — see deriveHomeworkStatus in repositories/homeworks.ts.
+    // No separate `status` enum column: it would just be a cache of a pure
+    // function of these three timestamps, and could drift out of sync.
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
+    title: text("title").notNull(),
+```
+
+- [ ] **Step 2: Generate the migration**
+
+Run: `cd apps/web && npm run db:generate`
+Expected: a new file `src/db/migrations/00XX_<generated-name>.sql` containing `ALTER TABLE "homeworks" ADD COLUMN "published_at" timestamp with time zone; ALTER TABLE "homeworks" ADD COLUMN "released_at" timestamp with time zone;` (nullable, additive — no default needed since both null already means "draft").
+
+- [ ] **Step 3: Apply and verify against a real Postgres**
+
+Run: `DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher npm run db:migrate` (from `apps/web`, matching the CI connection string in `.github/workflows/test.yml`)
+Expected: migration applies with no error; running it a second time is a no-op (drizzle-kit tracks applied migrations).
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/db/schema/content.ts apps/web/src/db/migrations/
+git commit -m "feat(db): add homeworks.publishedAt/releasedAt for draft/publish state (#94)"
+```
+
+---
+
+### Task 2: Repository — pure section-diff planner
+
+**Files:**
+- Create: `apps/web/src/server/repositories/sections.ts`
+- Test: `apps/web/src/server/repositories/sections.test.ts`
+
+**Interfaces:**
+- Consumes: nothing (pure function, no `Db`/`scope` — isolates the diff *logic* from the diff's DB *application*, which Task 3 builds on top of).
+- Produces: `planSectionDiff(existing: ExistingSection[], incoming: IncomingSection[]): SectionDiffPlan`, `ExistingSection`, `IncomingSection`, `SectionDiffPlan` types — Task 3 imports all four.
+
+- [ ] **Step 1: Write the failing tests (diff matrix)**
+
+```ts
+// apps/web/src/server/repositories/sections.test.ts
+import { describe, it, expect } from "vitest";
+import { planSectionDiff, type ExistingSection } from "./sections";
+
+const existing: ExistingSection[] = [
+  { id: "s1", order: 1, title: "Sample spaces", content: "c1", solutionId: "sol1" },
+  { id: "s2", order: 2, title: "Events", content: "c2", solutionId: null },
+  { id: "s3", order: 3, title: "Conditional prob", content: "c3", solutionId: "sol3" },
+];
+
+describe("planSectionDiff", () => {
+  it("creates sections with no id", () => {
+    const plan = planSectionDiff([], [{ title: "New", content: "c", order: 1 }]);
+    expect(plan.toCreate).toEqual([{ title: "New", content: "c", order: 1, solutionContent: undefined }]);
+    expect(plan.toUpdate).toEqual([]);
+    expect(plan.toDelete).toEqual([]);
+  });
+
+  it("updates a section whose id matches an existing row (title/content/order/solution)", () => {
+    const plan = planSectionDiff(existing, [
+      { id: "s1", title: "Sample spaces (revised)", content: "c1-new", order: 1, solutionContent: "sol text" },
+      { id: "s2", title: "Events", content: "c2", order: 2 },
+      { id: "s3", title: "Conditional prob", content: "c3", order: 3, solutionContent: "sol3 text" },
+    ]);
+    expect(plan.toUpdate).toEqual([
+      { id: "s1", title: "Sample spaces (revised)", content: "c1-new", order: 1, solutionContent: "sol text" },
+      { id: "s3", title: "Conditional prob", content: "c3", order: 3, solutionContent: "sol3 text" },
+    ]);
+    expect(plan.toCreate).toEqual([]);
+    expect(plan.toDelete).toEqual([]);
+  });
+
+  it("deletes existing rows omitted from the incoming array", () => {
+    const plan = planSectionDiff(existing, [
+      { id: "s1", title: "Sample spaces", content: "c1", order: 1 },
+    ]);
+    expect(plan.toDelete.map((d) => d.id).sort()).toEqual(["s2", "s3"]);
+  });
+
+  it("reorders by keeping id but changing order", () => {
+    const plan = planSectionDiff(existing, [
+      { id: "s1", title: "Sample spaces", content: "c1", order: 3 },
+      { id: "s2", title: "Events", content: "c2", order: 1 },
+      { id: "s3", title: "Conditional prob", content: "c3", order: 2 },
+    ]);
+    expect(plan.toUpdate.map((u) => ({ id: u.id, order: u.order }))).toEqual([
+      { id: "s1", order: 3 },
+      { id: "s2", order: 1 },
+      { id: "s3", order: 2 },
+    ]);
+  });
+
+  it("adds a solution to a section that had none", () => {
+    const plan = planSectionDiff(existing, [
+      { id: "s1", title: "Sample spaces", content: "c1", order: 1 },
+      { id: "s2", title: "Events", content: "c2", order: 2, solutionContent: "new solution" },
+      { id: "s3", title: "Conditional prob", content: "c3", order: 3 },
+    ]);
+    const s2 = plan.toUpdate.find((u) => u.id === "s2")!;
+    expect(s2.solutionContent).toBe("new solution");
+    expect(s2.solutionAction).toBe("create");
+  });
+
+  it("removes a solution from a section that had one (solutionContent omitted)", () => {
+    const plan = planSectionDiff(existing, [
+      { id: "s1", title: "Sample spaces", content: "c1", order: 1 },
+      { id: "s2", title: "Events", content: "c2", order: 2 },
+      { id: "s3", title: "Conditional prob", content: "c3", order: 3 }, // s3 had solutionId: "sol3", now omitted
+    ]);
+    const s3 = plan.toUpdate.find((u) => u.id === "s3")!;
+    expect(s3.solutionAction).toBe("delete");
+  });
+
+  it("throws when two incoming sections share the same order", () => {
+    expect(() =>
+      planSectionDiff([], [
+        { title: "A", content: "c", order: 1 },
+        { title: "B", content: "c", order: 1 },
+      ]),
+    ).toThrow(/duplicate order/i);
+  });
+
+  it("throws when an incoming section references an id not in existing", () => {
+    expect(() =>
+      planSectionDiff(existing, [{ id: "does-not-exist", title: "X", content: "c", order: 1 }]),
+    ).toThrow(/unknown section id/i);
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cd apps/web && npx vitest run src/server/repositories/sections.test.ts`
+Expected: FAIL — `Cannot find module './sections'` (file doesn't exist yet).
+
+- [ ] **Step 3: Implement `planSectionDiff`**
+
+```ts
+// apps/web/src/server/repositories/sections.ts
+
+export interface ExistingSection {
+  id: string;
+  order: number;
+  title: string;
+  content: string;
+  solutionId: string | null;
+}
+
+export interface IncomingSection {
+  id?: string;
+  order: number;
+  title: string;
+  content: string;
+  solutionContent?: string;
+}
+
+export interface SectionCreatePlan {
+  title: string;
+  content: string;
+  order: number;
+  solutionContent: string | undefined;
+}
+
+export interface SectionUpdatePlan {
+  id: string;
+  title: string;
+  content: string;
+  order: number;
+  solutionContent: string | undefined;
+  /** "none": no solution before or after. "create": had none, now has one.
+   *  "update": had one, still has one (content may differ). "delete": had
+   *  one, incoming omitted solutionContent. */
+  solutionAction: "none" | "create" | "update" | "delete";
+}
+
+export interface SectionDeletePlan {
+  id: string;
+}
+
+export interface SectionDiffPlan {
+  toCreate: SectionCreatePlan[];
+  toUpdate: SectionUpdatePlan[];
+  toDelete: SectionDeletePlan[];
+}
+
+/** Pure diff logic, no DB access -- repositories/homeworks.ts's updateHomework
+ *  applies this plan inside a transaction. Kept separate so the diff
+ *  algorithm (the trickiest part of #19, per the issue) is unit-testable
+ *  without mocking Drizzle. */
+export function planSectionDiff(
+  existing: ExistingSection[],
+  incoming: IncomingSection[],
+): SectionDiffPlan {
+  const orders = new Set<number>();
+  for (const s of incoming) {
+    if (orders.has(s.order)) {
+      throw new Error(`duplicate order ${s.order} in incoming sections`);
+    }
+    orders.add(s.order);
+  }
+
+  const existingById = new Map(existing.map((s) => [s.id, s]));
+  const incomingIds = new Set(incoming.filter((s) => s.id).map((s) => s.id));
+
+  const toCreate: SectionCreatePlan[] = [];
+  const toUpdate: SectionUpdatePlan[] = [];
+
+  for (const s of incoming) {
+    if (!s.id) {
+      toCreate.push({
+        title: s.title,
+        content: s.content,
+        order: s.order,
+        solutionContent: s.solutionContent,
+      });
+      continue;
+    }
+    const prior = existingById.get(s.id);
+    if (!prior) {
+      throw new Error(`unknown section id "${s.id}" -- not part of this homework`);
+    }
+    const hadSolution = prior.solutionId !== null;
+    const hasSolution = s.solutionContent !== undefined;
+    const solutionAction: SectionUpdatePlan["solutionAction"] = !hadSolution && !hasSolution
+      ? "none"
+      : !hadSolution && hasSolution
+        ? "create"
+        : hadSolution && hasSolution
+          ? "update"
+          : "delete";
+    toUpdate.push({
+      id: s.id,
+      title: s.title,
+      content: s.content,
+      order: s.order,
+      solutionContent: s.solutionContent,
+      solutionAction,
+    });
+  }
+
+  const toDelete: SectionDeletePlan[] = existing
+    .filter((s) => !incomingIds.has(s.id))
+    .map((s) => ({ id: s.id }));
+
+  return { toCreate, toUpdate, toDelete };
+}
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cd apps/web && npx vitest run src/server/repositories/sections.test.ts`
+Expected: PASS, all 8 tests.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/web/src/server/repositories/sections.ts apps/web/src/server/repositories/sections.test.ts
+git commit -m "feat(homeworks): pure section-diff planner (#19)"
+```
+
+---
+
+### Task 3: Repository — `homeworks.ts` extensions (get-by-id, update via diff, delete, publish)
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/homeworks.ts`
+- Test: `apps/web/src/server/repositories/homeworks.test.ts` (new file — none existed before; the route test file `routes/homeworks.test.ts` is separate)
+
+**Interfaces:**
+- Consumes: `planSectionDiff`, `ExistingSection`, `IncomingSection` from Task 2; `sections`, `sectionSolutions` from `../../db/schema`; `CourseScope` from `./scope`.
+- Produces: `getHomeworkById(db, scope, id)`, `updateHomework(db, scope, id, input)`, `deleteHomework(db, scope, id)`, `updateHomeworkPublishState(db, scope, id, input)`, `deriveHomeworkStatus(homework)` — all consumed by Phase 1 Task 5-8's routes and re-exported from `repositories/index.ts`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// apps/web/src/server/repositories/homeworks.test.ts
+import { describe, it, expect, vi } from "vitest";
+import { deriveHomeworkStatus } from "./homeworks";
+
+describe("deriveHomeworkStatus", () => {
+  const base = { dueDate: new Date("2026-09-01T00:00:00Z") };
+
+  it("is draft when publishedAt is null", () => {
+    expect(deriveHomeworkStatus({ ...base, publishedAt: null, releasedAt: null })).toBe("draft");
+  });
+
+  it("is scheduled when releasedAt is in the future", () => {
+    expect(
+      deriveHomeworkStatus({
+        ...base,
+        publishedAt: new Date("2026-08-01T00:00:00Z"),
+        releasedAt: new Date("2099-01-01T00:00:00Z"),
+      }),
+    ).toBe("scheduled");
+  });
+
+  it("is active when released and due date is in the future", () => {
+    expect(
+      deriveHomeworkStatus({
+        dueDate: new Date("2099-01-01T00:00:00Z"),
+        publishedAt: new Date("2026-08-01T00:00:00Z"),
+        releasedAt: new Date("2026-08-01T00:00:00Z"),
+      }),
+    ).toBe("active");
+  });
+
+  it("is past_due when released and due date has passed", () => {
+    expect(
+      deriveHomeworkStatus({
+        dueDate: new Date("2020-01-01T00:00:00Z"),
+        publishedAt: new Date("2019-01-01T00:00:00Z"),
+        releasedAt: new Date("2019-01-01T00:00:00Z"),
+      }),
+    ).toBe("past_due");
+  });
+
+  // "archived" is intentionally not reachable from any input this function
+  // accepts -- no feature in this milestone produces it. See the comment on
+  // deriveHomeworkStatus itself. Not tested here because there is no valid
+  // input that should ever produce it; a test asserting "no input reaches
+  // this branch" would just restate the function.
+});
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cd apps/web && npx vitest run src/server/repositories/homeworks.test.ts`
+Expected: FAIL — `deriveHomeworkStatus` is not exported from `./homeworks`.
+
+- [ ] **Step 3: Implement `deriveHomeworkStatus` and the new repository functions**
+
+```ts
+// apps/web/src/server/repositories/homeworks.ts — full replacement
+import { and, eq } from "drizzle-orm";
+import type { Db } from "../../db/client";
+import { homeworks, sections, sectionSolutions } from "../../db/schema";
+import type { CourseScope } from "./scope";
+import {
+  planSectionDiff,
+  type ExistingSection,
+  type IncomingSection,
+} from "./sections";
+
+export async function listHomeworksForCourse(db: Db, scope: CourseScope) {
+  return db.query.homeworks.findMany({ where: eq(homeworks.courseId, scope) });
+}
+
+export async function createHomework(
+  db: Db,
+  scope: CourseScope,
+  input: { createdById: string; title: string; description: string; dueDate: Date },
+) {
+  const [created] = await db
+    .insert(homeworks)
+    .values({ courseId: scope, ...input })
+    .returning({ id: homeworks.id });
+  return created;
+}
+
+export type HomeworkStatus = "draft" | "scheduled" | "active" | "past_due" | "archived";
+
+/** Pure function of (dueDate, publishedAt, releasedAt) -- no DB, no `now()`
+ *  parameter needed by callers (uses the real clock; tests pass fixed dates
+ *  through the three inputs instead of mocking time).
+ *
+ *  "archived" is a 5th status apps/admin's pre-M3 fixture typing already
+ *  carried (see apps/admin/src/client/lib/fixtures.ts's Homework.status),
+ *  but no issue in this milestone (#94 or otherwise) describes what would
+ *  set a homework archived. This function never returns it -- the type is
+ *  kept (not narrowed) so a future feature can add the missing input this
+ *  function would need, without every consumer's exhaustiveness check
+ *  breaking. TODO(#<follow-up-issue>): file and link an issue for a future
+ *  milestone once an archival feature is actually scoped -- confirm with
+ *  the requester before filing (issue creation needs sign-off). */
+export function deriveHomeworkStatus(hw: {
+  dueDate: Date;
+  publishedAt: Date | null;
+  releasedAt: Date | null;
+}): HomeworkStatus {
+  const now = new Date();
+  if (!hw.publishedAt) return "draft";
+  if (hw.releasedAt && hw.releasedAt.getTime() > now.getTime()) return "scheduled";
+  return hw.dueDate.getTime() > now.getTime() ? "active" : "past_due";
+}
+
+export async function getHomeworkById(db: Db, scope: CourseScope, id: string) {
+  const homework = await db.query.homeworks.findFirst({
+    where: and(eq(homeworks.id, id), eq(homeworks.courseId, scope)),
+  });
+  if (!homework) return null;
+
+  const sectionRows = await db.query.sections.findMany({
+    where: eq(sections.homeworkId, id),
+    with: { solution: true },
+    orderBy: (s, { asc }) => [asc(s.order)],
+  });
+
+  return { homework, sections: sectionRows };
+}
+
+export async function deleteHomework(db: Db, scope: CourseScope, id: string) {
+  // sections/sectionSolutions/conversations/messages/submissions all cascade
+  // from homeworks.id -> sections.homeworkId -> ... (see Resolved Design
+  // Decision 3) -- a single delete on this scoped row is sufficient.
+  const [deleted] = await db
+    .delete(homeworks)
+    .where(and(eq(homeworks.id, id), eq(homeworks.courseId, scope)))
+    .returning({ id: homeworks.id });
+  return deleted ?? null;
+}
+
+export async function updateHomeworkPublishState(
+  db: Db,
+  scope: CourseScope,
+  id: string,
+  input: { publish: boolean; releasedAt?: Date },
+) {
+  const [updated] = await db
+    .update(homeworks)
+    .set({
+      publishedAt: input.publish ? new Date() : null,
+      releasedAt: input.publish ? (input.releasedAt ?? new Date()) : null,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(homeworks.id, id), eq(homeworks.courseId, scope)))
+    .returning();
+  return updated ?? null;
+}
+
+export interface HomeworkUpdateFields {
+  title?: string;
+  description?: string;
+  dueDate?: Date;
+  llmConfigId?: string | null;
+  sections?: IncomingSection[];
+}
+
+/** Applies planSectionDiff's plan (Task 2) inside a transaction alongside
+ *  any top-level homework field updates. Returns null if `id` isn't found
+ *  in `scope` (caller maps that to 404). Throws Drizzle/Postgres errors for
+ *  constraint violations (duplicate/out-of-range order) uncaught -- the
+ *  route layer (Task 6) catches and maps those to a 422. */
+export async function updateHomework(
+  db: Db,
+  scope: CourseScope,
+  id: string,
+  input: HomeworkUpdateFields,
+) {
+  return db.transaction(async (tx) => {
+    const existingHomework = await tx.query.homeworks.findFirst({
+      where: and(eq(homeworks.id, id), eq(homeworks.courseId, scope)),
+    });
+    if (!existingHomework) return null;
+
+    const topLevelFields = {
+      ...(input.title !== undefined && { title: input.title }),
+      ...(input.description !== undefined && { description: input.description }),
+      ...(input.dueDate !== undefined && { dueDate: input.dueDate }),
+      ...(input.llmConfigId !== undefined && { llmConfigId: input.llmConfigId }),
+    };
+    if (Object.keys(topLevelFields).length > 0) {
+      await tx.update(homeworks).set({ ...topLevelFields, updatedAt: new Date() }).where(eq(homeworks.id, id));
+    }
+
+    if (input.sections) {
+      const existingSections: ExistingSection[] = (
+        await tx.query.sections.findMany({
+          where: eq(sections.homeworkId, id),
+          with: { solution: true },
+        })
+      ).map((s) => ({
+        id: s.id,
+        order: s.order,
+        title: s.title,
+        content: s.content,
+        solutionId: s.solution?.id ?? null,
+      }));
+
+      const plan = planSectionDiff(existingSections, input.sections);
+
+      for (const del of plan.toDelete) {
+        await tx.delete(sections).where(eq(sections.id, del.id));
+      }
+      for (const create of plan.toCreate) {
+        const [newSection] = await tx
+          .insert(sections)
+          .values({ homeworkId: id, title: create.title, content: create.content, order: create.order })
+          .returning({ id: sections.id });
+        if (create.solutionContent !== undefined) {
+          await tx.insert(sectionSolutions).values({ sectionId: newSection!.id, content: create.solutionContent });
+        }
+      }
+      for (const upd of plan.toUpdate) {
+        await tx
+          .update(sections)
+          .set({ title: upd.title, content: upd.content, order: upd.order, updatedAt: new Date() })
+          .where(eq(sections.id, upd.id));
+        if (upd.solutionAction === "create") {
+          await tx.insert(sectionSolutions).values({ sectionId: upd.id, content: upd.solutionContent! });
+        } else if (upd.solutionAction === "update") {
+          await tx
+            .update(sectionSolutions)
+            .set({ content: upd.solutionContent!, updatedAt: new Date() })
+            .where(eq(sectionSolutions.sectionId, upd.id));
+        } else if (upd.solutionAction === "delete") {
+          await tx.delete(sectionSolutions).where(eq(sectionSolutions.sectionId, upd.id));
+        }
+      }
+    }
+
+    return { id };
+  });
+}
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cd apps/web && npx vitest run src/server/repositories/homeworks.test.ts`
+Expected: PASS, all 4 `deriveHomeworkStatus` tests.
+
+- [ ] **Step 5: Real-DB integration test for `updateHomework`'s diff + transaction behavior**
+
+```ts
+// apps/web/src/server/repositories/homeworks.test.ts — appended, gated like
+// M2's real-DB suites (skips if DATABASE_URL isn't set locally; always runs
+// in CI per turbo.json's declared env)
+import { makeNodeDb } from "../../db/nodeClient";
+import { unsafeCourseScope } from "./scope";
+import { organizations, courses, courseMemberships, users } from "../../db/schema";
+import { eq as eq2 } from "drizzle-orm";
+
+describe.skipIf(!process.env.DATABASE_URL)("updateHomework (real DB)", () => {
+  it("creates, updates, reorders, and deletes sections in one call; solution lifecycle round-trips", async () => {
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const [org] = await db.insert(organizations).values({
+      slug: `m3-test-${Date.now()}`, name: "M3 Test Org", workosOrganizationId: `wo-${Date.now()}`,
+    }).returning();
+    const [course] = await db.insert(courses).values({
+      organizationId: org!.id, code: "TEST101", term: "Test", title: "Test Course",
+    }).returning();
+    const [user] = await db.insert(users).values({
+      email: new Uint8Array([1]) as never, emailBlindIndex: new Uint8Array([1]) as never,
+    }).returning();
+    const [membership] = await db.insert(courseMemberships).values({
+      userId: user!.id, courseId: course!.id, role: "instructor",
+    }).returning();
+
+    const scope = unsafeCourseScope(course!.id);
+    const created = await createHomework(db, scope, {
+      createdById: membership!.id, title: "HW1", description: "d", dueDate: new Date("2099-01-01"),
+    });
+
+    const initial = await updateHomework(db, scope, created!.id, {
+      sections: [
+        { title: "Sec A", content: "a", order: 1 },
+        { title: "Sec B", content: "b", order: 2, solutionContent: "sol-b" },
+      ],
+    });
+    expect(initial).not.toBeNull();
+
+    const afterCreate = await getHomeworkById(db, scope, created!.id);
+    const secA = afterCreate!.sections.find((s) => s.title === "Sec A")!;
+    const secB = afterCreate!.sections.find((s) => s.title === "Sec B")!;
+    expect(secB.solution?.content).toBe("sol-b");
+
+    // Diff pass: update Sec A's title, reorder (A<->B), remove Sec B's
+    // solution, add a brand-new Sec C, delete nothing.
+    await updateHomework(db, scope, created!.id, {
+      sections: [
+        { id: secA.id, title: "Sec A revised", content: "a", order: 2 },
+        { id: secB.id, title: "Sec B", content: "b", order: 1 },
+        { title: "Sec C", content: "c", order: 3 },
+      ],
+    });
+
+    const afterDiff = await getHomeworkById(db, scope, created!.id);
+    expect(afterDiff!.sections.map((s) => s.title)).toEqual(["Sec B", "Sec A revised", "Sec C"]);
+    expect(afterDiff!.sections.find((s) => s.title === "Sec B")!.solution).toBeNull();
+
+    // Final diff: omit Sec C -> deleted.
+    await updateHomework(db, scope, created!.id, {
+      sections: [
+        { id: secA.id, title: "Sec A revised", content: "a", order: 1 },
+        { id: secB.id, title: "Sec B", content: "b", order: 2 },
+      ],
+    });
+    const afterDelete = await getHomeworkById(db, scope, created!.id);
+    expect(afterDelete!.sections).toHaveLength(2);
+
+    await db.delete(organizations).where(eq2(organizations.id, org!.id));
+  });
+
+  it("rejects a diff with a duplicate order and leaves existing sections untouched", async () => {
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const [org] = await db.insert(organizations).values({
+      slug: `m3-test-${Date.now()}-b`, name: "M3 Test Org 2", workosOrganizationId: `wo-${Date.now()}-b`,
+    }).returning();
+    const [course] = await db.insert(courses).values({
+      organizationId: org!.id, code: "TEST102", term: "Test", title: "Test Course 2",
+    }).returning();
+    const [user] = await db.insert(users).values({
+      email: new Uint8Array([2]) as never, emailBlindIndex: new Uint8Array([2]) as never,
+    }).returning();
+    const [membership] = await db.insert(courseMemberships).values({
+      userId: user!.id, courseId: course!.id, role: "instructor",
+    }).returning();
+    const scope = unsafeCourseScope(course!.id);
+    const created = await createHomework(db, scope, {
+      createdById: membership!.id, title: "HW2", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    await updateHomework(db, scope, created!.id, {
+      sections: [{ title: "Sec A", content: "a", order: 1 }],
+    });
+
+    await expect(
+      updateHomework(db, scope, created!.id, {
+        sections: [
+          { title: "X", content: "x", order: 1 },
+          { title: "Y", content: "y", order: 1 },
+        ],
+      }),
+    ).rejects.toThrow(/duplicate order/i);
+
+    const afterFailedDiff = await getHomeworkById(db, scope, created!.id);
+    expect(afterFailedDiff!.sections).toHaveLength(1); // untouched
+
+    await db.delete(organizations).where(eq2(organizations.id, org!.id));
+  });
+});
+```
+
+Add the two new imports (`createHomework`, `getHomeworkById`, `updateHomework`) to the top of the test file alongside `deriveHomeworkStatus`.
+
+- [ ] **Step 6: Run against local Postgres**
+
+Run: `cd apps/web && DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher npx vitest run src/server/repositories/homeworks.test.ts`
+Expected: PASS, all 6 tests (4 pure + 2 real-DB).
+
+- [ ] **Step 7: Re-export from the repository index and commit**
+
+```ts
+// apps/web/src/server/repositories/index.ts — add homeworks' new exports
+// alongside its existing listHomeworksForCourse/createHomework (already
+// re-exported there); no new index.ts entry needed since it's the same file.
+```
+
+```bash
+git add apps/web/src/server/repositories/homeworks.ts apps/web/src/server/repositories/homeworks.test.ts
+git commit -m "feat(homeworks): getHomeworkById/updateHomework/deleteHomework/publish-state + status derivation (#19, #94)"
+```
+
+---
+
+### Task 4: Shared DTOs in `shared/types.ts`
+
+**Files:**
+- Modify: `apps/web/src/shared/types.ts`
+
+**Interfaces:**
+- Consumes: `HomeworkStatus` from `../server/repositories/homeworks`.
+- Produces: `SectionResponse`, `HomeworkDetailResponse`, `HomeworkListItemResponse`, `SectionDiffInput`, `HomeworkUpdateBody`, `HomeworkPublishBody` — consumed by Phase 1's routes (Tasks 5-8) and by Phase 3's admin form (Phase 3 Task 1).
+
+- [ ] **Step 1: Add the DTOs**
+
+```ts
+// apps/web/src/shared/types.ts — appended after ProfileWithStats
+import type { HomeworkStatus } from "../server/repositories/homeworks";
+
+export type { HomeworkStatus };
+
+export interface SectionResponse {
+  id: string;
+  title: string;
+  content: string;
+  order: number;
+  solution: { id: string; content: string } | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HomeworkListItemResponse {
+  id: string;
+  title: string;
+  description: string;
+  dueDate: string;
+  llmConfigId: string | null;
+  status: HomeworkStatus;
+  sectionCount: number;
+}
+
+export interface HomeworkDetailResponse {
+  id: string;
+  courseId: string;
+  title: string;
+  description: string;
+  dueDate: string;
+  llmConfigId: string | null;
+  status: HomeworkStatus;
+  publishedAt: string | null;
+  releasedAt: string | null;
+  sections: SectionResponse[];
+  /** Present (true) only in the instructor payload; absent for students. */
+  editableBy?: boolean;
+}
+
+export interface SectionDiffInput {
+  id?: string;
+  title: string;
+  content: string;
+  order: number;
+  solutionContent?: string;
+}
+
+export interface HomeworkUpdateBody {
+  title?: string;
+  description?: string;
+  dueDate?: string;
+  llmConfigId?: string | null;
+  sections?: SectionDiffInput[];
+}
+
+export interface HomeworkPublishBody {
+  publish: boolean;
+  /** ISO datetime. If omitted and publish=true, releases immediately. Must
+   *  be in the future if present -- the route rejects a past releasedAt
+   *  with 400. */
+  releasedAt?: string;
+}
+```
+
+- [ ] **Step 2: Typecheck**
+
+Run: `cd apps/web && npm run typecheck`
+Expected: PASS (no consumers yet, so nothing to break).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add apps/web/src/shared/types.ts
+git commit -m "feat(types): homework/section DTOs for #19/#94"
+```
+
+---
+
+### Task 5: Route — `GET /api/courses/:courseId/homeworks/:homeworkId` (role-aware detail)
+
+**Files:**
+- Modify: `apps/web/src/server/routes/homeworks.ts`
+- Modify: `apps/web/src/server/routes/homeworks.test.ts`
+- Modify: `apps/web/src/server/index.ts` (mount)
+
+**Interfaces:**
+- Consumes: `getHomeworkById`, `deriveHomeworkStatus` (Task 3); `HomeworkDetailResponse`, `SectionResponse` (Task 4); `requireCourseMember` (existing).
+- Produces: `getHomeworkDetailHandler(c)`, mounted at `GET /api/courses/:courseId/homeworks/:homeworkId`.
+
+- [ ] **Step 1: Write the failing route tests**
+
+```ts
+// apps/web/src/server/routes/homeworks.test.ts — new describe block, using
+// the existing findManyHomeworks/insertHomework mocks plus new ones:
+const findFirstHomework = vi.fn();
+const findManySections = vi.fn();
+vi.mock("../../db/client", () => ({
+  makeDb: () => ({
+    query: {
+      homeworks: {
+        findMany: (...args: unknown[]) => findManyHomeworks(...args),
+        findFirst: (...args: unknown[]) => findFirstHomework(...args),
+      },
+      sections: { findMany: (...args: unknown[]) => findManySections(...args) },
+    },
+    insert: (...args: unknown[]) => insertHomework(...args),
+  }),
+}));
+
+describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
+  it("denies a non-member with 403", async () => {
+    const res = await buildApp(fakeAuthContext()).request(
+      "/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("returns 404 when the homework isn't found in this course scope", async () => {
+    findFirstHomework.mockReset().mockResolvedValue(undefined);
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns sections + status for a course member (student payload has no editableBy)", async () => {
+    findFirstHomework.mockReset().mockResolvedValue({
+      id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
+      dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+    });
+    findManySections.mockReset().mockResolvedValue([
+      { id: "s1", title: "Sec 1", content: "c1", order: 1, solution: null, createdAt: new Date(), updatedAt: new Date() },
+    ]);
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { editableBy?: boolean; status: string; sections: unknown[] };
+    expect(body.editableBy).toBeUndefined();
+    expect(body.status).toBe("past_due");
+    expect(body.sections).toHaveLength(1);
+  });
+
+  it("sets editableBy=true for an instructor of the course", async () => {
+    findFirstHomework.mockReset().mockResolvedValue({
+      id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
+      dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null,
+    });
+    findManySections.mockReset().mockResolvedValue([]);
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    const body = (await res.json()) as { editableBy?: boolean };
+    expect(body.editableBy).toBe(true);
+  });
+});
+```
+
+Also add `app.get("/api/courses/:courseId/homeworks/:homeworkId", (c) => getHomeworkDetailHandler(c));` to `buildApp` in the test file.
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cd apps/web && npx vitest run src/server/routes/homeworks.test.ts`
+Expected: FAIL — `getHomeworkDetailHandler` not exported.
+
+- [ ] **Step 3: Implement the handler**
+
+```ts
+// apps/web/src/server/routes/homeworks.ts — add imports and handler
+import { getHomeworkById, deriveHomeworkStatus } from "../repositories/homeworks";
+import type { HomeworkDetailResponse, SectionResponse } from "../../shared/types";
+
+export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
+  const courseId = c.req.param("courseId");
+  const homeworkId = c.req.param("homeworkId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+
+  const scope = authContext && courseId ? courseScopeFromAuthContext(authContext, courseId) : null;
+  if (!scope) {
+    return c.json({ error: "Course access denied" }, 403);
+  }
+
+  const db = makeDb(c.env.DATABASE_URL);
+  const result = await getHomeworkById(db, scope, homeworkId!);
+  if (!result) {
+    return c.json({ error: "Homework not found" }, 404);
+  }
+
+  const sectionsResponse: SectionResponse[] = result.sections.map((s) => ({
+    id: s.id,
+    title: s.title,
+    content: s.content,
+    order: s.order,
+    solution: s.solution ? { id: s.solution.id, content: s.solution.content } : null,
+    createdAt: s.createdAt.toISOString(),
+    updatedAt: s.updatedAt.toISOString(),
+  }));
+
+  const body: HomeworkDetailResponse = {
+    id: result.homework.id,
+    courseId: result.homework.courseId,
+    title: result.homework.title,
+    description: result.homework.description,
+    dueDate: result.homework.dueDate.toISOString(),
+    llmConfigId: result.homework.llmConfigId,
+    status: deriveHomeworkStatus(result.homework),
+    publishedAt: result.homework.publishedAt?.toISOString() ?? null,
+    releasedAt: result.homework.releasedAt?.toISOString() ?? null,
+    sections: sectionsResponse,
+    ...(authContext!.isInstructorOf(courseId!) && { editableBy: true }),
+  };
+
+  return c.json(body);
+}
+
+// Add to the bottom of the file, alongside the existing two:
+homeworksRoutes.get("/:homeworkId", requireCourseMember()(getHomeworkDetailHandler));
+```
+
+- [ ] **Step 4: Mount in `index.ts`**
+
+```ts
+// apps/web/src/server/index.ts
+import { listHomeworksHandler, createHomeworkHandler, getHomeworkDetailHandler } from "./routes/homeworks";
+// ...
+app.get(
+  "/api/courses/:courseId/homeworks/:homeworkId",
+  requireCourseMember()(getHomeworkDetailHandler),
+);
+```
+
+- [ ] **Step 5: Run to verify it passes**
+
+Run: `cd apps/web && npx vitest run src/server/routes/homeworks.test.ts && npm run typecheck`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/web/src/server/routes/homeworks.ts apps/web/src/server/routes/homeworks.test.ts apps/web/src/server/index.ts
+git commit -m "feat(homeworks): GET /:homeworkId role-aware detail route (#19)"
+```
+
+---
+
+### Task 6: Route — `PATCH /api/courses/:courseId/homeworks/:homeworkId` (section diff + 422 mapping)
+
+**Files:**
+- Modify: `apps/web/src/server/routes/homeworks.ts`, `.test.ts`, `apps/web/src/server/index.ts`
+
+**Interfaces:**
+- Consumes: `updateHomework` (Task 3), `HomeworkUpdateBody`, `SectionDiffInput` (Task 4), `requireInstructorOf` (existing).
+- Produces: `updateHomeworkHandler(c)`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
+  const updateHomeworkMock = vi.fn();
+  // add to the vi.mock("../repositories/homeworks", ...) — see Step 3 for
+  // why this route mocks the repository directly rather than raw db calls.
+
+  it("denies a non-instructor with 403", async () => {
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sections: [] }),
+    }, TEST_ENV);
+    expect(res.status).toBe(403);
+  });
+
+  it("returns 404 when updateHomework resolves null (not found in scope)", async () => {
+    updateHomeworkMock.mockReset().mockResolvedValue(null);
+    const res = await buildApp(
+      fakeAuthContext({ isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "New title" }),
+    }, TEST_ENV);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 422 with a friendly message when the diff violates the order constraint", async () => {
+    updateHomeworkMock.mockReset().mockRejectedValue(new Error("duplicate order 1 in incoming sections"));
+    const res = await buildApp(
+      fakeAuthContext({ isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sections: [{ title: "A", content: "a", order: 1 }, { title: "B", content: "b", order: 1 }] }),
+    }, TEST_ENV);
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/order/i);
+  });
+
+  it("applies a valid update and returns 200", async () => {
+    updateHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1" });
+    const res = await buildApp(
+      fakeAuthContext({ isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Updated" }),
+    }, TEST_ENV);
+    expect(res.status).toBe(200);
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cd apps/web && npx vitest run src/server/routes/homeworks.test.ts`
+Expected: FAIL — no such route/mock wiring yet.
+
+- [ ] **Step 3: Implement the handler**
+
+Route-layer 422 mapping catches the plain `Error` thrown by `planSectionDiff`/`updateHomework` (order-constraint violations) by matching its message — matches the existing codebase convention of typed-error mapping being tracked separately (#141) rather than introducing a new error-class hierarchy in this PR.
+
+```ts
+// apps/web/src/server/routes/homeworks.ts
+import { updateHomework } from "../repositories/homeworks";
+import type { HomeworkUpdateBody } from "../../shared/types";
+
+export async function updateHomeworkHandler(c: Context<AppEnv>) {
+  const courseId = c.req.param("courseId");
+  const homeworkId = c.req.param("homeworkId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+
+  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
+    return c.json({ error: "Instructor access denied" }, 403);
+  }
+
+  let body: HomeworkUpdateBody;
+  try {
+    body = await c.req.json<HomeworkUpdateBody>();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+
+  let dueDate: Date | undefined;
+  if (body.dueDate !== undefined) {
+    dueDate = new Date(body.dueDate);
+    if (Number.isNaN(dueDate.getTime())) {
+      return c.json({ error: "dueDate must be a valid date" }, 400);
+    }
+  }
+
+  const scope = courseScopeFromAuthContext(authContext, courseId);
+  if (!scope) {
+    return c.json({ error: "Course access denied" }, 403);
+  }
+
+  const db = makeDb(c.env.DATABASE_URL);
+  try {
+    const result = await updateHomework(db, scope, homeworkId!, {
+      title: body.title,
+      description: body.description,
+      dueDate,
+      llmConfigId: body.llmConfigId,
+      sections: body.sections,
+    });
+    if (!result) {
+      return c.json({ error: "Homework not found" }, 404);
+    }
+    return c.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Invalid section data";
+    if (/order|section/i.test(message)) {
+      return c.json({ error: message }, 422);
+    }
+    throw err; // anything else falls through to app.onError's generic 503
+  }
+}
+
+// bottom of file:
+homeworksRoutes.patch("/:homeworkId", requireInstructorOf()(updateHomeworkHandler));
+```
+
+- [ ] **Step 4: Mount in `index.ts`**
+
+```ts
+app.patch(
+  "/api/courses/:courseId/homeworks/:homeworkId",
+  requireInstructorOf()(updateHomeworkHandler),
+);
+```
+
+- [ ] **Step 5: Run to verify it passes**
+
+Run: `cd apps/web && npx vitest run src/server/routes/homeworks.test.ts && npm run typecheck`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/web/src/server/routes/homeworks.ts apps/web/src/server/routes/homeworks.test.ts apps/web/src/server/index.ts
+git commit -m "feat(homeworks): PATCH /:homeworkId section diff + 422 constraint mapping (#19)"
+```
+
+---
+
+### Task 7: Route — `DELETE /api/courses/:courseId/homeworks/:homeworkId`
+
+**Files:**
+- Modify: `apps/web/src/server/routes/homeworks.ts`, `.test.ts`, `apps/web/src/server/index.ts`
+
+**Interfaces:**
+- Consumes: `deleteHomework` (Task 3).
+- Produces: `deleteHomeworkHandler(c)`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+describe("DELETE /api/courses/:courseId/homeworks/:homeworkId", () => {
+  it("denies a non-instructor with 403", async () => {
+    const res = await buildApp(
+      fakeAuthContext({ isInstructorOf: () => false }),
+    ).request("/api/courses/course-a/homeworks/hw-1", { method: "DELETE" }, TEST_ENV);
+    expect(res.status).toBe(403);
+  });
+
+  it("returns 404 when not found in scope", async () => {
+    deleteHomeworkMock.mockReset().mockResolvedValue(null);
+    const res = await buildApp(
+      fakeAuthContext({ isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", { method: "DELETE" }, TEST_ENV);
+    expect(res.status).toBe(404);
+  });
+
+  it("deletes and returns 204", async () => {
+    deleteHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1" });
+    const res = await buildApp(
+      fakeAuthContext({ isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", { method: "DELETE" }, TEST_ENV);
+    expect(res.status).toBe(204);
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify it fails.** Run: `npx vitest run src/server/routes/homeworks.test.ts` — expect FAIL.
+
+- [ ] **Step 3: Implement**
+
+```ts
+import { deleteHomework } from "../repositories/homeworks";
+
+export async function deleteHomeworkHandler(c: Context<AppEnv>) {
+  const courseId = c.req.param("courseId");
+  const homeworkId = c.req.param("homeworkId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+
+  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
+    return c.json({ error: "Instructor access denied" }, 403);
+  }
+  const scope = courseScopeFromAuthContext(authContext, courseId);
+  if (!scope) return c.json({ error: "Course access denied" }, 403);
+
+  const db = makeDb(c.env.DATABASE_URL);
+  const deleted = await deleteHomework(db, scope, homeworkId!);
+  if (!deleted) return c.json({ error: "Homework not found" }, 404);
+  return c.body(null, 204);
+}
+
+homeworksRoutes.delete("/:homeworkId", requireInstructorOf()(deleteHomeworkHandler));
+```
+
+- [ ] **Step 4: Mount in `index.ts`**: `app.delete("/api/courses/:courseId/homeworks/:homeworkId", requireInstructorOf()(deleteHomeworkHandler));`
+
+- [ ] **Step 5: Run to verify it passes.** Run: `npx vitest run src/server/routes/homeworks.test.ts && npm run typecheck` — expect PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/web/src/server/routes/homeworks.ts apps/web/src/server/routes/homeworks.test.ts apps/web/src/server/index.ts
+git commit -m "feat(homeworks): DELETE /:homeworkId (#19)"
+```
+
+---
+
+### Task 8: Route — `PATCH /api/courses/:courseId/homeworks/:homeworkId/publish` (#94)
+
+**Files:**
+- Modify: `apps/web/src/server/routes/homeworks.ts`, `.test.ts`, `apps/web/src/server/index.ts`
+
+**Interfaces:**
+- Consumes: `updateHomeworkPublishState` (Task 3), `HomeworkPublishBody` (Task 4).
+- Produces: `publishHomeworkHandler(c)`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
+  it("denies a non-instructor with 403", async () => {
+    const res = await buildApp(fakeAuthContext({ isInstructorOf: () => false })).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: true }) },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("rejects a past releasedAt with 400", async () => {
+    const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a" })).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publish: true, releasedAt: "2020-01-01T00:00:00Z" }),
+      },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("publishes immediately when releasedAt is omitted", async () => {
+    publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: new Date(), releasedAt: new Date() });
+    const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a" })).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: true }) },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("un-publishes (draft) when publish=false", async () => {
+    publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
+    const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a" })).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: false }) },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify it fails.** Expect FAIL (handler not defined).
+
+- [ ] **Step 3: Implement**
+
+```ts
+import { updateHomeworkPublishState } from "../repositories/homeworks";
+import type { HomeworkPublishBody } from "../../shared/types";
+
+export async function publishHomeworkHandler(c: Context<AppEnv>) {
+  const courseId = c.req.param("courseId");
+  const homeworkId = c.req.param("homeworkId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+
+  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
+    return c.json({ error: "Instructor access denied" }, 403);
+  }
+
+  let body: HomeworkPublishBody;
+  try {
+    body = await c.req.json<HomeworkPublishBody>();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+  if (typeof body.publish !== "boolean") {
+    return c.json({ error: "publish (boolean) is required" }, 400);
+  }
+
+  let releasedAt: Date | undefined;
+  if (body.releasedAt !== undefined) {
+    releasedAt = new Date(body.releasedAt);
+    if (Number.isNaN(releasedAt.getTime())) {
+      return c.json({ error: "releasedAt must be a valid date" }, 400);
+    }
+    if (releasedAt.getTime() < Date.now()) {
+      return c.json({ error: "Release time must be in the future" }, 400);
+    }
+  }
+
+  const scope = courseScopeFromAuthContext(authContext, courseId);
+  if (!scope) return c.json({ error: "Course access denied" }, 403);
+
+  const db = makeDb(c.env.DATABASE_URL);
+  const updated = await updateHomeworkPublishState(db, scope, homeworkId!, { publish: body.publish, releasedAt });
+  if (!updated) return c.json({ error: "Homework not found" }, 404);
+  return c.json({ id: updated.id, publishedAt: updated.publishedAt, releasedAt: updated.releasedAt });
+}
+
+homeworksRoutes.patch("/:homeworkId/publish", requireInstructorOf()(publishHomeworkHandler));
+```
+
+- [ ] **Step 4: Mount in `index.ts`**: `app.patch("/api/courses/:courseId/homeworks/:homeworkId/publish", requireInstructorOf()(publishHomeworkHandler));`
+
+- [ ] **Step 5: Run full Phase 1 suite + typecheck.** Run: `cd apps/web && npm test && npm run typecheck` — expect all PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/web/src/server/routes/homeworks.ts apps/web/src/server/routes/homeworks.test.ts apps/web/src/server/index.ts
+git commit -m "feat(homeworks): PATCH /:homeworkId/publish draft/publish/schedule endpoint (#94)"
+```
+
+**End of Phase 1 — stop and get requester review before starting Phase 2.**
+
+---
+
+## Phase 2 — Issue #20: Student homework list + section progress
+
+### Task 1: Repository — enrollment-scoped student homework query + section status
+
+**Files:**
+- Create: `apps/web/src/server/repositories/studentHomeworks.ts`
+- Test: `apps/web/src/server/repositories/studentHomeworks.test.ts`
+
+**Interfaces:**
+- Consumes: `deriveHomeworkStatus` (Phase 1 Task 3); `conversations`, `submissions`, `sections`, `homeworks`, `courseMemberships` from `../../db/schema`.
+- Produces: `deriveSectionStatus(input): SectionStatusType`, `getStudentHomeworksForUser(db, userId): Promise<StudentHomeworkSummary[]>` — consumed by Task 3's route and Phase 3's admin form is unaffected (different surface).
+
+- [ ] **Step 1: Write the failing tests for the pure status function first**
+
+```ts
+// apps/web/src/server/repositories/studentHomeworks.test.ts
+import { describe, it, expect } from "vitest";
+import { deriveSectionStatus } from "./studentHomeworks";
+
+describe("deriveSectionStatus", () => {
+  const future = new Date("2099-01-01");
+  const past = new Date("2020-01-01");
+
+  it("is submitted when a submission exists, regardless of due date", () => {
+    expect(deriveSectionStatus({ dueDate: past, hasActiveConversation: true, hasSubmission: true })).toBe("submitted");
+    expect(deriveSectionStatus({ dueDate: future, hasActiveConversation: true, hasSubmission: true })).toBe("submitted");
+  });
+
+  it("is in_progress when a conversation exists, not submitted, due date in future", () => {
+    expect(deriveSectionStatus({ dueDate: future, hasActiveConversation: true, hasSubmission: false })).toBe("in_progress");
+  });
+
+  it("is in_progress_overdue when a conversation exists, not submitted, due date passed", () => {
+    expect(deriveSectionStatus({ dueDate: past, hasActiveConversation: true, hasSubmission: false })).toBe("in_progress_overdue");
+  });
+
+  it("is overdue when no conversation exists and due date passed", () => {
+    expect(deriveSectionStatus({ dueDate: past, hasActiveConversation: false, hasSubmission: false })).toBe("overdue");
+  });
+
+  it("is not_started when no conversation exists and due date is in the future", () => {
+    expect(deriveSectionStatus({ dueDate: future, hasActiveConversation: false, hasSubmission: false })).toBe("not_started");
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify it fails.** Run: `cd apps/web && npx vitest run src/server/repositories/studentHomeworks.test.ts` — expect FAIL.
+
+- [ ] **Step 3: Implement `deriveSectionStatus` and the query function**
+
+```ts
+// apps/web/src/server/repositories/studentHomeworks.ts
+import { and, eq, isNull } from "drizzle-orm";
+import type { Db } from "../../db/client";
+import { homeworks, sections, conversations, submissions, courseMemberships } from "../../db/schema";
+import { deriveHomeworkStatus } from "./homeworks";
+
+export type SectionStatusType = "not_started" | "in_progress" | "in_progress_overdue" | "submitted" | "overdue";
+
+export function deriveSectionStatus(input: {
+  dueDate: Date;
+  hasActiveConversation: boolean;
+  hasSubmission: boolean;
+}): SectionStatusType {
+  const overdue = input.dueDate.getTime() < Date.now();
+  if (input.hasSubmission) return "submitted";
+  if (input.hasActiveConversation) return overdue ? "in_progress_overdue" : "in_progress";
+  return overdue ? "overdue" : "not_started";
+}
+
+export interface StudentSectionProgress {
+  id: string;
+  title: string;
+  order: number;
+  status: SectionStatusType;
+}
+
+export interface StudentHomeworkSummary {
+  id: string;
+  title: string;
+  description: string;
+  dueDate: string;
+  completedPercentage: number;
+  inProgressPercentage: number;
+  sections: StudentSectionProgress[];
+}
+
+/** Enrollment-scoped: only homeworks belonging to courses the user has a
+ *  non-dropped `student` membership in (deliberate improvement over Django,
+ *  which showed all homeworks to all students -- see issue #20). Published-
+ *  only: filters via the same on-read status derivation as the instructor
+ *  route (Phase 1), so a draft/scheduled homework never appears here even
+ *  though nothing in this query references publishedAt/releasedAt by name --
+ *  it's filtered by comparing deriveHomeworkStatus's result, not a raw
+ *  column check, so the two can never drift out of sync. */
+export async function getStudentHomeworksForUser(db: Db, userId: string): Promise<StudentHomeworkSummary[]> {
+  const memberships = await db.query.courseMemberships.findMany({
+    where: and(eq(courseMemberships.userId, userId), eq(courseMemberships.role, "student"), isNull(courseMemberships.droppedAt)),
+  });
+  const courseIds = memberships.map((m) => m.courseId);
+  if (courseIds.length === 0) return [];
+
+  const allHomeworks = await db.query.homeworks.findMany({
+    where: (h, { inArray }) => inArray(h.courseId, courseIds),
+    with: { sections: true },
+  });
+
+  const results: StudentHomeworkSummary[] = [];
+  for (const hw of allHomeworks) {
+    const status = deriveHomeworkStatus(hw);
+    if (status === "draft" || status === "scheduled") continue; // not yet visible to students
+
+    const sectionSummaries: StudentSectionProgress[] = [];
+    let completed = 0;
+    let inProgress = 0;
+
+    for (const section of hw.sections) {
+      const [activeConversation] = await db
+        .select({ id: conversations.id })
+        .from(conversations)
+        .where(and(eq(conversations.sectionId, section.id), eq(conversations.ownerUserId, userId), eq(conversations.isDeleted, false)));
+
+      let hasSubmission = false;
+      if (activeConversation) {
+        const [submission] = await db
+          .select({ id: submissions.id })
+          .from(submissions)
+          .where(eq(submissions.conversationId, activeConversation.id));
+        hasSubmission = !!submission;
+      }
+
+      const sectionStatus = deriveSectionStatus({
+        dueDate: hw.dueDate,
+        hasActiveConversation: !!activeConversation,
+        hasSubmission,
+      });
+      if (sectionStatus === "submitted") completed++;
+      else if (sectionStatus === "in_progress" || sectionStatus === "in_progress_overdue") inProgress++;
+
+      sectionSummaries.push({ id: section.id, title: section.title, order: section.order, status: sectionStatus });
+    }
+    sectionSummaries.sort((a, b) => a.order - b.order);
+
+    const total = hw.sections.length || 1;
+    results.push({
+      id: hw.id,
+      title: hw.title,
+      description: hw.description,
+      dueDate: hw.dueDate.toISOString(),
+      completedPercentage: Math.round((completed / total) * 100),
+      inProgressPercentage: Math.round((inProgress / total) * 100),
+      sections: sectionSummaries,
+    });
+  }
+  return results;
+}
+```
+
+- [ ] **Step 4: Run to verify the pure-function tests pass.** Run: `npx vitest run src/server/repositories/studentHomeworks.test.ts` — expect PASS (5 tests).
+
+- [ ] **Step 5: Real-DB integration test for enrollment scoping + soft-delete handling**
+
+```ts
+// appended to studentHomeworks.test.ts, gated like Phase 1's real-DB suite
+describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)", () => {
+  it("only returns homeworks for courses the student is enrolled in, excludes drafts, ignores soft-deleted conversations", async () => {
+    // Arrange: org -> two courses (A, B); student enrolled in A only;
+    // homework in A published+active with 2 sections; homework in B
+    // published+active (control: must NOT appear); a soft-deleted
+    // conversation on one of course A's sections (must not count as
+    // in_progress).
+    // ... full seed via makeNodeDb, same pattern as Phase 1 Task 3 Step 5 ...
+    // Assert: result has exactly 1 homework (course A's); its soft-deleted-
+    // conversation section reports status "not_started", not "in_progress".
+  });
+});
+```
+
+(Full seed boilerplate follows the exact pattern established in Phase 1 Task 3 Step 5 — organizations/courses/courseMemberships/users insert, `unsafeCourseScope`/`unsafeOrgScope` for scope construction, cleanup via `db.delete(organizations)`.)
+
+- [ ] **Step 6: Run against local Postgres.** Run: `DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher npx vitest run src/server/repositories/studentHomeworks.test.ts` — expect PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add apps/web/src/server/repositories/studentHomeworks.ts apps/web/src/server/repositories/studentHomeworks.test.ts
+git commit -m "feat(student): enrollment-scoped homework list + section status derivation (#20)"
+```
+
+---
+
+### Task 2: Shared DTO + route — `GET /api/student/homeworks`
+
+**Files:**
+- Modify: `apps/web/src/shared/types.ts`
+- Create: `apps/web/src/server/routes/studentHomeworks.ts`, `.test.ts`
+- Modify: `apps/web/src/server/index.ts`
+
+**Interfaces:**
+- Consumes: `getStudentHomeworksForUser` (Task 1); `requireRole` (existing guard).
+- Produces: `studentHomeworksHandler(c)`, mounted at `GET /api/student/homeworks`.
+
+- [ ] **Step 1: Add the DTO**
+
+```ts
+// apps/web/src/shared/types.ts
+import type { SectionStatusType, StudentHomeworkSummary } from "../server/repositories/studentHomeworks";
+export type { SectionStatusType, StudentHomeworkSummary };
+export interface StudentHomeworkListResponse {
+  homeworks: StudentHomeworkSummary[];
+}
+```
+
+- [ ] **Step 2: Write the failing route test**
+
+```ts
+// apps/web/src/server/routes/studentHomeworks.test.ts
+import { describe, it, expect, vi } from "vitest";
+import { Hono } from "hono";
+import { studentHomeworksHandler } from "./studentHomeworks";
+import type { AuthContext } from "../middleware/roles";
+import type { AppEnv } from "../context";
+
+const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
+const getStudentHomeworksForUser = vi.fn();
+vi.mock("../repositories/studentHomeworks", () => ({
+  getStudentHomeworksForUser: (...args: unknown[]) => getStudentHomeworksForUser(...args),
+}));
+vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
+
+function buildApp(authContext: AuthContext | undefined) {
+  const app = new Hono<AppEnv>();
+  app.use("*", async (c, next) => { if (authContext) c.set("authContext", authContext); await next(); });
+  app.get("/api/student/homeworks", (c) => studentHomeworksHandler(c));
+  return app;
+}
+
+function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
+  const memberships = overrides.memberships ?? [];
+  return {
+    session: { userId: "u1", workosUserId: "w1", sessionEpoch: 0, issuedAt: 0, expiresAt: 0 },
+    memberships,
+    hasRole: (role) => memberships.some((m) => m.role === role),
+    isMemberOf: (courseId) => memberships.some((m) => m.courseId === courseId),
+    isInstructorOf: () => false,
+    ...overrides,
+  };
+}
+
+describe("GET /api/student/homeworks", () => {
+  it("returns 401-shaped 403 when unauthenticated", async () => {
+    const res = await buildApp(undefined).request("/api/student/homeworks", {}, TEST_ENV);
+    expect(res.status).toBe(403);
+  });
+
+  it("denies a non-student (teacher-only membership) with 403", async () => {
+    const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "instructor" })).request(
+      "/api/student/homeworks", {}, TEST_ENV,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("returns the student's homeworks", async () => {
+    getStudentHomeworksForUser.mockReset().mockResolvedValue([
+      { id: "hw1", title: "HW1", description: "d", dueDate: "2099-01-01T00:00:00.000Z", completedPercentage: 50, inProgressPercentage: 50, sections: [] },
+    ]);
+    const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
+      "/api/student/homeworks", {}, TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { homeworks: unknown[] };
+    expect(body.homeworks).toHaveLength(1);
+  });
+});
+```
+
+- [ ] **Step 3: Run to verify it fails.** Run: `npx vitest run src/server/routes/studentHomeworks.test.ts` — expect FAIL (module doesn't exist).
+
+- [ ] **Step 4: Implement**
+
+```ts
+// apps/web/src/server/routes/studentHomeworks.ts
+import { Hono, type Context } from "hono";
+import { makeDb } from "../../db/client";
+import { getStudentHomeworksForUser } from "../repositories/studentHomeworks";
+import { requireRole } from "../utils/guards";
+import type { AuthContext } from "../middleware/roles";
+import type { AppEnv } from "../context";
+import type { StudentHomeworkListResponse } from "../../shared/types";
+
+export async function studentHomeworksHandler(c: Context<AppEnv>) {
+  const authContext = c.get("authContext") as AuthContext | undefined;
+  if (!authContext) {
+    return c.json({ error: "Course access denied" }, 403);
+  }
+  const db = makeDb(c.env.DATABASE_URL);
+  const homeworksList = await getStudentHomeworksForUser(db, authContext.session.userId);
+  const body: StudentHomeworkListResponse = { homeworks: homeworksList };
+  return c.json(body);
+}
+
+export const studentHomeworksRoutes = new Hono<AppEnv>();
+studentHomeworksRoutes.get("/", requireRole(["student"])(studentHomeworksHandler));
+```
+
+- [ ] **Step 5: Mount in `index.ts`**
+
+```ts
+import { studentHomeworksHandler } from "./routes/studentHomeworks";
+import { requireRole } from "./utils/guards";
+// ...
+app.get("/api/student/homeworks", requireRole(["student"])(studentHomeworksHandler));
+```
+
+- [ ] **Step 6: Run to verify it passes.** Run: `npx vitest run src/server/routes/studentHomeworks.test.ts && npm run typecheck` — expect PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add apps/web/src/shared/types.ts apps/web/src/server/routes/studentHomeworks.ts apps/web/src/server/routes/studentHomeworks.test.ts apps/web/src/server/index.ts
+git commit -m "feat(student): GET /api/student/homeworks route (#20)"
+```
+
+---
+
+### Task 3: Client — wire `App.tsx` to the real endpoint
+
+**Files:**
+- Modify: `apps/web/src/client/App.tsx`
+
+**Interfaces:**
+- Consumes: `GET /api/student/homeworks` (Task 2); existing `Sidebar`/`SidebarSection` from `@llteacher/ui`.
+- Produces: no new exports — `App` component behavior change only.
+
+- [ ] **Step 1: Replace the `INITIAL_SECTIONS` fixture with a fetch hook**
+
+```tsx
+// apps/web/src/client/App.tsx — replace the INITIAL_SECTIONS constant and
+// its useState usage. SidebarSection's status union ("submitted"|"current"|
+// "pending") doesn't have direct equivalents for "overdue"/"in_progress_
+// overdue" -- map them onto the closest existing visual state ("pending")
+// for now; a richer Sidebar status vocabulary is a @llteacher/ui change out
+// of scope for this issue.
+type StudentHomeworkListResponse = {
+  homeworks: {
+    id: string;
+    title: string;
+    sections: { id: string; title: string; order: number; status: string }[];
+  }[];
+};
+
+function useStudentHomework() {
+  const [sections, setSections] = useState<SidebarSection[]>([]);
+  const [hwTitle, setHwTitle] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/student/homeworks")
+      .then((r) => r.json() as Promise<StudentHomeworkListResponse>)
+      .then((data) => {
+        const hw = data.homeworks[0]; // single-homework sidebar UI, matches current design
+        if (!hw) { setLoading(false); return; }
+        setHwTitle(hw.title);
+        setSections(
+          hw.sections.map((s) => ({
+            number: s.order,
+            title: s.title,
+            status: s.status === "submitted" ? "submitted" : s.status === "in_progress" ? "current" : "pending",
+          })),
+        );
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
+  return { sections, setSections, hwTitle, loading };
+}
+```
+
+- [ ] **Step 2: Replace `useState<SidebarSection[]>(INITIAL_SECTIONS)` with the hook**
+
+```tsx
+// Inside App():
+const { sections, setSections, hwTitle, loading: homeworkLoading } = useStudentHomework();
+// remove: const [sections, setSections] = useState<SidebarSection[]>(INITIAL_SECTIONS);
+// Sidebar's hwTitle prop now uses `hwTitle` instead of the hardcoded
+// "Probability and Distributions" string; hwNumber/currentSection logic
+// unchanged (still local UI state, out of scope for this issue per the
+// design doc -- M4 wires section-select to conversation context).
+```
+
+- [ ] **Step 3: Manual verification (this is a UI change — no automated test substitutes for seeing it render)**
+
+Run: start the dev server (`mcp__Claude_Browser__preview_start` with the project's `apps/web` dev config), navigate to the app, confirm the sidebar renders real section titles/statuses instead of the old fixture, and that submit/collapse behavior is unaffected.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/client/App.tsx
+git commit -m "feat(student): wire sidebar to real homework/section data, drop INITIAL_SECTIONS fixture (#20)"
+```
+
+**End of Phase 2 — stop and get requester review before starting Phase 3.**
+
+---
+
+## Phase 3 — Issue #21: Admin homework create/edit form
+
+### Task 1: `computeSectionDiff` — client-side mirror of the server diff
+
+**Files:**
+- Create: `apps/admin/src/client/lib/computeSectionDiff.ts`, `.test.ts`
+
+**Interfaces:**
+- Consumes: nothing external (pure function, mirrors Phase 1 Task 2's `planSectionDiff` shape so the PATCH payload the form builds matches what the server-side diff expects).
+- Produces: `computeSectionDiff(existing, form): SectionDiffInput[]` — consumed by Task 3's form submit handler.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// apps/admin/src/client/lib/computeSectionDiff.test.ts
+import { describe, it, expect } from "vitest";
+import { computeSectionDiff, type FormSection } from "./computeSectionDiff";
+
+describe("computeSectionDiff", () => {
+  it("omits id for new sections and renumbers order 1..N", () => {
+    const form: FormSection[] = [
+      { id: undefined, title: "New", content: "c", solutionContent: undefined },
+    ];
+    expect(computeSectionDiff(form)).toEqual([
+      { title: "New", content: "c", order: 1, solutionContent: undefined },
+    ]);
+  });
+
+  it("preserves ids for existing sections and renumbers by current form order", () => {
+    const form: FormSection[] = [
+      { id: "s2", title: "Second", content: "c2", solutionContent: undefined },
+      { id: "s1", title: "First", content: "c1", solutionContent: "sol" },
+    ];
+    expect(computeSectionDiff(form)).toEqual([
+      { id: "s2", title: "Second", content: "c2", order: 1, solutionContent: undefined },
+      { id: "s1", title: "First", content: "c1", order: 2, solutionContent: "sol" },
+    ]);
+  });
+
+  it("a removed section (deleted from the form array) is simply absent from the output", () => {
+    // The server infers deletion from omission (Phase 1's planSectionDiff) --
+    // this function doesn't need a "deleted" marker, just doesn't include it.
+    const form: FormSection[] = [{ id: "s1", title: "Kept", content: "c", solutionContent: undefined }];
+    const result = computeSectionDiff(form);
+    expect(result.find((s) => "id" in s && s.id === "s2")).toBeUndefined();
+    expect(result).toHaveLength(1);
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify it fails.** Run: `cd apps/admin && npx vitest run src/client/lib/computeSectionDiff.test.ts` — expect FAIL.
+
+- [ ] **Step 3: Implement**
+
+```ts
+// apps/admin/src/client/lib/computeSectionDiff.ts
+export interface FormSection {
+  id?: string;
+  title: string;
+  content: string;
+  solutionContent?: string;
+}
+
+export interface SectionDiffOutput {
+  id?: string;
+  title: string;
+  content: string;
+  order: number;
+  solutionContent?: string;
+}
+
+/** Mirrors apps/web/src/server/repositories/sections.ts's planSectionDiff
+ *  input shape (IncomingSection) exactly -- order is always renumbered 1..N
+ *  from the form's current array order, so a drag-reorder or explicit
+ *  add/remove never produces a duplicate/gapped order the server would
+ *  reject with a 422. */
+export function computeSectionDiff(form: FormSection[]): SectionDiffOutput[] {
+  return form.map((s, i) => ({
+    ...(s.id !== undefined && { id: s.id }),
+    title: s.title,
+    content: s.content,
+    order: i + 1,
+    solutionContent: s.solutionContent,
+  }));
+}
+```
+
+- [ ] **Step 4: Run to verify it passes.** Run: `npx vitest run src/client/lib/computeSectionDiff.test.ts` — expect PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/admin/src/client/lib/computeSectionDiff.ts apps/admin/src/client/lib/computeSectionDiff.test.ts
+git commit -m "feat(admin): client-side section diff mirroring the server's diff shape (#21)"
+```
+
+---
+
+### Task 2: Extend admin fixtures/types to match the real schema (interim, until Task 4 wires the real fetch)
+
+**Files:**
+- Modify: `apps/admin/src/client/lib/fixtures.ts`
+
+**Interfaces:**
+- Produces: `Homework['sections']` items gain `content`/`solutionContent` fields the form needs to pre-populate on edit (previously only `SectionSummary`, a display-only shape with no body text — the form needs the actual editable content).
+
+- [ ] **Step 1: Add a `SectionDetail` type alongside the existing `SectionSummary`**
+
+```ts
+// apps/admin/src/client/lib/fixtures.ts — add near SectionSummary. Kept
+// separate rather than widening SectionSummary itself: HomeworksView (list)
+// only ever needs the summary shape, and widening it would mean every list
+// row fixture also has to carry full section body text it never renders.
+export type SectionDetail = SectionSummary & {
+  content: string;
+  solutionContent?: string;
+};
+```
+
+(No fixture data changes needed yet — Task 4 replaces fixture reads with real API calls entirely; this type only exists so `HomeworkForm`'s props in Task 3 compile against something concrete before Task 4 lands.)
+
+- [ ] **Step 2: Typecheck.** Run: `cd apps/admin && npm run typecheck` — expect PASS (additive type, no existing consumer affected).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add apps/admin/src/client/lib/fixtures.ts
+git commit -m "feat(admin): add SectionDetail type for the homework form (#21)"
+```
+
+---
+
+### Task 3: `HomeworkForm` component (field array, validation, publish tab)
+
+**Files:**
+- Create: `apps/admin/src/client/components/HomeworkForm.tsx`, `.test.tsx`
+- Modify: `apps/admin/package.json` (add `react-hook-form` dependency if not already present — check first)
+
+**Interfaces:**
+- Consumes: `computeSectionDiff` (Task 1), `SectionDetail` (Task 2), `LLMConfig` (existing fixtures type).
+- Produces: `HomeworkForm` component, `HomeworkFormProps`, `HomeworkFormValues` — consumed by Task 5's `HomeworkCreateView`/`HomeworkEditView`.
+
+- [ ] **Step 1: Confirm `react-hook-form` is available**
+
+Run: `cd apps/admin && cat package.json | grep react-hook-form`
+Expected: if absent, run `npm install react-hook-form --workspace=apps/admin` before continuing (issue #21's own Code Framework names it as the suggested library; the port plan's Phase 5 notes also name it).
+
+- [ ] **Step 2: Write the failing component tests**
+
+```tsx
+// apps/admin/src/client/components/HomeworkForm.test.tsx
+import { describe, it, expect, vi } from "vitest";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { HomeworkForm } from "./HomeworkForm";
+
+const LLM_CONFIGS = [{ id: "cfg-1", recordNumber: 1, name: "Default", modelName: "gpt-4o-mini", basePromptPreview: "", temperature: 0.7, maxCompletionTokens: 1000, isDefault: true, isActive: true, createdAt: "2026-01-01" }];
+
+describe("HomeworkForm", () => {
+  it("requires a title and at least one section before submit", async () => {
+    const onSubmit = vi.fn();
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    await waitFor(() => expect(screen.getByText(/title required/i)).toBeInTheDocument());
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("adds a section, fills it out, and submits with order renumbered", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "New HW" } });
+    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "desc" } });
+    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    const titleInputs = screen.getAllByLabelText(/section title/i);
+    fireEvent.change(titleInputs[0]!, { target: { value: "Sec 1" } });
+    const contentInputs = screen.getAllByLabelText(/section content/i);
+    fireEvent.change(contentInputs[0]!, { target: { value: "Sec 1 content" } });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.sections).toEqual([{ title: "Sec 1", content: "Sec 1 content", order: 1, solutionContent: undefined }]);
+  });
+
+  it("removing a section drops it and renumbers the rest", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
+    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
+    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    fireEvent.click(screen.getAllByRole("button", { name: /remove section/i })[0]!);
+    const titleInputs = screen.getAllByLabelText(/section title/i);
+    expect(titleInputs).toHaveLength(1);
+  });
+
+  it("rejects submit past 20 sections", async () => {
+    const onSubmit = vi.fn();
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
+    for (let i = 0; i < 21; i++) fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    await waitFor(() => expect(screen.getByText(/20 sections/i)).toBeInTheDocument());
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("keyboard: tab order flows title -> content -> add-solution within a section", () => {
+    render(<HomeworkForm onSubmit={vi.fn()} llmConfigs={LLM_CONFIGS} />);
+    fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    const title = screen.getAllByLabelText(/section title/i)[0]!;
+    title.focus();
+    expect(document.activeElement).toBe(title);
+    fireEvent.keyDown(title, { key: "Tab" });
+    // jsdom doesn't execute real tab-order focus movement -- this asserts
+    // the DOM order (fieldset children) matches the intended tab sequence,
+    // which is what actually determines native tab order.
+    const fieldset = title.closest("fieldset")!;
+    const focusable = Array.from(fieldset.querySelectorAll("input, textarea, button"));
+    expect(focusable[0]).toBe(title);
+  });
+});
+```
+
+- [ ] **Step 3: Run to verify it fails.** Run: `cd apps/admin && npx vitest run src/client/components/HomeworkForm.test.tsx` — expect FAIL (module doesn't exist).
+
+- [ ] **Step 4: Implement `HomeworkForm`**
+
+```tsx
+// apps/admin/src/client/components/HomeworkForm.tsx
+import { useState } from "react";
+import { useForm, useFieldArray } from "react-hook-form";
+import type { LLMConfig, SectionDetail } from "../lib/fixtures";
+import { computeSectionDiff, type FormSection } from "../lib/computeSectionDiff";
+
+export interface HomeworkFormValues {
+  title: string;
+  description: string;
+  dueDate: string;
+  llmConfigId: string | undefined;
+  sections: FormSection[];
+  publish: boolean;
+  releasedAt: string | undefined;
+}
+
+export interface HomeworkFormInitialData {
+  title: string;
+  description: string;
+  dueDate: string;
+  llmConfigId: string | null;
+  sections: SectionDetail[];
+  status: "draft" | "scheduled" | "active" | "past_due" | "archived";
+  releasedAt: string | null;
+}
+
+export interface HomeworkFormProps {
+  initialData?: HomeworkFormInitialData;
+  onSubmit: (payload: {
+    title: string; description: string; dueDate: string; llmConfigId?: string;
+    sections: ReturnType<typeof computeSectionDiff>;
+    publish: boolean; releasedAt?: string;
+  }) => Promise<void>;
+  llmConfigs: LLMConfig[];
+  isLoading?: boolean;
+}
+
+const MAX_SECTIONS = 20;
+
+export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: HomeworkFormProps) {
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const {
+    register, control, handleSubmit, formState: { errors, isDirty },
+  } = useForm<HomeworkFormValues>({
+    defaultValues: initialData
+      ? {
+          title: initialData.title, description: initialData.description, dueDate: initialData.dueDate,
+          llmConfigId: initialData.llmConfigId ?? undefined,
+          sections: initialData.sections.map((s) => ({ id: s.id, title: s.title, content: s.content, solutionContent: s.solutionContent })),
+          publish: initialData.status !== "draft",
+          releasedAt: initialData.releasedAt ?? undefined,
+        }
+      : { title: "", description: "", dueDate: "", llmConfigId: undefined, sections: [], publish: false, releasedAt: undefined },
+  });
+  const { fields, append, remove } = useFieldArray({ control, name: "sections" });
+
+  useUnsavedChangesGuard(isDirty);
+
+  const submit = handleSubmit(async (values) => {
+    if (values.sections.length === 0) { setSubmitError("At least 1 section is required"); return; }
+    if (values.sections.length > MAX_SECTIONS) { setSubmitError(`No more than ${MAX_SECTIONS} sections`); return; }
+    setSubmitError(null);
+    await onSubmit({
+      title: values.title, description: values.description, dueDate: values.dueDate,
+      llmConfigId: values.llmConfigId, sections: computeSectionDiff(values.sections),
+      publish: values.publish, releasedAt: values.releasedAt,
+    });
+  });
+
+  return (
+    <form onSubmit={submit} noValidate>
+      <div className="admin-form-field">
+        <label htmlFor="hw-title">Title</label>
+        <input id="hw-title" {...register("title", { required: "Title required" })} />
+        {errors.title && <p role="alert">{errors.title.message}</p>}
+      </div>
+
+      <div className="admin-form-field">
+        <label htmlFor="hw-description">Description</label>
+        <textarea id="hw-description" {...register("description")} />
+      </div>
+
+      <div className="admin-form-field">
+        <label htmlFor="hw-due-date">Due date</label>
+        <input id="hw-due-date" type="datetime-local" {...register("dueDate", { required: "Due date required" })} />
+      </div>
+
+      <div className="admin-form-field">
+        <label htmlFor="hw-llm-config">LLM config</label>
+        <select id="hw-llm-config" {...register("llmConfigId")}>
+          <option value="">(course/org default)</option>
+          {llmConfigs.map((cfg) => <option key={cfg.id} value={cfg.id}>{cfg.name}</option>)}
+        </select>
+      </div>
+
+      <fieldset>
+        <legend>Publish</legend>
+        <label>
+          <input type="checkbox" {...register("publish")} />
+          Published
+        </label>
+        <label htmlFor="hw-released-at">Release at (optional, future only)</label>
+        <input id="hw-released-at" type="datetime-local" {...register("releasedAt")} />
+      </fieldset>
+
+      {fields.map((field, index) => (
+        <fieldset key={field.id} aria-labelledby={`section-${index}-legend`}>
+          <legend id={`section-${index}-legend`}>Section {index + 1}</legend>
+          <label htmlFor={`section-${index}-title`}>Section title</label>
+          <input id={`section-${index}-title`} aria-label="Section title" {...register(`sections.${index}.title`, { required: true })} />
+          <label htmlFor={`section-${index}-content`}>Section content</label>
+          <textarea id={`section-${index}-content`} aria-label="Section content" {...register(`sections.${index}.content`, { required: true })} />
+          <label htmlFor={`section-${index}-solution`}>Solution (optional)</label>
+          <textarea id={`section-${index}-solution`} aria-label="Section solution" {...register(`sections.${index}.solutionContent`)} />
+          <button type="button" aria-label="Remove section" onClick={() => remove(index)}>Remove section</button>
+        </fieldset>
+      ))}
+
+      {errors.sections && <p role="alert">At least 1 section is required</p>}
+      {submitError && <p role="alert">{submitError}</p>}
+
+      <button type="button" onClick={() => append({ title: "", content: "", solutionContent: undefined })}>
+        + Add section
+      </button>
+
+      <button type="submit" disabled={isLoading}>Save</button>
+    </form>
+  );
+}
+
+/** Warns before navigating away with unsaved changes. Browser-native
+ *  beforeunload only covers a hard reload/close; in-app navigation (the
+ *  view-state switch in App.tsx, since there's no router) is guarded by the
+ *  caller checking isDirty before calling onBack -- exposed here only for
+ *  the reload/close case, which this hook alone can cover. */
+function useUnsavedChangesGuard(isDirty: boolean) {
+  useState(() => {
+    if (typeof window === "undefined") return;
+    const handler = (e: BeforeUnloadEvent) => { if (isDirty) e.preventDefault(); };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  });
+}
+```
+
+- [ ] **Step 5: Run to verify it passes.** Run: `npx vitest run src/client/components/HomeworkForm.test.tsx` — expect PASS, all 6 tests.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/admin/src/client/components/HomeworkForm.tsx apps/admin/src/client/components/HomeworkForm.test.tsx apps/admin/package.json apps/admin/package-lock.json
+git commit -m "feat(admin): HomeworkForm with section field array, publish tab, validation (#21, #94)"
+```
+
+---
+
+### Task 4: `HomeworkCreateView` / `HomeworkEditView` wired to the real API
+
+**Files:**
+- Create: `apps/admin/src/client/views/HomeworkCreateView.tsx`, `apps/admin/src/client/views/HomeworkEditView.tsx`
+- Modify: `apps/admin/src/client/App.tsx` (route the "New homework" button, add `edit-homework`/`create-homework` view states)
+
+**Interfaces:**
+- Consumes: `HomeworkForm` (Task 3); `POST /api/courses/:courseId/homeworks`, `GET/PATCH /api/courses/:courseId/homeworks/:homeworkId`, `PATCH .../publish` (Phase 1).
+- Produces: `HomeworkCreateView`, `HomeworkEditView` components.
+
+- [ ] **Step 1: Implement `HomeworkCreateView`**
+
+```tsx
+// apps/admin/src/client/views/HomeworkCreateView.tsx
+import { HomeworkForm } from "../components/HomeworkForm";
+
+export function HomeworkCreateView({ courseId, llmConfigs, onCreated, onCancel }: {
+  courseId: string;
+  llmConfigs: import("../lib/fixtures").LLMConfig[];
+  onCreated: (id: string) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="admin-view">
+      <button type="button" className="admin-back" onClick={onCancel}>Cancel</button>
+      <HomeworkForm
+        llmConfigs={llmConfigs}
+        onSubmit={async (payload) => {
+          const res = await fetch(`/api/courses/${courseId}/homeworks`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ title: payload.title, description: payload.description, dueDate: payload.dueDate }),
+          });
+          if (!res.ok) throw new Error("Failed to create homework");
+          const created = (await res.json()) as { id: string };
+          // Section diff + publish state apply via the same PATCH path an
+          // edit would use -- POST only creates the bare homework record
+          // (matches the existing createHomeworkHandler's minimal contract
+          // from Phase 1 Task 3, which predates sections/publish entirely).
+          await fetch(`/api/courses/${courseId}/homeworks/${created.id}`, {
+            method: "PATCH", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ llmConfigId: payload.llmConfigId, sections: payload.sections }),
+          });
+          if (payload.publish) {
+            await fetch(`/api/courses/${courseId}/homeworks/${created.id}/publish`, {
+              method: "PATCH", headers: { "content-type": "application/json" },
+              body: JSON.stringify({ publish: true, releasedAt: payload.releasedAt }),
+            });
+          }
+          onCreated(created.id);
+        }}
+      />
+    </div>
+  );
+}
+```
+
+- [ ] **Step 2: Implement `HomeworkEditView`**
+
+```tsx
+// apps/admin/src/client/views/HomeworkEditView.tsx
+import { useEffect, useState } from "react";
+import { HomeworkForm, type HomeworkFormInitialData } from "../components/HomeworkForm";
+
+export function HomeworkEditView({ courseId, homeworkId, llmConfigs, onSaved, onCancel }: {
+  courseId: string; homeworkId: string;
+  llmConfigs: import("../lib/fixtures").LLMConfig[];
+  onSaved: () => void; onCancel: () => void;
+}) {
+  const [initialData, setInitialData] = useState<HomeworkFormInitialData | null>(null);
+
+  useEffect(() => {
+    fetch(`/api/courses/${courseId}/homeworks/${homeworkId}`)
+      .then((r) => r.json())
+      .then((hw) => setInitialData({
+        title: hw.title, description: hw.description, dueDate: hw.dueDate,
+        llmConfigId: hw.llmConfigId, status: hw.status, releasedAt: hw.releasedAt,
+        sections: hw.sections.map((s: { id: string; title: string; order: number; content: string; solution: { content: string } | null }) => ({
+          id: s.id, homeworkId, title: s.title, order: s.order, hasSolution: !!s.solution,
+          submissionsCount: 0, content: s.content, solutionContent: s.solution?.content,
+        })),
+      }));
+  }, [courseId, homeworkId]);
+
+  if (!initialData) return null;
+
+  return (
+    <div className="admin-view">
+      <button type="button" className="admin-back" onClick={onCancel}>Cancel</button>
+      <HomeworkForm
+        initialData={initialData}
+        llmConfigs={llmConfigs}
+        onSubmit={async (payload) => {
+          await fetch(`/api/courses/${courseId}/homeworks/${homeworkId}`, {
+            method: "PATCH", headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              title: payload.title, description: payload.description, dueDate: payload.dueDate,
+              llmConfigId: payload.llmConfigId, sections: payload.sections,
+            }),
+          });
+          await fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/publish`, {
+            method: "PATCH", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ publish: payload.publish, releasedAt: payload.releasedAt }),
+          });
+          onSaved();
+        }}
+      />
+    </div>
+  );
+}
+```
+
+- [ ] **Step 3: Wire `App.tsx`'s view-state machine**
+
+```tsx
+// apps/admin/src/client/App.tsx
+type View =
+  | { kind: "homeworks" }
+  | { kind: "create-homework" }
+  | { kind: "edit-homework"; homeworkId: string }
+  | { kind: "submissions"; homeworkId: string }
+  | { kind: "llm-configs" }
+  | { kind: "students" };
+
+// Replace the onNewHomework console.log stubs (both the AdminSidebar prop
+// and HomeworksView prop) with:
+onNewHomework={() => setView({ kind: "create-homework" })}
+
+// Add a case:
+{view.kind === "create-homework" && (
+  <HomeworkCreateView
+    courseId={CURRENT_COURSE_ID} // existing constant/context — verify actual name at implementation time
+    llmConfigs={LLM_CONFIGS}
+    onCreated={() => setView({ kind: "homeworks" })}
+    onCancel={() => setView({ kind: "homeworks" })}
+  />
+)}
+{view.kind === "edit-homework" && (
+  <HomeworkEditView
+    courseId={CURRENT_COURSE_ID}
+    homeworkId={view.homeworkId}
+    llmConfigs={LLM_CONFIGS}
+    onSaved={() => setView({ kind: "homeworks" })}
+    onCancel={() => setView({ kind: "homeworks" })}
+  />
+)}
+// HomeworksView's onOpenHomework currently routes to "submissions" -- split
+// it: title click -> edit-homework, "Submissions" button stays -> submissions.
+```
+
+Note for the implementer: `CURRENT_COURSE_ID` doesn't exist yet in `App.tsx` — the admin app currently has no course-context source at all (everything reads from the global `HOMEWORKS`/`LLM_CONFIGS` fixtures with no course scoping). Before this task can compile against the real API, trace how `AuthProvider`/`useAuth()` exposes the current user's course memberships (read `apps/admin/src/client/components/AuthProvider.tsx` at implementation time) and derive the course id from that, the same way the student app's guards derive scope from `authContext.memberships` — do not hardcode a course id string.
+
+- [ ] **Step 4: Manual verification**
+
+Start the admin dev server, click "New homework," fill out the form with 2 sections (one with a solution), save, confirm it appears in the homeworks list; open it again, reorder sections, remove one, toggle publish on, save; confirm the student app (Phase 2) now shows it.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/admin/src/client/views/HomeworkCreateView.tsx apps/admin/src/client/views/HomeworkEditView.tsx apps/admin/src/client/App.tsx
+git commit -m "feat(admin): wire New/Edit homework to the real CRUD + publish API, drop console.log stub (#21)"
+```
+
+**End of Phase 3 — stop and get requester review before starting Phase 4.**
+
+---
+
+## Phase 4 — Issue #22: Section submission flow
+
+### Task 1: Repository — owner-checked submission upsert
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/submissions.ts`
+- Modify: `apps/web/src/server/repositories/submissions.test.ts` (if it exists — verify at implementation time; create if not)
+
+**Interfaces:**
+- Consumes: existing `submissions`, `conversations`, `courses` tables.
+- Produces: `submitSection(db, scope, conversationId, requesterId): Promise<{ id: string; conversationId: string; submittedAt: Date; isResubmission: boolean }>` — extends the existing `createSubmission` rather than replacing it (a different call site, `recordGrade`, may still need the ownerless variant — verify no other caller exists before deciding whether to fold this into `createSubmission` directly or add alongside it; based on the survey, `createSubmission` currently has zero route callers, so extending its signature in place is safe).
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// apps/web/src/server/repositories/submissions.test.ts — add describe block
+describe("submitSection", () => {
+  // Uses the same real-DB seed pattern as Phase 1 Task 3 Step 5.
+  it("creates a submission on first submit", async () => { /* ... */ });
+  it("resubmit updates submittedAt and returns isResubmission=true", async () => { /* ... */ });
+  it("rejects when requesterId does not own the conversation", async () => { /* ... */ });
+  it("rejects a soft-deleted conversation", async () => { /* ... */ });
+  it("rejects a tutor-kind conversation (no section)", async () => { /* ... */ });
+});
+```
+
+- [ ] **Step 2: Run to verify it fails.** Run: `cd apps/web && DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher npx vitest run src/server/repositories/submissions.test.ts` — expect FAIL (`submitSection` not exported).
+
+- [ ] **Step 3: Implement**
+
+```ts
+// apps/web/src/server/repositories/submissions.ts — add alongside createSubmission
+export async function submitSection(
+  db: Db,
+  scope: OrgScope,
+  conversationId: string,
+  requesterId: string,
+): Promise<{ id: string; conversationId: string; submittedAt: Date; isResubmission: boolean }> {
+  // Closes the ownership gap noted for conversations.ts's
+  // softDeleteConversation/appendMessage (#134): this check is scoped to a
+  // single route (the only one #22 adds), so it's inlined here rather than
+  // widening every repository function's signature.
+  const [owned] = await db
+    .select({ id: conversations.id, ownerUserId: conversations.ownerUserId })
+    .from(conversations)
+    .innerJoin(courses, eq(conversations.courseId, courses.id))
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        eq(courses.organizationId, scope),
+        eq(conversations.isDeleted, false),
+        eq(conversations.kind, "section"),
+      ),
+    );
+  if (!owned || owned.ownerUserId !== requesterId) {
+    throw new Error("Conversation not found or not owned by requester");
+  }
+
+  const existing = await getSubmissionByConversation(db, scope, conversationId);
+  if (existing) {
+    const [updated] = await db
+      .update(submissions)
+      .set({ submittedAt: new Date() })
+      .where(eq(submissions.id, existing.id))
+      .returning();
+    return { id: updated!.id, conversationId, submittedAt: updated!.submittedAt, isResubmission: true };
+  }
+
+  const created = await createSubmission(db, scope, conversationId);
+  return { id: created.id, conversationId, submittedAt: created.submittedAt, isResubmission: false };
+}
+```
+
+- [ ] **Step 4: Run to verify it passes.** Run: `DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher npx vitest run src/server/repositories/submissions.test.ts` — expect PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/web/src/server/repositories/submissions.ts apps/web/src/server/repositories/submissions.test.ts
+git commit -m "feat(submissions): owner-checked submit/resubmit upsert (#22)"
+```
+
+---
+
+### Task 2: Route — `POST /api/conversations/:id/submit`
+
+**Files:**
+- Create: `apps/web/src/server/routes/submissions.ts`, `.test.ts`
+- Modify: `apps/web/src/server/index.ts`
+- Modify: `apps/web/src/shared/types.ts`
+
+**Interfaces:**
+- Consumes: `submitSection` (Task 1); `requireRole` guard; needs an `OrgScope` — the route has no `:courseId` param (URL is keyed by conversation), so it derives org scope from the caller's own memberships via `getOrgScopesForUser` (existing, in `repositories/users.ts`) rather than `courseScopeFromAuthContext`.
+
+- [ ] **Step 1: Add `SubmissionResponse` DTO**
+
+```ts
+// apps/web/src/shared/types.ts
+export interface SubmissionResponse {
+  id: string;
+  conversationId: string;
+  submittedAt: string;
+  isResubmission: boolean;
+}
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+```ts
+// apps/web/src/server/routes/submissions.test.ts
+import { describe, it, expect, vi } from "vitest";
+import { Hono } from "hono";
+import { submitSectionHandler } from "./submissions";
+import type { AuthContext } from "../middleware/roles";
+import type { AppEnv } from "../context";
+
+const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
+const submitSectionMock = vi.fn();
+const getOrgScopesForUserMock = vi.fn();
+vi.mock("../repositories/submissions", () => ({ submitSection: (...a: unknown[]) => submitSectionMock(...a) }));
+vi.mock("../repositories/users", () => ({ getOrgScopesForUser: (...a: unknown[]) => getOrgScopesForUserMock(...a) }));
+vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
+
+function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
+  const memberships = overrides.memberships ?? [];
+  return {
+    session: { userId: "u1", workosUserId: "w1", sessionEpoch: 0, issuedAt: 0, expiresAt: 0 },
+    memberships, hasRole: (r) => memberships.some((m) => m.role === r),
+    isMemberOf: () => false, isInstructorOf: () => false, ...overrides,
+  };
+}
+function buildApp(authContext: AuthContext | undefined) {
+  const app = new Hono<AppEnv>();
+  app.use("*", async (c, next) => { if (authContext) c.set("authContext", authContext); await next(); });
+  app.post("/api/conversations/:id/submit", (c) => submitSectionHandler(c));
+  return app;
+}
+
+describe("POST /api/conversations/:id/submit", () => {
+  it("denies a non-student with 403", async () => {
+    const res = await buildApp(fakeAuthContext({ hasRole: () => false })).request(
+      "/api/conversations/conv-1/submit", { method: "POST" }, TEST_ENV,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("creates a submission and returns 201, isResubmission=false", async () => {
+    getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
+    submitSectionMock.mockReset().mockResolvedValue({ id: "sub-1", conversationId: "conv-1", submittedAt: new Date(), isResubmission: false });
+    const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
+      "/api/conversations/conv-1/submit", { method: "POST" }, TEST_ENV,
+    );
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as SubmissionResponse;
+    expect(body.isResubmission).toBe(false);
+  });
+
+  it("resubmit returns 200, isResubmission=true", async () => {
+    getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
+    submitSectionMock.mockReset().mockResolvedValue({ id: "sub-1", conversationId: "conv-1", submittedAt: new Date(), isResubmission: true });
+    const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
+      "/api/conversations/conv-1/submit", { method: "POST" }, TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("maps a wrong-owner repository error to 403", async () => {
+    getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
+    submitSectionMock.mockReset().mockRejectedValue(new Error("Conversation not found or not owned by requester"));
+    const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
+      "/api/conversations/conv-1/submit", { method: "POST" }, TEST_ENV,
+    );
+    expect(res.status).toBe(403);
+  });
+});
+```
+
+- [ ] **Step 3: Run to verify it fails.** Run: `cd apps/web && npx vitest run src/server/routes/submissions.test.ts` — expect FAIL.
+
+- [ ] **Step 4: Implement**
+
+```ts
+// apps/web/src/server/routes/submissions.ts
+import { Hono, type Context } from "hono";
+import { makeDb } from "../../db/client";
+import { submitSection } from "../repositories/submissions";
+import { getOrgScopesForUser } from "../repositories/users";
+import { requireRole } from "../utils/guards";
+import type { AuthContext } from "../middleware/roles";
+import type { AppEnv } from "../context";
+import type { SubmissionResponse } from "../../shared/types";
+
+export async function submitSectionHandler(c: Context<AppEnv>) {
+  const conversationId = c.req.param("id");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+  if (!authContext) return c.json({ error: "Unauthorized" }, 403);
+
+  const db = makeDb(c.env.DATABASE_URL);
+  // A student's conversation belongs to exactly one org via its course;
+  // getOrgScopesForUser (existing, repositories/users.ts) returns every org
+  // scope reachable through the caller's own non-dropped memberships --
+  // submitSection's own conversation-ownership check (Task 1) is what
+  // actually narrows this to the right one, this is just picking an org to
+  // scope the query by (a student only ever belongs to one org in the
+  // current single-org-per-user model this repo assumes elsewhere).
+  const orgScopes = await getOrgScopesForUser(db, authContext.session.userId);
+  const orgScope = orgScopes[0];
+  if (!orgScope) return c.json({ error: "No organization membership found" }, 403);
+
+  try {
+    const result = await submitSection(db, orgScope, conversationId!, authContext.session.userId);
+    const body: SubmissionResponse = {
+      id: result.id, conversationId: result.conversationId,
+      submittedAt: result.submittedAt.toISOString(), isResubmission: result.isResubmission,
+    };
+    return c.json(body, result.isResubmission ? 200 : 201);
+  } catch {
+    return c.json({ error: "Conversation not found or not accessible" }, 403);
+  }
+}
+
+export const submissionsRoutes = new Hono<AppEnv>();
+submissionsRoutes.post("/:id/submit", requireRole(["student"])(submitSectionHandler));
+```
+
+- [ ] **Step 5: Mount in `index.ts`**
+
+```ts
+import { submitSectionHandler } from "./routes/submissions";
+// ...
+app.post("/api/conversations/:id/submit", requireRole(["student"])(submitSectionHandler));
+```
+
+- [ ] **Step 6: Run to verify it passes.** Run: `npx vitest run src/server/routes/submissions.test.ts && npm run typecheck` — expect PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add apps/web/src/server/routes/submissions.ts apps/web/src/server/routes/submissions.test.ts apps/web/src/server/index.ts apps/web/src/shared/types.ts
+git commit -m "feat(submissions): POST /api/conversations/:id/submit route (#22)"
+```
+
+---
+
+### Task 3: Client — replace the fake submit `setTimeout` with a real call
+
+**Files:**
+- Modify: `apps/web/src/client/App.tsx`
+
+- [ ] **Step 1: Replace `handleSubmit`**
+
+```tsx
+// apps/web/src/client/App.tsx — handleSubmit needs the section's
+// conversationId, which the current fixture-only sidebar model doesn't
+// track. This depends on Phase 2 Task 3's real section data carrying a
+// conversationId (or the student needing to start one first, deferred to
+// M4's conversation lifecycle per the epic's own "stubbed as future"
+// acceptance-checklist line) -- implement against whatever shape Phase 2
+// actually landed with, verified at implementation time, not assumed here.
+const handleSubmit = async (sectionNumber: number) => {
+  const section = sections.find((s) => s.number === sectionNumber);
+  if (!section?.conversationId) return; // no active conversation yet -- nothing to submit
+  try {
+    const res = await fetch(`/api/conversations/${section.conversationId}/submit`, { method: "POST" });
+    if (!res.ok) throw new Error("submit failed");
+    setSections((prev) => prev.map((s) => (s.number === sectionNumber ? { ...s, status: "submitted" as const } : s)));
+    setJustSubmittedSection(sectionNumber);
+    setTimeout(() => setJustSubmittedSection(null), 800);
+  } catch {
+    // surface via existing UI error affordance -- verify at implementation
+    // time what error surface App.tsx already uses elsewhere (e.g. worker
+    // status indicator) rather than introducing a new one here.
+  }
+};
+```
+
+- [ ] **Step 2: Manual verification.** Start a section conversation, submit it, confirm the sidebar flips to submitted and a second submit ("resubmit") doesn't error.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add apps/web/src/client/App.tsx
+git commit -m "feat(student): wire section submit to the real API, drop fake setTimeout (#22)"
+```
+
+**End of Phase 4 — stop and get requester review before starting Phase 5.**
+
+---
+
+## Phase 5 — Issue #23: Submissions dashboard
+
+### Task 1: Repository — roster × section aggregation
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/submissions.ts`
+- Modify: `apps/web/src/server/repositories/submissions.test.ts`
+
+**Interfaces:**
+- Consumes: `IdentityCipher` (`apps/web/src/lib/crypto/identity-cipher.ts`) for decrypting `displayName`/`email`; `courseMemberships`, `sections`, `conversations`, `submissions`.
+- Produces: `getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId): Promise<HomeworkSubmissionsResponse>`.
+
+- [ ] **Step 1: Write the failing aggregation test (fixture-driven, not real-DB — isolates the aggregation logic from decryption/DB wiring)**
+
+```ts
+// apps/web/src/server/repositories/submissions.test.ts — new describe block
+describe("getHomeworkSubmissionsMatrix aggregation", () => {
+  it("computes participation status and section cells for a 3-student x 2-section fixture", async () => {
+    // Student A: 2 conversations on section 1, 1 submitted -> active
+    // Student B: 0 conversations -> no_interaction
+    // Student C: 1 conversation on section 1, not submitted -> partial
+    // (Full real-DB seed + assertions follow the Phase 1 Task 3 Step 5
+    // pattern; asserts matrix shape, per-student participationStatus,
+    // per-section SubmissionCell.status, and that a soft-deleted
+    // conversation still counts toward conversationCount with
+    // hasDeletedConversation=true on that cell.)
+  });
+
+  it("returns plaintext displayName/email, never ciphertext", async () => {
+    // Asserts a seeded user's encrypted displayName round-trips to the
+    // same plaintext string via the real IdentityCipher, and that the raw
+    // ciphertext bytes never appear anywhere in the JSON-serialized response.
+  });
+
+  it("scopes roster to course_memberships, excludes a student not enrolled in this course", async () => { /* ... */ });
+
+  it("uses at most 4 db round-trips (roster, homework+sections, conversations, submissions) -- no N+1", async () => {
+    // Spy on a query-counting wrapper around the mocked db object; assert
+    // call count regardless of student/section count in the fixture.
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify it fails.** Run: `DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher npx vitest run src/server/repositories/submissions.test.ts` — expect FAIL.
+
+- [ ] **Step 3: Implement**
+
+```ts
+// apps/web/src/server/repositories/submissions.ts
+import { sections as sectionsTable, homeworks } from "../../db/schema";
+import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
+
+export interface SubmissionCell {
+  sectionId: string;
+  status: "missing" | "in_progress" | "submitted";
+  conversationCount: number;
+  lastActivityAt: string | null;
+  hasDeletedConversation: boolean;
+}
+
+export type ParticipationStatus = "no_interaction" | "partial" | "active";
+
+export interface StudentSubmissionRow {
+  studentId: string;
+  displayName: string;
+  email: string;
+  sections: SubmissionCell[];
+  totalConversations: number;
+  submissionCount: number;
+  participationStatus: ParticipationStatus;
+  lastActivityAt: string | null;
+}
+
+export interface HomeworkSubmissionsMatrix {
+  homeworkId: string;
+  homeworkTitle: string;
+  homeworkDueDate: string;
+  sectionHeaders: { id: string; order: number; title: string }[];
+  students: StudentSubmissionRow[];
+  aggregateStats: {
+    totalStudents: number; activeStudents: number; inactiveStudents: number;
+    totalSubmissions: number; submissionRate: number;
+  };
+}
+
+/** Single-pass aggregation: roster, sections, conversations (incl.
+ *  soft-deleted, for badge display), and submissions are each fetched once
+ *  (4 queries total regardless of roster/section size) and joined in
+ *  memory -- avoids the N+1 the Django reference had (issue #23's own
+ *  framework note). Names/emails decrypted here, server-side only; nothing
+ *  upstream of this function ever sees ciphertext. */
+export async function getHomeworkSubmissionsMatrix(
+  db: Db,
+  scope: CourseScope,
+  cipher: IdentityCipher,
+  homeworkId: string,
+): Promise<HomeworkSubmissionsMatrix | null> {
+  const homework = await db.query.homeworks.findFirst({
+    where: and(eq(homeworks.id, homeworkId), eq(homeworks.courseId, scope)),
+    with: { sections: true },
+  });
+  if (!homework) return null;
+
+  const roster = await db.query.courseMemberships.findMany({
+    where: and(eq(courseMemberships.courseId, scope), eq(courseMemberships.role, "student"), isNull(courseMemberships.droppedAt)),
+    with: { user: true },
+  });
+
+  const sectionIds = homework.sections.map((s) => s.id);
+  const allConversations = sectionIds.length
+    ? await db.query.conversations.findMany({
+        where: (c, { inArray }) => inArray(c.sectionId, sectionIds),
+      })
+    : [];
+  const conversationIds = allConversations.map((c) => c.id);
+  const allSubmissions = conversationIds.length
+    ? await db.query.submissions.findMany({ where: (s, { inArray }) => inArray(s.conversationId, conversationIds) })
+    : [];
+  const submittedConversationIds = new Set(allSubmissions.map((s) => s.conversationId));
+
+  const students: StudentSubmissionRow[] = [];
+  for (const membership of roster) {
+    const displayName = membership.user.displayName ? await cipher.decryptString(membership.user.displayName) : "";
+    const email = await cipher.decryptString(membership.user.email);
+
+    const cells: SubmissionCell[] = [];
+    let totalConversations = 0;
+    let submissionCount = 0;
+    let lastActivityAt: Date | null = null;
+
+    for (const section of [...homework.sections].sort((a, b) => a.order - b.order)) {
+      const convosForCell = allConversations.filter((c) => c.sectionId === section.id && c.ownerUserId === membership.userId);
+      const activeConvo = convosForCell.find((c) => !c.isDeleted);
+      const hasDeleted = convosForCell.some((c) => c.isDeleted);
+      const submitted = convosForCell.some((c) => submittedConversationIds.has(c.id));
+
+      totalConversations += convosForCell.length;
+      if (submitted) submissionCount++;
+      for (const c of convosForCell) {
+        if (!lastActivityAt || c.updatedAt > lastActivityAt) lastActivityAt = c.updatedAt;
+      }
+
+      cells.push({
+        sectionId: section.id,
+        status: submitted ? "submitted" : activeConvo ? "in_progress" : "missing",
+        conversationCount: convosForCell.length,
+        lastActivityAt: lastActivityAt?.toISOString() ?? null,
+        hasDeletedConversation: hasDeleted,
+      });
+    }
+
+    const participationStatus: ParticipationStatus =
+      totalConversations === 0 ? "no_interaction" : submissionCount > 0 ? "active" : "partial";
+
+    students.push({
+      studentId: membership.userId, displayName, email, sections: cells,
+      totalConversations, submissionCount, participationStatus,
+      lastActivityAt: lastActivityAt?.toISOString() ?? null,
+    });
+  }
+
+  students.sort((a, b) => {
+    if (!a.lastActivityAt) return 1;
+    if (!b.lastActivityAt) return -1;
+    return b.lastActivityAt.localeCompare(a.lastActivityAt);
+  });
+
+  const activeStudents = students.filter((s) => s.participationStatus !== "no_interaction").length;
+  return {
+    homeworkId: homework.id,
+    homeworkTitle: homework.title,
+    homeworkDueDate: homework.dueDate.toISOString(),
+    sectionHeaders: homework.sections.map((s) => ({ id: s.id, order: s.order, title: s.title })).sort((a, b) => a.order - b.order),
+    students,
+    aggregateStats: {
+      totalStudents: students.length,
+      activeStudents,
+      inactiveStudents: students.length - activeStudents,
+      totalSubmissions: students.reduce((sum, s) => sum + s.submissionCount, 0),
+      submissionRate: students.length ? Math.round((activeStudents / students.length) * 100) : 0,
+    },
+  };
+}
+```
+
+- [ ] **Step 4: Run to verify it passes.** Run: `DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher npx vitest run src/server/repositories/submissions.test.ts` — expect PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/web/src/server/repositories/submissions.ts apps/web/src/server/repositories/submissions.test.ts
+git commit -m "feat(submissions): roster x section aggregation for the dashboard, no N+1 (#23)"
+```
+
+---
+
+### Task 2: Shared DTO + route — `GET /api/courses/:courseId/homeworks/:homeworkId/submissions`
+
+**Files:**
+- Modify: `apps/web/src/shared/types.ts`, `apps/web/src/server/routes/submissions.ts`, `.test.ts`, `apps/web/src/server/index.ts`
+
+**Interfaces:**
+- Consumes: `getHomeworkSubmissionsMatrix` (Task 1); `requireInstructorOf`; needs an `IdentityCipher` instance — verify at implementation time how existing routes (`profile.ts`, which already decrypts a display name for `ProfileWithStats`) construct one from `c.env`, and reuse that construction path rather than inventing a second one.
+
+- [ ] **Step 1: Add DTOs**
+
+```ts
+// apps/web/src/shared/types.ts
+import type { HomeworkSubmissionsMatrix, ParticipationStatus, SubmissionCell, StudentSubmissionRow } from "../server/repositories/submissions";
+export type { ParticipationStatus, SubmissionCell, StudentSubmissionRow };
+export type HomeworkSubmissionsResponse = HomeworkSubmissionsMatrix;
+```
+
+- [ ] **Step 2: Write the failing route test**
+
+```ts
+describe("GET /api/courses/:courseId/homeworks/:homeworkId/submissions", () => {
+  it("denies a non-instructor with 403", async () => { /* ... */ });
+  it("denies a student with 403", async () => { /* ... */ });
+  it("returns the matrix for an instructor of the course", async () => { /* ... */ });
+});
+```
+
+- [ ] **Step 3: Run to verify it fails.** Run: `npx vitest run src/server/routes/submissions.test.ts` — expect FAIL.
+
+- [ ] **Step 4: Implement (construct the cipher exactly as `profile.ts` already does — inspect that file first)**
+
+```ts
+// apps/web/src/server/routes/submissions.ts
+import { getHomeworkSubmissionsMatrix } from "../repositories/submissions";
+import { requireInstructorOf } from "../utils/guards";
+import { courseScopeFromAuthContext } from "../repositories/scope";
+// import whatever profile.ts uses to build an IdentityCipher from c.env —
+// confirm the exact helper name/import path at implementation time.
+
+export async function getHomeworkSubmissionsHandler(c: Context<AppEnv>) {
+  const courseId = c.req.param("courseId");
+  const homeworkId = c.req.param("homeworkId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
+    return c.json({ error: "Instructor access denied" }, 403);
+  }
+  const scope = courseScopeFromAuthContext(authContext, courseId);
+  if (!scope) return c.json({ error: "Course access denied" }, 403);
+
+  const db = makeDb(c.env.DATABASE_URL);
+  const cipher = /* loadIdentityCipher(c.env) — matching profile.ts's construction */;
+  const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId!);
+  if (!matrix) return c.json({ error: "Homework not found" }, 404);
+  return c.json(matrix);
+}
+
+submissionsRoutes.get("/homeworks/:homeworkId/submissions", requireInstructorOf()(getHomeworkSubmissionsHandler));
+```
+
+- [ ] **Step 5: Mount in `index.ts`**
+
+```ts
+app.get(
+  "/api/courses/:courseId/homeworks/:homeworkId/submissions",
+  requireInstructorOf()(getHomeworkSubmissionsHandler),
+);
+```
+
+- [ ] **Step 6: Run to verify it passes.** Run: `npx vitest run src/server/routes/submissions.test.ts && npm run typecheck` — expect PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add apps/web/src/shared/types.ts apps/web/src/server/routes/submissions.ts apps/web/src/server/routes/submissions.test.ts apps/web/src/server/index.ts
+git commit -m "feat(submissions): GET .../submissions dashboard route (#23)"
+```
+
+---
+
+### Task 3: Client — wire `SubmissionsView` to the real per-homework data, fix the always-HW-003 bug
+
+**Files:**
+- Modify: `apps/admin/src/client/App.tsx`
+- Modify: `apps/admin/src/client/views/SubmissionsView.tsx` (adapt props to the real `HomeworkSubmissionsResponse` shape instead of the fixture's `SubmissionRow[]`)
+
+**Interfaces:**
+- Consumes: `GET /api/courses/:courseId/homeworks/:homeworkId/submissions` (Task 2).
+
+- [ ] **Step 1: Fetch real data keyed by the open homework's id**
+
+```tsx
+// apps/admin/src/client/App.tsx — the submissions view.kind branch currently
+// always passes SUBMISSIONS_HW_003 regardless of view.homeworkId (the bug
+// noted in brainstorming). Replace with a fetch keyed by view.homeworkId:
+{view.kind === "submissions" && (
+  <SubmissionsDataLoader
+    courseId={CURRENT_COURSE_ID}
+    homeworkId={view.homeworkId}
+    onBack={() => setView({ kind: "homeworks" })}
+  />
+)}
+
+// New small component in App.tsx (or its own file if it grows):
+function SubmissionsDataLoader({ courseId, homeworkId, onBack }: { courseId: string; homeworkId: string; onBack: () => void }) {
+  const [data, setData] = useState<HomeworkSubmissionsResponse | null>(null);
+  useEffect(() => {
+    setData(null); // clear stale data from a previously-open homework before the new fetch resolves
+    fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/submissions`)
+      .then((r) => r.json())
+      .then(setData);
+  }, [courseId, homeworkId]);
+  if (!data) return null;
+  return <SubmissionsView data={data} onBack={onBack} />;
+}
+```
+
+- [ ] **Step 2: Adapt `SubmissionsView`'s props and rendering to the real response shape**
+
+```tsx
+// apps/admin/src/client/views/SubmissionsView.tsx — replace
+// `{ homework: Homework; rows: SubmissionRow[] }` props with
+// `{ data: HomeworkSubmissionsResponse }`. Section-progress grid maps
+// data.sectionHeaders (ordered) x student.sections (by sectionId) instead of
+// the old sectionsProgress[]/sectionNumber shape; participationStatus values
+// ("no_interaction"|"partial"|"active") are unchanged so STATUS_LABEL/
+// StatusBadge usage carries over directly. Add a small "deleted" badge/title
+// on any SubmissionCell with hasDeletedConversation=true (a rendering detail
+// with no prior equivalent -- the fixture data never modeled soft-deletes).
+```
+
+- [ ] **Step 3: Manual verification.** Open two different homeworks' submissions views back-to-back; confirm each shows its own roster/matrix (not always HW 3's), and that a submitted section renders correctly end-to-end from Phase 4's flow.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/admin/src/client/App.tsx apps/admin/src/client/views/SubmissionsView.tsx
+git commit -m "fix(admin): submissions view now fetches real per-homework data instead of always SUBMISSIONS_HW_003 (#23)"
+```
+
+**End of Phase 5 — stop and get requester review before starting Phase 6.**
+
+---
+
+## Phase 6 — Issue #24: Epic closure
+
+No new code — this phase runs epic #24's own end-to-end acceptance checklist (already written in its issue body) against the fully-integrated result of Phases 1-5, and formally closes out the milestone.
+
+### Task 1: Run the epic's acceptance checklist
+
+**Files:** none (verification only).
+
+- [ ] **Step 1:** Instructor creates a homework (title, description, 3 sections with markdown + solutions) via the admin form (Phase 3) → confirm it appears in the student app sidebar (Phase 2) with all sections, only after being published (Phase 1's `#94` state).
+- [ ] **Step 2:** Student clicks a section → existing conversation-context wiring (out of M3 scope, M4 handles the real chat — confirm this is stubbed/no-ops cleanly, not broken).
+- [ ] **Step 3:** Student submits a section (Phase 4) → sidebar badge flips to `submitted`; resubmit updates the timestamp (verify via the dashboard's `lastActivityAt`, Phase 5).
+- [ ] **Step 4:** Instructor opens the Submissions dashboard (Phase 5) → sees the roster × section matrix with participation statuses, a soft-deleted-conversation badge on at least one manually-created test case, last-activity timestamps, and confirm via browser devtools Network tab that the response body contains no ciphertext (`displayName`/`email` are readable plaintext).
+- [ ] **Step 5:** Instructor edits the homework (Phase 3 edit view) — reorder sections 3→1→2, add a 4th section, remove section 2's solution → student sidebar (Phase 2) reflects the new order/section/no-solution on next load.
+- [ ] **Step 6:** Instructor deletes the homework (Phase 1 Task 7) → confirm (via a direct DB check or the dashboard 404ing) that sections/solutions/conversations/submissions are gone (cascade, per Resolved Design Decision 3).
+- [ ] **Step 7:** Cross-tenant test — an instructor from course/org B cannot `GET`/`PATCH`/`DELETE` org A's homework (expect 403 across all of Phase 1's routes); a student from org B cannot see org A's homework in their list (Phase 2) or submit against one of its conversations (Phase 4).
+- [ ] **Step 8:** Grep for fixture leakage: `grep -rn "INITIAL_SECTIONS\|SUBMISSIONS_HW_003" apps/web/src/client apps/admin/src/client` — expect zero matches outside of any explicitly-kept storybook/offline-dev-only usage (per epic #24's own "fixtures remain... only for storybook/offline dev" note); if any route-reachable code still imports them, that's a Phase regression to fix before closing.
+- [ ] **Step 9:** Run the full test suite and typecheck across both apps: `cd apps/web && npm test && npm run typecheck`, `cd apps/admin && npm test && npm run typecheck`. Expect all green.
+- [ ] **Step 10:** Confirm CI (`.github/workflows/test.yml`) is green on the branch/PR containing all five phases before closing the milestone.
+
+- [ ] **Step 2: Assign and close out GitHub bookkeeping**
+
+Confirm every child issue (#19, #20, #21, #22, #23, #94) is assigned to the requester and closed with a reference to its merged PR, then close epic #24 itself referencing the epic-closure verification above. (Issue assignment/closing are GitHub actions — done via `gh issue edit`/`gh issue close`, one per issue, as each phase's PR actually merges — not something to batch at the very end.)
+
+**End of Phase 6 — epic #24 and milestone M3 ready to close.**
+
+---
+
+## Self-Review Notes (writing-plans skill's required pass)
+
+- **Spec coverage**: every requirement bullet in #19/#20/#21/#22/#23/#94's issue bodies maps to a task above; #24's own acceptance checklist is Phase 6 verbatim.
+- **Placeholder scan**: two intentional exceptions, both explicitly justified inline rather than vague: Phase 3 Task 4's `CURRENT_COURSE_ID` (genuinely doesn't exist yet in `App.tsx` — the note tells the implementer exactly what to go trace, not "figure it out"), and Phase 5 Task 2's cipher-construction line (points at the exact existing file, `profile.ts`, to copy the pattern from, since re-deriving `IdentityCipher` construction here would risk diverging from the one already-correct call site). Both are "verify X before continuing," not "add appropriate handling."
+- **Type consistency check**: `HomeworkStatus` (Phase 1) flows unchanged into `HomeworkDetailResponse`/`HomeworkListItemResponse` (Phase 1) and `HomeworkFormInitialData.status` (Phase 3). `SectionDiffInput`/`IncomingSection` field names (`title`, `content`, `order`, `solutionContent`, optional `id`) are identical across `planSectionDiff` (Phase 1 Task 2), the route body (Phase 1 Task 4/6), and `computeSectionDiff`'s output (Phase 3 Task 1) — verified by re-reading each signature during this pass. `SectionStatusType` (Phase 2) is distinct from `HomeworkStatus` (Phase 1) — deliberately two different enums (section-level vs. homework-level), not a naming collision.
