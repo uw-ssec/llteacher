@@ -26,6 +26,8 @@
 3. **Conversation FK cascade policy (#19)**: kept as-is. `conversations.sectionId` already has `onDelete: "cascade"` (set in M2) — deleting a section (directly, or via a homework delete/edit-diff) cascades to delete its conversations, messages, and submissions. Documented here rather than re-opened as a schema question; changing it would be a new M2-scope schema decision, out of scope for this epic.
 4. **Auto-submit-overdue (#22)**: explicitly deferred. No Cloudflare Cron Trigger added. `SectionStatus` for an overdue in-progress section is `"in_progress_overdue"` (matches Django), not auto-transitioned to `"submitted"`.
 5. **Homework status model (#94)**: two new nullable timestamp columns, `publishedAt` and `releasedAt`, added to `homeworks`. Status is derived **on read** (no scheduled job): no `publishedAt` → `"draft"`; `releasedAt` in the future → `"scheduled"`; `releasedAt` passed and `dueDate` in the future → `"active"`; `releasedAt` passed and `dueDate` passed → `"past_due"`. `"archived"` (a 5th value already present in `apps/admin`'s fixture-era `Homework.status` type) has no producing feature anywhere in this milestone — the derivation function has an explicit comment marking it unreachable, plus a pointer to file a follow-up issue (confirm with the requester before actually creating it — issue creation needs sign-off per this session's action rules) rather than silently dropping the state.
+6. **`updateHomework` uses `db.batch()`, not `db.transaction()`, with server-generated ids for new sections/solutions** (found during Task 3 implementation, before any code was committed): the plan originally called for `db.transaction(async (tx) => {...})`, but production routes construct `db` via `makeDb()` — the `@neondatabase/serverless` **neon-http** driver, required because this app deploys to Cloudflare Workers (no raw outbound TCP). neon-http's `.transaction()` unconditionally throws (`"No transactions support in neon-http driver"`); confirmed at `node_modules/drizzle-orm/neon-http/session.js`, and no code in this repo calls `db.transaction()` anywhere else. neon-http *does* support `db.batch([...])`: multiple statements sent in one HTTP round-trip, executed as a single real transaction server-side (all-or-nothing, same rollback guarantee as a normal transaction) — the correct primitive for this driver. The one wrinkle: batch statements are packaged before any of them run, so a later statement can't consume an earlier statement's `RETURNING` result the way sequential transaction code could. Fixed by generating each new section's (and its solution's) id via `crypto.randomUUID()` in the repository function itself, before building the batch, and inserting with that id explicit rather than relying on `sections.id`'s `defaultRandom()` — both statements in the batch then reference the same known id with no ordering dependency between them. (`crypto.randomUUID()` is a standard global in both the Workers runtime and modern Node, no import needed.)
+7. **Reordering existing sections resolved via dependency-ordered application with cycle-breaking scratch bumps, not a schema change** (found during Task 3 implementation): `sections_homework_order_uq` is a plain (non-deferrable) unique index — Postgres checks it immediately after each statement, whether inside `db.transaction()` or `db.batch()`. Naively applying every reordered section's `UPDATE` in plan order can collide mid-batch (e.g. swapping two sections' orders, or shifting a range when a section is inserted in the middle). Fixed at the application level, not by making the constraint deferrable (which would need a new migration and wasn't confirmed compatible with the installed Drizzle version) or by hand-writing non-generated migration SQL: `updateHomework` builds a dependency graph of "this section wants to move into order slot N," applies any move whose target slot is currently unoccupied (repeating in passes, since freeing one slot often unblocks another — this alone resolves plain shifts/insertions with zero scratch values, verified by hand-tracing an insert-in-the-middle scenario), and only when a genuine cycle remains (every remaining move's target is held by another remaining move) bumps one section in the cycle to a scratch order value not used by anyone in the homework, breaking the cycle so the pass-based resolution can finish. If no scratch value exists in `[1, 20]` (only possible when a homework already has all 20 allowed sections and the diff is a full cyclic rotation touching every one of them at once), `updateHomework` throws a descriptive error that the existing `/order|section/i` route-layer regex (Task 6) already maps to a 422 asking the instructor to reorder in two smaller steps — an explicitly accepted, narrow edge case rather than a silent failure.
 
 ---
 
@@ -68,7 +70,7 @@ Expected: a new file `src/db/migrations/00XX_<generated-name>.sql` containing `A
 
 - [ ] **Step 3: Apply and verify against a real Postgres**
 
-Run: `DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher npm run db:migrate` (from `apps/web`, matching the CI connection string in `.github/workflows/test.yml`)
+Run: `DATABASE_URL=postgres://llteacher:dev@localhost:5433/llteacher npm run db:migrate` (from `apps/web`, matching the CI connection string in `.github/workflows/test.yml`)
 Expected: migration applies with no error; running it a second time is a no-op (drizzle-kit tracks applied migrations).
 
 - [ ] **Step 4: Commit**
@@ -501,81 +503,205 @@ export interface HomeworkUpdateFields {
   sections?: IncomingSection[];
 }
 
-/** Applies planSectionDiff's plan (Task 2) inside a transaction alongside
- *  any top-level homework field updates. Returns null if `id` isn't found
- *  in `scope` (caller maps that to 404). Throws Drizzle/Postgres errors for
- *  constraint violations (duplicate/out-of-range order) uncaught -- the
- *  route layer (Task 6) catches and maps those to a 422. */
+type BatchStatement = Parameters<Db["batch"]>[0][number];
+
+/** Order-slot-collision-free reordering. sections_homework_order_uq is a
+ *  plain (non-deferrable) unique index -- Postgres checks it immediately
+ *  after each statement, so naively applying every reordered section's
+ *  UPDATE in plan order can collide mid-batch (e.g. a straight swap, or a
+ *  range shift when a section is inserted in the middle). This resolves the
+ *  moves in dependency order instead: repeatedly apply any pending move
+ *  whose target slot is currently free (freeing one slot often unblocks
+ *  another, so plain shifts/insertions resolve in zero scratch bumps), and
+ *  only bump a section to a scratch order value when a genuine cycle
+ *  remains (every remaining move's target is held by another remaining
+ *  move). See Resolved Design Decision 7 for the full reasoning and a
+ *  hand-traced example of both the zero-bump and one-bump cases. */
+function resolveSectionWrites(
+  existingSections: ExistingSection[],
+  deletedIds: Set<string>,
+  plan: ReturnType<typeof planSectionDiff>,
+  pushSectionInsert: (id: string, order: number, title: string, content: string) => void,
+  pushSectionUpdate: (id: string, order: number, title: string, content: string) => void,
+  pushSolutionWrites: (sectionId: string, action: SectionUpdatePlan["solutionAction"], content: string | undefined) => void,
+) {
+  type PendingWrite =
+    | { kind: "update"; id: string; targetOrder: number; title: string; content: string; solutionAction: SectionUpdatePlan["solutionAction"]; solutionContent?: string }
+    | { kind: "create"; id: string; targetOrder: number; title: string; content: string; solutionContent?: string };
+
+  const existingById = new Map(existingSections.map((s) => [s.id, s]));
+  const livePosition = new Map<string, number>();
+  const currentOccupant = new Map<number, string>();
+  for (const s of existingSections) {
+    if (!deletedIds.has(s.id)) {
+      livePosition.set(s.id, s.order);
+      currentOccupant.set(s.order, s.id);
+    }
+  }
+
+  const pending: PendingWrite[] = [];
+  for (const upd of plan.toUpdate) {
+    const prior = existingById.get(upd.id)!;
+    if (prior.order === upd.order) {
+      // No collision possible -- write it immediately, it never competes
+      // for a slot with anything else in this diff.
+      pushSectionUpdate(upd.id, upd.order, upd.title, upd.content);
+      pushSolutionWrites(upd.id, upd.solutionAction, upd.solutionContent);
+    } else {
+      pending.push({ kind: "update", id: upd.id, targetOrder: upd.order, title: upd.title, content: upd.content, solutionAction: upd.solutionAction, solutionContent: upd.solutionContent });
+    }
+  }
+  for (const create of plan.toCreate) {
+    pending.push({ kind: "create", id: crypto.randomUUID(), targetOrder: create.order, title: create.title, content: create.content, solutionContent: create.solutionContent });
+  }
+
+  const placed = new Set<PendingWrite>();
+
+  function apply(write: PendingWrite) {
+    if (write.kind === "create") {
+      pushSectionInsert(write.id, write.targetOrder, write.title, write.content);
+      if (write.solutionContent !== undefined) {
+        pushSolutionWrites(write.id, "create", write.solutionContent);
+      }
+    } else {
+      pushSectionUpdate(write.id, write.targetOrder, write.title, write.content);
+      pushSolutionWrites(write.id, write.solutionAction, write.solutionContent);
+      const prevOrder = livePosition.get(write.id);
+      if (prevOrder !== undefined) currentOccupant.delete(prevOrder);
+    }
+    currentOccupant.set(write.targetOrder, write.id);
+    livePosition.set(write.id, write.targetOrder);
+    placed.add(write);
+  }
+
+  function runPasses() {
+    let progress = true;
+    while (progress) {
+      progress = false;
+      for (const write of pending) {
+        if (placed.has(write)) continue;
+        if (!currentOccupant.has(write.targetOrder)) {
+          apply(write);
+          progress = true;
+        }
+      }
+    }
+  }
+
+  runPasses();
+
+  while (pending.some((w) => !placed.has(w))) {
+    const stillOpen = pending.filter((w) => !placed.has(w));
+    const reserved = new Set<number>([...currentOccupant.keys(), ...stillOpen.map((w) => w.targetOrder)]);
+    let scratch: number | undefined;
+    for (let candidate = 1; candidate <= 20; candidate++) {
+      if (!reserved.has(candidate)) { scratch = candidate; break; }
+    }
+    if (scratch === undefined) {
+      throw new Error(
+        "cannot resolve section reorder: no free order slot to stage a cyclic move -- reorder in two smaller steps",
+      );
+    }
+    // Every still-open write at this point is necessarily an "update": a
+    // brand-new create's target can only ever be blocked by an existing
+    // section that hasn't moved yet, and that section (if it too has a
+    // pending move) gets unblocked by this same bump-and-retry loop before
+    // a create could ever be the thing left stuck.
+    const stuck = stillOpen.find((w): w is Extract<PendingWrite, { kind: "update" }> => w.kind === "update")!;
+    const stuckCurrentOrder = livePosition.get(stuck.id)!;
+    pushSectionUpdate(stuck.id, scratch, existingById.get(stuck.id)!.title, existingById.get(stuck.id)!.content);
+    currentOccupant.delete(stuckCurrentOrder);
+    currentOccupant.set(scratch, stuck.id);
+    livePosition.set(stuck.id, scratch);
+    runPasses();
+  }
+}
+
+/** Applies planSectionDiff's plan (Task 2) via db.batch() (see Resolved
+ *  Design Decision 6 -- production's neon-http driver has no
+ *  db.transaction() support) alongside any top-level homework field
+ *  updates. Returns null if `id` isn't found in `scope` (caller maps that
+ *  to 404). Throws for constraint violations (duplicate/out-of-range
+ *  order) and for the unresolvable-cycle edge case above, both uncaught --
+ *  the route layer (Task 6) catches and maps those to a 422. */
 export async function updateHomework(
   db: Db,
   scope: CourseScope,
   id: string,
   input: HomeworkUpdateFields,
 ) {
-  return db.transaction(async (tx) => {
-    const existingHomework = await tx.query.homeworks.findFirst({
-      where: and(eq(homeworks.id, id), eq(homeworks.courseId, scope)),
-    });
-    if (!existingHomework) return null;
-
-    const topLevelFields = {
-      ...(input.title !== undefined && { title: input.title }),
-      ...(input.description !== undefined && { description: input.description }),
-      ...(input.dueDate !== undefined && { dueDate: input.dueDate }),
-      ...(input.llmConfigId !== undefined && { llmConfigId: input.llmConfigId }),
-    };
-    if (Object.keys(topLevelFields).length > 0) {
-      await tx.update(homeworks).set({ ...topLevelFields, updatedAt: new Date() }).where(eq(homeworks.id, id));
-    }
-
-    if (input.sections) {
-      const existingSections: ExistingSection[] = (
-        await tx.query.sections.findMany({
-          where: eq(sections.homeworkId, id),
-          with: { solution: true },
-        })
-      ).map((s) => ({
-        id: s.id,
-        order: s.order,
-        title: s.title,
-        content: s.content,
-        solutionId: s.solution?.id ?? null,
-      }));
-
-      const plan = planSectionDiff(existingSections, input.sections);
-
-      for (const del of plan.toDelete) {
-        await tx.delete(sections).where(eq(sections.id, del.id));
-      }
-      for (const create of plan.toCreate) {
-        const [newSection] = await tx
-          .insert(sections)
-          .values({ homeworkId: id, title: create.title, content: create.content, order: create.order })
-          .returning({ id: sections.id });
-        if (create.solutionContent !== undefined) {
-          await tx.insert(sectionSolutions).values({ sectionId: newSection!.id, content: create.solutionContent });
-        }
-      }
-      for (const upd of plan.toUpdate) {
-        await tx
-          .update(sections)
-          .set({ title: upd.title, content: upd.content, order: upd.order, updatedAt: new Date() })
-          .where(eq(sections.id, upd.id));
-        if (upd.solutionAction === "create") {
-          await tx.insert(sectionSolutions).values({ sectionId: upd.id, content: upd.solutionContent! });
-        } else if (upd.solutionAction === "update") {
-          await tx
-            .update(sectionSolutions)
-            .set({ content: upd.solutionContent!, updatedAt: new Date() })
-            .where(eq(sectionSolutions.sectionId, upd.id));
-        } else if (upd.solutionAction === "delete") {
-          await tx.delete(sectionSolutions).where(eq(sectionSolutions.sectionId, upd.id));
-        }
-      }
-    }
-
-    return { id };
+  const existingHomework = await db.query.homeworks.findFirst({
+    where: and(eq(homeworks.id, id), eq(homeworks.courseId, scope)),
   });
+  if (!existingHomework) return null;
+
+  const statements: BatchStatement[] = [];
+
+  const topLevelFields = {
+    ...(input.title !== undefined && { title: input.title }),
+    ...(input.description !== undefined && { description: input.description }),
+    ...(input.dueDate !== undefined && { dueDate: input.dueDate }),
+    ...(input.llmConfigId !== undefined && { llmConfigId: input.llmConfigId }),
+  };
+  if (Object.keys(topLevelFields).length > 0) {
+    statements.push(db.update(homeworks).set({ ...topLevelFields, updatedAt: new Date() }).where(eq(homeworks.id, id)));
+  }
+
+  if (input.sections) {
+    const existingSections: ExistingSection[] = (
+      await db.query.sections.findMany({
+        where: eq(sections.homeworkId, id),
+        with: { solution: true },
+      })
+    ).map((s) => ({
+      id: s.id,
+      order: s.order,
+      title: s.title,
+      content: s.content,
+      solutionId: s.solution?.id ?? null,
+    }));
+
+    const plan = planSectionDiff(existingSections, input.sections);
+    const deletedIds = new Set(plan.toDelete.map((d) => d.id));
+
+    // Deletes first -- unconditionally safe, and immediately frees their
+    // order slots for anything else in this diff that wants to reuse them.
+    for (const del of plan.toDelete) {
+      statements.push(db.delete(sections).where(eq(sections.id, del.id)));
+    }
+
+    resolveSectionWrites(
+      existingSections,
+      deletedIds,
+      plan,
+      (sectionId, order, title, content) => {
+        statements.push(db.insert(sections).values({ id: sectionId, homeworkId: id, title, content, order }));
+      },
+      (sectionId, order, title, content) => {
+        statements.push(db.update(sections).set({ title, content, order, updatedAt: new Date() }).where(eq(sections.id, sectionId)));
+      },
+      (sectionId, action, content) => {
+        if (action === "create") {
+          statements.push(db.insert(sectionSolutions).values({ sectionId, content: content! }));
+        } else if (action === "update") {
+          statements.push(db.update(sectionSolutions).set({ content: content!, updatedAt: new Date() }).where(eq(sectionSolutions.sectionId, sectionId)));
+        } else if (action === "delete") {
+          statements.push(db.delete(sectionSolutions).where(eq(sectionSolutions.sectionId, sectionId)));
+        }
+      },
+    );
+  }
+
+  if (statements.length > 0) {
+    // db.batch() requires a non-empty tuple type in some Drizzle versions --
+    // verify against the installed drizzle-orm's neon-http batch() signature
+    // (check node_modules/drizzle-orm/neon-http/session.d.ts or let
+    // TypeScript's error on this call guide the exact expected type) and
+    // adjust the `statements` array's declared type/cast if needed.
+    await db.batch(statements as [BatchStatement, ...BatchStatement[]]);
+  }
+
+  return { id };
 }
 ```
 
@@ -584,7 +710,7 @@ export async function updateHomework(
 Run: `cd apps/web && npx vitest run src/server/repositories/homeworks.test.ts`
 Expected: PASS, all 4 `deriveHomeworkStatus` tests.
 
-- [ ] **Step 5: Real-DB integration test for `updateHomework`'s diff + transaction behavior**
+- [ ] **Step 5: Real-DB integration tests for `updateHomework`'s diff, batch atomicity, and reorder resolution**
 
 ```ts
 // apps/web/src/server/repositories/homeworks.test.ts — appended, gated like
@@ -595,25 +721,34 @@ import { unsafeCourseScope } from "./scope";
 import { organizations, courses, courseMemberships, users } from "../../db/schema";
 import { eq as eq2 } from "drizzle-orm";
 
+// Fixed byte arrays would collide with users_email_blind_index_uq across
+// runs (the users table isn't cascade-deleted when a test's organizations
+// row is cleaned up) -- random bytes per call, matching every other
+// real-DB test file's convention (conversations.test.ts, submissions.test.ts).
+async function seedCourseWithInstructor(db: ReturnType<typeof makeNodeDb>, suffix: string) {
+  const [org] = await db.insert(organizations).values({
+    slug: `m3-test-${suffix}`, name: `M3 Test Org ${suffix}`, workosOrganizationId: `wo-${suffix}`,
+  }).returning();
+  const [course] = await db.insert(courses).values({
+    organizationId: org!.id, code: `TEST-${suffix}`, term: "Test", title: `Test Course ${suffix}`,
+  }).returning();
+  const [user] = await db.insert(users).values({
+    email: crypto.getRandomValues(new Uint8Array(32)) as never,
+    emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+  }).returning();
+  const [membership] = await db.insert(courseMemberships).values({
+    userId: user!.id, courseId: course!.id, role: "instructor",
+  }).returning();
+  return { org: org!, course: course!, membership: membership! };
+}
+
 describe.skipIf(!process.env.DATABASE_URL)("updateHomework (real DB)", () => {
   it("creates, updates, reorders, and deletes sections in one call; solution lifecycle round-trips", async () => {
     const db = makeNodeDb(process.env.DATABASE_URL!);
-    const [org] = await db.insert(organizations).values({
-      slug: `m3-test-${Date.now()}`, name: "M3 Test Org", workosOrganizationId: `wo-${Date.now()}`,
-    }).returning();
-    const [course] = await db.insert(courses).values({
-      organizationId: org!.id, code: "TEST101", term: "Test", title: "Test Course",
-    }).returning();
-    const [user] = await db.insert(users).values({
-      email: new Uint8Array([1]) as never, emailBlindIndex: new Uint8Array([1]) as never,
-    }).returning();
-    const [membership] = await db.insert(courseMemberships).values({
-      userId: user!.id, courseId: course!.id, role: "instructor",
-    }).returning();
-
-    const scope = unsafeCourseScope(course!.id);
+    const { org, membership } = await seedCourseWithInstructor(db, "1");
+    const scope = unsafeCourseScope(membership.courseId);
     const created = await createHomework(db, scope, {
-      createdById: membership!.id, title: "HW1", description: "d", dueDate: new Date("2099-01-01"),
+      createdById: membership.id, title: "HW1", description: "d", dueDate: new Date("2099-01-01"),
     });
 
     const initial = await updateHomework(db, scope, created!.id, {
@@ -629,8 +764,9 @@ describe.skipIf(!process.env.DATABASE_URL)("updateHomework (real DB)", () => {
     const secB = afterCreate!.sections.find((s) => s.title === "Sec B")!;
     expect(secB.solution?.content).toBe("sol-b");
 
-    // Diff pass: update Sec A's title, reorder (A<->B), remove Sec B's
-    // solution, add a brand-new Sec C, delete nothing.
+    // Diff pass: update Sec A's title, reorder (A<->B, a genuine 2-cycle --
+    // exercises the scratch-bump path), remove Sec B's solution, add a
+    // brand-new Sec C, delete nothing.
     await updateHomework(db, scope, created!.id, {
       sections: [
         { id: secA.id, title: "Sec A revised", content: "a", order: 2 },
@@ -653,26 +789,15 @@ describe.skipIf(!process.env.DATABASE_URL)("updateHomework (real DB)", () => {
     const afterDelete = await getHomeworkById(db, scope, created!.id);
     expect(afterDelete!.sections).toHaveLength(2);
 
-    await db.delete(organizations).where(eq2(organizations.id, org!.id));
+    await db.delete(organizations).where(eq2(organizations.id, org.id));
   });
 
   it("rejects a diff with a duplicate order and leaves existing sections untouched", async () => {
     const db = makeNodeDb(process.env.DATABASE_URL!);
-    const [org] = await db.insert(organizations).values({
-      slug: `m3-test-${Date.now()}-b`, name: "M3 Test Org 2", workosOrganizationId: `wo-${Date.now()}-b`,
-    }).returning();
-    const [course] = await db.insert(courses).values({
-      organizationId: org!.id, code: "TEST102", term: "Test", title: "Test Course 2",
-    }).returning();
-    const [user] = await db.insert(users).values({
-      email: new Uint8Array([2]) as never, emailBlindIndex: new Uint8Array([2]) as never,
-    }).returning();
-    const [membership] = await db.insert(courseMemberships).values({
-      userId: user!.id, courseId: course!.id, role: "instructor",
-    }).returning();
-    const scope = unsafeCourseScope(course!.id);
+    const { org, membership } = await seedCourseWithInstructor(db, "2");
+    const scope = unsafeCourseScope(membership.courseId);
     const created = await createHomework(db, scope, {
-      createdById: membership!.id, title: "HW2", description: "d", dueDate: new Date("2099-01-01"),
+      createdById: membership.id, title: "HW2", description: "d", dueDate: new Date("2099-01-01"),
     });
     await updateHomework(db, scope, created!.id, {
       sections: [{ title: "Sec A", content: "a", order: 1 }],
@@ -690,7 +815,119 @@ describe.skipIf(!process.env.DATABASE_URL)("updateHomework (real DB)", () => {
     const afterFailedDiff = await getHomeworkById(db, scope, created!.id);
     expect(afterFailedDiff!.sections).toHaveLength(1); // untouched
 
-    await db.delete(organizations).where(eq2(organizations.id, org!.id));
+    await db.delete(organizations).where(eq2(organizations.id, org.id));
+  });
+
+  it("shifts a range with zero scratch bumps when a section is inserted in the middle", async () => {
+    // Inserting at position 2 of an existing 1/2/3 shifts 2->3 and 3->4 --
+    // a range shift, not a cycle. Verifies resolveSectionWrites resolves
+    // this purely through pass-based ordering (see Resolved Design
+    // Decision 7): the section that vacates a slot first is whichever one
+    // this diff didn't block on anything else, discovered automatically by
+    // the algorithm rather than by the test asserting a specific statement
+    // order.
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const { org, membership } = await seedCourseWithInstructor(db, "3");
+    const scope = unsafeCourseScope(membership.courseId);
+    const created = await createHomework(db, scope, {
+      createdById: membership.id, title: "HW3", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    await updateHomework(db, scope, created!.id, {
+      sections: [
+        { title: "S1", content: "1", order: 1 },
+        { title: "S2", content: "2", order: 2 },
+        { title: "S3", content: "3", order: 3 },
+      ],
+    });
+    const before = await getHomeworkById(db, scope, created!.id);
+    const s1 = before!.sections.find((s) => s.title === "S1")!;
+    const s2 = before!.sections.find((s) => s.title === "S2")!;
+    const s3 = before!.sections.find((s) => s.title === "S3")!;
+
+    await updateHomework(db, scope, created!.id, {
+      sections: [
+        { id: s1.id, title: "S1", content: "1", order: 1 },
+        { title: "NEW", content: "new", order: 2 },
+        { id: s2.id, title: "S2", content: "2", order: 3 },
+        { id: s3.id, title: "S3", content: "3", order: 4 },
+      ],
+    });
+
+    const after = await getHomeworkById(db, scope, created!.id);
+    expect(after!.sections.map((s) => [s.title, s.order])).toEqual([
+      ["S1", 1], ["NEW", 2], ["S2", 3], ["S3", 4],
+    ]);
+
+    await db.delete(organizations).where(eq2(organizations.id, org.id));
+  });
+
+  it("resolves a genuine 3-way reorder cycle via a scratch bump", async () => {
+    // A(1)->2, B(2)->3, C(3)->1 -- every target is held by another section
+    // in the same cycle, so a direct pass-based resolution alone cannot
+    // place any of them; this exercises the scratch-bump branch (with only
+    // 3 sections, slot 4+ is available as scratch).
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const { org, membership } = await seedCourseWithInstructor(db, "4");
+    const scope = unsafeCourseScope(membership.courseId);
+    const created = await createHomework(db, scope, {
+      createdById: membership.id, title: "HW4", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    await updateHomework(db, scope, created!.id, {
+      sections: [
+        { title: "A", content: "a", order: 1 },
+        { title: "B", content: "b", order: 2 },
+        { title: "C", content: "c", order: 3 },
+      ],
+    });
+    const before = await getHomeworkById(db, scope, created!.id);
+    const a = before!.sections.find((s) => s.title === "A")!;
+    const b = before!.sections.find((s) => s.title === "B")!;
+    const c = before!.sections.find((s) => s.title === "C")!;
+
+    await updateHomework(db, scope, created!.id, {
+      sections: [
+        { id: a.id, title: "A", content: "a", order: 2 },
+        { id: b.id, title: "B", content: "b", order: 3 },
+        { id: c.id, title: "C", content: "c", order: 1 },
+      ],
+    });
+
+    const after = await getHomeworkById(db, scope, created!.id);
+    expect(after!.sections.map((s) => [s.title, s.order]).sort()).toEqual([
+      ["A", 2], ["B", 3], ["C", 1],
+    ].sort());
+
+    await db.delete(organizations).where(eq2(organizations.id, org.id));
+  });
+
+  it("returns a friendly error when all 20 sections are reordered in a single full cyclic rotation", async () => {
+    // The one case resolveSectionWrites cannot resolve: every order slot
+    // 1-20 is simultaneously occupied AND every section is moving, so no
+    // scratch value exists anywhere in the allowed range.
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const { org, membership } = await seedCourseWithInstructor(db, "5");
+    const scope = unsafeCourseScope(membership.courseId);
+    const created = await createHomework(db, scope, {
+      createdById: membership.id, title: "HW5", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    const initialSections = Array.from({ length: 20 }, (_, i) => ({
+      title: `Sec ${i + 1}`, content: `c${i + 1}`, order: i + 1,
+    }));
+    await updateHomework(db, scope, created!.id, { sections: initialSections });
+    const before = await getHomeworkById(db, scope, created!.id);
+    const byTitle = new Map(before!.sections.map((s) => [s.title, s]));
+
+    // Full rotation: section at order N moves to order (N % 20) + 1.
+    const rotated = initialSections.map((s) => ({
+      id: byTitle.get(s.title)!.id, title: s.title, content: s.content,
+      order: (s.order % 20) + 1,
+    }));
+
+    await expect(
+      updateHomework(db, scope, created!.id, { sections: rotated }),
+    ).rejects.toThrow(/no free order slot/i);
+
+    await db.delete(organizations).where(eq2(organizations.id, org.id));
   });
 });
 ```
@@ -699,8 +936,8 @@ Add the two new imports (`createHomework`, `getHomeworkById`, `updateHomework`) 
 
 - [ ] **Step 6: Run against local Postgres**
 
-Run: `cd apps/web && DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher npx vitest run src/server/repositories/homeworks.test.ts`
-Expected: PASS, all 6 tests (4 pure + 2 real-DB).
+Run: `cd apps/web && DATABASE_URL=postgres://llteacher:dev@localhost:5433/llteacher npx vitest run src/server/repositories/homeworks.test.ts`
+Expected: PASS, all 11 tests (2 pre-existing `listHomeworksForCourse`/`createHomework` + 4 pure `deriveHomeworkStatus` + 5 real-DB).
 
 - [ ] **Step 7: Re-export from the repository index and commit**
 
@@ -1510,7 +1747,7 @@ describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)
 
 (Full seed boilerplate follows the exact pattern established in Phase 1 Task 3 Step 5 — organizations/courses/courseMemberships/users insert, `unsafeCourseScope`/`unsafeOrgScope` for scope construction, cleanup via `db.delete(organizations)`.)
 
-- [ ] **Step 6: Run against local Postgres.** Run: `DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher npx vitest run src/server/repositories/studentHomeworks.test.ts` — expect PASS.
+- [ ] **Step 6: Run against local Postgres.** Run: `DATABASE_URL=postgres://llteacher:dev@localhost:5433/llteacher npx vitest run src/server/repositories/studentHomeworks.test.ts` — expect PASS.
 
 - [ ] **Step 7: Commit**
 
@@ -2312,7 +2549,7 @@ describe("submitSection", () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify it fails.** Run: `cd apps/web && DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher npx vitest run src/server/repositories/submissions.test.ts` — expect FAIL (`submitSection` not exported).
+- [ ] **Step 2: Run to verify it fails.** Run: `cd apps/web && DATABASE_URL=postgres://llteacher:dev@localhost:5433/llteacher npx vitest run src/server/repositories/submissions.test.ts` — expect FAIL (`submitSection` not exported).
 
 - [ ] **Step 3: Implement**
 
@@ -2359,7 +2596,7 @@ export async function submitSection(
 }
 ```
 
-- [ ] **Step 4: Run to verify it passes.** Run: `DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher npx vitest run src/server/repositories/submissions.test.ts` — expect PASS.
+- [ ] **Step 4: Run to verify it passes.** Run: `DATABASE_URL=postgres://llteacher:dev@localhost:5433/llteacher npx vitest run src/server/repositories/submissions.test.ts` — expect PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -2618,7 +2855,7 @@ describe("getHomeworkSubmissionsMatrix aggregation", () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify it fails.** Run: `DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher npx vitest run src/server/repositories/submissions.test.ts` — expect FAIL.
+- [ ] **Step 2: Run to verify it fails.** Run: `DATABASE_URL=postgres://llteacher:dev@localhost:5433/llteacher npx vitest run src/server/repositories/submissions.test.ts` — expect FAIL.
 
 - [ ] **Step 3: Implement**
 
@@ -2760,7 +2997,7 @@ export async function getHomeworkSubmissionsMatrix(
 }
 ```
 
-- [ ] **Step 4: Run to verify it passes.** Run: `DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher npx vitest run src/server/repositories/submissions.test.ts` — expect PASS.
+- [ ] **Step 4: Run to verify it passes.** Run: `DATABASE_URL=postgres://llteacher:dev@localhost:5433/llteacher npx vitest run src/server/repositories/submissions.test.ts` — expect PASS.
 
 - [ ] **Step 5: Commit**
 
