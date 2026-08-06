@@ -26,7 +26,6 @@ import { LLMConfigsView } from "./views/LLMConfigsView";
 import {
   HOMEWORKS,
   LLM_CONFIGS,
-  SUBMISSIONS_HW_003,
   CURRENT_TEACHER,
 } from "./lib/fixtures";
 import { useAuth, type CourseRole } from "./components/AuthProvider";
@@ -195,17 +194,17 @@ export default function App() {
                 )
               )}
 
-              {view.kind === "submissions" && (() => {
-                const hw = HOMEWORKS.find((h) => h.id === view.homeworkId);
-                if (!hw) return <EmptyView label="Homework not found" />;
-                return (
-                  <SubmissionsView
-                    homework={hw}
-                    rows={SUBMISSIONS_HW_003}
+              {view.kind === "submissions" && (
+                CURRENT_COURSE_ID ? (
+                  <SubmissionsDataLoader
+                    courseId={CURRENT_COURSE_ID}
+                    homeworkId={view.homeworkId}
                     onBack={() => setView({ kind: "homeworks" })}
                   />
-                );
-              })()}
+                ) : (
+                  <EmptyView label="No course found for your account yet" />
+                )
+              )}
 
               {view.kind === "llm-configs" && (
                 <LLMConfigsView
@@ -230,6 +229,26 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+function SubmissionsDataLoader({
+  courseId,
+  homeworkId,
+  onBack,
+}: {
+  courseId: string;
+  homeworkId: string;
+  onBack: () => void;
+}) {
+  const [data, setData] = useState<import("./views/SubmissionsView").HomeworkSubmissionsData | null>(null);
+  useEffect(() => {
+    setData(null); // clear stale data from a previously-open homework before the new fetch resolves
+    fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/submissions`)
+      .then((r) => r.json())
+      .then(setData);
+  }, [courseId, homeworkId]);
+  if (!data) return null;
+  return <SubmissionsView data={data} onBack={onBack} />;
 }
 
 function EmptyView({ label }: { label: string }) {
