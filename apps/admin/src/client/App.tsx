@@ -19,6 +19,7 @@ import { TopNav } from "@llteacher/ui";
 import { AdminSidebar } from "./components/AdminSidebar";
 import type { AdminNavKey } from "./components/AdminSidebar";
 import { HomeworksView } from "./views/HomeworksView";
+import type { HomeworkListItemResponse } from "./views/HomeworksView";
 import { HomeworkCreateView } from "./views/HomeworkCreateView";
 import { HomeworkEditView } from "./views/HomeworkEditView";
 import { SubmissionsView } from "./views/SubmissionsView";
@@ -159,12 +160,16 @@ export default function App() {
           <div className="conversation-messages">
             <div className="conversation-inner admin-inner">
               {view.kind === "homeworks" && (
-                <HomeworksView
-                  homeworks={HOMEWORKS}
-                  onOpenHomework={(id) => setView({ kind: "edit-homework", homeworkId: id })}
-                  onOpenSubmissions={(id) => setView({ kind: "submissions", homeworkId: id })}
-                  onNewHomework={() => setView({ kind: "create-homework" })}
-                />
+                CURRENT_COURSE_ID ? (
+                  <HomeworksDataLoader
+                    courseId={CURRENT_COURSE_ID}
+                    onOpenHomework={(id) => setView({ kind: "edit-homework", homeworkId: id })}
+                    onOpenSubmissions={(id) => setView({ kind: "submissions", homeworkId: id })}
+                    onNewHomework={() => setView({ kind: "create-homework" })}
+                  />
+                ) : (
+                  <EmptyView label="No course found for your account yet" />
+                )
               )}
 
               {view.kind === "create-homework" && (
@@ -228,6 +233,40 @@ export default function App() {
         </main>
       </div>
     </div>
+  );
+}
+
+function HomeworksDataLoader({
+  courseId,
+  onOpenHomework,
+  onOpenSubmissions,
+  onNewHomework,
+}: {
+  courseId: string;
+  onOpenHomework: (id: string) => void;
+  onOpenSubmissions: (id: string) => void;
+  onNewHomework: () => void;
+}) {
+  const [homeworks, setHomeworks] = useState<HomeworkListItemResponse[] | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  useEffect(() => {
+    fetch(`/api/courses/${courseId}/homeworks`)
+      .then((r) => {
+        if (!r.ok) throw new Error("failed");
+        return r.json();
+      })
+      .then((data) => setHomeworks(data.homeworks))
+      .catch(() => setLoadError(true));
+  }, [courseId]);
+  if (loadError) return <p role="alert">Failed to load homeworks.</p>;
+  if (!homeworks) return null;
+  return (
+    <HomeworksView
+      homeworks={homeworks}
+      onOpenHomework={onOpenHomework}
+      onOpenSubmissions={onOpenSubmissions}
+      onNewHomework={onNewHomework}
+    />
   );
 }
 

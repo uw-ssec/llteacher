@@ -8,20 +8,35 @@
    live catalog, not static documentation."
    -------------------------------------------------------------------------- */
 
-import { ArrowRight, CalendarBlank, ClipboardText, Folder } from "@phosphor-icons/react";
+import { ArrowRight, CalendarBlank, Folder } from "@phosphor-icons/react";
 import { PageHeader } from "../components/PageHeader";
 import { RecordId } from "../components/RecordId";
 import { StatusBadge } from "../components/StatusBadge";
-import type { Homework } from "../lib/fixtures";
+
+/** Mirrors apps/web's `HomeworkListItemResponse` (Task 23) -- apps/admin
+ *  never imports from apps/web (the only cross-package import anywhere in
+ *  apps/admin/src is @llteacher/ui), so this is the contract, same
+ *  convention as SubmissionsView.tsx's local types. */
+export type HomeworkStatus = "draft" | "scheduled" | "active" | "past_due" | "archived";
+
+export interface HomeworkListItemResponse {
+  id: string;
+  title: string;
+  description: string;
+  dueDate: string;
+  llmConfigId: string | null;
+  status: HomeworkStatus;
+  sectionCount: number;
+}
 
 export type HomeworksViewProps = {
-  homeworks: Homework[];
+  homeworks: HomeworkListItemResponse[];
   onOpenHomework: (id: string) => void;
   onOpenSubmissions: (id: string) => void;
   onNewHomework: () => void;
 };
 
-const STATUS_LABEL: Record<Homework["status"], string> = {
+const STATUS_LABEL: Record<HomeworkStatus, string> = {
   active:    "active",
   draft:     "draft",
   scheduled: "scheduled",
@@ -30,7 +45,10 @@ const STATUS_LABEL: Record<Homework["status"], string> = {
 };
 
 function formatDueDate(iso: string): string {
-  const d = new Date(iso + "T00:00:00");
+  // The real API returns a full ISO datetime (`dueDate.toISOString()`),
+  // unlike the fixture's plain YYYY-MM-DD -- parse directly rather than
+  // appending a redundant time component that would double up on "Z".
+  const d = new Date(iso);
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
@@ -40,8 +58,6 @@ export function HomeworksView({
   onOpenSubmissions,
   onNewHomework,
 }: HomeworksViewProps) {
-  const totalStudents = homeworks[0]?.studentsTotal ?? 0;
-  const totalSubmissions = homeworks.reduce((s, h) => s + h.submissionsCount, 0);
   const activeCount = homeworks.filter((h) => h.status === "active").length;
 
   return (
@@ -70,14 +86,6 @@ export function HomeworksView({
           <div className="admin-stat__label">Active</div>
           <div className="admin-stat__value">{activeCount}</div>
         </div>
-        <div className="admin-stat" role="listitem">
-          <div className="admin-stat__label">Students enrolled</div>
-          <div className="admin-stat__value">{totalStudents}</div>
-        </div>
-        <div className="admin-stat" role="listitem">
-          <div className="admin-stat__label">Submissions logged</div>
-          <div className="admin-stat__value">{totalSubmissions}</div>
-        </div>
       </div>
 
       <section className="admin-record-list" aria-label="Homeworks">
@@ -88,7 +96,7 @@ export function HomeworksView({
             style={{ animationDelay: `${idx * 55}ms` }}
           >
             <div className="admin-record-row__id">
-              <RecordId prefix="HW" index={hw.recordNumber} />
+              <RecordId prefix="HW" index={idx + 1} />
             </div>
 
             <div className="admin-record-row__body">
@@ -102,15 +110,11 @@ export function HomeworksView({
               <div className="admin-record-row__meta">
                 <span className="admin-record-row__meta-chip">
                   <Folder size={12} weight="regular" aria-hidden="true" />
-                  {hw.sections.length} {hw.sections.length === 1 ? "section" : "sections"}
+                  {hw.sectionCount} {hw.sectionCount === 1 ? "section" : "sections"}
                 </span>
                 <span className="admin-record-row__meta-chip">
                   <CalendarBlank size={12} weight="regular" aria-hidden="true" />
                   due {formatDueDate(hw.dueDate)}
-                </span>
-                <span className="admin-record-row__meta-chip">
-                  <ClipboardText size={12} weight="regular" aria-hidden="true" />
-                  {hw.submissionsCount} submissions
                 </span>
               </div>
               <p className="admin-record-row__desc">{hw.description}</p>
