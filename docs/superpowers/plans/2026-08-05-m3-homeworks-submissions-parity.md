@@ -3781,23 +3781,31 @@ git commit -m "feat(submissions): GET .../submissions dashboard route (#23)"
 **Interfaces:**
 - Consumes: `GET /api/courses/:courseId/homeworks/:homeworkId/submissions` (Task 20).
 
+Note: `apps/admin` never imports from `apps/web` (confirmed by grep — the only cross-package import anywhere in `apps/admin/src` is `@llteacher/ui`). Define a local type mirroring the API response shape in `SubmissionsView.tsx` itself, matching this codebase's existing convention of `lib/fixtures.ts`'s own header comment ("the TypeScript types here are the contract") — don't invent a shared-package import that doesn't exist yet.
+
 - [ ] **Step 1: Fetch real data keyed by the open homework's id**
 
 ```tsx
 // apps/admin/src/client/App.tsx — the submissions view.kind branch currently
-// always passes SUBMISSIONS_HW_003 regardless of view.homeworkId (the bug
-// noted in brainstorming). Replace with a fetch keyed by view.homeworkId:
+// always passes SUBMISSIONS_HW_003 regardless of view.homeworkId. Replace
+// with a fetch keyed by view.homeworkId. CURRENT_COURSE_ID (from Task 15)
+// can be undefined (an instructor with zero courses) -- guard the same way
+// create/edit already do, reusing the existing EmptyView.
 {view.kind === "submissions" && (
-  <SubmissionsDataLoader
-    courseId={CURRENT_COURSE_ID}
-    homeworkId={view.homeworkId}
-    onBack={() => setView({ kind: "homeworks" })}
-  />
+  CURRENT_COURSE_ID ? (
+    <SubmissionsDataLoader
+      courseId={CURRENT_COURSE_ID}
+      homeworkId={view.homeworkId}
+      onBack={() => setView({ kind: "homeworks" })}
+    />
+  ) : (
+    <EmptyView label="No course found for your account yet" />
+  )
 )}
 
 // New small component in App.tsx (or its own file if it grows):
 function SubmissionsDataLoader({ courseId, homeworkId, onBack }: { courseId: string; homeworkId: string; onBack: () => void }) {
-  const [data, setData] = useState<HomeworkSubmissionsResponse | null>(null);
+  const [data, setData] = useState<import("./views/SubmissionsView").HomeworkSubmissionsData | null>(null);
   useEffect(() => {
     setData(null); // clear stale data from a previously-open homework before the new fetch resolves
     fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/submissions`)
@@ -3812,16 +3820,207 @@ function SubmissionsDataLoader({ courseId, homeworkId, onBack }: { courseId: str
 - [ ] **Step 2: Adapt `SubmissionsView`'s props and rendering to the real response shape**
 
 ```tsx
-// apps/admin/src/client/views/SubmissionsView.tsx — replace
-// `{ homework: Homework; rows: SubmissionRow[] }` props with
-// `{ data: HomeworkSubmissionsResponse }`. Section-progress grid maps
-// data.sectionHeaders (ordered) x student.sections (by sectionId) instead of
-// the old sectionsProgress[]/sectionNumber shape; participationStatus values
-// ("no_interaction"|"partial"|"active") are unchanged so STATUS_LABEL/
-// StatusBadge usage carries over directly. Add a small "deleted" badge/title
-// on any SubmissionCell with hasDeletedConversation=true (a rendering detail
-// with no prior equivalent -- the fixture data never modeled soft-deletes).
+// apps/admin/src/client/views/SubmissionsView.tsx — full replacement.
+// Local types mirror apps/web's HomeworkSubmissionsMatrix/StudentSubmissionRow/
+// SubmissionCell/ParticipationStatus (Tasks 19-20) -- this app has no import
+// path to that package, per the note above.
+import { useMemo, useState } from "react";
+import { ArrowLeft, ChatCircleDots, ClipboardText, Warning } from "@phosphor-icons/react";
+import { PageHeader } from "../components/PageHeader";
+import { StatusBadge } from "../components/StatusBadge";
+
+export type ParticipationStatus = "no_interaction" | "partial" | "active";
+
+export interface SubmissionCell {
+  sectionId: string;
+  status: "missing" | "in_progress" | "submitted";
+  conversationCount: number;
+  lastActivityAt: string | null;
+  hasDeletedConversation: boolean;
+}
+
+export interface StudentSubmissionRow {
+  studentId: string;
+  displayName: string;
+  email: string;
+  sections: SubmissionCell[];
+  totalConversations: number;
+  submissionCount: number;
+  participationStatus: ParticipationStatus;
+  lastActivityAt: string | null;
+}
+
+export interface HomeworkSubmissionsData {
+  homeworkId: string;
+  homeworkTitle: string;
+  homeworkDueDate: string;
+  sectionHeaders: { id: string; order: number; title: string }[];
+  students: StudentSubmissionRow[];
+  aggregateStats: {
+    totalStudents: number; activeStudents: number; inactiveStudents: number;
+    totalSubmissions: number; submissionRate: number;
+  };
+}
+
+export type SubmissionsViewProps = {
+  data: HomeworkSubmissionsData;
+  onBack: () => void;
+};
+
+type Filter = "all" | "active" | "no_interaction";
+
+const STATUS_LABEL: Record<ParticipationStatus, string> = {
+  active: "active",
+  partial: "partial",
+  no_interaction: "no interaction",
+};
+
+function initialsFor(displayName: string): string {
+  return displayName.split(" ").map((p) => p[0]).join("").slice(0, 2).toUpperCase() || "?";
+}
+
+export function SubmissionsView({ data, onBack }: SubmissionsViewProps) {
+  const [filter, setFilter] = useState<Filter>("all");
+
+  const counts = useMemo(() => ({
+    total: data.students.length,
+    active: data.students.filter((r) => r.participationStatus === "active").length,
+    partial: data.students.filter((r) => r.participationStatus === "partial").length,
+    no_interaction: data.students.filter((r) => r.participationStatus === "no_interaction").length,
+  }), [data.students]);
+
+  const filtered = useMemo(() => {
+    if (filter === "all") return data.students;
+    if (filter === "active") return data.students.filter((r) => r.participationStatus === "active");
+    return data.students.filter((r) => r.participationStatus === "no_interaction");
+  }, [data.students, filter]);
+
+  return (
+    <div className="admin-view">
+      <button type="button" className="admin-back" onClick={onBack}>
+        <ArrowLeft size={14} weight="regular" aria-hidden="true" />
+        All homeworks
+      </button>
+
+      <PageHeader
+        eyebrow="SUBMISSIONS"
+        title={data.homeworkTitle}
+        subtitle={`${data.sectionHeaders.length} sections · due ${new Date(data.homeworkDueDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`}
+      />
+
+      {counts.no_interaction > 0 && (
+        <div className="admin-alert" role="status">
+          <span className="admin-alert__icon" aria-hidden="true">
+            <Warning size={16} weight="regular" />
+          </span>
+          <span>
+            <strong>{counts.no_interaction}</strong>{" "}
+            {counts.no_interaction === 1 ? "student has" : "students have"} not started this homework.
+          </span>
+        </div>
+      )}
+
+      <div className="admin-stat-row" role="list" aria-label="Submission summary">
+        <div className="admin-stat" role="listitem">
+          <div className="admin-stat__label">Total students</div>
+          <div className="admin-stat__value">{counts.total}</div>
+        </div>
+        <div className="admin-stat" role="listitem">
+          <div className="admin-stat__label">Active</div>
+          <div className="admin-stat__value">{counts.active}</div>
+        </div>
+        <div className="admin-stat" role="listitem">
+          <div className="admin-stat__label">Partial</div>
+          <div className="admin-stat__value">{counts.partial}</div>
+        </div>
+        <div className="admin-stat" role="listitem">
+          <div className="admin-stat__label">No interaction</div>
+          <div className="admin-stat__value">{counts.no_interaction}</div>
+        </div>
+      </div>
+
+      <div className="admin-filter-row" role="tablist" aria-label="Filter students">
+        <FilterChip active={filter === "all"} onClick={() => setFilter("all")} label="All" count={counts.total} />
+        <FilterChip active={filter === "active"} onClick={() => setFilter("active")} label="Active" count={counts.active} />
+        <FilterChip active={filter === "no_interaction"} onClick={() => setFilter("no_interaction")} label="No interaction" count={counts.no_interaction} />
+      </div>
+
+      <section className="admin-record-list" aria-label="Student submissions">
+        <header className="admin-submission-row admin-submission-row--head" aria-hidden="true">
+          <div className="admin-submission-row__avatar" />
+          <div className="admin-submission-row__name">Student</div>
+          <div className="admin-submission-row__grid">Sections</div>
+          <div className="admin-submission-row__conv">Conversations</div>
+          <div className="admin-submission-row__status">Status</div>
+          <div className="admin-submission-row__activity">Last activity</div>
+        </header>
+
+        {filtered.map((row, idx) => (
+          <article key={row.studentId} className="admin-submission-row admin-record-row--enterable" style={{ animationDelay: `${idx * 40}ms` }}>
+            <div className="admin-submission-row__avatar">
+              <span aria-hidden="true">{initialsFor(row.displayName)}</span>
+            </div>
+            <div className="admin-submission-row__name">
+              <span className="admin-submission-row__name-label">{row.displayName}</span>
+              <span className="admin-submission-row__name-id">{row.email}</span>
+            </div>
+            <div className="admin-submission-row__grid" role="group" aria-label="Section progress">
+              {data.sectionHeaders.map((header) => {
+                const cell = row.sections.find((c) => c.sectionId === header.id);
+                // cell.status is already one of "missing"|"in_progress"|"submitted" --
+                // the same 3 values the existing admin-progress-cell--* CSS classes
+                // expect (unchanged from the fixture-era shape), so no translation needed.
+                const state = cell?.status ?? "missing";
+                return (
+                  <span
+                    key={header.id}
+                    className={`admin-progress-cell admin-progress-cell--${state}`}
+                    aria-label={`${header.title}: ${state}${cell?.hasDeletedConversation ? " (has a deleted conversation)" : ""}`}
+                    title={`${header.title}: ${state}${cell?.hasDeletedConversation ? " -- includes a deleted conversation" : ""}`}
+                  >
+                    {header.order}
+                    {cell?.hasDeletedConversation && <sup aria-hidden="true">†</sup>}
+                  </span>
+                );
+              })}
+            </div>
+            <div className="admin-submission-row__conv">
+              <ChatCircleDots size={13} weight="regular" aria-hidden="true" />
+              {row.totalConversations}
+            </div>
+            <div className="admin-submission-row__status">
+              <StatusBadge kind={row.participationStatus}>{STATUS_LABEL[row.participationStatus]}</StatusBadge>
+            </div>
+            <div className="admin-submission-row__activity">
+              {row.lastActivityAt
+                ? new Date(row.lastActivityAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+                : <span className="admin-muted">—</span>}
+            </div>
+          </article>
+        ))}
+
+        {filtered.length === 0 && (
+          <div className="admin-empty">
+            <ClipboardText size={22} weight="regular" aria-hidden="true" />
+            <p>No students match this filter.</p>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function FilterChip({ active, onClick, label, count }: { active: boolean; onClick: () => void; label: string; count: number }) {
+  return (
+    <button type="button" className={active ? "admin-filter admin-filter--active" : "admin-filter"} onClick={onClick} role="tab" aria-selected={active}>
+      <span className="admin-filter__label">{label}</span>
+      <span className="admin-filter__count">{count}</span>
+    </button>
+  );
+}
 ```
+
+The old `RecordId`-based numeric badge (`HW·003`) is dropped from this view's eyebrow since the real API response has no `recordNumber` field (that was a fixture-only cosmetic detail) — plain "SUBMISSIONS" text replaces it. `HomeworksView.tsx`'s own `RecordId` usage (a different, un-modified file, still reading the `HOMEWORKS` fixture for the list) is untouched by this task.
 
 - [ ] **Step 3: Manual verification.** Open two different homeworks' submissions views back-to-back; confirm each shows its own roster/matrix (not always HW 3's), and that a submitted section renders correctly end-to-end from Phase 4's flow.
 
