@@ -488,6 +488,20 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     const body = (await res.json()) as { status: string };
     expect(body.status).toBe("draft");
   });
+
+  it("still returns a scheduled homework normally for an instructor", async () => {
+    findFirstHomework.mockReset().mockResolvedValue({
+      id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
+      dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: new Date("2020-01-01"), releasedAt: new Date("2099-01-01"),
+    });
+    findManySections.mockReset().mockResolvedValue([]);
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string };
+    expect(body.status).toBe("scheduled");
+  });
 });
 
 describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
