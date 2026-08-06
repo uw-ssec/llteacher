@@ -131,6 +131,30 @@ describe("HomeworkForm", () => {
     expect(focusable[0]).toBe(title);
   });
 
+  // #166
+  it("renders a controllable Hidden checkbox and expires-at field, included in the submit payload", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
+    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
+    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, { target: { value: "Sec 1" } });
+    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, { target: { value: "c" } });
+
+    const hiddenCheckbox = screen.getByLabelText(/^hidden/i) as HTMLInputElement;
+    expect(hiddenCheckbox.checked).toBe(false);
+    fireEvent.click(hiddenCheckbox);
+    expect(hiddenCheckbox.checked).toBe(true);
+    fireEvent.change(screen.getByLabelText(/expires at/i), { target: { value: "2099-06-01T00:00" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.hidden).toBe(true);
+    expect(payload.expiresAt).toBe("2099-06-01T00:00");
+  });
+
   it("shows a friendly error and does not throw when onSubmit rejects", async () => {
     const onSubmit = vi.fn().mockRejectedValue(new Error("network error"));
     render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);

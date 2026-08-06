@@ -33,6 +33,12 @@ export function HomeworkEditView({
   // (which would otherwise silently overwrite an already-scheduled release
   // timestamp on an unrelated edit -- see final review finding I3).
   const [originalPublishState, setOriginalPublishState] = useState<{ publish: boolean; releasedAt: string | undefined } | null>(null);
+  // #166: captured the same way originalPublishState is, from the same
+  // initial load -- onSubmit compares against these to decide whether the
+  // hide/expiry fields actually changed, instead of unconditionally
+  // PATCHing /hide on every save (same rationale as final review finding I3
+  // for /publish).
+  const [originalHideState, setOriginalHideState] = useState<{ hidden: boolean; expiresAt: string | undefined } | null>(null);
 
   useEffect(() => {
     fetch(`/api/courses/${courseId}/homeworks/${homeworkId}`)
@@ -48,6 +54,8 @@ export function HomeworkEditView({
           llmConfigId: hw.llmConfigId,
           status: hw.status,
           releasedAt: hw.releasedAt ? toDatetimeLocalValue(hw.releasedAt) : null,
+          isHidden: hw.isHidden,
+          expiresAt: hw.expiresAt ? toDatetimeLocalValue(hw.expiresAt) : null,
           sections: hw.sections.map(
             (s: {
               id: string;
@@ -83,6 +91,13 @@ export function HomeworkEditView({
           // the form actually produces, so the comparison now holds.
           releasedAt: hw.releasedAt ? toDatetimeLocalValue(hw.releasedAt) : "",
         });
+        // #166: same "" vs undefined reasoning as originalPublishState above
+        // -- the uncontrolled expiresAt datetime-local input sends "" for an
+        // untouched field, never undefined.
+        setOriginalHideState({
+          hidden: hw.isHidden,
+          expiresAt: hw.expiresAt ? toDatetimeLocalValue(hw.expiresAt) : "",
+        });
       })
       .catch(() => setLoadError("Failed to load homework. Please try again."));
   }, [courseId, homeworkId]);
@@ -98,7 +113,7 @@ export function HomeworkEditView({
     );
   }
 
-  if (!initialData || !originalPublishState) return null;
+  if (!initialData || !originalPublishState || !originalHideState) return null;
 
   return (
     <div className="admin-view">
@@ -147,6 +162,21 @@ export function HomeworkEditView({
               throw new Error("Failed to update publish state");
             }
           }
+
+          // #166: distinct from publish/unpublish -- its own conditional
+          // call, same "only PATCH when actually changed" guard as above.
+          const hideChanged =
+            payload.hidden !== originalHideState.hidden ||
+            payload.expiresAt !== originalHideState.expiresAt;
+          if (hideChanged) {
+            const hideRes = await fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/hide`, {
+              method: "PATCH",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ isHidden: payload.hidden, expiresAt: payload.expiresAt }),
+            });
+            if (!hideRes.ok) throw new Error("Failed to update visibility state");
+          }
+
           onSaved();
         }}
       />

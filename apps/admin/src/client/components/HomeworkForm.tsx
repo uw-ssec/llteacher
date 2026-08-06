@@ -14,6 +14,8 @@ export interface HomeworkFormValues {
   sections: FormSection[];
   publish: boolean;
   releasedAt: string | undefined;
+  hidden: boolean;
+  expiresAt: string | undefined;
 }
 
 export interface HomeworkFormInitialData {
@@ -24,6 +26,8 @@ export interface HomeworkFormInitialData {
   sections: SectionDetail[];
   status: "draft" | "scheduled" | "active" | "past_due" | "hidden" | "archived";
   releasedAt: string | null;
+  isHidden: boolean;
+  expiresAt: string | null;
 }
 
 export interface HomeworkFormProps {
@@ -32,6 +36,7 @@ export interface HomeworkFormProps {
     title: string; description: string; dueDate: string; llmConfigId?: string;
     sections: ReturnType<typeof computeSectionDiff>;
     publish: boolean; releasedAt?: string;
+    hidden: boolean; expiresAt?: string;
   }) => Promise<void>;
   llmConfigs: LLMConfig[];
   isLoading?: boolean;
@@ -51,8 +56,13 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
           sections: initialData.sections.map((s) => ({ id: s.id, title: s.title, content: s.content, solutionContent: s.solutionContent })),
           publish: initialData.status !== "draft",
           releasedAt: initialData.releasedAt ?? undefined,
+          hidden: initialData.isHidden,
+          expiresAt: initialData.expiresAt ?? undefined,
         }
-      : { title: "", description: "", dueDate: "", llmConfigId: undefined, sections: [], publish: false, releasedAt: undefined },
+      : {
+          title: "", description: "", dueDate: "", llmConfigId: undefined, sections: [], publish: false, releasedAt: undefined,
+          hidden: false, expiresAt: undefined,
+        },
   });
   const { fields, append, remove } = useFieldArray({ control, name: "sections" });
 
@@ -84,6 +94,7 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
         title: values.title, description: values.description, dueDate: values.dueDate,
         llmConfigId: values.llmConfigId, sections: computeSectionDiff(sections),
         publish: values.publish, releasedAt: values.releasedAt,
+        hidden: values.hidden, expiresAt: values.expiresAt,
       });
     } catch {
       setSubmitError("Failed to save homework. Please try again.");
@@ -136,6 +147,16 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
         </label>
         <label htmlFor="hw-released-at">Release at (optional, future only)</label>
         <input id="hw-released-at" type="datetime-local" {...register("releasedAt")} />
+      </fieldset>
+
+      <fieldset>
+        <legend>Visibility</legend>
+        <label>
+          <input type="checkbox" {...register("hidden")} />
+          Hidden (pulled from student view regardless of publish state)
+        </label>
+        <label htmlFor="hw-expires-at">Expires at (optional — auto-hides once passed)</label>
+        <input id="hw-expires-at" type="datetime-local" {...register("expiresAt")} />
       </fieldset>
 
       {fields.map((field, index) => (

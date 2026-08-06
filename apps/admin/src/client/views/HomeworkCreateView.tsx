@@ -49,6 +49,17 @@ export function HomeworkCreateView({
             });
             if (!publishRes.ok) throw new Error("Failed to publish homework");
           }
+          // #166: a freshly created homework defaults is_hidden=false
+          // server-side -- only call the route when the instructor actually
+          // checked the box, mirrors the publish conditional above.
+          if (payload.hidden) {
+            const hideRes = await fetch(`/api/courses/${courseId}/homeworks/${created.id}/hide`, {
+              method: "PATCH",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ isHidden: true, expiresAt: payload.expiresAt }),
+            });
+            if (!hideRes.ok) throw new Error("Failed to hide homework");
+          }
           onCreated(created.id);
         }}
       />

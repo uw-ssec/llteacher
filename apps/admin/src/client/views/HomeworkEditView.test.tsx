@@ -18,6 +18,8 @@ const HOMEWORK = {
   llmConfigId: null,
   status: "draft",
   releasedAt: null,
+  isHidden: false,
+  expiresAt: null,
   sections: [
     { id: "s1", title: "Sec 1", order: 1, content: "content 1", solution: null },
   ],
@@ -81,6 +83,51 @@ describe("HomeworkEditView", () => {
     expect(publishCall).toBeTruthy();
     const publishBody = JSON.parse((publishCall![1] as RequestInit).body as string);
     expect(publishBody.publish).toBe(true);
+  });
+
+  // #166
+  it("does not call /hide when saving without touching the Hidden checkbox", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === "string" && url.endsWith(`/homeworks/hw-1`)) {
+        return Promise.resolve({ ok: true, json: async () => HOMEWORK });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    global.fetch = fetchMock;
+    render(
+      <HomeworkEditView courseId="course-a" homeworkId="hw-1" llmConfigs={LLM_CONFIGS} onSaved={vi.fn()} onCancel={vi.fn()} />,
+    );
+    await waitFor(() => expect(screen.getByLabelText(/^title$/i)).toBeTruthy());
+
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW 1 updated" } });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const calledUrls = fetchMock.mock.calls.map((c) => c[0] as string);
+    expect(calledUrls.some((u) => u.includes("/hide"))).toBe(false);
+  });
+
+  it("calls /hide with isHidden: true when the Hidden checkbox is toggled", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === "string" && url.endsWith(`/homeworks/hw-1`)) {
+        return Promise.resolve({ ok: true, json: async () => HOMEWORK });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    global.fetch = fetchMock;
+    render(
+      <HomeworkEditView courseId="course-a" homeworkId="hw-1" llmConfigs={LLM_CONFIGS} onSaved={vi.fn()} onCancel={vi.fn()} />,
+    );
+    await waitFor(() => expect(screen.getByLabelText(/^title$/i)).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /^hidden/i }));
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    const hideCall = fetchMock.mock.calls.find((c) => (c[0] as string).includes("/hide"));
+    expect(hideCall).toBeTruthy();
+    const hideBody = JSON.parse((hideCall![1] as RequestInit).body as string);
+    expect(hideBody.isHidden).toBe(true);
   });
 
   it("does not call /publish when saving an already-scheduled homework without touching its release date", async () => {
