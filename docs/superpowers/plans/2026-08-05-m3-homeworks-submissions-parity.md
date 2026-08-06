@@ -2927,8 +2927,18 @@ export async function submitSection(
         eq(conversations.kind, "section"),
       ),
     );
-  if (!owned || owned.ownerUserId !== requesterId) {
-    throw new Error("Conversation not found or not owned by requester");
+  // Two distinct messages, not one combined check -- found in review: a
+  // single message conflated "doesn't exist / soft-deleted / wrong kind"
+  // with "exists but wrong owner," leaving the route layer (Task 17) no way
+  // to tell them apart if it ever needs to (today it deliberately maps both
+  // to a uniform 403 to avoid leaking conversation existence to a non-owner,
+  // but that's a route-layer choice, not something the repository should
+  // force by only offering one indistinguishable message).
+  if (!owned) {
+    throw new Error("Conversation not found or not accessible");
+  }
+  if (owned.ownerUserId !== requesterId) {
+    throw new Error("Conversation is not owned by requester");
   }
 
   const existing = await getSubmissionByConversation(db, scope, conversationId);
