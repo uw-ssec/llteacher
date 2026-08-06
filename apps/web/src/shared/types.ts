@@ -90,6 +90,13 @@ export interface HomeworkPublishBody {
   releasedAt?: string;
 }
 
+export interface SubmissionResponse {
+  id: string;
+  conversationId: string;
+  submittedAt: string;
+  isResubmission: boolean;
+}
+
 // Cloudflare Worker bindings + secrets. Augmented in Phase 1+.
 declare global {
   interface Env {
