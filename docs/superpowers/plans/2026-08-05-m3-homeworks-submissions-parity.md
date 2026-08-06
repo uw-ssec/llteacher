@@ -4160,8 +4160,9 @@ In `publishHomeworkHandler`, after `updateHomeworkPublishState` succeeds, mirror
 
 ```ts
   try {
-    await auditBestEffort(db, [scope], {
-      actorUserId: authContext.userId,
+    const orgScopes = await getOrgScopesForUser(db, authContext.session.userId);
+    await auditBestEffort(db, orgScopes, {
+      actorUserId: authContext.session.userId,
       action: body.publish ? AUDIT_ACTIONS.HOMEWORK_PUBLISHED : AUDIT_ACTIONS.HOMEWORK_UNPUBLISHED,
       targetType: "homework",
       targetId: updated.id,
@@ -4171,7 +4172,7 @@ In `publishHomeworkHandler`, after `updateHomeworkPublishState` succeeds, mirror
   }
 ```
 
-`scope` here is already a `CourseScope`, not `OrgScope[]` — check `auditBestEffort`'s signature (`scopes: OrgScope[]`) against what `courseScopeFromAuthContext` returns; if `CourseScope` isn't assignable to `OrgScope`, use whatever this route already has in scope to resolve the org (check how `courseScopeFromAuthContext` or `authContext` expose the organization id elsewhere in this file, or in `profile.ts`'s `getOrgScopesForUser` helper, and reuse that pattern rather than inventing a new one). Note `authContext.userId` — confirm this is the actual field name on `AuthContext` (grep the type definition in `apps/web/src/server/middleware/roles.ts` if unsure; other handlers in this file use `authContext` for role checks but this is the first one in `homeworks.ts` needing the actor's own user id, not just their memberships).
+`scope` (the `CourseScope` already in this handler) is a different branded type than `OrgScope` (see `apps/web/src/server/repositories/scope.ts` — both are branded `string`s, not assignable to each other) and `auditBestEffort` requires `OrgScope[]`. Use `getOrgScopesForUser(db, authContext.session.userId)` from `../repositories/users` (the exact helper `profile.ts` imports and calls the same way at `apps/web/src/server/routes/profile.ts:46`) instead of trying to reuse `scope`. `AuthContext` (`apps/web/src/server/middleware/roles.ts:12-18`) has no top-level `userId` — the actor's id is `authContext.session.userId` (`session: SessionPayload`). Add `import { getOrgScopesForUser } from "../repositories/users";` and `import { logServerError } from "../utils/errors";` to `homeworks.ts` if not already present (check the existing import block first — `logServerError` may already be imported for other error paths in this file).
 
 - [ ] **Step 1-2:** Implement (a) and (b) as described above.
 - [ ] **Step 3: Tests.** (a) Unpublishing a homework with an existing conversation, without `confirm: true`, returns 409 with `hasStudentActivity: true`; with `confirm: true`, succeeds (200). Unpublishing a homework with zero activity succeeds without needing `confirm`. Publishing (not unpublishing) never triggers the check regardless of activity. (b) A successful publish/unpublish call results in exactly one `recordAuditEvent` call (mock/spy `auditBestEffort` or the underlying repository call, matching this codebase's existing audit-test convention — check `apps/web/src/server/routes/profile.test.ts` if it exists for the pattern) with the correct action string.
