@@ -19,6 +19,8 @@ import { TopNav } from "@llteacher/ui";
 import { AdminSidebar } from "./components/AdminSidebar";
 import type { AdminNavKey } from "./components/AdminSidebar";
 import { HomeworksView } from "./views/HomeworksView";
+import { HomeworkCreateView } from "./views/HomeworkCreateView";
+import { HomeworkEditView } from "./views/HomeworkEditView";
 import { SubmissionsView } from "./views/SubmissionsView";
 import { LLMConfigsView } from "./views/LLMConfigsView";
 import {
@@ -46,20 +48,35 @@ const SIDEBAR_COLLAPSED_KEY = "llteacher:admin-sidebar-collapsed";
 /* The view-state machine. Adding a view = adding a discriminated case. */
 type View =
   | { kind: "homeworks" }
+  | { kind: "create-homework" }
+  | { kind: "edit-homework"; homeworkId: string }
   | { kind: "submissions"; homeworkId: string }
   | { kind: "llm-configs" }
   | { kind: "students" };
 
 const NAV_BREADCRUMB: Record<View["kind"], string> = {
-  "homeworks":   "Instructor Console · Homeworks",
-  "submissions": "Instructor Console · Submissions",
-  "llm-configs": "Instructor Console · LLM Configs",
-  "students":    "Instructor Console · Students",
+  "homeworks":        "Instructor Console · Homeworks",
+  "create-homework":  "Instructor Console · New Homework",
+  "edit-homework":    "Instructor Console · Edit Homework",
+  "submissions":      "Instructor Console · Submissions",
+  "llm-configs":      "Instructor Console · LLM Configs",
+  "students":         "Instructor Console · Students",
 };
 
 export default function App() {
-  const { isAuthenticated, loading: authLoading, error: authError, role, login, logout } =
+  const { isAuthenticated, loading: authLoading, error: authError, role, courses, login, logout } =
     useAuth();
+
+  // Stopgap: this app assumes exactly one course everywhere else today
+  // (TopNav's hardcoded course="STATS 311" string) -- courses[0] matches
+  // that existing assumption rather than inventing a switcher here. Real
+  // multi-course support (picker, deep-linked course context, persisted
+  // selection) is issue #70; when that lands, replace this with real
+  // course-scoped navigation. See Resolved Design Decision 8 in the M3 plan
+  // for the full reasoning. An instructor with zero courses (a genuine edge
+  // case, e.g. a brand-new admin account before any course assignment)
+  // sees the "No course found" empty state below rather than a broken form.
+  const CURRENT_COURSE_ID = courses[0]?.id;
 
   const [view, setView] = useState<View>({ kind: "homeworks" });
 
@@ -85,7 +102,11 @@ export default function App() {
   }, [isSidebarCollapsed]);
 
   const navKey: AdminNavKey =
-    view.kind === "submissions" ? "submissions" : (view.kind as AdminNavKey);
+    view.kind === "submissions"
+      ? "submissions"
+      : view.kind === "create-homework" || view.kind === "edit-homework"
+        ? "homeworks"
+        : (view.kind as AdminNavKey);
 
   const navigate = (key: AdminNavKey) => {
     if (key === "submissions") {
@@ -128,13 +149,7 @@ export default function App() {
           onNavigate={navigate}
           isCollapsed={isSidebarCollapsed}
           onToggleCollapse={() => setIsSidebarCollapsed((c) => !c)}
-          onNewHomework={() => {
-            /* TODO: route to HomeworkEditView when the form view lands.
-               For now the click is acknowledged with a console log so the
-               affordance feels live during the demo. */
-            // eslint-disable-next-line no-console
-            console.log("[admin] new homework — form view not yet implemented");
-          }}
+          onNewHomework={() => setView({ kind: "create-homework" })}
           onNewLLMConfig={() => {
             // eslint-disable-next-line no-console
             console.log("[admin] new LLM config — form view not yet implemented");
@@ -147,13 +162,37 @@ export default function App() {
               {view.kind === "homeworks" && (
                 <HomeworksView
                   homeworks={HOMEWORKS}
-                  onOpenHomework={(id) => setView({ kind: "submissions", homeworkId: id })}
+                  onOpenHomework={(id) => setView({ kind: "edit-homework", homeworkId: id })}
                   onOpenSubmissions={(id) => setView({ kind: "submissions", homeworkId: id })}
-                  onNewHomework={() => {
-                    // eslint-disable-next-line no-console
-                    console.log("[admin] new homework — form view not yet implemented");
-                  }}
+                  onNewHomework={() => setView({ kind: "create-homework" })}
                 />
+              )}
+
+              {view.kind === "create-homework" && (
+                CURRENT_COURSE_ID ? (
+                  <HomeworkCreateView
+                    courseId={CURRENT_COURSE_ID}
+                    llmConfigs={LLM_CONFIGS}
+                    onCreated={() => setView({ kind: "homeworks" })}
+                    onCancel={() => setView({ kind: "homeworks" })}
+                  />
+                ) : (
+                  <EmptyView label="No course found for your account yet" />
+                )
+              )}
+
+              {view.kind === "edit-homework" && (
+                CURRENT_COURSE_ID ? (
+                  <HomeworkEditView
+                    courseId={CURRENT_COURSE_ID}
+                    homeworkId={view.homeworkId}
+                    llmConfigs={LLM_CONFIGS}
+                    onSaved={() => setView({ kind: "homeworks" })}
+                    onCancel={() => setView({ kind: "homeworks" })}
+                  />
+                ) : (
+                  <EmptyView label="No course found for your account yet" />
+                )
               )}
 
               {view.kind === "submissions" && (() => {
