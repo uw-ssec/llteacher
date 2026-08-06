@@ -25,7 +25,12 @@ import type { Db } from "./client";
  * query builder (select/insert/update/delete/query.*), never a raw
  * `.execute()` call whose shape depends on that parameter, so the runtime
  * behavior is identical -- this cast reflects verified compatibility, not
- * a hidden risk.
+ * a hidden risk. One exception: `db.batch` is a driver-capability method
+ * that genuinely differs (present on neon-http, absent at runtime here) --
+ * repositories/homeworks.ts's updateHomework feature-detects it via
+ * `typeof db.batch === "function"` rather than calling it unconditionally,
+ * so this cast's underlying claim still holds; the next `.batch()` call
+ * site should do the same.
  */
 export function makeNodeDb(databaseUrl: string): Db {
   const pool = new Pool({ connectionString: databaseUrl });

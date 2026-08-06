@@ -1,7 +1,8 @@
 import { and, eq, isNull, or } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { submissions, grades, conversations, courses, courseMemberships } from "../../db/schema";
-import type { OrgScope } from "./scope";
+import { submissions, grades, conversations, courses, courseMemberships, homeworks, users } from "../../db/schema";
+import type { OrgScope, CourseScope } from "./scope";
+import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
 
 export async function createSubmission(db: Db, scope: OrgScope, conversationId: string) {
   // The conversation isn't guaranteed to belong to `scope`'s org just
@@ -35,6 +36,56 @@ export async function createSubmission(db: Db, scope: OrgScope, conversationId: 
     .values({ conversationId, organizationId: scope })
     .returning();
   return created;
+}
+
+export async function submitSection(
+  db: Db,
+  scope: OrgScope,
+  conversationId: string,
+  requesterId: string,
+): Promise<{ id: string; conversationId: string; submittedAt: Date; isResubmission: boolean }> {
+  // Closes the ownership gap noted for conversations.ts's
+  // softDeleteConversation/appendMessage (#134): this check is scoped to a
+  // single route (the only one #22 adds), so it's inlined here rather than
+  // widening every repository function's signature.
+  const [owned] = await db
+    .select({ id: conversations.id, ownerUserId: conversations.ownerUserId })
+    .from(conversations)
+    .innerJoin(courses, eq(conversations.courseId, courses.id))
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        eq(courses.organizationId, scope),
+        eq(conversations.isDeleted, false),
+        eq(conversations.kind, "section"),
+      ),
+    );
+  // Two distinct messages, not one combined check -- found in review: a
+  // single message conflated "doesn't exist / soft-deleted / wrong kind"
+  // with "exists but wrong owner," leaving the route layer (Task 17) no way
+  // to tell them apart if it ever needs to (today it deliberately maps both
+  // to a uniform 403 to avoid leaking conversation existence to a non-owner,
+  // but that's a route-layer choice, not something the repository should
+  // force by only offering one indistinguishable message).
+  if (!owned) {
+    throw new Error("Conversation not found or not accessible");
+  }
+  if (owned.ownerUserId !== requesterId) {
+    throw new Error("Conversation is not owned by requester");
+  }
+
+  const existing = await getSubmissionByConversation(db, scope, conversationId);
+  if (existing) {
+    const [updated] = await db
+      .update(submissions)
+      .set({ submittedAt: new Date() })
+      .where(eq(submissions.id, existing.id))
+      .returning();
+    return { id: updated!.id, conversationId, submittedAt: updated!.submittedAt, isResubmission: true };
+  }
+
+  const created = await createSubmission(db, scope, conversationId);
+  return { id: created.id, conversationId, submittedAt: created.submittedAt, isResubmission: false };
 }
 
 export async function getSubmissionByConversation(db: Db, scope: OrgScope, conversationId: string) {
@@ -102,4 +153,196 @@ export async function recordGrade(
     .values({ organizationId: scope, ...input })
     .returning();
   return created;
+}
+
+export interface SubmissionCell {
+  sectionId: string;
+  status: "missing" | "in_progress" | "submitted";
+  conversationCount: number;
+  lastActivityAt: string | null;
+  hasDeletedConversation: boolean;
+}
+
+export type ParticipationStatus = "no_interaction" | "partial" | "active";
+
+export interface StudentSubmissionRow {
+  studentId: string;
+  displayName: string;
+  email: string;
+  sections: SubmissionCell[];
+  totalConversations: number;
+  submissionCount: number;
+  participationStatus: ParticipationStatus;
+  lastActivityAt: string | null;
+}
+
+export interface HomeworkSubmissionsMatrix {
+  homeworkId: string;
+  homeworkTitle: string;
+  homeworkDueDate: string;
+  sectionHeaders: { id: string; order: number; title: string }[];
+  students: StudentSubmissionRow[];
+  missingSectionWarnings: { sectionId: string; sectionTitle: string; missingStudentCount: number }[];
+  aggregateStats: {
+    totalStudents: number; activeStudents: number; inactiveStudents: number;
+    totalSubmissions: number; submissionRate: number;
+  };
+}
+
+/** Most-recent-activity-first, nulls (no activity at all) last. #162: both
+ *  null must return 0 -- returning 1 for both (a, b) and (b, a), as an
+ *  earlier version did, is not a valid ordering (it will not throw, but
+ *  leaves the relative order of students with no activity arbitrary and
+ *  unstable across runs/engines). Exported so this ordering rule has its
+ *  own direct unit test rather than only being exercised indirectly through
+ *  getHomeworkSubmissionsMatrix's full aggregation. */
+export function compareByLastActivityDesc(a: { lastActivityAt: string | null }, b: { lastActivityAt: string | null }): number {
+  if (!a.lastActivityAt && !b.lastActivityAt) return 0;
+  if (!a.lastActivityAt) return 1;
+  if (!b.lastActivityAt) return -1;
+  return b.lastActivityAt.localeCompare(a.lastActivityAt);
+}
+
+/** Single-pass aggregation: roster, sections, conversations (incl.
+ *  soft-deleted, for badge display), and submissions are each fetched once
+ *  (4 queries total regardless of roster/section size) and joined in
+ *  memory -- avoids the N+1 the Django reference had (issue #23's own
+ *  framework note). Names/emails decrypted here, server-side only; nothing
+ *  upstream of this function ever sees ciphertext. */
+export async function getHomeworkSubmissionsMatrix(
+  db: Db,
+  scope: CourseScope,
+  cipher: IdentityCipher,
+  homeworkId: string,
+): Promise<HomeworkSubmissionsMatrix | null> {
+  const homework = await db.query.homeworks.findFirst({
+    where: and(eq(homeworks.id, homeworkId), eq(homeworks.courseId, scope)),
+    with: { sections: true },
+  });
+  if (!homework) return null;
+
+  // Plain select+join, not db.query.courseMemberships.findMany({with:{user:true}}):
+  // Drizzle's relational query builder (this installed version) resolves a
+  // nested `with` via `left join lateral (select json_build_array(...))`,
+  // which forces Postgres to serialize each joined column -- including
+  // users.email/displayName's `bytea` -- through JSON. Postgres renders
+  // bytea as its hex-text form inside that JSON array, so node-postgres's
+  // JSON parser hands the customType's fromDriver a plain string instead of
+  // a Buffer; `new Uint8Array(aString)` (encrypted.ts's fromDriver) silently
+  // returns a *0-length* array rather than throwing, so every decrypt in
+  // this function failed with "Ciphertext shorter than envelope header" --
+  // caught by running this against real Postgres, not by reading the code.
+  // A flat select+join keeps every column a top-level SQL result column, so
+  // node-postgres's normal bytea type parser (a real Buffer) runs and
+  // fromDriver decodes correctly -- still one query, no N+1.
+  const roster = await db
+    .select({
+      membershipId: courseMemberships.id,
+      userId: courseMemberships.userId,
+      email: users.email,
+      displayName: users.displayName,
+    })
+    .from(courseMemberships)
+    .innerJoin(users, eq(courseMemberships.userId, users.id))
+    .where(and(eq(courseMemberships.courseId, scope), eq(courseMemberships.role, "student"), isNull(courseMemberships.droppedAt)));
+
+  const sectionIds = homework.sections.map((s) => s.id);
+  const allConversations = sectionIds.length
+    ? await db.query.conversations.findMany({
+        where: (c, { inArray }) => inArray(c.sectionId, sectionIds),
+      })
+    : [];
+  const conversationIds = allConversations.map((c) => c.id);
+  const allSubmissions = conversationIds.length
+    ? await db.query.submissions.findMany({ where: (s, { inArray }) => inArray(s.conversationId, conversationIds) })
+    : [];
+  const submittedConversationIds = new Set(allSubmissions.map((s) => s.conversationId));
+
+  const students: StudentSubmissionRow[] = [];
+  for (const membership of roster) {
+    const displayName = membership.displayName ? await cipher.decryptString(membership.displayName) : "";
+    const email = await cipher.decryptString(membership.email);
+
+    const cells: SubmissionCell[] = [];
+    let totalConversations = 0;
+    let submissionCount = 0;
+    // Student-level "latest activity across every section" -- distinct from
+    // each cell's OWN lastActivityAt below. An earlier draft of this
+    // function used one shared variable for both, which meant a later
+    // section's cell incorrectly inherited an earlier section's activity
+    // timestamp (the cumulative max-so-far, not that section's own).
+    let studentLastActivityAt: Date | null = null;
+
+    for (const section of [...homework.sections].sort((a, b) => a.order - b.order)) {
+      const convosForCell = allConversations.filter((c) => c.sectionId === section.id && c.ownerUserId === membership.userId);
+      const activeConvo = convosForCell.find((c) => !c.isDeleted);
+      const hasDeleted = convosForCell.some((c) => c.isDeleted);
+      const submitted = convosForCell.some((c) => submittedConversationIds.has(c.id));
+
+      totalConversations += convosForCell.length;
+      if (submitted) submissionCount++;
+
+      let cellLastActivityAt: Date | null = null;
+      for (const c of convosForCell) {
+        if (!cellLastActivityAt || c.updatedAt > cellLastActivityAt) cellLastActivityAt = c.updatedAt;
+        if (!studentLastActivityAt || c.updatedAt > studentLastActivityAt) studentLastActivityAt = c.updatedAt;
+      }
+
+      cells.push({
+        sectionId: section.id,
+        status: submitted ? "submitted" : activeConvo ? "in_progress" : "missing",
+        conversationCount: convosForCell.length,
+        lastActivityAt: cellLastActivityAt?.toISOString() ?? null,
+        hasDeletedConversation: hasDeleted,
+      });
+    }
+
+    const participationStatus: ParticipationStatus =
+      totalConversations === 0 ? "no_interaction" : submissionCount > 0 ? "active" : "partial";
+
+    students.push({
+      studentId: membership.userId, displayName, email, sections: cells,
+      totalConversations, submissionCount, participationStatus,
+      lastActivityAt: studentLastActivityAt?.toISOString() ?? null,
+    });
+  }
+
+  students.sort(compareByLastActivityDesc);
+
+  // #23: a summary aggregation over each cell's already-computed status --
+  // no new query -- surfacing sections most of the roster hasn't touched
+  // yet. A section every student has touched is omitted entirely (not
+  // returned with count 0), so the client only ever renders real warnings.
+  const missingSectionWarnings = homework.sections
+    .map((section) => {
+      const missingCount = students.filter((s) => s.sections.find((c) => c.sectionId === section.id)?.status === "missing").length;
+      return { sectionId: section.id, sectionTitle: section.title, missingStudentCount: missingCount };
+    })
+    .filter((w) => w.missingStudentCount > 0)
+    .sort((a, b) => b.missingStudentCount - a.missingStudentCount);
+
+  // #159: "activeStudents" means any engagement (a conversation exists,
+  // participationStatus !== "no_interaction") -- that's what its own name
+  // claims, and it's a legitimate distinct concept from "submitted", so
+  // it's left as-is. submissionRate specifically means the share who
+  // submitted, which activeStudents does NOT track (it also counts
+  // "partial": a conversation with zero submissions) -- so it needs its own
+  // count rather than reusing activeStudents.
+  const activeStudents = students.filter((s) => s.participationStatus !== "no_interaction").length;
+  const submittedStudents = students.filter((s) => s.submissionCount > 0).length;
+  return {
+    homeworkId: homework.id,
+    homeworkTitle: homework.title,
+    homeworkDueDate: homework.dueDate.toISOString(),
+    sectionHeaders: homework.sections.map((s) => ({ id: s.id, order: s.order, title: s.title })).sort((a, b) => a.order - b.order),
+    students,
+    missingSectionWarnings,
+    aggregateStats: {
+      totalStudents: students.length,
+      activeStudents,
+      inactiveStudents: students.length - activeStudents,
+      totalSubmissions: students.reduce((sum, s) => sum + s.submissionCount, 0),
+      submissionRate: students.length ? Math.round((submittedStudents / students.length) * 100) : 0,
+    },
+  };
 }

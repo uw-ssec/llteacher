@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { organizations } from "../../db/schema";
+import { organizations, courses } from "../../db/schema";
 import { unsafeOrgScope, type OrgScope } from "./scope";
 
 /** Resolves the local `organizations` row for a WorkOS organization id --
@@ -24,4 +24,20 @@ export async function getOrgScopeByWorkosOrgId(
     columns: { id: true },
   });
   return org ? unsafeOrgScope(org.id) : null;
+}
+
+/** Resolves the org a specific course belongs to. #161: deliberately
+ *  scoped to this one course, not getOrgScopesForUser's full list of every
+ *  org the caller belongs to -- an instructor with memberships in two
+ *  different organizations (a real case: WorkOS orgs are independent
+ *  tenants, and course_memberships carries no cross-org uniqueness
+ *  constraint) would otherwise be able to point course A's homework (org
+ *  A) at an llmConfig from org B, since both orgs are "one of their own".
+ *  Returns null if courseId doesn't exist. */
+export async function getOrgScopeForCourse(db: Db, courseId: string): Promise<OrgScope | null> {
+  const course = await db.query.courses.findFirst({
+    where: eq(courses.id, courseId),
+    columns: { organizationId: true },
+  });
+  return course ? unsafeOrgScope(course.organizationId) : null;
 }

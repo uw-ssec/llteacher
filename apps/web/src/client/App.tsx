@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { useNavigate } from "react-router";
@@ -6,6 +6,7 @@ import { Sidebar, TopNav, ConversationView, renderToolPart } from "@llteacher/ui
 import type { SidebarSection, MessageData, ToolPart } from "@llteacher/ui";
 import { useAuth } from "./components/AuthProvider";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
+import type { StudentHomeworkListResponse } from "../shared/types";
 
 /* ==========================================================================
    LLTeacher v2 — Chat-with-syllabus shell
@@ -49,19 +50,65 @@ function useWorkerStatus() {
   return { status, loading };
 }
 
-/* -- Homework sections fixture data ---------------------------------------- */
+/* -- Student homework data -------------------------------------------------- */
 
 /** localStorage key for the sidebar collapsed preference. Namespaced so it
     doesn't collide with future preference keys (`llteacher:*`). */
 const SIDEBAR_COLLAPSED_KEY = "llteacher:sidebar-collapsed";
 
-const INITIAL_SECTIONS: SidebarSection[] = [
-  { number: 1, title: "Random variables",          status: "submitted" },
-  { number: 2, title: "Probability distributions", status: "submitted" },
-  { number: 3, title: "P-values",                  status: "current"   },
-  { number: 4, title: "Confidence intervals",      status: "pending"   },
-  { number: 5, title: "Hypothesis testing",        status: "pending"   },
-];
+/** Fetches the current student's homework list and adapts it into the
+    Sidebar's section shape. SidebarSection's status union ("submitted" |
+    "current" | "pending") has no direct equivalent for "not_started" /
+    "overdue" / "in_progress_overdue" -- those all map onto "pending" for
+    now; a richer Sidebar status vocabulary is a @llteacher/ui change out of
+    scope for this issue. */
+export function useStudentHomework() {
+  const [sections, setSections] = useState<SidebarSection[]>([]);
+  const [hwTitle, setHwTitle] = useState("");
+  const [loading, setLoading] = useState(true);
+  // #160: distinct from "loaded, zero homeworks" -- a 401/403/503 must not
+  // render as an indistinguishable empty sidebar. r.ok was never checked
+  // before, so a non-2xx error-body response (`{ error: "..." }`) was cast
+  // straight to StudentHomeworkListResponse; data.homeworks[0] then threw a
+  // TypeError inside the .then chain that the trailing .catch swallowed.
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/student/homeworks")
+      .then((r) => {
+        if (!r.ok) throw new Error(`failed to load student homeworks: ${r.status}`);
+        return r.json() as Promise<StudentHomeworkListResponse>;
+      })
+      .then((data) => {
+        const hw = data.homeworks[0]; // single-homework sidebar UI, matches current design
+        if (!hw) {
+          setLoading(false);
+          return;
+        }
+        setHwTitle(hw.title);
+        setSections(
+          hw.sections.map((s) => ({
+            number: s.order,
+            title: s.title,
+            status:
+              s.status === "submitted"
+                ? ("submitted" as const)
+                : s.status === "in_progress"
+                  ? ("current" as const)
+                  : ("pending" as const),
+            conversationId: s.conversationId ?? undefined,
+          })),
+        );
+        setLoading(false);
+      })
+      .catch(() => {
+        setLoadError(true);
+        setLoading(false);
+      });
+  }, []);
+
+  return { sections, setSections, hwTitle, loading, loadError };
+}
 
 /* ==========================================================================
    App — the root component
@@ -85,8 +132,21 @@ export default function App() {
     transport: new DefaultChatTransport({ api: "/api/chat" }),
   });
 
-  const [sections, setSections] = useState<SidebarSection[]>(INITIAL_SECTIONS);
-  const [currentSection, setCurrentSection] = useState(3);
+  const { sections, setSections, hwTitle, loadError } = useStudentHomework();
+  // #160: was hardcoded to 3 regardless of what actually loaded -- a
+  // homework with fewer than 3 sections left this pointing at a section
+  // that doesn't exist. Starts at 1 (the Sidebar's own placeholder-free
+  // default) and snaps to the first real section's number once the fetch
+  // resolves; the ref guards against re-snapping after the student has
+  // already navigated to a different section.
+  const [currentSection, setCurrentSection] = useState(1);
+  const hasAutoSelectedSection = useRef(false);
+  useEffect(() => {
+    if (!hasAutoSelectedSection.current && sections.length > 0) {
+      setCurrentSection(sections[0]!.number);
+      hasAutoSelectedSection.current = true;
+    }
+  }, [sections]);
   const [hintCount, setHintCount] = useState(3);
   const [justSubmittedSection, setJustSubmittedSection] = useState<number | null>(null);
   /* Sidebar collapse persists across reloads via localStorage. Lazy initializer
@@ -179,18 +239,35 @@ export default function App() {
     setHintCount((n) => n + 1);
   };
 
-  const handleSubmit = (sectionNumber: number) => {
-    /* Transition the section to submitted and trigger the gold-halo
-       success animation on its ✓ indicator. The flag clears after the
-       animation duration (~700ms) so the indicator settles into its
-       normal submitted state. */
-    setSections((prev) =>
-      prev.map((s) =>
-        s.number === sectionNumber ? { ...s, status: "submitted" as const } : s,
-      ),
-    );
-    setJustSubmittedSection(sectionNumber);
-    setTimeout(() => setJustSubmittedSection(null), 800);
+  /* Submits the section's active conversation via the real API. No existing
+     generic error-surface exists in this file to reuse (workerStatus/
+     workerLoading is specifically for the /api/hello ping, not a
+     general-purpose error affordance) -- rather than inventing new UI for
+     this one failure path, log and leave sidebar state unchanged on
+     failure; this is a deliberate, minimal-scope choice, not an oversight
+     (a real error affordance is a separate, cross-cutting concern beyond
+     this task). */
+  const handleSubmit = async (sectionNumber: number) => {
+    const section = sections.find((s) => s.number === sectionNumber);
+    if (!section?.conversationId) return; // no active conversation yet -- nothing to submit
+    try {
+      const res = await fetch(`/api/conversations/${section.conversationId}/submit`, { method: "POST" });
+      if (!res.ok) throw new Error("submit failed");
+      /* Transition the section to submitted and trigger the gold-halo
+         success animation on its ✓ indicator. The flag clears after the
+         animation duration (~700ms) so the indicator settles into its
+         normal submitted state. */
+      setSections((prev) =>
+        prev.map((s) =>
+          s.number === sectionNumber ? { ...s, status: "submitted" as const } : s,
+        ),
+      );
+      setJustSubmittedSection(sectionNumber);
+      setTimeout(() => setJustSubmittedSection(null), 800);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[App] section submit failed", err);
+    }
   };
 
   /* Anonymous visitors get a minimal placeholder, not the fixture course
@@ -199,6 +276,31 @@ export default function App() {
      nothing rather than flashing one state then the other. */
   if (authLoading) return null;
   if (!isAuthenticated) return <UnauthenticatedHome onLogin={login} error={authError} />;
+
+  // #160: distinct from a genuinely empty (zero-homework) sidebar -- a
+  // failed fetch must surface something rather than silently rendering the
+  // same "no sections" shell a real empty state would. No richer error UI
+  // exists in this app yet (matches the deliberate minimal-scope choice in
+  // handleSubmit's own catch above); this is the smallest surface that
+  // isn't silence.
+  if (loadError) {
+    return (
+      <div className="page-frame">
+        <TopNav
+          course="STATS 311"
+          term="Autumn 2026"
+          homework=""
+          userInitials="AC"
+          isAuthenticated={isAuthenticated}
+          onProfileClick={() => navigate("/profile")}
+          onLogout={logout}
+        />
+        <div className="app-shell">
+          <p role="alert">Failed to load your homework. Please refresh the page.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="page-frame">
@@ -217,8 +319,8 @@ export default function App() {
       <div className="app-shell">
         {/* Left rail — homework section progress on UW Husky Purple */}
         <Sidebar
-          hwNumber={3}
-          hwTitle="Probability and Distributions"
+          hwNumber={1}
+          hwTitle={hwTitle}
           sections={sections}
           currentSection={currentSection}
           hintCount={hintCount}

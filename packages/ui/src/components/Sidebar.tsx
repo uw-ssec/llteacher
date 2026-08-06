@@ -26,6 +26,11 @@ export interface SidebarSection {
   number: number;
   title: string;
   status: SectionStatus;
+  /** The section's active (non-deleted) conversation, if the student has
+   *  started one. Optional -- most call sites (including this package's own
+   *  Storybook-style fixtures, if any) have no conversation concept at all;
+   *  only apps/web's real data populates it. */
+  conversationId?: string;
 }
 
 export interface SidebarProps {

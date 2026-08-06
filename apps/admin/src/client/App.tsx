@@ -19,12 +19,13 @@ import { TopNav } from "@llteacher/ui";
 import { AdminSidebar } from "./components/AdminSidebar";
 import type { AdminNavKey } from "./components/AdminSidebar";
 import { HomeworksView } from "./views/HomeworksView";
+import type { HomeworkListItemResponse } from "./views/HomeworksView";
+import { HomeworkCreateView } from "./views/HomeworkCreateView";
+import { HomeworkEditView } from "./views/HomeworkEditView";
 import { SubmissionsView } from "./views/SubmissionsView";
 import { LLMConfigsView } from "./views/LLMConfigsView";
 import {
-  HOMEWORKS,
   LLM_CONFIGS,
-  SUBMISSIONS_HW_003,
   CURRENT_TEACHER,
 } from "./lib/fixtures";
 import { useAuth, type CourseRole } from "./components/AuthProvider";
@@ -46,20 +47,35 @@ const SIDEBAR_COLLAPSED_KEY = "llteacher:admin-sidebar-collapsed";
 /* The view-state machine. Adding a view = adding a discriminated case. */
 type View =
   | { kind: "homeworks" }
+  | { kind: "create-homework" }
+  | { kind: "edit-homework"; homeworkId: string }
   | { kind: "submissions"; homeworkId: string }
   | { kind: "llm-configs" }
   | { kind: "students" };
 
 const NAV_BREADCRUMB: Record<View["kind"], string> = {
-  "homeworks":   "Instructor Console · Homeworks",
-  "submissions": "Instructor Console · Submissions",
-  "llm-configs": "Instructor Console · LLM Configs",
-  "students":    "Instructor Console · Students",
+  "homeworks":        "Instructor Console · Homeworks",
+  "create-homework":  "Instructor Console · New Homework",
+  "edit-homework":    "Instructor Console · Edit Homework",
+  "submissions":      "Instructor Console · Submissions",
+  "llm-configs":      "Instructor Console · LLM Configs",
+  "students":         "Instructor Console · Students",
 };
 
 export default function App() {
-  const { isAuthenticated, loading: authLoading, error: authError, role, login, logout } =
+  const { isAuthenticated, loading: authLoading, error: authError, role, courses, login, logout } =
     useAuth();
+
+  // Stopgap: this app assumes exactly one course everywhere else today
+  // (TopNav's hardcoded course="STATS 311" string) -- courses[0] matches
+  // that existing assumption rather than inventing a switcher here. Real
+  // multi-course support (picker, deep-linked course context, persisted
+  // selection) is issue #70; when that lands, replace this with real
+  // course-scoped navigation. See Resolved Design Decision 8 in the M3 plan
+  // for the full reasoning. An instructor with zero courses (a genuine edge
+  // case, e.g. a brand-new admin account before any course assignment)
+  // sees the "No course found" empty state below rather than a broken form.
+  const CURRENT_COURSE_ID = courses[0]?.id;
 
   const [view, setView] = useState<View>({ kind: "homeworks" });
 
@@ -85,13 +101,32 @@ export default function App() {
   }, [isSidebarCollapsed]);
 
   const navKey: AdminNavKey =
-    view.kind === "submissions" ? "submissions" : (view.kind as AdminNavKey);
+    view.kind === "submissions"
+      ? "submissions"
+      : view.kind === "create-homework" || view.kind === "edit-homework"
+        ? "homeworks"
+        : (view.kind as AdminNavKey);
 
   const navigate = (key: AdminNavKey) => {
     if (key === "submissions") {
-      /* No homework selected → default to the active homework */
-      const active = HOMEWORKS.find((h) => h.status === "active") ?? HOMEWORKS[0]!;
-      setView({ kind: "submissions", homeworkId: active.id });
+      /* No homework selected → default to the active homework. Fetches
+         the real list fresh (mirrors HomeworksDataLoader/SubmissionsData
+         Loader's per-need fetch pattern -- no app-level cache elsewhere
+         in this codebase to hook into) rather than falling back to the
+         HOMEWORKS fixture, whose ids aren't real UUIDs and would 400
+         against the real submissions endpoint. */
+      if (!CURRENT_COURSE_ID) return;
+      fetch(`/api/courses/${CURRENT_COURSE_ID}/homeworks`)
+        .then((r) => { if (!r.ok) throw new Error("failed"); return r.json(); })
+        .then((data: { homeworks: HomeworkListItemResponse[] }) => {
+          const active = data.homeworks.find((h) => h.status === "active") ?? data.homeworks[0];
+          if (active) setView({ kind: "submissions", homeworkId: active.id });
+        })
+        .catch(() => {
+          /* No general-purpose error affordance in this shell (matches
+             the student app's own documented choice in App.tsx) -- stay
+             on the current view rather than navigating to a broken one. */
+        });
     } else {
       setView({ kind: key } as View);
     }
@@ -128,13 +163,7 @@ export default function App() {
           onNavigate={navigate}
           isCollapsed={isSidebarCollapsed}
           onToggleCollapse={() => setIsSidebarCollapsed((c) => !c)}
-          onNewHomework={() => {
-            /* TODO: route to HomeworkEditView when the form view lands.
-               For now the click is acknowledged with a console log so the
-               affordance feels live during the demo. */
-            // eslint-disable-next-line no-console
-            console.log("[admin] new homework — form view not yet implemented");
-          }}
+          onNewHomework={() => setView({ kind: "create-homework" })}
           onNewLLMConfig={() => {
             // eslint-disable-next-line no-console
             console.log("[admin] new LLM config — form view not yet implemented");
@@ -145,28 +174,56 @@ export default function App() {
           <div className="conversation-messages">
             <div className="conversation-inner admin-inner">
               {view.kind === "homeworks" && (
-                <HomeworksView
-                  homeworks={HOMEWORKS}
-                  onOpenHomework={(id) => setView({ kind: "submissions", homeworkId: id })}
-                  onOpenSubmissions={(id) => setView({ kind: "submissions", homeworkId: id })}
-                  onNewHomework={() => {
-                    // eslint-disable-next-line no-console
-                    console.log("[admin] new homework — form view not yet implemented");
-                  }}
-                />
+                CURRENT_COURSE_ID ? (
+                  <HomeworksDataLoader
+                    courseId={CURRENT_COURSE_ID}
+                    onOpenHomework={(id) => setView({ kind: "edit-homework", homeworkId: id })}
+                    onOpenSubmissions={(id) => setView({ kind: "submissions", homeworkId: id })}
+                    onNewHomework={() => setView({ kind: "create-homework" })}
+                  />
+                ) : (
+                  <EmptyView label="No course found for your account yet" />
+                )
               )}
 
-              {view.kind === "submissions" && (() => {
-                const hw = HOMEWORKS.find((h) => h.id === view.homeworkId);
-                if (!hw) return <EmptyView label="Homework not found" />;
-                return (
-                  <SubmissionsView
-                    homework={hw}
-                    rows={SUBMISSIONS_HW_003}
+              {view.kind === "create-homework" && (
+                CURRENT_COURSE_ID ? (
+                  <HomeworkCreateView
+                    courseId={CURRENT_COURSE_ID}
+                    llmConfigs={LLM_CONFIGS}
+                    onCreated={() => setView({ kind: "homeworks" })}
+                    onCancel={() => setView({ kind: "homeworks" })}
+                  />
+                ) : (
+                  <EmptyView label="No course found for your account yet" />
+                )
+              )}
+
+              {view.kind === "edit-homework" && (
+                CURRENT_COURSE_ID ? (
+                  <HomeworkEditView
+                    courseId={CURRENT_COURSE_ID}
+                    homeworkId={view.homeworkId}
+                    llmConfigs={LLM_CONFIGS}
+                    onSaved={() => setView({ kind: "homeworks" })}
+                    onCancel={() => setView({ kind: "homeworks" })}
+                  />
+                ) : (
+                  <EmptyView label="No course found for your account yet" />
+                )
+              )}
+
+              {view.kind === "submissions" && (
+                CURRENT_COURSE_ID ? (
+                  <SubmissionsDataLoader
+                    courseId={CURRENT_COURSE_ID}
+                    homeworkId={view.homeworkId}
                     onBack={() => setView({ kind: "homeworks" })}
                   />
-                );
-              })()}
+                ) : (
+                  <EmptyView label="No course found for your account yet" />
+                )
+              )}
 
               {view.kind === "llm-configs" && (
                 <LLMConfigsView
@@ -191,6 +248,67 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+function HomeworksDataLoader({
+  courseId,
+  onOpenHomework,
+  onOpenSubmissions,
+  onNewHomework,
+}: {
+  courseId: string;
+  onOpenHomework: (id: string) => void;
+  onOpenSubmissions: (id: string) => void;
+  onNewHomework: () => void;
+}) {
+  const [homeworks, setHomeworks] = useState<HomeworkListItemResponse[] | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  useEffect(() => {
+    fetch(`/api/courses/${courseId}/homeworks`)
+      .then((r) => {
+        if (!r.ok) throw new Error("failed");
+        return r.json();
+      })
+      .then((data) => setHomeworks(data.homeworks))
+      .catch(() => setLoadError(true));
+  }, [courseId]);
+  if (loadError) return <p role="alert">Failed to load homeworks.</p>;
+  if (!homeworks) return null;
+  return (
+    <HomeworksView
+      homeworks={homeworks}
+      onOpenHomework={onOpenHomework}
+      onOpenSubmissions={onOpenSubmissions}
+      onNewHomework={onNewHomework}
+    />
+  );
+}
+
+function SubmissionsDataLoader({
+  courseId,
+  homeworkId,
+  onBack,
+}: {
+  courseId: string;
+  homeworkId: string;
+  onBack: () => void;
+}) {
+  const [data, setData] = useState<import("./views/SubmissionsView").HomeworkSubmissionsData | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  useEffect(() => {
+    setData(null); // clear stale data from a previously-open homework before the new fetch resolves
+    setLoadError(false);
+    fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/submissions`)
+      .then((r) => {
+        if (!r.ok) throw new Error("failed");
+        return r.json();
+      })
+      .then(setData)
+      .catch(() => setLoadError(true));
+  }, [courseId, homeworkId]);
+  if (loadError) return <p role="alert">Failed to load submissions.</p>;
+  if (!data) return null;
+  return <SubmissionsView data={data} onBack={onBack} />;
 }
 
 function EmptyView({ label }: { label: string }) {

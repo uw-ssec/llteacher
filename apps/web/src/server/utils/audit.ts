@@ -14,6 +14,8 @@ export const AUDIT_ACTIONS = {
   USER_PROVISIONED: "user.provisioned",
   USER_DEPROVISIONED: "user.deprovisioned",
   PROFILE_UPDATED: "profile.updated",
+  HOMEWORK_PUBLISHED: "homework.published",
+  HOMEWORK_UNPUBLISHED: "homework.unpublished",
 } as const;
 
 /** Fans an audit write out across every org scope it's relevant to (a

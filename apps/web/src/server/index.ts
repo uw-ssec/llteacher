@@ -3,11 +3,20 @@ import { helloHandler } from "./routes/hello";
 import { chatHandler } from "./routes/chat";
 import { loginHandler, callbackHandler, logoutHandler } from "./routes/auth";
 import { getProfileHandler, patchProfileHandler } from "./routes/profile";
-import { listHomeworksHandler, createHomeworkHandler } from "./routes/homeworks";
+import {
+  listHomeworksHandler,
+  createHomeworkHandler,
+  getHomeworkDetailHandler,
+  updateHomeworkHandler,
+  deleteHomeworkHandler,
+  publishHomeworkHandler,
+} from "./routes/homeworks";
 import { workosWebhookHandler } from "./routes/webhooksWorkos";
+import { studentHomeworksHandler } from "./routes/studentHomeworks";
+import { submitSectionHandler, getHomeworkSubmissionsHandler } from "./routes/submissions";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
-import { requireCourseMember, requireInstructorOf } from "./utils/guards";
+import { requireCourseMember, requireInstructorOf, requireRole } from "./utils/guards";
 import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "./utils/errors";
 import type { AppEnv } from "./context";
 
@@ -40,6 +49,28 @@ app.get("/api/profile", getProfileHandler);
 app.patch("/api/profile", patchProfileHandler);
 app.get("/api/courses/:courseId/homeworks", requireCourseMember()(listHomeworksHandler));
 app.post("/api/courses/:courseId/homeworks", requireInstructorOf()(createHomeworkHandler));
+app.get(
+  "/api/courses/:courseId/homeworks/:homeworkId",
+  requireCourseMember()(getHomeworkDetailHandler),
+);
+app.patch(
+  "/api/courses/:courseId/homeworks/:homeworkId",
+  requireInstructorOf()(updateHomeworkHandler),
+);
+app.delete(
+  "/api/courses/:courseId/homeworks/:homeworkId",
+  requireInstructorOf()(deleteHomeworkHandler),
+);
+app.patch(
+  "/api/courses/:courseId/homeworks/:homeworkId/publish",
+  requireInstructorOf()(publishHomeworkHandler),
+);
+app.get("/api/student/homeworks", requireRole(["student"])(studentHomeworksHandler));
+app.post("/api/conversations/:id/submit", requireRole(["student"])(submitSectionHandler));
+app.get(
+  "/api/courses/:courseId/homeworks/:homeworkId/submissions",
+  requireInstructorOf()(getHomeworkSubmissionsHandler),
+);
 
 // Everything else: delegate to the static asset binding.
 // In dev, this proxies to Vite's pipeline (so HMR + source maps work).
