@@ -11,6 +11,8 @@ import {
   homeworkHasStudentActivity,
 } from "../repositories/homeworks";
 import { getOrgScopesForUser } from "../repositories/users";
+import { getOrgScopeForCourse } from "../repositories/organizations";
+import { llmConfigBelongsToOrg } from "../repositories/llmConfigs";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import { requireCourseMember, requireInstructorOf } from "../utils/guards";
 import { AUDIT_ACTIONS, auditBestEffort } from "../utils/audit";
@@ -227,6 +229,21 @@ export async function updateHomeworkHandler(c: Context<AppEnv>) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
+
+  // #161: the FK on homeworks.llm_config_id only requires the row to exist
+  // somewhere, not that it belongs to this course's organization -- without
+  // this, an instructor could point a homework at another tenant's llmConfig
+  // (and, once M4 resolves credentials through this column, another
+  // tenant's provider credentials). Scoped to this course's own org, not
+  // every org the caller belongs to -- see getOrgScopeForCourse's docstring.
+  if (llmConfigId != null) {
+    const courseOrgScope = await getOrgScopeForCourse(db, courseId);
+    const belongsToOrg = courseOrgScope ? await llmConfigBelongsToOrg(db, courseOrgScope, llmConfigId) : false;
+    if (!belongsToOrg) {
+      return c.json({ error: "llmConfigId does not belong to this course's organization" }, 400);
+    }
+  }
+
   try {
     const result = await updateHomework(db, scope, homeworkId!, {
       title: body.title,

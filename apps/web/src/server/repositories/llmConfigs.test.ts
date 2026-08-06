@@ -4,7 +4,7 @@ import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import { organizations, llmConfigs } from "../../db/schema";
 import { unsafeOrgScope } from "./scope";
-import { listLlmConfigsForOrg, getDefaultLlmConfig } from "./llmConfigs";
+import { listLlmConfigsForOrg, getDefaultLlmConfig, llmConfigBelongsToOrg } from "./llmConfigs";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -94,5 +94,17 @@ describe.skipIf(!DATABASE_URL)("llmConfigs repository", () => {
     const found = await getDefaultLlmConfig(db, unsafeOrgScope(orgC.id));
     expect(found).toBeUndefined();
     await db.delete(organizations).where(eq(organizations.id, orgC.id));
+  });
+
+  // #161: the cross-tenant check updateHomeworkHandler relies on before
+  // writing llmConfigId through.
+  it("llmConfigBelongsToOrg returns true only when the id and org both match, false for a real id under the wrong org", async () => {
+    expect(await llmConfigBelongsToOrg(db, unsafeOrgScope(orgAId), configAId)).toBe(true);
+    // configBDefaultId is a real, existing llmConfig row -- just not org A's.
+    expect(await llmConfigBelongsToOrg(db, unsafeOrgScope(orgAId), configBDefaultId)).toBe(false);
+  });
+
+  it("llmConfigBelongsToOrg returns false for a well-formed but nonexistent id", async () => {
+    expect(await llmConfigBelongsToOrg(db, unsafeOrgScope(orgAId), "00000000-0000-0000-0000-000000000000")).toBe(false);
   });
 });

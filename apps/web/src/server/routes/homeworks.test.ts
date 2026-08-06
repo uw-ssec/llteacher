@@ -89,6 +89,24 @@ vi.mock("../repositories/homeworks", async (importOriginal) => {
   };
 });
 
+// #161: getOrgScopeForCourse/llmConfigBelongsToOrg are real DB queries in
+// production; mocked directly (same rationale as the homeworks repository
+// mocks above) so PATCH tests drive the org-scope-check contract without
+// simulating db.query.courses/db.select against the shared db-client mock.
+// Defaults to "belongs" so every pre-existing llmConfigId test (written
+// before #161) keeps passing unmodified; tests that need the rejection path
+// override the return value explicitly.
+const getOrgScopeForCourseMock = vi.fn(async () => "org-a");
+const llmConfigBelongsToOrgMock = vi.fn(async () => true);
+vi.mock("../repositories/organizations", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../repositories/organizations")>();
+  return { ...actual, getOrgScopeForCourse: (...args: unknown[]) => getOrgScopeForCourseMock(...args) };
+});
+vi.mock("../repositories/llmConfigs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../repositories/llmConfigs")>();
+  return { ...actual, llmConfigBelongsToOrg: (...args: unknown[]) => llmConfigBelongsToOrgMock(...args) };
+});
+
 // Derives hasRole/isMemberOf/isInstructorOf from `memberships` the same way
 // rolesMiddleware does in production, so a test that sets `memberships` gets
 // consistent predicates for free -- callers can still override any
@@ -561,9 +579,10 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
     expect(updateHomeworkMock).not.toHaveBeenCalled();
   });
 
-  it("still applies a valid UUID llmConfigId (regression check)", async () => {
+  it("still applies a valid UUID llmConfigId that belongs to the course's org (regression check)", async () => {
     const validUuid = "123e4567-e89b-12d3-a456-426614174000";
     updateHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", llmConfigId: validUuid });
+    llmConfigBelongsToOrgMock.mockClear().mockResolvedValue(true);
     const res = await buildApp(
       fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
     ).request("/api/courses/course-a/homeworks/hw-1", {
@@ -577,6 +596,37 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
       "hw-1",
       expect.objectContaining({ llmConfigId: validUuid }),
     );
+  });
+
+  // #161: the FK on homeworks.llm_config_id only requires the row to exist
+  // somewhere, not that it belongs to this course's tenant.
+  it("rejects a well-formed llmConfigId that belongs to a different org with 400", async () => {
+    const otherOrgUuid = "123e4567-e89b-12d3-a456-426614174000";
+    updateHomeworkMock.mockReset();
+    llmConfigBelongsToOrgMock.mockClear().mockResolvedValue(false);
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ llmConfigId: otherOrgUuid }),
+    }, TEST_ENV);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/organization/i);
+    expect(updateHomeworkMock).not.toHaveBeenCalled();
+  });
+
+  it("skips the org-scope check entirely when llmConfigId is not present in the request", async () => {
+    updateHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1" });
+    llmConfigBelongsToOrgMock.mockClear();
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Updated" }),
+    }, TEST_ENV);
+    expect(res.status).toBe(200);
+    expect(llmConfigBelongsToOrgMock).not.toHaveBeenCalled();
   });
 });
 
