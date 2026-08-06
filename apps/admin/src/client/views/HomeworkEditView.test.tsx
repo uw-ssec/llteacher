@@ -83,6 +83,35 @@ describe("HomeworkEditView", () => {
     expect(publishBody.publish).toBe(true);
   });
 
+  it("does not call /publish when saving an already-scheduled homework without touching its release date", async () => {
+    // The scenario the fix wave's I3 correction actually protects against:
+    // a homework that already has a real releasedAt must not have it
+    // silently re-PATCHed (or cleared) just because an unrelated field
+    // changed. Both originalPublishState.releasedAt and the form's
+    // defaultValues.releasedAt are derived from the same
+    // toDatetimeLocalValue(hw.releasedAt) call, so they must compare equal
+    // when untouched.
+    const scheduledHomework = { ...HOMEWORK, status: "scheduled", releasedAt: "2099-01-01T09:00:00.000Z" };
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === "string" && url.endsWith(`/homeworks/hw-1`)) {
+        return Promise.resolve({ ok: true, json: async () => scheduledHomework });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    global.fetch = fetchMock;
+    render(
+      <HomeworkEditView courseId="course-a" homeworkId="hw-1" llmConfigs={LLM_CONFIGS} onSaved={vi.fn()} onCancel={vi.fn()} />,
+    );
+    await waitFor(() => expect(screen.getByLabelText(/^title$/i)).toBeTruthy());
+
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW 1 updated" } });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const calledUrls = fetchMock.mock.calls.map((c) => c[0] as string);
+    expect(calledUrls.some((u) => u.includes("/publish"))).toBe(false);
+  });
+
   it("converts a full ISO dueDate into the datetime-local input's local YYYY-MM-DDTHH:mm shape", async () => {
     global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => HOMEWORK });
     render(
