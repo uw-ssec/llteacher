@@ -1,7 +1,8 @@
 import { and, eq, isNull, or } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { submissions, grades, conversations, courses, courseMemberships } from "../../db/schema";
-import type { OrgScope } from "./scope";
+import { submissions, grades, conversations, courses, courseMemberships, homeworks, users } from "../../db/schema";
+import type { OrgScope, CourseScope } from "./scope";
+import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
 
 export async function createSubmission(db: Db, scope: OrgScope, conversationId: string) {
   // The conversation isn't guaranteed to belong to `scope`'s org just
@@ -152,4 +153,164 @@ export async function recordGrade(
     .values({ organizationId: scope, ...input })
     .returning();
   return created;
+}
+
+export interface SubmissionCell {
+  sectionId: string;
+  status: "missing" | "in_progress" | "submitted";
+  conversationCount: number;
+  lastActivityAt: string | null;
+  hasDeletedConversation: boolean;
+}
+
+export type ParticipationStatus = "no_interaction" | "partial" | "active";
+
+export interface StudentSubmissionRow {
+  studentId: string;
+  displayName: string;
+  email: string;
+  sections: SubmissionCell[];
+  totalConversations: number;
+  submissionCount: number;
+  participationStatus: ParticipationStatus;
+  lastActivityAt: string | null;
+}
+
+export interface HomeworkSubmissionsMatrix {
+  homeworkId: string;
+  homeworkTitle: string;
+  homeworkDueDate: string;
+  sectionHeaders: { id: string; order: number; title: string }[];
+  students: StudentSubmissionRow[];
+  aggregateStats: {
+    totalStudents: number; activeStudents: number; inactiveStudents: number;
+    totalSubmissions: number; submissionRate: number;
+  };
+}
+
+/** Single-pass aggregation: roster, sections, conversations (incl.
+ *  soft-deleted, for badge display), and submissions are each fetched once
+ *  (4 queries total regardless of roster/section size) and joined in
+ *  memory -- avoids the N+1 the Django reference had (issue #23's own
+ *  framework note). Names/emails decrypted here, server-side only; nothing
+ *  upstream of this function ever sees ciphertext. */
+export async function getHomeworkSubmissionsMatrix(
+  db: Db,
+  scope: CourseScope,
+  cipher: IdentityCipher,
+  homeworkId: string,
+): Promise<HomeworkSubmissionsMatrix | null> {
+  const homework = await db.query.homeworks.findFirst({
+    where: and(eq(homeworks.id, homeworkId), eq(homeworks.courseId, scope)),
+    with: { sections: true },
+  });
+  if (!homework) return null;
+
+  // Plain select+join, not db.query.courseMemberships.findMany({with:{user:true}}):
+  // Drizzle's relational query builder (this installed version) resolves a
+  // nested `with` via `left join lateral (select json_build_array(...))`,
+  // which forces Postgres to serialize each joined column -- including
+  // users.email/displayName's `bytea` -- through JSON. Postgres renders
+  // bytea as its hex-text form inside that JSON array, so node-postgres's
+  // JSON parser hands the customType's fromDriver a plain string instead of
+  // a Buffer; `new Uint8Array(aString)` (encrypted.ts's fromDriver) silently
+  // returns a *0-length* array rather than throwing, so every decrypt in
+  // this function failed with "Ciphertext shorter than envelope header" --
+  // caught by running this against real Postgres, not by reading the code.
+  // A flat select+join keeps every column a top-level SQL result column, so
+  // node-postgres's normal bytea type parser (a real Buffer) runs and
+  // fromDriver decodes correctly -- still one query, no N+1.
+  const roster = await db
+    .select({
+      membershipId: courseMemberships.id,
+      userId: courseMemberships.userId,
+      email: users.email,
+      displayName: users.displayName,
+    })
+    .from(courseMemberships)
+    .innerJoin(users, eq(courseMemberships.userId, users.id))
+    .where(and(eq(courseMemberships.courseId, scope), eq(courseMemberships.role, "student"), isNull(courseMemberships.droppedAt)));
+
+  const sectionIds = homework.sections.map((s) => s.id);
+  const allConversations = sectionIds.length
+    ? await db.query.conversations.findMany({
+        where: (c, { inArray }) => inArray(c.sectionId, sectionIds),
+      })
+    : [];
+  const conversationIds = allConversations.map((c) => c.id);
+  const allSubmissions = conversationIds.length
+    ? await db.query.submissions.findMany({ where: (s, { inArray }) => inArray(s.conversationId, conversationIds) })
+    : [];
+  const submittedConversationIds = new Set(allSubmissions.map((s) => s.conversationId));
+
+  const students: StudentSubmissionRow[] = [];
+  for (const membership of roster) {
+    const displayName = membership.displayName ? await cipher.decryptString(membership.displayName) : "";
+    const email = await cipher.decryptString(membership.email);
+
+    const cells: SubmissionCell[] = [];
+    let totalConversations = 0;
+    let submissionCount = 0;
+    // Student-level "latest activity across every section" -- distinct from
+    // each cell's OWN lastActivityAt below. An earlier draft of this
+    // function used one shared variable for both, which meant a later
+    // section's cell incorrectly inherited an earlier section's activity
+    // timestamp (the cumulative max-so-far, not that section's own).
+    let studentLastActivityAt: Date | null = null;
+
+    for (const section of [...homework.sections].sort((a, b) => a.order - b.order)) {
+      const convosForCell = allConversations.filter((c) => c.sectionId === section.id && c.ownerUserId === membership.userId);
+      const activeConvo = convosForCell.find((c) => !c.isDeleted);
+      const hasDeleted = convosForCell.some((c) => c.isDeleted);
+      const submitted = convosForCell.some((c) => submittedConversationIds.has(c.id));
+
+      totalConversations += convosForCell.length;
+      if (submitted) submissionCount++;
+
+      let cellLastActivityAt: Date | null = null;
+      for (const c of convosForCell) {
+        if (!cellLastActivityAt || c.updatedAt > cellLastActivityAt) cellLastActivityAt = c.updatedAt;
+        if (!studentLastActivityAt || c.updatedAt > studentLastActivityAt) studentLastActivityAt = c.updatedAt;
+      }
+
+      cells.push({
+        sectionId: section.id,
+        status: submitted ? "submitted" : activeConvo ? "in_progress" : "missing",
+        conversationCount: convosForCell.length,
+        lastActivityAt: cellLastActivityAt?.toISOString() ?? null,
+        hasDeletedConversation: hasDeleted,
+      });
+    }
+
+    const participationStatus: ParticipationStatus =
+      totalConversations === 0 ? "no_interaction" : submissionCount > 0 ? "active" : "partial";
+
+    students.push({
+      studentId: membership.userId, displayName, email, sections: cells,
+      totalConversations, submissionCount, participationStatus,
+      lastActivityAt: studentLastActivityAt?.toISOString() ?? null,
+    });
+  }
+
+  students.sort((a, b) => {
+    if (!a.lastActivityAt) return 1;
+    if (!b.lastActivityAt) return -1;
+    return b.lastActivityAt.localeCompare(a.lastActivityAt);
+  });
+
+  const activeStudents = students.filter((s) => s.participationStatus !== "no_interaction").length;
+  return {
+    homeworkId: homework.id,
+    homeworkTitle: homework.title,
+    homeworkDueDate: homework.dueDate.toISOString(),
+    sectionHeaders: homework.sections.map((s) => ({ id: s.id, order: s.order, title: s.title })).sort((a, b) => a.order - b.order),
+    students,
+    aggregateStats: {
+      totalStudents: students.length,
+      activeStudents,
+      inactiveStudents: students.length - activeStudents,
+      totalSubmissions: students.reduce((sum, s) => sum + s.submissionCount, 0),
+      submissionRate: students.length ? Math.round((activeStudents / students.length) * 100) : 0,
+    },
+  };
 }

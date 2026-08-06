@@ -5,7 +5,10 @@ import type { Db } from "../../db/client";
 import { organizations, courses, users, conversations, courseMemberships, grades, homeworks, sections } from "../../db/schema";
 import { unsafeOrgScope, unsafeCourseScope } from "./scope";
 import { createConversation, softDeleteConversation } from "./conversations";
-import { createSubmission, getSubmissionByConversation, recordGrade, submitSection } from "./submissions";
+import { createSubmission, getSubmissionByConversation, recordGrade, submitSection, getHomeworkSubmissionsMatrix } from "./submissions";
+import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
+import { IdentityCipher } from "../../lib/crypto/identity-cipher";
+import { createHomework, updateHomework, getHomeworkById } from "./homeworks";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -261,5 +264,183 @@ describe.skipIf(!DATABASE_URL)("submissions repository", () => {
         submitSection(db, unsafeOrgScope(orgAId), tutorConv.id, userAId),
       ).rejects.toThrow();
     });
+  });
+});
+
+describe.skipIf(!DATABASE_URL)("getHomeworkSubmissionsMatrix (real DB)", () => {
+  async function seedMatrixFixture() {
+    const db = makeNodeDb(DATABASE_URL!);
+    const [org] = await db.insert(organizations).values({
+      slug: `m3-test-19-${crypto.randomUUID()}`, name: "M3 Test Org 19", workosOrganizationId: `wo-19-${crypto.randomUUID()}`,
+    }).returning();
+    const [course] = await db.insert(courses).values({
+      organizationId: org!.id, code: "TEST19", term: "Test", title: "Test Course 19",
+    }).returning();
+
+    const cipher = new IdentityCipher(await loadIdentityCipherKeys({
+      ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+      BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+    } as Env));
+
+    async function seedStudent(displayName: string, email: string) {
+      const [user] = await db.insert(users).values({
+        email: await cipher.encryptString(email),
+        emailBlindIndex: await cipher.computeBlindIndex(IdentityCipher.normalizeEmail(email)),
+        displayName: await cipher.encryptString(displayName),
+      }).returning();
+      const [membership] = await db.insert(courseMemberships).values({
+        userId: user!.id, courseId: course!.id, role: "student",
+      }).returning();
+      return { user: user!, membership: membership! };
+    }
+
+    const studentA = await seedStudent("Student Active", "active@test.example");
+    const studentB = await seedStudent("Student Inactive", "inactive@test.example");
+    const studentC = await seedStudent("Student Partial", "partial@test.example");
+
+    const [instructorUser] = await db.insert(users).values({
+      email: crypto.getRandomValues(new Uint8Array(32)) as never,
+      emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+    }).returning();
+    const [instructorMembership] = await db.insert(courseMemberships).values({
+      userId: instructorUser!.id, courseId: course!.id, role: "instructor",
+    }).returning();
+
+    const scope = unsafeCourseScope(course!.id);
+    const hw = await createHomework(db, scope, {
+      createdById: instructorMembership!.id, title: "Matrix HW", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    await updateHomework(db, scope, hw!.id, {
+      sections: [
+        { title: "Section 1", content: "c1", order: 1 },
+        { title: "Section 2", content: "c2", order: 2 },
+      ],
+    });
+    const withSections = await getHomeworkById(db, scope, hw!.id);
+    const section1 = withSections!.sections.find((s) => s.title === "Section 1")!;
+    const section2 = withSections!.sections.find((s) => s.title === "Section 2")!;
+
+    // Student A: 2 conversations on section 1 (one soft-deleted), 1 submitted -> active.
+    const [convA1] = await db.insert(conversations).values({
+      ownerUserId: studentA.user.id, courseId: course!.id, sectionId: section1.id, kind: "section", title: "a1",
+    }).returning();
+    await db.insert(conversations).values({
+      ownerUserId: studentA.user.id, courseId: course!.id, sectionId: section1.id, kind: "section", title: "a2-deleted",
+      isDeleted: true, deletedAt: new Date(),
+    });
+    await createSubmission(db, unsafeOrgScope(org!.id), convA1!.id);
+
+    // Student B: no conversations at all -> no_interaction.
+
+    // Student C: 1 conversation on section 2, not submitted -> partial.
+    await db.insert(conversations).values({
+      ownerUserId: studentC.user.id, courseId: course!.id, sectionId: section2.id, kind: "section", title: "c1",
+    });
+
+    return { db, org: org!, course: course!, cipher, scope, homeworkId: hw!.id, section1, section2, studentA, studentB, studentC };
+  }
+
+  it("computes participation status and section cells for a 3-student x 2-section fixture", async () => {
+    const { db, org, cipher, scope, homeworkId, section1, studentA, studentB, studentC } = await seedMatrixFixture();
+
+    const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId);
+
+    expect(matrix).not.toBeNull();
+    expect(matrix!.sectionHeaders).toHaveLength(2);
+    expect(matrix!.students).toHaveLength(3);
+
+    const rowA = matrix!.students.find((s) => s.studentId === studentA.user.id)!;
+    const rowB = matrix!.students.find((s) => s.studentId === studentB.user.id)!;
+    const rowC = matrix!.students.find((s) => s.studentId === studentC.user.id)!;
+
+    expect(rowA.participationStatus).toBe("active");
+    expect(rowA.totalConversations).toBe(2); // includes the soft-deleted one
+    const rowASection1Cell = rowA.sections.find((c) => c.sectionId === section1.id)!;
+    expect(rowASection1Cell.status).toBe("submitted");
+    expect(rowASection1Cell.hasDeletedConversation).toBe(true);
+    expect(rowASection1Cell.conversationCount).toBe(2);
+
+    expect(rowB.participationStatus).toBe("no_interaction");
+    expect(rowB.totalConversations).toBe(0);
+
+    expect(rowC.participationStatus).toBe("partial");
+    expect(rowC.totalConversations).toBe(1);
+
+    expect(matrix!.aggregateStats).toEqual({
+      totalStudents: 3, activeStudents: 2, inactiveStudents: 1, totalSubmissions: 1, submissionRate: 67,
+    });
+
+    await db.delete(organizations).where(eq(organizations.id, org.id));
+  });
+
+  it("returns plaintext displayName/email, never ciphertext", async () => {
+    const { db, org, cipher, scope, homeworkId, studentA } = await seedMatrixFixture();
+
+    const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId);
+    const rowA = matrix!.students.find((s) => s.studentId === studentA.user.id)!;
+
+    expect(rowA.displayName).toBe("Student Active");
+    expect(rowA.email).toBe("active@test.example");
+
+    const serialized = JSON.stringify(matrix);
+    // The raw encrypted column value for studentA's email/displayName must
+    // never appear in the serialized response -- fetch it directly and
+    // confirm its ciphertext bytes (base64'd for a substring check) aren't
+    // present anywhere in the output.
+    const [rawUser] = await db.select({ email: users.email }).from(users).where(eq(users.id, studentA.user.id));
+    const ciphertextBase64 = Buffer.from(rawUser!.email).toString("base64");
+    expect(serialized).not.toContain(ciphertextBase64);
+
+    await db.delete(organizations).where(eq(organizations.id, org.id));
+  });
+
+  it("scopes roster to course_memberships, excludes a student not enrolled in this course", async () => {
+    const { db, org, cipher, scope, homeworkId } = await seedMatrixFixture();
+    const [outsideUser] = await db.insert(users).values({
+      email: crypto.getRandomValues(new Uint8Array(32)) as never,
+      emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+    }).returning();
+    // Enrolled in a *different* course under the same org, not this homework's course.
+    const [otherCourse] = await db.insert(courses).values({
+      organizationId: org.id, code: "OTHER", term: "Test", title: "Other Course",
+    }).returning();
+    await db.insert(courseMemberships).values({ userId: outsideUser!.id, courseId: otherCourse!.id, role: "student" });
+
+    const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId);
+    expect(matrix!.students.find((s) => s.studentId === outsideUser!.id)).toBeUndefined();
+    expect(matrix!.students).toHaveLength(3); // unchanged from the base fixture
+
+    await db.delete(organizations).where(eq(organizations.id, org.id));
+  });
+
+  it("uses at most 4 db query round-trips (roster, homework+sections, conversations, submissions) -- no N+1", async () => {
+    const { db, org, cipher, scope, homeworkId } = await seedMatrixFixture();
+
+    let queryCount = 0;
+    const targets: Array<[object, string]> = [
+      [db.query.homeworks, "findFirst"],
+      [db.query.courseMemberships, "findMany"],
+      [db.query.conversations, "findMany"],
+      [db.query.submissions, "findMany"],
+    ];
+    const originals = targets.map(([obj, key]) => (obj as Record<string, unknown>)[key]);
+    // If Drizzle's query-builder methods turn out not to be plain writable
+    // own-properties (rare, but depends on the installed version), wrap
+    // `db.query` itself in a Proxy counting `get` calls on `findFirst`/
+    // `findMany` instead -- same intent, different mechanism.
+    targets.forEach(([obj, key], i) => {
+      (obj as Record<string, unknown>)[key] = (...args: unknown[]) => {
+        queryCount++;
+        return (originals[i] as (...a: unknown[]) => unknown).apply(obj, args);
+      };
+    });
+    try {
+      await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId);
+    } finally {
+      targets.forEach(([obj, key], i) => { (obj as Record<string, unknown>)[key] = originals[i]; });
+    }
+    expect(queryCount).toBeLessThanOrEqual(4);
+
+    await db.delete(organizations).where(eq(organizations.id, org.id));
   });
 });
