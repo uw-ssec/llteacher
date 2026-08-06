@@ -37,6 +37,46 @@ export async function createSubmission(db: Db, scope: OrgScope, conversationId: 
   return created;
 }
 
+export async function submitSection(
+  db: Db,
+  scope: OrgScope,
+  conversationId: string,
+  requesterId: string,
+): Promise<{ id: string; conversationId: string; submittedAt: Date; isResubmission: boolean }> {
+  // Closes the ownership gap noted for conversations.ts's
+  // softDeleteConversation/appendMessage (#134): this check is scoped to a
+  // single route (the only one #22 adds), so it's inlined here rather than
+  // widening every repository function's signature.
+  const [owned] = await db
+    .select({ id: conversations.id, ownerUserId: conversations.ownerUserId })
+    .from(conversations)
+    .innerJoin(courses, eq(conversations.courseId, courses.id))
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        eq(courses.organizationId, scope),
+        eq(conversations.isDeleted, false),
+        eq(conversations.kind, "section"),
+      ),
+    );
+  if (!owned || owned.ownerUserId !== requesterId) {
+    throw new Error("Conversation not found or not owned by requester");
+  }
+
+  const existing = await getSubmissionByConversation(db, scope, conversationId);
+  if (existing) {
+    const [updated] = await db
+      .update(submissions)
+      .set({ submittedAt: new Date() })
+      .where(eq(submissions.id, existing.id))
+      .returning();
+    return { id: updated!.id, conversationId, submittedAt: updated!.submittedAt, isResubmission: true };
+  }
+
+  const created = await createSubmission(db, scope, conversationId);
+  return { id: created.id, conversationId, submittedAt: created.submittedAt, isResubmission: false };
+}
+
 export async function getSubmissionByConversation(db: Db, scope: OrgScope, conversationId: string) {
   const [found] = await db
     .select()

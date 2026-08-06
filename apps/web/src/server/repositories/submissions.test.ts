@@ -5,7 +5,7 @@ import type { Db } from "../../db/client";
 import { organizations, courses, users, conversations, courseMemberships, grades, homeworks, sections } from "../../db/schema";
 import { unsafeOrgScope, unsafeCourseScope } from "./scope";
 import { createConversation, softDeleteConversation } from "./conversations";
-import { createSubmission, getSubmissionByConversation, recordGrade } from "./submissions";
+import { createSubmission, getSubmissionByConversation, recordGrade, submitSection } from "./submissions";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -216,5 +216,50 @@ describe.skipIf(!DATABASE_URL)("submissions repository", () => {
         graderMembershipId: studentMembershipAId,
       }),
     ).rejects.toThrow();
+  });
+
+  describe("submitSection", () => {
+    it("creates a submission on first submit", async () => {
+      const conversationId = await newConversation(courseAId, userAId);
+      const result = await submitSection(db, unsafeOrgScope(orgAId), conversationId, userAId);
+      expect(result.conversationId).toBe(conversationId);
+      expect(result.isResubmission).toBe(false);
+      expect(result.submittedAt).toBeInstanceOf(Date);
+    });
+
+    it("resubmit updates submittedAt and returns isResubmission=true", async () => {
+      const conversationId = await newConversation(courseAId, userAId);
+      const first = await submitSection(db, unsafeOrgScope(orgAId), conversationId, userAId);
+      const second = await submitSection(db, unsafeOrgScope(orgAId), conversationId, userAId);
+      expect(second.id).toBe(first.id); // same row, updated -- not a duplicate
+      expect(second.isResubmission).toBe(true);
+    });
+
+    it("rejects when requesterId does not own the conversation", async () => {
+      const conversationId = await newConversation(courseAId, userAId);
+      await expect(
+        submitSection(db, unsafeOrgScope(orgAId), conversationId, userBId),
+      ).rejects.toThrow();
+    });
+
+    it("rejects a soft-deleted conversation", async () => {
+      const conversationId = await newConversation(courseAId, userAId);
+      await softDeleteConversation(db, unsafeCourseScope(courseAId), conversationId);
+      await expect(
+        submitSection(db, unsafeOrgScope(orgAId), conversationId, userAId),
+      ).rejects.toThrow();
+    });
+
+    it("rejects a tutor-kind conversation (no section)", async () => {
+      const tutorConv = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userAId,
+        sectionId: null,
+        kind: "tutor",
+        title: "tutor chat",
+      });
+      await expect(
+        submitSection(db, unsafeOrgScope(orgAId), tutorConv.id, userAId),
+      ).rejects.toThrow();
+    });
   });
 });
