@@ -460,3 +460,93 @@ describe.skipIf(!DATABASE_URL)("getHomeworkSubmissionsMatrix (real DB)", () => {
     await db.delete(organizations).where(eq(organizations.id, org.id));
   });
 });
+
+describe.skipIf(!DATABASE_URL)("missingSectionWarnings (#23, real DB)", () => {
+  async function seedWarningsFixture(studentCount: number) {
+    const db = makeNodeDb(DATABASE_URL!);
+    const [org] = await db.insert(organizations).values({
+      slug: `m3-test-23-${crypto.randomUUID()}`, name: "M3 Test Org 23", workosOrganizationId: `wo-23-${crypto.randomUUID()}`,
+    }).returning();
+    const [course] = await db.insert(courses).values({
+      organizationId: org!.id, code: "TEST23", term: "Test", title: "Test Course 23",
+    }).returning();
+
+    const cipher = new IdentityCipher(await loadIdentityCipherKeys({
+      ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+      BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+    } as Env));
+
+    const [instructorUser] = await db.insert(users).values({
+      email: crypto.getRandomValues(new Uint8Array(32)) as never,
+      emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+    }).returning();
+    const [instructorMembership] = await db.insert(courseMemberships).values({
+      userId: instructorUser!.id, courseId: course!.id, role: "instructor",
+    }).returning();
+
+    const scope = unsafeCourseScope(course!.id);
+    const hw = await createHomework(db, scope, {
+      createdById: instructorMembership!.id, title: "Warnings HW", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    await updateHomework(db, scope, hw!.id, {
+      sections: [
+        { title: "Section 1", content: "c1", order: 1 },
+        { title: "Section 2", content: "c2", order: 2 },
+      ],
+    });
+    const withSections = await getHomeworkById(db, scope, hw!.id);
+    const section1 = withSections!.sections.find((s) => s.title === "Section 1")!;
+    const section2 = withSections!.sections.find((s) => s.title === "Section 2")!;
+
+    // Students, unlike the instructor above, go through getHomeworkSubmissionsMatrix's
+    // roster decrypt path (only role="student" rows are fetched/decrypted)
+    // -- their email/displayName must be real ciphertext from this fixture's
+    // own cipher, not raw random bytes (which decryptString rejects with
+    // "Unsupported ciphertext version").
+    const students: { userId: string }[] = [];
+    for (let i = 0; i < studentCount; i++) {
+      const email = `warnings-student-${i}-${crypto.randomUUID()}@test.example`;
+      const [user] = await db.insert(users).values({
+        email: await cipher.encryptString(email),
+        emailBlindIndex: await cipher.computeBlindIndex(IdentityCipher.normalizeEmail(email)),
+      }).returning();
+      await db.insert(courseMemberships).values({ userId: user!.id, courseId: course!.id, role: "student" });
+      students.push({ userId: user!.id });
+    }
+
+    return { db, org: org!, course: course!, cipher, scope, homeworkId: hw!.id, section1, section2, students };
+  }
+
+  it("flags a section only some students have touched, omits a section every student has touched", async () => {
+    const { db, org, course, cipher, scope, homeworkId, section1, section2, students } = await seedWarningsFixture(3);
+
+    // Every student touches section 1 -> not a warning.
+    for (const s of students) {
+      await db.insert(conversations).values({
+        ownerUserId: s.userId, courseId: course.id, sectionId: section1.id, kind: "section", title: "t1",
+      });
+    }
+    // Only 1 of 3 students touches section 2 -> 2 students missing.
+    await db.insert(conversations).values({
+      ownerUserId: students[0]!.userId, courseId: course.id, sectionId: section2.id, kind: "section", title: "t2",
+    });
+
+    const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId);
+
+    expect(matrix!.missingSectionWarnings).toEqual([
+      { sectionId: section2.id, sectionTitle: "Section 2", missingStudentCount: 2 },
+    ]);
+
+    await db.delete(organizations).where(eq(organizations.id, org.id));
+  });
+
+  it("returns an empty array (not an error) when zero students are enrolled", async () => {
+    const { db, org, cipher, scope, homeworkId } = await seedWarningsFixture(0);
+
+    const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId);
+
+    expect(matrix!.missingSectionWarnings).toEqual([]);
+
+    await db.delete(organizations).where(eq(organizations.id, org.id));
+  });
+});

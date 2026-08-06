@@ -182,6 +182,7 @@ export interface HomeworkSubmissionsMatrix {
   homeworkDueDate: string;
   sectionHeaders: { id: string; order: number; title: string }[];
   students: StudentSubmissionRow[];
+  missingSectionWarnings: { sectionId: string; sectionTitle: string; missingStudentCount: number }[];
   aggregateStats: {
     totalStudents: number; activeStudents: number; inactiveStudents: number;
     totalSubmissions: number; submissionRate: number;
@@ -298,6 +299,18 @@ export async function getHomeworkSubmissionsMatrix(
     return b.lastActivityAt.localeCompare(a.lastActivityAt);
   });
 
+  // #23: a summary aggregation over each cell's already-computed status --
+  // no new query -- surfacing sections most of the roster hasn't touched
+  // yet. A section every student has touched is omitted entirely (not
+  // returned with count 0), so the client only ever renders real warnings.
+  const missingSectionWarnings = homework.sections
+    .map((section) => {
+      const missingCount = students.filter((s) => s.sections.find((c) => c.sectionId === section.id)?.status === "missing").length;
+      return { sectionId: section.id, sectionTitle: section.title, missingStudentCount: missingCount };
+    })
+    .filter((w) => w.missingStudentCount > 0)
+    .sort((a, b) => b.missingStudentCount - a.missingStudentCount);
+
   const activeStudents = students.filter((s) => s.participationStatus !== "no_interaction").length;
   return {
     homeworkId: homework.id,
@@ -305,6 +318,7 @@ export async function getHomeworkSubmissionsMatrix(
     homeworkDueDate: homework.dueDate.toISOString(),
     sectionHeaders: homework.sections.map((s) => ({ id: s.id, order: s.order, title: s.title })).sort((a, b) => a.order - b.order),
     students,
+    missingSectionWarnings,
     aggregateStats: {
       totalStudents: students.length,
       activeStudents,
