@@ -17,6 +17,10 @@ const findManyHomeworks = vi.fn();
 const insertHomework = vi.fn();
 const findFirstHomework = vi.fn();
 const findManySections = vi.fn();
+// listHomeworksForCourse's section-count query (Task 23) is a plain
+// `db.select({...}).from(sections).where(...).groupBy(...)` chain, not a
+// db.query.*.findMany call -- faked separately from the two above.
+const selectSectionCounts = vi.fn();
 vi.mock("../../db/client", () => ({
   makeDb: () => ({
     query: {
@@ -27,6 +31,7 @@ vi.mock("../../db/client", () => ({
       sections: { findMany: (...args: unknown[]) => findManySections(...args) },
     },
     insert: (...args: unknown[]) => insertHomework(...args),
+    select: (...args: unknown[]) => selectSectionCounts(...args),
   }),
 }));
 
@@ -98,13 +103,32 @@ describe("GET /api/courses/:courseId/homeworks", () => {
   });
 
   it("allows a course member and lists that course's homeworks", async () => {
-    findManyHomeworks.mockReset().mockResolvedValue([{ id: "hw1", title: "HW 1" }]);
+    findManyHomeworks.mockReset().mockResolvedValue([
+      {
+        id: "hw1",
+        title: "HW 1",
+        description: "d",
+        dueDate: new Date("2020-01-02"),
+        llmConfigId: null,
+        publishedAt: new Date("2020-01-01"),
+        releasedAt: new Date("2020-01-01"),
+      },
+    ]);
+    selectSectionCounts.mockReset().mockReturnValue({
+      from: () => ({ where: () => ({ groupBy: async () => [{ homeworkId: "hw1", count: 2 }] }) }),
+    });
     const res = await buildApp(
       fakeAuthContext({ isMemberOf: (id) => id === "course-a" }),
     ).request("/api/courses/course-a/homeworks", {}, TEST_ENV);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { homeworks: unknown[] };
+    const body = (await res.json()) as { homeworks: { status: string; sectionCount: number }[] };
     expect(body.homeworks).toHaveLength(1);
+    // Task 23: status is derived (deriveHomeworkStatus), not a raw DB column
+    // -- the fixture's dueDate has already passed, so "past_due" here proves
+    // it's not just echoing some raw `status` field that doesn't even exist
+    // on the row.
+    expect(body.homeworks[0].status).toBe("past_due");
+    expect(body.homeworks[0].sectionCount).toBe(2);
   });
 
   it("denies access to a different course than the one the user is a member of (cross-course)", async () => {

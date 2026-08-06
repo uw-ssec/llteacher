@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { homeworks, sections, sectionSolutions } from "../../db/schema";
 import type { CourseScope } from "./scope";
@@ -8,9 +8,26 @@ import {
   type IncomingSection,
   type SectionUpdatePlan,
 } from "./sections";
+import type { HomeworkListItemResponse } from "../../shared/types";
 
-export async function listHomeworksForCourse(db: Db, scope: CourseScope) {
-  return db.query.homeworks.findMany({ where: eq(homeworks.courseId, scope) });
+export async function listHomeworksForCourse(db: Db, scope: CourseScope): Promise<HomeworkListItemResponse[]> {
+  const rows = await db.query.homeworks.findMany({ where: eq(homeworks.courseId, scope) });
+  if (rows.length === 0) return [];
+  const counts = await db
+    .select({ homeworkId: sections.homeworkId, count: sql<number>`count(*)::int` })
+    .from(sections)
+    .where(inArray(sections.homeworkId, rows.map((h) => h.id)))
+    .groupBy(sections.homeworkId);
+  const countByHomeworkId = new Map(counts.map((c) => [c.homeworkId, c.count]));
+  return rows.map((hw) => ({
+    id: hw.id,
+    title: hw.title,
+    description: hw.description,
+    dueDate: hw.dueDate.toISOString(),
+    llmConfigId: hw.llmConfigId,
+    status: deriveHomeworkStatus(hw),
+    sectionCount: countByHomeworkId.get(hw.id) ?? 0,
+  }));
 }
 
 export async function createHomework(

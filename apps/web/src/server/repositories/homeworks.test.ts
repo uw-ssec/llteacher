@@ -3,15 +3,88 @@ import { listHomeworksForCourse, createHomework, getHomeworkById, updateHomework
 import { unsafeCourseScope } from "./scope";
 import type { Db } from "../../db/client";
 
+// listHomeworksForCourse's section-count query is `db.select({...}).from
+// (sections).where(...).groupBy(...)` -- a plain builder chain, not a
+// db.query.*.findMany call, so it needs its own fake chain distinct from
+// the findMany mock used for the homeworks fetch itself.
+function mockSectionCountsChain(counts: { homeworkId: string; count: number }[]) {
+  const groupBy = vi.fn().mockResolvedValue(counts);
+  const where = vi.fn().mockReturnValue({ groupBy });
+  const from = vi.fn().mockReturnValue({ where });
+  return vi.fn().mockReturnValue({ from });
+}
+
 describe("homeworks repository", () => {
-  it("listHomeworksForCourse queries by the given course scope", async () => {
-    const findMany = vi.fn().mockResolvedValue([{ id: "hw1" }]);
-    const db = { query: { homeworks: { findMany } } } as unknown as Db;
+  it("listHomeworksForCourse shapes rows via deriveHomeworkStatus and attaches section counts", async () => {
+    const hwRow = {
+      id: "hw1",
+      title: "HW 1",
+      description: "d",
+      dueDate: new Date("2020-01-02"),
+      llmConfigId: null,
+      publishedAt: new Date("2020-01-01"),
+      releasedAt: new Date("2020-01-01"),
+    };
+    const findMany = vi.fn().mockResolvedValue([hwRow]);
+    const select = mockSectionCountsChain([{ homeworkId: "hw1", count: 3 }]);
+    const db = { query: { homeworks: { findMany } }, select } as unknown as Db;
 
     const result = await listHomeworksForCourse(db, unsafeCourseScope("course-a"));
 
-    expect(result).toEqual([{ id: "hw1" }]);
+    expect(result).toEqual([
+      {
+        id: "hw1",
+        title: "HW 1",
+        description: "d",
+        dueDate: hwRow.dueDate.toISOString(),
+        llmConfigId: null,
+        status: "past_due",
+        sectionCount: 3,
+      },
+    ]);
     expect(findMany).toHaveBeenCalledOnce();
+  });
+
+  it("returns sectionCount: 0 for a homework the count query has no row for (not the outer list being empty)", async () => {
+    const hwRow = {
+      id: "hw2",
+      title: "HW 2",
+      description: "d",
+      dueDate: new Date("2099-01-01"),
+      llmConfigId: null,
+      publishedAt: null,
+      releasedAt: null,
+    };
+    const findMany = vi.fn().mockResolvedValue([hwRow]);
+    // The count query itself returns zero rows for hw2 (no sections exist),
+    // distinct from the rows.length === 0 early-return below.
+    const select = mockSectionCountsChain([]);
+    const db = { query: { homeworks: { findMany } }, select } as unknown as Db;
+
+    const result = await listHomeworksForCourse(db, unsafeCourseScope("course-a"));
+
+    expect(result).toEqual([
+      {
+        id: "hw2",
+        title: "HW 2",
+        description: "d",
+        dueDate: hwRow.dueDate.toISOString(),
+        llmConfigId: null,
+        status: "draft",
+        sectionCount: 0,
+      },
+    ]);
+  });
+
+  it("returns [] without querying section counts when the course has no homeworks", async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const select = vi.fn();
+    const db = { query: { homeworks: { findMany } }, select } as unknown as Db;
+
+    const result = await listHomeworksForCourse(db, unsafeCourseScope("course-a"));
+
+    expect(result).toEqual([]);
+    expect(select).not.toHaveBeenCalled();
   });
 
   it("createHomework inserts with the scope as courseId", async () => {
