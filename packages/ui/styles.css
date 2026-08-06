@@ -2087,11 +2087,13 @@ body {
 .admin-status--in_progress .admin-status__dot,
 .admin-status--partial .admin-status__dot { background-color: #5B4FAB; }
 
-.admin-status--archived {
+.admin-status--archived,
+.admin-status--hidden {
   color: var(--color-text-secondary);
   background-color: rgba(122, 117, 112, 0.08);
 }
-.admin-status--archived .admin-status__dot { background-color: var(--color-text-secondary); }
+.admin-status--archived .admin-status__dot,
+.admin-status--hidden .admin-status__dot { background-color: var(--color-text-secondary); }
 
 .admin-status--past_due {
   color: var(--color-error);

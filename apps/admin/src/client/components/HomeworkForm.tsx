@@ -22,7 +22,7 @@ export interface HomeworkFormInitialData {
   dueDate: string;
   llmConfigId: string | null;
   sections: SectionDetail[];
-  status: "draft" | "scheduled" | "active" | "past_due" | "archived";
+  status: "draft" | "scheduled" | "active" | "past_due" | "hidden" | "archived";
   releasedAt: string | null;
 }
 

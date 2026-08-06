@@ -12,6 +12,7 @@ export type StatusKind =
   | "scheduled"
   | "archived"
   | "past_due"
+  | "hidden"
   | "default"
   | "inactive"
   | "submitted"
