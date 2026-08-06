@@ -3078,7 +3078,12 @@ import type { SubmissionResponse } from "../../shared/types";
 export async function submitSectionHandler(c: Context<AppEnv>) {
   const conversationId = c.req.param("id");
   const authContext = c.get("authContext") as AuthContext | undefined;
-  if (!authContext) return c.json({ error: "Unauthorized" }, 403);
+  // Defensive re-check of requireRole(["student"]) -- matches the
+  // belt-and-suspenders pattern in studentHomeworks.ts/homeworks.ts (found
+  // during Task 17 implementation: without the hasRole check, calling this
+  // handler directly, as the unit tests do, would let a non-student
+  // authContext through).
+  if (!authContext || !authContext.hasRole("student")) return c.json({ error: "Unauthorized" }, 403);
 
   const db = makeDb(c.env.DATABASE_URL);
   // A student's conversation belongs to exactly one org via its course;
