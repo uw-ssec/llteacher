@@ -1,5 +1,8 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useForm, useFieldArray } from "react-hook-form";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { Button, Input } from "@llteacher/ui";
 import type { LLMConfig, SectionDetail } from "../lib/fixtures";
 import { computeSectionDiff, type FormSection } from "../lib/computeSectionDiff";
 
@@ -39,7 +42,7 @@ const MAX_SECTIONS = 20;
 export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: HomeworkFormProps) {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const {
-    register, control, handleSubmit, formState: { errors, isDirty },
+    register, control, handleSubmit, watch, formState: { errors, isDirty },
   } = useForm<HomeworkFormValues>({
     defaultValues: initialData
       ? {
@@ -99,9 +102,11 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
   return (
     <form onSubmit={submit} noValidate>
       <div className="admin-form-field">
-        <label htmlFor="hw-title">Title</label>
-        <input id="hw-title" {...register("title", { required: "Title required" })} />
-        {errors.title && <p role="alert">{errors.title.message}</p>}
+        <Input
+          label="Title"
+          {...register("title", { required: "Title required" })}
+          error={errors.title?.message}
+        />
       </div>
 
       <div className="admin-form-field">
@@ -140,20 +145,35 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
           <input id={`section-${index}-title`} aria-label="Section title" {...register(`sections.${index}.title`, { required: true })} />
           <label htmlFor={`section-${index}-content`}>Section content</label>
           <textarea id={`section-${index}-content`} aria-label="Section content" {...register(`sections.${index}.content`, { required: true })} />
+          <div className="admin-markdown-preview" aria-label={`Section ${index + 1} content preview`}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{watch(`sections.${index}.content`) || ""}</ReactMarkdown>
+          </div>
           <label htmlFor={`section-${index}-solution`}>Solution (optional)</label>
           <textarea id={`section-${index}-solution`} aria-label="Section solution" {...register(`sections.${index}.solutionContent`)} />
-          <button type="button" aria-label="Remove section" onClick={() => remove(index)}>Remove section</button>
+          <div className="admin-markdown-preview" aria-label={`Section ${index + 1} solution preview`}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{watch(`sections.${index}.solutionContent`) || ""}</ReactMarkdown>
+          </div>
+          <Button
+            type="button"
+            variant="danger"
+            aria-label="Remove section"
+            onClick={() => {
+              if (window.confirm(`Remove section ${index + 1}? This cannot be undone until you save.`)) remove(index);
+            }}
+          >
+            Remove section
+          </Button>
         </fieldset>
       ))}
 
       {errors.sections && <p role="alert">At least 1 section is required</p>}
       {submitError && <p role="alert">{submitError}</p>}
 
-      <button type="button" onClick={() => append({ title: "", content: "", solutionContent: undefined })}>
+      <Button type="button" onClick={() => append({ title: "", content: "", solutionContent: undefined })}>
         + Add section
-      </button>
+      </Button>
 
-      <button type="submit" disabled={isLoading}>Save</button>
+      <Button type="submit" variant="accent" disabled={isLoading}>Save</Button>
     </form>
   );
 }
@@ -164,10 +184,10 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
  *  caller checking isDirty before calling onBack -- exposed here only for
  *  the reload/close case, which this hook alone can cover. */
 function useUnsavedChangesGuard(isDirty: boolean) {
-  useState(() => {
+  useEffect(() => {
     if (typeof window === "undefined") return;
     const handler = (e: BeforeUnloadEvent) => { if (isDirty) e.preventDefault(); };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  });
+  }, [isDirty]);
 }
