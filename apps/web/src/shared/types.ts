@@ -48,6 +48,8 @@ export interface HomeworkListItemResponse {
   dueDate: string;
   llmConfigId: string | null;
   status: HomeworkStatus;
+  isHidden: boolean;
+  expiresAt: string | null;
   sectionCount: number;
 }
 
@@ -61,6 +63,8 @@ export interface HomeworkDetailResponse {
   status: HomeworkStatus;
   publishedAt: string | null;
   releasedAt: string | null;
+  isHidden: boolean;
+  expiresAt: string | null;
   sections: SectionResponse[];
   /** Present (true) only in the instructor payload; absent for students. */
   editableBy?: boolean;
@@ -104,6 +108,20 @@ export interface HomeworkPublishResponse {
    *  student activity (conversations against its sections) at the time of
    *  the transition. */
   hadExistingActivity?: boolean;
+}
+
+export interface HomeworkHideBody {
+  isHidden: boolean;
+  /** ISO datetime, or null to explicitly clear. Omit entirely to leave the
+   *  existing expiresAt unchanged (mirrors updateHomeworkHideState's
+   *  `!== undefined` convention). */
+  expiresAt?: string | null;
+}
+
+export interface HomeworkHideResponse {
+  id: string;
+  isHidden: boolean;
+  expiresAt: string | null;
 }
 
 export interface SubmissionResponse {

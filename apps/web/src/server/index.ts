@@ -10,6 +10,7 @@ import {
   updateHomeworkHandler,
   deleteHomeworkHandler,
   publishHomeworkHandler,
+  updateHomeworkHideHandler,
 } from "./routes/homeworks";
 import { workosWebhookHandler } from "./routes/webhooksWorkos";
 import { studentHomeworksHandler } from "./routes/studentHomeworks";
@@ -64,6 +65,10 @@ app.delete(
 app.patch(
   "/api/courses/:courseId/homeworks/:homeworkId/publish",
   requireInstructorOf()(publishHomeworkHandler),
+);
+app.patch(
+  "/api/courses/:courseId/homeworks/:homeworkId/hide",
+  requireInstructorOf()(updateHomeworkHideHandler),
 );
 app.get("/api/student/homeworks", requireRole(["student"])(studentHomeworksHandler));
 app.post("/api/conversations/:id/submit", requireRole(["student"])(submitSectionHandler));

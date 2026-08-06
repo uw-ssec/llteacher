@@ -7,6 +7,7 @@ import {
   updateHomeworkHandler,
   deleteHomeworkHandler,
   publishHomeworkHandler,
+  updateHomeworkHideHandler,
 } from "./homeworks";
 import { auditEvents } from "../../db/schema";
 import type { AuthContext } from "../middleware/roles";
@@ -77,6 +78,7 @@ vi.mock("../../db/client", () => ({
 const updateHomeworkMock = vi.fn();
 const deleteHomeworkMock = vi.fn();
 const publishHomeworkMock = vi.fn();
+const hideHomeworkMock = vi.fn();
 const homeworkHasStudentActivityMock = vi.fn();
 vi.mock("../repositories/homeworks", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../repositories/homeworks")>();
@@ -85,6 +87,7 @@ vi.mock("../repositories/homeworks", async (importOriginal) => {
     updateHomework: (...args: unknown[]) => updateHomeworkMock(...args),
     deleteHomework: (...args: unknown[]) => deleteHomeworkMock(...args),
     updateHomeworkPublishState: (...args: unknown[]) => publishHomeworkMock(...args),
+    updateHomeworkHideState: (...args: unknown[]) => hideHomeworkMock(...args),
     homeworkHasStudentActivity: (...args: unknown[]) => homeworkHasStudentActivityMock(...args),
   };
 });
@@ -137,6 +140,7 @@ function buildApp(authContext: AuthContext | undefined) {
   app.patch("/api/courses/:courseId/homeworks/:homeworkId", (c) => updateHomeworkHandler(c));
   app.delete("/api/courses/:courseId/homeworks/:homeworkId", (c) => deleteHomeworkHandler(c));
   app.patch("/api/courses/:courseId/homeworks/:homeworkId/publish", (c) => publishHomeworkHandler(c));
+  app.patch("/api/courses/:courseId/homeworks/:homeworkId/hide", (c) => updateHomeworkHideHandler(c));
   return app;
 }
 
@@ -162,6 +166,8 @@ describe("GET /api/courses/:courseId/homeworks", () => {
         llmConfigId: null,
         publishedAt: new Date("2020-01-01"),
         releasedAt: new Date("2020-01-01"),
+        isHidden: false,
+        expiresAt: null,
       },
     ]);
     selectSectionCounts.mockReset().mockReturnValue({
@@ -200,18 +206,28 @@ describe("GET /api/courses/:courseId/homeworks", () => {
       {
         id: "hw-draft", title: "Draft HW", description: "d",
         dueDate: new Date("2099-01-02"), llmConfigId: null, publishedAt: null, releasedAt: null,
+        isHidden: false, expiresAt: null,
       },
       // scheduled: releasedAt in the future
       {
         id: "hw-scheduled", title: "Scheduled HW", description: "d",
         dueDate: new Date("2099-01-02"), llmConfigId: null,
         publishedAt: new Date("2020-01-01"), releasedAt: new Date("2099-01-01"),
+        isHidden: false, expiresAt: null,
       },
       // active: released in the past, due in the future
       {
         id: "hw-active", title: "Active HW", description: "d",
         dueDate: new Date("2099-01-02"), llmConfigId: null,
         publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+        isHidden: false, expiresAt: null,
+      },
+      // hidden: published+active, but is_hidden true (#166)
+      {
+        id: "hw-hidden", title: "Hidden HW", description: "d",
+        dueDate: new Date("2099-01-02"), llmConfigId: null,
+        publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+        isHidden: true, expiresAt: null,
       },
     ]);
     selectSectionCounts.mockReset().mockReturnValue({
@@ -219,7 +235,7 @@ describe("GET /api/courses/:courseId/homeworks", () => {
     });
   }
 
-  it("filters draft/scheduled homeworks out for a non-instructor (student)", async () => {
+  it("filters draft/scheduled/hidden homeworks out for a non-instructor (student)", async () => {
     mixedStatusHomeworks();
     const res = await buildApp(
       fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
@@ -229,14 +245,14 @@ describe("GET /api/courses/:courseId/homeworks", () => {
     expect(body.homeworks.map((h) => h.id)).toEqual(["hw-active"]);
   });
 
-  it("returns every homework unfiltered for an instructor", async () => {
+  it("returns every homework unfiltered for an instructor, including hidden", async () => {
     mixedStatusHomeworks();
     const res = await buildApp(
       fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
     ).request("/api/courses/course-a/homeworks", {}, TEST_ENV);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { homeworks: { id: string }[] };
-    expect(body.homeworks.map((h) => h.id)).toEqual(["hw-draft", "hw-scheduled", "hw-active"]);
+    expect(body.homeworks.map((h) => h.id)).toEqual(["hw-draft", "hw-scheduled", "hw-active", "hw-hidden"]);
   });
 });
 
@@ -389,6 +405,7 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
       // publishedAt/releasedAt in the past alone would otherwise yield "active".
       id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
       dueDate: new Date("2020-01-02"), llmConfigId: null, publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+      isHidden: false, expiresAt: null,
     });
     findManySections.mockReset().mockResolvedValue([
       { id: "s1", title: "Sec 1", content: "c1", order: 1, solution: null, createdAt: new Date(), updatedAt: new Date() },
@@ -407,6 +424,7 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     findFirstHomework.mockReset().mockResolvedValue({
       id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
       dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null,
+      isHidden: false, expiresAt: null,
     });
     findManySections.mockReset().mockResolvedValue([]);
     const res = await buildApp(
@@ -421,6 +439,7 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     findFirstHomework.mockReset().mockResolvedValue({
       id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
       dueDate: new Date("2020-01-02"), llmConfigId: null, publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+      isHidden: false, expiresAt: null,
     });
     findManySections.mockReset().mockResolvedValue([
       { id: "s1", title: "Sec 1", content: "c1", order: 1, solution: { id: "sol-1", content: "the answer is 42" }, createdAt: new Date(), updatedAt: new Date() },
@@ -437,6 +456,7 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     findFirstHomework.mockReset().mockResolvedValue({
       id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
       dueDate: new Date("2020-01-02"), llmConfigId: null, publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+      isHidden: false, expiresAt: null,
     });
     findManySections.mockReset().mockResolvedValue([
       { id: "s1", title: "Sec 1", content: "c1", order: 1, solution: { id: "sol-1", content: "the answer is 42" }, createdAt: new Date(), updatedAt: new Date() },
@@ -455,6 +475,7 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     findFirstHomework.mockReset().mockResolvedValue({
       id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
       dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null,
+      isHidden: false, expiresAt: null,
     });
     findManySections.mockReset().mockResolvedValue([]);
     const res = await buildApp(
@@ -467,6 +488,7 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     findFirstHomework.mockReset().mockResolvedValue({
       id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
       dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: new Date("2020-01-01"), releasedAt: new Date("2099-01-01"),
+      isHidden: false, expiresAt: null,
     });
     findManySections.mockReset().mockResolvedValue([]);
     const res = await buildApp(
@@ -475,10 +497,41 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     expect(res.status).toBe(404);
   });
 
+  // #166: hidden is the same 404-not-403 gate as draft/scheduled for a
+  // non-instructor, even though the homework is otherwise published+active.
+  it("404s a student member for a hidden homework", async () => {
+    findFirstHomework.mockReset().mockResolvedValue({
+      id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
+      dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+      isHidden: true, expiresAt: null,
+    });
+    findManySections.mockReset().mockResolvedValue([]);
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    expect(res.status).toBe(404);
+  });
+
+  it("still returns a hidden homework normally for an instructor", async () => {
+    findFirstHomework.mockReset().mockResolvedValue({
+      id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
+      dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+      isHidden: true, expiresAt: null,
+    });
+    findManySections.mockReset().mockResolvedValue([]);
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string };
+    expect(body.status).toBe("hidden");
+  });
+
   it("still returns a draft homework normally for an instructor", async () => {
     findFirstHomework.mockReset().mockResolvedValue({
       id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
       dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null,
+      isHidden: false, expiresAt: null,
     });
     findManySections.mockReset().mockResolvedValue([]);
     const res = await buildApp(
@@ -493,6 +546,7 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     findFirstHomework.mockReset().mockResolvedValue({
       id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
       dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: new Date("2020-01-01"), releasedAt: new Date("2099-01-01"),
+      isHidden: false, expiresAt: null,
     });
     findManySections.mockReset().mockResolvedValue([]);
     const res = await buildApp(
@@ -715,6 +769,7 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
     findFirstHomework.mockReset().mockResolvedValue({
       id: "hw-1", courseId: "course-a", title: "t", description: "d",
       dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null,
+      isHidden: false, expiresAt: null,
     });
     findManySections.mockReset().mockResolvedValue([]);
     publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
@@ -737,6 +792,7 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
     findFirstHomework.mockReset().mockResolvedValue({
       id: "hw-1", courseId: "course-a", title: "t", description: "d",
       dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null,
+      isHidden: false, expiresAt: null,
     });
     findManySections.mockReset().mockResolvedValue([]);
     publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
@@ -753,6 +809,7 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
       id: "hw-1", courseId: "course-a", title: "t", description: "d",
       dueDate: new Date("2099-01-01"), llmConfigId: null,
       publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+      isHidden: false, expiresAt: null,
     });
     findManySections.mockReset().mockResolvedValue([]);
     homeworkHasStudentActivityMock.mockReset().mockResolvedValue(false);
@@ -784,6 +841,7 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
       id: "hw-1", courseId: "course-a", title: "t", description: "d",
       dueDate: new Date("2099-01-01"), llmConfigId: null,
       publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+      isHidden: false, expiresAt: null,
     });
     findManySections.mockReset().mockResolvedValue([]);
   }
@@ -903,5 +961,100 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
     expect(auditInserts[0]).toMatchObject({
       actorUserId: "u1", action: "homework.published", targetType: "homework", targetId: "hw-1",
     });
+  });
+});
+
+// #166
+describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/hide", () => {
+  it("denies a non-instructor with 403", async () => {
+    const res = await buildApp(fakeAuthContext({ isInstructorOf: () => false })).request(
+      "/api/courses/course-a/homeworks/hw-1/hide",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ isHidden: true }) },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("returns 400 when isHidden is missing/non-boolean", async () => {
+    const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a" })).request(
+      "/api/courses/course-a/homeworks/hw-1/hide",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({}) },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 for an invalid expiresAt", async () => {
+    const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a" })).request(
+      "/api/courses/course-a/homeworks/hw-1/hide",
+      {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ isHidden: false, expiresAt: "banana" }),
+      },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("hides a homework and audits homework.hidden exactly once", async () => {
+    hideHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", isHidden: true, expiresAt: null });
+    dbOrgScopesForUser = ["org-a"];
+    auditInserts = [];
+
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request(
+      "/api/courses/course-a/homeworks/hw-1/hide",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ isHidden: true }) },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { isHidden: boolean; expiresAt: string | null };
+    expect(body).toEqual({ id: "hw-1", isHidden: true, expiresAt: null });
+    expect(auditInserts).toHaveLength(1);
+    expect(auditInserts[0]).toMatchObject({
+      actorUserId: "u1", action: "homework.hidden", targetType: "homework", targetId: "hw-1",
+    });
+  });
+
+  it("unhides a homework and audits homework.unhidden exactly once", async () => {
+    hideHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", isHidden: false, expiresAt: null });
+    dbOrgScopesForUser = ["org-a"];
+    auditInserts = [];
+
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request(
+      "/api/courses/course-a/homeworks/hw-1/hide",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ isHidden: false }) },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(200);
+    expect(auditInserts[0]).toMatchObject({ action: "homework.unhidden" });
+  });
+
+  it("returns 404 when the homework isn't found in this course scope", async () => {
+    hideHomeworkMock.mockReset().mockResolvedValue(null);
+    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
+      "/api/courses/course-a/homeworks/hw-1/hide",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ isHidden: true }) },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("treats expiresAt: '' the same as null (explicit clear)", async () => {
+    hideHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", isHidden: false, expiresAt: null });
+    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
+      "/api/courses/course-a/homeworks/hw-1/hide",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ isHidden: false, expiresAt: "" }) },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+    expect(hideHomeworkMock).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), "hw-1", { isHidden: false, expiresAt: null },
+    );
   });
 });

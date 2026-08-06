@@ -8,6 +8,7 @@ import {
   updateHomework,
   deleteHomework,
   updateHomeworkPublishState,
+  updateHomeworkHideState,
   homeworkHasStudentActivity,
 } from "../repositories/homeworks";
 import { getOrgScopesForUser } from "../repositories/users";
@@ -21,6 +22,8 @@ import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type {
   HomeworkDetailResponse,
+  HomeworkHideBody,
+  HomeworkHideResponse,
   HomeworkPublishBody,
   HomeworkPublishResponse,
   HomeworkUpdateBody,
@@ -50,9 +53,11 @@ export async function listHomeworksHandler(c: Context<AppEnv>) {
 
   const db = makeDb(c.env.DATABASE_URL);
   const rows = await listHomeworksForCourse(db, scope);
+  // #166: instructors continue to see hidden/expired homeworks (labelled as
+  // such); students never see them, same gate as draft/scheduled.
   const visibleRows = authContext!.isInstructorOf(courseId!)
     ? rows
-    : rows.filter((hw) => hw.status !== "draft" && hw.status !== "scheduled");
+    : rows.filter((hw) => hw.status !== "draft" && hw.status !== "scheduled" && hw.status !== "hidden");
   return c.json({ homeworks: visibleRows });
 }
 
@@ -138,9 +143,10 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
   const isInstructor = authContext!.isInstructorOf(courseId!);
 
   const status = deriveHomeworkStatus(result.homework);
-  if (!isInstructor && (status === "draft" || status === "scheduled")) {
-    // 404, not 403 -- indistinguishable from a homework that doesn't exist,
-    // so a guessed/leaked UUID can't be used to confirm a draft is real.
+  // #166: hidden/expired is the same gate as draft/scheduled for a
+  // non-instructor -- indistinguishable from not-found, so a guessed/leaked
+  // UUID can't be used to confirm a hidden/draft homework is real.
+  if (!isInstructor && (status === "draft" || status === "scheduled" || status === "hidden")) {
     return c.json({ error: "Homework not found" }, 404);
   }
 
@@ -164,6 +170,8 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
     status,
     publishedAt: result.homework.publishedAt?.toISOString() ?? null,
     releasedAt: result.homework.releasedAt?.toISOString() ?? null,
+    isHidden: result.homework.isHidden,
+    expiresAt: result.homework.expiresAt?.toISOString() ?? null,
     sections: sectionsResponse,
     ...(isInstructor && { editableBy: true }),
   };
@@ -382,6 +390,68 @@ export async function publishHomeworkHandler(c: Context<AppEnv>) {
   return c.json(responseBody);
 }
 
+export async function updateHomeworkHideHandler(c: Context<AppEnv>) {
+  const courseId = c.req.param("courseId");
+  const homeworkId = c.req.param("homeworkId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+
+  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
+    return c.json({ error: "Instructor access denied" }, 403);
+  }
+
+  let body: HomeworkHideBody;
+  try {
+    body = await c.req.json<HomeworkHideBody>();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+  if (typeof body.isHidden !== "boolean") {
+    return c.json({ error: "isHidden (boolean) is required" }, 400);
+  }
+
+  let expiresAt: Date | null | undefined;
+  if (body.expiresAt !== undefined) {
+    // Same uncontrolled-<input>-sends-"" class of bug as releasedAt (C1/#161
+    // pattern) -- normalize an empty string to null (explicit clear) rather
+    // than letting `new Date("")` produce an Invalid Date.
+    if (body.expiresAt === null || body.expiresAt === "") {
+      expiresAt = null;
+    } else {
+      expiresAt = new Date(body.expiresAt);
+      if (Number.isNaN(expiresAt.getTime())) {
+        return c.json({ error: "expiresAt must be a valid date or null" }, 400);
+      }
+    }
+  }
+
+  const scope = courseScopeFromAuthContext(authContext, courseId);
+  if (!scope) return c.json({ error: "Course access denied" }, 403);
+
+  const db = makeDb(c.env.DATABASE_URL);
+  const updated = await updateHomeworkHideState(db, scope, homeworkId!, { isHidden: body.isHidden, expiresAt });
+  if (!updated) return c.json({ error: "Homework not found" }, 404);
+
+  // Best-effort (#147), same pattern as publishHomeworkHandler.
+  try {
+    const orgScopes = await getOrgScopesForUser(db, authContext.session.userId);
+    await auditBestEffort(db, orgScopes, {
+      actorUserId: authContext.session.userId,
+      action: body.isHidden ? AUDIT_ACTIONS.HOMEWORK_HIDDEN : AUDIT_ACTIONS.HOMEWORK_UNHIDDEN,
+      targetType: "homework",
+      targetId: updated.id,
+    });
+  } catch (err) {
+    logServerError("updateHomeworkHideHandler", err);
+  }
+
+  const responseBody: HomeworkHideResponse = {
+    id: updated.id,
+    isHidden: updated.isHidden,
+    expiresAt: updated.expiresAt?.toISOString() ?? null,
+  };
+  return c.json(responseBody);
+}
+
 // Sub-app preserved for direct unit testing; production routing happens via
 // app.get/post("/api/courses/:courseId/homeworks", ...) in server/index.ts.
 export const homeworksRoutes = new Hono<AppEnv>();
@@ -391,3 +461,4 @@ homeworksRoutes.get("/:homeworkId", requireCourseMember()(getHomeworkDetailHandl
 homeworksRoutes.patch("/:homeworkId", requireInstructorOf()(updateHomeworkHandler));
 homeworksRoutes.delete("/:homeworkId", requireInstructorOf()(deleteHomeworkHandler));
 homeworksRoutes.patch("/:homeworkId/publish", requireInstructorOf()(publishHomeworkHandler));
+homeworksRoutes.patch("/:homeworkId/hide", requireInstructorOf()(updateHomeworkHideHandler));
