@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { useNavigate } from "react-router";
@@ -62,14 +62,23 @@ const SIDEBAR_COLLAPSED_KEY = "llteacher:sidebar-collapsed";
     "overdue" / "in_progress_overdue" -- those all map onto "pending" for
     now; a richer Sidebar status vocabulary is a @llteacher/ui change out of
     scope for this issue. */
-function useStudentHomework() {
+export function useStudentHomework() {
   const [sections, setSections] = useState<SidebarSection[]>([]);
   const [hwTitle, setHwTitle] = useState("");
   const [loading, setLoading] = useState(true);
+  // #160: distinct from "loaded, zero homeworks" -- a 401/403/503 must not
+  // render as an indistinguishable empty sidebar. r.ok was never checked
+  // before, so a non-2xx error-body response (`{ error: "..." }`) was cast
+  // straight to StudentHomeworkListResponse; data.homeworks[0] then threw a
+  // TypeError inside the .then chain that the trailing .catch swallowed.
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     fetch("/api/student/homeworks")
-      .then((r) => r.json() as Promise<StudentHomeworkListResponse>)
+      .then((r) => {
+        if (!r.ok) throw new Error(`failed to load student homeworks: ${r.status}`);
+        return r.json() as Promise<StudentHomeworkListResponse>;
+      })
       .then((data) => {
         const hw = data.homeworks[0]; // single-homework sidebar UI, matches current design
         if (!hw) {
@@ -92,10 +101,13 @@ function useStudentHomework() {
         );
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(() => {
+        setLoadError(true);
+        setLoading(false);
+      });
   }, []);
 
-  return { sections, setSections, hwTitle, loading };
+  return { sections, setSections, hwTitle, loading, loadError };
 }
 
 /* ==========================================================================
@@ -120,8 +132,21 @@ export default function App() {
     transport: new DefaultChatTransport({ api: "/api/chat" }),
   });
 
-  const { sections, setSections, hwTitle } = useStudentHomework();
-  const [currentSection, setCurrentSection] = useState(3);
+  const { sections, setSections, hwTitle, loadError } = useStudentHomework();
+  // #160: was hardcoded to 3 regardless of what actually loaded -- a
+  // homework with fewer than 3 sections left this pointing at a section
+  // that doesn't exist. Starts at 1 (the Sidebar's own placeholder-free
+  // default) and snaps to the first real section's number once the fetch
+  // resolves; the ref guards against re-snapping after the student has
+  // already navigated to a different section.
+  const [currentSection, setCurrentSection] = useState(1);
+  const hasAutoSelectedSection = useRef(false);
+  useEffect(() => {
+    if (!hasAutoSelectedSection.current && sections.length > 0) {
+      setCurrentSection(sections[0]!.number);
+      hasAutoSelectedSection.current = true;
+    }
+  }, [sections]);
   const [hintCount, setHintCount] = useState(3);
   const [justSubmittedSection, setJustSubmittedSection] = useState<number | null>(null);
   /* Sidebar collapse persists across reloads via localStorage. Lazy initializer
@@ -252,6 +277,31 @@ export default function App() {
   if (authLoading) return null;
   if (!isAuthenticated) return <UnauthenticatedHome onLogin={login} error={authError} />;
 
+  // #160: distinct from a genuinely empty (zero-homework) sidebar -- a
+  // failed fetch must surface something rather than silently rendering the
+  // same "no sections" shell a real empty state would. No richer error UI
+  // exists in this app yet (matches the deliberate minimal-scope choice in
+  // handleSubmit's own catch above); this is the smallest surface that
+  // isn't silence.
+  if (loadError) {
+    return (
+      <div className="page-frame">
+        <TopNav
+          course="STATS 311"
+          term="Autumn 2026"
+          homework=""
+          userInitials="AC"
+          isAuthenticated={isAuthenticated}
+          onProfileClick={() => navigate("/profile")}
+          onLogout={logout}
+        />
+        <div className="app-shell">
+          <p role="alert">Failed to load your homework. Please refresh the page.</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="page-frame">
       {/* Top nav — UW Husky Purple full-bleed bar */}
@@ -269,7 +319,7 @@ export default function App() {
       <div className="app-shell">
         {/* Left rail — homework section progress on UW Husky Purple */}
         <Sidebar
-          hwNumber={3}
+          hwNumber={1}
           hwTitle={hwTitle}
           sections={sections}
           currentSection={currentSection}
