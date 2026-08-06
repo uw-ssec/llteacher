@@ -21,6 +21,7 @@ export interface StudentSectionProgress {
   title: string;
   order: number;
   status: SectionStatusType;
+  conversationId: string | null;
 }
 
 export interface StudentHomeworkSummary {
@@ -85,7 +86,10 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
       if (sectionStatus === "submitted") completed++;
       else if (sectionStatus === "in_progress" || sectionStatus === "in_progress_overdue") inProgress++;
 
-      sectionSummaries.push({ id: section.id, title: section.title, order: section.order, status: sectionStatus });
+      sectionSummaries.push({
+        id: section.id, title: section.title, order: section.order, status: sectionStatus,
+        conversationId: activeConversation?.id ?? null,
+      });
     }
     sectionSummaries.sort((a, b) => a.order - b.order);
 
