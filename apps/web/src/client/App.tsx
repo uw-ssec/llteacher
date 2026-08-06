@@ -87,6 +87,7 @@ function useStudentHomework() {
                 : s.status === "in_progress"
                   ? ("current" as const)
                   : ("pending" as const),
+            conversationId: s.conversationId ?? undefined,
           })),
         );
         setLoading(false);
@@ -213,18 +214,35 @@ export default function App() {
     setHintCount((n) => n + 1);
   };
 
-  const handleSubmit = (sectionNumber: number) => {
-    /* Transition the section to submitted and trigger the gold-halo
-       success animation on its ✓ indicator. The flag clears after the
-       animation duration (~700ms) so the indicator settles into its
-       normal submitted state. */
-    setSections((prev) =>
-      prev.map((s) =>
-        s.number === sectionNumber ? { ...s, status: "submitted" as const } : s,
-      ),
-    );
-    setJustSubmittedSection(sectionNumber);
-    setTimeout(() => setJustSubmittedSection(null), 800);
+  /* Submits the section's active conversation via the real API. No existing
+     generic error-surface exists in this file to reuse (workerStatus/
+     workerLoading is specifically for the /api/hello ping, not a
+     general-purpose error affordance) -- rather than inventing new UI for
+     this one failure path, log and leave sidebar state unchanged on
+     failure; this is a deliberate, minimal-scope choice, not an oversight
+     (a real error affordance is a separate, cross-cutting concern beyond
+     this task). */
+  const handleSubmit = async (sectionNumber: number) => {
+    const section = sections.find((s) => s.number === sectionNumber);
+    if (!section?.conversationId) return; // no active conversation yet -- nothing to submit
+    try {
+      const res = await fetch(`/api/conversations/${section.conversationId}/submit`, { method: "POST" });
+      if (!res.ok) throw new Error("submit failed");
+      /* Transition the section to submitted and trigger the gold-halo
+         success animation on its ✓ indicator. The flag clears after the
+         animation duration (~700ms) so the indicator settles into its
+         normal submitted state. */
+      setSections((prev) =>
+        prev.map((s) =>
+          s.number === sectionNumber ? { ...s, status: "submitted" as const } : s,
+        ),
+      );
+      setJustSubmittedSection(sectionNumber);
+      setTimeout(() => setJustSubmittedSection(null), 800);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[App] section submit failed", err);
+    }
   };
 
   /* Anonymous visitors get a minimal placeholder, not the fixture course
