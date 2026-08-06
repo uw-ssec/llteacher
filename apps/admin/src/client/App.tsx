@@ -25,7 +25,6 @@ import { HomeworkEditView } from "./views/HomeworkEditView";
 import { SubmissionsView } from "./views/SubmissionsView";
 import { LLMConfigsView } from "./views/LLMConfigsView";
 import {
-  HOMEWORKS,
   LLM_CONFIGS,
   CURRENT_TEACHER,
 } from "./lib/fixtures";
@@ -110,9 +109,24 @@ export default function App() {
 
   const navigate = (key: AdminNavKey) => {
     if (key === "submissions") {
-      /* No homework selected → default to the active homework */
-      const active = HOMEWORKS.find((h) => h.status === "active") ?? HOMEWORKS[0]!;
-      setView({ kind: "submissions", homeworkId: active.id });
+      /* No homework selected → default to the active homework. Fetches
+         the real list fresh (mirrors HomeworksDataLoader/SubmissionsData
+         Loader's per-need fetch pattern -- no app-level cache elsewhere
+         in this codebase to hook into) rather than falling back to the
+         HOMEWORKS fixture, whose ids aren't real UUIDs and would 400
+         against the real submissions endpoint. */
+      if (!CURRENT_COURSE_ID) return;
+      fetch(`/api/courses/${CURRENT_COURSE_ID}/homeworks`)
+        .then((r) => { if (!r.ok) throw new Error("failed"); return r.json(); })
+        .then((data: { homeworks: HomeworkListItemResponse[] }) => {
+          const active = data.homeworks.find((h) => h.status === "active") ?? data.homeworks[0];
+          if (active) setView({ kind: "submissions", homeworkId: active.id });
+        })
+        .catch(() => {
+          /* No general-purpose error affordance in this shell (matches
+             the student app's own documented choice in App.tsx) -- stay
+             on the current view rather than navigating to a broken one. */
+        });
     } else {
       setView({ kind: key } as View);
     }
