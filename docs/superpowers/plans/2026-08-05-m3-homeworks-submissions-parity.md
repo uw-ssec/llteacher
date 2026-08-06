@@ -4468,3 +4468,304 @@ git commit -m "feat(admin): missing-section warnings banner on the submissions d
     Checked for overlap with other milestones before implementing any of these (the user's own explicit ask, after #166/#92/#141 turned up in earlier scope checks this epic): #166 (already in M3) explicitly depends on #156 landing first and is where the "archived" vs. "hidden" status question from #162's TODO gets decided; #31 (M5) is LLM config CRUD, a different concern from #161's write-path validation; #26 (M4) resolves `llmConfigId` at chat time and doesn't validate org ownership either, making #161 a real prerequisite for #26 being safe, not overlapping work. No duplication found.
 
     All 7 issues' own requirement checklists checked off; PR #154 description and this plan doc updated in the same pass. `Closes #22`/`Closes #23` in the PR downgraded to `Part of` per the reviewer's own note (no production path creates a `conversations` row yet — unchanged from Decision 11, still true).
+
+---
+
+## M3 Follow-Up Phases (#166, #164, #165)
+
+> **For agentic workers:** These three phases were brainstormed and appended after PR #154 merged, covering the remaining open M3 enhancement issues (#164, #165, #166) — #22/#23/#94/#19/#20/#21 are the epic's original six and are done (Phases 1–7 above); #128 (design: submission uniqueness) and #167 (auto-submit, blocked on #128 by its own text — see the deferral comment on the issue) are explicitly **not** covered here. REQUIRED SUB-SKILL: use superpowers:executing-plans to execute each phase task-by-task, exactly as Phases 1–7 were. Build order is deliberate — **Phase 8 (#166) → Phase 9 (#164) → Phase 10 (#165)**, smallest and most self-contained first. Stop after each phase's final task and get the requester's review before starting the next phase.
+
+17. **#166: "hidden" and "archived" are distinct concepts, not the same status.** The unreachable `"archived"` value in `HomeworkStatus` (Decision 5) has no defined semantics anywhere — it might later mean something stronger than invisibility (read-only, term-ended, non-editable). Conflating it with #166's manual-hide/auto-expiry feature now would foreclose that future design for no benefit today. `is_hidden`/`expires_at` instead produce a new, real, reachable `"hidden"` status; `"archived"` stays in the union, still unreachable, still documented as reserved. `deriveHomeworkStatus` checks hidden/expired **first**, ahead of draft/scheduled/active/past_due — matching the reference app's own design principle that access is a single source of truth independent of the display label (see #166's issue body). Confirmed with the requester during brainstorming.
+
+---
+
+## Phase 8 — Issue #166: Manual hide + scheduled auto-expiry for homeworks
+
+**Goal:** Give instructors a hide toggle independent of publish state, plus an optional auto-expiry timestamp, so a live homework can be pulled from student view without unpublishing it.
+
+### Task 1: Schema — `is_hidden`/`expires_at` columns + migration
+
+**Files:**
+- Modify: `apps/web/src/db/schema/content.ts` (the `homeworks` table)
+- Create: `apps/web/src/db/migrations/00XX_homework_hide_expiry.sql` (generated, not hand-written)
+
+**Interfaces:**
+- Produces: `homeworks.isHidden: boolean` (not null, default false), `homeworks.expiresAt: Date | null`.
+
+- [ ] **Step 1: Add the two columns**, alongside `publishedAt`/`releasedAt` in the same table:
+
+```ts
+// apps/web/src/db/schema/content.ts — inside homeworks pgTable(...)
+// #166: is_hidden is the single source of truth for student access,
+// independent of publish state (an instructor can pull a *published*
+// homework from view without unpublishing it). expires_at is optional
+// auto-hide once passed. See deriveHomeworkStatus and Resolved Design
+// Decision 17 for the "hidden" vs "archived" call.
+isHidden: boolean("is_hidden").notNull().default(false),
+expiresAt: timestamp("expires_at", { withTimezone: true }),
+```
+
+- [ ] **Step 2:** `cd apps/web && npm run db:generate` — verify the generated migration only adds these two columns, nothing else drifted.
+- [ ] **Step 3: Commit**
+
+```bash
+git add apps/web/src/db/schema/content.ts apps/web/src/db/migrations/
+git commit -m "feat(db): homeworks.is_hidden/expires_at columns (#166)"
+```
+
+### Task 2: `deriveHomeworkStatus` gains a real `"hidden"` status
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/homeworks.ts`
+- Modify: `apps/web/src/server/repositories/homeworks.test.ts`
+
+**Interfaces:**
+- Changes: `deriveHomeworkStatus(hw: { dueDate, publishedAt, releasedAt, isHidden, expiresAt })` — two new required inputs.
+- `HomeworkStatus` union unchanged in shape (`"hidden"` was always a theoretical value via `"archived"`'s sibling documentation — now `"hidden"` itself becomes reachable; `"archived"` remains unreachable, per Decision 17).
+
+- [ ] **Step 1: Update the function and its doc comment**
+
+```ts
+export function deriveHomeworkStatus(hw: {
+  dueDate: Date;
+  publishedAt: Date | null;
+  releasedAt: Date | null;
+  isHidden: boolean;
+  expiresAt: Date | null;
+}): HomeworkStatus {
+  const now = new Date();
+  // #166: is_hidden/expires_at take precedence over every other state,
+  // including draft -- matches the reference app's design (access is one
+  // source of truth, the enum is cosmetic). Checked first so callers can
+  // filter on deriveHomeworkStatus's result alone, never a raw column.
+  if (hw.isHidden || (hw.expiresAt !== null && hw.expiresAt.getTime() <= now.getTime())) {
+    return "hidden";
+  }
+  if (!hw.publishedAt) return "draft";
+  if (hw.releasedAt && hw.releasedAt.getTime() > now.getTime()) return "scheduled";
+  return hw.dueDate.getTime() > now.getTime() ? "active" : "past_due";
+}
+```
+
+Replace the doc comment above the function (the one pointing at #166 as "where this gets resolved") with one recording the decision made, referencing Resolved Design Decision 17.
+
+- [ ] **Step 2: Update the two existing callers** of `deriveHomeworkStatus` inside this file (`listHomeworksForCourse`'s map, any other call site — grep to confirm all are found) to pass `isHidden: hw.isHidden, expiresAt: hw.expiresAt`.
+- [ ] **Step 3: Tests** — table-driven cases in `homeworks.test.ts`: `isHidden: true` overrides an otherwise-`"draft"` homework → `"hidden"`; `isHidden: true` overrides `"active"` → `"hidden"`; `expiresAt` in the past overrides `"active"` → `"hidden"`; `expiresAt` in the future does not affect an otherwise-`"active"` homework; `expiresAt: null` + `isHidden: false` is a no-op (existing behavior unchanged, regression-proofs Phase 1's original test cases still pass with the two new required fields added to every existing test fixture in this file).
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/homeworks.ts apps/web/src/server/repositories/homeworks.test.ts
+git commit -m "feat(homeworks): deriveHomeworkStatus gains a real hidden status (#166)"
+```
+
+### Task 3: Repository — `updateHomeworkHideState` + wire hidden into every status-gate filter
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/homeworks.ts`
+- Modify: `apps/web/src/server/repositories/studentHomeworks.ts`
+- Modify: `apps/web/src/server/repositories/studentHomeworks.test.ts`
+
+**Interfaces:**
+- Produces: `updateHomeworkHideState(db, scope, id, input: { isHidden: boolean; expiresAt?: Date | null }): Promise<Homework | null>` — same shape/pattern as `updateHomeworkPublishState`.
+
+- [ ] **Step 1: Add `updateHomeworkHideState`**, mirroring `updateHomeworkPublishState` exactly:
+
+```ts
+export async function updateHomeworkHideState(
+  db: Db,
+  scope: CourseScope,
+  id: string,
+  input: { isHidden: boolean; expiresAt?: Date | null },
+) {
+  const [updated] = await db
+    .update(homeworks)
+    .set({
+      isHidden: input.isHidden,
+      ...(input.expiresAt !== undefined && { expiresAt: input.expiresAt }),
+      updatedAt: new Date(),
+    })
+    .where(and(eq(homeworks.id, id), eq(homeworks.courseId, scope)))
+    .returning();
+  return updated ?? null;
+}
+```
+
+- [ ] **Step 2: Extend `studentHomeworks.ts`'s `visibleHomeworks` filter** (currently `status !== "draft" && status !== "scheduled"`) to also exclude `"hidden"`, and pass the two new `deriveHomeworkStatus` inputs at that call site.
+- [ ] **Step 3: Tests** — `studentHomeworks.test.ts`: a hidden published-and-active homework is excluded from `getStudentHomeworksForUser`'s result; an expired (`expiresAt` in the past) homework is excluded the same way; a non-hidden, non-expired homework is unaffected (regression).
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/homeworks.ts apps/web/src/server/repositories/studentHomeworks.ts apps/web/src/server/repositories/studentHomeworks.test.ts
+git commit -m "feat(homeworks): updateHomeworkHideState + student-facing hidden filtering (#166)"
+```
+
+### Task 4: Route — `PATCH .../hide` + audit action + instructor-facing filters
+
+**Files:**
+- Modify: `apps/web/src/server/routes/homeworks.ts`
+- Modify: `apps/web/src/server/utils/audit.ts`
+- Modify: `apps/web/src/shared/types.ts`
+- Modify: `apps/web/src/server/index.ts`
+- Modify: `apps/web/src/server/routes/homeworks.test.ts`
+
+**Interfaces:**
+- Produces: `updateHomeworkHideHandler`, registered at `PATCH /api/courses/:courseId/homeworks/:homeworkId/hide`, guarded by `requireInstructorOf()` — same shape as the existing `/publish` route.
+- Produces: `HomeworkHideBody { isHidden: boolean; expiresAt?: string | null }`, `HomeworkHideResponse { id: string; isHidden: boolean; expiresAt: string | null }` in `shared/types.ts`.
+- Adds `AUDIT_ACTIONS.HOMEWORK_HIDDEN: "homework.hidden"`, `AUDIT_ACTIONS.HOMEWORK_UNHIDDEN: "homework.unhidden"`.
+
+- [ ] **Step 1: Add the two audit actions** to `AUDIT_ACTIONS` in `audit.ts`, alongside `HOMEWORK_PUBLISHED`/`HOMEWORK_UNPUBLISHED`.
+- [ ] **Step 2: Add `HomeworkHideBody`/`HomeworkHideResponse`** to `shared/types.ts`, next to `HomeworkPublishBody`/`HomeworkPublishResponse`.
+- [ ] **Step 3: Add `updateHomeworkHideHandler`**, modeled directly on `publishHomeworkHandler` (same auth guard defensively re-checked, same body-parse try/catch, same best-effort audit try/catch via `logServerError`):
+
+```ts
+export async function updateHomeworkHideHandler(c: Context<AppEnv>) {
+  const courseId = c.req.param("courseId");
+  const homeworkId = c.req.param("homeworkId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+
+  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
+    return c.json({ error: "Instructor access denied" }, 403);
+  }
+
+  let body: HomeworkHideBody;
+  try {
+    body = await c.req.json<HomeworkHideBody>();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+  if (typeof body.isHidden !== "boolean") {
+    return c.json({ error: "isHidden (boolean) is required" }, 400);
+  }
+
+  let expiresAt: Date | null | undefined;
+  if (body.expiresAt !== undefined) {
+    // Same uncontrolled-<input>-sends-"" class of bug as releasedAt (C1/#161
+    // pattern) -- normalize an empty string to null (explicit clear) rather
+    // than letting `new Date("")` produce an Invalid Date.
+    if (body.expiresAt === null || body.expiresAt === "") {
+      expiresAt = null;
+    } else {
+      expiresAt = new Date(body.expiresAt);
+      if (Number.isNaN(expiresAt.getTime())) {
+        return c.json({ error: "expiresAt must be a valid date or null" }, 400);
+      }
+    }
+  }
+
+  const scope = courseScopeFromAuthContext(authContext, courseId);
+  if (!scope) return c.json({ error: "Course access denied" }, 403);
+
+  const db = makeDb(c.env.DATABASE_URL);
+  const updated = await updateHomeworkHideState(db, scope, homeworkId!, { isHidden: body.isHidden, expiresAt });
+  if (!updated) return c.json({ error: "Homework not found" }, 404);
+
+  try {
+    const orgScopes = await getOrgScopesForUser(db, authContext.session.userId);
+    await auditBestEffort(db, orgScopes, {
+      actorUserId: authContext.session.userId,
+      action: body.isHidden ? AUDIT_ACTIONS.HOMEWORK_HIDDEN : AUDIT_ACTIONS.HOMEWORK_UNHIDDEN,
+      targetType: "homework",
+      targetId: updated.id,
+    });
+  } catch (err) {
+    logServerError("updateHomeworkHideHandler", err);
+  }
+
+  const responseBody: HomeworkHideResponse = {
+    id: updated.id,
+    isHidden: updated.isHidden,
+    expiresAt: updated.expiresAt?.toISOString() ?? null,
+  };
+  return c.json(responseBody);
+}
+```
+
+- [ ] **Step 4: Register the route** in `index.ts`, immediately after the existing `/publish` registration:
+
+```ts
+app.patch(
+  "/api/courses/:courseId/homeworks/:homeworkId/hide",
+  requireInstructorOf()(updateHomeworkHideHandler),
+);
+```
+
+- [ ] **Step 5: Pass `isHidden`/`expiresAt` through `deriveHomeworkStatus`** at `listHomeworksHandler` and `getHomeworkDetailHandler`'s existing call sites, and add `status !== "hidden"` to both routes' student-facing filter predicates (line 55's `rows.filter(...)`, line 141's draft/scheduled gate). Instructors are unfiltered already (existing `isInstructorOf` branch) — no change needed there, they see hidden/expired homeworks by design (requirement: "Instructors continue to see hidden and expired homeworks, labelled as such").
+- [ ] **Step 6: Add `isHidden`/`expiresAt` to `HomeworkDetailResponse`/`HomeworkListItemResponse`** in `shared/types.ts` (`isHidden: boolean`, `expiresAt: string | null`) so the admin UI can render the toggle's current state and the expiry field.
+- [ ] **Step 7: Tests** in `homeworks.test.ts`: register the new route on the test sub-app (mirrors the existing `app.patch(".../publish", ...)` line); non-instructor gets 403; missing/non-boolean `isHidden` gets 400; invalid `expiresAt` gets 400; a successful hide writes the audit action and returns the expected body; a student-role list/detail request excludes a hidden or expired homework; an instructor-role request includes it.
+- [ ] **Step 8: Commit**
+
+```bash
+git add apps/web/src/server/routes/homeworks.ts apps/web/src/server/utils/audit.ts apps/web/src/shared/types.ts apps/web/src/server/index.ts apps/web/src/server/routes/homeworks.test.ts
+git commit -m "feat(api): PATCH .../hide route + student-facing hidden filtering (#166)"
+```
+
+### Task 5: Admin — `StatusBadge`/status-type plumbing for `"hidden"`
+
+**Files:**
+- Modify: `apps/admin/src/client/components/StatusBadge.tsx`
+- Modify: `packages/ui/styles.css`
+- Modify: `apps/admin/src/client/views/HomeworksView.tsx`
+- Modify: `apps/admin/src/client/components/HomeworkForm.tsx`
+
+**Interfaces:**
+- `StatusKind` gains `"hidden"`. The two duplicated local `HomeworkStatus` unions (`HomeworksView.tsx`, `HomeworkForm.tsx` — this app never imports from `apps/web`, per the existing "mirrors apps/web's contract" comment convention) both gain `"hidden"`.
+
+- [ ] **Step 1:** Add `"hidden"` to `StatusKind` in `StatusBadge.tsx`.
+- [ ] **Step 2:** Add a `.admin-status--hidden` CSS rule in `packages/ui/styles.css`, next to `.admin-status--archived` — reuse the same muted `var(--color-text-secondary)` dot color (both represent "not currently active," visually grouping them without conflating the underlying concepts per Decision 17).
+- [ ] **Step 3:** Add `"hidden"` to `HomeworksView.tsx`'s local `HomeworkStatus` union, its `STATUS_LABEL` map (`hidden: "hidden"`), and its `HomeworkListItemResponse` mirror (add `isHidden`/`expiresAt` fields, unused by this view directly but kept in sync with the real contract per the file's own stated convention).
+- [ ] **Step 4:** Add `"hidden"` to `HomeworkForm.tsx`'s `HomeworkFormInitialData.status` union.
+- [ ] **Step 5: Tests** — `HomeworksView.test.tsx`: a homework with `status: "hidden"` renders the `StatusBadge` with `kind="hidden"` and label "hidden".
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/admin/src/client/components/StatusBadge.tsx packages/ui/styles.css apps/admin/src/client/views/HomeworksView.tsx apps/admin/src/client/components/HomeworkForm.tsx apps/admin/src/client/views/HomeworksView.test.tsx
+git commit -m "feat(admin): hidden StatusKind + badge styling (#166)"
+```
+
+### Task 6: Admin — hide toggle + expiry field in `HomeworkForm`, wired in Create/Edit views
+
+**Files:**
+- Modify: `apps/admin/src/client/components/HomeworkForm.tsx`
+- Modify: `apps/admin/src/client/views/HomeworkCreateView.tsx`
+- Modify: `apps/admin/src/client/views/HomeworkEditView.tsx`
+- Modify: `apps/admin/src/client/components/HomeworkForm.test.tsx`
+- Modify: `apps/admin/src/client/views/HomeworkEditView.test.tsx`
+
+**Interfaces:**
+- `HomeworkFormValues` gains `hidden: boolean`, `expiresAt: string | undefined`. `HomeworkFormInitialData` gains `isHidden: boolean`, `expiresAt: string | null`. `HomeworkForm`'s `onSubmit` payload gains `hidden: boolean`, `expiresAt?: string`.
+
+- [ ] **Step 1: Add a second `<fieldset>`** in `HomeworkForm.tsx`, distinct from the existing `<legend>Publish</legend>` block (per the requirement: "distinct from publish/unpublish"):
+
+```tsx
+<fieldset>
+  <legend>Visibility</legend>
+  <label>
+    <input type="checkbox" {...register("hidden")} />
+    Hidden (pulled from student view regardless of publish state)
+  </label>
+  <label htmlFor="hw-expires-at">Expires at (optional — auto-hides once passed)</label>
+  <input id="hw-expires-at" type="datetime-local" {...register("expiresAt")} />
+</fieldset>
+```
+
+- [ ] **Step 2: Wire `defaultValues`** from `initialData.isHidden`/`initialData.expiresAt` (converted via the existing `toDatetimeLocalValue`-style helper — reuse `HomeworkEditView.tsx`'s function or lift it if a second view needs it), same pattern as `publish`/`releasedAt`.
+- [ ] **Step 3: `HomeworkEditView.tsx`** — capture `originalHideState` the same way `originalPublishState` is captured (from the same initial `GET`), and after the existing `/publish` conditional call, add a parallel conditional call to `PATCH .../hide` only when `payload.hidden !== originalHideState.hidden || payload.expiresAt !== originalHideState.expiresAt` (mirrors the publish-changed guard exactly, including the `""` vs `undefined` normalization note already documented at that call site).
+- [ ] **Step 4: `HomeworkCreateView.tsx`** — after the existing conditional `/publish` call, add `if (payload.hidden) { PATCH .../hide with { isHidden: true, expiresAt: payload.expiresAt } }` (a freshly created homework defaults to `isHidden: false` server-side, so only call the route when the instructor actually checked the box — mirrors the existing `if (payload.publish)` conditional).
+- [ ] **Step 5: Tests** — `HomeworkForm.test.tsx`: the Hidden checkbox and expiry field render and are controllable; `HomeworkEditView.test.tsx`: saving without touching Visibility does not call `/hide` (mirrors the existing "does not call /publish when untouched" test); saving with the box checked calls `/hide` with `isHidden: true`.
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/admin/src/client/components/HomeworkForm.tsx apps/admin/src/client/views/HomeworkCreateView.tsx apps/admin/src/client/views/HomeworkEditView.tsx apps/admin/src/client/components/HomeworkForm.test.tsx apps/admin/src/client/views/HomeworkEditView.test.tsx
+git commit -m "feat(admin): hide/expiry toggle in HomeworkForm, wired in create/edit (#166)"
+```
+
+### Task 7: Phase close — full verification
+
+- [ ] **Step 1:** `npm test` (all three workspaces) — 0 failures.
+- [ ] **Step 2:** `npm run typecheck` — 0 errors.
+- [ ] **Step 3:** Re-read #166's own requirements checklist verbatim; confirm every bullet is satisfied by a task above.
+- [ ] **Step 4:** Stop. Report to the requester and wait for review before starting Phase 9.
+
+**End of Phase 8.**
+
+---
