@@ -123,6 +123,29 @@ export async function homeworkHasStudentActivity(db: Db, homeworkId: string): Pr
   return !!row;
 }
 
+/** #166: is_hidden/expires_at, independent of publish state -- an instructor
+ *  can pull a published homework from view without unpublishing it.
+ *  expiresAt is `undefined` (omit the field entirely) to leave it
+ *  unchanged, `null` to explicitly clear it -- mirrors updateHomework's
+ *  `!== undefined` convention elsewhere in this file. */
+export async function updateHomeworkHideState(
+  db: Db,
+  scope: CourseScope,
+  id: string,
+  input: { isHidden: boolean; expiresAt?: Date | null },
+) {
+  const [updated] = await db
+    .update(homeworks)
+    .set({
+      isHidden: input.isHidden,
+      ...(input.expiresAt !== undefined && { expiresAt: input.expiresAt }),
+      updatedAt: new Date(),
+    })
+    .where(and(eq(homeworks.id, id), eq(homeworks.courseId, scope)))
+    .returning();
+  return updated ?? null;
+}
+
 export async function updateHomeworkPublishState(
   db: Db,
   scope: CourseScope,

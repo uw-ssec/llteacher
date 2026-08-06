@@ -34,7 +34,7 @@ import { makeNodeDb } from "../../db/nodeClient";
 import { unsafeCourseScope } from "./scope";
 import { organizations, courses, courseMemberships, users, conversations, submissions } from "../../db/schema";
 import { eq as eq2 } from "drizzle-orm";
-import { createHomework, updateHomework, updateHomeworkPublishState, getHomeworkById } from "./homeworks";
+import { createHomework, updateHomework, updateHomeworkPublishState, updateHomeworkHideState, getHomeworkById } from "./homeworks";
 
 describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)", () => {
   it("only returns homeworks for courses the student is enrolled in, excludes drafts, ignores soft-deleted conversations", async () => {
@@ -104,6 +104,53 @@ describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)
     expect(result[0]!.title).toBe("HW in Course A");
     const sec1Status = result[0]!.sections.find((s) => s.title === "Sec 1")!;
     expect(sec1Status.status).toBe("not_started");
+
+    await db.delete(organizations).where(eq2(organizations.id, org!.id));
+  });
+
+  // #166: a hidden or expired homework is excluded from the student list
+  // the same way a draft/scheduled one is, even though it's published and
+  // otherwise active.
+  it("excludes hidden and expired homeworks, includes an unaffected one", async () => {
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const [org] = await db.insert(organizations).values({
+      slug: `m3-test-166-${crypto.randomUUID()}`, name: "M3 Test Org 166", workosOrganizationId: `wo-166-${crypto.randomUUID()}`,
+    }).returning();
+    const [course] = await db.insert(courses).values({
+      organizationId: org!.id, code: "TEST-166", term: "Test", title: "Course 166",
+    }).returning();
+    const [student] = await db.insert(users).values({
+      email: crypto.getRandomValues(new Uint8Array(32)) as never,
+      emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+    }).returning();
+    const [instructorUser] = await db.insert(users).values({
+      email: crypto.getRandomValues(new Uint8Array(32)) as never,
+      emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+    }).returning();
+    await db.insert(courseMemberships).values({ userId: student!.id, courseId: course!.id, role: "student" });
+    const [instructorMembership] = await db.insert(courseMemberships).values({
+      userId: instructorUser!.id, courseId: course!.id, role: "instructor",
+    }).returning();
+
+    const scope = unsafeCourseScope(course!.id);
+    const hwHidden = await createHomework(db, scope, {
+      createdById: instructorMembership!.id, title: "Manually Hidden", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    const hwExpired = await createHomework(db, scope, {
+      createdById: instructorMembership!.id, title: "Expired", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    const hwVisible = await createHomework(db, scope, {
+      createdById: instructorMembership!.id, title: "Still Visible", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    for (const hw of [hwHidden, hwExpired, hwVisible]) {
+      await updateHomeworkPublishState(db, scope, hw!.id, { publish: true, releasedAt: new Date("2020-01-01") });
+    }
+    await updateHomeworkHideState(db, scope, hwHidden!.id, { isHidden: true });
+    await updateHomeworkHideState(db, scope, hwExpired!.id, { isHidden: false, expiresAt: new Date("2020-01-01") });
+
+    const result = await getStudentHomeworksForUser(db, student!.id);
+
+    expect(result.map((hw) => hw.title)).toEqual(["Still Visible"]);
 
     await db.delete(organizations).where(eq2(organizations.id, org!.id));
   });

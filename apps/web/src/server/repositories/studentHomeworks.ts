@@ -56,7 +56,10 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
 
   const visibleHomeworks = allHomeworks.filter((hw) => {
     const status = deriveHomeworkStatus(hw);
-    return status !== "draft" && status !== "scheduled"; // not yet visible to students
+    // #166: "hidden" folds in both is_hidden and a passed expires_at (see
+    // deriveHomeworkStatus) -- filtered here the same way draft/scheduled
+    // are, by comparing the derived status, never a raw column.
+    return status !== "draft" && status !== "scheduled" && status !== "hidden";
   });
 
   // #158: batch the per-section conversation/submission lookups instead of
