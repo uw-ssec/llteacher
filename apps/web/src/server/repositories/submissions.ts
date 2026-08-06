@@ -189,6 +189,20 @@ export interface HomeworkSubmissionsMatrix {
   };
 }
 
+/** Most-recent-activity-first, nulls (no activity at all) last. #162: both
+ *  null must return 0 -- returning 1 for both (a, b) and (b, a), as an
+ *  earlier version did, is not a valid ordering (it will not throw, but
+ *  leaves the relative order of students with no activity arbitrary and
+ *  unstable across runs/engines). Exported so this ordering rule has its
+ *  own direct unit test rather than only being exercised indirectly through
+ *  getHomeworkSubmissionsMatrix's full aggregation. */
+export function compareByLastActivityDesc(a: { lastActivityAt: string | null }, b: { lastActivityAt: string | null }): number {
+  if (!a.lastActivityAt && !b.lastActivityAt) return 0;
+  if (!a.lastActivityAt) return 1;
+  if (!b.lastActivityAt) return -1;
+  return b.lastActivityAt.localeCompare(a.lastActivityAt);
+}
+
 /** Single-pass aggregation: roster, sections, conversations (incl.
  *  soft-deleted, for badge display), and submissions are each fetched once
  *  (4 queries total regardless of roster/section size) and joined in
@@ -293,11 +307,7 @@ export async function getHomeworkSubmissionsMatrix(
     });
   }
 
-  students.sort((a, b) => {
-    if (!a.lastActivityAt) return 1;
-    if (!b.lastActivityAt) return -1;
-    return b.lastActivityAt.localeCompare(a.lastActivityAt);
-  });
+  students.sort(compareByLastActivityDesc);
 
   // #23: a summary aggregation over each cell's already-computed status --
   // no new query -- surfacing sections most of the roster hasn't touched
@@ -311,7 +321,15 @@ export async function getHomeworkSubmissionsMatrix(
     .filter((w) => w.missingStudentCount > 0)
     .sort((a, b) => b.missingStudentCount - a.missingStudentCount);
 
+  // #159: "activeStudents" means any engagement (a conversation exists,
+  // participationStatus !== "no_interaction") -- that's what its own name
+  // claims, and it's a legitimate distinct concept from "submitted", so
+  // it's left as-is. submissionRate specifically means the share who
+  // submitted, which activeStudents does NOT track (it also counts
+  // "partial": a conversation with zero submissions) -- so it needs its own
+  // count rather than reusing activeStudents.
   const activeStudents = students.filter((s) => s.participationStatus !== "no_interaction").length;
+  const submittedStudents = students.filter((s) => s.submissionCount > 0).length;
   return {
     homeworkId: homework.id,
     homeworkTitle: homework.title,
@@ -324,7 +342,7 @@ export async function getHomeworkSubmissionsMatrix(
       activeStudents,
       inactiveStudents: students.length - activeStudents,
       totalSubmissions: students.reduce((sum, s) => sum + s.submissionCount, 0),
-      submissionRate: students.length ? Math.round((activeStudents / students.length) * 100) : 0,
+      submissionRate: students.length ? Math.round((submittedStudents / students.length) * 100) : 0,
     },
   };
 }

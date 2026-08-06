@@ -5,12 +5,33 @@ import type { Db } from "../../db/client";
 import { organizations, courses, users, conversations, courseMemberships, grades, homeworks, sections } from "../../db/schema";
 import { unsafeOrgScope, unsafeCourseScope } from "./scope";
 import { createConversation, softDeleteConversation } from "./conversations";
-import { createSubmission, getSubmissionByConversation, recordGrade, submitSection, getHomeworkSubmissionsMatrix } from "./submissions";
+import { createSubmission, getSubmissionByConversation, recordGrade, submitSection, getHomeworkSubmissionsMatrix, compareByLastActivityDesc } from "./submissions";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { createHomework, updateHomework, getHomeworkById } from "./homeworks";
 
 const DATABASE_URL = process.env.DATABASE_URL;
+
+// #162: pure-function unit tests, no DB needed -- always run.
+describe("compareByLastActivityDesc", () => {
+  it("returns 0 when both are null (was 1 for both directions -- not a valid ordering)", () => {
+    expect(compareByLastActivityDesc({ lastActivityAt: null }, { lastActivityAt: null })).toBe(0);
+  });
+
+  it("orders a null lastActivityAt after a non-null one, regardless of position", () => {
+    const withActivity = { lastActivityAt: "2026-01-01T00:00:00.000Z" };
+    const noActivity = { lastActivityAt: null };
+    expect(compareByLastActivityDesc(noActivity, withActivity)).toBeGreaterThan(0);
+    expect(compareByLastActivityDesc(withActivity, noActivity)).toBeLessThan(0);
+  });
+
+  it("orders more recent activity first when both are non-null", () => {
+    const earlier = { lastActivityAt: "2026-01-01T00:00:00.000Z" };
+    const later = { lastActivityAt: "2026-06-01T00:00:00.000Z" };
+    expect(compareByLastActivityDesc(later, earlier)).toBeLessThan(0);
+    expect(compareByLastActivityDesc(earlier, later)).toBeGreaterThan(0);
+  });
+});
 
 describe.skipIf(!DATABASE_URL)("submissions repository", () => {
   let db: Db;
@@ -366,12 +387,30 @@ describe.skipIf(!DATABASE_URL)("getHomeworkSubmissionsMatrix (real DB)", () => {
     expect(rowC.participationStatus).toBe("partial");
     expect(rowC.totalConversations).toBe(1);
 
+    // #159: submissionRate reflects students with an actual submission (only
+    // Student A) -- not "any engagement" (which would also count Student C's
+    // conversation-with-no-submission "partial" status, as activeStudents
+    // correctly does).
     expect(matrix!.aggregateStats).toEqual({
-      totalStudents: 3, activeStudents: 2, inactiveStudents: 1, totalSubmissions: 1, submissionRate: 67,
+      totalStudents: 3, activeStudents: 2, inactiveStudents: 1, totalSubmissions: 1, submissionRate: 33,
     });
 
     await db.delete(organizations).where(eq(organizations.id, org.id));
   });
+
+  // #159: a roster where one student submitted, one has a conversation but
+  // no submission ("partial"), and one has nothing -- the exact ambiguity
+  // the original activeStudents-based submissionRate conflated.
+  it("submissionRate counts only students with an actual submission, not any engagement", async () => {
+    const { db, org, cipher, scope, homeworkId } = await seedMatrixFixture();
+    const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId);
+    // 1 of 3 students (Student A) actually submitted -> round(1/3 * 100) = 33,
+    // not round(2/3 * 100) = 67 (which would double-count Student C's
+    // conversation-only "partial" engagement as a submission).
+    expect(matrix!.aggregateStats.submissionRate).toBe(33);
+    await db.delete(organizations).where(eq(organizations.id, org.id));
+  });
+
 
   it("returns plaintext displayName/email, never ciphertext", async () => {
     const { db, org, cipher, scope, homeworkId, studentA } = await seedMatrixFixture();
