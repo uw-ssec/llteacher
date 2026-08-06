@@ -4764,8 +4764,10 @@ git commit -m "feat(admin): hide/expiry toggle in HomeworkForm, wired in create/
 - [ ] **Step 1:** `npm test` (all three workspaces) — 0 failures.
 - [ ] **Step 2:** `npm run typecheck` — 0 errors.
 - [ ] **Step 3:** Re-read #166's own requirements checklist verbatim; confirm every bullet is satisfied by a task above.
-- [ ] **Step 4:** Stop. Report to the requester and wait for review before starting Phase 9.
+- [x] **Step 4:** Stop. Report to the requester and wait for review before starting Phase 9.
 
-**End of Phase 8.**
+**End of Phase 8.** All 7 tasks complete, committed individually. Full monorepo suite green (442 tests: 382 web + 43 admin + 18 ui, 0 failures) and typecheck clean (`llteacher-web`'s two `TS2556` errors in `routes/homeworks.test.ts` are pre-existing, confirmed unrelated by checking out the clean base commit eb9f8a4 into a disposable worktree before touching any code -- not fixed here, out of scope for #166).
+
+18. **Found during Task 7 (verification): `HomeworkForm`'s Publish-checkbox default broke once "hidden" could mask a draft.** `HomeworkFormInitialData`/`originalPublishState` both derived `publish` from `status !== "draft"` -- a proxy that was safe pre-#166 because "draft" was the only unpublished status. Once `deriveHomeworkStatus` can return `"hidden"` for a *never-published* homework an instructor hides (Decision 17's precedence checks hidden first, ahead of draft), that proxy breaks: a hidden-but-still-draft homework would show "Published" incorrectly checked, and saving would silently publish it. Fixed by threading `publishedAt` itself through `HomeworkFormInitialData` and `originalPublishState`, deriving `publish` from `publishedAt !== null` directly instead of the status-string proxy. Caught by re-deriving Task 5's exhaustiveness grep (every `HomeworkStatus` consumer) rather than by a task-scoped test, since this bug lived one level away from any file Task 6 itself touched for the obvious reason. Regression test added: a `status: "hidden", publishedAt: null` fixture must render the Published checkbox unchecked.
 
 ---
