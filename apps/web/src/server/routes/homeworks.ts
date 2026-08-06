@@ -48,7 +48,10 @@ export async function listHomeworksHandler(c: Context<AppEnv>) {
 
   const db = makeDb(c.env.DATABASE_URL);
   const rows = await listHomeworksForCourse(db, scope);
-  return c.json({ homeworks: rows });
+  const visibleRows = authContext!.isInstructorOf(courseId!)
+    ? rows
+    : rows.filter((hw) => hw.status !== "draft" && hw.status !== "scheduled");
+  return c.json({ homeworks: visibleRows });
 }
 
 export async function createHomeworkHandler(c: Context<AppEnv>) {
@@ -275,7 +278,14 @@ export async function publishHomeworkHandler(c: Context<AppEnv>) {
   }
 
   let releasedAt: Date | undefined;
-  if (body.releasedAt !== undefined) {
+  if (body.publish && body.releasedAt) {
+    // An uncontrolled <input type="datetime-local"> (apps/admin's
+    // HomeworkForm) sends "" for an untouched field, never undefined --
+    // same class of bug as the C1 llmConfigId fix above. releasedAt is
+    // also irrelevant when unpublishing (updateHomeworkPublishState
+    // ignores it whenever publish is false), so only validate it on an
+    // actual publish -- an unpublish must never 400 on a re-sent,
+    // already-past releasedAt from the loaded form state.
     releasedAt = new Date(body.releasedAt);
     if (Number.isNaN(releasedAt.getTime())) {
       return c.json({ error: "releasedAt must be a valid date" }, 400);

@@ -280,12 +280,19 @@ function SubmissionsDataLoader({
   onBack: () => void;
 }) {
   const [data, setData] = useState<import("./views/SubmissionsView").HomeworkSubmissionsData | null>(null);
+  const [loadError, setLoadError] = useState(false);
   useEffect(() => {
     setData(null); // clear stale data from a previously-open homework before the new fetch resolves
+    setLoadError(false);
     fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/submissions`)
-      .then((r) => r.json())
-      .then(setData);
+      .then((r) => {
+        if (!r.ok) throw new Error("failed");
+        return r.json();
+      })
+      .then(setData)
+      .catch(() => setLoadError(true));
   }, [courseId, homeworkId]);
+  if (loadError) return <p role="alert">Failed to load submissions.</p>;
   if (!data) return null;
   return <SubmissionsView data={data} onBack={onBack} />;
 }

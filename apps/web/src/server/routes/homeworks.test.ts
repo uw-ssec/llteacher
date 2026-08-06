@@ -170,6 +170,56 @@ describe("GET /api/courses/:courseId/homeworks", () => {
     ).request("/api/courses/course-a/homeworks", {}, TEST_ENV);
     expect(res.status).toBe(403);
   });
+
+  // Finding 4 (Phase 7 final review): the list endpoint is guarded by
+  // requireCourseMember() (any role) but never filtered draft/scheduled
+  // homeworks out for non-instructors -- apps/web's student-facing
+  // studentHomeworks.ts already does this filtering; this list endpoint
+  // must match that policy.
+  function mixedStatusHomeworks() {
+    findManyHomeworks.mockReset().mockResolvedValue([
+      // draft: publishedAt null
+      {
+        id: "hw-draft", title: "Draft HW", description: "d",
+        dueDate: new Date("2099-01-02"), llmConfigId: null, publishedAt: null, releasedAt: null,
+      },
+      // scheduled: releasedAt in the future
+      {
+        id: "hw-scheduled", title: "Scheduled HW", description: "d",
+        dueDate: new Date("2099-01-02"), llmConfigId: null,
+        publishedAt: new Date("2020-01-01"), releasedAt: new Date("2099-01-01"),
+      },
+      // active: released in the past, due in the future
+      {
+        id: "hw-active", title: "Active HW", description: "d",
+        dueDate: new Date("2099-01-02"), llmConfigId: null,
+        publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+      },
+    ]);
+    selectSectionCounts.mockReset().mockReturnValue({
+      from: () => ({ where: () => ({ groupBy: async () => [] }) }),
+    });
+  }
+
+  it("filters draft/scheduled homeworks out for a non-instructor (student)", async () => {
+    mixedStatusHomeworks();
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
+    ).request("/api/courses/course-a/homeworks", {}, TEST_ENV);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { homeworks: { id: string }[] };
+    expect(body.homeworks.map((h) => h.id)).toEqual(["hw-active"]);
+  });
+
+  it("returns every homework unfiltered for an instructor", async () => {
+    mixedStatusHomeworks();
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks", {}, TEST_ENV);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { homeworks: { id: string }[] };
+    expect(body.homeworks.map((h) => h.id)).toEqual(["hw-draft", "hw-scheduled", "hw-active"]);
+  });
 });
 
 describe("POST /api/courses/:courseId/homeworks", () => {
@@ -534,6 +584,58 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
     const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
       "/api/courses/course-a/homeworks/hw-1/publish",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: false }) },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  // Finding 1 (Phase 7 final review): an uncontrolled <input
+  // type="datetime-local"> in apps/admin's HomeworkForm sends "" for an
+  // untouched releasedAt field, never undefined -- this "" must not reach
+  // `new Date("")` (Invalid Date) and 400 an unpublish. releasedAt is also
+  // irrelevant to unpublish entirely (updateHomeworkPublishState ignores it
+  // whenever publish is false), so a re-sent past releasedAt must not 400
+  // either.
+  it("unpublishes a never-released homework when releasedAt is '' (not undefined)", async () => {
+    findFirstHomework.mockReset().mockResolvedValue({
+      id: "hw-1", courseId: "course-a", title: "t", description: "d",
+      dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null,
+    });
+    findManySections.mockReset().mockResolvedValue([]);
+    publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
+    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: false, releasedAt: "" }) },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("unpublishes an already-released homework when re-sending its own unchanged past releasedAt", async () => {
+    findFirstHomework.mockReset().mockResolvedValue({
+      id: "hw-1", courseId: "course-a", title: "t", description: "d",
+      dueDate: new Date("2099-01-01"), llmConfigId: null,
+      publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+    });
+    findManySections.mockReset().mockResolvedValue([]);
+    homeworkHasStudentActivityMock.mockReset().mockResolvedValue(false);
+    publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
+    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publish: false, releasedAt: "2020-01-01T00:00:00.000Z" }),
+      },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("publishes immediately when releasedAt is '' (leave-at-default), same as omitted", async () => {
+    publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: new Date(), releasedAt: new Date() });
+    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: true, releasedAt: "" }) },
       TEST_ENV,
     );
     expect(res.status).toBe(200);

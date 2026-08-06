@@ -11,7 +11,10 @@ import {
 import type { HomeworkListItemResponse } from "../../shared/types";
 
 export async function listHomeworksForCourse(db: Db, scope: CourseScope): Promise<HomeworkListItemResponse[]> {
-  const rows = await db.query.homeworks.findMany({ where: eq(homeworks.courseId, scope) });
+  const rows = await db.query.homeworks.findMany({
+    where: eq(homeworks.courseId, scope),
+    orderBy: (h, { asc }) => [asc(h.createdAt)],
+  });
   if (rows.length === 0) return [];
   const counts = await db
     .select({ homeworkId: sections.homeworkId, count: sql<number>`count(*)::int` })

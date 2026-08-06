@@ -94,6 +94,42 @@ describe("homeworks repository", () => {
     expect(select).not.toHaveBeenCalled();
   });
 
+  // Finding 2 (Phase 7 final review): with no explicit orderBy, Postgres
+  // heap-scan order can change after any UPDATE, silently reordering the
+  // catalog and renumbering the HW-00N badges apps/admin derives from array
+  // position. This fake findMany actually applies the `orderBy` callback
+  // listHomeworksForCourse passes (rather than ignoring it, as a plain
+  // mockResolvedValue would) so this test exercises the real sort
+  // direction/key, not just that some orderBy option was passed.
+  it("orders homeworks by createdAt ascending regardless of insertion/mock order", async () => {
+    const baseRow = { description: "d", dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null };
+    const rows = [
+      { ...baseRow, id: "hw-b", title: "B", createdAt: new Date("2020-01-02") },
+      { ...baseRow, id: "hw-a", title: "A", createdAt: new Date("2020-01-01") },
+      { ...baseRow, id: "hw-c", title: "C", createdAt: new Date("2020-01-03") },
+    ];
+    type Order = { field: string; dir: string };
+    const findMany = vi.fn().mockImplementation(
+      async (opts: { orderBy?: (h: Record<string, string>, helpers: { asc: (f: string) => Order }) => Order[] }) => {
+        const h = new Proxy({}, { get: (_t, prop) => prop }) as Record<string, string>;
+        const asc = (field: string): Order => ({ field, dir: "asc" });
+        const [order] = opts.orderBy ? opts.orderBy(h, { asc }) : [];
+        if (!order) return rows;
+        return [...rows].sort((a, b) => {
+          const av = (a as unknown as Record<string, Date>)[order.field].getTime();
+          const bv = (b as unknown as Record<string, Date>)[order.field].getTime();
+          return order.dir === "asc" ? av - bv : bv - av;
+        });
+      },
+    );
+    const select = mockSectionCountsChain([]);
+    const db = { query: { homeworks: { findMany } }, select } as unknown as Db;
+
+    const result = await listHomeworksForCourse(db, unsafeCourseScope("course-a"));
+
+    expect(result.map((r) => r.id)).toEqual(["hw-a", "hw-b", "hw-c"]);
+  });
+
   it("createHomework inserts with the scope as courseId", async () => {
     const returning = vi.fn().mockResolvedValue([{ id: "hw-new" }]);
     const values = vi.fn().mockReturnValue({ returning });
