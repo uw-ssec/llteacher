@@ -46,6 +46,7 @@ export interface HomeworkSubmissionsData {
   homeworkDueDate: string;
   sectionHeaders: { id: string; order: number; title: string }[];
   students: StudentSubmissionRow[];
+  missingSectionWarnings: { sectionId: string; sectionTitle: string; missingStudentCount: number }[];
   aggregateStats: {
     totalStudents: number; activeStudents: number; inactiveStudents: number;
     totalSubmissions: number; submissionRate: number;
@@ -106,6 +107,19 @@ export function SubmissionsView({ data, onBack }: SubmissionsViewProps) {
           <span>
             <strong>{counts.no_interaction}</strong>{" "}
             {counts.no_interaction === 1 ? "student has" : "students have"} not started this homework.
+          </span>
+        </div>
+      )}
+
+      {data.missingSectionWarnings.length > 0 && (
+        <div className="admin-alert" role="status">
+          <span className="admin-alert__icon" aria-hidden="true"><Warning size={16} weight="regular" /></span>
+          <span>
+            {data.missingSectionWarnings.map((w) => (
+              <span key={w.sectionId} style={{ display: "block" }}>
+                <strong>{w.missingStudentCount}</strong> {w.missingStudentCount === 1 ? "student hasn't" : "students haven't"} started "{w.sectionTitle}"
+              </span>
+            ))}
           </span>
         </div>
       )}
