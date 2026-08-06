@@ -175,6 +175,13 @@ export const homeworks = pgTable(
     // function of these three timestamps, and could drift out of sync.
     publishedAt: timestamp("published_at", { withTimezone: true }),
     releasedAt: timestamp("released_at", { withTimezone: true }),
+    // #166: is_hidden is the single source of truth for student access,
+    // independent of publish state (an instructor can pull a *published*
+    // homework from view without unpublishing it). expires_at is optional
+    // auto-hide once passed. See deriveHomeworkStatus and Resolved Design
+    // Decision 17 for the "hidden" vs "archived" call.
+    isHidden: boolean("is_hidden").notNull().default(false),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
     title: text("title").notNull(),
     description: text("description").notNull(),
     dueDate: timestamp("due_date", { withTimezone: true }).notNull(),
