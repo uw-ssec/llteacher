@@ -97,6 +97,16 @@ export interface SubmissionResponse {
   isResubmission: boolean;
 }
 
+import type {
+  HomeworkSubmissionsMatrix,
+  ParticipationStatus,
+  SubmissionCell,
+  StudentSubmissionRow,
+} from "../server/repositories/submissions";
+
+export type { ParticipationStatus, SubmissionCell, StudentSubmissionRow };
+export type HomeworkSubmissionsResponse = HomeworkSubmissionsMatrix;
+
 // Cloudflare Worker bindings + secrets. Augmented in Phase 1+.
 declare global {
   interface Env {

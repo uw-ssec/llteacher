@@ -1,8 +1,11 @@
 import { Hono, type Context } from "hono";
 import { makeDb } from "../../db/client";
-import { submitSection } from "../repositories/submissions";
+import { submitSection, getHomeworkSubmissionsMatrix } from "../repositories/submissions";
 import { getOrgScopesForUser } from "../repositories/users";
 import { requireRole } from "../utils/guards";
+import { courseScopeFromAuthContext } from "../repositories/scope";
+import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
+import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { SubmissionResponse } from "../../shared/types";
@@ -50,6 +53,33 @@ export async function submitSectionHandler(c: Context<AppEnv>) {
     // split to learn a conversation exists.
     return c.json({ error: "Conversation not found or not accessible" }, 403);
   }
+}
+
+export async function getHomeworkSubmissionsHandler(c: Context<AppEnv>) {
+  const courseId = c.req.param("courseId");
+  const homeworkId = c.req.param("homeworkId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+
+  // Guarded again here even though production routing already wraps this
+  // handler in requireInstructorOf() -- mirrors submitSectionHandler's own
+  // fail-closed re-check above, so a direct call to the handler (as the
+  // unit tests below do, and as buildSubmissionsApp does without the guard
+  // middleware) still 403s rather than throwing past this point.
+  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
+    return c.json({ error: "Instructor access denied" }, 403);
+  }
+
+  const scope = courseScopeFromAuthContext(authContext, courseId);
+  if (!scope) return c.json({ error: "Course access denied" }, 403);
+
+  const db = makeDb(c.env.DATABASE_URL);
+  // Constructed exactly as profile.ts's getProfileHandler/patchProfileHandler
+  // already do -- the one existing precedent for building a cipher from
+  // c.env at the route layer.
+  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
+  const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId!);
+  if (!matrix) return c.json({ error: "Homework not found" }, 404);
+  return c.json(matrix);
 }
 
 // Sub-app preserved for direct unit testing; production routing happens via
