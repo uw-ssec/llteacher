@@ -36,7 +36,9 @@
 10. **`db.query.X.findMany({ with: { relation: true } })` silently corrupts encrypted columns reached through the join — found during Task 19 implementation, by running against real Postgres, not by reading the code.** `getHomeworkSubmissionsMatrix`'s roster fetch originally used Drizzle's relational query API (`db.query.courseMemberships.findMany({ with: { user: true } })`) to pull each membership's user row in one query. This installed Drizzle version resolves a nested `with` via `left join lateral (select json_build_array(...))`, which forces Postgres to serialize every joined column — including `users.email`/`displayName`'s `bytea` — through JSON. Postgres renders `bytea` as hex-text inside that JSON array, so node-postgres's JSON parser hands the `encryptedText` customType's `fromDriver` a plain string instead of a `Buffer`; `new Uint8Array(aString)` doesn't throw, it silently returns a **0-length array**, so every `IdentityCipher.decryptString` call downstream failed with "Ciphertext shorter than envelope header" — a failure mode that would have shipped to production despite a clean typecheck and code that reads correctly at a glance.
     Fixed by switching to a flat `select().from().innerJoin()` (still one query, still no N+1 — every column stays a top-level SQL result column, so node-postgres's normal `bytea` parser, which produces a real `Buffer`, runs instead). This is a narrow, function-scoped fix, not a codebase-wide one: only relational `with` traversals that reach an `encryptedText`/`blindIndex` custom-typed column are affected (a `with` that only touches plain-text columns, like Task 15's `courseMemberships.findMany({ with: { course: true } })` pulling `courses.id`/`title`, is unaffected — verified those columns are plain `text`, not `encryptedText`). Flagged as a background task for a wider codebase sweep rather than auditing every `with:` call site in this pass, which would be scope creep beyond this task — worth surfacing to the requester as a real, if narrow, finding regardless of this epic's own scope. **The final whole-branch review independently re-confirmed this bug class and found the root cause (`encrypted.ts`'s `fromDriver`, not just this one call site) was never hardened — a type guard throwing on non-Buffer/non-Uint8Array input was added there as part of the final-review fix wave (see Decision 12), so the *next* `with:`-based query touching an encrypted column now fails loudly at the source instead of silently corrupting data.**
 11. **No production code path creates a `conversations` row — explicitly a deferred M4 dependency, not an M3 bug.** The final whole-branch review flagged that `createConversation` (`apps/web/src/server/repositories/conversations.ts`) has zero production callers anywhere in the codebase: nothing in `apps/web`'s student client or server routes ever starts a conversation for a section. This means Phase 4's submit flow (`submitSection`) and Phase 5's dashboard (`getHomeworkSubmissionsMatrix`) are both correctly implemented and tested against real data shapes, but have no way to *receive* real data in production today — a student has no UI/route that begins a section conversation in the first place. This is not an oversight inside this epic's scope: epic #24's own Integration & Verification Strategy text describes conversation-start/LLM-chat integration as "M4 integration... stubbed as future" — conversation creation (the actual chat UI, LLM wiring, message send/receive loop) is M4's job, not M3's. #19/#20/#22/#23 all define their contracts *in terms of* an existing conversation (submit a section's conversation, aggregate a roster's conversations) without themselves creating one, which is consistent with M3's scope being "homeworks and submissions parity" rather than "the chat feature." Recording this explicitly here — rather than leaving it implicit — so it isn't mistaken for a bug during merge review: Phases 4 and 5 are correctly built and will become reachable in production as soon as M4 lands `ConversationStartView`/equivalent and wires it to `createConversation`. No code change made for this in the final-review fix wave; this is a recorded scope boundary.
-12. **Final whole-branch review fix wave (post-Task-22, pre-merge): C1/I1/I2/I3/I5 fixed in one consolidated pass.** The final review (dispatched per the subagent-driven-development skill's required final-review step, on the most capable available model) found that despite every one of the 22 tasks passing its own task-level spec/quality review, the *integration* of several tasks was broken in ways no single task's reviewer could see: (C1, Critical) `HomeworkForm`'s LLM-config `<select>` sends `""` (not `undefined`) when left on its default option, which passed unvalidated through `updateHomework`'s `!== undefined` guard into a raw `UPDATE homeworks SET llm_config_id = ''` against a `uuid` column — Postgres throws, the error doesn't match the existing `/order|section/i` 422 regex, and becomes an invisible generic 503; fixed by validating/normalizing `llmConfigId` server-side in `updateHomeworkHandler` (empty string → `null`, anything else must match a UUID shape or 400s) — the durable fix point, since it protects every caller of the route, not just this one admin form. (I1, Important) neither `HomeworkCreateView` nor `HomeworkEditView` checked `res.ok` on any fetch, which is *why* C1 was invisible — fixed by adding `res.ok` checks (throwing into `HomeworkForm`'s existing try/catch) on every write call in both views, plus the initial `GET` in `HomeworkEditView` (which previously left the view stuck on an infinite blank screen on failure with no error state at all). (I2, Important) `dueDate`/`releasedAt` are returned by `GET` as full ISO strings, which a `datetime-local` input silently rejects (renders blank) — fixed with a `toDatetimeLocalValue` conversion helper applied when populating the edit form's `initialData`, plus rendering the previously-missing `errors.dueDate` alert in `HomeworkForm` so a resulting blank-required-field failure is now visible instead of silently no-op-ing Save. (I3, Important) `HomeworkEditView` unconditionally PATCHed `/publish` on every save regardless of whether the instructor touched the publish section at all, which could silently overwrite an already-scheduled release timestamp on an unrelated edit — fixed by capturing the publish state as loaded and only calling `/publish` when the payload's `publish`/`releasedAt` actually differ from what was loaded. The implementer caught and corrected a bug in this fix's own first draft during TDD: an unset `releasedAt` must be captured as `""` (matching what react-hook-form's uncontrolled `datetime-local` input actually submits for an untouched field), not `undefined` as first written — `undefined` would have made the comparison always report "changed" for any homework with no scheduled release (the common case), silently defeating I3 entirely. Verified via the test that exercises exactly that scenario. (I5, Important) `encrypted.ts`'s `fromDriver` — the actual root cause behind Decision 10's Task 19 bug — still silently corrupted on non-Buffer input; fixed with a type guard that throws instead, so the next `with:`-based query touching an encrypted column fails loudly at the source. (I4, Important) is not a code fix — see Decision 11. One consolidated implementer dispatch plus one scoped re-review handled all five, per the skill's final-review fix process (no second fix wave). Full findings recorded in this plan's SDD ledger (`.superpowers/sdd/2026-08-05-m3-homeworks-submissions-parity/progress.md`).
+12. **"Duplication (rollover) copies homeworks as drafts" (#94's own requirement text) is not M3 scope — it's already issue [#92](https://github.com/uw-ssec/llteacher/issues/92) in M13.** A post-closure requirements audit (comparing shipped code against every checkbox in #19/#94/#20/#21/#22/#23's own issue bodies, not just against the task briefs derived from them) found this line item unbuilt, with zero existing scaffolding anywhere in the codebase (no duplicate button, no course-rollover concept, no route). Rather than guess a homework-level duplication feature's shape, checked the milestone list and found #92 ("feat(courses): course duplication for term rollover," M13: Course & Class Management) already owns this exact capability at the *course* level — copying an entire course graph (settings, modes, prompt templates, **homeworks + sections + solutions**, LLM config association) forward into a new term, with homeworks landing as drafts in the copy. #92's own Context line states it "Depends on ... M3 homework structures" — i.e. it is downstream of this epic, not parallel to it. No new issue filed (unlike Decision 5's "archived" status gap, which had no tracking issue at all) — #94's checklist item is left unchecked with a comment pointing at #92 rather than built here, since building a homework-only duplicate feature now would likely diverge from #92's whole-course-graph design (it introduces a `previous_course_id` lineage FK on `courses`, not `homeworks`) and would need reworking once #92 lands anyway.
+13. **Post-closure requirements audit (Phase 7): comparing shipped code against every checkbox in the six child issues' own bodies — not just the task briefs derived from them — found 7 more genuine, unbuilt requirement gaps the per-task and whole-branch reviews couldn't have caught**, because those reviews checked "does the code match this task's brief," never "does the code match what the original GitHub issue asked for." None are regressions — they're original-scope items nobody had built yet: (1) `GET .../homeworks` returned raw undecorated Drizzle rows instead of a role-aware, status-derived payload (#19), and `apps/admin`'s `HomeworksView` (the catalog list, distinct from the create/edit form Phase 3 already wired) was still reading the `HOMEWORKS` fixture — the other half of the "no fixture data remains" gap the final review flagged but didn't fully diagnose; (2) no markdown editor/live preview on section content or solutions in `HomeworkForm` (#21) — plain `<textarea>`s; (3) no confirmation before removing a section in `HomeworkForm` (#21) — immediate delete on click; (4) `HomeworkForm`'s `useUnsavedChangesGuard` has the bug the final review already found (side effect in a `useState` initializer, never fires) but which was deferred as Minor rather than fixed; (5) `HomeworkForm`/`HomeworkCreateView`/`HomeworkEditView` used zero `@llteacher/ui` components — plain HTML, not the shared design system (#21); (6) unpublishing a homework with existing student activity (conversations/submissions already exist) didn't warn the instructor — it silently nulled the publish state (#94); (7) homework publish/unpublish state transitions weren't audited (#94), despite a ready-to-use `auditBestEffort`/`AUDIT_ACTIONS` system already in `apps/web/src/server/utils/audit.ts` (built for #147, used by `auth.ts`/`profile.ts`) that these handlers simply never called; (8) the submissions matrix computed per-cell status but never surfaced a "N students haven't started section X" warning (#23). Tasks 23-29 below build all eight (grouped as 7 tasks; 1 and the fixture-wiring half share a task). "Chronological conversation list per cell" (#23) and per-cell drill-in navigation to a transcript viewer are deliberately left out of this pass — both exist only to feed the M4 transcript viewer, which doesn't exist yet (same reasoning as Decision 11's I4): building a list shape with no consumer would be speculative, not implementing a requirement.
+14. **Final whole-branch review fix wave (post-Task-22, pre-merge): C1/I1/I2/I3/I5 fixed in one consolidated pass.** The final review (dispatched per the subagent-driven-development skill's required final-review step, on the most capable available model) found that despite every one of the 22 tasks passing its own task-level spec/quality review, the *integration* of several tasks was broken in ways no single task's reviewer could see: (C1, Critical) `HomeworkForm`'s LLM-config `<select>` sends `""` (not `undefined`) when left on its default option, which passed unvalidated through `updateHomework`'s `!== undefined` guard into a raw `UPDATE homeworks SET llm_config_id = ''` against a `uuid` column — Postgres throws, the error doesn't match the existing `/order|section/i` 422 regex, and becomes an invisible generic 503; fixed by validating/normalizing `llmConfigId` server-side in `updateHomeworkHandler` (empty string → `null`, anything else must match a UUID shape or 400s) — the durable fix point, since it protects every caller of the route, not just this one admin form. (I1, Important) neither `HomeworkCreateView` nor `HomeworkEditView` checked `res.ok` on any fetch, which is *why* C1 was invisible — fixed by adding `res.ok` checks (throwing into `HomeworkForm`'s existing try/catch) on every write call in both views, plus the initial `GET` in `HomeworkEditView` (which previously left the view stuck on an infinite blank screen on failure with no error state at all). (I2, Important) `dueDate`/`releasedAt` are returned by `GET` as full ISO strings, which a `datetime-local` input silently rejects (renders blank) — fixed with a `toDatetimeLocalValue` conversion helper applied when populating the edit form's `initialData`, plus rendering the previously-missing `errors.dueDate` alert in `HomeworkForm` so a resulting blank-required-field failure is now visible instead of silently no-op-ing Save. (I3, Important) `HomeworkEditView` unconditionally PATCHed `/publish` on every save regardless of whether the instructor touched the publish section at all, which could silently overwrite an already-scheduled release timestamp on an unrelated edit — fixed by capturing the publish state as loaded and only calling `/publish` when the payload's `publish`/`releasedAt` actually differ from what was loaded. The implementer caught and corrected a bug in this fix's own first draft during TDD: an unset `releasedAt` must be captured as `""` (matching what react-hook-form's uncontrolled `datetime-local` input actually submits for an untouched field), not `undefined` as first written — `undefined` would have made the comparison always report "changed" for any homework with no scheduled release (the common case), silently defeating I3 entirely. Verified via the test that exercises exactly that scenario. (I5, Important) `encrypted.ts`'s `fromDriver` — the actual root cause behind Decision 10's Task 19 bug — still silently corrupted on non-Buffer input; fixed with a type guard that throws instead, so the next `with:`-based query touching an encrypted column fails loudly at the source. (I4, Important) is not a code fix — see Decision 11. One consolidated implementer dispatch plus one scoped re-review handled all five, per the skill's final-review fix process (no second fix wave). Full findings recorded in this plan's SDD ledger (`.superpowers/sdd/2026-08-05-m3-homeworks-submissions-parity/progress.md`).
 
 ---
 
@@ -4061,6 +4063,390 @@ No new code — this phase runs epic #24's own end-to-end acceptance checklist (
 Confirm every child issue (#19, #20, #21, #22, #23, #94) is assigned to the requester and closed with a reference to its merged PR, then close epic #24 itself referencing the epic-closure verification above. (Issue assignment/closing are GitHub actions — done via `gh issue edit`/`gh issue close`, one per issue, as each phase's PR actually merges — not something to batch at the very end.)
 
 **End of Phase 6 — epic #24 and milestone M3 ready to close.**
+
+---
+
+## Phase 7 — Post-closure requirements audit: build the 7 gaps found
+
+See Resolved Design Decisions 13-14. This phase is not driven by a GitHub issue's task-brief-derived requirements the way Phases 1-6 were — it's driven directly by re-reading issues #19/#94/#20/#21/#22/#23's own checkbox text against the code Phases 1-6 + the final-review fix wave actually shipped, and building what's still missing. Two dispatch waves: backend (Tasks 23-25, `apps/web`) then client (Tasks 26-29, `apps/admin`/`apps/web/src/client`), since the client tasks consume the backend tasks' response shapes.
+
+### Task 23: Repository + route — role-aware, status-derived homework list payload
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/homeworks.ts` (`listHomeworksForCourse`)
+- Modify: `apps/web/src/server/routes/homeworks.ts` (`listHomeworksHandler`)
+- Modify: `apps/web/src/shared/types.ts` (`HomeworkListItemResponse` already exists — extend it)
+- Test: `apps/web/src/server/repositories/homeworks.test.ts`, `apps/web/src/server/routes/homeworks.test.ts`
+
+**Interfaces:**
+- Produces: `HomeworkListItemResponse[]` actually populated (currently defined, unused — `listHomeworksHandler` returns raw rows today).
+
+`listHomeworksForCourse` currently does `return db.query.homeworks.findMany({ where: eq(homeworks.courseId, scope) })` — raw rows, no derived status, no section count. `HomeworkListItemResponse` already has the right shape (`{id, title, description, dueDate, llmConfigId, status, sectionCount}`); it's just never populated. Extend `listHomeworksForCourse` to also load each homework's section count (one extra query, not per-homework — `db.select({homeworkId, count}).from(sections).where(inArray(sections.homeworkId, ids)).groupBy(sections.homeworkId)` — then map counts by id), and shape the response using `deriveHomeworkStatus` (already exported from this file, used by `getHomeworkDetailHandler`). `listHomeworksHandler` then maps `rows` through this shape and returns `{ homeworks: HomeworkListItemResponse[] }` instead of raw Drizzle rows — do not break the existing response envelope's `homeworks` key (`apps/admin`'s consumer in Task 26 expects it).
+
+- [ ] **Step 1: Extend `listHomeworksForCourse`**
+
+```ts
+export async function listHomeworksForCourse(db: Db, scope: CourseScope): Promise<HomeworkListItemResponse[]> {
+  const rows = await db.query.homeworks.findMany({ where: eq(homeworks.courseId, scope) });
+  if (rows.length === 0) return [];
+  const counts = await db
+    .select({ homeworkId: sections.homeworkId, count: sql<number>`count(*)::int` })
+    .from(sections)
+    .where(inArray(sections.homeworkId, rows.map((h) => h.id)))
+    .groupBy(sections.homeworkId);
+  const countByHomeworkId = new Map(counts.map((c) => [c.homeworkId, c.count]));
+  return rows.map((hw) => ({
+    id: hw.id, title: hw.title, description: hw.description,
+    dueDate: hw.dueDate.toISOString(), llmConfigId: hw.llmConfigId,
+    status: deriveHomeworkStatus(hw),
+    sectionCount: countByHomeworkId.get(hw.id) ?? 0,
+  }));
+}
+```
+
+`sql` and `inArray` need importing from `drizzle-orm` if not already imported in this file — check the existing import line before adding a duplicate.
+
+- [ ] **Step 2: Update `listHomeworksHandler`**
+
+Change `const rows = await listHomeworksForCourse(db, scope); return c.json({ homeworks: rows });` — no change needed here at all, since Step 1 already returns the right shape through the same variable name and response envelope. Just update the return type annotation/import of `HomeworkListItemResponse` if the handler declares one explicitly.
+
+- [ ] **Step 3: Tests.** In `homeworks.test.ts` (repository): a homework with 3 sections returns `sectionCount: 3`; a homework with zero sections returns `sectionCount: 0` (verify the `rows.length === 0` early-return doesn't accidentally also skip the per-homework-with-zero-sections case — that's the *count query* returning zero rows for that id, not the outer list being empty). In `routes/homeworks.test.ts` (route): assert the JSON response's `homeworks[0].status` is a derived value (`"draft"`/`"scheduled"`/`"active"`/`"past_due"`), not a raw DB column.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/homeworks.ts apps/web/src/server/repositories/homeworks.test.ts apps/web/src/server/routes/homeworks.test.ts
+git commit -m "feat(homeworks): role-aware, status-derived list payload (#19)"
+```
+
+### Task 24: Repository + route — unpublish-with-activity warning + audit publish/unpublish transitions
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/homeworks.ts` (`updateHomeworkPublishState`)
+- Modify: `apps/web/src/server/routes/homeworks.ts` (`publishHomeworkHandler`)
+- Modify: `apps/web/src/server/utils/audit.ts` (`AUDIT_ACTIONS`)
+- Modify: `apps/web/src/shared/types.ts` (`HomeworkPublishBody`/response)
+- Test: `apps/web/src/server/repositories/homeworks.test.ts`, `apps/web/src/server/routes/homeworks.test.ts`
+
+**Interfaces:**
+- Produces: `publishHomeworkHandler` now returns `{ id, publishedAt, releasedAt, hadExistingActivity? }`; accepts an optional `confirm?: boolean` in the request body.
+
+Two independent pieces of #94's requirements, both touching the same handler:
+
+**(a) Unpublish-with-activity warning.** "Unpublishing" means the request transitions a currently-published homework (`publishedAt` not null) to unpublished (`body.publish === false`). Detect existing student activity the same way Task 19's aggregation does — cheaply, via `EXISTS`, not a full fetch: does any conversation exist for any of this homework's sections? Add a repository helper:
+
+```ts
+export async function homeworkHasStudentActivity(db: Db, homeworkId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ id: conversations.id })
+    .from(conversations)
+    .innerJoin(sections, eq(conversations.sectionId, sections.id))
+    .where(eq(sections.homeworkId, homeworkId))
+    .limit(1);
+  return !!row;
+}
+```
+
+In `publishHomeworkHandler`, before calling `updateHomeworkPublishState`: if `body.publish === false` (unpublishing) and the existing homework's `publishedAt` is not null (it's currently published — fetch via `getHomeworkById` or a lighter existence check first) and `homeworkHasStudentActivity(db, homeworkId)` is true and `body.confirm !== true`, return `409` with `{ error: "This homework has existing student activity. Pass confirm: true to unpublish anyway.", hasStudentActivity: true }` instead of proceeding. If `body.confirm === true` (or there's no existing activity, or this isn't actually an unpublish), proceed as today — "hides-not-deletes" is already true (unpublishing only touches the `homeworks` row; nothing about conversations/submissions changes), this only adds the missing confirmation gate.
+
+**(b) Audit publish/unpublish transitions.** Add two new actions to `AUDIT_ACTIONS` in `apps/web/src/server/utils/audit.ts`:
+
+```ts
+  HOMEWORK_PUBLISHED: "homework.published",
+  HOMEWORK_UNPUBLISHED: "homework.unpublished",
+```
+
+In `publishHomeworkHandler`, after `updateHomeworkPublishState` succeeds, mirror `profile.ts`'s best-effort pattern exactly (same file imports `AUDIT_ACTIONS`/`auditBestEffort` already used elsewhere in this codebase — see `apps/web/src/server/routes/profile.ts:43-55` for the pattern to copy):
+
+```ts
+  try {
+    await auditBestEffort(db, [scope], {
+      actorUserId: authContext.userId,
+      action: body.publish ? AUDIT_ACTIONS.HOMEWORK_PUBLISHED : AUDIT_ACTIONS.HOMEWORK_UNPUBLISHED,
+      targetType: "homework",
+      targetId: updated.id,
+    });
+  } catch (err) {
+    logServerError("publishHomeworkHandler", err);
+  }
+```
+
+`scope` here is already a `CourseScope`, not `OrgScope[]` — check `auditBestEffort`'s signature (`scopes: OrgScope[]`) against what `courseScopeFromAuthContext` returns; if `CourseScope` isn't assignable to `OrgScope`, use whatever this route already has in scope to resolve the org (check how `courseScopeFromAuthContext` or `authContext` expose the organization id elsewhere in this file, or in `profile.ts`'s `getOrgScopesForUser` helper, and reuse that pattern rather than inventing a new one). Note `authContext.userId` — confirm this is the actual field name on `AuthContext` (grep the type definition in `apps/web/src/server/middleware/roles.ts` if unsure; other handlers in this file use `authContext` for role checks but this is the first one in `homeworks.ts` needing the actor's own user id, not just their memberships).
+
+- [ ] **Step 1-2:** Implement (a) and (b) as described above.
+- [ ] **Step 3: Tests.** (a) Unpublishing a homework with an existing conversation, without `confirm: true`, returns 409 with `hasStudentActivity: true`; with `confirm: true`, succeeds (200). Unpublishing a homework with zero activity succeeds without needing `confirm`. Publishing (not unpublishing) never triggers the check regardless of activity. (b) A successful publish/unpublish call results in exactly one `recordAuditEvent` call (mock/spy `auditBestEffort` or the underlying repository call, matching this codebase's existing audit-test convention — check `apps/web/src/server/routes/profile.test.ts` if it exists for the pattern) with the correct action string.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/homeworks.ts apps/web/src/server/routes/homeworks.ts apps/web/src/server/utils/audit.ts apps/web/src/shared/types.ts apps/web/src/server/repositories/homeworks.test.ts apps/web/src/server/routes/homeworks.test.ts
+git commit -m "feat(homeworks): unpublish-with-activity warning + audit publish/unpublish transitions (#94)"
+```
+
+### Task 25: Repository + route — missing-section warnings in the submissions matrix
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/submissions.ts` (`HomeworkSubmissionsMatrix`, `getHomeworkSubmissionsMatrix`)
+- Test: `apps/web/src/server/repositories/submissions.test.ts`
+
+**Interfaces:**
+- Produces: `HomeworkSubmissionsMatrix` gains `missingSectionWarnings: { sectionId: string; sectionTitle: string; missingStudentCount: number }[]`.
+
+`getHomeworkSubmissionsMatrix` already computes, per student per section, a `SubmissionCell.status` of `"missing" | "in_progress" | "submitted"` (line ~278 of the current file) — the raw data already exists, this task only adds a summary aggregation over it, no new query.
+
+- [ ] **Step 1: Extend the interface**
+
+```ts
+export interface HomeworkSubmissionsMatrix {
+  homeworkId: string;
+  homeworkTitle: string;
+  homeworkDueDate: string;
+  sectionHeaders: { id: string; order: number; title: string }[];
+  students: StudentSubmissionRow[];
+  missingSectionWarnings: { sectionId: string; sectionTitle: string; missingStudentCount: number }[];
+  aggregateStats: { /* unchanged */ };
+}
+```
+
+- [ ] **Step 2: Compute it after `students` is fully built, before the `return`**
+
+```ts
+  const missingSectionWarnings = homework.sections
+    .map((section) => {
+      const missingCount = students.filter((s) => s.sections.find((c) => c.sectionId === section.id)?.status === "missing").length;
+      return { sectionId: section.id, sectionTitle: section.title, missingStudentCount: missingCount };
+    })
+    .filter((w) => w.missingStudentCount > 0)
+    .sort((a, b) => b.missingStudentCount - a.missingStudentCount);
+```
+
+Add `missingSectionWarnings,` to the returned object (alongside `sectionHeaders`, `students`, `aggregateStats`).
+
+- [ ] **Step 3: Tests.** Fixture: 3 students × 2 sections, where 2 of 3 students have never touched section 2 → `missingSectionWarnings` contains one entry for section 2 with `missingStudentCount: 2`; a section every student has touched at least once does not appear in the array at all (filtered out, not returned with count 0). Zero students enrolled → empty array, not an error.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/submissions.ts apps/web/src/server/repositories/submissions.test.ts
+git commit -m "feat(submissions): missing-section warnings in the roster matrix (#23)"
+```
+
+---
+
+**Stop after Task 25 and dispatch the client-side wave (Tasks 26-29) only once 23-25 are reviewed clean — Task 26 needs Task 23's actual shipped response shape, Task 28 needs Task 24's, Task 29 needs Task 25's.**
+
+### Task 26: Client — wire `HomeworksView` to the real list endpoint
+
+**Files:**
+- Modify: `apps/admin/src/client/App.tsx`
+- Modify: `apps/admin/src/client/views/HomeworksView.tsx` (props/type only — its JSX already renders real fields, it just needs a shape that isn't the fixture's `Homework` type)
+
+**Interfaces:**
+- Consumes: `GET /api/courses/:courseId/homeworks` → `{ homeworks: HomeworkListItemResponse[] }` (Task 23).
+
+`HomeworksView` currently takes `homeworks: Homework[]` (the fixture type, with `recordNumber`, `studentsTotal`, `studentsActive`, `submissionsCount`, `lastActivity` — richer than what the real API returns). Rather than build a second full submissions-style aggregation query just to populate those four fields for a list view (real scope creep — that data already exists per-homework via Task 20's dashboard, one click away), relax `HomeworksView`'s props to the fields the real payload actually has, and drop the four it doesn't. `RecordId` (currently fed `hw.recordNumber`) needs a stand-in — use the array index + 1 from the fetched list (same spirit as `SubmissionsView`'s own `RecordId` removal in Task 21, which dropped a `recordNumber`-fed badge entirely when the real API had no such field; here there's still an index available, so keep the badge but source it from position, not a stored field).
+
+- [ ] **Step 1: Update `HomeworksView`'s prop type**
+
+```tsx
+// apps/admin/src/client/views/HomeworksView.tsx
+import type { HomeworkListItemResponse } from "../lib/apiTypes"; // see note below
+
+export type HomeworksViewProps = {
+  homeworks: HomeworkListItemResponse[];
+  onOpenHomework: (id: string) => void;
+  onOpenSubmissions: (id: string) => void;
+  onNewHomework: () => void;
+};
+```
+
+`apps/admin` never imports from `apps/web` (confirmed convention, same as Task 21's note) — mirror the real `HomeworkListItemResponse` shape (`{id, title, description, dueDate, llmConfigId, status, sectionCount}`) as a local type. Put it in `apps/admin/src/client/lib/apiTypes.ts` if that file exists already (check first — Task 21/23's local-type convention may already have started one); otherwise define it inline in `HomeworksView.tsx` itself, matching how `SubmissionsView.tsx` (Task 21) defined its local types directly in the view file.
+
+Update the JSX that reads dropped fields: `hw.recordNumber` → `idx + 1` (already have `idx` from the `.map`); `hw.sections.length` → `hw.sectionCount`; `hw.submissionsCount` → drop that meta-chip entirely (no source for it without a second aggregation query — removing one chip, not breaking the layout, three chips become two); the top stat row's `studentsTotal`/`totalSubmissions`/`activeCount` — `activeCount` still derivable (`homeworks.filter(h => h.status === "active").length`, `status` is real), but `studentsTotal` and `totalSubmissions` have no source in this payload — drop those two stat cards, keep "Records" and "Active".
+
+- [ ] **Step 2: Fetch real data in `App.tsx`**
+
+Find the `view.kind === "homeworks"` branch (currently passes `homeworks={HOMEWORKS}`) and replace with a data-loader component, same pattern as Task 21's `SubmissionsDataLoader`:
+
+```tsx
+function HomeworksDataLoader({ courseId, onOpenHomework, onOpenSubmissions, onNewHomework }: {
+  courseId: string; onOpenHomework: (id: string) => void; onOpenSubmissions: (id: string) => void; onNewHomework: () => void;
+}) {
+  const [homeworks, setHomeworks] = useState<HomeworkListItemResponse[] | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  useEffect(() => {
+    fetch(`/api/courses/${courseId}/homeworks`)
+      .then((r) => { if (!r.ok) throw new Error("failed"); return r.json(); })
+      .then((data) => setHomeworks(data.homeworks))
+      .catch(() => setLoadError(true));
+  }, [courseId]);
+  if (loadError) return <p role="alert">Failed to load homeworks.</p>;
+  if (!homeworks) return null;
+  return <HomeworksView homeworks={homeworks} onOpenHomework={onOpenHomework} onOpenSubmissions={onOpenSubmissions} onNewHomework={onNewHomework} />;
+}
+```
+
+Wire it into the `view.kind === "homeworks"` branch the same way `CURRENT_COURSE_ID`-gated Task 15/21 components are (guard with `EmptyView` if `CURRENT_COURSE_ID` is undefined). Remove the now-dead `HOMEWORKS` import from `App.tsx` if nothing else in the file still uses it (check first — `App.tsx` line ~113 also used `HOMEWORKS.find(...)` for something unrelated per the codebase notes; if that's still load-bearing for a different, still-fixture-backed view, leave the import and only remove the one call site this task replaces).
+
+- [ ] **Step 3: Tests.** Component test for `HomeworksView` with the new prop shape (adapt/replace any existing fixture-based test for this view if one exists — check `apps/admin/src/client/views/` for a `HomeworksView.test.tsx` first). Verify the stat row renders "Records"/"Active" without crashing on the removed fields.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/admin/src/client/App.tsx apps/admin/src/client/views/HomeworksView.tsx
+git commit -m "fix(admin): HomeworksView fetches real homework list instead of the HOMEWORKS fixture (#19)"
+```
+
+### Task 27: Client — `HomeworkForm`: markdown preview, delete confirmation, fix the unsaved-changes-guard bug, adopt `@llteacher/ui`
+
+**Files:**
+- Modify: `apps/admin/src/client/components/HomeworkForm.tsx`
+- Modify: `apps/admin/src/client/components/HomeworkForm.test.tsx`
+- Modify: `apps/admin/package.json` (new dependency)
+
+Four independent fixes to the same file — implement all four, they don't conflict:
+
+**(a) Markdown preview.** Add `react-markdown` + `remark-gfm` as a dependency (`cd apps/admin && npm install react-markdown remark-gfm`). For each section's content textarea and solution textarea, render a live preview below it using `watch()` from react-hook-form (not a separate `useState` — the form already tracks the value):
+
+```tsx
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+// Inside the component, after `const { register, control, handleSubmit, watch, formState... } = useForm(...)`:
+// (add `watch` to the destructured hook return if not already there)
+
+// Inside the fields.map(...) block, after each content/solution textarea:
+<div className="admin-markdown-preview" aria-label={`Section ${index + 1} content preview`}>
+  <ReactMarkdown remarkPlugins={[remarkGfm]}>{watch(`sections.${index}.content`) || ""}</ReactMarkdown>
+</div>
+```
+
+Same pattern for the solution textarea's preview. `watch()` on a field-array-indexed path re-renders on every keystroke across the whole form — acceptable here (this form already re-renders on every field change via react-hook-form's own subscription model; this doesn't introduce a new class of perf problem, just makes it observable in the preview).
+
+**(b) Delete confirmation.** Wrap the existing `remove(index)` call:
+
+```tsx
+<button type="button" aria-label="Remove section" onClick={() => {
+  if (window.confirm(`Remove section ${index + 1}? This cannot be undone until you save.`)) remove(index);
+}}>Remove section</button>
+```
+
+**(c) Fix `useUnsavedChangesGuard`.** The final review found this hook's side effect runs inside a `useState` lazy initializer instead of `useEffect` — it executes during render (a React purity violation), the returned cleanup function is stored as unused state, and `isDirty` is captured stale from the first render (always `false`), so the guard never actually fires and a `beforeunload` listener leaks on every mount. Fix:
+
+```tsx
+function useUnsavedChangesGuard(isDirty: boolean) {
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handler = (e: BeforeUnloadEvent) => { if (isDirty) e.preventDefault(); };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [isDirty]);
+}
+```
+
+Add `useEffect` to the existing `import { useState, type FormEvent } from "react"` line.
+
+**(d) Adopt `@llteacher/ui`.** `packages/ui` exports `Button` and `Input` (no textarea or datetime-local variant — `Input` only supports `text | email | password | number | search | url | tel`, so the due-date/released-at/description/content/solution fields stay native `<input type="datetime-local">`/`<textarea>`; forcing those into `Input` would mean changing the shared package's public contract for one consumer, out of scope here). Swap what actually fits:
+- The title field (`<input id="hw-title" {...register("title", ...)} />`) → `<Input label="Title" {...register("title", { required: "Title required" })} error={errors.title?.message} />` (drop the manual `{errors.title && <p role="alert">...}` block — `Input` renders its own error text with `role="alert"` internally).
+- Every plain `<button type="button" ...>`/`<button type="submit" ...>` → `Button` (`variant="danger"` for "Remove section", `variant="accent"` for "Save", default for "+ Add section"). Keep existing `aria-label`s and `disabled` props — `Button` extends `ButtonHTMLAttributes` so they pass through unchanged.
+
+Do **not** attempt to reskin the section-title inputs inside the field array to `Input` beyond the top-level title field in this task — the field-array `register(\`sections.${index}.title\`, ...)` paths use dynamic error access (`errors.sections?.[index]?.title`) that's more involved to wire into `Input`'s `error` prop correctly; leave those as-is if time-constrained, note it as a follow-up in the report rather than risking a rushed, untested change to the field-array's a11y (which the existing keyboard-order test already covers and must keep passing).
+
+- [ ] **Step 1-4:** Implement (a)-(d).
+- [ ] **Step 5: Tests.** (a) A section's content textarea renders its markdown as HTML in the adjacent preview (e.g. typing `**bold**` produces a `<strong>` in the preview — use `screen.getByText` or `container.querySelector` to check, not a snapshot). (b) Clicking "Remove section" with `window.confirm` mocked to return `false` does not remove the section; mocked to return `true`, removes it (matches the existing "removing a section drops it and renumbers the rest" test's setup, just add the confirm mock). (c) Render the form, unmount, and verify no `beforeunload` listener leak — or simpler: spy on `window.addEventListener`/`removeEventListener` and assert they're called equally on mount/unmount (this is the regression test the original bug had none of). (d) The title field's `role="alert"` error text still renders (existing test, should still pass since `Input` renders it internally — verify, don't just assume).
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/admin/src/client/components/HomeworkForm.tsx apps/admin/src/client/components/HomeworkForm.test.tsx apps/admin/package.json apps/admin/package-lock.json
+git commit -m "feat(admin): HomeworkForm markdown preview, delete confirmation, fix unsaved-changes-guard leak, adopt @llteacher/ui (#21)"
+```
+
+### Task 28: Client — unpublish-with-activity warning UI
+
+**Files:**
+- Modify: `apps/admin/src/client/views/HomeworkEditView.tsx`
+
+**Interfaces:**
+- Consumes: `PATCH .../publish` now may return `409 { error, hasStudentActivity: true }` (Task 24).
+
+In the `onSubmit` handler's publish-PATCH block (already conditional on `publishChanged`, per the final-review fix wave), handle the new 409:
+
+```tsx
+if (publishChanged) {
+  const publishRes = await fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/publish`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ publish: payload.publish, releasedAt: payload.releasedAt }),
+  });
+  if (publishRes.status === 409) {
+    const body = await publishRes.json();
+    if (body.hasStudentActivity && window.confirm("This homework already has student activity. Unpublish anyway?")) {
+      const retryRes = await fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/publish`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publish: payload.publish, releasedAt: payload.releasedAt, confirm: true }),
+      });
+      if (!retryRes.ok) throw new Error("Failed to update publish state");
+    } else {
+      throw new Error("Publish state not changed");
+    }
+  } else if (!publishRes.ok) {
+    throw new Error("Failed to update publish state");
+  }
+}
+```
+
+- [ ] **Step 1:** Implement as above.
+- [ ] **Step 2: Tests.** Add to `HomeworkEditView.test.tsx`: unpublishing with the mock fetch returning `409 {hasStudentActivity: true}` and `window.confirm` mocked `true` results in a second `/publish` call carrying `confirm: true`; `window.confirm` mocked `false` results in `submitError` being shown (via `HomeworkForm`'s existing catch) and no second call.
+- [ ] **Step 3: Commit**
+
+```bash
+git add apps/admin/src/client/views/HomeworkEditView.tsx apps/admin/src/client/views/HomeworkEditView.test.tsx
+git commit -m "feat(admin): confirm before unpublishing a homework with existing student activity (#94)"
+```
+
+### Task 29: Client — missing-section-warnings banner in `SubmissionsView`
+
+**Files:**
+- Modify: `apps/admin/src/client/views/SubmissionsView.tsx`
+
+**Interfaces:**
+- Consumes: `HomeworkSubmissionsData.missingSectionWarnings` (mirrors Task 25's `HomeworkSubmissionsMatrix.missingSectionWarnings`, local type per this file's existing no-cross-app-import convention).
+
+Add the field to the local `HomeworkSubmissionsData` interface:
+
+```ts
+export interface HomeworkSubmissionsData {
+  // ...existing fields...
+  missingSectionWarnings: { sectionId: string; sectionTitle: string; missingStudentCount: number }[];
+}
+```
+
+Render a banner, same visual pattern as the existing `counts.no_interaction > 0` banner directly above it (reuse the `admin-alert`/`Warning` icon convention already in this file):
+
+```tsx
+{data.missingSectionWarnings.length > 0 && (
+  <div className="admin-alert" role="status">
+    <span className="admin-alert__icon" aria-hidden="true"><Warning size={16} weight="regular" /></span>
+    <span>
+      {data.missingSectionWarnings.map((w) => (
+        <span key={w.sectionId} style={{ display: "block" }}>
+          <strong>{w.missingStudentCount}</strong> {w.missingStudentCount === 1 ? "student hasn't" : "students haven't"} started "{w.sectionTitle}"
+        </span>
+      ))}
+    </span>
+  </div>
+)}
+```
+
+- [ ] **Step 1:** Implement as above.
+- [ ] **Step 2: Tests.** Rendering with a non-empty `missingSectionWarnings` shows the banner text for each entry; empty array renders nothing extra (existing snapshot-free assertions, matching this file's test conventions if a test file exists yet — check `apps/admin/src/client/views/` first; if none exists for this view yet, create one mirroring `HomeworkEditView.test.tsx`'s style).
+- [ ] **Step 3: Commit**
+
+```bash
+git add apps/admin/src/client/views/SubmissionsView.tsx
+git commit -m "feat(admin): missing-section warnings banner on the submissions dashboard (#23)"
+```
+
+**End of Phase 7.**
 
 ---
 
