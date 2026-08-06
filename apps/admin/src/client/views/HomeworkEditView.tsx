@@ -56,6 +56,7 @@ export function HomeworkEditView({
           releasedAt: hw.releasedAt ? toDatetimeLocalValue(hw.releasedAt) : null,
           isHidden: hw.isHidden,
           expiresAt: hw.expiresAt ? toDatetimeLocalValue(hw.expiresAt) : null,
+          publishedAt: hw.publishedAt,
           sections: hw.sections.map(
             (s: {
               id: string;
@@ -76,7 +77,11 @@ export function HomeworkEditView({
           ),
         });
         setOriginalPublishState({
-          publish: hw.status !== "draft",
+          // #166: keyed off publishedAt, not status -- "hidden" can now mask
+          // an otherwise-draft homework (Resolved Design Decision 17's
+          // precedence), so `status !== "draft"` stopped being a reliable
+          // "is this published" proxy once a draft could be hidden too.
+          publish: hw.publishedAt !== null,
           // NOTE (deviation from the fix brief's literal text, called out in
           // the fix report): the brief said to use `undefined` here "so both
           // sides of the !== comparison are in the same shape" against

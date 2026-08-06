@@ -28,6 +28,11 @@ export interface HomeworkFormInitialData {
   releasedAt: string | null;
   isHidden: boolean;
   expiresAt: string | null;
+  /** #166: the Publish checkbox's default must key off this, not `status`
+   *  -- "hidden" (Resolved Design Decision 17's precedence) can now mask an
+   *  otherwise-draft homework's status, so `status !== "draft"` is no
+   *  longer a reliable "is this published" proxy on its own. */
+  publishedAt: string | null;
 }
 
 export interface HomeworkFormProps {
@@ -54,7 +59,7 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
           title: initialData.title, description: initialData.description, dueDate: initialData.dueDate,
           llmConfigId: initialData.llmConfigId ?? undefined,
           sections: initialData.sections.map((s) => ({ id: s.id, title: s.title, content: s.content, solutionContent: s.solutionContent })),
-          publish: initialData.status !== "draft",
+          publish: initialData.publishedAt !== null,
           releasedAt: initialData.releasedAt ?? undefined,
           hidden: initialData.isHidden,
           expiresAt: initialData.expiresAt ?? undefined,
