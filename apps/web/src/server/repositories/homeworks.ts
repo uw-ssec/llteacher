@@ -57,9 +57,10 @@ export type HomeworkStatus = "draft" | "scheduled" | "active" | "past_due" | "ar
  *  set a homework archived. This function never returns it -- the type is
  *  kept (not narrowed) so a future feature can add the missing input this
  *  function would need, without every consumer's exhaustiveness check
- *  breaking. TODO(#<follow-up-issue>): file and link an issue for a future
- *  milestone once an archival feature is actually scoped -- confirm with
- *  the requester before filing (issue creation needs sign-off). */
+ *  breaking. #166 (M3) is where this gets resolved: it adds a real
+ *  `is_hidden`/`expires_at`-driven "hidden" status and explicitly asks
+ *  whether "hidden" and "archived" are the same concept or two -- decide
+ *  there, not here. */
 export function deriveHomeworkStatus(hw: {
   dueDate: Date;
   publishedAt: Date | null;
@@ -339,11 +340,13 @@ export async function updateHomework(
       );
     }
     if (statements.length > 0) {
-      // db.batch() requires a non-empty tuple type in some Drizzle
-      // versions -- verify against the installed drizzle-orm's neon-http
-      // batch() signature (check node_modules/drizzle-orm/neon-http/
-      // session.d.ts or let TypeScript's error on this call guide the
-      // exact expected type) and adjust the cast if needed.
+      // The installed drizzle-orm's neon-http batch() signature is
+      // `batch<U extends BatchItem<'pg'>, T extends Readonly<[U, ...U[]]>>
+      // (queries: T)` -- a non-empty tuple type, not a plain array. This
+      // cast is required because `statements` is built up as
+      // `BatchStatement[]` (its length isn't known statically); the
+      // `statements.length > 0` check above is what makes the cast sound
+      // at runtime.
       await db.batch(statements as [BatchStatement, ...BatchStatement[]]);
     }
     return { id };
