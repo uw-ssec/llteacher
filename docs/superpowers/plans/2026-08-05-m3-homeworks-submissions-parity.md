@@ -32,6 +32,7 @@
 8. **Admin course-id source: extend `GET /api/profile` with the caller's instructor course(s), not a new course-management API** (found during Task 15 implementation, before any code was written): `HomeworkCreateView`/`HomeworkEditView` need a real `courseId` for every API call, but nothing in the codebase exposes one to the client — confirmed by tracing the full chain: `useAuth()` → `GET /api/profile` → `ProfileWithStats`, which only ever returns a collapsed `role` and a `courseCount` number, never actual course rows. Checked whether this belongs to an already-planned milestone rather than being a genuine M3 gap: it does — [#68](https://github.com/uw-ssec/llteacher/issues/68) ("organization and course management routes with archival," M13, open) is the issue that adds a real `GET /api/courses` and course *creation*; its own summary states "nothing in the platform creates organizations or courses outside the seed script." [#70](https://github.com/uw-ssec/llteacher/issues/70) ("course switcher and multi-course navigation," M13, open) is the actual multi-course UI — a dedicated `CourseSwitcher.tsx` component, localStorage persistence, deep-linking — and explicitly notes "the student app currently assumes a single implicit course" (true of admin too: `TopNav`'s `course="STATS 311"` is a literal hardcoded string everywhere else in the admin app today).
    Building #68's full course-management API or #70's real switcher inside M3 would be scope creep into a different milestone's job, and would likely get reworked once those land properly. Decision (confirmed with the requester): extend the *existing* `GET /api/profile` response (already fetched on app load by both apps' `AuthProvider`, minimal new surface, additive-only) with the caller's course membership(s) as an **array**, not a single id — an instructor teaching multiple courses must not be silently broken by this stopgap. `apps/admin`'s `App.tsx` then uses `courses[0]` for now, matching the app's existing single-course assumption everywhere else, with an explicit code comment (not just a plan note) explaining why this is temporary and that #70's real switcher is the intended replacement — so the stopgap is self-documenting in the code a future implementer of #70 will actually be reading, not just in this plan.
    Scope of the extension, deliberately minimal: `ProfileWithStats` gains an optional `courses?: { id: string; title: string }[]` field, populated only for instructor/ta/admin roles (parallel to the existing `instructorStats` field), from non-dropped course memberships only (a dropped membership showing up in a course picker would be misleading, even though the route-layer `requireInstructorOf` guard independently re-verifies real access regardless of what the client sends). No new route, no pagination, no org-admin "all courses" case, no archival filtering beyond what already exists — those are #68's job.
+9. **Student sidebar submit needs a `conversationId` per section — thread the id the backend already fetches, not a new architectural gap** (found during Task 18 planning, before dispatch): the brief's `handleSubmit` reads `section?.conversationId`, but `SidebarSection` (`packages/ui/src/components/Sidebar.tsx`) has no such field, and neither does `StudentSectionProgress` (Task 9, `repositories/studentHomeworks.ts`) — the brief's own code would not typecheck as written. Unlike decision 8's course-id gap, this is *not* a missing-data problem: `getStudentHomeworksForUser` already runs `SELECT ... FROM conversations WHERE sectionId = ... AND ownerUserId = ... AND isDeleted = false` per section (to compute status) and already has the conversation's `id` in hand at that point — it just never puts it in the returned object. No new query, no new milestone dependency, no design alternative worth pausing on: extend `StudentSectionProgress` with `conversationId: string | null` (populated from the already-fetched `activeConversation?.id ?? null`), extend `SidebarSection` with an optional `conversationId?: string`, and thread it through Task 11's `useStudentHomework` mapping in `App.tsx`. This revises two already-merged, already-reviewed tasks (9 and 11) — expected and unremarkable: the gap only became visible once a *later* task (18) tried to consume data the earlier ones never had a reason to carry. Resolved directly without pausing for input, unlike decision 8, since there's no genuine architectural trade-off here (no alternative design, no scope-creep risk into another milestone) — just a field that needed to be threaded one level further than it was.
 
 ---
 
@@ -3135,18 +3136,78 @@ git commit -m "feat(submissions): POST /api/conversations/:id/submit route (#22)
 ### Task 18: Client — replace the fake submit `setTimeout` with a real call
 
 **Files:**
+- Modify: `apps/web/src/server/repositories/studentHomeworks.ts`, `.test.ts` (thread `conversationId`)
+- Modify: `packages/ui/src/components/Sidebar.tsx` (add the field to `SidebarSection`)
 - Modify: `apps/web/src/client/App.tsx`
 
-- [ ] **Step 1: Replace `handleSubmit`**
+See Resolved Design Decision 9 — the brief's `handleSubmit` needs `section.conversationId`, which doesn't exist on `SidebarSection` or `StudentSectionProgress` yet. Not a new architectural gap like decision 8's: the backend already fetches the conversation's id per section, it's just not in the returned object yet.
+
+- [ ] **Step 0: Thread `conversationId` through the student homework query and sidebar type**
+
+```ts
+// apps/web/src/server/repositories/studentHomeworks.ts
+// StudentSectionProgress gains one field:
+export interface StudentSectionProgress {
+  id: string;
+  title: string;
+  order: number;
+  status: SectionStatusType;
+  conversationId: string | null;
+}
+
+// Inside getStudentHomeworksForUser's per-section loop, the push call becomes:
+sectionSummaries.push({
+  id: section.id, title: section.title, order: section.order, status: sectionStatus,
+  conversationId: activeConversation?.id ?? null,
+});
+```
+
+`activeConversation` is already fetched a few lines above this push (used to compute `hasActiveConversation` for `deriveSectionStatus`) — no new query. If any existing test in `studentHomeworks.test.ts` constructs a `StudentSectionProgress`-shaped literal for a `toEqual`/`toStrictEqual` assertion, add `conversationId` to it (a real-DB test asserting via `.find(...)!.status` or similar targeted field access needs no change).
+
+```ts
+// packages/ui/src/components/Sidebar.tsx
+export interface SidebarSection {
+  number: number;
+  title: string;
+  status: SectionStatus;
+  /** The section's active (non-deleted) conversation, if the student has
+   *  started one. Optional -- most call sites (including this package's own
+   *  Storybook-style fixtures, if any) have no conversation concept at all;
+   *  only apps/web's real data populates it. */
+  conversationId?: string;
+}
+```
+
+Run `cd packages/ui && npm run typecheck` (if the package has its own script; otherwise whatever check that package uses) to confirm the additive field doesn't break any existing consumer/test of `Sidebar`/`SidebarSection` before continuing.
+
+- [ ] **Step 1: Update `useStudentHomework`'s mapping and `handleSubmit`**
 
 ```tsx
-// apps/web/src/client/App.tsx — handleSubmit needs the section's
-// conversationId, which the current fixture-only sidebar model doesn't
-// track. This depends on Phase 2 Task 3's real section data carrying a
-// conversationId (or the student needing to start one first, deferred to
-// M4's conversation lifecycle per the epic's own "stubbed as future"
-// acceptance-checklist line) -- implement against whatever shape Phase 2
-// actually landed with, verified at implementation time, not assumed here.
+// apps/web/src/client/App.tsx — inside useStudentHomework's .then(), add
+// conversationId to the mapped SidebarSection objects:
+setSections(
+  hw.sections.map((s) => ({
+    number: s.order,
+    title: s.title,
+    status:
+      s.status === "submitted"
+        ? ("submitted" as const)
+        : s.status === "in_progress"
+          ? ("current" as const)
+          : ("pending" as const),
+    conversationId: s.conversationId ?? undefined,
+  })),
+);
+```
+
+```tsx
+// apps/web/src/client/App.tsx — replace handleSubmit. No existing generic
+// error-surface exists in this file to reuse (workerStatus/workerLoading is
+// specifically for the /api/hello ping, not a general-purpose error
+// affordance) -- rather than inventing new UI for this one failure path,
+// log and leave sidebar state unchanged on failure; this is a deliberate,
+// minimal-scope choice, not an oversight (a real error affordance is a
+// separate, cross-cutting concern beyond this task).
 const handleSubmit = async (sectionNumber: number) => {
   const section = sections.find((s) => s.number === sectionNumber);
   if (!section?.conversationId) return; // no active conversation yet -- nothing to submit
@@ -3156,19 +3217,21 @@ const handleSubmit = async (sectionNumber: number) => {
     setSections((prev) => prev.map((s) => (s.number === sectionNumber ? { ...s, status: "submitted" as const } : s)));
     setJustSubmittedSection(sectionNumber);
     setTimeout(() => setJustSubmittedSection(null), 800);
-  } catch {
-    // surface via existing UI error affordance -- verify at implementation
-    // time what error surface App.tsx already uses elsewhere (e.g. worker
-    // status indicator) rather than introducing a new one here.
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error("[App] section submit failed", err);
   }
 };
 ```
 
-- [ ] **Step 2: Manual verification.** Start a section conversation, submit it, confirm the sidebar flips to submitted and a second submit ("resubmit") doesn't error.
+- [ ] **Step 2: Manual verification.** Start a section conversation, submit it, confirm the sidebar flips to submitted and a second submit ("resubmit") doesn't error. If dev-server/browser tooling isn't available, rely on typecheck + tests + careful code reading instead, and say so explicitly.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Commit (two commits — the backend/type thread is independently testable)**
 
 ```bash
+git add apps/web/src/server/repositories/studentHomeworks.ts apps/web/src/server/repositories/studentHomeworks.test.ts packages/ui/src/components/Sidebar.tsx
+git commit -m "feat(student): thread conversationId through student homework query and Sidebar type (#22)"
+
 git add apps/web/src/client/App.tsx
 git commit -m "feat(student): wire section submit to the real API, drop fake setTimeout (#22)"
 ```
