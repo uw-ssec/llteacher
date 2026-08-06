@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { conversations, submissions, courseMemberships } from "../../db/schema";
 import { deriveHomeworkStatus } from "./homeworks";
@@ -50,33 +50,48 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
   if (courseIds.length === 0) return [];
 
   const allHomeworks = await db.query.homeworks.findMany({
-    where: (h, { inArray }) => inArray(h.courseId, courseIds),
+    where: (h, { inArray: inArrayOp }) => inArrayOp(h.courseId, courseIds),
     with: { sections: true },
   });
 
-  const results: StudentHomeworkSummary[] = [];
-  for (const hw of allHomeworks) {
+  const visibleHomeworks = allHomeworks.filter((hw) => {
     const status = deriveHomeworkStatus(hw);
-    if (status === "draft" || status === "scheduled") continue; // not yet visible to students
+    return status !== "draft" && status !== "scheduled"; // not yet visible to students
+  });
 
+  // #158: batch the per-section conversation/submission lookups instead of
+  // querying per section inside a per-homework loop (up to ~120 sequential
+  // round-trips for 3 published homeworks x 20 sections, each its own HTTP
+  // request on neon-http). Mirrors getHomeworkSubmissionsMatrix's fetch-by-
+  // inArray-then-join-in-memory pattern: query count is now fixed regardless
+  // of homework/section count.
+  const allSectionIds = visibleHomeworks.flatMap((hw) => hw.sections.map((s) => s.id));
+  const activeConversations = allSectionIds.length
+    ? await db
+        .select({ id: conversations.id, sectionId: conversations.sectionId })
+        .from(conversations)
+        .where(and(inArray(conversations.sectionId, allSectionIds), eq(conversations.ownerUserId, userId), eq(conversations.isDeleted, false)))
+    : [];
+  // At most one active (non-deleted) conversation per (section, user) is the
+  // case this app enforces today -- if that ever changes, this map keeps the
+  // last row seen rather than the original per-section query's first.
+  const conversationBySectionId = new Map(activeConversations.map((c) => [c.sectionId, c]));
+
+  const conversationIds = activeConversations.map((c) => c.id);
+  const submittedRows = conversationIds.length
+    ? await db.select({ conversationId: submissions.conversationId }).from(submissions).where(inArray(submissions.conversationId, conversationIds))
+    : [];
+  const submittedConversationIds = new Set(submittedRows.map((s) => s.conversationId));
+
+  const results: StudentHomeworkSummary[] = [];
+  for (const hw of visibleHomeworks) {
     const sectionSummaries: StudentSectionProgress[] = [];
     let completed = 0;
     let inProgress = 0;
 
     for (const section of hw.sections) {
-      const [activeConversation] = await db
-        .select({ id: conversations.id })
-        .from(conversations)
-        .where(and(eq(conversations.sectionId, section.id), eq(conversations.ownerUserId, userId), eq(conversations.isDeleted, false)));
-
-      let hasSubmission = false;
-      if (activeConversation) {
-        const [submission] = await db
-          .select({ id: submissions.id })
-          .from(submissions)
-          .where(eq(submissions.conversationId, activeConversation.id));
-        hasSubmission = !!submission;
-      }
+      const activeConversation = conversationBySectionId.get(section.id) ?? null;
+      const hasSubmission = activeConversation ? submittedConversationIds.has(activeConversation.id) : false;
 
       const sectionStatus = deriveSectionStatus({
         dueDate: hw.dueDate,
