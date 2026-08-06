@@ -416,14 +416,25 @@ describe.skipIf(!DATABASE_URL)("getHomeworkSubmissionsMatrix (real DB)", () => {
   it("uses at most 4 db query round-trips (roster, homework+sections, conversations, submissions) -- no N+1", async () => {
     const { db, org, cipher, scope, homeworkId } = await seedMatrixFixture();
 
+    // The roster fetch is a flat db.select(...).from(...).innerJoin(...)
+    // chain, not a db.query.X.findMany call (see the bytea-corruption fix
+    // above) -- found in review: the original version of this test only
+    // wrapped db.query.*.findMany/findFirst methods, so after that fix the
+    // roster query became invisible to this test entirely (count silently
+    // dropped from 4 to 3, and a future regression to a per-student roster
+    // query wouldn't be caught by the very test meant to prevent it). Wrap
+    // db.select itself in addition to the three db.query.* methods -- this
+    // function calls db.select() exactly once (for the roster), so counting
+    // invocations of the method itself (not chained calls) correctly counts
+    // it as one query alongside the other three.
     let queryCount = 0;
     const targets: Array<[object, string]> = [
       [db.query.homeworks, "findFirst"],
-      [db.query.courseMemberships, "findMany"],
       [db.query.conversations, "findMany"],
       [db.query.submissions, "findMany"],
     ];
     const originals = targets.map(([obj, key]) => (obj as Record<string, unknown>)[key]);
+    const originalSelect = db.select.bind(db);
     // If Drizzle's query-builder methods turn out not to be plain writable
     // own-properties (rare, but depends on the installed version), wrap
     // `db.query` itself in a Proxy counting `get` calls on `findFirst`/
@@ -434,12 +445,17 @@ describe.skipIf(!DATABASE_URL)("getHomeworkSubmissionsMatrix (real DB)", () => {
         return (originals[i] as (...a: unknown[]) => unknown).apply(obj, args);
       };
     });
+    (db as unknown as Record<string, unknown>).select = (...args: unknown[]) => {
+      queryCount++;
+      return (originalSelect as (...a: unknown[]) => unknown)(...args);
+    };
     try {
       await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId);
     } finally {
       targets.forEach(([obj, key], i) => { (obj as Record<string, unknown>)[key] = originals[i]; });
+      (db as unknown as Record<string, unknown>).select = originalSelect;
     }
-    expect(queryCount).toBeLessThanOrEqual(4);
+    expect(queryCount).toBe(4);
 
     await db.delete(organizations).where(eq(organizations.id, org.id));
   });
