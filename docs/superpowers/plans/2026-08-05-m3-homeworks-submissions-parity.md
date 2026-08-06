@@ -29,6 +29,9 @@
 6. **`updateHomework` branches on driver capability at runtime: `db.batch()` in production, a real `db.transaction()` for real-DB tests, with server-generated ids for new sections/solutions** (found during Task 3 implementation, before any code was committed; refined twice as the full picture emerged). The plan originally called for `db.transaction(async (tx) => {...})` unconditionally, but production routes construct `db` via `makeDb()` — the `@neondatabase/serverless` **neon-http** driver, required because this app deploys to Cloudflare Workers (no raw outbound TCP). neon-http's `.transaction()` unconditionally throws (`"No transactions support in neon-http driver"`); confirmed at `node_modules/drizzle-orm/neon-http/session.js`, and no code in this repo calls `db.transaction()` anywhere else. neon-http *does* support `db.batch([...])`: multiple statements sent in one HTTP round-trip, executed as a single real transaction server-side (all-or-nothing, same rollback guarantee as a normal transaction). The wrinkle: batch statements are packaged before any of them run, so a later statement can't consume an earlier statement's `RETURNING` result the way sequential transaction code could — fixed by generating each new section's (and its solution's) id via `crypto.randomUUID()` in the repository function itself, before building the batch, and inserting with that id explicit rather than relying on `sections.id`'s `defaultRandom()`.
    Switching to `db.batch()` alone wasn't the end of it: real-DB tests use `makeNodeDb` (node-postgres driver, needed because neon-http can't reach a plain Postgres server at all — see M2's decision 9), and node-postgres has the *opposite* gap — it supports `db.transaction()` but has no `.batch()` at runtime, despite `nodeClient.ts`'s cast making the shared `Db` type claim otherwise. Naively falling back to "wrap the same statements in a node-postgres transaction" doesn't give real atomicity either: Drizzle query-builder objects (`db.insert(...)`, etc.) are bound to whichever executor built them, so statements built against the outer `db` and merely awaited inside a `tx` callback would run on a different pooled connection than the transaction, not inside it. Resolved by keeping `resolveSectionWrites`'s reorder-resolution *algorithm* identical on both paths (it never touches `db` directly, only the three callback params) and branching only on *how a resolved write executes*: `updateHomework` feature-detects `typeof db.batch === "function"` and either (a) collects query-builder objects built against `db` into an array for one `db.batch()` call, or (b) opens a real `db.transaction()` and awaits each write immediately against `tx`. This means real-DB tests exercise the exact same ordering logic production runs — only the execution mechanics differ, not the logic being verified. (`crypto.randomUUID()` is a standard global in both the Workers runtime and modern Node, no import needed.)
 7. **Reordering existing sections resolved via dependency-ordered application with cycle-breaking scratch bumps, not a schema change** (found during Task 3 implementation): `sections_homework_order_uq` is a plain (non-deferrable) unique index — Postgres checks it immediately after each statement, whether inside `db.transaction()` or `db.batch()`. Naively applying every reordered section's `UPDATE` in plan order can collide mid-batch (e.g. swapping two sections' orders, or shifting a range when a section is inserted in the middle). Fixed at the application level, not by making the constraint deferrable (which would need a new migration and wasn't confirmed compatible with the installed Drizzle version) or by hand-writing non-generated migration SQL: `updateHomework` builds a dependency graph of "this section wants to move into order slot N," applies any move whose target slot is currently unoccupied (repeating in passes, since freeing one slot often unblocks another — this alone resolves plain shifts/insertions with zero scratch values, verified by hand-tracing an insert-in-the-middle scenario), and only when a genuine cycle remains (every remaining move's target is held by another remaining move) bumps one section in the cycle to a scratch order value not used by anyone in the homework, breaking the cycle so the pass-based resolution can finish. If no scratch value exists in `[1, 20]` (only possible when a homework already has all 20 allowed sections and the diff is a full cyclic rotation touching every one of them at once), `updateHomework` throws a descriptive error that the existing `/order|section/i` route-layer regex (Task 6) already maps to a 422 asking the instructor to reorder in two smaller steps — an explicitly accepted, narrow edge case rather than a silent failure.
+8. **Admin course-id source: extend `GET /api/profile` with the caller's instructor course(s), not a new course-management API** (found during Task 15 implementation, before any code was written): `HomeworkCreateView`/`HomeworkEditView` need a real `courseId` for every API call, but nothing in the codebase exposes one to the client — confirmed by tracing the full chain: `useAuth()` → `GET /api/profile` → `ProfileWithStats`, which only ever returns a collapsed `role` and a `courseCount` number, never actual course rows. Checked whether this belongs to an already-planned milestone rather than being a genuine M3 gap: it does — [#68](https://github.com/uw-ssec/llteacher/issues/68) ("organization and course management routes with archival," M13, open) is the issue that adds a real `GET /api/courses` and course *creation*; its own summary states "nothing in the platform creates organizations or courses outside the seed script." [#70](https://github.com/uw-ssec/llteacher/issues/70) ("course switcher and multi-course navigation," M13, open) is the actual multi-course UI — a dedicated `CourseSwitcher.tsx` component, localStorage persistence, deep-linking — and explicitly notes "the student app currently assumes a single implicit course" (true of admin too: `TopNav`'s `course="STATS 311"` is a literal hardcoded string everywhere else in the admin app today).
+   Building #68's full course-management API or #70's real switcher inside M3 would be scope creep into a different milestone's job, and would likely get reworked once those land properly. Decision (confirmed with the requester): extend the *existing* `GET /api/profile` response (already fetched on app load by both apps' `AuthProvider`, minimal new surface, additive-only) with the caller's course membership(s) as an **array**, not a single id — an instructor teaching multiple courses must not be silently broken by this stopgap. `apps/admin`'s `App.tsx` then uses `courses[0]` for now, matching the app's existing single-course assumption everywhere else, with an explicit code comment (not just a plan note) explaining why this is temporary and that #70's real switcher is the intended replacement — so the stopgap is self-documenting in the code a future implementer of #70 will actually be reading, not just in this plan.
+   Scope of the extension, deliberately minimal: `ProfileWithStats` gains an optional `courses?: { id: string; title: string }[]` field, populated only for instructor/ta/admin roles (parallel to the existing `instructorStats` field), from non-dropped course memberships only (a dropped membership showing up in a course picker would be misleading, even though the route-layer `requireInstructorOf` guard independently re-verifies real access regardless of what the client sends). No new route, no pagination, no org-admin "all courses" case, no archival filtering beyond what already exists — those are #68's job.
 
 ---
 
@@ -2551,12 +2554,93 @@ git commit -m "feat(admin): HomeworkForm with section field array, publish tab, 
 ### Task 15: `HomeworkCreateView` / `HomeworkEditView` wired to the real API
 
 **Files:**
+- Modify: `apps/web/src/shared/types.ts` (extend `ProfileWithStats`)
+- Modify: `apps/web/src/lib/services/ProfileService.ts` (populate the new field)
+- Modify: `apps/web/src/lib/services/ProfileService.test.ts` (add coverage — read the existing file first and follow its established test pattern/mocking convention for this addition; don't invent a new pattern)
+- Modify: `apps/admin/src/client/components/AuthProvider.tsx` (parse the new field)
 - Create: `apps/admin/src/client/views/HomeworkCreateView.tsx`, `apps/admin/src/client/views/HomeworkEditView.tsx`
-- Modify: `apps/admin/src/client/App.tsx` (route the "New homework" button, add `edit-homework`/`create-homework` view states)
+- Modify: `apps/admin/src/client/App.tsx` (route the "New homework" button, add `edit-homework`/`create-homework` view states, derive the course id from `useAuth()`)
 
 **Interfaces:**
 - Consumes: `HomeworkForm` (Task 14); `POST /api/courses/:courseId/homeworks`, `GET/PATCH /api/courses/:courseId/homeworks/:homeworkId`, `PATCH .../publish` (Phase 1).
-- Produces: `HomeworkCreateView`, `HomeworkEditView` components.
+- Produces: `HomeworkCreateView`, `HomeworkEditView` components; an extended `ProfileWithStats.courses` field consumed by `apps/admin`'s `AuthProvider`/`useAuth()`.
+
+See Resolved Design Decision 8 for why this task also touches the profile API — `apps/admin` had no course-id source anywhere (traced the whole chain: confirmed a genuine gap, not an oversight; the real fix — #68/#70 — is a different milestone).
+
+- [ ] **Step 0: Extend `GET /api/profile` with the caller's instructor course(s)**
+
+```ts
+// apps/web/src/shared/types.ts — add to ProfileWithStats
+export interface ProfileWithStats {
+  userId: string;
+  email: string;
+  displayName: string | null;
+  role: CourseRole | null;
+  courseCount: number;
+  instructorStats?: { homeworksCreated: number };
+  studentStats?: { submissionsCount: number; completedSections: number };
+  /** Course(s) where the caller has a non-dropped instructor/ta/admin
+   *  membership. Stopgap for apps/admin's course context until #70's real
+   *  course switcher lands (see docs/superpowers/plans/2026-08-05-m3-
+   *  homeworks-submissions-parity.md, Resolved Design Decision 8) -- do not
+   *  extend this into a general course-listing API; that's #68's job. */
+  courses?: { id: string; title: string }[];
+}
+```
+
+```ts
+// apps/web/src/lib/services/ProfileService.ts
+// Add to the existing imports:
+import { and, eq, inArray, isNull } from "drizzle-orm";
+import { courseMemberships, courses, homeworks, users } from "../../db/schema";
+
+// Inside getProfileWithStats, in the existing
+// `if (primaryRole === "instructor" || primaryRole === "ta" || primaryRole === "admin")`
+// branch, alongside the existing `profile.instructorStats = ...` line:
+const instructorCourses = await this.db
+  .select({ id: courses.id, title: courses.title })
+  .from(courseMemberships)
+  .innerJoin(courses, eq(courseMemberships.courseId, courses.id))
+  .where(
+    and(
+      eq(courseMemberships.userId, userId),
+      isNull(courseMemberships.droppedAt),
+      inArray(courseMemberships.role, ["instructor", "ta", "admin"]),
+    ),
+  );
+profile.courses = instructorCourses;
+```
+
+Add a test to `ProfileService.test.ts` covering: an instructor with one course gets `courses: [{id, title}]`; an instructor with a *dropped* membership in a second course does not see that course; a student (no instructor/ta/admin role) gets no `courses` field at all (matches the existing `instructorStats`/`studentStats` mutual-exclusivity pattern already in this function). Follow whatever mocking/real-DB convention the existing tests in this file already use.
+
+```ts
+// apps/admin/src/client/components/AuthProvider.tsx — full replacement
+import { createAuthProvider, parseCourseRole, type AuthSessionState, type CourseRole } from "@llteacher/ui";
+
+export type { CourseRole };
+export interface CourseOption { id: string; title: string }
+export type AuthState = AuthSessionState & { role: CourseRole | null; courses: CourseOption[] };
+
+export const { AuthProvider, useAuth } = createAuthProvider<{ role: CourseRole | null; courses: CourseOption[] }>({
+  parseExtra: (body) => {
+    const raw = body as { role?: unknown; courses?: unknown } | null;
+    let role: CourseRole | null = null;
+    if (raw?.role != null) {
+      const parsed = parseCourseRole(raw.role);
+      if (!parsed) {
+        // eslint-disable-next-line no-console
+        console.warn(`[AuthProvider] /api/profile returned an unrecognized role: ${String(raw.role)}`);
+      }
+      role = parsed;
+    }
+    const courses: CourseOption[] = Array.isArray(raw?.courses) ? (raw.courses as CourseOption[]) : [];
+    return { role, courses };
+  },
+  defaultExtra: { role: null, courses: [] },
+});
+```
+
+Run `cd apps/web && npm run typecheck && npx vitest run src/lib/services/ProfileService.test.ts` and `cd apps/admin && npm run typecheck` before continuing to Step 1 — this extension must be solid before the view components depend on it.
 
 - [ ] **Step 1: Implement `HomeworkCreateView`**
 
@@ -2672,41 +2756,71 @@ type View =
   | { kind: "llm-configs" }
   | { kind: "students" };
 
+// App.tsx already destructures useAuth()'s return in its component body
+// (e.g. `const { isAuthenticated, loading: authLoading, error: authError, role, login, logout } = useAuth();`)
+// -- add `courses` to that destructure.
+const { courses, ...rest } = useAuth(); // merge into the existing destructure, don't add a second call
+
+// Stopgap: this app assumes exactly one course everywhere else today
+// (TopNav's hardcoded course="STATS 311" string) -- courses[0] matches that
+// existing assumption rather than inventing a switcher here. Real
+// multi-course support (picker, deep-linked course context, persisted
+// selection) is issue #70; when that lands, replace this with real
+// course-scoped navigation. See Resolved Design Decision 8 for the full
+// reasoning. An instructor with zero courses (a genuine edge case, e.g. a
+// brand-new admin account before any course assignment) sees the
+// "No course found" empty state below rather than a broken form.
+const CURRENT_COURSE_ID = courses[0]?.id;
+
 // Replace the onNewHomework console.log stubs (both the AdminSidebar prop
 // and HomeworksView prop) with:
 onNewHomework={() => setView({ kind: "create-homework" })}
 
 // Add a case:
 {view.kind === "create-homework" && (
-  <HomeworkCreateView
-    courseId={CURRENT_COURSE_ID} // existing constant/context — verify actual name at implementation time
-    llmConfigs={LLM_CONFIGS}
-    onCreated={() => setView({ kind: "homeworks" })}
-    onCancel={() => setView({ kind: "homeworks" })}
-  />
+  CURRENT_COURSE_ID ? (
+    <HomeworkCreateView
+      courseId={CURRENT_COURSE_ID}
+      llmConfigs={LLM_CONFIGS}
+      onCreated={() => setView({ kind: "homeworks" })}
+      onCancel={() => setView({ kind: "homeworks" })}
+    />
+  ) : (
+    <EmptyView label="No course found for your account yet" />
+  )
 )}
 {view.kind === "edit-homework" && (
-  <HomeworkEditView
-    courseId={CURRENT_COURSE_ID}
-    homeworkId={view.homeworkId}
-    llmConfigs={LLM_CONFIGS}
-    onSaved={() => setView({ kind: "homeworks" })}
-    onCancel={() => setView({ kind: "homeworks" })}
-  />
+  CURRENT_COURSE_ID ? (
+    <HomeworkEditView
+      courseId={CURRENT_COURSE_ID}
+      homeworkId={view.homeworkId}
+      llmConfigs={LLM_CONFIGS}
+      onSaved={() => setView({ kind: "homeworks" })}
+      onCancel={() => setView({ kind: "homeworks" })}
+    />
+  ) : (
+    <EmptyView label="No course found for your account yet" />
+  )
 )}
 // HomeworksView's onOpenHomework currently routes to "submissions" -- split
 // it: title click -> edit-homework, "Submissions" button stays -> submissions.
 ```
 
-Note for the implementer: `CURRENT_COURSE_ID` doesn't exist yet in `App.tsx` — the admin app currently has no course-context source at all (everything reads from the global `HOMEWORKS`/`LLM_CONFIGS` fixtures with no course scoping). Before this task can compile against the real API, trace how `AuthProvider`/`useAuth()` exposes the current user's course memberships (read `apps/admin/src/client/components/AuthProvider.tsx` at implementation time) and derive the course id from that, the same way the student app's guards derive scope from `authContext.memberships` — do not hardcode a course id string.
+`EmptyView` already exists in `App.tsx` (used for the "students" view's placeholder) — reuse it, don't create a second one.
 
 - [ ] **Step 4: Manual verification**
 
 Start the admin dev server, click "New homework," fill out the form with 2 sections (one with a solution), save, confirm it appears in the homeworks list; open it again, reorder sections, remove one, toggle publish on, save; confirm the student app (Phase 2) now shows it.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit (two commits — the profile extension is independently testable and reviewable)**
 
 ```bash
+git add apps/web/src/shared/types.ts apps/web/src/lib/services/ProfileService.ts apps/web/src/lib/services/ProfileService.test.ts apps/admin/src/client/components/AuthProvider.tsx
+git commit -m "feat(profile): expose caller's instructor courses on GET /api/profile (#21)
+
+Stopgap for apps/admin's course context -- see Resolved Design
+Decision 8 in the M3 plan. Superseded by #70's real course switcher."
+
 git add apps/admin/src/client/views/HomeworkCreateView.tsx apps/admin/src/client/views/HomeworkEditView.tsx apps/admin/src/client/App.tsx
 git commit -m "feat(admin): wire New/Edit homework to the real CRUD + publish API, drop console.log stub (#21)"
 ```
