@@ -13,6 +13,12 @@ export interface ProfileWithStats {
   courseCount: number;
   instructorStats?: { homeworksCreated: number };
   studentStats?: { submissionsCount: number; completedSections: number };
+  /** Course(s) where the caller has a non-dropped instructor/ta/admin
+   *  membership. Stopgap for apps/admin's course context until #70's real
+   *  course switcher lands (see docs/superpowers/plans/2026-08-05-m3-
+   *  homeworks-submissions-parity.md, Resolved Design Decision 8) -- do not
+   *  extend this into a general course-listing API; that's #68's job. */
+  courses?: { id: string; title: string }[];
 }
 
 import type { HomeworkStatus } from "../server/repositories/homeworks";

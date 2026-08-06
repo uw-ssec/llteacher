@@ -32,7 +32,16 @@ describe("ProfileService.getProfileWithStats", () => {
           }),
         },
         courseMemberships: {
-          findMany: async () => [{ id: "m1", userId: "u1", courseId: "c1", role: "instructor" }],
+          findMany: async () => [
+            {
+              id: "m1",
+              userId: "u1",
+              courseId: "c1",
+              role: "instructor",
+              droppedAt: null,
+              course: { id: "c1", title: "STATS 311" },
+            },
+          ],
         },
         homeworks: {
           findMany: async () => [{ id: "h1" }, { id: "h2" }],
@@ -48,6 +57,43 @@ describe("ProfileService.getProfileWithStats", () => {
     expect(profile.courseCount).toBe(1);
     expect(profile.instructorStats).toEqual({ homeworksCreated: 2 });
     expect(profile.studentStats).toBeUndefined();
+    expect(profile.courses).toEqual([{ id: "c1", title: "STATS 311" }]);
+  });
+
+  it("excludes a dropped instructor membership's course from `courses`", async () => {
+    const cipher = new IdentityCipher(keys);
+    const encryptedEmail = await cipher.encryptString("multi-course@uw.edu");
+    const db = {
+      query: {
+        users: {
+          findFirst: async () => ({ id: "u4", email: encryptedEmail, displayName: null }),
+        },
+        courseMemberships: {
+          findMany: async () => [
+            {
+              id: "m1",
+              userId: "u4",
+              courseId: "c1",
+              role: "instructor",
+              droppedAt: null,
+              course: { id: "c1", title: "STATS 311" },
+            },
+            {
+              id: "m2",
+              userId: "u4",
+              courseId: "c2",
+              role: "instructor",
+              droppedAt: new Date("2026-01-01"),
+              course: { id: "c2", title: "STATS 412" },
+            },
+          ],
+        },
+        homeworks: { findMany: async () => [] },
+      },
+    } as unknown as Db;
+
+    const profile = await new ProfileService(cipher, db).getProfileWithStats("u4");
+    expect(profile.courses).toEqual([{ id: "c1", title: "STATS 311" }]);
   });
 
   it("stubs student stats to zero (no submissions/conversations table yet)", async () => {
@@ -66,6 +112,7 @@ describe("ProfileService.getProfileWithStats", () => {
     const profile = await new ProfileService(cipher, db).getProfileWithStats("u2");
     expect(profile.studentStats).toEqual({ submissionsCount: 0, completedSections: 0 });
     expect(profile.instructorStats).toBeUndefined();
+    expect(profile.courses).toBeUndefined();
   });
 
   it("picks the highest-privilege role deterministically, regardless of findMany row order", async () => {
@@ -80,7 +127,13 @@ describe("ProfileService.getProfileWithStats", () => {
           },
           courseMemberships: {
             findMany: async () =>
-              memberships.map((m) => ({ ...m, userId: "u3", courseId: "c1" })),
+              memberships.map((m) => ({
+                ...m,
+                userId: "u3",
+                courseId: "c1",
+                droppedAt: null,
+                course: { id: "c1", title: "STATS 311" },
+              })),
           },
           homeworks: { findMany: async () => [] },
         },
