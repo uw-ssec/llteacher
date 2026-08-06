@@ -127,4 +127,76 @@ describe("HomeworkEditView", () => {
     const expected = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
     expect(input.value).toBe(expected);
   });
+
+  it("retries the publish PATCH with confirm:true when a 409 hasStudentActivity is confirmed", async () => {
+    const publishedHomework = { ...HOMEWORK, status: "active" };
+    const fetchMock = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (typeof url === "string" && url.endsWith(`/homeworks/hw-1`)) {
+        return Promise.resolve({ ok: true, json: async () => publishedHomework });
+      }
+      if (typeof url === "string" && url.endsWith("/publish")) {
+        const body = init?.body ? JSON.parse(init.body as string) : {};
+        if (body.confirm === true) {
+          return Promise.resolve({ ok: true, json: async () => ({ id: "hw-1", publishedAt: null, releasedAt: null }) });
+        }
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          json: async () => ({ error: "conflict", hasStudentActivity: true }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    global.fetch = fetchMock;
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const onSaved = vi.fn();
+    render(
+      <HomeworkEditView courseId="course-a" homeworkId="hw-1" llmConfigs={LLM_CONFIGS} onSaved={onSaved} onCancel={vi.fn()} />,
+    );
+    await waitFor(() => expect(screen.getByLabelText(/^title$/i)).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /published/i }));
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    // GET homework (mount), PATCH homework, PATCH /publish (409), retry PATCH /publish (confirm:true)
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    const publishCalls = fetchMock.mock.calls.filter((c) => (c[0] as string).includes("/publish"));
+    expect(publishCalls).toHaveLength(2);
+    const retryBody = JSON.parse((publishCalls[1]![1] as RequestInit).body as string);
+    expect(retryBody.confirm).toBe(true);
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  });
+
+  it("shows an error and does not retry when a 409 hasStudentActivity confirmation is dismissed", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === "string" && url.endsWith(`/homeworks/hw-1`)) {
+        return Promise.resolve({ ok: true, json: async () => HOMEWORK });
+      }
+      if (typeof url === "string" && url.endsWith("/publish")) {
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          json: async () => ({ error: "conflict", hasStudentActivity: true }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    global.fetch = fetchMock;
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    const onSaved = vi.fn();
+    render(
+      <HomeworkEditView courseId="course-a" homeworkId="hw-1" llmConfigs={LLM_CONFIGS} onSaved={onSaved} onCancel={vi.fn()} />,
+    );
+    await waitFor(() => expect(screen.getByLabelText(/^title$/i)).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /published/i }));
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    // GET homework (mount), PATCH homework, PATCH /publish (409) -- no retry
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    const publishCalls = fetchMock.mock.calls.filter((c) => (c[0] as string).includes("/publish"));
+    expect(publishCalls).toHaveLength(1);
+    await waitFor(() => expect(screen.getByText(/failed to save/i)).toBeTruthy());
+    expect(onSaved).not.toHaveBeenCalled();
+  });
 });

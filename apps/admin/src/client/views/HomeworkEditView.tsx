@@ -131,7 +131,21 @@ export function HomeworkEditView({
               headers: { "content-type": "application/json" },
               body: JSON.stringify({ publish: payload.publish, releasedAt: payload.releasedAt }),
             });
-            if (!publishRes.ok) throw new Error("Failed to update publish state");
+            if (publishRes.status === 409) {
+              const body = await publishRes.json();
+              if (body.hasStudentActivity && window.confirm("This homework already has student activity. Unpublish anyway?")) {
+                const retryRes = await fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/publish`, {
+                  method: "PATCH",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ publish: payload.publish, releasedAt: payload.releasedAt, confirm: true }),
+                });
+                if (!retryRes.ok) throw new Error("Failed to update publish state");
+              } else {
+                throw new Error("Publish state not changed");
+              }
+            } else if (!publishRes.ok) {
+              throw new Error("Failed to update publish state");
+            }
           }
           onSaved();
         }}
