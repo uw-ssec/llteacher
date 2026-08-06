@@ -112,6 +112,7 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
       <div className="admin-form-field">
         <label htmlFor="hw-due-date">Due date</label>
         <input id="hw-due-date" type="datetime-local" {...register("dueDate", { required: "Due date required" })} />
+        {errors.dueDate && <p role="alert">{errors.dueDate.message}</p>}
       </div>
 
       <div className="admin-form-field">

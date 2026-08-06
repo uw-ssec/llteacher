@@ -35,6 +35,20 @@ export const encryptedText = customType<{
     return Buffer.from(value);
   },
   fromDriver(value): Ciphertext {
+    if (!(value instanceof Uint8Array)) {
+      // A relational `with:` query (drizzle-orm's JSON-wrapping LATERAL
+      // join) serializes bytea columns as a hex string instead of handing
+      // back the driver's Buffer -- `new Uint8Array(aString)` would not
+      // throw here, it silently returns a 0-length array, corrupting the
+      // decrypted value with no visible error (this was the actual root
+      // cause of a bug Task 19 hit and fixed locally by switching that one
+      // query to a flat select+join; this guard is the durable fix so the
+      // *next* `with:`-based query touching this column fails loudly here
+      // instead of silently, or via a much-later confusing decryption
+      // error). Use a flat select().from().innerJoin() instead of a
+      // relational `with:` traversal for any query touching this column.
+      throw new Error(`encryptedText.fromDriver: expected a Buffer/Uint8Array from the driver, got ${typeof value}. This almost always means a relational "with:" query wrapped this bytea column in a JSON-serializing LATERAL join -- use a flat select+join instead.`);
+    }
     return new Uint8Array(value) as Ciphertext;
   },
 });
@@ -50,6 +64,9 @@ export const blindIndex = customType<{
     return Buffer.from(value);
   },
   fromDriver(value): BlindIndex {
+    if (!(value instanceof Uint8Array)) {
+      throw new Error(`blindIndex.fromDriver: expected a Buffer/Uint8Array from the driver, got ${typeof value}. This almost always means a relational "with:" query wrapped this bytea column in a JSON-serializing LATERAL join -- use a flat select+join instead.`);
+    }
     return new Uint8Array(value) as BlindIndex;
   },
 });

@@ -35,17 +35,19 @@ export function HomeworkCreateView({
           // edit would use -- POST only creates the bare homework record
           // (matches the existing createHomeworkHandler's minimal contract
           // from Phase 1 Task 3, which predates sections/publish entirely).
-          await fetch(`/api/courses/${courseId}/homeworks/${created.id}`, {
+          const patchRes = await fetch(`/api/courses/${courseId}/homeworks/${created.id}`, {
             method: "PATCH",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ llmConfigId: payload.llmConfigId, sections: payload.sections }),
           });
+          if (!patchRes.ok) throw new Error("Failed to save sections");
           if (payload.publish) {
-            await fetch(`/api/courses/${courseId}/homeworks/${created.id}/publish`, {
+            const publishRes = await fetch(`/api/courses/${courseId}/homeworks/${created.id}/publish`, {
               method: "PATCH",
               headers: { "content-type": "application/json" },
               body: JSON.stringify({ publish: true, releasedAt: payload.releasedAt }),
             });
+            if (!publishRes.ok) throw new Error("Failed to publish homework");
           }
           onCreated(created.id);
         }}

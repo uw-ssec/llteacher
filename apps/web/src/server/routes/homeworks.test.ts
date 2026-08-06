@@ -343,6 +343,62 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
     }, TEST_ENV);
     expect(res.status).toBe(200);
   });
+
+  // C1: an uncontrolled <select> (apps/admin's HomeworkForm) always sends a
+  // string, never `undefined`, for its "(course/org default)" option -- that
+  // arrives here as `""`. Without normalization this reaches updateHomework's
+  // `!== undefined` guard and Postgres throws on `UPDATE ... SET
+  // llm_config_id = ''` against a uuid column, which becomes a generic 503.
+  it("normalizes llmConfigId: '' to null and returns 200 (not 503)", async () => {
+    updateHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", llmConfigId: null });
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ llmConfigId: "" }),
+    }, TEST_ENV);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { llmConfigId: string | null };
+    expect(body.llmConfigId).toBeNull();
+    expect(updateHomeworkMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "hw-1",
+      expect.objectContaining({ llmConfigId: null }),
+    );
+  });
+
+  it("rejects a non-UUID llmConfigId with 400", async () => {
+    updateHomeworkMock.mockReset();
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ llmConfigId: "not-a-uuid" }),
+    }, TEST_ENV);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/uuid/i);
+    expect(updateHomeworkMock).not.toHaveBeenCalled();
+  });
+
+  it("still applies a valid UUID llmConfigId (regression check)", async () => {
+    const validUuid = "123e4567-e89b-12d3-a456-426614174000";
+    updateHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", llmConfigId: validUuid });
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ llmConfigId: validUuid }),
+    }, TEST_ENV);
+    expect(res.status).toBe(200);
+    expect(updateHomeworkMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "hw-1",
+      expect.objectContaining({ llmConfigId: validUuid }),
+    );
+  });
 });
 
 describe("DELETE /api/courses/:courseId/homeworks/:homeworkId", () => {

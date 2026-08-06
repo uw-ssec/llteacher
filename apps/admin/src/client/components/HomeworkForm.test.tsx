@@ -15,6 +15,16 @@ describe("HomeworkForm", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it("shows a due date required alert when due date is left blank", async () => {
+    const onSubmit = vi.fn();
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "New HW" } });
+    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "desc" } });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    await waitFor(() => expect(screen.getByText(/due date required/i)).toBeTruthy());
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it("adds a section, fills it out, and submits with order renumbered", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);

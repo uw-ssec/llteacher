@@ -7,6 +7,8 @@ import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { HomeworkDetailResponse, HomeworkPublishBody, HomeworkUpdateBody, SectionResponse } from "../../shared/types";
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 interface CreateHomeworkBody {
   title?: unknown;
   description?: unknown;
@@ -160,6 +162,25 @@ export async function updateHomeworkHandler(c: Context<AppEnv>) {
     }
   }
 
+  // An uncontrolled <select> (apps/admin's HomeworkForm) always sends a
+  // string, never `undefined`, for its "(course/org default)" option --
+  // that arrives here as `""`. Normalize it to `null` (explicit clear,
+  // matching the option's own label) rather than letting it reach
+  // updateHomework's `!== undefined` guard, which would otherwise pass ""
+  // straight into `UPDATE homeworks SET llm_config_id = ''` against a uuid
+  // column (Postgres throws, unmatched by the 422 regex below, becomes a
+  // generic 503 -- this was invisible until the admin write paths started
+  // checking res.ok). Any other non-empty value must look like a UUID --
+  // apps/admin's LLM_CONFIGS fixture data uses non-UUID placeholder ids
+  // ("cfg-1" etc.) with no real GET /api/llm-configs endpoint behind it yet,
+  // so selecting one from the dropdown correctly 400s here until that
+  // endpoint exists (out of scope for this milestone).
+  let llmConfigId = body.llmConfigId;
+  if (llmConfigId === "") llmConfigId = null;
+  if (llmConfigId != null && !UUID_RE.test(llmConfigId)) {
+    return c.json({ error: "llmConfigId must be a valid UUID or null" }, 400);
+  }
+
   const scope = courseScopeFromAuthContext(authContext, courseId);
   if (!scope) {
     // requireInstructorOf already verified isInstructorOf(courseId), which
@@ -175,7 +196,7 @@ export async function updateHomeworkHandler(c: Context<AppEnv>) {
       title: body.title,
       description: body.description,
       dueDate,
-      llmConfigId: body.llmConfigId,
+      llmConfigId,
       sections: body.sections,
     });
     if (!result) {
