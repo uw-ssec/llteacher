@@ -31,6 +31,8 @@ describe("homeworks repository", () => {
       llmConfigId: null,
       publishedAt: new Date("2020-01-01"),
       releasedAt: new Date("2020-01-01"),
+      isHidden: false,
+      expiresAt: null,
     };
     const findMany = vi.fn().mockResolvedValue([hwRow]);
     const select = mockSectionCountsChain([{ homeworkId: "hw1", count: 3 }]);
@@ -46,6 +48,8 @@ describe("homeworks repository", () => {
         dueDate: hwRow.dueDate.toISOString(),
         llmConfigId: null,
         status: "past_due",
+        isHidden: false,
+        expiresAt: null,
         sectionCount: 3,
       },
     ]);
@@ -61,6 +65,8 @@ describe("homeworks repository", () => {
       llmConfigId: null,
       publishedAt: null,
       releasedAt: null,
+      isHidden: false,
+      expiresAt: null,
     };
     const findMany = vi.fn().mockResolvedValue([hwRow]);
     // The count query itself returns zero rows for hw2 (no sections exist),
@@ -78,6 +84,8 @@ describe("homeworks repository", () => {
         dueDate: hwRow.dueDate.toISOString(),
         llmConfigId: null,
         status: "draft",
+        isHidden: false,
+        expiresAt: null,
         sectionCount: 0,
       },
     ]);
@@ -102,7 +110,7 @@ describe("homeworks repository", () => {
   // mockResolvedValue would) so this test exercises the real sort
   // direction/key, not just that some orderBy option was passed.
   it("orders homeworks by createdAt ascending regardless of insertion/mock order", async () => {
-    const baseRow = { description: "d", dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null };
+    const baseRow = { description: "d", dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null, isHidden: false, expiresAt: null };
     const rows = [
       { ...baseRow, id: "hw-b", title: "B", createdAt: new Date("2020-01-02") },
       { ...baseRow, id: "hw-a", title: "A", createdAt: new Date("2020-01-01") },
@@ -151,7 +159,7 @@ describe("homeworks repository", () => {
 });
 
 describe("deriveHomeworkStatus", () => {
-  const base = { dueDate: new Date("2026-09-01T00:00:00Z") };
+  const base = { dueDate: new Date("2026-09-01T00:00:00Z"), isHidden: false, expiresAt: null };
 
   it("is draft when publishedAt is null", () => {
     expect(deriveHomeworkStatus({ ...base, publishedAt: null, releasedAt: null })).toBe("draft");
@@ -170,6 +178,7 @@ describe("deriveHomeworkStatus", () => {
   it("is active when released and due date is in the future", () => {
     expect(
       deriveHomeworkStatus({
+        ...base,
         dueDate: new Date("2099-01-01T00:00:00Z"),
         publishedAt: new Date("2026-08-01T00:00:00Z"),
         releasedAt: new Date("2026-08-01T00:00:00Z"),
@@ -180,11 +189,56 @@ describe("deriveHomeworkStatus", () => {
   it("is past_due when released and due date has passed", () => {
     expect(
       deriveHomeworkStatus({
+        ...base,
         dueDate: new Date("2020-01-01T00:00:00Z"),
         publishedAt: new Date("2019-01-01T00:00:00Z"),
         releasedAt: new Date("2019-01-01T00:00:00Z"),
       }),
     ).toBe("past_due");
+  });
+
+  // #166: isHidden/expiresAt take precedence over every other input,
+  // including draft -- the point of a single source of truth for access.
+  it("is hidden when isHidden is true, overriding an otherwise-draft homework", () => {
+    expect(
+      deriveHomeworkStatus({ ...base, publishedAt: null, releasedAt: null, isHidden: true }),
+    ).toBe("hidden");
+  });
+
+  it("is hidden when isHidden is true, overriding an otherwise-active homework", () => {
+    expect(
+      deriveHomeworkStatus({
+        ...base,
+        dueDate: new Date("2099-01-01T00:00:00Z"),
+        publishedAt: new Date("2026-08-01T00:00:00Z"),
+        releasedAt: new Date("2026-08-01T00:00:00Z"),
+        isHidden: true,
+      }),
+    ).toBe("hidden");
+  });
+
+  it("is hidden when expiresAt has passed, overriding an otherwise-active homework", () => {
+    expect(
+      deriveHomeworkStatus({
+        ...base,
+        dueDate: new Date("2099-01-01T00:00:00Z"),
+        publishedAt: new Date("2026-08-01T00:00:00Z"),
+        releasedAt: new Date("2026-08-01T00:00:00Z"),
+        expiresAt: new Date("2020-01-01T00:00:00Z"),
+      }),
+    ).toBe("hidden");
+  });
+
+  it("is not hidden when expiresAt is in the future", () => {
+    expect(
+      deriveHomeworkStatus({
+        ...base,
+        dueDate: new Date("2099-01-01T00:00:00Z"),
+        publishedAt: new Date("2026-08-01T00:00:00Z"),
+        releasedAt: new Date("2026-08-01T00:00:00Z"),
+        expiresAt: new Date("2099-01-01T00:00:00Z"),
+      }),
+    ).toBe("active");
   });
 
   // "archived" is intentionally not reachable from any input this function

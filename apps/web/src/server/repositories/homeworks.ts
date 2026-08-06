@@ -29,6 +29,8 @@ export async function listHomeworksForCourse(db: Db, scope: CourseScope): Promis
     dueDate: hw.dueDate.toISOString(),
     llmConfigId: hw.llmConfigId,
     status: deriveHomeworkStatus(hw),
+    isHidden: hw.isHidden,
+    expiresAt: hw.expiresAt?.toISOString() ?? null,
     sectionCount: countByHomeworkId.get(hw.id) ?? 0,
   }));
 }
@@ -45,28 +47,37 @@ export async function createHomework(
   return created;
 }
 
-export type HomeworkStatus = "draft" | "scheduled" | "active" | "past_due" | "archived";
+export type HomeworkStatus = "draft" | "scheduled" | "active" | "past_due" | "hidden" | "archived";
 
-/** Pure function of (dueDate, publishedAt, releasedAt) -- no DB, no `now()`
- *  parameter needed by callers (uses the real clock; tests pass fixed dates
- *  through the three inputs instead of mocking time).
+/** Pure function of (dueDate, publishedAt, releasedAt, isHidden, expiresAt)
+ *  -- no DB, no `now()` parameter needed by callers (uses the real clock;
+ *  tests pass fixed dates through the inputs instead of mocking time).
  *
  *  "archived" is a 5th status apps/admin's pre-M3 fixture typing already
- *  carried (see apps/admin/src/client/lib/fixtures.ts's Homework.status),
- *  but no issue in this milestone (#94 or otherwise) describes what would
- *  set a homework archived. This function never returns it -- the type is
- *  kept (not narrowed) so a future feature can add the missing input this
- *  function would need, without every consumer's exhaustiveness check
- *  breaking. #166 (M3) is where this gets resolved: it adds a real
- *  `is_hidden`/`expires_at`-driven "hidden" status and explicitly asks
- *  whether "hidden" and "archived" are the same concept or two -- decide
- *  there, not here. */
+ *  carried (see apps/admin/src/client/lib/fixtures.ts's Homework.status).
+ *  This function still never returns it -- the type is kept (not narrowed)
+ *  so a future feature can add the missing input it would need, without
+ *  every consumer's exhaustiveness check breaking. #166 (M3, Resolved
+ *  Design Decision 17) decided "hidden" and "archived" are distinct
+ *  concepts: "archived" has no defined semantics anywhere yet (it might
+ *  later mean something stronger than invisibility -- read-only, term-
+ *  ended, non-editable), so it stays reserved and unreachable rather than
+ *  being repurposed for #166's manual-hide/auto-expiry feature. */
 export function deriveHomeworkStatus(hw: {
   dueDate: Date;
   publishedAt: Date | null;
   releasedAt: Date | null;
+  isHidden: boolean;
+  expiresAt: Date | null;
 }): HomeworkStatus {
   const now = new Date();
+  // #166: is_hidden/expires_at take precedence over every other state,
+  // including draft -- matches the reference app's design (access is one
+  // source of truth, the enum is cosmetic). Checked first so callers can
+  // filter on deriveHomeworkStatus's result alone, never a raw column.
+  if (hw.isHidden || (hw.expiresAt !== null && hw.expiresAt.getTime() <= now.getTime())) {
+    return "hidden";
+  }
   if (!hw.publishedAt) return "draft";
   if (hw.releasedAt && hw.releasedAt.getTime() > now.getTime()) return "scheduled";
   return hw.dueDate.getTime() > now.getTime() ? "active" : "past_due";
