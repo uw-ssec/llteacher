@@ -397,6 +397,79 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     const body = (await res.json()) as { editableBy?: boolean };
     expect(body.editableBy).toBe(true);
   });
+
+  // #155: solution content must never reach a non-instructor caller.
+  it("nulls out a section's solution for a student member, even when a solution row exists", async () => {
+    findFirstHomework.mockReset().mockResolvedValue({
+      id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
+      dueDate: new Date("2020-01-02"), llmConfigId: null, publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+    });
+    findManySections.mockReset().mockResolvedValue([
+      { id: "s1", title: "Sec 1", content: "c1", order: 1, solution: { id: "sol-1", content: "the answer is 42" }, createdAt: new Date(), updatedAt: new Date() },
+    ]);
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { sections: Array<{ solution: unknown }> };
+    expect(body.sections[0]!.solution).toBeNull();
+  });
+
+  it("still returns the full solution content for an instructor", async () => {
+    findFirstHomework.mockReset().mockResolvedValue({
+      id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
+      dueDate: new Date("2020-01-02"), llmConfigId: null, publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+    });
+    findManySections.mockReset().mockResolvedValue([
+      { id: "s1", title: "Sec 1", content: "c1", order: 1, solution: { id: "sol-1", content: "the answer is 42" }, createdAt: new Date(), updatedAt: new Date() },
+    ]);
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { sections: Array<{ solution: { content: string } | null }> };
+    expect(body.sections[0]!.solution).toEqual({ id: "sol-1", content: "the answer is 42" });
+  });
+
+  // #156: draft/scheduled homeworks must 404 (not 403, so a guessed UUID
+  // can't be confirmed real) for anyone who isn't an instructor.
+  it("404s a student member for a draft homework (publishedAt null)", async () => {
+    findFirstHomework.mockReset().mockResolvedValue({
+      id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
+      dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null,
+    });
+    findManySections.mockReset().mockResolvedValue([]);
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    expect(res.status).toBe(404);
+  });
+
+  it("404s a student member for a scheduled homework (releasedAt in the future)", async () => {
+    findFirstHomework.mockReset().mockResolvedValue({
+      id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
+      dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: new Date("2020-01-01"), releasedAt: new Date("2099-01-01"),
+    });
+    findManySections.mockReset().mockResolvedValue([]);
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    expect(res.status).toBe(404);
+  });
+
+  it("still returns a draft homework normally for an instructor", async () => {
+    findFirstHomework.mockReset().mockResolvedValue({
+      id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
+      dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null,
+    });
+    findManySections.mockReset().mockResolvedValue([]);
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string };
+    expect(body.status).toBe("draft");
+  });
 });
 
 describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {

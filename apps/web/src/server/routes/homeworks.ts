@@ -127,12 +127,27 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
     return c.json({ error: "Homework not found" }, 404);
   }
 
+  // #155/#156: solutions and draft/scheduled homeworks are instructor-only.
+  // Hoisted above the response build (rather than computed per-field) so
+  // both gates share one check and neither can be added back independently
+  // without the other -- reviewed together in #154 because they're the same
+  // handler and the same class of bug (a role check the list route and the
+  // student repository both already apply, that this route skipped).
+  const isInstructor = authContext!.isInstructorOf(courseId!);
+
+  const status = deriveHomeworkStatus(result.homework);
+  if (!isInstructor && (status === "draft" || status === "scheduled")) {
+    // 404, not 403 -- indistinguishable from a homework that doesn't exist,
+    // so a guessed/leaked UUID can't be used to confirm a draft is real.
+    return c.json({ error: "Homework not found" }, 404);
+  }
+
   const sectionsResponse: SectionResponse[] = result.sections.map((s) => ({
     id: s.id,
     title: s.title,
     content: s.content,
     order: s.order,
-    solution: s.solution ? { id: s.solution.id, content: s.solution.content } : null,
+    solution: isInstructor && s.solution ? { id: s.solution.id, content: s.solution.content } : null,
     createdAt: s.createdAt.toISOString(),
     updatedAt: s.updatedAt.toISOString(),
   }));
@@ -144,11 +159,11 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
     description: result.homework.description,
     dueDate: result.homework.dueDate.toISOString(),
     llmConfigId: result.homework.llmConfigId,
-    status: deriveHomeworkStatus(result.homework),
+    status,
     publishedAt: result.homework.publishedAt?.toISOString() ?? null,
     releasedAt: result.homework.releasedAt?.toISOString() ?? null,
     sections: sectionsResponse,
-    ...(authContext!.isInstructorOf(courseId!) && { editableBy: true }),
+    ...(isInstructor && { editableBy: true }),
   };
 
   return c.json(body);
