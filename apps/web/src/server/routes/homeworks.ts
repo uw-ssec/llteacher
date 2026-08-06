@@ -1,11 +1,29 @@
 import { Hono, type Context } from "hono";
 import { makeDb } from "../../db/client";
-import { listHomeworksForCourse, createHomework, getHomeworkById, deriveHomeworkStatus, updateHomework, deleteHomework, updateHomeworkPublishState } from "../repositories/homeworks";
+import {
+  listHomeworksForCourse,
+  createHomework,
+  getHomeworkById,
+  deriveHomeworkStatus,
+  updateHomework,
+  deleteHomework,
+  updateHomeworkPublishState,
+  homeworkHasStudentActivity,
+} from "../repositories/homeworks";
+import { getOrgScopesForUser } from "../repositories/users";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import { requireCourseMember, requireInstructorOf } from "../utils/guards";
+import { AUDIT_ACTIONS, auditBestEffort } from "../utils/audit";
+import { logServerError } from "../utils/errors";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
-import type { HomeworkDetailResponse, HomeworkPublishBody, HomeworkUpdateBody, SectionResponse } from "../../shared/types";
+import type {
+  HomeworkDetailResponse,
+  HomeworkPublishBody,
+  HomeworkPublishResponse,
+  HomeworkUpdateBody,
+  SectionResponse,
+} from "../../shared/types";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -271,9 +289,55 @@ export async function publishHomeworkHandler(c: Context<AppEnv>) {
   if (!scope) return c.json({ error: "Course access denied" }, 403);
 
   const db = makeDb(c.env.DATABASE_URL);
+
+  // #94: unpublishing (publish=false) a homework that already has student
+  // activity (conversations against its sections) needs an explicit
+  // confirm -- surfaced here, before the write, so a careless unpublish
+  // doesn't silently proceed. "hides-not-deletes" already holds today
+  // (unpublishing only touches the homeworks row); this only adds the
+  // missing confirmation gate in front of it.
+  let hadExistingActivity: boolean | undefined;
+  if (body.publish === false) {
+    const existing = await getHomeworkById(db, scope, homeworkId!);
+    if (existing?.homework.publishedAt) {
+      hadExistingActivity = await homeworkHasStudentActivity(db, homeworkId!);
+      if (hadExistingActivity && body.confirm !== true) {
+        return c.json(
+          {
+            error: "This homework has existing student activity. Pass confirm: true to unpublish anyway.",
+            hasStudentActivity: true,
+          },
+          409,
+        );
+      }
+    }
+  }
+
   const updated = await updateHomeworkPublishState(db, scope, homeworkId!, { publish: body.publish, releasedAt });
   if (!updated) return c.json({ error: "Homework not found" }, 404);
-  return c.json({ id: updated.id, publishedAt: updated.publishedAt, releasedAt: updated.releasedAt });
+
+  // Best-effort (#147): an audit-write failure must not fail a
+  // publish/unpublish that already succeeded -- mirrors profile.ts's
+  // patchProfileHandler pattern.
+  try {
+    const orgScopes = await getOrgScopesForUser(db, authContext.session.userId);
+    await auditBestEffort(db, orgScopes, {
+      actorUserId: authContext.session.userId,
+      action: body.publish ? AUDIT_ACTIONS.HOMEWORK_PUBLISHED : AUDIT_ACTIONS.HOMEWORK_UNPUBLISHED,
+      targetType: "homework",
+      targetId: updated.id,
+    });
+  } catch (err) {
+    logServerError("publishHomeworkHandler", err);
+  }
+
+  const responseBody: HomeworkPublishResponse = {
+    id: updated.id,
+    publishedAt: updated.publishedAt?.toISOString() ?? null,
+    releasedAt: updated.releasedAt?.toISOString() ?? null,
+    ...(hadExistingActivity !== undefined && { hadExistingActivity }),
+  };
+  return c.json(responseBody);
 }
 
 // Sub-app preserved for direct unit testing; production routing happens via

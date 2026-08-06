@@ -1,6 +1,6 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { homeworks, sections, sectionSolutions } from "../../db/schema";
+import { homeworks, sections, sectionSolutions, conversations } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import {
   planSectionDiff,
@@ -92,6 +92,20 @@ export async function deleteHomework(db: Db, scope: CourseScope, id: string) {
     .where(and(eq(homeworks.id, id), eq(homeworks.courseId, scope)))
     .returning({ id: homeworks.id });
   return deleted ?? null;
+}
+
+/** Cheap existence check (#94) for the unpublish-with-activity warning:
+ *  does any conversation exist for any of this homework's sections? An
+ *  EXISTS-shaped `limit(1)` query, not a full fetch -- the route layer only
+ *  needs a boolean, not the rows themselves. */
+export async function homeworkHasStudentActivity(db: Db, homeworkId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ id: conversations.id })
+    .from(conversations)
+    .innerJoin(sections, eq(conversations.sectionId, sections.id))
+    .where(eq(sections.homeworkId, homeworkId))
+    .limit(1);
+  return !!row;
 }
 
 export async function updateHomeworkPublishState(

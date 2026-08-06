@@ -1,5 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
-import { listHomeworksForCourse, createHomework, getHomeworkById, updateHomework, deriveHomeworkStatus } from "./homeworks";
+import {
+  listHomeworksForCourse,
+  createHomework,
+  getHomeworkById,
+  updateHomework,
+  deriveHomeworkStatus,
+  homeworkHasStudentActivity,
+} from "./homeworks";
 import { unsafeCourseScope } from "./scope";
 import type { Db } from "../../db/client";
 
@@ -155,7 +162,7 @@ describe("deriveHomeworkStatus", () => {
 // DATABASE_URL isn't set locally; always runs in CI per turbo.json's
 // declared env).
 import { makeNodeDb } from "../../db/nodeClient";
-import { organizations, courses, courseMemberships, users } from "../../db/schema";
+import { organizations, courses, courseMemberships, users, conversations } from "../../db/schema";
 import { eq as eq2 } from "drizzle-orm";
 
 // Fixed byte arrays would collide with users_email_blind_index_uq across
@@ -366,6 +373,36 @@ describe.skipIf(!process.env.DATABASE_URL)("updateHomework (real DB)", () => {
     await expect(
       updateHomework(db, scope, created!.id, { sections: rotated }),
     ).rejects.toThrow(/no free order slot/i);
+
+    await db.delete(organizations).where(eq2(organizations.id, org.id));
+  });
+});
+
+describe.skipIf(!process.env.DATABASE_URL)("homeworkHasStudentActivity (real DB)", () => {
+  it("is false with no conversations against any section, true once one is created", async () => {
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const { org, membership } = await seedCourseWithInstructor(db, `6-${crypto.randomUUID()}`);
+    const scope = unsafeCourseScope(membership.courseId);
+    const created = await createHomework(db, scope, {
+      createdById: membership.id, title: "HW6", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    await updateHomework(db, scope, created!.id, {
+      sections: [{ title: "Sec A", content: "a", order: 1 }],
+    });
+    const withSections = await getHomeworkById(db, scope, created!.id);
+    const section = withSections!.sections[0]!;
+
+    expect(await homeworkHasStudentActivity(db, created!.id)).toBe(false);
+
+    await db.insert(conversations).values({
+      ownerUserId: membership.userId,
+      courseId: membership.courseId,
+      sectionId: section.id,
+      kind: "section",
+      title: "t",
+    });
+
+    expect(await homeworkHasStudentActivity(db, created!.id)).toBe(true);
 
     await db.delete(organizations).where(eq2(organizations.id, org.id));
   });

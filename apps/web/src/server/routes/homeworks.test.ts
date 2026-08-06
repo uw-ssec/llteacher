@@ -8,6 +8,7 @@ import {
   deleteHomeworkHandler,
   publishHomeworkHandler,
 } from "./homeworks";
+import { auditEvents } from "../../db/schema";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 
@@ -21,6 +22,14 @@ const findManySections = vi.fn();
 // `db.select({...}).from(sections).where(...).groupBy(...)` chain, not a
 // db.query.*.findMany call -- faked separately from the two above.
 const selectSectionCounts = vi.fn();
+// publishHomeworkHandler's audit write (Task 24, #94/#147): mirrors
+// profile.test.ts's convention -- db.insert(auditEvents, ...) is captured
+// into auditInserts, and getOrgScopesForUser's selectDistinct chain is fed
+// by dbOrgScopesForUser. Reset explicitly (assigned to `[]`) inside any test
+// that asserts on them; other tests are unaffected by the default `[]`.
+let auditInserts: Record<string, unknown>[] = [];
+let auditInsertError: Error | null = null;
+let dbOrgScopesForUser: string[] = [];
 vi.mock("../../db/client", () => ({
   makeDb: () => ({
     query: {
@@ -30,8 +39,27 @@ vi.mock("../../db/client", () => ({
       },
       sections: { findMany: (...args: unknown[]) => findManySections(...args) },
     },
-    insert: (...args: unknown[]) => insertHomework(...args),
+    insert: (...args: unknown[]) => {
+      const [table] = args;
+      if (table === auditEvents) {
+        return {
+          values: (v: Record<string, unknown>) => {
+            if (auditInsertError) throw auditInsertError;
+            auditInserts.push(v);
+            return { returning: async () => [{ id: "audit-1", ...v }] };
+          },
+        };
+      }
+      return insertHomework(...args);
+    },
     select: (...args: unknown[]) => selectSectionCounts(...args),
+    selectDistinct: () => ({
+      from: () => ({
+        innerJoin: () => ({
+          where: async () => dbOrgScopesForUser.map((organizationId) => ({ organizationId })),
+        }),
+      }),
+    }),
   }),
 }));
 
@@ -43,10 +71,13 @@ vi.mock("../../db/client", () => ({
 // drive updateHomework's return/throw contract in one line, while
 // `importOriginal` keeps every other exported repository function (used by
 // the handlers above) running against their real implementation over the
-// already-mocked db client.
+// already-mocked db client. homeworkHasStudentActivity (Task 24) is mocked
+// the same way -- its real implementation is a select/innerJoin/where/limit
+// chain, not worth faking through the db-client mock above.
 const updateHomeworkMock = vi.fn();
 const deleteHomeworkMock = vi.fn();
 const publishHomeworkMock = vi.fn();
+const homeworkHasStudentActivityMock = vi.fn();
 vi.mock("../repositories/homeworks", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../repositories/homeworks")>();
   return {
@@ -54,6 +85,7 @@ vi.mock("../repositories/homeworks", async (importOriginal) => {
     updateHomework: (...args: unknown[]) => updateHomeworkMock(...args),
     deleteHomework: (...args: unknown[]) => deleteHomeworkMock(...args),
     updateHomeworkPublishState: (...args: unknown[]) => publishHomeworkMock(...args),
+    homeworkHasStudentActivity: (...args: unknown[]) => homeworkHasStudentActivityMock(...args),
   };
 });
 
@@ -490,6 +522,14 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
   });
 
   it("un-publishes (draft) when publish=false", async () => {
+    // publishedAt: null -- not currently published, so Task 24's
+    // unpublish-with-activity gate (which only fires for a *currently
+    // published* homework) never engages here.
+    findFirstHomework.mockReset().mockResolvedValue({
+      id: "hw-1", courseId: "course-a", title: "t", description: "d",
+      dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null,
+    });
+    findManySections.mockReset().mockResolvedValue([]);
     publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
     const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
       "/api/courses/course-a/homeworks/hw-1/publish",
@@ -497,5 +537,132 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
       TEST_ENV,
     );
     expect(res.status).toBe(200);
+  });
+
+  // Task 24 (#94): unpublish-with-activity confirmation gate.
+  function mockCurrentlyPublishedHomework() {
+    findFirstHomework.mockReset().mockResolvedValue({
+      id: "hw-1", courseId: "course-a", title: "t", description: "d",
+      dueDate: new Date("2099-01-01"), llmConfigId: null,
+      publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+    });
+    findManySections.mockReset().mockResolvedValue([]);
+  }
+
+  it("returns 409 with hasStudentActivity when unpublishing a currently-published homework with existing activity, without confirm", async () => {
+    mockCurrentlyPublishedHomework();
+    homeworkHasStudentActivityMock.mockReset().mockResolvedValue(true);
+    publishHomeworkMock.mockReset();
+
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: false }) },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { hasStudentActivity: boolean };
+    expect(body.hasStudentActivity).toBe(true);
+    expect(publishHomeworkMock).not.toHaveBeenCalled();
+  });
+
+  it("unpublishes a currently-published homework with existing activity when confirm: true", async () => {
+    mockCurrentlyPublishedHomework();
+    homeworkHasStudentActivityMock.mockReset().mockResolvedValue(true);
+    publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
+
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publish: false, confirm: true }),
+      },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { hadExistingActivity?: boolean };
+    expect(body.hadExistingActivity).toBe(true);
+    expect(publishHomeworkMock).toHaveBeenCalledOnce();
+  });
+
+  it("unpublishes a currently-published homework with zero activity without needing confirm", async () => {
+    mockCurrentlyPublishedHomework();
+    homeworkHasStudentActivityMock.mockReset().mockResolvedValue(false);
+    publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
+
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: false }) },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(200);
+    expect(publishHomeworkMock).toHaveBeenCalledOnce();
+  });
+
+  it("publishing (publish: true) never triggers the activity check, even with existing activity", async () => {
+    homeworkHasStudentActivityMock.mockReset().mockResolvedValue(true);
+    publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: new Date(), releasedAt: new Date() });
+
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: true }) },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(200);
+    expect(homeworkHasStudentActivityMock).not.toHaveBeenCalled();
+  });
+
+  // Task 24 (#94, #147): publish/unpublish transitions are audited.
+  it("audits homework.unpublished exactly once on a successful unpublish", async () => {
+    mockCurrentlyPublishedHomework();
+    homeworkHasStudentActivityMock.mockReset().mockResolvedValue(false);
+    publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
+    dbOrgScopesForUser = ["org-a"];
+    auditInserts = [];
+
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: false }) },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(200);
+    expect(auditInserts).toHaveLength(1);
+    expect(auditInserts[0]).toMatchObject({
+      actorUserId: "u1", action: "homework.unpublished", targetType: "homework", targetId: "hw-1",
+    });
+  });
+
+  it("audits homework.published exactly once on a successful publish", async () => {
+    publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: new Date(), releasedAt: new Date() });
+    dbOrgScopesForUser = ["org-a"];
+    auditInserts = [];
+
+    const res = await buildApp(
+      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+    ).request(
+      "/api/courses/course-a/homeworks/hw-1/publish",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: true }) },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(200);
+    expect(auditInserts).toHaveLength(1);
+    expect(auditInserts[0]).toMatchObject({
+      actorUserId: "u1", action: "homework.published", targetType: "homework", targetId: "hw-1",
+    });
   });
 });

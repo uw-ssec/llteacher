@@ -88,6 +88,22 @@ export interface HomeworkPublishBody {
    *  be in the future if present -- the route rejects a past releasedAt
    *  with 400. */
   releasedAt?: string;
+  /** Required to be `true` to unpublish (publish=false) a homework that
+   *  already has student activity (#94) -- omitted/false on that request
+   *  shape gets a 409 warning instead of applying the transition. Ignored
+   *  otherwise. */
+  confirm?: boolean;
+}
+
+export interface HomeworkPublishResponse {
+  id: string;
+  publishedAt: string | null;
+  releasedAt: string | null;
+  /** Present only when this request unpublished a homework that was
+   *  currently published -- true/false reports whether it had existing
+   *  student activity (conversations against its sections) at the time of
+   *  the transition. */
+  hadExistingActivity?: boolean;
 }
 
 export interface SubmissionResponse {
