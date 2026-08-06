@@ -33,6 +33,8 @@
    Building #68's full course-management API or #70's real switcher inside M3 would be scope creep into a different milestone's job, and would likely get reworked once those land properly. Decision (confirmed with the requester): extend the *existing* `GET /api/profile` response (already fetched on app load by both apps' `AuthProvider`, minimal new surface, additive-only) with the caller's course membership(s) as an **array**, not a single id — an instructor teaching multiple courses must not be silently broken by this stopgap. `apps/admin`'s `App.tsx` then uses `courses[0]` for now, matching the app's existing single-course assumption everywhere else, with an explicit code comment (not just a plan note) explaining why this is temporary and that #70's real switcher is the intended replacement — so the stopgap is self-documenting in the code a future implementer of #70 will actually be reading, not just in this plan.
    Scope of the extension, deliberately minimal: `ProfileWithStats` gains an optional `courses?: { id: string; title: string }[]` field, populated only for instructor/ta/admin roles (parallel to the existing `instructorStats` field), from non-dropped course memberships only (a dropped membership showing up in a course picker would be misleading, even though the route-layer `requireInstructorOf` guard independently re-verifies real access regardless of what the client sends). No new route, no pagination, no org-admin "all courses" case, no archival filtering beyond what already exists — those are #68's job.
 9. **Student sidebar submit needs a `conversationId` per section — thread the id the backend already fetches, not a new architectural gap** (found during Task 18 planning, before dispatch): the brief's `handleSubmit` reads `section?.conversationId`, but `SidebarSection` (`packages/ui/src/components/Sidebar.tsx`) has no such field, and neither does `StudentSectionProgress` (Task 9, `repositories/studentHomeworks.ts`) — the brief's own code would not typecheck as written. Unlike decision 8's course-id gap, this is *not* a missing-data problem: `getStudentHomeworksForUser` already runs `SELECT ... FROM conversations WHERE sectionId = ... AND ownerUserId = ... AND isDeleted = false` per section (to compute status) and already has the conversation's `id` in hand at that point — it just never puts it in the returned object. No new query, no new milestone dependency, no design alternative worth pausing on: extend `StudentSectionProgress` with `conversationId: string | null` (populated from the already-fetched `activeConversation?.id ?? null`), extend `SidebarSection` with an optional `conversationId?: string`, and thread it through Task 11's `useStudentHomework` mapping in `App.tsx`. This revises two already-merged, already-reviewed tasks (9 and 11) — expected and unremarkable: the gap only became visible once a *later* task (18) tried to consume data the earlier ones never had a reason to carry. Resolved directly without pausing for input, unlike decision 8, since there's no genuine architectural trade-off here (no alternative design, no scope-creep risk into another milestone) — just a field that needed to be threaded one level further than it was.
+10. **`db.query.X.findMany({ with: { relation: true } })` silently corrupts encrypted columns reached through the join — found during Task 19 implementation, by running against real Postgres, not by reading the code.** `getHomeworkSubmissionsMatrix`'s roster fetch originally used Drizzle's relational query API (`db.query.courseMemberships.findMany({ with: { user: true } })`) to pull each membership's user row in one query. This installed Drizzle version resolves a nested `with` via `left join lateral (select json_build_array(...))`, which forces Postgres to serialize every joined column — including `users.email`/`displayName`'s `bytea` — through JSON. Postgres renders `bytea` as hex-text inside that JSON array, so node-postgres's JSON parser hands the `encryptedText` customType's `fromDriver` a plain string instead of a `Buffer`; `new Uint8Array(aString)` doesn't throw, it silently returns a **0-length array**, so every `IdentityCipher.decryptString` call downstream failed with "Ciphertext shorter than envelope header" — a failure mode that would have shipped to production despite a clean typecheck and code that reads correctly at a glance.
+    Fixed by switching to a flat `select().from().innerJoin()` (still one query, still no N+1 — every column stays a top-level SQL result column, so node-postgres's normal `bytea` parser, which produces a real `Buffer`, runs instead). This is a narrow, function-scoped fix, not a codebase-wide one: only relational `with` traversals that reach an `encryptedText`/`blindIndex` custom-typed column are affected (a `with` that only touches plain-text columns, like Task 15's `courseMemberships.findMany({ with: { course: true } })` pulling `courses.id`/`title`, is unaffected — verified those columns are plain `text`, not `encryptedText`). Flagged as a background task for a wider codebase sweep rather than auditing every `with:` call site in this pass, which would be scope creep beyond this task — worth surfacing to the requester as a real, if narrow, finding regardless of this epic's own scope.
 
 ---
 
@@ -3452,7 +3454,7 @@ describe.skipIf(!DATABASE_URL)("getHomeworkSubmissionsMatrix (real DB)", () => {
 
 ```ts
 // apps/web/src/server/repositories/submissions.ts
-import { sections as sectionsTable, homeworks } from "../../db/schema";
+import { homeworks, users } from "../../db/schema";
 import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
 
 export interface SubmissionCell {
@@ -3506,10 +3508,34 @@ export async function getHomeworkSubmissionsMatrix(
   });
   if (!homework) return null;
 
-  const roster = await db.query.courseMemberships.findMany({
-    where: and(eq(courseMemberships.courseId, scope), eq(courseMemberships.role, "student"), isNull(courseMemberships.droppedAt)),
-    with: { user: true },
-  });
+  // Plain select+join, not db.query.courseMemberships.findMany({with:{user:true}}):
+  // found during Task 19 implementation, by running against real Postgres,
+  // not by reading the code. This installed Drizzle version resolves a
+  // nested `with` via `left join lateral (select json_build_array(...))`,
+  // which forces Postgres to serialize every joined column -- including
+  // users.email/displayName's `bytea` -- through JSON. Postgres renders
+  // bytea as hex-text inside that JSON array, so node-postgres's JSON
+  // parser hands the encryptedText customType's fromDriver a plain string
+  // instead of a Buffer; `new Uint8Array(aString)` silently returns a
+  // *0-length* array rather than throwing, so every decrypt below would
+  // have failed with "Ciphertext shorter than envelope header" in
+  // production despite typechecking and looking correct. A flat
+  // select+join keeps every column a top-level SQL result column, so
+  // node-postgres's normal bytea parser (a real Buffer) runs and
+  // fromDriver decodes correctly -- still one query, no N+1. Any other
+  // relational `with` traversal that reaches an encryptedText column in
+  // this codebase carries the same risk; worth a follow-up audit, flagged
+  // separately, not fixed wholesale here.
+  const roster = await db
+    .select({
+      membershipId: courseMemberships.id,
+      userId: courseMemberships.userId,
+      email: users.email,
+      displayName: users.displayName,
+    })
+    .from(courseMemberships)
+    .innerJoin(users, eq(courseMemberships.userId, users.id))
+    .where(and(eq(courseMemberships.courseId, scope), eq(courseMemberships.role, "student"), isNull(courseMemberships.droppedAt)));
 
   const sectionIds = homework.sections.map((s) => s.id);
   const allConversations = sectionIds.length
@@ -3525,8 +3551,8 @@ export async function getHomeworkSubmissionsMatrix(
 
   const students: StudentSubmissionRow[] = [];
   for (const membership of roster) {
-    const displayName = membership.user.displayName ? await cipher.decryptString(membership.user.displayName) : "";
-    const email = await cipher.decryptString(membership.user.email);
+    const displayName = membership.displayName ? await cipher.decryptString(membership.displayName) : "";
+    const email = await cipher.decryptString(membership.email);
 
     const cells: SubmissionCell[] = [];
     let totalConversations = 0;
@@ -3568,7 +3594,7 @@ export async function getHomeworkSubmissionsMatrix(
     students.push({
       studentId: membership.userId, displayName, email, sections: cells,
       totalConversations, submissionCount, participationStatus,
-      lastActivityAt: lastActivityAt?.toISOString() ?? null,
+      lastActivityAt: studentLastActivityAt?.toISOString() ?? null,
     });
   }
 
