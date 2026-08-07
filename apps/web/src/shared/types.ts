@@ -148,6 +148,23 @@ export interface SectionAnswerResponse {
   updatedAt: string;
 }
 
+export interface WidgetResponseBody {
+  which: "pre" | "post";
+  /** 0-10 inclusive -- validated server-side, not trusted from the
+   *  client-side slider bound. */
+  value: number;
+}
+
+export interface WidgetResponseResponse {
+  id: string;
+  widgetId: string;
+  userId: string;
+  preValue: number | null;
+  preSubmittedAt: string | null;
+  postValue: number | null;
+  postSubmittedAt: string | null;
+}
+
 import type {
   HomeworkSubmissionsMatrix,
   ParticipationStatus,
