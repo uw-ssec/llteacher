@@ -4768,6 +4768,372 @@ git commit -m "feat(admin): hide/expiry toggle in HomeworkForm, wired in create/
 
 **End of Phase 8.** All 7 tasks complete, committed individually. Full monorepo suite green (442 tests: 382 web + 43 admin + 18 ui, 0 failures) and typecheck clean (`llteacher-web`'s two `TS2556` errors in `routes/homeworks.test.ts` are pre-existing, confirmed unrelated by checking out the clean base commit eb9f8a4 into a disposable worktree before touching any code -- not fixed here, out of scope for #166).
 
+---
+
+## Phase 9 — Issue #164: Non-interactive question sections with student answers
+
+**Goal:** Support sections that collect a plain free-text answer instead of an AI conversation -- a type discriminator on `sections`, a `section_answers` table, submit/read routes, status derivation, dashboard counting, and admin authoring. See Resolved Design Decisions 19-20 for the two open questions the issue itself flags.
+
+### Task 1: Schema — `sections.type` + `section_answers` table + migration
+
+**Files:**
+- Modify: `apps/web/src/db/schema/content.ts` (new `sectionTypeEnum`, `sections.type` column)
+- Modify: `apps/web/src/db/schema/runtime.ts` (new `sectionAnswers` table + relations -- lives alongside `submissions`/`conversations`, the other per-user runtime-data tables)
+- Create: generated migration
+
+**Interfaces:**
+- Produces: `sectionTypeEnum = pgEnum("section_type", ["conversation", "non_interactive"])`, `sections.type: "conversation" | "non_interactive"` (not null, default `"conversation"`), `sectionAnswers` table.
+
+- [ ] **Step 1: Add the enum and column** to `content.ts`, next to `sections`' other columns:
+
+```ts
+export const sectionTypeEnum = pgEnum("section_type", ["conversation", "non_interactive"]);
+
+// inside sections pgTable(...) columns:
+// #164: defaults to "conversation" so every existing row is unchanged.
+// non_interactive sections collect a section_answers row instead of a
+// conversation -- see runtime.ts's sectionAnswers table.
+type: sectionTypeEnum("type").notNull().default("conversation"),
+```
+
+- [ ] **Step 2: Add `sectionAnswers`** to `runtime.ts`, modeled on `submissions`' denormalized-org-id pattern (verify at write time via the real parent chain, never trust client input) and `conversations`' owner-column naming:
+
+```ts
+// ---------- SectionAnswer ----------
+// #164: the non-interactive counterpart to a conversation -- one row per
+// (user, section), upserted on submit-and-revise (Resolved Design Decision
+// 19: not a history table, matches submitSection's own existing
+// update-in-place resubmission pattern; #128's actual ambiguity is about a
+// conversation's restart cycle, which doesn't exist for this section type).
+export const sectionAnswers = pgTable(
+  "section_answers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sectionId: uuid("section_id").notNull().references(() => sections.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    content: text("content").notNull(),
+    submittedAt: timestamp("submitted_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("section_answers_user_section_uq").on(t.userId, t.sectionId),
+    index("section_answers_org_idx").on(t.organizationId),
+  ],
+);
+
+export const sectionAnswersRelations = relations(sectionAnswers, ({ one }) => ({
+  section: one(sections, { fields: [sectionAnswers.sectionId], references: [sections.id] }),
+  user: one(users, { fields: [sectionAnswers.userId], references: [users.id] }),
+}));
+```
+
+`sections` is imported from `./content` in `runtime.ts` already (verify the existing import line and extend it, don't duplicate).
+
+- [ ] **Step 3:** `cd apps/web && npm run db:generate` -- verify the generated migration adds exactly the `type` column, the enum type, and the new `section_answers` table.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/db/schema/content.ts apps/web/src/db/schema/runtime.ts apps/web/src/db/migrations/
+git commit -m "feat(db): sections.type + section_answers table (#164)"
+```
+
+### Task 2: `planSectionDiff` threads `type` through change detection
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/sections.ts`
+- Modify: `apps/web/src/server/repositories/sections.test.ts`
+
+**Interfaces:**
+- `ExistingSection` gains `type: "conversation" | "non_interactive"`. `IncomingSection` gains `type?: "conversation" | "non_interactive"` (optional -- an omitted type on an existing section leaves it unchanged; a `toCreate` with no type defaults to `"conversation"` at the DB layer, matching the column default). `SectionCreatePlan`/`SectionUpdatePlan` gain `type: "conversation" | "non_interactive"` (always resolved, never optional, so downstream consumers never re-derive the default).
+
+- [ ] **Step 1: Extend the four interfaces** with the `type` field as described above.
+- [ ] **Step 2: Resolve the incoming type with a default** near the top of `planSectionDiff` (or per-item, whichever reads cleaner): `const incomingType = s.type ?? "conversation"`.
+- [ ] **Step 3: Thread `type` into `toCreate`** (`type: incomingType`) and **into the `toUpdate` change-detection**: add `const typeChanged = prior.type !== incomingType;` alongside `titleChanged`/`contentChanged`/`orderChanged`, include it in the `if (titleChanged || contentChanged || orderChanged || solutionChanged || typeChanged)` condition, and set `type: incomingType` on the pushed `SectionUpdatePlan`.
+- [ ] **Step 4: Tests** in `sections.test.ts`: an incoming section with a changed `type` (title/content/order unchanged) still produces a `toUpdate` entry; an incoming section with `type` omitted preserves the existing type untouched (not silently reset to `"conversation"`); a brand-new section's `toCreate` entry carries the incoming type or defaults to `"conversation"` when omitted.
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/web/src/server/repositories/sections.ts apps/web/src/server/repositories/sections.test.ts
+git commit -m "feat(sections): planSectionDiff detects section type changes (#164)"
+```
+
+### Task 3: `resolveSectionWrites`/`updateHomework` write the `type` column
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/homeworks.ts`
+- Modify: `apps/web/src/server/repositories/homeworks.test.ts`
+
+**Interfaces:**
+- `resolveSectionWrites`'s `pushSectionInsert`/`pushSectionUpdate` callback signatures both gain a `type` parameter (5 args total, inserted after `content`: `(id, order, title, content, type)`).
+
+- [ ] **Step 1: Extend `PendingWrite`'s two variants** with `type: "conversation" | "non_interactive"`, populate it in both `pending.push(...)` call sites (from `upd.type`/`create.type`), and pass `write.type` through in `apply()`'s two branches.
+- [ ] **Step 2: Update both callback signatures** and their five call sites (2 in the `db.batch()` production path, i.e. insert+update; 2 in the `db.transaction()` test/dev path; plus the two closures inside `resolveSectionWrites` itself if typed inline) to accept and use the new `type` parameter:
+
+```ts
+// production path
+(sectionId, order, title, content, type) => {
+  statements.push(db.insert(sections).values({ id: sectionId, homeworkId: id, title, content, order, type }));
+},
+(sectionId, order, title, content, type) => {
+  statements.push(db.update(sections).set({ title, content, order, type, updatedAt: new Date() }).where(eq(sections.id, sectionId)));
+},
+// test/dev path -- same shape, `await tx.insert/update` instead of `statements.push`
+```
+
+- [ ] **Step 3: Tests** in `homeworks.test.ts` (real-DB, gated by `DATABASE_URL` like the rest of this file's `updateHomework` suite): creating a homework with a `type: "non_interactive"` section persists it; editing an existing section's `type` from `"conversation"` to `"non_interactive"` (title/content/order unchanged) persists the change; omitting `type` on an edit leaves the existing type untouched.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/homeworks.ts apps/web/src/server/repositories/homeworks.test.ts
+git commit -m "feat(homeworks): updateHomework writes sections.type on both write paths (#164)"
+```
+
+### Task 4: Repository — `section_answers` read/upsert
+
+**Files:**
+- Create: `apps/web/src/server/repositories/sectionAnswers.ts`
+- Create: `apps/web/src/server/repositories/sectionAnswers.test.ts`
+
+**Interfaces:**
+- Produces: `upsertSectionAnswer(db: Db, scope: OrgScope, sectionId: string, userId: string, content: string): Promise<{id, sectionId, userId, content, submittedAt, updatedAt}>` -- verifies (via a real join, not trusting the caller) that `sectionId` resolves to a `non_interactive` section within `scope`'s org before writing; throws a plain `Error` otherwise (route layer maps to 403/404, matching `createSubmission`'s existing convention).
+- Produces: `getSectionAnswer(db: Db, scope: OrgScope, sectionId: string, userId: string): Promise<SectionAnswer | null>`.
+
+- [ ] **Step 1: `upsertSectionAnswer`**, modeled directly on `submitSection`'s existing-row-update pattern and `createSubmission`'s ownership-verification-via-join pattern:
+
+```ts
+export async function upsertSectionAnswer(db: Db, scope: OrgScope, sectionId: string, userId: string, content: string) {
+  const [owned] = await db
+    .select({ id: sections.id, type: sections.type })
+    .from(sections)
+    .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
+    .innerJoin(courses, eq(homeworks.courseId, courses.id))
+    .where(and(eq(sections.id, sectionId), eq(courses.organizationId, scope)));
+  if (!owned) throw new Error("Section not found in this org scope");
+  if (owned.type !== "non_interactive") throw new Error("Section does not accept a direct answer");
+
+  const [existing] = await db
+    .select({ id: sectionAnswers.id })
+    .from(sectionAnswers)
+    .where(and(eq(sectionAnswers.sectionId, sectionId), eq(sectionAnswers.userId, userId)));
+  if (existing) {
+    const [updated] = await db
+      .update(sectionAnswers)
+      .set({ content, updatedAt: new Date() })
+      .where(eq(sectionAnswers.id, existing.id))
+      .returning();
+    return updated!;
+  }
+  const [created] = await db
+    .insert(sectionAnswers)
+    .values({ sectionId, userId, organizationId: scope, content })
+    .returning();
+  return created!;
+}
+```
+
+- [ ] **Step 2: `getSectionAnswer`** -- plain scoped select, same shape as `getSubmissionByConversation`.
+- [ ] **Step 3: Tests** (mock-`db` style, matching `homeworks.test.ts`'s convention): first submit creates a row; second submit for the same (user, section) updates the same row (`updatedAt` changes, `id` stays the same, no second row); submitting against a `"conversation"`-type section throws; submitting against a section outside `scope`'s org throws; `getSectionAnswer` returns `null` when none exists.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/sectionAnswers.ts apps/web/src/server/repositories/sectionAnswers.test.ts
+git commit -m "feat(sections): section_answers upsert-on-revise repository (#164)"
+```
+
+### Task 5: Routes — student submit/revise + instructor read
+
+**Files:**
+- Create: `apps/web/src/server/routes/sectionAnswers.ts`
+- Create: `apps/web/src/server/routes/sectionAnswers.test.ts`
+- Modify: `apps/web/src/server/index.ts`
+- Modify: `apps/web/src/shared/types.ts`
+
+**Interfaces:**
+- Produces: `submitSectionAnswerHandler`, `PATCH /api/sections/:sectionId/answer`, guarded by `requireRole(["student"])` only -- no `:courseId`, mirroring `submitSectionHandler`'s exact pattern (org resolved via `getOrgScopesForUser`/`orgScopes[0]`, ownership verified inside the repository call via the real parent chain, not a route-layer guard param).
+- Produces: `getSectionAnswerHandler`, `GET /api/courses/:courseId/sections/:sectionId/answers/:studentId`, guarded by `requireInstructorOf()`, org resolved via `getOrgScopeForCourse(db, courseId)`.
+- Produces `SectionAnswerBody { content: string }`, `SectionAnswerResponse { id, sectionId, userId, content, submittedAt, updatedAt }` (all timestamps ISO strings) in `shared/types.ts`.
+
+- [ ] **Step 1: Add the two response types** to `shared/types.ts`.
+- [ ] **Step 2: `submitSectionAnswerHandler`**, modeled on `submitSectionHandler`:
+
+```ts
+export async function submitSectionAnswerHandler(c: Context<AppEnv>) {
+  const sectionId = c.req.param("sectionId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+  if (!authContext || !authContext.hasRole("student")) {
+    return c.json({ error: "Insufficient permissions" }, 403);
+  }
+  let body: SectionAnswerBody;
+  try {
+    body = await c.req.json<SectionAnswerBody>();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+  if (typeof body.content !== "string" || body.content.trim() === "") {
+    return c.json({ error: "content is required" }, 400);
+  }
+  const db = makeDb(c.env.DATABASE_URL);
+  const orgScopes = await getOrgScopesForUser(db, authContext.session.userId);
+  const orgScope = orgScopes[0];
+  if (!orgScope) return c.json({ error: "No organization membership found" }, 403);
+  try {
+    const answer = await upsertSectionAnswer(db, orgScope, sectionId!, authContext.session.userId, body.content);
+    const responseBody: SectionAnswerResponse = {
+      id: answer.id, sectionId: answer.sectionId, userId: answer.userId,
+      content: answer.content, submittedAt: answer.submittedAt.toISOString(), updatedAt: answer.updatedAt.toISOString(),
+    };
+    return c.json(responseBody);
+  } catch {
+    // Same uniform-403 rationale as submitSectionHandler: don't let a
+    // not-found-vs-wrong-type distinction leak section existence.
+    return c.json({ error: "Section not found or does not accept a direct answer" }, 403);
+  }
+}
+```
+
+- [ ] **Step 3: `getSectionAnswerHandler`**:
+
+```ts
+export async function getSectionAnswerHandler(c: Context<AppEnv>) {
+  const courseId = c.req.param("courseId");
+  const sectionId = c.req.param("sectionId");
+  const studentId = c.req.param("studentId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
+    return c.json({ error: "Instructor access denied" }, 403);
+  }
+  const db = makeDb(c.env.DATABASE_URL);
+  const orgScope = await getOrgScopeForCourse(db, courseId);
+  if (!orgScope) return c.json({ error: "Course access denied" }, 403);
+  const answer = await getSectionAnswer(db, orgScope, sectionId!, studentId!);
+  if (!answer) return c.json({ error: "Answer not found" }, 404);
+  const responseBody: SectionAnswerResponse = {
+    id: answer.id, sectionId: answer.sectionId, userId: answer.userId,
+    content: answer.content, submittedAt: answer.submittedAt.toISOString(), updatedAt: answer.updatedAt.toISOString(),
+  };
+  return c.json(responseBody);
+}
+```
+
+- [ ] **Step 4: Register both routes** in `index.ts`:
+
+```ts
+app.patch("/api/sections/:sectionId/answer", requireRole(["student"])(submitSectionAnswerHandler));
+app.get(
+  "/api/courses/:courseId/sections/:sectionId/answers/:studentId",
+  requireInstructorOf()(getSectionAnswerHandler),
+);
+```
+
+- [ ] **Step 5: Tests** in `sectionAnswers.test.ts` (mirrors `submissions.test.ts`'s route-test structure): non-student 403 on submit; empty/missing content 400; a successful submit returns 200 with the expected body; a `"conversation"`-type section 403s on submit; non-instructor 403 on the read route; a missing answer 404s; a found answer returns the expected body.
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/web/src/server/routes/sectionAnswers.ts apps/web/src/server/routes/sectionAnswers.test.ts apps/web/src/server/index.ts apps/web/src/shared/types.ts
+git commit -m "feat(api): section answer submit/revise + instructor read routes (#164)"
+```
+
+### Task 6: Status derivation — `deriveSectionStatus` gains `hasAnswer`
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/studentHomeworks.ts`
+- Modify: `apps/web/src/server/repositories/studentHomeworks.test.ts`
+
+**Interfaces:**
+- `deriveSectionStatus(input: { dueDate, hasActiveConversation, hasSubmission, hasAnswer })` -- `hasAnswer` treated identically to `hasSubmission`.
+
+- [ ] **Step 1: Extend the function**:
+
+```ts
+export function deriveSectionStatus(input: {
+  dueDate: Date;
+  hasActiveConversation: boolean;
+  hasSubmission: boolean;
+  hasAnswer: boolean;
+}): SectionStatusType {
+  const overdue = input.dueDate.getTime() < Date.now();
+  if (input.hasSubmission || input.hasAnswer) return "submitted";
+  if (input.hasActiveConversation) return overdue ? "in_progress_overdue" : "in_progress";
+  return overdue ? "overdue" : "not_started";
+}
+```
+
+- [ ] **Step 2: `getStudentHomeworksForUser`** -- fetch `section_answers` batched the same `inArray`-then-join-in-memory way conversations/submissions already are (one extra `db.select()`, still a fixed query count regardless of section count -- keep the #158 no-N+1 property this function was already built to preserve), and pass `hasAnswer: answersBySectionId.has(section.id)` at the per-section call site, `false` for `type === "conversation"` sections (they can never have an answer row, but pass explicitly rather than relying on an always-empty Set for clarity).
+- [ ] **Step 3: Tests** in `studentHomeworks.test.ts`: a non-interactive section with an answer row reports `"submitted"`; without one reports `"not_started"`/`"overdue"` per the existing due-date rules; a real-DB test (mirrors the existing "excludes hidden and expired" test's structure) creating a `non_interactive` section, submitting an answer via `upsertSectionAnswer`, and asserting the returned `StudentSectionProgress.status` is `"submitted"`.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/studentHomeworks.ts apps/web/src/server/repositories/studentHomeworks.test.ts
+git commit -m "feat(homeworks): deriveSectionStatus treats an answer as completion for non-interactive sections (#164)"
+```
+
+### Task 7: Submissions dashboard counts non-interactive sections correctly
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/submissions.ts`
+- Modify: `apps/web/src/server/repositories/submissions.test.ts`
+
+**Interfaces:**
+- No public signature change -- `getHomeworkSubmissionsMatrix`'s internals gain one more batched fetch.
+
+- [ ] **Step 1:** After the existing `allSubmissions` fetch, batch-fetch `section_answers` for `sectionIds` the same `inArray` way, build `const answeredByUserSection = new Set(allAnswers.map((a) => \`${a.userId}:${a.sectionId}\`))`.
+- [ ] **Step 2:** In the per-student/per-section loop, when `section.type === "non_interactive"`, compute `submitted` from `answeredByUserSection.has(\`${membership.userId}:${section.id}\`)` instead of the conversation-derived `submitted`/`activeConvo` (which will always be empty for this section type) -- everything else in the cell (`conversationCount: 0`, `hasDeletedConversation: false`, `lastActivityAt` from the answer's `updatedAt` if you want the cell to show recency, or `null` if that's out of scope for this pass -- keep it `null`, matching "no speculative fields" discipline, since nothing in #164's requirements asks for it) stays structurally the same `SubmissionCell` shape.
+- [ ] **Step 3: Tests**: a real-DB test creating a homework with one `non_interactive` section, a student answer via `upsertSectionAnswer`, and asserting the matrix's cell for that section reports `status: "submitted"` (not `"missing"`) and the student's `submissionCount`/`participationStatus` reflect it; `missingSectionWarnings` omits that section once every student has answered.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/submissions.ts apps/web/src/server/repositories/submissions.test.ts
+git commit -m "feat(submissions): dashboard counts non-interactive section answers correctly (#164)"
+```
+
+### Task 8: Admin — section type selector in `HomeworkForm`
+
+**Files:**
+- Modify: `apps/web/src/server/routes/homeworks.ts` (`SectionResponse` mapping in `getHomeworkDetailHandler` -- gains `type: s.type`)
+- Modify: `apps/web/src/shared/types.ts` (`SectionResponse` gains `type`, `SectionDiffInput` gains `type?`)
+- Modify: `apps/admin/src/client/lib/fixtures.ts` (`SectionSummary` gains `type`)
+- Modify: `apps/admin/src/client/lib/computeSectionDiff.ts` (`FormSection`/`SectionDiffOutput` gain `type?`)
+- Modify: `apps/admin/src/client/components/HomeworkForm.tsx`
+- Modify: `apps/admin/src/client/components/HomeworkForm.test.tsx`
+- Modify: `apps/admin/src/client/views/HomeworkEditView.tsx` (section-mapping in the `GET` handler gains `type: s.type`)
+
+**Interfaces:**
+- `FormSection.type?: "conversation" | "non_interactive"` (defaults to `"conversation"` via the `<select>`'s own default option, matching the server-side column default).
+
+- [ ] **Step 1: Backend response/body plumbing** -- add `type: "conversation" | "non_interactive"` to `SectionResponse` and `type?: "conversation" | "non_interactive"` to `SectionDiffInput` in `shared/types.ts` (distinct from Task 5's `SectionAnswerBody`/`SectionAnswerResponse`, which that task adds separately), and add `type: s.type` to the `SectionResponse` mapping in `getHomeworkDetailHandler` (`routes/homeworks.ts`).
+- [ ] **Step 2: Client type plumbing** -- add `type: "conversation" | "non_interactive"` to `SectionSummary` (`fixtures.ts`, flows into `SectionDetail`), `type?: "conversation" | "non_interactive"` to `FormSection`/`SectionDiffOutput` (`computeSectionDiff.ts`), thread it through `computeSectionDiff`'s mapping (`type: s.type`), and add `type: s.type` to `HomeworkEditView.tsx`'s section-mapping.
+- [ ] **Step 3: Add a type `<select>`** inside `HomeworkForm.tsx`'s per-section `<fieldset>`, right after the section title field:
+
+```tsx
+<label htmlFor={`section-${index}-type`}>Section type</label>
+<select id={`section-${index}-type`} {...register(`sections.${index}.type`)}>
+  <option value="conversation">Conversation</option>
+  <option value="non_interactive">Question (student types an answer)</option>
+</select>
+```
+
+- [ ] **Step 4: Tests** in `HomeworkForm.test.tsx`: a newly added section's type selector defaults to "Conversation"; changing it to "Question" and submitting includes `type: "non_interactive"` in the section's diff payload.
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/web/src/server/routes/homeworks.ts apps/web/src/shared/types.ts apps/admin/src/client/lib/fixtures.ts apps/admin/src/client/lib/computeSectionDiff.ts apps/admin/src/client/components/HomeworkForm.tsx apps/admin/src/client/components/HomeworkForm.test.tsx apps/admin/src/client/views/HomeworkEditView.tsx
+git commit -m "feat(admin): section type selector in HomeworkForm (#164)"
+```
+
+### Task 9: Phase close — full verification
+
+- [ ] **Step 1:** `npm test` (all three workspaces, `DATABASE_URL` set for the real-DB gated suites) -- 0 failures.
+- [ ] **Step 2:** `npm run typecheck` -- 0 new errors beyond the two pre-existing `TS2556`s recorded in Phase 8's closeout.
+- [ ] **Step 3:** Re-read #164's own requirements checklist verbatim; confirm every bullet is satisfied by a task above (the "admin homework form lets an author choose the section type" bullet is Task 8; "submissions dashboard counts non-interactive sections correctly" is Task 7; all others map 1:1 to Tasks 1-6).
+- [ ] **Step 4:** Stop. Report to the requester and wait for review before starting Phase 10.
+
+**End of Phase 9.**
+
+---
+
 18. **Found during Task 7 (verification): `HomeworkForm`'s Publish-checkbox default broke once "hidden" could mask a draft.** `HomeworkFormInitialData`/`originalPublishState` both derived `publish` from `status !== "draft"` -- a proxy that was safe pre-#166 because "draft" was the only unpublished status. Once `deriveHomeworkStatus` can return `"hidden"` for a *never-published* homework an instructor hides (Decision 17's precedence checks hidden first, ahead of draft), that proxy breaks: a hidden-but-still-draft homework would show "Published" incorrectly checked, and saving would silently publish it. Fixed by threading `publishedAt` itself through `HomeworkFormInitialData` and `originalPublishState`, deriving `publish` from `publishedAt !== null` directly instead of the status-string proxy. Caught by re-deriving Task 5's exhaustiveness grep (every `HomeworkStatus` consumer) rather than by a task-scoped test, since this bug lived one level away from any file Task 6 itself touched for the obvious reason. Regression test added: a `status: "hidden", publishedAt: null` fixture must render the Published checkbox unchecked.
+19. **#164: `section_answers` is a single upsert row per (user, section), not a revision-history table.** The issue's own Implementation Notes flag this as an open question to align with #128 ("resubmission semantics"), which is out of scope here. Resolved by checking what #128 actually disputes: `conversations.ts`'s schema comment (`conversations_owner_section_active_uq`) says the real ambiguity is a *soft-delete-and-restart conversation cycle* producing multiple `submissions` rows for one section -- and `submitSection` (Phase 4, already shipped) already treats a *single* conversation's resubmission as a plain update-in-place (`existing ? update : create`), not a new row. Non-interactive sections have no conversation and no restart cycle at all, so #128's specific ambiguity doesn't reach them. `section_answers` gets a unique `(userId, sectionId)` index and "submit and revise" is the same upsert `submitSection` already established -- consistent with existing precedent, not blocked by #128, and avoids a history table with no reader (no requirement asks for showing prior revisions). Confirmed with the requester during brainstorming.
+20. **#164: no new student-facing answer UI in `apps/web/src/client`.** The issue's requirement is "a route," not a UI; building a real answer form now would risk conflicting with M4's chat UI work and isn't itself required. Mirrors Decision 11's precedent exactly (Phases 4/5 built `submitSection`/`getHomeworkSubmissionsMatrix` correctly with no production caller yet, deferred to M4's `ConversationStartView`). Confirmed with the requester during brainstorming.
 
 ---
