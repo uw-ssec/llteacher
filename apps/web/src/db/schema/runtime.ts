@@ -15,7 +15,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { courseMemberships, courses, organizations, users } from "./identity";
-import { llmConfigs, llmProviderEnum, materialChunks, sections } from "./content";
+import { llmConfigs, llmProviderEnum, materialChunks, sections, homeworkProgressWidgets } from "./content";
 
 // ---------- Enums ----------
 
@@ -212,6 +212,35 @@ export const sectionAnswers = pgTable(
   ],
 );
 
+// ---------- HomeworkProgressWidgetResponse ----------
+// #165: one row per (user, widget) -- nullable pre/post pair on a single
+// row is deliberate (per the issue's own Implementation Notes): keeps the
+// pairing trivial to query and makes partial completion (pre answered,
+// post never answered) a natural state rather than a correlation problem
+// across two event rows.
+
+export const homeworkProgressWidgetResponses = pgTable(
+  "homework_progress_widget_responses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    widgetId: uuid("widget_id")
+      .notNull()
+      .references(() => homeworkProgressWidgets.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    preValue: integer("pre_value"),
+    preSubmittedAt: timestamp("pre_submitted_at", { withTimezone: true }),
+    postValue: integer("post_value"),
+    postSubmittedAt: timestamp("post_submitted_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("hpwr_widget_user_uq").on(t.widgetId, t.userId),
+    check("hpwr_pre_value_range_chk", sql`${t.preValue} IS NULL OR (${t.preValue} >= 0 AND ${t.preValue} <= 10)`),
+    check("hpwr_post_value_range_chk", sql`${t.postValue} IS NULL OR (${t.postValue} >= 0 AND ${t.postValue} <= 10)`),
+  ],
+);
+
 // ---------- Grade ----------
 // N:1 from submission (AI-first, instructor override allowed as a second
 // row). CHECK enforces exactly one of (graded_by_ai, grader_membership_id
@@ -362,6 +391,17 @@ export const sectionAnswersRelations = relations(sectionAnswers, ({ one }) => ({
   organization: one(organizations, {
     fields: [sectionAnswers.organizationId],
     references: [organizations.id],
+  }),
+}));
+
+export const homeworkProgressWidgetResponsesRelations = relations(homeworkProgressWidgetResponses, ({ one }) => ({
+  widget: one(homeworkProgressWidgets, {
+    fields: [homeworkProgressWidgetResponses.widgetId],
+    references: [homeworkProgressWidgets.id],
+  }),
+  user: one(users, {
+    fields: [homeworkProgressWidgetResponses.userId],
+    references: [users.id],
   }),
 }));
 

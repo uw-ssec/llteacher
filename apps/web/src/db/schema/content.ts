@@ -245,6 +245,36 @@ export const sections = pgTable(
   ],
 );
 
+// ---------- HomeworkProgressWidget ----------
+// #165: an ordered pre/post self-assessment prompt pair, authored per
+// homework. order is 1-indexed, capped at 20 -- same idiom as sections.
+
+export const homeworkProgressWidgets = pgTable(
+  "homework_progress_widgets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    homeworkId: uuid("homework_id")
+      .notNull()
+      .references(() => homeworks.id, { onDelete: "cascade" }),
+    prePrompt: text("pre_prompt").notNull(),
+    postPrompt: text("post_prompt").notNull(),
+    order: integer("order").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("homework_progress_widgets_homework_order_uq").on(t.homeworkId, t.order),
+    check(
+      "homework_progress_widgets_order_range_chk",
+      sql`${t.order} >= 1 AND ${t.order} <= 20`,
+    ),
+  ],
+);
+
 // ---------- SectionSolution ----------
 // Teacher-provided model solution. Optional; 1:1 with Section when present.
 // FK lives on this side (vs. on Section) so a Section can exist without a
@@ -441,6 +471,13 @@ export const sectionsRelations = relations(sections, ({ one }) => ({
     references: [promptTemplates.id],
   }),
   solution: one(sectionSolutions),
+}));
+
+export const homeworkProgressWidgetsRelations = relations(homeworkProgressWidgets, ({ one }) => ({
+  homework: one(homeworks, {
+    fields: [homeworkProgressWidgets.homeworkId],
+    references: [homeworks.id],
+  }),
 }));
 
 export const sectionSolutionsRelations = relations(
