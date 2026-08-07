@@ -5371,9 +5371,11 @@ git commit -m "feat(admin): progress widget authoring in HomeworkForm (#165)"
 - [ ] **Step 1:** `npm test` (all three workspaces, `DATABASE_URL` set) -- 0 failures.
 - [ ] **Step 2:** `npm run typecheck` -- 0 new errors beyond the two pre-existing `TS2556`s.
 - [ ] **Step 3:** Re-read #165's own requirements checklist verbatim; confirm every bullet Phase 10 actually owns is satisfied (schema, partial completion, admin authoring, and the response-submit route) and that the two explicitly-deferred bullets (student surface UI, export) are recorded as deferred, not silently dropped.
-- [ ] **Step 4:** Stop. Report to the requester -- this is the last phase in the currently-scoped follow-up set (#167 remains deferred behind #128, per the earlier scope decision).
+- [x] **Step 4:** Stop. Report to the requester -- this is the last phase in the currently-scoped follow-up set (#167 remains deferred behind #128, per the earlier scope decision).
 
-**End of Phase 10.**
+**End of Phase 10.** All 7 tasks complete, committed individually. Full monorepo suite green (487 tests: 422 web + 47 admin + 18 ui, 0 failures) and typecheck clean (same two pre-existing `TS2556` errors recorded in Phase 8's closeout, still unrelated). Of #165's six requirement bullets: schema, partial completion, and admin authoring are fully built and tested; the student-surface UI and export bullets are recorded as explicitly deferred (Decisions 22, 24), not silently dropped -- both confirmed with the requester during brainstorming.
+
+This closes out the currently-scoped M3 follow-up work (#166, #164, #165). #167 remains deferred behind #128 (Resolved Design Decision blocking it, recorded at the top of this section, plus the deferral comment posted on the issue itself).
 
 ---
 
