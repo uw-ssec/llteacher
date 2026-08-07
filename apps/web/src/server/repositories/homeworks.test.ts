@@ -252,7 +252,7 @@ describe("deriveHomeworkStatus", () => {
 // DATABASE_URL isn't set locally; always runs in CI per turbo.json's
 // declared env).
 import { makeNodeDb } from "../../db/nodeClient";
-import { organizations, courses, courseMemberships, users, conversations } from "../../db/schema";
+import { organizations, courses, courseMemberships, users, conversations, homeworkProgressWidgets } from "../../db/schema";
 import { eq as eq2 } from "drizzle-orm";
 
 // Fixed byte arrays would collide with users_email_blind_index_uq across
@@ -499,6 +499,60 @@ describe.skipIf(!process.env.DATABASE_URL)("updateHomework (real DB)", () => {
     const afterEdit = await getHomeworkById(db, scope, created!.id);
     expect(afterEdit!.sections.find((s) => s.id === q.id)!.type).toBe("non_interactive");
     expect(afterEdit!.sections.find((s) => s.id === chat.id)!.type).toBe("non_interactive");
+
+    await db.delete(organizations).where(eq2(organizations.id, org.id));
+  });
+
+  // #165
+  async function widgetsFor(db: ReturnType<typeof makeNodeDb>, homeworkId: string) {
+    return db.query.homeworkProgressWidgets.findMany({
+      where: eq2(homeworkProgressWidgets.homeworkId, homeworkId),
+      orderBy: (w, { asc }) => [asc(w.order)],
+    });
+  }
+
+  it("creates, edits, reorders, and deletes widgets in one call, atomically alongside a section diff", async () => {
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const { org, membership } = await seedCourseWithInstructor(db, `165-${crypto.randomUUID()}`);
+    const scope = unsafeCourseScope(membership.courseId);
+    const created = await createHomework(db, scope, {
+      createdById: membership.id, title: "HW165", description: "d", dueDate: new Date("2099-01-01"),
+    });
+
+    await updateHomework(db, scope, created!.id, {
+      sections: [{ title: "Sec 1", content: "c", order: 1 }],
+      widgets: [
+        { prePrompt: "Confidence before?", postPrompt: "Confidence after?", order: 1 },
+        { prePrompt: "Understanding before?", postPrompt: "Understanding after?", order: 2 },
+      ],
+    });
+    const afterCreate = await widgetsFor(db, created!.id);
+    expect(afterCreate).toHaveLength(2);
+    const w1 = afterCreate.find((w) => w.prePrompt === "Confidence before?")!;
+    const w2 = afterCreate.find((w) => w.prePrompt === "Understanding before?")!;
+
+    // Swap orders (a genuine 2-cycle, exercises the scratch-bump path) and
+    // edit w1's prompt, in the same call as an unrelated section edit --
+    // proves the two diffs don't clobber each other inside one atomic write.
+    await updateHomework(db, scope, created!.id, {
+      sections: [{ id: (await getHomeworkById(db, scope, created!.id))!.sections[0]!.id, title: "Sec 1 revised", content: "c", order: 1 }],
+      widgets: [
+        { id: w1.id, prePrompt: "Confidence before? (revised)", postPrompt: "Confidence after?", order: 2 },
+        { id: w2.id, prePrompt: "Understanding before?", postPrompt: "Understanding after?", order: 1 },
+      ],
+    });
+    const afterEdit = await widgetsFor(db, created!.id);
+    expect(afterEdit.map((w) => w.prePrompt)).toEqual(["Understanding before?", "Confidence before? (revised)"]);
+    const afterEditSections = await getHomeworkById(db, scope, created!.id);
+    expect(afterEditSections!.sections[0]!.title).toBe("Sec 1 revised");
+
+    // Omit w2 -> deleted.
+    await updateHomework(db, scope, created!.id, {
+      widgets: [{ id: w1.id, prePrompt: "Confidence before? (revised)", postPrompt: "Confidence after?", order: 1 }],
+    });
+    const afterDelete = await widgetsFor(db, created!.id);
+    expect(afterDelete).toHaveLength(1);
+    expect(afterDelete[0]!.id).toBe(w1.id);
 
     await db.delete(organizations).where(eq2(organizations.id, org.id));
   });

@@ -1,6 +1,6 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { homeworks, sections, sectionSolutions, conversations } from "../../db/schema";
+import { homeworks, sections, sectionSolutions, conversations, homeworkProgressWidgets } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import {
   planSectionDiff,
@@ -9,6 +9,7 @@ import {
   type SectionUpdatePlan,
   type SectionType,
 } from "./sections";
+import { planWidgetDiff, type ExistingWidget, type IncomingWidget } from "./progressWidgets";
 import type { HomeworkListItemResponse } from "../../shared/types";
 
 export async function listHomeworksForCourse(db: Db, scope: CourseScope): Promise<HomeworkListItemResponse[]> {
@@ -171,6 +172,7 @@ export interface HomeworkUpdateFields {
   dueDate?: Date;
   llmConfigId?: string | null;
   sections?: IncomingSection[];
+  widgets?: IncomingWidget[];
 }
 
 type BatchStatement = Parameters<Db["batch"]>[0][number];
@@ -292,6 +294,99 @@ async function resolveSectionWrites(
   }
 }
 
+/** #165: same pass-based-plus-scratch-bump technique as resolveSectionWrites
+ *  above (Resolved Design Decision 7), sized down -- widgets carry no
+ *  solution-equivalent sub-write, so there's no third callback and no
+ *  solution bookkeeping. See Resolved Design Decision 25 for why this is a
+ *  parallel implementation rather than a generalization of the section
+ *  version. */
+async function resolveWidgetWrites(
+  existingWidgets: ExistingWidget[],
+  deletedIds: Set<string>,
+  plan: ReturnType<typeof planWidgetDiff>,
+  pushWidgetInsert: (id: string, order: number, prePrompt: string, postPrompt: string) => Promise<void> | void,
+  pushWidgetUpdate: (id: string, order: number, prePrompt: string, postPrompt: string) => Promise<void> | void,
+) {
+  type PendingWrite =
+    | { kind: "update"; id: string; targetOrder: number; prePrompt: string; postPrompt: string }
+    | { kind: "create"; id: string; targetOrder: number; prePrompt: string; postPrompt: string };
+
+  const existingById = new Map(existingWidgets.map((w) => [w.id, w]));
+  const livePosition = new Map<string, number>();
+  const currentOccupant = new Map<number, string>();
+  for (const w of existingWidgets) {
+    if (!deletedIds.has(w.id)) {
+      livePosition.set(w.id, w.order);
+      currentOccupant.set(w.order, w.id);
+    }
+  }
+
+  const pending: PendingWrite[] = [];
+  for (const upd of plan.toUpdate) {
+    const prior = existingById.get(upd.id)!;
+    if (prior.order === upd.order) {
+      await pushWidgetUpdate(upd.id, upd.order, upd.prePrompt, upd.postPrompt);
+    } else {
+      pending.push({ kind: "update", id: upd.id, targetOrder: upd.order, prePrompt: upd.prePrompt, postPrompt: upd.postPrompt });
+    }
+  }
+  for (const create of plan.toCreate) {
+    pending.push({ kind: "create", id: crypto.randomUUID(), targetOrder: create.order, prePrompt: create.prePrompt, postPrompt: create.postPrompt });
+  }
+
+  const placed = new Set<PendingWrite>();
+
+  async function apply(write: PendingWrite) {
+    if (write.kind === "create") {
+      await pushWidgetInsert(write.id, write.targetOrder, write.prePrompt, write.postPrompt);
+    } else {
+      await pushWidgetUpdate(write.id, write.targetOrder, write.prePrompt, write.postPrompt);
+      const prevOrder = livePosition.get(write.id);
+      if (prevOrder !== undefined) currentOccupant.delete(prevOrder);
+    }
+    currentOccupant.set(write.targetOrder, write.id);
+    livePosition.set(write.id, write.targetOrder);
+    placed.add(write);
+  }
+
+  async function runPasses() {
+    let progress = true;
+    while (progress) {
+      progress = false;
+      for (const write of pending) {
+        if (placed.has(write)) continue;
+        if (!currentOccupant.has(write.targetOrder)) {
+          await apply(write);
+          progress = true;
+        }
+      }
+    }
+  }
+
+  await runPasses();
+
+  while (pending.some((w) => !placed.has(w))) {
+    const stillOpen = pending.filter((w) => !placed.has(w));
+    const reserved = new Set<number>([...currentOccupant.keys(), ...stillOpen.map((w) => w.targetOrder)]);
+    let scratch: number | undefined;
+    for (let candidate = 1; candidate <= 20; candidate++) {
+      if (!reserved.has(candidate)) { scratch = candidate; break; }
+    }
+    if (scratch === undefined) {
+      throw new Error(
+        "cannot resolve widget reorder: no free order slot to stage a cyclic move -- reorder in two smaller steps",
+      );
+    }
+    const stuck = stillOpen.find((w): w is Extract<PendingWrite, { kind: "update" }> => w.kind === "update")!;
+    const stuckCurrentOrder = livePosition.get(stuck.id)!;
+    await pushWidgetUpdate(stuck.id, scratch, existingById.get(stuck.id)!.prePrompt, existingById.get(stuck.id)!.postPrompt);
+    currentOccupant.delete(stuckCurrentOrder);
+    currentOccupant.set(scratch, stuck.id);
+    livePosition.set(stuck.id, scratch);
+    await runPasses();
+  }
+}
+
 /** Applies planSectionDiff's plan (Task 2) atomically alongside any
  *  top-level homework field updates. Branches on driver capability at
  *  runtime (see Resolved Design Decision 6): production's neon-http driver
@@ -347,6 +442,18 @@ export async function updateHomework(
     plan = planSectionDiff(existingSections, input.sections);
   }
 
+  // #165: an independent diff from sections' -- widgets and sections share
+  // one atomic write (both write paths below) but neither reads the
+  // other's plan.
+  let existingWidgets: ExistingWidget[] = [];
+  let widgetPlan: ReturnType<typeof planWidgetDiff> | null = null;
+  if (input.widgets) {
+    existingWidgets = await db.query.homeworkProgressWidgets.findMany({
+      where: eq(homeworkProgressWidgets.homeworkId, id),
+    });
+    widgetPlan = planWidgetDiff(existingWidgets, input.widgets);
+  }
+
   if (typeof db.batch === "function") {
     // Production path: neon-http. Collect query-builder objects (built
     // against `db`) and execute them all as one atomic HTTP round-trip.
@@ -377,6 +484,23 @@ export async function updateHomework(
           } else if (action === "delete") {
             statements.push(db.delete(sectionSolutions).where(eq(sectionSolutions.sectionId, sectionId)));
           }
+        },
+      );
+    }
+    if (widgetPlan) {
+      const deletedWidgetIds = new Set(widgetPlan.toDelete.map((d) => d.id));
+      for (const del of widgetPlan.toDelete) {
+        statements.push(db.delete(homeworkProgressWidgets).where(eq(homeworkProgressWidgets.id, del.id)));
+      }
+      await resolveWidgetWrites(
+        existingWidgets,
+        deletedWidgetIds,
+        widgetPlan,
+        (widgetId, order, prePrompt, postPrompt) => {
+          statements.push(db.insert(homeworkProgressWidgets).values({ id: widgetId, homeworkId: id, prePrompt, postPrompt, order }));
+        },
+        (widgetId, order, prePrompt, postPrompt) => {
+          statements.push(db.update(homeworkProgressWidgets).set({ prePrompt, postPrompt, order, updatedAt: new Date() }).where(eq(homeworkProgressWidgets.id, widgetId)));
         },
       );
     }
@@ -424,6 +548,23 @@ export async function updateHomework(
           } else if (action === "delete") {
             await tx.delete(sectionSolutions).where(eq(sectionSolutions.sectionId, sectionId));
           }
+        },
+      );
+    }
+    if (widgetPlan) {
+      const deletedWidgetIds = new Set(widgetPlan.toDelete.map((d) => d.id));
+      for (const del of widgetPlan.toDelete) {
+        await tx.delete(homeworkProgressWidgets).where(eq(homeworkProgressWidgets.id, del.id));
+      }
+      await resolveWidgetWrites(
+        existingWidgets,
+        deletedWidgetIds,
+        widgetPlan,
+        async (widgetId, order, prePrompt, postPrompt) => {
+          await tx.insert(homeworkProgressWidgets).values({ id: widgetId, homeworkId: id, prePrompt, postPrompt, order });
+        },
+        async (widgetId, order, prePrompt, postPrompt) => {
+          await tx.update(homeworkProgressWidgets).set({ prePrompt, postPrompt, order, updatedAt: new Date() }).where(eq(homeworkProgressWidgets.id, widgetId));
         },
       );
     }
