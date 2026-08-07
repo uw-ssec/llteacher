@@ -5131,6 +5131,251 @@ git commit -m "feat(admin): section type selector in HomeworkForm (#164)"
 **End of Phase 9.** All 8 tasks complete, committed individually. Full monorepo suite green (466 tests: 403 web + 45 admin + 18 ui, 0 failures) and typecheck clean (same two pre-existing `TS2556` errors recorded in Phase 8's closeout, still unrelated).
 
 21. **Found during Task 7 (verification): fixing the per-cell "missing" bug for non_interactive sections left `participationStatus`/`totalConversations`'s `no_interaction` check self-contradictory.** A student who only answered non_interactive sections (zero conversations) would have every cell correctly report `"submitted"` but the row-level `participationStatus` still read `"no_interaction"`, since that check was keyed on `totalConversations === 0` alone. Fixed in the same task, same file: a `totalEngagement` counter tracks conversations *and* non_interactive answers, and the `no_interaction`/`partial`/`active` split now reads from it instead of `totalConversations` (which keeps its original literal meaning for its own field). Not scope creep -- same root cause (a section type the aggregation logic never accounted for), same function, caught by tracing the fix through to every consumer of the values it touches rather than stopping at the first green test.
+22. **#165: no student-facing prompt UI, and more concretely blocked than #164's equivalent call (Decision 20).** The requirement text describes a real UI trigger ("before the first section is opened," "after the last section is submitted"), but tracing `apps/web/src/client/App.tsx` found no event in the current student client that corresponds to "a section was opened" -- `createConversation` still has zero production callers (Decision 11), so there is no stable hook to attach a pre-prompt to. Building the trigger now would mean inventing a fake event. The route/repository layer is still built correctly and independently of this gap, same relationship Decision 11 describes for `submitSection`/`getHomeworkSubmissionsMatrix` and M4.
+23. **#165: no instructor-facing read route at all in this phase, aggregate or per-student.** Checked #78 (the issue's own "intersects" pointer) directly: it's an open, PI-sign-off-required product/consent decision (not an engineering default) about individual-level student data visibility, with its own stated default of `aggregate_only` pending confirmation. #165's own requirement checklist doesn't actually ask for any instructor read surface -- only schema, the student response route, and admin authoring -- so building even an aggregate-stats endpoint now would be inventing a requirement, not just deferring a risky one. Widget responses are captured and stored; a future instructor view (aggregate or individual) is separate work gated on #78's resolution.
+24. **#165: no export support.** "Responses are exportable alongside other research data" names #91 (instructor export of transcripts/submissions/grades), which doesn't exist yet anywhere in the codebase. Out of scope here, same reasoning as Decision 12's #92 deferral.
+25. **#165: widget reorder gets its own smaller diff/collision-resolution, not a generalization of `resolveSectionWrites`.** The issue's Implementation Notes explicitly flag the same non-deferrable-unique-index problem sections already solved (Decision 7) and point at that solution -- but widgets carry no solution-equivalent sub-write, so a parallel, simpler pass-based-plus-scratch-bump implementation is meaningfully smaller than the section version. Extracting a shared generalization now would mean risk-touching the already-battle-tested section algorithm for an abstraction only two call sites will ever use -- not justified by this phase's actual requirement.
+
+---
+
+## Phase 10 — Issue #165: Pre/post self-assessment progress widgets
+
+**Goal:** Let instructors attach ordered pre/post self-assessment prompts to a homework; students record independent 0-10 values for each, partial completion allowed. See Resolved Design Decisions 22-25 for this phase's scope boundaries.
+
+### Task 1: Schema — `homework_progress_widgets` + `homework_progress_widget_responses` + migration
+
+**Files:**
+- Modify: `apps/web/src/db/schema/content.ts` (new `homeworkProgressWidgets` table + relations, alongside `sections`)
+- Modify: `apps/web/src/db/schema/runtime.ts` (new `homeworkProgressWidgetResponses` table + relations, alongside `sectionAnswers`)
+- Create: generated migration
+
+**Interfaces:**
+- Produces: `homeworkProgressWidgets` (`id`, `homeworkId`, `prePrompt`, `postPrompt`, `order` 1-20 unique-per-homework), `homeworkProgressWidgetResponses` (`id`, `widgetId`, `userId`, `preValue`/`postValue` nullable 0-10, `preSubmittedAt`/`postSubmittedAt` nullable, unique on `(widgetId, userId)`).
+
+- [ ] **Step 1: Add `homeworkProgressWidgets`** to `content.ts`, mirroring `sections`' order/uniqueness idiom exactly:
+
+```ts
+// ---------- HomeworkProgressWidget ----------
+// #165: an ordered pre/post self-assessment prompt pair, authored per
+// homework. order is 1-indexed, capped at 20 -- same idiom as sections.
+
+export const homeworkProgressWidgets = pgTable(
+  "homework_progress_widgets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    homeworkId: uuid("homework_id")
+      .notNull()
+      .references(() => homeworks.id, { onDelete: "cascade" }),
+    prePrompt: text("pre_prompt").notNull(),
+    postPrompt: text("post_prompt").notNull(),
+    order: integer("order").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("homework_progress_widgets_homework_order_uq").on(t.homeworkId, t.order),
+    check("homework_progress_widgets_order_range_chk", sql`${t.order} >= 1 AND ${t.order} <= 20`),
+  ],
+);
+```
+
+- [ ] **Step 2: Add `homeworkProgressWidgetResponses`** to `runtime.ts`, alongside `sectionAnswers`:
+
+```ts
+// ---------- HomeworkProgressWidgetResponse ----------
+// #165: one row per (user, widget) -- nullable pre/post pair on a single
+// row is deliberate (per the issue's own Implementation Notes): keeps the
+// pairing trivial to query and makes partial completion (pre answered,
+// post never answered) a natural state rather than a correlation problem
+// across two event rows.
+
+export const homeworkProgressWidgetResponses = pgTable(
+  "homework_progress_widget_responses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    widgetId: uuid("widget_id")
+      .notNull()
+      .references(() => homeworkProgressWidgets.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    preValue: integer("pre_value"),
+    preSubmittedAt: timestamp("pre_submitted_at", { withTimezone: true }),
+    postValue: integer("post_value"),
+    postSubmittedAt: timestamp("post_submitted_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("hpwr_widget_user_uq").on(t.widgetId, t.userId),
+    check("hpwr_pre_value_range_chk", sql`${t.preValue} IS NULL OR (${t.preValue} >= 0 AND ${t.preValue} <= 10)`),
+    check("hpwr_post_value_range_chk", sql`${t.postValue} IS NULL OR (${t.postValue} >= 0 AND ${t.postValue} <= 10)`),
+  ],
+);
+```
+
+`homeworkProgressWidgets` needs importing into `runtime.ts` alongside the existing `sections` import from `./content`.
+
+- [ ] **Step 3:** `cd apps/web && npm run db:generate` -- verify the generated migration adds exactly the two tables.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/db/schema/content.ts apps/web/src/db/schema/runtime.ts apps/web/src/db/migrations/
+git commit -m "feat(db): homework_progress_widgets + responses tables (#165)"
+```
+
+### Task 2: Widget diff planner (`planWidgetDiff`)
+
+**Files:**
+- Create: `apps/web/src/server/repositories/progressWidgets.ts`
+- Create: `apps/web/src/server/repositories/progressWidgets.test.ts`
+
+**Interfaces:**
+- Produces: `ExistingWidget { id, order, prePrompt, postPrompt }`, `IncomingWidget { id?, order, prePrompt, postPrompt }`, `WidgetCreatePlan { prePrompt, postPrompt, order }`, `WidgetUpdatePlan { id, prePrompt, postPrompt, order }`, `WidgetDeletePlan { id }`, `WidgetDiffPlan { toCreate, toUpdate, toDelete }`, `planWidgetDiff(existing, incoming): WidgetDiffPlan`.
+
+- [ ] **Step 1: Implement `planWidgetDiff`**, structurally identical to `planSectionDiff` (`repositories/sections.ts`) minus the solution dimension: duplicate-order detection, unknown-id detection, change-detection on `prePrompt`/`postPrompt`/`order` only, omitted-from-incoming ⇒ delete.
+- [ ] **Step 2: Tests**, mirroring `sections.test.ts`'s structure: creates with no id; updates on prompt/order change; omits unchanged widgets from `toUpdate`; deletes widgets omitted from incoming; duplicate-order throw; unknown-id throw.
+- [ ] **Step 3: Commit**
+
+```bash
+git add apps/web/src/server/repositories/progressWidgets.ts apps/web/src/server/repositories/progressWidgets.test.ts
+git commit -m "feat(widgets): planWidgetDiff -- pure diff logic for widget authoring (#165)"
+```
+
+### Task 3: `resolveWidgetWrites` + `updateHomework` integration
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/homeworks.ts`
+- Modify: `apps/web/src/server/repositories/homeworks.test.ts`
+
+**Interfaces:**
+- `HomeworkUpdateFields` gains `widgets?: IncomingWidget[]`. `updateHomework` diffs and applies widgets atomically alongside sections, on both write paths (production `db.batch()`, test/dev `db.transaction()`).
+
+- [ ] **Step 1: Implement `resolveWidgetWrites`** in `homeworks.ts` (or exported from `progressWidgets.ts` and imported here -- prefer co-locating with `resolveSectionWrites` since both are `updateHomework`-internal helpers), same pass-based-plus-scratch-bump technique as `resolveSectionWrites` (Decision 7), sized down: no solution callback, just `pushWidgetInsert(id, order, prePrompt, postPrompt)` / `pushWidgetUpdate(id, order, prePrompt, postPrompt)`.
+- [ ] **Step 2: Wire into `updateHomework`**: read existing widgets (`db.query.homeworkProgressWidgets.findMany({ where: eq(homeworkId, id) })`) the same way existing sections are read, run `planWidgetDiff` when `input.widgets` is present, apply `toDelete` directly and `toCreate`/`toUpdate` via `resolveWidgetWrites`, on both the batch-statements array and the `tx`-immediate paths -- same structure as the existing sections block, run alongside it (not nested inside), since sections and widgets are independent diffs sharing one atomic write.
+- [ ] **Step 3: Tests** (real-DB, mirrors the existing `updateHomework (real DB)` suite): creates widgets on a homework; edits an existing widget's prompts; reorders two widgets (swap, exercising the scratch-bump path); deletes a widget omitted from a later diff; a widget diff and a section diff in the same `updateHomework` call both apply correctly (proves they don't clobber each other inside one atomic write).
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/homeworks.ts apps/web/src/server/repositories/homeworks.test.ts
+git commit -m "feat(widgets): updateHomework diffs and writes widgets atomically alongside sections (#165)"
+```
+
+### Task 4: Repository — response upsert + `getHomeworkById` widget fetch
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/progressWidgets.ts`
+- Modify: `apps/web/src/server/repositories/progressWidgets.test.ts`
+- Modify: `apps/web/src/server/repositories/homeworks.ts` (`getHomeworkById` gains a widgets fetch, same two-query style as its existing sections fetch)
+
+**Interfaces:**
+- Produces: `submitWidgetResponse(db: Db, scope: OrgScope, widgetId: string, userId: string, input: { which: "pre" | "post"; value: number }): Promise<WidgetResponse>` -- verifies (via the real parent chain: widget -> homework -> course -> org) that `widgetId` belongs to `scope`'s org; upserts only the `pre*`/`post*` pair matching `which`, leaving the other untouched (partial completion).
+- `getHomeworkById`'s return type gains `widgets: { id, prePrompt, postPrompt, order }[]`.
+
+- [ ] **Step 1: `submitWidgetResponse`**, modeled directly on `upsertSectionAnswer` (Phase 9 Task 4)'s ownership-verification-via-join pattern, branching on `which`:
+
+```ts
+export async function submitWidgetResponse(
+  db: Db, scope: OrgScope, widgetId: string, userId: string,
+  input: { which: "pre" | "post"; value: number },
+) {
+  const [owned] = await db
+    .select({ id: homeworkProgressWidgets.id })
+    .from(homeworkProgressWidgets)
+    .innerJoin(homeworks, eq(homeworkProgressWidgets.homeworkId, homeworks.id))
+    .innerJoin(courses, eq(homeworks.courseId, courses.id))
+    .where(and(eq(homeworkProgressWidgets.id, widgetId), eq(courses.organizationId, scope)));
+  if (!owned) throw new Error("Widget not found in this org scope");
+
+  const [existing] = await db
+    .select({ id: homeworkProgressWidgetResponses.id })
+    .from(homeworkProgressWidgetResponses)
+    .where(and(eq(homeworkProgressWidgetResponses.widgetId, widgetId), eq(homeworkProgressWidgetResponses.userId, userId)));
+
+  const columnSet = input.which === "pre"
+    ? { preValue: input.value, preSubmittedAt: new Date() }
+    : { postValue: input.value, postSubmittedAt: new Date() };
+
+  if (existing) {
+    const [updated] = await db
+      .update(homeworkProgressWidgetResponses)
+      .set(columnSet)
+      .where(eq(homeworkProgressWidgetResponses.id, existing.id))
+      .returning();
+    return updated!;
+  }
+  const [created] = await db
+    .insert(homeworkProgressWidgetResponses)
+    .values({ widgetId, userId, ...columnSet })
+    .returning();
+  return created!;
+}
+```
+
+- [ ] **Step 2: `getHomeworkById` widget fetch** -- add a `db.query.homeworkProgressWidgets.findMany({ where: eq(homeworkId, id), orderBy: (w, {asc}) => [asc(w.order)] })` call alongside the existing sections fetch, include in the returned object.
+- [ ] **Step 3: Tests**: first `which: "pre"` submit creates a row with `preValue` set, `postValue` null; a later `which: "post"` submit on the same (widget, user) updates the *same* row, setting `postValue` without touching the already-set `preValue` (proves independence); resubmitting the same `which` updates in place, not a new row; throws for a widget outside `scope`'s org.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/progressWidgets.ts apps/web/src/server/repositories/progressWidgets.test.ts apps/web/src/server/repositories/homeworks.ts
+git commit -m "feat(widgets): submitWidgetResponse upsert (independent pre/post) + getHomeworkById widgets (#165)"
+```
+
+### Task 5: Route — student response submit
+
+**Files:**
+- Create: `apps/web/src/server/routes/progressWidgets.ts`
+- Create: `apps/web/src/server/routes/progressWidgets.test.ts`
+- Modify: `apps/web/src/server/index.ts`
+- Modify: `apps/web/src/shared/types.ts`
+
+**Interfaces:**
+- Produces: `submitWidgetResponseHandler`, `PATCH /api/widgets/:widgetId/response`, guarded by `requireRole(["student"])` only -- identical shape to #164's `submitSectionAnswerHandler` (org via `getOrgScopesForUser`/`orgScopes[0]`, ownership verified inside the repository call).
+- Produces `WidgetResponseBody { which: "pre" | "post"; value: number }`, `WidgetResponseResponse { id, widgetId, userId, preValue, preSubmittedAt, postValue, postSubmittedAt }` (nullable timestamp fields as ISO strings or null) in `shared/types.ts`.
+
+- [ ] **Step 1: Add the two types** to `shared/types.ts`.
+- [ ] **Step 2: `submitWidgetResponseHandler`**, modeled on `submitSectionAnswerHandler` (Phase 9 Task 5): 403 non-student, 400 for missing/invalid `which` or a `value` outside 0-10 (validate server-side, don't trust the client-side slider bound), 403 mapping the repository's not-found-in-org error, 403 for no org membership, 200 with the response body otherwise.
+- [ ] **Step 3: Register** `app.patch("/api/widgets/:widgetId/response", requireRole(["student"])(submitWidgetResponseHandler));` in `index.ts`.
+- [ ] **Step 4: Tests**, mirroring `sectionAnswers.test.ts` (Phase 9 Task 5): non-student 403; missing `which` 400; `value` of -1 or 11 400; successful pre submit 200; successful post submit 200; not-found-in-org repository error mapped to 403.
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/web/src/server/routes/progressWidgets.ts apps/web/src/server/routes/progressWidgets.test.ts apps/web/src/server/index.ts apps/web/src/shared/types.ts
+git commit -m "feat(api): widget pre/post response submit route (#165)"
+```
+
+### Task 6: Admin — widget authoring in `HomeworkForm`
+
+**Files:**
+- Modify: `apps/web/src/shared/types.ts` (`HomeworkUpdateBody` gains `widgets?: WidgetDiffInput[]`; `HomeworkDetailResponse` gains `widgets: WidgetResponse[]`)
+- Modify: `apps/web/src/server/routes/homeworks.ts` (`updateHomeworkHandler` passes `body.widgets` through to `updateHomework`; `getHomeworkDetailHandler`'s response body includes `widgets`)
+- Modify: `apps/admin/src/client/components/HomeworkForm.tsx`
+- Modify: `apps/admin/src/client/components/HomeworkForm.test.tsx`
+- Modify: `apps/admin/src/client/views/HomeworkEditView.tsx` (initial-data mapping gains `widgets`)
+- Modify: `apps/admin/src/client/views/HomeworkCreateView.tsx` (widgets ride the same follow-up `PATCH .../homeworkId` call sections already use -- no separate endpoint)
+
+**Interfaces:**
+- `HomeworkFormValues` gains `widgets: { id?: string; prePrompt: string; postPrompt: string }[]` (order is renumbered from array position, same convention `computeSectionDiff` already established for sections -- reuse that exact renumbering approach for widgets via a small parallel `computeWidgetDiff` helper in `computeSectionDiff.ts`, or inline if trivial enough not to warrant a second exported function).
+
+- [ ] **Step 1: Backend wiring** -- thread `widgets` through `HomeworkUpdateBody`/`updateHomeworkHandler`/`HomeworkDetailResponse`/`getHomeworkDetailHandler`, same shape as the existing `sections` plumbing.
+- [ ] **Step 2: Add a "Progress Widgets" fieldset array** in `HomeworkForm.tsx`, structurally parallel to the section fields (`useFieldArray({ control, name: "widgets" })`, add/remove buttons), each row with a pre-prompt and post-prompt text input. No solution-equivalent field, no type selector -- just the two prompts.
+- [ ] **Step 3: Wire `defaultValues.widgets`** from `initialData.widgets` on edit, empty array on create.
+- [ ] **Step 4: Tests** in `HomeworkForm.test.tsx`: adding a widget row renders both prompt inputs; filling them in and submitting includes the widget in the payload; removing a widget row drops it from the payload (no confirmation needed here, unlike section removal -- a widget row has no accumulated student content analogous to a section's conversations, so the existing section-delete confirm precedent doesn't apply; note this explicitly rather than copying the confirm behavior reflexively).
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/web/src/shared/types.ts apps/web/src/server/routes/homeworks.ts apps/admin/src/client/components/HomeworkForm.tsx apps/admin/src/client/components/HomeworkForm.test.tsx apps/admin/src/client/views/HomeworkEditView.tsx apps/admin/src/client/views/HomeworkCreateView.tsx
+git commit -m "feat(admin): progress widget authoring in HomeworkForm (#165)"
+```
+
+### Task 7: Phase close — full verification
+
+- [ ] **Step 1:** `npm test` (all three workspaces, `DATABASE_URL` set) -- 0 failures.
+- [ ] **Step 2:** `npm run typecheck` -- 0 new errors beyond the two pre-existing `TS2556`s.
+- [ ] **Step 3:** Re-read #165's own requirements checklist verbatim; confirm every bullet Phase 10 actually owns is satisfied (schema, partial completion, admin authoring, and the response-submit route) and that the two explicitly-deferred bullets (student surface UI, export) are recorded as deferred, not silently dropped.
+- [ ] **Step 4:** Stop. Report to the requester -- this is the last phase in the currently-scoped follow-up set (#167 remains deferred behind #128, per the earlier scope decision).
+
+**End of Phase 10.**
+
+---
 
 ---
 
