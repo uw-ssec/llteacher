@@ -131,6 +131,19 @@ export interface SubmissionResponse {
   isResubmission: boolean;
 }
 
+export interface SectionAnswerBody {
+  content: string;
+}
+
+export interface SectionAnswerResponse {
+  id: string;
+  sectionId: string;
+  userId: string;
+  content: string;
+  submittedAt: string;
+  updatedAt: string;
+}
+
 import type {
   HomeworkSubmissionsMatrix,
   ParticipationStatus,

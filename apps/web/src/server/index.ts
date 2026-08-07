@@ -15,6 +15,7 @@ import {
 import { workosWebhookHandler } from "./routes/webhooksWorkos";
 import { studentHomeworksHandler } from "./routes/studentHomeworks";
 import { submitSectionHandler, getHomeworkSubmissionsHandler } from "./routes/submissions";
+import { submitSectionAnswerHandler, getSectionAnswerHandler } from "./routes/sectionAnswers";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireInstructorOf, requireRole } from "./utils/guards";
@@ -75,6 +76,11 @@ app.post("/api/conversations/:id/submit", requireRole(["student"])(submitSection
 app.get(
   "/api/courses/:courseId/homeworks/:homeworkId/submissions",
   requireInstructorOf()(getHomeworkSubmissionsHandler),
+);
+app.patch("/api/sections/:sectionId/answer", requireRole(["student"])(submitSectionAnswerHandler));
+app.get(
+  "/api/courses/:courseId/sections/:sectionId/answers/:studentId",
+  requireInstructorOf()(getSectionAnswerHandler),
 );
 
 // Everything else: delegate to the static asset binding.
