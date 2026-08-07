@@ -42,7 +42,7 @@ describe("HomeworkForm", () => {
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     const payload = onSubmit.mock.calls[0][0];
-    expect(payload.sections).toEqual([{ title: "Sec 1", content: "Sec 1 content", order: 1, solutionContent: undefined }]);
+    expect(payload.sections).toEqual([{ title: "Sec 1", content: "Sec 1 content", order: 1, solutionContent: undefined, type: "conversation" }]);
   });
 
   it("removing a section drops it and renumbers the rest", async () => {
@@ -129,6 +129,27 @@ describe("HomeworkForm", () => {
     const fieldset = title.closest("fieldset")!;
     const focusable = Array.from(fieldset.querySelectorAll("input, textarea, button"));
     expect(focusable[0]).toBe(title);
+  });
+
+  // #164
+  it("defaults a new section's type to Conversation, and includes a changed type in the submit payload", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
+    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
+    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, { target: { value: "Sec 1" } });
+    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, { target: { value: "c" } });
+
+    const typeSelect = screen.getByLabelText(/section type/i) as HTMLSelectElement;
+    expect(typeSelect.value).toBe("conversation");
+    fireEvent.change(typeSelect, { target: { value: "non_interactive" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.sections[0].type).toBe("non_interactive");
   });
 
   // #166

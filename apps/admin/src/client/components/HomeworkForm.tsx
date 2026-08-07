@@ -58,7 +58,7 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
       ? {
           title: initialData.title, description: initialData.description, dueDate: initialData.dueDate,
           llmConfigId: initialData.llmConfigId ?? undefined,
-          sections: initialData.sections.map((s) => ({ id: s.id, title: s.title, content: s.content, solutionContent: s.solutionContent })),
+          sections: initialData.sections.map((s) => ({ id: s.id, title: s.title, content: s.content, solutionContent: s.solutionContent, type: s.type })),
           publish: initialData.publishedAt !== null,
           releasedAt: initialData.releasedAt ?? undefined,
           hidden: initialData.isHidden,
@@ -169,6 +169,11 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
           <legend id={`section-${index}-legend`}>Section {index + 1}</legend>
           <label htmlFor={`section-${index}-title`}>Section title</label>
           <input id={`section-${index}-title`} aria-label="Section title" {...register(`sections.${index}.title`, { required: true })} />
+          <label htmlFor={`section-${index}-type`}>Section type</label>
+          <select id={`section-${index}-type`} aria-label="Section type" {...register(`sections.${index}.type`)}>
+            <option value="conversation">Conversation</option>
+            <option value="non_interactive">Question (student types an answer)</option>
+          </select>
           <label htmlFor={`section-${index}-content`}>Section content</label>
           <textarea id={`section-${index}-content`} aria-label="Section content" {...register(`sections.${index}.content`, { required: true })} />
           <div className="admin-markdown-preview" aria-label={`Section ${index + 1} content preview`}>
@@ -195,7 +200,7 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
       {errors.sections && <p role="alert">At least 1 section is required</p>}
       {submitError && <p role="alert">{submitError}</p>}
 
-      <Button type="button" onClick={() => append({ title: "", content: "", solutionContent: undefined })}>
+      <Button type="button" onClick={() => append({ title: "", content: "", solutionContent: undefined, type: "conversation" })}>
         + Add section
       </Button>
 

@@ -63,12 +63,14 @@ export function HomeworkEditView({
               title: string;
               order: number;
               content: string;
+              type: "conversation" | "non_interactive";
               solution: { content: string } | null;
             }) => ({
               id: s.id,
               homeworkId,
               title: s.title,
               order: s.order,
+              type: s.type,
               hasSolution: !!s.solution,
               submissionsCount: 0,
               content: s.content,

@@ -155,6 +155,7 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
     title: s.title,
     content: s.content,
     order: s.order,
+    type: s.type,
     solution: isInstructor && s.solution ? { id: s.solution.id, content: s.solution.content } : null,
     createdAt: s.createdAt.toISOString(),
     updatedAt: s.updatedAt.toISOString(),

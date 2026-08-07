@@ -36,6 +36,7 @@ export interface SectionResponse {
   title: string;
   content: string;
   order: number;
+  type: "conversation" | "non_interactive";
   solution: { id: string; content: string } | null;
   createdAt: string;
   updatedAt: string;
@@ -76,6 +77,9 @@ export interface SectionDiffInput {
   content: string;
   order: number;
   solutionContent?: string;
+  /** Omitted on an existing section leaves its type unchanged; omitted on a
+   *  new section defaults to "conversation" (matches planSectionDiff). */
+  type?: "conversation" | "non_interactive";
 }
 
 export interface HomeworkUpdateBody {
