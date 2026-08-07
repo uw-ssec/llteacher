@@ -5126,9 +5126,11 @@ git commit -m "feat(admin): section type selector in HomeworkForm (#164)"
 - [ ] **Step 1:** `npm test` (all three workspaces, `DATABASE_URL` set for the real-DB gated suites) -- 0 failures.
 - [ ] **Step 2:** `npm run typecheck` -- 0 new errors beyond the two pre-existing `TS2556`s recorded in Phase 8's closeout.
 - [ ] **Step 3:** Re-read #164's own requirements checklist verbatim; confirm every bullet is satisfied by a task above (the "admin homework form lets an author choose the section type" bullet is Task 8; "submissions dashboard counts non-interactive sections correctly" is Task 7; all others map 1:1 to Tasks 1-6).
-- [ ] **Step 4:** Stop. Report to the requester and wait for review before starting Phase 10.
+- [x] **Step 4:** Stop. Report to the requester and wait for review before starting Phase 10.
 
-**End of Phase 9.**
+**End of Phase 9.** All 8 tasks complete, committed individually. Full monorepo suite green (466 tests: 403 web + 45 admin + 18 ui, 0 failures) and typecheck clean (same two pre-existing `TS2556` errors recorded in Phase 8's closeout, still unrelated).
+
+21. **Found during Task 7 (verification): fixing the per-cell "missing" bug for non_interactive sections left `participationStatus`/`totalConversations`'s `no_interaction` check self-contradictory.** A student who only answered non_interactive sections (zero conversations) would have every cell correctly report `"submitted"` but the row-level `participationStatus` still read `"no_interaction"`, since that check was keyed on `totalConversations === 0` alone. Fixed in the same task, same file: a `totalEngagement` counter tracks conversations *and* non_interactive answers, and the `no_interaction`/`partial`/`active` split now reads from it instead of `totalConversations` (which keeps its original literal meaning for its own field). Not scope creep -- same root cause (a section type the aggregation logic never accounted for), same function, caught by tracing the fix through to every consumer of the values it touches rather than stopping at the first green test.
 
 ---
 
