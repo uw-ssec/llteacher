@@ -65,6 +65,14 @@ export type HomeworkStatus = "draft" | "scheduled" | "active" | "past_due" | "hi
  *  later mean something stronger than invisibility -- read-only, term-
  *  ended, non-editable), so it stays reserved and unreachable rather than
  *  being repurposed for #166's manual-hide/auto-expiry feature. */
+/** #177: extracted so the write-side gate (upsertSectionAnswer,
+ *  submitWidgetResponse, submitSection) checks the exact same condition as
+ *  deriveHomeworkStatus's own hidden branch, rather than a second
+ *  hand-copied expression that could drift out of sync with it. */
+export function isHomeworkHidden(hw: { isHidden: boolean; expiresAt: Date | null }): boolean {
+  return hw.isHidden || (hw.expiresAt !== null && hw.expiresAt.getTime() <= Date.now());
+}
+
 export function deriveHomeworkStatus(hw: {
   dueDate: Date;
   publishedAt: Date | null;
@@ -77,7 +85,7 @@ export function deriveHomeworkStatus(hw: {
   // including draft -- matches the reference app's design (access is one
   // source of truth, the enum is cosmetic). Checked first so callers can
   // filter on deriveHomeworkStatus's result alone, never a raw column.
-  if (hw.isHidden || (hw.expiresAt !== null && hw.expiresAt.getTime() <= now.getTime())) {
+  if (isHomeworkHidden(hw)) {
     return "hidden";
   }
   if (!hw.publishedAt) return "draft";

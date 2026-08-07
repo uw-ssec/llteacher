@@ -2,7 +2,7 @@ import { Hono, type Context } from "hono";
 import { makeDb } from "../../db/client";
 import { upsertSectionAnswer, getSectionAnswer } from "../repositories/sectionAnswers";
 import { getOrgScopesForUser } from "../repositories/users";
-import { getOrgScopeForCourse } from "../repositories/organizations";
+import { courseScopeFromAuthContext } from "../repositories/scope";
 import { requireRole, requireInstructorOf } from "../utils/guards";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
@@ -68,11 +68,14 @@ export async function getSectionAnswerHandler(c: Context<AppEnv>) {
     return c.json({ error: "Instructor access denied" }, 403);
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const orgScope = await getOrgScopeForCourse(db, courseId);
-  if (!orgScope) return c.json({ error: "Course access denied" }, 403);
+  // #174: mint a CourseScope, not an OrgScope -- isInstructorOf(courseId)
+  // above only proves membership in *this* course, so the query below must
+  // stay constrained to it rather than widening to the whole org.
+  const scope = courseScopeFromAuthContext(authContext, courseId);
+  if (!scope) return c.json({ error: "Course access denied" }, 403);
 
-  const answer = await getSectionAnswer(db, orgScope, sectionId!, studentId!);
+  const db = makeDb(c.env.DATABASE_URL);
+  const answer = await getSectionAnswer(db, scope, sectionId!, studentId!);
   if (!answer) return c.json({ error: "Answer not found" }, 404);
 
   const responseBody: SectionAnswerResponse = {

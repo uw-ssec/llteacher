@@ -127,6 +127,13 @@
       "when": 1786063664905,
       "tag": "0017_sticky_the_anarchist",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1786141800249,
+      "tag": "0018_widget_response_org_scope",
+      "breakpoints": true
     }
   ]
 }

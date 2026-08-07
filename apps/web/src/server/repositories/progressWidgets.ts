@@ -1,7 +1,8 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { homeworkProgressWidgets, homeworks, courses, homeworkProgressWidgetResponses } from "../../db/schema";
+import { homeworkProgressWidgets, homeworks, courses, courseMemberships, homeworkProgressWidgetResponses } from "../../db/schema";
 import type { OrgScope } from "./scope";
+import { isHomeworkHidden } from "./homeworks";
 
 export interface ExistingWidget {
   id: string;
@@ -92,7 +93,11 @@ export function planWidgetDiff(
  *  same rationale as upsertSectionAnswer/createSubmission's ownership-
  *  verification-via-join pattern. Upserts only the pre/post column pair
  *  matching `which`, leaving the other column pair untouched -- partial completion
- *  (pre answered, post never answered) is a valid, expected state. */
+ *  (pre answered, post never answered) is a valid, expected state.
+ *  #175: also requires a non-dropped student membership in the widget's own
+ *  course -- see upsertSectionAnswer's identical addition for the full
+ *  rationale (no prior owned parent object to narrow this otherwise).
+ *  #177: also rejects once the parent homework derives to hidden. */
 export async function submitWidgetResponse(
   db: Db,
   scope: OrgScope,
@@ -101,12 +106,28 @@ export async function submitWidgetResponse(
   input: { which: "pre" | "post"; value: number },
 ) {
   const [owned] = await db
-    .select({ id: homeworkProgressWidgets.id })
+    .select({
+      id: homeworkProgressWidgets.id,
+      isHidden: homeworks.isHidden,
+      expiresAt: homeworks.expiresAt,
+    })
     .from(homeworkProgressWidgets)
     .innerJoin(homeworks, eq(homeworkProgressWidgets.homeworkId, homeworks.id))
     .innerJoin(courses, eq(homeworks.courseId, courses.id))
+    .innerJoin(
+      courseMemberships,
+      and(
+        eq(courseMemberships.courseId, courses.id),
+        eq(courseMemberships.userId, userId),
+        eq(courseMemberships.role, "student"),
+        isNull(courseMemberships.droppedAt),
+      ),
+    )
     .where(and(eq(homeworkProgressWidgets.id, widgetId), eq(courses.organizationId, scope)));
   if (!owned) {
+    throw new Error("Widget not found in this org scope");
+  }
+  if (isHomeworkHidden(owned)) {
     throw new Error("Widget not found in this org scope");
   }
 
@@ -128,9 +149,12 @@ export async function submitWidgetResponse(
     return updated!;
   }
 
+  // #176: organizationId is now denormalized here the same way
+  // upsertSectionAnswer's insert already carries it -- written from the
+  // verified scope, never trusted from caller input.
   const [created] = await db
     .insert(homeworkProgressWidgetResponses)
-    .values({ widgetId, userId, ...columnSet })
+    .values({ widgetId, userId, organizationId: scope, ...columnSet })
     .returning();
   return created!;
 }

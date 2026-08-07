@@ -127,10 +127,22 @@ describe.skipIf(!DATABASE_URL)("submissions repository", () => {
   // owner. submissions.conversation_id is also unique, so reusing a shared
   // conversation fixture across multiple createSubmission() calls would
   // collide with an earlier test's row regardless.
-  async function newConversation(courseId: string, ownerUserId: string) {
+  async function newConversation(
+    courseId: string,
+    ownerUserId: string,
+    hwOpts: { isHidden?: boolean; expiresAt?: Date | null } = {},
+  ) {
     const [hw] = await db
       .insert(homeworks)
-      .values({ courseId, createdById: membershipByCourse[courseId], title: "h", description: "d", dueDate: new Date() })
+      .values({
+        courseId,
+        createdById: membershipByCourse[courseId],
+        title: "h",
+        description: "d",
+        dueDate: new Date(),
+        isHidden: hwOpts.isHidden ?? false,
+        expiresAt: hwOpts.expiresAt ?? null,
+      })
       .returning({ id: homeworks.id });
     const [section] = await db
       .insert(sections)
@@ -285,6 +297,29 @@ describe.skipIf(!DATABASE_URL)("submissions repository", () => {
       await expect(
         submitSection(db, unsafeOrgScope(orgAId), tutorConv.id, userAId),
       ).rejects.toThrow();
+    });
+
+    // #177: a manually hidden or expired homework blocks the write, the
+    // same as the two other new student write paths (upsertSectionAnswer,
+    // submitWidgetResponse).
+    it("rejects when the parent homework is manually hidden", async () => {
+      const conversationId = await newConversation(courseAId, userAId, { isHidden: true });
+      await expect(
+        submitSection(db, unsafeOrgScope(orgAId), conversationId, userAId),
+      ).rejects.toThrow(/hidden or expired/i);
+    });
+
+    it("rejects when the parent homework's expiresAt has passed", async () => {
+      const conversationId = await newConversation(courseAId, userAId, { expiresAt: new Date(Date.now() - 60_000) });
+      await expect(
+        submitSection(db, unsafeOrgScope(orgAId), conversationId, userAId),
+      ).rejects.toThrow(/hidden or expired/i);
+    });
+
+    it("does not block a submit when expiresAt is in the future", async () => {
+      const conversationId = await newConversation(courseAId, userAId, { expiresAt: new Date(Date.now() + 60_000) });
+      const result = await submitSection(db, unsafeOrgScope(orgAId), conversationId, userAId);
+      expect(result.isResubmission).toBe(false);
     });
   });
 });

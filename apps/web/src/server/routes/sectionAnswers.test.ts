@@ -15,8 +15,6 @@ vi.mock("../repositories/sectionAnswers", () => ({
 }));
 const getOrgScopesForUserMock = vi.fn();
 vi.mock("../repositories/users", () => ({ getOrgScopesForUser: (...a: unknown[]) => getOrgScopesForUserMock(...a) }));
-const getOrgScopeForCourseMock = vi.fn();
-vi.mock("../repositories/organizations", () => ({ getOrgScopeForCourse: (...a: unknown[]) => getOrgScopeForCourseMock(...a) }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
 function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
@@ -102,22 +100,40 @@ describe("GET /api/courses/:courseId/sections/:sectionId/answers/:studentId", ()
     expect(res.status).toBe(403);
   });
 
+  // #174: courseScopeFromAuthContext (real, unmocked -- pure function) only
+  // mints a scope when isMemberOf(courseId) is true, so both success-path
+  // tests below must set it alongside isInstructorOf.
+  it("returns 403 when isInstructorOf passes but isMemberOf doesn't (should be unreachable in practice)", async () => {
+    getSectionAnswerMock.mockReset();
+    const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a", isMemberOf: () => false })).request(
+      "/api/courses/course-a/sections/sec-1/answers/student-1", {}, TEST_ENV,
+    );
+    expect(res.status).toBe(403);
+    expect(getSectionAnswerMock).not.toHaveBeenCalled();
+  });
+
   it("returns 404 when no answer exists", async () => {
-    getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
     getSectionAnswerMock.mockReset().mockResolvedValue(null);
-    const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a" })).request(
+    const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a", isMemberOf: (id) => id === "course-a" })).request(
       "/api/courses/course-a/sections/sec-1/answers/student-1", {}, TEST_ENV,
     );
     expect(res.status).toBe(404);
   });
 
+  it("passes a course-scoped (not org-scoped) query down to the repository", async () => {
+    getSectionAnswerMock.mockReset().mockResolvedValue(null);
+    await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a", isMemberOf: (id) => id === "course-a" })).request(
+      "/api/courses/course-a/sections/sec-1/answers/student-1", {}, TEST_ENV,
+    );
+    expect(getSectionAnswerMock).toHaveBeenCalledWith(expect.anything(), "course-a", "sec-1", "student-1");
+  });
+
   it("returns the found answer", async () => {
-    getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
     getSectionAnswerMock.mockReset().mockResolvedValue({
       id: "ans-1", sectionId: "sec-1", userId: "student-1", content: "their answer",
       submittedAt: new Date("2026-01-01T00:00:00.000Z"), updatedAt: new Date("2026-01-01T00:00:00.000Z"),
     });
-    const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a" })).request(
+    const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a", isMemberOf: (id) => id === "course-a" })).request(
       "/api/courses/course-a/sections/sec-1/answers/student-1", {}, TEST_ENV,
     );
     expect(res.status).toBe(200);

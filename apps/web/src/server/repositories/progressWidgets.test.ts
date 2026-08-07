@@ -80,8 +80,10 @@ describe.skipIf(!DATABASE_URL)("submitWidgetResponse (real DB)", () => {
   let orgAId: string;
   let orgBId: string;
   let courseAId: string;
-  let userAId: string;
   let membershipAId: string;
+  let studentId: string;
+  let unenrolledStudentId: string;
+  let droppedStudentId: string;
 
   beforeAll(async () => {
     db = makeNodeDb(DATABASE_URL!);
@@ -105,12 +107,36 @@ describe.skipIf(!DATABASE_URL)("submitWidgetResponse (real DB)", () => {
       .insert(users)
       .values({ email: emailBytes as never, emailBlindIndex: emailBytes as never })
       .returning({ id: users.id });
-    userAId = userA.id;
     const [membershipA] = await db
       .insert(courseMemberships)
-      .values({ userId: userAId, courseId: courseAId, role: "instructor" })
+      .values({ userId: userA.id, courseId: courseAId, role: "instructor" })
       .returning({ id: courseMemberships.id });
     membershipAId = membershipA.id;
+
+    // #175: the student who actually writes -- distinct from the instructor
+    // creator above (course memberships are unique per (userId, courseId)).
+    const studentEmailBytes = crypto.getRandomValues(new Uint8Array(32));
+    const [studentUser] = await db
+      .insert(users)
+      .values({ email: studentEmailBytes as never, emailBlindIndex: studentEmailBytes as never })
+      .returning({ id: users.id });
+    studentId = studentUser.id;
+    await db.insert(courseMemberships).values({ userId: studentId, courseId: courseAId, role: "student" });
+
+    const unenrolledEmailBytes = crypto.getRandomValues(new Uint8Array(32));
+    const [unenrolledUser] = await db
+      .insert(users)
+      .values({ email: unenrolledEmailBytes as never, emailBlindIndex: unenrolledEmailBytes as never })
+      .returning({ id: users.id });
+    unenrolledStudentId = unenrolledUser.id;
+
+    const droppedEmailBytes = crypto.getRandomValues(new Uint8Array(32));
+    const [droppedUser] = await db
+      .insert(users)
+      .values({ email: droppedEmailBytes as never, emailBlindIndex: droppedEmailBytes as never })
+      .returning({ id: users.id });
+    droppedStudentId = droppedUser.id;
+    await db.insert(courseMemberships).values({ userId: droppedStudentId, courseId: courseAId, role: "student", droppedAt: new Date() });
   });
 
   afterAll(async () => {
@@ -118,10 +144,18 @@ describe.skipIf(!DATABASE_URL)("submitWidgetResponse (real DB)", () => {
     await db.delete(organizations).where(eq(organizations.id, orgBId));
   });
 
-  async function newWidget() {
+  async function newWidget(opts: { isHidden?: boolean; expiresAt?: Date | null } = {}) {
     const [hw] = await db
       .insert(homeworks)
-      .values({ courseId: courseAId, createdById: membershipAId, title: "h", description: "d", dueDate: new Date() })
+      .values({
+        courseId: courseAId,
+        createdById: membershipAId,
+        title: "h",
+        description: "d",
+        dueDate: new Date(),
+        isHidden: opts.isHidden ?? false,
+        expiresAt: opts.expiresAt ?? null,
+      })
       .returning({ id: homeworks.id });
     const [widget] = await db
       .insert(homeworkProgressWidgets)
@@ -132,16 +166,23 @@ describe.skipIf(!DATABASE_URL)("submitWidgetResponse (real DB)", () => {
 
   it("first pre submit creates a row with postValue still null", async () => {
     const widgetId = await newWidget();
-    const response = await submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, userAId, { which: "pre", value: 7 });
+    const response = await submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, studentId, { which: "pre", value: 7 });
     expect(response.preValue).toBe(7);
     expect(response.postValue).toBeNull();
     expect(response.preSubmittedAt).not.toBeNull();
   });
 
+  // #176: organizationId must be written on insert, not left to a default.
+  it("writes organizationId from the verified scope", async () => {
+    const widgetId = await newWidget();
+    const response = await submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, studentId, { which: "pre", value: 7 });
+    expect(response.organizationId).toBe(orgAId);
+  });
+
   it("a later post submit updates the same row, setting postValue without touching the already-set preValue", async () => {
     const widgetId = await newWidget();
-    const pre = await submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, userAId, { which: "pre", value: 4 });
-    const post = await submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, userAId, { which: "post", value: 9 });
+    const pre = await submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, studentId, { which: "pre", value: 4 });
+    const post = await submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, studentId, { which: "post", value: 9 });
     expect(post.id).toBe(pre.id);
     expect(post.preValue).toBe(4);
     expect(post.postValue).toBe(9);
@@ -149,8 +190,8 @@ describe.skipIf(!DATABASE_URL)("submitWidgetResponse (real DB)", () => {
 
   it("resubmitting the same which updates in place, not a new row", async () => {
     const widgetId = await newWidget();
-    const first = await submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, userAId, { which: "pre", value: 3 });
-    const second = await submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, userAId, { which: "pre", value: 8 });
+    const first = await submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, studentId, { which: "pre", value: 3 });
+    const second = await submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, studentId, { which: "pre", value: 8 });
     expect(second.id).toBe(first.id);
     expect(second.preValue).toBe(8);
   });
@@ -158,7 +199,44 @@ describe.skipIf(!DATABASE_URL)("submitWidgetResponse (real DB)", () => {
   it("throws when the widget belongs to a different org's course", async () => {
     const widgetId = await newWidget();
     await expect(
-      submitWidgetResponse(db, unsafeOrgScope(orgBId), widgetId, userAId, { which: "pre", value: 5 }),
+      submitWidgetResponse(db, unsafeOrgScope(orgBId), widgetId, studentId, { which: "pre", value: 5 }),
     ).rejects.toThrow(/not found in this org scope/i);
+  });
+
+  // #175: no membership in the widget's course at all.
+  it("throws when the calling user has no membership in the widget's course", async () => {
+    const widgetId = await newWidget();
+    await expect(
+      submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, unenrolledStudentId, { which: "pre", value: 5 }),
+    ).rejects.toThrow(/not found in this org scope/i);
+  });
+
+  // #175: dropped enrollment must not still count.
+  it("throws when the calling user's membership in the widget's course has been dropped", async () => {
+    const widgetId = await newWidget();
+    await expect(
+      submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, droppedStudentId, { which: "pre", value: 5 }),
+    ).rejects.toThrow(/not found in this org scope/i);
+  });
+
+  // #177: manually hidden and expired homeworks both block the write.
+  it("throws when the parent homework is manually hidden", async () => {
+    const widgetId = await newWidget({ isHidden: true });
+    await expect(
+      submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, studentId, { which: "pre", value: 5 }),
+    ).rejects.toThrow(/not found in this org scope/i);
+  });
+
+  it("throws when the parent homework's expiresAt has passed", async () => {
+    const widgetId = await newWidget({ expiresAt: new Date(Date.now() - 60_000) });
+    await expect(
+      submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, studentId, { which: "pre", value: 5 }),
+    ).rejects.toThrow(/not found in this org scope/i);
+  });
+
+  it("does not block a write when expiresAt is in the future", async () => {
+    const widgetId = await newWidget({ expiresAt: new Date(Date.now() + 60_000) });
+    const response = await submitWidgetResponse(db, unsafeOrgScope(orgAId), widgetId, studentId, { which: "pre", value: 5 });
+    expect(response.preValue).toBe(5);
   });
 });

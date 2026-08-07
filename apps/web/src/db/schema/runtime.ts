@@ -229,6 +229,14 @@ export const homeworkProgressWidgetResponses = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
+    // #176: sole exception among runtime.ts's tenant-data tables until now --
+    // its sibling section_answers already carries this. No direct security
+    // hole today (submitWidgetResponse verifies the full parent chain before
+    // writing), but FERPA deletion (#51) and export (#91, #165) need a
+    // direct org predicate rather than a three-table join.
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
     preValue: integer("pre_value"),
     preSubmittedAt: timestamp("pre_submitted_at", { withTimezone: true }),
     postValue: integer("post_value"),
@@ -236,6 +244,7 @@ export const homeworkProgressWidgetResponses = pgTable(
   },
   (t) => [
     uniqueIndex("hpwr_widget_user_uq").on(t.widgetId, t.userId),
+    index("hpwr_org_idx").on(t.organizationId),
     check("hpwr_pre_value_range_chk", sql`${t.preValue} IS NULL OR (${t.preValue} >= 0 AND ${t.preValue} <= 10)`),
     check("hpwr_post_value_range_chk", sql`${t.postValue} IS NULL OR (${t.postValue} >= 0 AND ${t.postValue} <= 10)`),
   ],

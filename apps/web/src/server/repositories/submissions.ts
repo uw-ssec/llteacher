@@ -1,8 +1,9 @@
 import { and, eq, inArray, isNull, or } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { submissions, grades, conversations, courses, courseMemberships, homeworks, users, sectionAnswers } from "../../db/schema";
+import { submissions, grades, conversations, courses, courseMemberships, homeworks, sections, users, sectionAnswers } from "../../db/schema";
 import type { OrgScope, CourseScope } from "./scope";
 import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
+import { isHomeworkHidden } from "./homeworks";
 
 export async function createSubmission(db: Db, scope: OrgScope, conversationId: string) {
   // The conversation isn't guaranteed to belong to `scope`'s org just
@@ -48,10 +49,20 @@ export async function submitSection(
   // softDeleteConversation/appendMessage (#134): this check is scoped to a
   // single route (the only one #22 adds), so it's inlined here rather than
   // widening every repository function's signature.
+  // #177: joined through to sections/homeworks (via conversations.sectionId)
+  // to read isHidden/expiresAt -- same rationale as
+  // upsertSectionAnswer/submitWidgetResponse's identical addition.
   const [owned] = await db
-    .select({ id: conversations.id, ownerUserId: conversations.ownerUserId })
+    .select({
+      id: conversations.id,
+      ownerUserId: conversations.ownerUserId,
+      isHidden: homeworks.isHidden,
+      expiresAt: homeworks.expiresAt,
+    })
     .from(conversations)
     .innerJoin(courses, eq(conversations.courseId, courses.id))
+    .innerJoin(sections, eq(conversations.sectionId, sections.id))
+    .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
     .where(
       and(
         eq(conversations.id, conversationId),
@@ -72,6 +83,9 @@ export async function submitSection(
   }
   if (owned.ownerUserId !== requesterId) {
     throw new Error("Conversation is not owned by requester");
+  }
+  if (isHomeworkHidden(owned)) {
+    throw new Error("Homework is hidden or expired");
   }
 
   const existing = await getSubmissionByConversation(db, scope, conversationId);
