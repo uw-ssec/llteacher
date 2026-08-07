@@ -175,6 +175,43 @@ export const submissions = pgTable(
   (t) => [index("submissions_org_idx").on(t.organizationId)],
 );
 
+// ---------- SectionAnswer ----------
+// #164: the non-interactive counterpart to a conversation -- one row per
+// (user, section), upserted on submit-and-revise (Resolved Design Decision
+// 19 in the M3 plan: not a history table, matches submitSection's own
+// existing update-in-place resubmission pattern; #128's actual ambiguity is
+// about a conversation's restart cycle, which doesn't exist for this
+// section type). organization_id is denormalized, same rationale as
+// submissions above.
+
+export const sectionAnswers = pgTable(
+  "section_answers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sectionId: uuid("section_id")
+      .notNull()
+      .references(() => sections.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    content: text("content").notNull(),
+    submittedAt: timestamp("submitted_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("section_answers_user_section_uq").on(t.userId, t.sectionId),
+    index("section_answers_org_idx").on(t.organizationId),
+  ],
+);
+
 // ---------- Grade ----------
 // N:1 from submission (AI-first, instructor override allowed as a second
 // row). CHECK enforces exactly one of (graded_by_ai, grader_membership_id
@@ -311,6 +348,21 @@ export const submissionsRelations = relations(submissions, ({ one, many }) => ({
     references: [organizations.id],
   }),
   grades: many(grades),
+}));
+
+export const sectionAnswersRelations = relations(sectionAnswers, ({ one }) => ({
+  section: one(sections, {
+    fields: [sectionAnswers.sectionId],
+    references: [sections.id],
+  }),
+  user: one(users, {
+    fields: [sectionAnswers.userId],
+    references: [users.id],
+  }),
+  organization: one(organizations, {
+    fields: [sectionAnswers.organizationId],
+    references: [organizations.id],
+  }),
 }));
 
 export const gradesRelations = relations(grades, ({ one, many }) => ({

@@ -41,6 +41,14 @@ export const materialSourceEnum = pgEnum("material_source_type", [
   "other",
 ]);
 
+// #164: "conversation" is a student working the section via chat (the
+// existing behavior); "non_interactive" collects a section_answers row
+// instead (see runtime.ts's sectionAnswers table).
+export const sectionTypeEnum = pgEnum("section_type", [
+  "conversation",
+  "non_interactive",
+]);
+
 // ---------- LLMConfig ----------
 // Per-Organization pool of model configurations. is_default is per-org; at
 // most one row per org may have is_default = true (enforced via partial
@@ -217,6 +225,10 @@ export const sections = pgTable(
     order: integer("order").notNull(),
     title: text("title").notNull(),
     content: text("content").notNull(),
+    // #164: defaults to "conversation" so every existing row is unchanged.
+    // non_interactive sections collect a section_answers row instead of a
+    // conversation -- see runtime.ts's sectionAnswers table.
+    type: sectionTypeEnum("type").notNull().default("conversation"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
