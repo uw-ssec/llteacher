@@ -19,6 +19,10 @@ const findManyHomeworks = vi.fn();
 const insertHomework = vi.fn();
 const findFirstHomework = vi.fn();
 const findManySections = vi.fn();
+// #165: getHomeworkById now also fetches widgets -- defaults to empty so
+// every existing test (none of which cares about widgets) is unaffected;
+// tests that do care call .mockReset().mockResolvedValue([...]) themselves.
+const findManyWidgets = vi.fn().mockResolvedValue([]);
 // listHomeworksForCourse's section-count query (Task 23) is a plain
 // `db.select({...}).from(sections).where(...).groupBy(...)` chain, not a
 // db.query.*.findMany call -- faked separately from the two above.
@@ -39,6 +43,7 @@ vi.mock("../../db/client", () => ({
         findFirst: (...args: unknown[]) => findFirstHomework(...args),
       },
       sections: { findMany: (...args: unknown[]) => findManySections(...args) },
+      homeworkProgressWidgets: { findMany: (...args: unknown[]) => findManyWidgets(...args) },
     },
     insert: (...args: unknown[]) => {
       const [table] = args;

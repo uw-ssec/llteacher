@@ -1,3 +1,8 @@
+import { and, eq } from "drizzle-orm";
+import type { Db } from "../../db/client";
+import { homeworkProgressWidgets, homeworks, courses, homeworkProgressWidgetResponses } from "../../db/schema";
+import type { OrgScope } from "./scope";
+
 export interface ExistingWidget {
   id: string;
   order: number;
@@ -80,4 +85,52 @@ export function planWidgetDiff(
     .map((w) => ({ id: w.id }));
 
   return { toCreate, toUpdate, toDelete };
+}
+
+/** #165: verifies (via the real parent chain, never trusting the caller)
+ *  that widgetId resolves to a widget within scope's org before writing --
+ *  same rationale as upsertSectionAnswer/createSubmission's ownership-
+ *  verification-via-join pattern. Upserts only the pre/post column pair
+ *  matching `which`, leaving the other column pair untouched -- partial completion
+ *  (pre answered, post never answered) is a valid, expected state. */
+export async function submitWidgetResponse(
+  db: Db,
+  scope: OrgScope,
+  widgetId: string,
+  userId: string,
+  input: { which: "pre" | "post"; value: number },
+) {
+  const [owned] = await db
+    .select({ id: homeworkProgressWidgets.id })
+    .from(homeworkProgressWidgets)
+    .innerJoin(homeworks, eq(homeworkProgressWidgets.homeworkId, homeworks.id))
+    .innerJoin(courses, eq(homeworks.courseId, courses.id))
+    .where(and(eq(homeworkProgressWidgets.id, widgetId), eq(courses.organizationId, scope)));
+  if (!owned) {
+    throw new Error("Widget not found in this org scope");
+  }
+
+  const [existing] = await db
+    .select({ id: homeworkProgressWidgetResponses.id })
+    .from(homeworkProgressWidgetResponses)
+    .where(and(eq(homeworkProgressWidgetResponses.widgetId, widgetId), eq(homeworkProgressWidgetResponses.userId, userId)));
+
+  const columnSet = input.which === "pre"
+    ? { preValue: input.value, preSubmittedAt: new Date() }
+    : { postValue: input.value, postSubmittedAt: new Date() };
+
+  if (existing) {
+    const [updated] = await db
+      .update(homeworkProgressWidgetResponses)
+      .set(columnSet)
+      .where(eq(homeworkProgressWidgetResponses.id, existing.id))
+      .returning();
+    return updated!;
+  }
+
+  const [created] = await db
+    .insert(homeworkProgressWidgetResponses)
+    .values({ widgetId, userId, ...columnSet })
+    .returning();
+  return created!;
 }

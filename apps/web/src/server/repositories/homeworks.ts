@@ -97,7 +97,16 @@ export async function getHomeworkById(db: Db, scope: CourseScope, id: string) {
     orderBy: (s, { asc }) => [asc(s.order)],
   });
 
-  return { homework, sections: sectionRows };
+  // #165: same two-query style as the sections fetch above, not a nested
+  // `with` (Decision 10's bytea-corruption finding is about encrypted
+  // columns specifically, not a blanket ban -- but this file's existing
+  // convention is already flat fetches for every homework sub-resource).
+  const widgetRows = await db.query.homeworkProgressWidgets.findMany({
+    where: eq(homeworkProgressWidgets.homeworkId, id),
+    orderBy: (w, { asc }) => [asc(w.order)],
+  });
+
+  return { homework, sections: sectionRows, widgets: widgetRows };
 }
 
 export async function deleteHomework(db: Db, scope: CourseScope, id: string) {
