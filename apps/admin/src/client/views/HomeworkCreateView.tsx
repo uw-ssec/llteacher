@@ -38,7 +38,7 @@ export function HomeworkCreateView({
           const patchRes = await fetch(`/api/courses/${courseId}/homeworks/${created.id}`, {
             method: "PATCH",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ llmConfigId: payload.llmConfigId, sections: payload.sections }),
+            body: JSON.stringify({ llmConfigId: payload.llmConfigId, sections: payload.sections, widgets: payload.widgets }),
           });
           if (!patchRes.ok) throw new Error("Failed to save sections");
           if (payload.publish) {

@@ -176,6 +176,49 @@ describe("HomeworkForm", () => {
     expect(payload.expiresAt).toBe("2099-06-01T00:00");
   });
 
+  // #165
+  it("adding a progress widget row renders both prompt inputs and includes them in the submit payload", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
+    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
+    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, { target: { value: "Sec 1" } });
+    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, { target: { value: "c" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /add progress widget/i }));
+    expect(screen.getByLabelText(/pre-section prompt/i)).toBeTruthy();
+    expect(screen.getByLabelText(/post-section prompt/i)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(/pre-section prompt/i), { target: { value: "Confidence before?" } });
+    fireEvent.change(screen.getByLabelText(/post-section prompt/i), { target: { value: "Confidence after?" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.widgets).toEqual([{ prePrompt: "Confidence before?", postPrompt: "Confidence after?", order: 1 }]);
+  });
+
+  it("removing a progress widget row drops it from the submit payload, no confirmation required", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
+    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
+    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, { target: { value: "Sec 1" } });
+    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, { target: { value: "c" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /add progress widget/i }));
+    fireEvent.click(screen.getByRole("button", { name: /remove widget/i }));
+    expect(screen.queryByLabelText(/pre-section prompt/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.widgets).toEqual([]);
+  });
+
   it("shows a friendly error and does not throw when onSubmit rejects", async () => {
     const onSubmit = vi.fn().mockRejectedValue(new Error("network error"));
     render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);

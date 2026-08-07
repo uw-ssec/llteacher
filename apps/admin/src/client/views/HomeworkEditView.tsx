@@ -77,6 +77,12 @@ export function HomeworkEditView({
               solutionContent: s.solution?.content,
             }),
           ),
+          widgets: hw.widgets.map((w: { id: string; prePrompt: string; postPrompt: string; order: number }) => ({
+            id: w.id,
+            prePrompt: w.prePrompt,
+            postPrompt: w.postPrompt,
+            order: w.order,
+          })),
         });
         setOriginalPublishState({
           // #166: keyed off publishedAt, not status -- "hidden" can now mask
@@ -140,6 +146,7 @@ export function HomeworkEditView({
               dueDate: payload.dueDate,
               llmConfigId: payload.llmConfigId,
               sections: payload.sections,
+              widgets: payload.widgets,
             }),
           });
           if (!patchRes.ok) throw new Error("Failed to save homework");

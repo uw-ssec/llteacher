@@ -6,12 +6,28 @@ import { Button, Input } from "@llteacher/ui";
 import type { LLMConfig, SectionDetail } from "../lib/fixtures";
 import { computeSectionDiff, type FormSection } from "../lib/computeSectionDiff";
 
+/** #165: an authored pre/post prompt pair, before the order-renumbering
+ *  submit-time transform (mirrors FormSection's role for sections). */
+export interface FormWidget {
+  id?: string;
+  prePrompt: string;
+  postPrompt: string;
+}
+
+export interface WidgetDetail {
+  id: string;
+  prePrompt: string;
+  postPrompt: string;
+  order: number;
+}
+
 export interface HomeworkFormValues {
   title: string;
   description: string;
   dueDate: string;
   llmConfigId: string | undefined;
   sections: FormSection[];
+  widgets: FormWidget[];
   publish: boolean;
   releasedAt: string | undefined;
   hidden: boolean;
@@ -24,6 +40,7 @@ export interface HomeworkFormInitialData {
   dueDate: string;
   llmConfigId: string | null;
   sections: SectionDetail[];
+  widgets: WidgetDetail[];
   status: "draft" | "scheduled" | "active" | "past_due" | "hidden" | "archived";
   releasedAt: string | null;
   isHidden: boolean;
@@ -40,6 +57,7 @@ export interface HomeworkFormProps {
   onSubmit: (payload: {
     title: string; description: string; dueDate: string; llmConfigId?: string;
     sections: ReturnType<typeof computeSectionDiff>;
+    widgets: { id?: string; prePrompt: string; postPrompt: string; order: number }[];
     publish: boolean; releasedAt?: string;
     hidden: boolean; expiresAt?: string;
   }) => Promise<void>;
@@ -59,17 +77,19 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
           title: initialData.title, description: initialData.description, dueDate: initialData.dueDate,
           llmConfigId: initialData.llmConfigId ?? undefined,
           sections: initialData.sections.map((s) => ({ id: s.id, title: s.title, content: s.content, solutionContent: s.solutionContent, type: s.type })),
+          widgets: initialData.widgets.map((w) => ({ id: w.id, prePrompt: w.prePrompt, postPrompt: w.postPrompt })),
           publish: initialData.publishedAt !== null,
           releasedAt: initialData.releasedAt ?? undefined,
           hidden: initialData.isHidden,
           expiresAt: initialData.expiresAt ?? undefined,
         }
       : {
-          title: "", description: "", dueDate: "", llmConfigId: undefined, sections: [], publish: false, releasedAt: undefined,
+          title: "", description: "", dueDate: "", llmConfigId: undefined, sections: [], widgets: [], publish: false, releasedAt: undefined,
           hidden: false, expiresAt: undefined,
         },
   });
   const { fields, append, remove } = useFieldArray({ control, name: "sections" });
+  const { fields: widgetFields, append: appendWidget, remove: removeWidget } = useFieldArray({ control, name: "widgets" });
 
   useUnsavedChangesGuard(isDirty);
 
@@ -94,10 +114,19 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
     // onSubmit rejection (a real API failure once Task 15 wires this to a
     // network call) becomes an unhandled promise rejection with no
     // user-facing feedback at all. Caught in task review before this landed.
+    // Order is always renumbered 1..N from the form's current array order --
+    // same convention computeSectionDiff already established for sections.
+    const widgets = values.widgets.map((w, i) => ({
+      ...(w.id !== undefined && { id: w.id }),
+      prePrompt: w.prePrompt,
+      postPrompt: w.postPrompt,
+      order: i + 1,
+    }));
     try {
       await onSubmit({
         title: values.title, description: values.description, dueDate: values.dueDate,
         llmConfigId: values.llmConfigId, sections: computeSectionDiff(sections),
+        widgets,
         publish: values.publish, releasedAt: values.releasedAt,
         hidden: values.hidden, expiresAt: values.expiresAt,
       });
@@ -198,11 +227,34 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
       ))}
 
       {errors.sections && <p role="alert">At least 1 section is required</p>}
-      {submitError && <p role="alert">{submitError}</p>}
 
       <Button type="button" onClick={() => append({ title: "", content: "", solutionContent: undefined, type: "conversation" })}>
         + Add section
       </Button>
+
+      {widgetFields.map((field, index) => (
+        <fieldset key={field.id} aria-labelledby={`widget-${index}-legend`}>
+          <legend id={`widget-${index}-legend`}>Progress Widget {index + 1}</legend>
+          <label htmlFor={`widget-${index}-pre`}>Pre-section prompt</label>
+          <input id={`widget-${index}-pre`} aria-label="Pre-section prompt" {...register(`widgets.${index}.prePrompt`, { required: true })} />
+          <label htmlFor={`widget-${index}-post`}>Post-section prompt</label>
+          <input id={`widget-${index}-post`} aria-label="Post-section prompt" {...register(`widgets.${index}.postPrompt`, { required: true })} />
+          <Button
+            type="button"
+            variant="danger"
+            aria-label="Remove widget"
+            onClick={() => removeWidget(index)}
+          >
+            Remove widget
+          </Button>
+        </fieldset>
+      ))}
+
+      <Button type="button" onClick={() => appendWidget({ prePrompt: "", postPrompt: "" })}>
+        + Add progress widget
+      </Button>
+
+      {submitError && <p role="alert">{submitError}</p>}
 
       <Button type="submit" variant="accent" disabled={isLoading}>Save</Button>
     </form>

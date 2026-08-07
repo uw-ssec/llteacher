@@ -174,6 +174,7 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
     isHidden: result.homework.isHidden,
     expiresAt: result.homework.expiresAt?.toISOString() ?? null,
     sections: sectionsResponse,
+    widgets: result.widgets.map((w) => ({ id: w.id, prePrompt: w.prePrompt, postPrompt: w.postPrompt, order: w.order })),
     ...(isInstructor && { editableBy: true }),
   };
 
@@ -260,6 +261,7 @@ export async function updateHomeworkHandler(c: Context<AppEnv>) {
       dueDate,
       llmConfigId,
       sections: body.sections,
+      widgets: body.widgets,
     });
     if (!result) {
       return c.json({ error: "Homework not found" }, 404);

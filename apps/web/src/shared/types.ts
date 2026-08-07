@@ -54,6 +54,16 @@ export interface HomeworkListItemResponse {
   sectionCount: number;
 }
 
+/** #165: the authored widget itself (prompts + order) -- distinct from
+ *  WidgetResponseResponse, which is a student's recorded pre/post values
+ *  for one widget. */
+export interface ProgressWidgetResponse {
+  id: string;
+  prePrompt: string;
+  postPrompt: string;
+  order: number;
+}
+
 export interface HomeworkDetailResponse {
   id: string;
   courseId: string;
@@ -67,6 +77,7 @@ export interface HomeworkDetailResponse {
   isHidden: boolean;
   expiresAt: string | null;
   sections: SectionResponse[];
+  widgets: ProgressWidgetResponse[];
   /** Present (true) only in the instructor payload; absent for students. */
   editableBy?: boolean;
 }
@@ -82,12 +93,20 @@ export interface SectionDiffInput {
   type?: "conversation" | "non_interactive";
 }
 
+export interface ProgressWidgetDiffInput {
+  id?: string;
+  prePrompt: string;
+  postPrompt: string;
+  order: number;
+}
+
 export interface HomeworkUpdateBody {
   title?: string;
   description?: string;
   dueDate?: string;
   llmConfigId?: string | null;
   sections?: SectionDiffInput[];
+  widgets?: ProgressWidgetDiffInput[];
 }
 
 export interface HomeworkPublishBody {

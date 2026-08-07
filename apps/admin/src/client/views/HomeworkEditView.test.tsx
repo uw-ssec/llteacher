@@ -24,6 +24,7 @@ const HOMEWORK = {
   sections: [
     { id: "s1", title: "Sec 1", order: 1, content: "content 1", solution: null },
   ],
+  widgets: [],
 };
 
 afterEach(cleanup);
