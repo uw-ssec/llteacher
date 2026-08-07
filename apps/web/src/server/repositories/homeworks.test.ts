@@ -466,6 +466,42 @@ describe.skipIf(!process.env.DATABASE_URL)("updateHomework (real DB)", () => {
 
     await db.delete(organizations).where(eq2(organizations.id, org.id));
   });
+
+  // #164
+  it("persists a section's type on create and on edit, and leaves it untouched when omitted", async () => {
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const { org, membership } = await seedCourseWithInstructor(db, `164-${crypto.randomUUID()}`);
+    const scope = unsafeCourseScope(membership.courseId);
+    const created = await createHomework(db, scope, {
+      createdById: membership.id, title: "HW164", description: "d", dueDate: new Date("2099-01-01"),
+    });
+
+    await updateHomework(db, scope, created!.id, {
+      sections: [
+        { title: "Q", content: "q", order: 1, type: "non_interactive" },
+        { title: "Chat", content: "c", order: 2 },
+      ],
+    });
+    const afterCreate = await getHomeworkById(db, scope, created!.id);
+    const q = afterCreate!.sections.find((s) => s.title === "Q")!;
+    const chat = afterCreate!.sections.find((s) => s.title === "Chat")!;
+    expect(q.type).toBe("non_interactive");
+    expect(chat.type).toBe("conversation");
+
+    // Edit: flip Chat to non_interactive, leave Q's type omitted (must stay
+    // non_interactive, not silently reset to the "conversation" default).
+    await updateHomework(db, scope, created!.id, {
+      sections: [
+        { id: q.id, title: "Q", content: "q", order: 1 },
+        { id: chat.id, title: "Chat", content: "c", order: 2, type: "non_interactive" },
+      ],
+    });
+    const afterEdit = await getHomeworkById(db, scope, created!.id);
+    expect(afterEdit!.sections.find((s) => s.id === q.id)!.type).toBe("non_interactive");
+    expect(afterEdit!.sections.find((s) => s.id === chat.id)!.type).toBe("non_interactive");
+
+    await db.delete(organizations).where(eq2(organizations.id, org.id));
+  });
 });
 
 describe.skipIf(!process.env.DATABASE_URL)("homeworkHasStudentActivity (real DB)", () => {

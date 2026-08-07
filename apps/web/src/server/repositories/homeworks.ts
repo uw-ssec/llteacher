@@ -7,6 +7,7 @@ import {
   type ExistingSection,
   type IncomingSection,
   type SectionUpdatePlan,
+  type SectionType,
 } from "./sections";
 import type { HomeworkListItemResponse } from "../../shared/types";
 
@@ -190,13 +191,13 @@ async function resolveSectionWrites(
   existingSections: ExistingSection[],
   deletedIds: Set<string>,
   plan: ReturnType<typeof planSectionDiff>,
-  pushSectionInsert: (id: string, order: number, title: string, content: string) => Promise<void> | void,
-  pushSectionUpdate: (id: string, order: number, title: string, content: string) => Promise<void> | void,
+  pushSectionInsert: (id: string, order: number, title: string, content: string, type: SectionType) => Promise<void> | void,
+  pushSectionUpdate: (id: string, order: number, title: string, content: string, type: SectionType) => Promise<void> | void,
   pushSolutionWrites: (sectionId: string, action: SectionUpdatePlan["solutionAction"], content: string | undefined) => Promise<void> | void,
 ) {
   type PendingWrite =
-    | { kind: "update"; id: string; targetOrder: number; title: string; content: string; solutionAction: SectionUpdatePlan["solutionAction"]; solutionContent?: string }
-    | { kind: "create"; id: string; targetOrder: number; title: string; content: string; solutionContent?: string };
+    | { kind: "update"; id: string; targetOrder: number; title: string; content: string; type: SectionType; solutionAction: SectionUpdatePlan["solutionAction"]; solutionContent?: string }
+    | { kind: "create"; id: string; targetOrder: number; title: string; content: string; type: SectionType; solutionContent?: string };
 
   const existingById = new Map(existingSections.map((s) => [s.id, s]));
   const livePosition = new Map<string, number>();
@@ -214,26 +215,26 @@ async function resolveSectionWrites(
     if (prior.order === upd.order) {
       // No collision possible -- write it immediately, it never competes
       // for a slot with anything else in this diff.
-      await pushSectionUpdate(upd.id, upd.order, upd.title, upd.content);
+      await pushSectionUpdate(upd.id, upd.order, upd.title, upd.content, upd.type);
       await pushSolutionWrites(upd.id, upd.solutionAction, upd.solutionContent);
     } else {
-      pending.push({ kind: "update", id: upd.id, targetOrder: upd.order, title: upd.title, content: upd.content, solutionAction: upd.solutionAction, solutionContent: upd.solutionContent });
+      pending.push({ kind: "update", id: upd.id, targetOrder: upd.order, title: upd.title, content: upd.content, type: upd.type, solutionAction: upd.solutionAction, solutionContent: upd.solutionContent });
     }
   }
   for (const create of plan.toCreate) {
-    pending.push({ kind: "create", id: crypto.randomUUID(), targetOrder: create.order, title: create.title, content: create.content, solutionContent: create.solutionContent });
+    pending.push({ kind: "create", id: crypto.randomUUID(), targetOrder: create.order, title: create.title, content: create.content, type: create.type, solutionContent: create.solutionContent });
   }
 
   const placed = new Set<PendingWrite>();
 
   async function apply(write: PendingWrite) {
     if (write.kind === "create") {
-      await pushSectionInsert(write.id, write.targetOrder, write.title, write.content);
+      await pushSectionInsert(write.id, write.targetOrder, write.title, write.content, write.type);
       if (write.solutionContent !== undefined) {
         await pushSolutionWrites(write.id, "create", write.solutionContent);
       }
     } else {
-      await pushSectionUpdate(write.id, write.targetOrder, write.title, write.content);
+      await pushSectionUpdate(write.id, write.targetOrder, write.title, write.content, write.type);
       await pushSolutionWrites(write.id, write.solutionAction, write.solutionContent);
       const prevOrder = livePosition.get(write.id);
       if (prevOrder !== undefined) currentOccupant.delete(prevOrder);
@@ -278,7 +279,12 @@ async function resolveSectionWrites(
     // a create could ever be the thing left stuck.
     const stuck = stillOpen.find((w): w is Extract<PendingWrite, { kind: "update" }> => w.kind === "update")!;
     const stuckCurrentOrder = livePosition.get(stuck.id)!;
-    await pushSectionUpdate(stuck.id, scratch, existingById.get(stuck.id)!.title, existingById.get(stuck.id)!.content);
+    // Parked at a scratch slot, not the final write -- apply() (via
+    // runPasses() below) writes the real target title/content/type once
+    // the collision clears. Use the section's *current* type here, not
+    // stuck.type (the target), to avoid writing a value that never gets
+    // reconciled if this loop iterates again before apply() runs.
+    await pushSectionUpdate(stuck.id, scratch, existingById.get(stuck.id)!.title, existingById.get(stuck.id)!.content, existingById.get(stuck.id)!.type);
     currentOccupant.delete(stuckCurrentOrder);
     currentOccupant.set(scratch, stuck.id);
     livePosition.set(stuck.id, scratch);
@@ -357,11 +363,11 @@ export async function updateHomework(
         existingSections,
         deletedIds,
         plan,
-        (sectionId, order, title, content) => {
-          statements.push(db.insert(sections).values({ id: sectionId, homeworkId: id, title, content, order }));
+        (sectionId, order, title, content, type) => {
+          statements.push(db.insert(sections).values({ id: sectionId, homeworkId: id, title, content, order, type }));
         },
-        (sectionId, order, title, content) => {
-          statements.push(db.update(sections).set({ title, content, order, updatedAt: new Date() }).where(eq(sections.id, sectionId)));
+        (sectionId, order, title, content, type) => {
+          statements.push(db.update(sections).set({ title, content, order, type, updatedAt: new Date() }).where(eq(sections.id, sectionId)));
         },
         (sectionId, action, content) => {
           if (action === "create") {
@@ -404,11 +410,11 @@ export async function updateHomework(
         existingSections,
         deletedIds,
         plan,
-        async (sectionId, order, title, content) => {
-          await tx.insert(sections).values({ id: sectionId, homeworkId: id, title, content, order });
+        async (sectionId, order, title, content, type) => {
+          await tx.insert(sections).values({ id: sectionId, homeworkId: id, title, content, order, type });
         },
-        async (sectionId, order, title, content) => {
-          await tx.update(sections).set({ title, content, order, updatedAt: new Date() }).where(eq(sections.id, sectionId));
+        async (sectionId, order, title, content, type) => {
+          await tx.update(sections).set({ title, content, order, type, updatedAt: new Date() }).where(eq(sections.id, sectionId));
         },
         async (sectionId, action, content) => {
           if (action === "create") {
