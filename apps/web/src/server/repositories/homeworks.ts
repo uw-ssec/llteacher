@@ -336,6 +336,7 @@ export async function updateHomework(
       title: s.title,
       content: s.content,
       solutionId: s.solution?.id ?? null,
+      type: s.type,
     }));
     plan = planSectionDiff(existingSections, input.sections);
   }

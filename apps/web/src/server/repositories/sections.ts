@@ -1,9 +1,12 @@
+export type SectionType = "conversation" | "non_interactive";
+
 export interface ExistingSection {
   id: string;
   order: number;
   title: string;
   content: string;
   solutionId: string | null;
+  type: SectionType;
 }
 
 export interface IncomingSection {
@@ -12,6 +15,9 @@ export interface IncomingSection {
   title: string;
   content: string;
   solutionContent?: string;
+  /** Omitted on an existing section leaves its type unchanged; omitted on a
+   *  new section defaults to "conversation" (matches the column default). */
+  type?: SectionType;
 }
 
 export interface SectionCreatePlan {
@@ -19,6 +25,7 @@ export interface SectionCreatePlan {
   content: string;
   order: number;
   solutionContent: string | undefined;
+  type: SectionType;
 }
 
 export interface SectionUpdatePlan {
@@ -31,6 +38,7 @@ export interface SectionUpdatePlan {
    *  "update": had one, still has one (content may differ). "delete": had
    *  one, incoming omitted solutionContent. */
   solutionAction: "none" | "create" | "update" | "delete";
+  type: SectionType;
 }
 
 export interface SectionDeletePlan {
@@ -72,6 +80,7 @@ export function planSectionDiff(
         content: s.content,
         order: s.order,
         solutionContent: s.solutionContent,
+        type: s.type ?? "conversation",
       });
       continue;
     }
@@ -89,13 +98,19 @@ export function planSectionDiff(
           ? "update"
           : "delete";
 
+    // #164: an omitted incoming type leaves the existing type unchanged --
+    // resolved once, up front, so both the change-detection and the pushed
+    // plan use the exact same value.
+    const resolvedType = s.type ?? prior.type;
+
     // Only include in toUpdate if something actually changed
     const titleChanged = prior.title !== s.title;
     const contentChanged = prior.content !== s.content;
     const orderChanged = prior.order !== s.order;
     const solutionChanged = solutionAction !== "none";
+    const typeChanged = prior.type !== resolvedType;
 
-    if (titleChanged || contentChanged || orderChanged || solutionChanged) {
+    if (titleChanged || contentChanged || orderChanged || solutionChanged || typeChanged) {
       toUpdate.push({
         id: s.id,
         title: s.title,
@@ -103,6 +118,7 @@ export function planSectionDiff(
         order: s.order,
         solutionContent: s.solutionContent,
         solutionAction,
+        type: resolvedType,
       });
     }
   }
