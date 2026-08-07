@@ -1,6 +1,6 @@
-import { and, eq, isNull, or } from "drizzle-orm";
+import { and, eq, inArray, isNull, or } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { submissions, grades, conversations, courses, courseMemberships, homeworks, users } from "../../db/schema";
+import { submissions, grades, conversations, courses, courseMemberships, homeworks, users, sectionAnswers } from "../../db/schema";
 import type { OrgScope, CourseScope } from "./scope";
 import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
 
@@ -258,6 +258,15 @@ export async function getHomeworkSubmissionsMatrix(
     : [];
   const submittedConversationIds = new Set(allSubmissions.map((s) => s.conversationId));
 
+  // #164: non_interactive sections never produce a conversation, so
+  // submitted/activeConvo below are always empty/false for them -- fetched
+  // the same batched way as conversations/submissions above (one more
+  // query, still fixed count regardless of roster/section size).
+  const allAnswers = sectionIds.length
+    ? await db.select({ sectionId: sectionAnswers.sectionId, userId: sectionAnswers.userId }).from(sectionAnswers).where(inArray(sectionAnswers.sectionId, sectionIds))
+    : [];
+  const answeredByUserSection = new Set(allAnswers.map((a) => `${a.userId}:${a.sectionId}`));
+
   const students: StudentSubmissionRow[] = [];
   for (const membership of roster) {
     const displayName = membership.displayName ? await cipher.decryptString(membership.displayName) : "";
@@ -266,6 +275,12 @@ export async function getHomeworkSubmissionsMatrix(
     const cells: SubmissionCell[] = [];
     let totalConversations = 0;
     let submissionCount = 0;
+    // Distinct from totalConversations: also counts a non_interactive
+    // section's answer, which is real engagement with no conversation
+    // behind it. Used only for the no_interaction/partial/active split
+    // below -- totalConversations itself keeps meaning literally "how many
+    // conversations," unchanged for any other consumer.
+    let totalEngagement = 0;
     // Student-level "latest activity across every section" -- distinct from
     // each cell's OWN lastActivityAt below. An earlier draft of this
     // function used one shared variable for both, which meant a later
@@ -274,12 +289,29 @@ export async function getHomeworkSubmissionsMatrix(
     let studentLastActivityAt: Date | null = null;
 
     for (const section of [...homework.sections].sort((a, b) => a.order - b.order)) {
+      if (section.type === "non_interactive") {
+        // #164: no conversation ever exists for this section type -- status
+        // comes from whether an answer row exists, not from the (always
+        // empty) conversation/submission lookups above.
+        const answered = answeredByUserSection.has(`${membership.userId}:${section.id}`);
+        if (answered) { submissionCount++; totalEngagement++; }
+        cells.push({
+          sectionId: section.id,
+          status: answered ? "submitted" : "missing",
+          conversationCount: 0,
+          lastActivityAt: null,
+          hasDeletedConversation: false,
+        });
+        continue;
+      }
+
       const convosForCell = allConversations.filter((c) => c.sectionId === section.id && c.ownerUserId === membership.userId);
       const activeConvo = convosForCell.find((c) => !c.isDeleted);
       const hasDeleted = convosForCell.some((c) => c.isDeleted);
       const submitted = convosForCell.some((c) => submittedConversationIds.has(c.id));
 
       totalConversations += convosForCell.length;
+      totalEngagement += convosForCell.length;
       if (submitted) submissionCount++;
 
       let cellLastActivityAt: Date | null = null;
@@ -298,7 +330,7 @@ export async function getHomeworkSubmissionsMatrix(
     }
 
     const participationStatus: ParticipationStatus =
-      totalConversations === 0 ? "no_interaction" : submissionCount > 0 ? "active" : "partial";
+      totalEngagement === 0 ? "no_interaction" : submissionCount > 0 ? "active" : "partial";
 
     students.push({
       studentId: membership.userId, displayName, email, sections: cells,

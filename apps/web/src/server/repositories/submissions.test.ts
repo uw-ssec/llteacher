@@ -9,6 +9,7 @@ import { createSubmission, getSubmissionByConversation, recordGrade, submitSecti
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { createHomework, updateHomework, getHomeworkById } from "./homeworks";
+import { upsertSectionAnswer } from "./sectionAnswers";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -452,7 +453,79 @@ describe.skipIf(!DATABASE_URL)("getHomeworkSubmissionsMatrix (real DB)", () => {
     await db.delete(organizations).where(eq(organizations.id, org.id));
   });
 
-  it("uses at most 4 db query round-trips (roster, homework+sections, conversations, submissions) -- no N+1", async () => {
+  // #164: a non_interactive section has no conversation at all -- before
+  // this fix, every cell for it reported "missing" regardless of whether
+  // the student actually answered.
+  it("counts a non_interactive section's answer as submitted, not missing", async () => {
+    const { db, org, course, cipher, instructorMembership } = await (async () => {
+      const db = makeNodeDb(DATABASE_URL!);
+      const [org] = await db.insert(organizations).values({
+        slug: `m3-test-164-matrix-${crypto.randomUUID()}`, name: "M3 164 Matrix", workosOrganizationId: `wo-164m-${crypto.randomUUID()}`,
+      }).returning();
+      const [course] = await db.insert(courses).values({
+        organizationId: org!.id, code: "TEST164M", term: "Test", title: "Test Course 164",
+      }).returning();
+      const cipher = new IdentityCipher(await loadIdentityCipherKeys({
+        ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+        BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+      } as Env));
+      const [instructorUser] = await db.insert(users).values({
+        email: crypto.getRandomValues(new Uint8Array(32)) as never,
+        emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+      }).returning();
+      const [instructorMembership] = await db.insert(courseMemberships).values({
+        userId: instructorUser!.id, courseId: course!.id, role: "instructor",
+      }).returning();
+      return { db, org: org!, course: course!, cipher, instructorMembership: instructorMembership! };
+    })();
+
+    // getHomeworkSubmissionsMatrix decrypts every roster row's email --
+    // unlike the instructor row above (never fetched by this query, so a
+    // random-bytes placeholder is fine there), student emails must be real
+    // ciphertext.
+    async function seedStudent(email: string) {
+      const [user] = await db.insert(users).values({
+        email: await cipher.encryptString(email),
+        emailBlindIndex: await cipher.computeBlindIndex(IdentityCipher.normalizeEmail(email)),
+      }).returning();
+      await db.insert(courseMemberships).values({ userId: user!.id, courseId: course.id, role: "student" });
+      return user!;
+    }
+    const answered = await seedStudent("answered164@test.example");
+    const unanswered = await seedStudent("unanswered164@test.example");
+
+    const scope = unsafeCourseScope(course.id);
+    const hw = await createHomework(db, scope, {
+      createdById: instructorMembership.id, title: "Q HW", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    await updateHomework(db, scope, hw!.id, {
+      sections: [{ title: "Question", content: "q", order: 1, type: "non_interactive" }],
+    });
+    const withSections = await getHomeworkById(db, scope, hw!.id);
+    const section = withSections!.sections[0]!;
+
+    await upsertSectionAnswer(db, unsafeOrgScope(org.id), section.id, answered.id, "my answer");
+
+    const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, hw!.id);
+
+    const answeredRow = matrix!.students.find((s) => s.studentId === answered.id)!;
+    const unansweredRow = matrix!.students.find((s) => s.studentId === unanswered.id)!;
+
+    expect(answeredRow.sections[0]!.status).toBe("submitted");
+    expect(answeredRow.sections[0]!.conversationCount).toBe(0);
+    expect(answeredRow.submissionCount).toBe(1);
+    expect(answeredRow.participationStatus).toBe("active");
+
+    expect(unansweredRow.sections[0]!.status).toBe("missing");
+    expect(unansweredRow.participationStatus).toBe("no_interaction");
+
+    // Not every student answered -- the section still shows in the warnings.
+    expect(matrix!.missingSectionWarnings.find((w) => w.sectionId === section.id)?.missingStudentCount).toBe(1);
+
+    await db.delete(organizations).where(eq(organizations.id, org.id));
+  });
+
+  it("uses at most 5 db query round-trips (roster, homework+sections, conversations, submissions, #164's answers) -- no N+1", async () => {
     const { db, org, cipher, scope, homeworkId } = await seedMatrixFixture();
 
     // The roster fetch is a flat db.select(...).from(...).innerJoin(...)
@@ -463,9 +536,10 @@ describe.skipIf(!DATABASE_URL)("getHomeworkSubmissionsMatrix (real DB)", () => {
     // dropped from 4 to 3, and a future regression to a per-student roster
     // query wouldn't be caught by the very test meant to prevent it). Wrap
     // db.select itself in addition to the three db.query.* methods -- this
-    // function calls db.select() exactly once (for the roster), so counting
-    // invocations of the method itself (not chained calls) correctly counts
-    // it as one query alongside the other three.
+    // function calls db.select() exactly twice (roster, #164's
+    // sectionAnswers fetch), so counting invocations of the method itself
+    // (not chained calls) correctly counts each as its own query alongside
+    // the other three.
     let queryCount = 0;
     const targets: Array<[object, string]> = [
       [db.query.homeworks, "findFirst"],
@@ -494,7 +568,7 @@ describe.skipIf(!DATABASE_URL)("getHomeworkSubmissionsMatrix (real DB)", () => {
       targets.forEach(([obj, key], i) => { (obj as Record<string, unknown>)[key] = originals[i]; });
       (db as unknown as Record<string, unknown>).select = originalSelect;
     }
-    expect(queryCount).toBe(4);
+    expect(queryCount).toBe(5);
 
     await db.delete(organizations).where(eq(organizations.id, org.id));
   });
