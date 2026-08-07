@@ -104,8 +104,13 @@ vi.mock("../repositories/homeworks", async (importOriginal) => {
 // Defaults to "belongs" so every pre-existing llmConfigId test (written
 // before #161) keeps passing unmodified; tests that need the rejection path
 // override the return value explicitly.
-const getOrgScopeForCourseMock = vi.fn(async () => "org-a");
-const llmConfigBelongsToOrgMock = vi.fn(async () => true);
+// Pre-existing TS2556 fix (unrelated to #166/#164/#165): a zero-arg mock
+// signature can't be called via `mock(...args)` where args is a plain
+// unknown[] (not a tuple) -- TS can't verify the spread matches a fixed
+// zero-arity function. The rest param below accepts and ignores whatever
+// is spread in, same runtime behavior as before.
+const getOrgScopeForCourseMock = vi.fn(async (..._args: unknown[]) => "org-a");
+const llmConfigBelongsToOrgMock = vi.fn(async (..._args: unknown[]) => true);
 vi.mock("../repositories/organizations", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../repositories/organizations")>();
   return { ...actual, getOrgScopeForCourse: (...args: unknown[]) => getOrgScopeForCourseMock(...args) };
