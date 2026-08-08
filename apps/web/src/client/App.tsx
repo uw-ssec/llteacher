@@ -123,13 +123,36 @@ export default function App() {
   const { isAuthenticated, loading: authLoading, error: authError, login, logout } = useAuth();
   const navigate = useNavigate();
 
+  /* #3: the server creates a conversation on the first turn and returns its
+     id via the x-conversation-id response header; every subsequent turn
+     sends it back so the server persists into the same conversation instead
+     of minting a new one each time. Component state only for now (not the
+     URL) -- persisting it there, and loading an existing conversation's
+     history on mount, is conversation-lifecycle scope (#27), not this task. */
+  const [conversationId, setConversationId] = useState<string | undefined>(undefined);
+
+  /* Wraps fetch to read the x-conversation-id response header before handing
+     the (untouched) Response back to useChat's own stream parsing --
+     DefaultChatTransport otherwise has no way to surface response headers
+     to the caller. */
+  const chatFetch: typeof fetch = async (input, init) => {
+    const res = await fetch(input, init);
+    const newConversationId = res.headers.get("x-conversation-id");
+    if (newConversationId) setConversationId(newConversationId);
+    return res;
+  };
+
   /* The AI SDK chat — owns messages + streaming state. */
   const {
     messages: aiMessages,
     sendMessage,
     status: chatStatus,
   } = useChat({
-    transport: new DefaultChatTransport({ api: "/api/chat" }),
+    transport: new DefaultChatTransport({
+      api: "/api/chat",
+      fetch: chatFetch,
+      body: conversationId ? { conversationId } : {},
+    }),
   });
 
   const { sections, setSections, hwTitle, loadError } = useStudentHomework();

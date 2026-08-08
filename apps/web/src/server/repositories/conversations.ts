@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { conversations, messages, sections, homeworks, courseMemberships } from "../../db/schema";
 import type { CourseScope } from "./scope";
@@ -113,4 +113,45 @@ export async function appendMessage(
     .values({ conversationId, role: input.role, parts: input.parts })
     .returning();
   return created;
+}
+
+// Unscoped by design (chatHandler needs to look a conversation up by id
+// before it knows -- or can prove -- which CourseScope it belongs to). The
+// caller MUST check the returned row's ownerUserId against the requesting
+// user before trusting it or minting a CourseScope from its courseId (see
+// scope.ts's unsafeCourseScope docstring: "a row just read back from the DB
+// under an already-verified scope" is the sanctioned case for that cast --
+// the ownerUserId check below is what verifies it here).
+export async function getConversationById(db: Db, conversationId: string) {
+  const [row] = await db.select().from(conversations).where(eq(conversations.id, conversationId));
+  return row ?? null;
+}
+
+// Used by chatHandler's retry/idempotency check (#3): if the most recently
+// persisted message in the conversation is already the exact user message
+// the client is about to send, the caller should skip the insert rather than
+// create a duplicate row -- covers a client retry after a disconnect where
+// the user message made it to the DB but the response (and thus the
+// client's confirmation) never arrived. Scoped the same way appendMessage is
+// (courseId match + not-deleted) so a caller can't probe a message via a
+// conversationId scoped to the wrong course.
+export async function getLastMessage(db: Db, scope: CourseScope, conversationId: string) {
+  const [owned] = await db
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        eq(conversations.courseId, scope),
+        eq(conversations.isDeleted, false),
+      ),
+    );
+  if (!owned) return null;
+  const [row] = await db
+    .select()
+    .from(messages)
+    .where(eq(messages.conversationId, conversationId))
+    .orderBy(desc(messages.createdAt))
+    .limit(1);
+  return row ?? null;
 }
