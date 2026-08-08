@@ -17,8 +17,10 @@
    reload --
      1. resolve/create the conversation (conversationId from the client, or a
         brand-new "tutor" conversation if absent)
-     2. persist the inbound user message (idempotently -- see the retry
-        comment below) before calling the model
+     2. check the two retry/idempotency cases (see the comment at the
+        getLastMessages call below) -- either short-circuits without
+        touching the model, or persists the inbound user message before
+        calling it
      3. stream the response, persisting the full final UIMessage (text + any
         tool parts) via toUIMessageStreamResponse's onFinish hook
      4. return the conversationId to the client via the x-conversation-id
@@ -32,9 +34,12 @@ import type { Context } from "hono";
 import {
   streamText,
   convertToModelMessages,
+  createUIMessageStream,
+  createUIMessageStreamResponse,
   jsonSchema,
   stepCountIs,
   type UIMessage,
+  type UIMessageStreamWriter,
   type ToolSet,
 } from "ai";
 import { z } from "zod";
@@ -44,7 +49,7 @@ import {
   getConversationById,
   createConversation,
   appendMessage,
-  getLastMessage,
+  getLastMessages,
 } from "../repositories/conversations";
 import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
 import { logServerError } from "../utils/errors";
@@ -123,6 +128,61 @@ const inboundUserMessageSchema = z.object({
   role: z.literal("user"),
   parts: z.array(chatPartSchema).min(1),
 });
+
+// Replays an already-persisted assistant message's `parts` (jsonb, so typed
+// unknown at the DB boundary) as UIMessageChunk writes -- used only by the
+// "already answered" retry path below, never by a fresh model turn. Only
+// handles the two part shapes this app's own TOOLS catalog can actually
+// produce (plain text, and a completed showDefinition tool call/result) --
+// anything else is dropped rather than guessed at, so an unrecognized part
+// shape fails safe instead of throwing mid-replay.
+function replayPersistedPart(part: { type: string } & Record<string, unknown>, writer: UIMessageStreamWriter) {
+  if (part.type === "text" && typeof part.text === "string") {
+    const id = crypto.randomUUID();
+    writer.write({ type: "text-start", id });
+    writer.write({ type: "text-delta", id, delta: part.text });
+    writer.write({ type: "text-end", id });
+    return;
+  }
+  if (part.type.startsWith("tool-") && typeof part.toolCallId === "string") {
+    const toolName = part.type.slice("tool-".length);
+    writer.write({ type: "tool-input-available", toolCallId: part.toolCallId, toolName, input: part.input });
+    if (part.state === "output-error") {
+      writer.write({
+        type: "tool-output-error",
+        toolCallId: part.toolCallId,
+        errorText: typeof part.errorText === "string" ? part.errorText : "Tool execution failed",
+      });
+    } else {
+      writer.write({ type: "tool-output-available", toolCallId: part.toolCallId, output: part.output });
+    }
+  }
+}
+
+// Builds the UI message stream Response for the "already answered" retry
+// case (#3 requirement 6): no model call, no new DB rows -- just the
+// previously-persisted assistant message replayed back through the same
+// wire protocol a fresh streamText response would use, so the client's
+// useChat can't tell the difference.
+function replayResponse(conversationId: string, persistedParts: unknown) {
+  const parts = Array.isArray(persistedParts) ? persistedParts : [];
+  return createUIMessageStreamResponse({
+    headers: { "x-conversation-id": conversationId },
+    stream: createUIMessageStream({
+      execute: ({ writer }) => {
+        writer.write({ type: "start" });
+        writer.write({ type: "start-step" });
+        for (const part of parts) {
+          if (part && typeof part === "object" && "type" in part && typeof (part as { type: unknown }).type === "string") {
+            replayPersistedPart(part as { type: string } & Record<string, unknown>, writer);
+          }
+        }
+        writer.write({ type: "finish-step" });
+        writer.write({ type: "finish" });
+      },
+    }),
+  });
+}
 
 export async function chatHandler(c: Context<AppEnv>) {
   const apiKey = c.env.OPENROUTER_API_KEY;
@@ -207,16 +267,30 @@ export async function chatHandler(c: Context<AppEnv>) {
   // unsafeCourseScope docstring.
   const scope = unsafeCourseScope(conv.courseId);
 
-  // Idempotency (#3): if the last message already persisted to this
-  // conversation is this exact user message, this is a client retry after a
-  // disconnect (the user message landed, the response never got back to the
-  // client) rather than a genuinely new turn -- skip the insert so retrying
-  // doesn't duplicate the row.
-  const lastMessage = await getLastMessage(db, scope, conv.id);
-  const isRetryOfLastMessage =
-    lastMessage?.role === "user" &&
-    JSON.stringify(lastMessage.parts) === JSON.stringify(parsedInbound.data.parts);
-  if (!isRetryOfLastMessage) {
+  // Idempotency (#3) -- two distinct retry shapes, both covered so neither
+  // the user row nor the assistant row can be double-written:
+  //
+  //   1. "Not answered yet": the user message already landed but the
+  //      assistant hasn't responded (or its response hasn't been persisted)
+  //      yet -- last row is this exact user message. Skip the insert, fall
+  //      through to a normal model call (which will produce and persist the
+  //      still-missing assistant reply).
+  //   2. "Already answered": the model already ran AND its response is
+  //      already persisted for this exact user turn -- last row is the
+  //      assistant reply, and the row before it is this exact user message.
+  //      The client just never received that response (dropped after the
+  //      last streamed byte, client-side timeout, etc). Skip the insert AND
+  //      the model call entirely -- replay the persisted assistant message
+  //      instead, so retrying can't produce a second user/assistant row
+  //      pair or a second (paid) model call.
+  const [lastMessage, secondLastMessage] = await getLastMessages(db, scope, conv.id, 2);
+  const matchesInboundUser = (msg: { role: string; parts: unknown } | undefined) =>
+    msg?.role === "user" && JSON.stringify(msg.parts) === JSON.stringify(parsedInbound.data.parts);
+
+  if (lastMessage?.role === "assistant" && matchesInboundUser(secondLastMessage)) {
+    return replayResponse(conv.id, lastMessage.parts);
+  }
+  if (!matchesInboundUser(lastMessage)) {
     await appendMessage(db, scope, conv.id, { role: "user", parts: inboundMessage.parts });
   }
 

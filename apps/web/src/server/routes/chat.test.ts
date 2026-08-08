@@ -15,12 +15,12 @@ vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 const getConversationByIdMock = vi.fn();
 const createConversationMock = vi.fn();
 const appendMessageMock = vi.fn();
-const getLastMessageMock = vi.fn();
+const getLastMessagesMock = vi.fn();
 vi.mock("../repositories/conversations", () => ({
   getConversationById: (...args: unknown[]) => getConversationByIdMock(...args),
   createConversation: (...args: unknown[]) => createConversationMock(...args),
   appendMessage: (...args: unknown[]) => appendMessageMock(...args),
-  getLastMessage: (...args: unknown[]) => getLastMessageMock(...args),
+  getLastMessages: (...args: unknown[]) => getLastMessagesMock(...args),
 }));
 
 // streamText is mocked so no real model call happens and the test controls
@@ -91,7 +91,7 @@ describe("POST /api/chat", () => {
     getConversationByIdMock.mockReset();
     createConversationMock.mockReset();
     appendMessageMock.mockReset();
-    getLastMessageMock.mockReset();
+    getLastMessagesMock.mockReset();
     streamTextMock.mockClear();
     capturedOnFinish = undefined;
   });
@@ -127,7 +127,7 @@ describe("POST /api/chat", () => {
 
   it("creates a new tutor conversation with a default title when conversationId is omitted", async () => {
     createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
-    getLastMessageMock.mockResolvedValue(null);
+    getLastMessagesMock.mockResolvedValue([]);
 
     const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
 
@@ -144,7 +144,7 @@ describe("POST /api/chat", () => {
 
   it("falls back to the caller's own course membership when courseId is omitted", async () => {
     createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
-    getLastMessageMock.mockResolvedValue(null);
+    getLastMessagesMock.mockResolvedValue([]);
 
     await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
 
@@ -163,7 +163,7 @@ describe("POST /api/chat", () => {
 
   it("persists the inbound user message before the model call", async () => {
     createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
-    getLastMessageMock.mockResolvedValue(null);
+    getLastMessagesMock.mockResolvedValue([]);
 
     await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
 
@@ -182,7 +182,7 @@ describe("POST /api/chat", () => {
 
   it("returns the conversationId via the x-conversation-id response header", async () => {
     createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
-    getLastMessageMock.mockResolvedValue(null);
+    getLastMessagesMock.mockResolvedValue([]);
 
     const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
 
@@ -191,7 +191,7 @@ describe("POST /api/chat", () => {
 
   it("uses an existing conversationId instead of creating a new one, when owned by the caller", async () => {
     getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
-    getLastMessageMock.mockResolvedValue(null);
+    getLastMessagesMock.mockResolvedValue([]);
 
     const res = await postChat(buildApp(fakeAuthContext()), {
       messages: [userUiMessage],
@@ -228,13 +228,16 @@ describe("POST /api/chat", () => {
     expect(streamTextMock).not.toHaveBeenCalled();
   });
 
-  it("does not double-write the user message on a retry (idempotency)", async () => {
+  it("does not double-write the user message on a retry before it was answered (idempotency case 1)", async () => {
     getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
     // Simulates the disconnect/retry race from the issue's pitfall #1: the
     // last row already in the conversation is this exact user message
     // (persisted by a request that never got its response back to the
-    // client), and the client is now retrying with the same message.
-    getLastMessageMock.mockResolvedValue({ role: "user", parts: userUiMessage.parts });
+    // client), and the client is now retrying with the same message. No
+    // assistant row exists yet, so this must fall through to a normal model
+    // call (not the "already answered" replay path) -- just without
+    // re-inserting the user row.
+    getLastMessagesMock.mockResolvedValue([{ role: "user", parts: userUiMessage.parts }]);
 
     await postChat(buildApp(fakeAuthContext()), {
       messages: [userUiMessage],
@@ -247,11 +250,18 @@ describe("POST /api/chat", () => {
       "conv-1",
       expect.objectContaining({ role: "user" }),
     );
+    expect(streamTextMock).toHaveBeenCalledTimes(1);
   });
 
   it("still persists a genuinely new user message even when the conversation has prior messages", async () => {
     getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
-    getLastMessageMock.mockResolvedValue({ role: "assistant", parts: [{ type: "text", text: "previous reply" }] });
+    // Last row is an assistant reply, but the user message before it does
+    // NOT match this turn's inbound message -- a genuinely new turn in an
+    // existing conversation, not a retry of anything.
+    getLastMessagesMock.mockResolvedValue([
+      { role: "assistant", parts: [{ type: "text", text: "previous reply" }] },
+      { role: "user", parts: [{ type: "text", text: "an earlier, different message" }] },
+    ]);
 
     await postChat(buildApp(fakeAuthContext()), {
       messages: [userUiMessage],
@@ -266,9 +276,52 @@ describe("POST /api/chat", () => {
     );
   });
 
+  it("does not double-write or re-call the model when the assistant already answered this exact turn (idempotency case 2)", async () => {
+    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    const persistedAssistantParts = [
+      { type: "text", text: "already answered this one" },
+      {
+        type: "tool-showDefinition",
+        toolCallId: "call-1",
+        state: "output-available",
+        input: { term: "p-value", body: "..." },
+        output: { status: "displayed", term: "p-value" },
+      },
+    ];
+    // The scenario the reviewer flagged: the model already ran and its
+    // response is already persisted for this exact user turn (last row is
+    // the assistant reply; the row before it is this exact user message) --
+    // the client just never received it (e.g. dropped after the last
+    // streamed byte). A retry here must not touch the model or the DB a
+    // second time.
+    getLastMessagesMock.mockResolvedValue([
+      { role: "assistant", parts: persistedAssistantParts },
+      { role: "user", parts: userUiMessage.parts },
+    ]);
+
+    const res = await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      conversationId: "conv-1",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-conversation-id")).toBe("conv-1");
+    expect(appendMessageMock).not.toHaveBeenCalled();
+    expect(streamTextMock).not.toHaveBeenCalled();
+
+    // The "existing assistant response is what's effectively returned" --
+    // this uses the REAL createUIMessageStream/createUIMessageStreamResponse
+    // (only streamText is mocked in this file), so the response body is a
+    // genuine UI message stream replaying the persisted text and tool parts.
+    const text = await res.text();
+    expect(text).toContain("already answered this one");
+    expect(text).toContain('"toolCallId":"call-1"');
+    expect(text).toContain('"type":"tool-output-available"');
+  });
+
   it("persists the streamed assistant message (full text + tool parts) on stream completion", async () => {
     createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
-    getLastMessageMock.mockResolvedValue(null);
+    getLastMessagesMock.mockResolvedValue([]);
 
     await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
 
@@ -293,7 +346,7 @@ describe("POST /api/chat", () => {
 
   it("logs (does not throw) when the assistant persistence write fails inside onFinish", async () => {
     createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
-    getLastMessageMock.mockResolvedValue(null);
+    getLastMessagesMock.mockResolvedValue([]);
     appendMessageMock.mockImplementation(async (_db, _scope, _id, input) => {
       if (input.role === "assistant") throw new Error("db unavailable");
       return { id: "msg-1" };

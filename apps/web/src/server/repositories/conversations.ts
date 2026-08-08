@@ -127,15 +127,17 @@ export async function getConversationById(db: Db, conversationId: string) {
   return row ?? null;
 }
 
-// Used by chatHandler's retry/idempotency check (#3): if the most recently
-// persisted message in the conversation is already the exact user message
-// the client is about to send, the caller should skip the insert rather than
-// create a duplicate row -- covers a client retry after a disconnect where
-// the user message made it to the DB but the response (and thus the
-// client's confirmation) never arrived. Scoped the same way appendMessage is
+// Used by chatHandler's retry/idempotency check (#3): the most recently
+// persisted messages in a conversation, newest first (index 0 = last
+// message). limit=2 is what chatHandler needs to distinguish its two retry
+// cases -- "the user message already landed but the assistant hasn't
+// answered yet" (last row is that same user message) from "the assistant
+// already answered but the client never received it" (last row is the
+// assistant reply, and the row before it is that same user message) --
+// without a second round-trip. Scoped the same way appendMessage is
 // (courseId match + not-deleted) so a caller can't probe a message via a
 // conversationId scoped to the wrong course.
-export async function getLastMessage(db: Db, scope: CourseScope, conversationId: string) {
+export async function getLastMessages(db: Db, scope: CourseScope, conversationId: string, limit = 2) {
   const [owned] = await db
     .select({ id: conversations.id })
     .from(conversations)
@@ -146,12 +148,11 @@ export async function getLastMessage(db: Db, scope: CourseScope, conversationId:
         eq(conversations.isDeleted, false),
       ),
     );
-  if (!owned) return null;
-  const [row] = await db
+  if (!owned) return [];
+  return db
     .select()
     .from(messages)
     .where(eq(messages.conversationId, conversationId))
     .orderBy(desc(messages.createdAt))
-    .limit(1);
-  return row ?? null;
+    .limit(limit);
 }

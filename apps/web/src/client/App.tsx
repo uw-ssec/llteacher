@@ -142,7 +142,22 @@ export default function App() {
     return res;
   };
 
-  /* The AI SDK chat — owns messages + streaming state. */
+  /* The AI SDK chat — owns messages + streaming state.
+
+     useChat memoizes its internal Chat instance in a useRef on first mount
+     (see @ai-sdk/react's use-chat.ts: shouldRecreateChat only fires when
+     the `chat` or `id` option changes) -- the `transport` object built here
+     is therefore only ever read on the FIRST render. Putting
+     `conversationId` into DefaultChatTransport's own `body` option (as an
+     earlier version of this file did) silently froze it at `undefined`
+     forever: every turn after the first would omit it and the server would
+     mint a brand-new conversation each time. `sendMessage`'s per-call
+     `options.body` (in handleSendMessage below) is merged into the request
+     body per-request instead, at the version of `conversationId` current on
+     the render that calls it -- through the *same* long-lived transport --
+     avoiding both the staleness bug and the churn/message-reset (`id in
+     options` triggers a fresh Chat with reset UI messages) that swapping
+     `id: conversationId` into useChat's options would cause. */
   const {
     messages: aiMessages,
     sendMessage,
@@ -151,7 +166,6 @@ export default function App() {
     transport: new DefaultChatTransport({
       api: "/api/chat",
       fetch: chatFetch,
-      body: conversationId ? { conversationId } : {},
     }),
   });
 
@@ -256,7 +270,12 @@ export default function App() {
   }
 
   const handleSendMessage = (text: string) => {
-    sendMessage({ text });
+    /* conversationId flows per-call (not via the transport's own `body`,
+       see the useChat comment above) so each turn after the first actually
+       carries whatever the previous turn's x-conversation-id response
+       header set -- letting the server continue the same conversation
+       instead of minting a new one on every message. */
+    sendMessage({ text }, { body: conversationId ? { conversationId } : {} });
     /* Each AI response counts as a hint — increments trigger the gold flash
        on the sidebar's hint-history-row count numeral. */
     setHintCount((n) => n + 1);

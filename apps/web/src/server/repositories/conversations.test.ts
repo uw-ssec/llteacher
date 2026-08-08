@@ -10,7 +10,7 @@ import {
   softDeleteConversation,
   appendMessage,
   getConversationById,
-  getLastMessage,
+  getLastMessages,
 } from "./conversations";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -222,12 +222,12 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     expect(found).toBeNull();
   });
 
-  it("getLastMessage returns the most recently created message in the conversation", async () => {
+  it("getLastMessages returns the most recent messages newest-first, capped at limit", async () => {
     const created = await createConversation(db, unsafeCourseScope(courseAId), {
       ownerUserId: userId,
       sectionId: null,
       kind: "tutor",
-      title: "Last message target",
+      title: "Last messages target",
     });
     await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
       role: "user",
@@ -237,24 +237,27 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       role: "assistant",
       parts: [{ type: "text", text: "second" }],
     });
-    const last = await getLastMessage(db, unsafeCourseScope(courseAId), created.id);
-    expect(last?.role).toBe("assistant");
-    expect(last?.parts).toEqual([{ type: "text", text: "second" }]);
+    const last = await getLastMessages(db, unsafeCourseScope(courseAId), created.id, 2);
+    expect(last).toHaveLength(2);
+    expect(last[0]?.role).toBe("assistant");
+    expect(last[0]?.parts).toEqual([{ type: "text", text: "second" }]);
+    expect(last[1]?.role).toBe("user");
+    expect(last[1]?.parts).toEqual([{ type: "text", text: "first" }]);
   });
 
-  it("getLastMessage returns null for a conversation scoped to a different course", async () => {
+  it("getLastMessages returns an empty array for a conversation scoped to a different course", async () => {
     const created = await createConversation(db, unsafeCourseScope(courseAId), {
       ownerUserId: userId,
       sectionId: null,
       kind: "tutor",
-      title: "Wrong-scope last-message target",
+      title: "Wrong-scope last-messages target",
     });
     await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
       role: "user",
       parts: [{ type: "text", text: "hello" }],
     });
-    const last = await getLastMessage(db, unsafeCourseScope(courseBId), created.id);
-    expect(last).toBeNull();
+    const last = await getLastMessages(db, unsafeCourseScope(courseBId), created.id, 2);
+    expect(last).toEqual([]);
   });
 
   it("rejects a sectionId that belongs to a different course", async () => {
