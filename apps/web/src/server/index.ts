@@ -10,10 +10,13 @@ import {
   updateHomeworkHandler,
   deleteHomeworkHandler,
   publishHomeworkHandler,
+  updateHomeworkHideHandler,
 } from "./routes/homeworks";
 import { workosWebhookHandler } from "./routes/webhooksWorkos";
 import { studentHomeworksHandler } from "./routes/studentHomeworks";
 import { submitSectionHandler, getHomeworkSubmissionsHandler } from "./routes/submissions";
+import { submitSectionAnswerHandler, getSectionAnswerHandler } from "./routes/sectionAnswers";
+import { submitWidgetResponseHandler } from "./routes/progressWidgets";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireInstructorOf, requireRole } from "./utils/guards";
@@ -65,12 +68,22 @@ app.patch(
   "/api/courses/:courseId/homeworks/:homeworkId/publish",
   requireInstructorOf()(publishHomeworkHandler),
 );
+app.patch(
+  "/api/courses/:courseId/homeworks/:homeworkId/hide",
+  requireInstructorOf()(updateHomeworkHideHandler),
+);
 app.get("/api/student/homeworks", requireRole(["student"])(studentHomeworksHandler));
 app.post("/api/conversations/:id/submit", requireRole(["student"])(submitSectionHandler));
 app.get(
   "/api/courses/:courseId/homeworks/:homeworkId/submissions",
   requireInstructorOf()(getHomeworkSubmissionsHandler),
 );
+app.patch("/api/sections/:sectionId/answer", requireRole(["student"])(submitSectionAnswerHandler));
+app.get(
+  "/api/courses/:courseId/sections/:sectionId/answers/:studentId",
+  requireInstructorOf()(getSectionAnswerHandler),
+);
+app.patch("/api/widgets/:widgetId/response", requireRole(["student"])(submitWidgetResponseHandler));
 
 // Everything else: delegate to the static asset binding.
 // In dev, this proxies to Vite's pipeline (so HMR + source maps work).

@@ -45,6 +45,7 @@ export type SectionSummary = {
   hasSolution: boolean;
   /** How many students have submitted this section */
   submissionsCount: number;
+  type: "conversation" | "non_interactive";
 };
 
 export type SectionDetail = SectionSummary & {
@@ -134,31 +135,31 @@ export const LLM_CONFIGS: LLMConfig[] = [
 
 const SECTION_FIXTURES_BY_HW: Record<string, SectionSummary[]> = {
   "hw-001": [
-    { id: "s-101", homeworkId: "hw-001", title: "Sample spaces", order: 1, hasSolution: true, submissionsCount: 31 },
-    { id: "s-102", homeworkId: "hw-001", title: "Events and probability", order: 2, hasSolution: true, submissionsCount: 29 },
-    { id: "s-103", homeworkId: "hw-001", title: "Conditional probability", order: 3, hasSolution: true, submissionsCount: 28 },
+    { id: "s-101", homeworkId: "hw-001", title: "Sample spaces", order: 1, hasSolution: true, submissionsCount: 31, type: "conversation" },
+    { id: "s-102", homeworkId: "hw-001", title: "Events and probability", order: 2, hasSolution: true, submissionsCount: 29, type: "conversation" },
+    { id: "s-103", homeworkId: "hw-001", title: "Conditional probability", order: 3, hasSolution: true, submissionsCount: 28, type: "conversation" },
   ],
   "hw-002": [
-    { id: "s-201", homeworkId: "hw-002", title: "Discrete random variables", order: 1, hasSolution: true, submissionsCount: 26 },
-    { id: "s-202", homeworkId: "hw-002", title: "Continuous random variables", order: 2, hasSolution: true, submissionsCount: 25 },
-    { id: "s-203", homeworkId: "hw-002", title: "Expectation and variance", order: 3, hasSolution: false, submissionsCount: 24 },
-    { id: "s-204", homeworkId: "hw-002", title: "Joint distributions", order: 4, hasSolution: true, submissionsCount: 22 },
+    { id: "s-201", homeworkId: "hw-002", title: "Discrete random variables", order: 1, hasSolution: true, submissionsCount: 26, type: "conversation" },
+    { id: "s-202", homeworkId: "hw-002", title: "Continuous random variables", order: 2, hasSolution: true, submissionsCount: 25, type: "conversation" },
+    { id: "s-203", homeworkId: "hw-002", title: "Expectation and variance", order: 3, hasSolution: false, submissionsCount: 24, type: "conversation" },
+    { id: "s-204", homeworkId: "hw-002", title: "Joint distributions", order: 4, hasSolution: true, submissionsCount: 22, type: "conversation" },
   ],
   "hw-003": [
-    { id: "s-301", homeworkId: "hw-003", title: "Random variables", order: 1, hasSolution: true, submissionsCount: 18 },
-    { id: "s-302", homeworkId: "hw-003", title: "Probability distributions", order: 2, hasSolution: true, submissionsCount: 14 },
-    { id: "s-303", homeworkId: "hw-003", title: "P-values", order: 3, hasSolution: true, submissionsCount: 6 },
-    { id: "s-304", homeworkId: "hw-003", title: "Confidence intervals", order: 4, hasSolution: false, submissionsCount: 0 },
-    { id: "s-305", homeworkId: "hw-003", title: "Hypothesis testing", order: 5, hasSolution: false, submissionsCount: 0 },
+    { id: "s-301", homeworkId: "hw-003", title: "Random variables", order: 1, hasSolution: true, submissionsCount: 18, type: "conversation" },
+    { id: "s-302", homeworkId: "hw-003", title: "Probability distributions", order: 2, hasSolution: true, submissionsCount: 14, type: "conversation" },
+    { id: "s-303", homeworkId: "hw-003", title: "P-values", order: 3, hasSolution: true, submissionsCount: 6, type: "conversation" },
+    { id: "s-304", homeworkId: "hw-003", title: "Confidence intervals", order: 4, hasSolution: false, submissionsCount: 0, type: "conversation" },
+    { id: "s-305", homeworkId: "hw-003", title: "Hypothesis testing", order: 5, hasSolution: false, submissionsCount: 0, type: "conversation" },
   ],
   "hw-004": [
-    { id: "s-401", homeworkId: "hw-004", title: "Sampling distributions", order: 1, hasSolution: false, submissionsCount: 0 },
-    { id: "s-402", homeworkId: "hw-004", title: "Central limit theorem", order: 2, hasSolution: false, submissionsCount: 0 },
-    { id: "s-403", homeworkId: "hw-004", title: "Standard error", order: 3, hasSolution: false, submissionsCount: 0 },
+    { id: "s-401", homeworkId: "hw-004", title: "Sampling distributions", order: 1, hasSolution: false, submissionsCount: 0, type: "conversation" },
+    { id: "s-402", homeworkId: "hw-004", title: "Central limit theorem", order: 2, hasSolution: false, submissionsCount: 0, type: "conversation" },
+    { id: "s-403", homeworkId: "hw-004", title: "Standard error", order: 3, hasSolution: false, submissionsCount: 0, type: "conversation" },
   ],
   "hw-005": [
-    { id: "s-501", homeworkId: "hw-005", title: "Two-sample tests", order: 1, hasSolution: false, submissionsCount: 0 },
-    { id: "s-502", homeworkId: "hw-005", title: "Chi-squared tests", order: 2, hasSolution: false, submissionsCount: 0 },
+    { id: "s-501", homeworkId: "hw-005", title: "Two-sample tests", order: 1, hasSolution: false, submissionsCount: 0, type: "conversation" },
+    { id: "s-502", homeworkId: "hw-005", title: "Chi-squared tests", order: 2, hasSolution: false, submissionsCount: 0, type: "conversation" },
   ],
 };
 

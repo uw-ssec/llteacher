@@ -12,6 +12,8 @@ const HOMEWORKS: HomeworkListItemResponse[] = [
     dueDate: "2026-08-05T14:30:00.000Z",
     llmConfigId: null,
     status: "active",
+    isHidden: false,
+    expiresAt: null,
     sectionCount: 3,
   },
   {
@@ -21,6 +23,8 @@ const HOMEWORKS: HomeworkListItemResponse[] = [
     dueDate: "2026-09-01T00:00:00.000Z",
     llmConfigId: "cfg-1",
     status: "draft",
+    isHidden: false,
+    expiresAt: null,
     sectionCount: 1,
   },
 ];
@@ -89,5 +93,23 @@ describe("HomeworksView", () => {
     const metaChips = document.querySelectorAll(".admin-record-row__meta-chip");
     expect(metaChips.length).toBe(4); // 2 homeworks × (section count + due date), no submissions chip
     metaChips.forEach((chip) => expect(chip.textContent).not.toMatch(/submissions/i));
+  });
+
+  // #166
+  it("renders a hidden StatusBadge for a homework with status: hidden", () => {
+    const homeworks: HomeworkListItemResponse[] = [
+      { ...HOMEWORKS[0]!, status: "hidden", isHidden: true },
+    ];
+    render(
+      <HomeworksView
+        homeworks={homeworks}
+        onOpenHomework={vi.fn()}
+        onOpenSubmissions={vi.fn()}
+        onNewHomework={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("hidden")).toBeTruthy();
+    expect(document.querySelector(".admin-status--hidden")).toBeTruthy();
   });
 });

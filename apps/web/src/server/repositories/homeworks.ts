@@ -1,13 +1,15 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { homeworks, sections, sectionSolutions, conversations } from "../../db/schema";
+import { homeworks, sections, sectionSolutions, conversations, homeworkProgressWidgets } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import {
   planSectionDiff,
   type ExistingSection,
   type IncomingSection,
   type SectionUpdatePlan,
+  type SectionType,
 } from "./sections";
+import { planWidgetDiff, type ExistingWidget, type IncomingWidget } from "./progressWidgets";
 import type { HomeworkListItemResponse } from "../../shared/types";
 
 export async function listHomeworksForCourse(db: Db, scope: CourseScope): Promise<HomeworkListItemResponse[]> {
@@ -29,6 +31,8 @@ export async function listHomeworksForCourse(db: Db, scope: CourseScope): Promis
     dueDate: hw.dueDate.toISOString(),
     llmConfigId: hw.llmConfigId,
     status: deriveHomeworkStatus(hw),
+    isHidden: hw.isHidden,
+    expiresAt: hw.expiresAt?.toISOString() ?? null,
     sectionCount: countByHomeworkId.get(hw.id) ?? 0,
   }));
 }
@@ -45,28 +49,45 @@ export async function createHomework(
   return created;
 }
 
-export type HomeworkStatus = "draft" | "scheduled" | "active" | "past_due" | "archived";
+export type HomeworkStatus = "draft" | "scheduled" | "active" | "past_due" | "hidden" | "archived";
 
-/** Pure function of (dueDate, publishedAt, releasedAt) -- no DB, no `now()`
- *  parameter needed by callers (uses the real clock; tests pass fixed dates
- *  through the three inputs instead of mocking time).
+/** Pure function of (dueDate, publishedAt, releasedAt, isHidden, expiresAt)
+ *  -- no DB, no `now()` parameter needed by callers (uses the real clock;
+ *  tests pass fixed dates through the inputs instead of mocking time).
  *
  *  "archived" is a 5th status apps/admin's pre-M3 fixture typing already
- *  carried (see apps/admin/src/client/lib/fixtures.ts's Homework.status),
- *  but no issue in this milestone (#94 or otherwise) describes what would
- *  set a homework archived. This function never returns it -- the type is
- *  kept (not narrowed) so a future feature can add the missing input this
- *  function would need, without every consumer's exhaustiveness check
- *  breaking. #166 (M3) is where this gets resolved: it adds a real
- *  `is_hidden`/`expires_at`-driven "hidden" status and explicitly asks
- *  whether "hidden" and "archived" are the same concept or two -- decide
- *  there, not here. */
+ *  carried (see apps/admin/src/client/lib/fixtures.ts's Homework.status).
+ *  This function still never returns it -- the type is kept (not narrowed)
+ *  so a future feature can add the missing input it would need, without
+ *  every consumer's exhaustiveness check breaking. #166 (M3, Resolved
+ *  Design Decision 17) decided "hidden" and "archived" are distinct
+ *  concepts: "archived" has no defined semantics anywhere yet (it might
+ *  later mean something stronger than invisibility -- read-only, term-
+ *  ended, non-editable), so it stays reserved and unreachable rather than
+ *  being repurposed for #166's manual-hide/auto-expiry feature. */
+/** #177: extracted so the write-side gate (upsertSectionAnswer,
+ *  submitWidgetResponse, submitSection) checks the exact same condition as
+ *  deriveHomeworkStatus's own hidden branch, rather than a second
+ *  hand-copied expression that could drift out of sync with it. */
+export function isHomeworkHidden(hw: { isHidden: boolean; expiresAt: Date | null }): boolean {
+  return hw.isHidden || (hw.expiresAt !== null && hw.expiresAt.getTime() <= Date.now());
+}
+
 export function deriveHomeworkStatus(hw: {
   dueDate: Date;
   publishedAt: Date | null;
   releasedAt: Date | null;
+  isHidden: boolean;
+  expiresAt: Date | null;
 }): HomeworkStatus {
   const now = new Date();
+  // #166: is_hidden/expires_at take precedence over every other state,
+  // including draft -- matches the reference app's design (access is one
+  // source of truth, the enum is cosmetic). Checked first so callers can
+  // filter on deriveHomeworkStatus's result alone, never a raw column.
+  if (isHomeworkHidden(hw)) {
+    return "hidden";
+  }
   if (!hw.publishedAt) return "draft";
   if (hw.releasedAt && hw.releasedAt.getTime() > now.getTime()) return "scheduled";
   return hw.dueDate.getTime() > now.getTime() ? "active" : "past_due";
@@ -84,7 +105,16 @@ export async function getHomeworkById(db: Db, scope: CourseScope, id: string) {
     orderBy: (s, { asc }) => [asc(s.order)],
   });
 
-  return { homework, sections: sectionRows };
+  // #165: same two-query style as the sections fetch above, not a nested
+  // `with` (Decision 10's bytea-corruption finding is about encrypted
+  // columns specifically, not a blanket ban -- but this file's existing
+  // convention is already flat fetches for every homework sub-resource).
+  const widgetRows = await db.query.homeworkProgressWidgets.findMany({
+    where: eq(homeworkProgressWidgets.homeworkId, id),
+    orderBy: (w, { asc }) => [asc(w.order)],
+  });
+
+  return { homework, sections: sectionRows, widgets: widgetRows };
 }
 
 export async function deleteHomework(db: Db, scope: CourseScope, id: string) {
@@ -112,6 +142,29 @@ export async function homeworkHasStudentActivity(db: Db, homeworkId: string): Pr
   return !!row;
 }
 
+/** #166: is_hidden/expires_at, independent of publish state -- an instructor
+ *  can pull a published homework from view without unpublishing it.
+ *  expiresAt is `undefined` (omit the field entirely) to leave it
+ *  unchanged, `null` to explicitly clear it -- mirrors updateHomework's
+ *  `!== undefined` convention elsewhere in this file. */
+export async function updateHomeworkHideState(
+  db: Db,
+  scope: CourseScope,
+  id: string,
+  input: { isHidden: boolean; expiresAt?: Date | null },
+) {
+  const [updated] = await db
+    .update(homeworks)
+    .set({
+      isHidden: input.isHidden,
+      ...(input.expiresAt !== undefined && { expiresAt: input.expiresAt }),
+      updatedAt: new Date(),
+    })
+    .where(and(eq(homeworks.id, id), eq(homeworks.courseId, scope)))
+    .returning();
+  return updated ?? null;
+}
+
 export async function updateHomeworkPublishState(
   db: Db,
   scope: CourseScope,
@@ -136,6 +189,7 @@ export interface HomeworkUpdateFields {
   dueDate?: Date;
   llmConfigId?: string | null;
   sections?: IncomingSection[];
+  widgets?: IncomingWidget[];
 }
 
 type BatchStatement = Parameters<Db["batch"]>[0][number];
@@ -156,13 +210,13 @@ async function resolveSectionWrites(
   existingSections: ExistingSection[],
   deletedIds: Set<string>,
   plan: ReturnType<typeof planSectionDiff>,
-  pushSectionInsert: (id: string, order: number, title: string, content: string) => Promise<void> | void,
-  pushSectionUpdate: (id: string, order: number, title: string, content: string) => Promise<void> | void,
+  pushSectionInsert: (id: string, order: number, title: string, content: string, type: SectionType) => Promise<void> | void,
+  pushSectionUpdate: (id: string, order: number, title: string, content: string, type: SectionType) => Promise<void> | void,
   pushSolutionWrites: (sectionId: string, action: SectionUpdatePlan["solutionAction"], content: string | undefined) => Promise<void> | void,
 ) {
   type PendingWrite =
-    | { kind: "update"; id: string; targetOrder: number; title: string; content: string; solutionAction: SectionUpdatePlan["solutionAction"]; solutionContent?: string }
-    | { kind: "create"; id: string; targetOrder: number; title: string; content: string; solutionContent?: string };
+    | { kind: "update"; id: string; targetOrder: number; title: string; content: string; type: SectionType; solutionAction: SectionUpdatePlan["solutionAction"]; solutionContent?: string }
+    | { kind: "create"; id: string; targetOrder: number; title: string; content: string; type: SectionType; solutionContent?: string };
 
   const existingById = new Map(existingSections.map((s) => [s.id, s]));
   const livePosition = new Map<string, number>();
@@ -180,26 +234,26 @@ async function resolveSectionWrites(
     if (prior.order === upd.order) {
       // No collision possible -- write it immediately, it never competes
       // for a slot with anything else in this diff.
-      await pushSectionUpdate(upd.id, upd.order, upd.title, upd.content);
+      await pushSectionUpdate(upd.id, upd.order, upd.title, upd.content, upd.type);
       await pushSolutionWrites(upd.id, upd.solutionAction, upd.solutionContent);
     } else {
-      pending.push({ kind: "update", id: upd.id, targetOrder: upd.order, title: upd.title, content: upd.content, solutionAction: upd.solutionAction, solutionContent: upd.solutionContent });
+      pending.push({ kind: "update", id: upd.id, targetOrder: upd.order, title: upd.title, content: upd.content, type: upd.type, solutionAction: upd.solutionAction, solutionContent: upd.solutionContent });
     }
   }
   for (const create of plan.toCreate) {
-    pending.push({ kind: "create", id: crypto.randomUUID(), targetOrder: create.order, title: create.title, content: create.content, solutionContent: create.solutionContent });
+    pending.push({ kind: "create", id: crypto.randomUUID(), targetOrder: create.order, title: create.title, content: create.content, type: create.type, solutionContent: create.solutionContent });
   }
 
   const placed = new Set<PendingWrite>();
 
   async function apply(write: PendingWrite) {
     if (write.kind === "create") {
-      await pushSectionInsert(write.id, write.targetOrder, write.title, write.content);
+      await pushSectionInsert(write.id, write.targetOrder, write.title, write.content, write.type);
       if (write.solutionContent !== undefined) {
         await pushSolutionWrites(write.id, "create", write.solutionContent);
       }
     } else {
-      await pushSectionUpdate(write.id, write.targetOrder, write.title, write.content);
+      await pushSectionUpdate(write.id, write.targetOrder, write.title, write.content, write.type);
       await pushSolutionWrites(write.id, write.solutionAction, write.solutionContent);
       const prevOrder = livePosition.get(write.id);
       if (prevOrder !== undefined) currentOccupant.delete(prevOrder);
@@ -244,7 +298,105 @@ async function resolveSectionWrites(
     // a create could ever be the thing left stuck.
     const stuck = stillOpen.find((w): w is Extract<PendingWrite, { kind: "update" }> => w.kind === "update")!;
     const stuckCurrentOrder = livePosition.get(stuck.id)!;
-    await pushSectionUpdate(stuck.id, scratch, existingById.get(stuck.id)!.title, existingById.get(stuck.id)!.content);
+    // Parked at a scratch slot, not the final write -- apply() (via
+    // runPasses() below) writes the real target title/content/type once
+    // the collision clears. Use the section's *current* type here, not
+    // stuck.type (the target), to avoid writing a value that never gets
+    // reconciled if this loop iterates again before apply() runs.
+    await pushSectionUpdate(stuck.id, scratch, existingById.get(stuck.id)!.title, existingById.get(stuck.id)!.content, existingById.get(stuck.id)!.type);
+    currentOccupant.delete(stuckCurrentOrder);
+    currentOccupant.set(scratch, stuck.id);
+    livePosition.set(stuck.id, scratch);
+    await runPasses();
+  }
+}
+
+/** #165: same pass-based-plus-scratch-bump technique as resolveSectionWrites
+ *  above (Resolved Design Decision 7), sized down -- widgets carry no
+ *  solution-equivalent sub-write, so there's no third callback and no
+ *  solution bookkeeping. See Resolved Design Decision 25 for why this is a
+ *  parallel implementation rather than a generalization of the section
+ *  version. */
+async function resolveWidgetWrites(
+  existingWidgets: ExistingWidget[],
+  deletedIds: Set<string>,
+  plan: ReturnType<typeof planWidgetDiff>,
+  pushWidgetInsert: (id: string, order: number, prePrompt: string, postPrompt: string) => Promise<void> | void,
+  pushWidgetUpdate: (id: string, order: number, prePrompt: string, postPrompt: string) => Promise<void> | void,
+) {
+  type PendingWrite =
+    | { kind: "update"; id: string; targetOrder: number; prePrompt: string; postPrompt: string }
+    | { kind: "create"; id: string; targetOrder: number; prePrompt: string; postPrompt: string };
+
+  const existingById = new Map(existingWidgets.map((w) => [w.id, w]));
+  const livePosition = new Map<string, number>();
+  const currentOccupant = new Map<number, string>();
+  for (const w of existingWidgets) {
+    if (!deletedIds.has(w.id)) {
+      livePosition.set(w.id, w.order);
+      currentOccupant.set(w.order, w.id);
+    }
+  }
+
+  const pending: PendingWrite[] = [];
+  for (const upd of plan.toUpdate) {
+    const prior = existingById.get(upd.id)!;
+    if (prior.order === upd.order) {
+      await pushWidgetUpdate(upd.id, upd.order, upd.prePrompt, upd.postPrompt);
+    } else {
+      pending.push({ kind: "update", id: upd.id, targetOrder: upd.order, prePrompt: upd.prePrompt, postPrompt: upd.postPrompt });
+    }
+  }
+  for (const create of plan.toCreate) {
+    pending.push({ kind: "create", id: crypto.randomUUID(), targetOrder: create.order, prePrompt: create.prePrompt, postPrompt: create.postPrompt });
+  }
+
+  const placed = new Set<PendingWrite>();
+
+  async function apply(write: PendingWrite) {
+    if (write.kind === "create") {
+      await pushWidgetInsert(write.id, write.targetOrder, write.prePrompt, write.postPrompt);
+    } else {
+      await pushWidgetUpdate(write.id, write.targetOrder, write.prePrompt, write.postPrompt);
+      const prevOrder = livePosition.get(write.id);
+      if (prevOrder !== undefined) currentOccupant.delete(prevOrder);
+    }
+    currentOccupant.set(write.targetOrder, write.id);
+    livePosition.set(write.id, write.targetOrder);
+    placed.add(write);
+  }
+
+  async function runPasses() {
+    let progress = true;
+    while (progress) {
+      progress = false;
+      for (const write of pending) {
+        if (placed.has(write)) continue;
+        if (!currentOccupant.has(write.targetOrder)) {
+          await apply(write);
+          progress = true;
+        }
+      }
+    }
+  }
+
+  await runPasses();
+
+  while (pending.some((w) => !placed.has(w))) {
+    const stillOpen = pending.filter((w) => !placed.has(w));
+    const reserved = new Set<number>([...currentOccupant.keys(), ...stillOpen.map((w) => w.targetOrder)]);
+    let scratch: number | undefined;
+    for (let candidate = 1; candidate <= 20; candidate++) {
+      if (!reserved.has(candidate)) { scratch = candidate; break; }
+    }
+    if (scratch === undefined) {
+      throw new Error(
+        "cannot resolve widget reorder: no free order slot to stage a cyclic move -- reorder in two smaller steps",
+      );
+    }
+    const stuck = stillOpen.find((w): w is Extract<PendingWrite, { kind: "update" }> => w.kind === "update")!;
+    const stuckCurrentOrder = livePosition.get(stuck.id)!;
+    await pushWidgetUpdate(stuck.id, scratch, existingById.get(stuck.id)!.prePrompt, existingById.get(stuck.id)!.postPrompt);
     currentOccupant.delete(stuckCurrentOrder);
     currentOccupant.set(scratch, stuck.id);
     livePosition.set(stuck.id, scratch);
@@ -302,8 +454,21 @@ export async function updateHomework(
       title: s.title,
       content: s.content,
       solutionId: s.solution?.id ?? null,
+      type: s.type,
     }));
     plan = planSectionDiff(existingSections, input.sections);
+  }
+
+  // #165: an independent diff from sections' -- widgets and sections share
+  // one atomic write (both write paths below) but neither reads the
+  // other's plan.
+  let existingWidgets: ExistingWidget[] = [];
+  let widgetPlan: ReturnType<typeof planWidgetDiff> | null = null;
+  if (input.widgets) {
+    existingWidgets = await db.query.homeworkProgressWidgets.findMany({
+      where: eq(homeworkProgressWidgets.homeworkId, id),
+    });
+    widgetPlan = planWidgetDiff(existingWidgets, input.widgets);
   }
 
   if (typeof db.batch === "function") {
@@ -322,11 +487,11 @@ export async function updateHomework(
         existingSections,
         deletedIds,
         plan,
-        (sectionId, order, title, content) => {
-          statements.push(db.insert(sections).values({ id: sectionId, homeworkId: id, title, content, order }));
+        (sectionId, order, title, content, type) => {
+          statements.push(db.insert(sections).values({ id: sectionId, homeworkId: id, title, content, order, type }));
         },
-        (sectionId, order, title, content) => {
-          statements.push(db.update(sections).set({ title, content, order, updatedAt: new Date() }).where(eq(sections.id, sectionId)));
+        (sectionId, order, title, content, type) => {
+          statements.push(db.update(sections).set({ title, content, order, type, updatedAt: new Date() }).where(eq(sections.id, sectionId)));
         },
         (sectionId, action, content) => {
           if (action === "create") {
@@ -336,6 +501,23 @@ export async function updateHomework(
           } else if (action === "delete") {
             statements.push(db.delete(sectionSolutions).where(eq(sectionSolutions.sectionId, sectionId)));
           }
+        },
+      );
+    }
+    if (widgetPlan) {
+      const deletedWidgetIds = new Set(widgetPlan.toDelete.map((d) => d.id));
+      for (const del of widgetPlan.toDelete) {
+        statements.push(db.delete(homeworkProgressWidgets).where(eq(homeworkProgressWidgets.id, del.id)));
+      }
+      await resolveWidgetWrites(
+        existingWidgets,
+        deletedWidgetIds,
+        widgetPlan,
+        (widgetId, order, prePrompt, postPrompt) => {
+          statements.push(db.insert(homeworkProgressWidgets).values({ id: widgetId, homeworkId: id, prePrompt, postPrompt, order }));
+        },
+        (widgetId, order, prePrompt, postPrompt) => {
+          statements.push(db.update(homeworkProgressWidgets).set({ prePrompt, postPrompt, order, updatedAt: new Date() }).where(eq(homeworkProgressWidgets.id, widgetId)));
         },
       );
     }
@@ -369,11 +551,11 @@ export async function updateHomework(
         existingSections,
         deletedIds,
         plan,
-        async (sectionId, order, title, content) => {
-          await tx.insert(sections).values({ id: sectionId, homeworkId: id, title, content, order });
+        async (sectionId, order, title, content, type) => {
+          await tx.insert(sections).values({ id: sectionId, homeworkId: id, title, content, order, type });
         },
-        async (sectionId, order, title, content) => {
-          await tx.update(sections).set({ title, content, order, updatedAt: new Date() }).where(eq(sections.id, sectionId));
+        async (sectionId, order, title, content, type) => {
+          await tx.update(sections).set({ title, content, order, type, updatedAt: new Date() }).where(eq(sections.id, sectionId));
         },
         async (sectionId, action, content) => {
           if (action === "create") {
@@ -383,6 +565,23 @@ export async function updateHomework(
           } else if (action === "delete") {
             await tx.delete(sectionSolutions).where(eq(sectionSolutions.sectionId, sectionId));
           }
+        },
+      );
+    }
+    if (widgetPlan) {
+      const deletedWidgetIds = new Set(widgetPlan.toDelete.map((d) => d.id));
+      for (const del of widgetPlan.toDelete) {
+        await tx.delete(homeworkProgressWidgets).where(eq(homeworkProgressWidgets.id, del.id));
+      }
+      await resolveWidgetWrites(
+        existingWidgets,
+        deletedWidgetIds,
+        widgetPlan,
+        async (widgetId, order, prePrompt, postPrompt) => {
+          await tx.insert(homeworkProgressWidgets).values({ id: widgetId, homeworkId: id, prePrompt, postPrompt, order });
+        },
+        async (widgetId, order, prePrompt, postPrompt) => {
+          await tx.update(homeworkProgressWidgets).set({ prePrompt, postPrompt, order, updatedAt: new Date() }).where(eq(homeworkProgressWidgets.id, widgetId));
         },
       );
     }

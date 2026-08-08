@@ -17,10 +17,14 @@ const HOMEWORK = {
   dueDate: "2026-08-05T14:30:00.000Z",
   llmConfigId: null,
   status: "draft",
+  publishedAt: null,
   releasedAt: null,
+  isHidden: false,
+  expiresAt: null,
   sections: [
     { id: "s1", title: "Sec 1", order: 1, content: "content 1", solution: null },
   ],
+  widgets: [],
 };
 
 afterEach(cleanup);
@@ -83,6 +87,69 @@ describe("HomeworkEditView", () => {
     expect(publishBody.publish).toBe(true);
   });
 
+  // #166
+  it("does not call /hide when saving without touching the Hidden checkbox", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === "string" && url.endsWith(`/homeworks/hw-1`)) {
+        return Promise.resolve({ ok: true, json: async () => HOMEWORK });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    global.fetch = fetchMock;
+    render(
+      <HomeworkEditView courseId="course-a" homeworkId="hw-1" llmConfigs={LLM_CONFIGS} onSaved={vi.fn()} onCancel={vi.fn()} />,
+    );
+    await waitFor(() => expect(screen.getByLabelText(/^title$/i)).toBeTruthy());
+
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW 1 updated" } });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const calledUrls = fetchMock.mock.calls.map((c) => c[0] as string);
+    expect(calledUrls.some((u) => u.includes("/hide"))).toBe(false);
+  });
+
+  it("calls /hide with isHidden: true when the Hidden checkbox is toggled", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === "string" && url.endsWith(`/homeworks/hw-1`)) {
+        return Promise.resolve({ ok: true, json: async () => HOMEWORK });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    global.fetch = fetchMock;
+    render(
+      <HomeworkEditView courseId="course-a" homeworkId="hw-1" llmConfigs={LLM_CONFIGS} onSaved={vi.fn()} onCancel={vi.fn()} />,
+    );
+    await waitFor(() => expect(screen.getByLabelText(/^title$/i)).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /^hidden/i }));
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    const hideCall = fetchMock.mock.calls.find((c) => (c[0] as string).includes("/hide"));
+    expect(hideCall).toBeTruthy();
+    const hideBody = JSON.parse((hideCall![1] as RequestInit).body as string);
+    expect(hideBody.isHidden).toBe(true);
+  });
+
+  // #166: "hidden" (Resolved Design Decision 17's precedence) can mask an
+  // otherwise-draft homework's status -- the Publish checkbox default must
+  // key off publishedAt, not the status string, or a hidden-but-never-
+  // published homework would show "Published" incorrectly checked.
+  it("does not show Published checked for a homework that is hidden but was never published", async () => {
+    const hiddenDraft = { ...HOMEWORK, status: "hidden", isHidden: true, publishedAt: null };
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => hiddenDraft });
+    render(
+      <HomeworkEditView courseId="course-a" homeworkId="hw-1" llmConfigs={LLM_CONFIGS} onSaved={vi.fn()} onCancel={vi.fn()} />,
+    );
+    await waitFor(() => expect(screen.getByLabelText(/^title$/i)).toBeTruthy());
+
+    const publishedCheckbox = screen.getByRole("checkbox", { name: /published/i }) as HTMLInputElement;
+    expect(publishedCheckbox.checked).toBe(false);
+    const hiddenCheckbox = screen.getByRole("checkbox", { name: /^hidden/i }) as HTMLInputElement;
+    expect(hiddenCheckbox.checked).toBe(true);
+  });
+
   it("does not call /publish when saving an already-scheduled homework without touching its release date", async () => {
     // The scenario the fix wave's I3 correction actually protects against:
     // a homework that already has a real releasedAt must not have it
@@ -91,7 +158,9 @@ describe("HomeworkEditView", () => {
     // defaultValues.releasedAt are derived from the same
     // toDatetimeLocalValue(hw.releasedAt) call, so they must compare equal
     // when untouched.
-    const scheduledHomework = { ...HOMEWORK, status: "scheduled", releasedAt: "2099-01-01T09:00:00.000Z" };
+    const scheduledHomework = {
+      ...HOMEWORK, status: "scheduled", publishedAt: "2020-01-01T00:00:00.000Z", releasedAt: "2099-01-01T09:00:00.000Z",
+    };
     const fetchMock = vi.fn().mockImplementation((url: string) => {
       if (typeof url === "string" && url.endsWith(`/homeworks/hw-1`)) {
         return Promise.resolve({ ok: true, json: async () => scheduledHomework });
@@ -129,7 +198,7 @@ describe("HomeworkEditView", () => {
   });
 
   it("retries the publish PATCH with confirm:true when a 409 hasStudentActivity is confirmed", async () => {
-    const publishedHomework = { ...HOMEWORK, status: "active" };
+    const publishedHomework = { ...HOMEWORK, status: "active", publishedAt: "2020-01-01T00:00:00.000Z" };
     const fetchMock = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
       if (typeof url === "string" && url.endsWith(`/homeworks/hw-1`)) {
         return Promise.resolve({ ok: true, json: async () => publishedHomework });

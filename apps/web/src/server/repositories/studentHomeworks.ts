@@ -1,17 +1,24 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { conversations, submissions, courseMemberships } from "../../db/schema";
+import { conversations, submissions, courseMemberships, sectionAnswers } from "../../db/schema";
 import { deriveHomeworkStatus } from "./homeworks";
 
 export type SectionStatusType = "not_started" | "in_progress" | "in_progress_overdue" | "submitted" | "overdue";
 
+/** #164: hasAnswer is treated identically to hasSubmission -- a
+ *  non_interactive section's answer *is* its completion, the same way a
+ *  conversation section's submission is. Callers pass hasAnswer: false for
+ *  a "conversation"-type section (it can never have an answer row), and
+ *  hasActiveConversation/hasSubmission: false for a "non_interactive" one
+ *  (it can never have a conversation). */
 export function deriveSectionStatus(input: {
   dueDate: Date;
   hasActiveConversation: boolean;
   hasSubmission: boolean;
+  hasAnswer: boolean;
 }): SectionStatusType {
   const overdue = input.dueDate.getTime() < Date.now();
-  if (input.hasSubmission) return "submitted";
+  if (input.hasSubmission || input.hasAnswer) return "submitted";
   if (input.hasActiveConversation) return overdue ? "in_progress_overdue" : "in_progress";
   return overdue ? "overdue" : "not_started";
 }
@@ -56,7 +63,10 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
 
   const visibleHomeworks = allHomeworks.filter((hw) => {
     const status = deriveHomeworkStatus(hw);
-    return status !== "draft" && status !== "scheduled"; // not yet visible to students
+    // #166: "hidden" folds in both is_hidden and a passed expires_at (see
+    // deriveHomeworkStatus) -- filtered here the same way draft/scheduled
+    // are, by comparing the derived status, never a raw column.
+    return status !== "draft" && status !== "scheduled" && status !== "hidden";
   });
 
   // #158: batch the per-section conversation/submission lookups instead of
@@ -83,6 +93,18 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
     : [];
   const submittedConversationIds = new Set(submittedRows.map((s) => s.conversationId));
 
+  // #164: same batched inArray fetch as conversations/submissions above --
+  // one extra query, still a fixed count regardless of section/homework
+  // count (preserves the #158 no-N+1 property this function was built to
+  // guarantee).
+  const answerRows = allSectionIds.length
+    ? await db
+        .select({ sectionId: sectionAnswers.sectionId })
+        .from(sectionAnswers)
+        .where(and(inArray(sectionAnswers.sectionId, allSectionIds), eq(sectionAnswers.userId, userId)))
+    : [];
+  const answeredSectionIds = new Set(answerRows.map((a) => a.sectionId));
+
   const results: StudentHomeworkSummary[] = [];
   for (const hw of visibleHomeworks) {
     const sectionSummaries: StudentSectionProgress[] = [];
@@ -97,6 +119,7 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
         dueDate: hw.dueDate,
         hasActiveConversation: !!activeConversation,
         hasSubmission,
+        hasAnswer: section.type === "non_interactive" && answeredSectionIds.has(section.id),
       });
       if (sectionStatus === "submitted") completed++;
       else if (sectionStatus === "in_progress" || sectionStatus === "in_progress_overdue") inProgress++;

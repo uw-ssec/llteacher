@@ -36,6 +36,7 @@ export interface SectionResponse {
   title: string;
   content: string;
   order: number;
+  type: "conversation" | "non_interactive";
   solution: { id: string; content: string } | null;
   createdAt: string;
   updatedAt: string;
@@ -48,7 +49,19 @@ export interface HomeworkListItemResponse {
   dueDate: string;
   llmConfigId: string | null;
   status: HomeworkStatus;
+  isHidden: boolean;
+  expiresAt: string | null;
   sectionCount: number;
+}
+
+/** #165: the authored widget itself (prompts + order) -- distinct from
+ *  WidgetResponseResponse, which is a student's recorded pre/post values
+ *  for one widget. */
+export interface ProgressWidgetResponse {
+  id: string;
+  prePrompt: string;
+  postPrompt: string;
+  order: number;
 }
 
 export interface HomeworkDetailResponse {
@@ -61,7 +74,10 @@ export interface HomeworkDetailResponse {
   status: HomeworkStatus;
   publishedAt: string | null;
   releasedAt: string | null;
+  isHidden: boolean;
+  expiresAt: string | null;
   sections: SectionResponse[];
+  widgets: ProgressWidgetResponse[];
   /** Present (true) only in the instructor payload; absent for students. */
   editableBy?: boolean;
 }
@@ -72,6 +88,16 @@ export interface SectionDiffInput {
   content: string;
   order: number;
   solutionContent?: string;
+  /** Omitted on an existing section leaves its type unchanged; omitted on a
+   *  new section defaults to "conversation" (matches planSectionDiff). */
+  type?: "conversation" | "non_interactive";
+}
+
+export interface ProgressWidgetDiffInput {
+  id?: string;
+  prePrompt: string;
+  postPrompt: string;
+  order: number;
 }
 
 export interface HomeworkUpdateBody {
@@ -80,6 +106,7 @@ export interface HomeworkUpdateBody {
   dueDate?: string;
   llmConfigId?: string | null;
   sections?: SectionDiffInput[];
+  widgets?: ProgressWidgetDiffInput[];
 }
 
 export interface HomeworkPublishBody {
@@ -106,11 +133,55 @@ export interface HomeworkPublishResponse {
   hadExistingActivity?: boolean;
 }
 
+export interface HomeworkHideBody {
+  isHidden: boolean;
+  /** ISO datetime, or null to explicitly clear. Omit entirely to leave the
+   *  existing expiresAt unchanged (mirrors updateHomeworkHideState's
+   *  `!== undefined` convention). */
+  expiresAt?: string | null;
+}
+
+export interface HomeworkHideResponse {
+  id: string;
+  isHidden: boolean;
+  expiresAt: string | null;
+}
+
 export interface SubmissionResponse {
   id: string;
   conversationId: string;
   submittedAt: string;
   isResubmission: boolean;
+}
+
+export interface SectionAnswerBody {
+  content: string;
+}
+
+export interface SectionAnswerResponse {
+  id: string;
+  sectionId: string;
+  userId: string;
+  content: string;
+  submittedAt: string;
+  updatedAt: string;
+}
+
+export interface WidgetResponseBody {
+  which: "pre" | "post";
+  /** 0-10 inclusive -- validated server-side, not trusted from the
+   *  client-side slider bound. */
+  value: number;
+}
+
+export interface WidgetResponseResponse {
+  id: string;
+  widgetId: string;
+  userId: string;
+  preValue: number | null;
+  preSubmittedAt: string | null;
+  postValue: number | null;
+  postSubmittedAt: string | null;
 }
 
 import type {

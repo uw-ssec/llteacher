@@ -3,6 +3,9 @@ export interface FormSection {
   title: string;
   content: string;
   solutionContent?: string;
+  /** Omitted on an existing section leaves its type unchanged; omitted on a
+   *  new section defaults to "conversation" (matches planSectionDiff). */
+  type?: "conversation" | "non_interactive";
 }
 
 export interface SectionDiffOutput {
@@ -11,6 +14,7 @@ export interface SectionDiffOutput {
   content: string;
   order: number;
   solutionContent?: string;
+  type?: "conversation" | "non_interactive";
 }
 
 /** Mirrors apps/web/src/server/repositories/sections.ts's planSectionDiff
@@ -25,5 +29,6 @@ export function computeSectionDiff(form: FormSection[]): SectionDiffOutput[] {
     content: s.content,
     order: i + 1,
     solutionContent: s.solutionContent,
+    type: s.type,
   }));
 }

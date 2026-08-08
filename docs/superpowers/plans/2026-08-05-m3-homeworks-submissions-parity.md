@@ -4468,3 +4468,933 @@ git commit -m "feat(admin): missing-section warnings banner on the submissions d
     Checked for overlap with other milestones before implementing any of these (the user's own explicit ask, after #166/#92/#141 turned up in earlier scope checks this epic): #166 (already in M3) explicitly depends on #156 landing first and is where the "archived" vs. "hidden" status question from #162's TODO gets decided; #31 (M5) is LLM config CRUD, a different concern from #161's write-path validation; #26 (M4) resolves `llmConfigId` at chat time and doesn't validate org ownership either, making #161 a real prerequisite for #26 being safe, not overlapping work. No duplication found.
 
     All 7 issues' own requirement checklists checked off; PR #154 description and this plan doc updated in the same pass. `Closes #22`/`Closes #23` in the PR downgraded to `Part of` per the reviewer's own note (no production path creates a `conversations` row yet — unchanged from Decision 11, still true).
+
+---
+
+## M3 Follow-Up Phases (#166, #164, #165)
+
+> **For agentic workers:** These three phases were brainstormed and appended after PR #154 merged, covering the remaining open M3 enhancement issues (#164, #165, #166) — #22/#23/#94/#19/#20/#21 are the epic's original six and are done (Phases 1–7 above); #128 (design: submission uniqueness) and #167 (auto-submit, blocked on #128 by its own text — see the deferral comment on the issue) are explicitly **not** covered here. REQUIRED SUB-SKILL: use superpowers:executing-plans to execute each phase task-by-task, exactly as Phases 1–7 were. Build order is deliberate — **Phase 8 (#166) → Phase 9 (#164) → Phase 10 (#165)**, smallest and most self-contained first. Stop after each phase's final task and get the requester's review before starting the next phase.
+
+17. **#166: "hidden" and "archived" are distinct concepts, not the same status.** The unreachable `"archived"` value in `HomeworkStatus` (Decision 5) has no defined semantics anywhere — it might later mean something stronger than invisibility (read-only, term-ended, non-editable). Conflating it with #166's manual-hide/auto-expiry feature now would foreclose that future design for no benefit today. `is_hidden`/`expires_at` instead produce a new, real, reachable `"hidden"` status; `"archived"` stays in the union, still unreachable, still documented as reserved. `deriveHomeworkStatus` checks hidden/expired **first**, ahead of draft/scheduled/active/past_due — matching the reference app's own design principle that access is a single source of truth independent of the display label (see #166's issue body). Confirmed with the requester during brainstorming.
+
+---
+
+## Phase 8 — Issue #166: Manual hide + scheduled auto-expiry for homeworks
+
+**Goal:** Give instructors a hide toggle independent of publish state, plus an optional auto-expiry timestamp, so a live homework can be pulled from student view without unpublishing it.
+
+### Task 1: Schema — `is_hidden`/`expires_at` columns + migration
+
+**Files:**
+- Modify: `apps/web/src/db/schema/content.ts` (the `homeworks` table)
+- Create: `apps/web/src/db/migrations/00XX_homework_hide_expiry.sql` (generated, not hand-written)
+
+**Interfaces:**
+- Produces: `homeworks.isHidden: boolean` (not null, default false), `homeworks.expiresAt: Date | null`.
+
+- [ ] **Step 1: Add the two columns**, alongside `publishedAt`/`releasedAt` in the same table:
+
+```ts
+// apps/web/src/db/schema/content.ts — inside homeworks pgTable(...)
+// #166: is_hidden is the single source of truth for student access,
+// independent of publish state (an instructor can pull a *published*
+// homework from view without unpublishing it). expires_at is optional
+// auto-hide once passed. See deriveHomeworkStatus and Resolved Design
+// Decision 17 for the "hidden" vs "archived" call.
+isHidden: boolean("is_hidden").notNull().default(false),
+expiresAt: timestamp("expires_at", { withTimezone: true }),
+```
+
+- [ ] **Step 2:** `cd apps/web && npm run db:generate` — verify the generated migration only adds these two columns, nothing else drifted.
+- [ ] **Step 3: Commit**
+
+```bash
+git add apps/web/src/db/schema/content.ts apps/web/src/db/migrations/
+git commit -m "feat(db): homeworks.is_hidden/expires_at columns (#166)"
+```
+
+### Task 2: `deriveHomeworkStatus` gains a real `"hidden"` status
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/homeworks.ts`
+- Modify: `apps/web/src/server/repositories/homeworks.test.ts`
+
+**Interfaces:**
+- Changes: `deriveHomeworkStatus(hw: { dueDate, publishedAt, releasedAt, isHidden, expiresAt })` — two new required inputs.
+- `HomeworkStatus` union unchanged in shape (`"hidden"` was always a theoretical value via `"archived"`'s sibling documentation — now `"hidden"` itself becomes reachable; `"archived"` remains unreachable, per Decision 17).
+
+- [ ] **Step 1: Update the function and its doc comment**
+
+```ts
+export function deriveHomeworkStatus(hw: {
+  dueDate: Date;
+  publishedAt: Date | null;
+  releasedAt: Date | null;
+  isHidden: boolean;
+  expiresAt: Date | null;
+}): HomeworkStatus {
+  const now = new Date();
+  // #166: is_hidden/expires_at take precedence over every other state,
+  // including draft -- matches the reference app's design (access is one
+  // source of truth, the enum is cosmetic). Checked first so callers can
+  // filter on deriveHomeworkStatus's result alone, never a raw column.
+  if (hw.isHidden || (hw.expiresAt !== null && hw.expiresAt.getTime() <= now.getTime())) {
+    return "hidden";
+  }
+  if (!hw.publishedAt) return "draft";
+  if (hw.releasedAt && hw.releasedAt.getTime() > now.getTime()) return "scheduled";
+  return hw.dueDate.getTime() > now.getTime() ? "active" : "past_due";
+}
+```
+
+Replace the doc comment above the function (the one pointing at #166 as "where this gets resolved") with one recording the decision made, referencing Resolved Design Decision 17.
+
+- [ ] **Step 2: Update the two existing callers** of `deriveHomeworkStatus` inside this file (`listHomeworksForCourse`'s map, any other call site — grep to confirm all are found) to pass `isHidden: hw.isHidden, expiresAt: hw.expiresAt`.
+- [ ] **Step 3: Tests** — table-driven cases in `homeworks.test.ts`: `isHidden: true` overrides an otherwise-`"draft"` homework → `"hidden"`; `isHidden: true` overrides `"active"` → `"hidden"`; `expiresAt` in the past overrides `"active"` → `"hidden"`; `expiresAt` in the future does not affect an otherwise-`"active"` homework; `expiresAt: null` + `isHidden: false` is a no-op (existing behavior unchanged, regression-proofs Phase 1's original test cases still pass with the two new required fields added to every existing test fixture in this file).
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/homeworks.ts apps/web/src/server/repositories/homeworks.test.ts
+git commit -m "feat(homeworks): deriveHomeworkStatus gains a real hidden status (#166)"
+```
+
+### Task 3: Repository — `updateHomeworkHideState` + wire hidden into every status-gate filter
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/homeworks.ts`
+- Modify: `apps/web/src/server/repositories/studentHomeworks.ts`
+- Modify: `apps/web/src/server/repositories/studentHomeworks.test.ts`
+
+**Interfaces:**
+- Produces: `updateHomeworkHideState(db, scope, id, input: { isHidden: boolean; expiresAt?: Date | null }): Promise<Homework | null>` — same shape/pattern as `updateHomeworkPublishState`.
+
+- [ ] **Step 1: Add `updateHomeworkHideState`**, mirroring `updateHomeworkPublishState` exactly:
+
+```ts
+export async function updateHomeworkHideState(
+  db: Db,
+  scope: CourseScope,
+  id: string,
+  input: { isHidden: boolean; expiresAt?: Date | null },
+) {
+  const [updated] = await db
+    .update(homeworks)
+    .set({
+      isHidden: input.isHidden,
+      ...(input.expiresAt !== undefined && { expiresAt: input.expiresAt }),
+      updatedAt: new Date(),
+    })
+    .where(and(eq(homeworks.id, id), eq(homeworks.courseId, scope)))
+    .returning();
+  return updated ?? null;
+}
+```
+
+- [ ] **Step 2: Extend `studentHomeworks.ts`'s `visibleHomeworks` filter** (currently `status !== "draft" && status !== "scheduled"`) to also exclude `"hidden"`, and pass the two new `deriveHomeworkStatus` inputs at that call site.
+- [ ] **Step 3: Tests** — `studentHomeworks.test.ts`: a hidden published-and-active homework is excluded from `getStudentHomeworksForUser`'s result; an expired (`expiresAt` in the past) homework is excluded the same way; a non-hidden, non-expired homework is unaffected (regression).
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/homeworks.ts apps/web/src/server/repositories/studentHomeworks.ts apps/web/src/server/repositories/studentHomeworks.test.ts
+git commit -m "feat(homeworks): updateHomeworkHideState + student-facing hidden filtering (#166)"
+```
+
+### Task 4: Route — `PATCH .../hide` + audit action + instructor-facing filters
+
+**Files:**
+- Modify: `apps/web/src/server/routes/homeworks.ts`
+- Modify: `apps/web/src/server/utils/audit.ts`
+- Modify: `apps/web/src/shared/types.ts`
+- Modify: `apps/web/src/server/index.ts`
+- Modify: `apps/web/src/server/routes/homeworks.test.ts`
+
+**Interfaces:**
+- Produces: `updateHomeworkHideHandler`, registered at `PATCH /api/courses/:courseId/homeworks/:homeworkId/hide`, guarded by `requireInstructorOf()` — same shape as the existing `/publish` route.
+- Produces: `HomeworkHideBody { isHidden: boolean; expiresAt?: string | null }`, `HomeworkHideResponse { id: string; isHidden: boolean; expiresAt: string | null }` in `shared/types.ts`.
+- Adds `AUDIT_ACTIONS.HOMEWORK_HIDDEN: "homework.hidden"`, `AUDIT_ACTIONS.HOMEWORK_UNHIDDEN: "homework.unhidden"`.
+
+- [ ] **Step 1: Add the two audit actions** to `AUDIT_ACTIONS` in `audit.ts`, alongside `HOMEWORK_PUBLISHED`/`HOMEWORK_UNPUBLISHED`.
+- [ ] **Step 2: Add `HomeworkHideBody`/`HomeworkHideResponse`** to `shared/types.ts`, next to `HomeworkPublishBody`/`HomeworkPublishResponse`.
+- [ ] **Step 3: Add `updateHomeworkHideHandler`**, modeled directly on `publishHomeworkHandler` (same auth guard defensively re-checked, same body-parse try/catch, same best-effort audit try/catch via `logServerError`):
+
+```ts
+export async function updateHomeworkHideHandler(c: Context<AppEnv>) {
+  const courseId = c.req.param("courseId");
+  const homeworkId = c.req.param("homeworkId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+
+  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
+    return c.json({ error: "Instructor access denied" }, 403);
+  }
+
+  let body: HomeworkHideBody;
+  try {
+    body = await c.req.json<HomeworkHideBody>();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+  if (typeof body.isHidden !== "boolean") {
+    return c.json({ error: "isHidden (boolean) is required" }, 400);
+  }
+
+  let expiresAt: Date | null | undefined;
+  if (body.expiresAt !== undefined) {
+    // Same uncontrolled-<input>-sends-"" class of bug as releasedAt (C1/#161
+    // pattern) -- normalize an empty string to null (explicit clear) rather
+    // than letting `new Date("")` produce an Invalid Date.
+    if (body.expiresAt === null || body.expiresAt === "") {
+      expiresAt = null;
+    } else {
+      expiresAt = new Date(body.expiresAt);
+      if (Number.isNaN(expiresAt.getTime())) {
+        return c.json({ error: "expiresAt must be a valid date or null" }, 400);
+      }
+    }
+  }
+
+  const scope = courseScopeFromAuthContext(authContext, courseId);
+  if (!scope) return c.json({ error: "Course access denied" }, 403);
+
+  const db = makeDb(c.env.DATABASE_URL);
+  const updated = await updateHomeworkHideState(db, scope, homeworkId!, { isHidden: body.isHidden, expiresAt });
+  if (!updated) return c.json({ error: "Homework not found" }, 404);
+
+  try {
+    const orgScopes = await getOrgScopesForUser(db, authContext.session.userId);
+    await auditBestEffort(db, orgScopes, {
+      actorUserId: authContext.session.userId,
+      action: body.isHidden ? AUDIT_ACTIONS.HOMEWORK_HIDDEN : AUDIT_ACTIONS.HOMEWORK_UNHIDDEN,
+      targetType: "homework",
+      targetId: updated.id,
+    });
+  } catch (err) {
+    logServerError("updateHomeworkHideHandler", err);
+  }
+
+  const responseBody: HomeworkHideResponse = {
+    id: updated.id,
+    isHidden: updated.isHidden,
+    expiresAt: updated.expiresAt?.toISOString() ?? null,
+  };
+  return c.json(responseBody);
+}
+```
+
+- [ ] **Step 4: Register the route** in `index.ts`, immediately after the existing `/publish` registration:
+
+```ts
+app.patch(
+  "/api/courses/:courseId/homeworks/:homeworkId/hide",
+  requireInstructorOf()(updateHomeworkHideHandler),
+);
+```
+
+- [ ] **Step 5: Pass `isHidden`/`expiresAt` through `deriveHomeworkStatus`** at `listHomeworksHandler` and `getHomeworkDetailHandler`'s existing call sites, and add `status !== "hidden"` to both routes' student-facing filter predicates (line 55's `rows.filter(...)`, line 141's draft/scheduled gate). Instructors are unfiltered already (existing `isInstructorOf` branch) — no change needed there, they see hidden/expired homeworks by design (requirement: "Instructors continue to see hidden and expired homeworks, labelled as such").
+- [ ] **Step 6: Add `isHidden`/`expiresAt` to `HomeworkDetailResponse`/`HomeworkListItemResponse`** in `shared/types.ts` (`isHidden: boolean`, `expiresAt: string | null`) so the admin UI can render the toggle's current state and the expiry field.
+- [ ] **Step 7: Tests** in `homeworks.test.ts`: register the new route on the test sub-app (mirrors the existing `app.patch(".../publish", ...)` line); non-instructor gets 403; missing/non-boolean `isHidden` gets 400; invalid `expiresAt` gets 400; a successful hide writes the audit action and returns the expected body; a student-role list/detail request excludes a hidden or expired homework; an instructor-role request includes it.
+- [ ] **Step 8: Commit**
+
+```bash
+git add apps/web/src/server/routes/homeworks.ts apps/web/src/server/utils/audit.ts apps/web/src/shared/types.ts apps/web/src/server/index.ts apps/web/src/server/routes/homeworks.test.ts
+git commit -m "feat(api): PATCH .../hide route + student-facing hidden filtering (#166)"
+```
+
+### Task 5: Admin — `StatusBadge`/status-type plumbing for `"hidden"`
+
+**Files:**
+- Modify: `apps/admin/src/client/components/StatusBadge.tsx`
+- Modify: `packages/ui/styles.css`
+- Modify: `apps/admin/src/client/views/HomeworksView.tsx`
+- Modify: `apps/admin/src/client/components/HomeworkForm.tsx`
+
+**Interfaces:**
+- `StatusKind` gains `"hidden"`. The two duplicated local `HomeworkStatus` unions (`HomeworksView.tsx`, `HomeworkForm.tsx` — this app never imports from `apps/web`, per the existing "mirrors apps/web's contract" comment convention) both gain `"hidden"`.
+
+- [ ] **Step 1:** Add `"hidden"` to `StatusKind` in `StatusBadge.tsx`.
+- [ ] **Step 2:** Add a `.admin-status--hidden` CSS rule in `packages/ui/styles.css`, next to `.admin-status--archived` — reuse the same muted `var(--color-text-secondary)` dot color (both represent "not currently active," visually grouping them without conflating the underlying concepts per Decision 17).
+- [ ] **Step 3:** Add `"hidden"` to `HomeworksView.tsx`'s local `HomeworkStatus` union, its `STATUS_LABEL` map (`hidden: "hidden"`), and its `HomeworkListItemResponse` mirror (add `isHidden`/`expiresAt` fields, unused by this view directly but kept in sync with the real contract per the file's own stated convention).
+- [ ] **Step 4:** Add `"hidden"` to `HomeworkForm.tsx`'s `HomeworkFormInitialData.status` union.
+- [ ] **Step 5: Tests** — `HomeworksView.test.tsx`: a homework with `status: "hidden"` renders the `StatusBadge` with `kind="hidden"` and label "hidden".
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/admin/src/client/components/StatusBadge.tsx packages/ui/styles.css apps/admin/src/client/views/HomeworksView.tsx apps/admin/src/client/components/HomeworkForm.tsx apps/admin/src/client/views/HomeworksView.test.tsx
+git commit -m "feat(admin): hidden StatusKind + badge styling (#166)"
+```
+
+### Task 6: Admin — hide toggle + expiry field in `HomeworkForm`, wired in Create/Edit views
+
+**Files:**
+- Modify: `apps/admin/src/client/components/HomeworkForm.tsx`
+- Modify: `apps/admin/src/client/views/HomeworkCreateView.tsx`
+- Modify: `apps/admin/src/client/views/HomeworkEditView.tsx`
+- Modify: `apps/admin/src/client/components/HomeworkForm.test.tsx`
+- Modify: `apps/admin/src/client/views/HomeworkEditView.test.tsx`
+
+**Interfaces:**
+- `HomeworkFormValues` gains `hidden: boolean`, `expiresAt: string | undefined`. `HomeworkFormInitialData` gains `isHidden: boolean`, `expiresAt: string | null`. `HomeworkForm`'s `onSubmit` payload gains `hidden: boolean`, `expiresAt?: string`.
+
+- [ ] **Step 1: Add a second `<fieldset>`** in `HomeworkForm.tsx`, distinct from the existing `<legend>Publish</legend>` block (per the requirement: "distinct from publish/unpublish"):
+
+```tsx
+<fieldset>
+  <legend>Visibility</legend>
+  <label>
+    <input type="checkbox" {...register("hidden")} />
+    Hidden (pulled from student view regardless of publish state)
+  </label>
+  <label htmlFor="hw-expires-at">Expires at (optional — auto-hides once passed)</label>
+  <input id="hw-expires-at" type="datetime-local" {...register("expiresAt")} />
+</fieldset>
+```
+
+- [ ] **Step 2: Wire `defaultValues`** from `initialData.isHidden`/`initialData.expiresAt` (converted via the existing `toDatetimeLocalValue`-style helper — reuse `HomeworkEditView.tsx`'s function or lift it if a second view needs it), same pattern as `publish`/`releasedAt`.
+- [ ] **Step 3: `HomeworkEditView.tsx`** — capture `originalHideState` the same way `originalPublishState` is captured (from the same initial `GET`), and after the existing `/publish` conditional call, add a parallel conditional call to `PATCH .../hide` only when `payload.hidden !== originalHideState.hidden || payload.expiresAt !== originalHideState.expiresAt` (mirrors the publish-changed guard exactly, including the `""` vs `undefined` normalization note already documented at that call site).
+- [ ] **Step 4: `HomeworkCreateView.tsx`** — after the existing conditional `/publish` call, add `if (payload.hidden) { PATCH .../hide with { isHidden: true, expiresAt: payload.expiresAt } }` (a freshly created homework defaults to `isHidden: false` server-side, so only call the route when the instructor actually checked the box — mirrors the existing `if (payload.publish)` conditional).
+- [ ] **Step 5: Tests** — `HomeworkForm.test.tsx`: the Hidden checkbox and expiry field render and are controllable; `HomeworkEditView.test.tsx`: saving without touching Visibility does not call `/hide` (mirrors the existing "does not call /publish when untouched" test); saving with the box checked calls `/hide` with `isHidden: true`.
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/admin/src/client/components/HomeworkForm.tsx apps/admin/src/client/views/HomeworkCreateView.tsx apps/admin/src/client/views/HomeworkEditView.tsx apps/admin/src/client/components/HomeworkForm.test.tsx apps/admin/src/client/views/HomeworkEditView.test.tsx
+git commit -m "feat(admin): hide/expiry toggle in HomeworkForm, wired in create/edit (#166)"
+```
+
+### Task 7: Phase close — full verification
+
+- [ ] **Step 1:** `npm test` (all three workspaces) — 0 failures.
+- [ ] **Step 2:** `npm run typecheck` — 0 errors.
+- [ ] **Step 3:** Re-read #166's own requirements checklist verbatim; confirm every bullet is satisfied by a task above.
+- [x] **Step 4:** Stop. Report to the requester and wait for review before starting Phase 9.
+
+**End of Phase 8.** All 7 tasks complete, committed individually. Full monorepo suite green (442 tests: 382 web + 43 admin + 18 ui, 0 failures) and typecheck clean (`llteacher-web`'s two `TS2556` errors in `routes/homeworks.test.ts` are pre-existing, confirmed unrelated by checking out the clean base commit eb9f8a4 into a disposable worktree before touching any code -- not fixed here, out of scope for #166).
+
+---
+
+## Phase 9 — Issue #164: Non-interactive question sections with student answers
+
+**Goal:** Support sections that collect a plain free-text answer instead of an AI conversation -- a type discriminator on `sections`, a `section_answers` table, submit/read routes, status derivation, dashboard counting, and admin authoring. See Resolved Design Decisions 19-20 for the two open questions the issue itself flags.
+
+### Task 1: Schema — `sections.type` + `section_answers` table + migration
+
+**Files:**
+- Modify: `apps/web/src/db/schema/content.ts` (new `sectionTypeEnum`, `sections.type` column)
+- Modify: `apps/web/src/db/schema/runtime.ts` (new `sectionAnswers` table + relations -- lives alongside `submissions`/`conversations`, the other per-user runtime-data tables)
+- Create: generated migration
+
+**Interfaces:**
+- Produces: `sectionTypeEnum = pgEnum("section_type", ["conversation", "non_interactive"])`, `sections.type: "conversation" | "non_interactive"` (not null, default `"conversation"`), `sectionAnswers` table.
+
+- [ ] **Step 1: Add the enum and column** to `content.ts`, next to `sections`' other columns:
+
+```ts
+export const sectionTypeEnum = pgEnum("section_type", ["conversation", "non_interactive"]);
+
+// inside sections pgTable(...) columns:
+// #164: defaults to "conversation" so every existing row is unchanged.
+// non_interactive sections collect a section_answers row instead of a
+// conversation -- see runtime.ts's sectionAnswers table.
+type: sectionTypeEnum("type").notNull().default("conversation"),
+```
+
+- [ ] **Step 2: Add `sectionAnswers`** to `runtime.ts`, modeled on `submissions`' denormalized-org-id pattern (verify at write time via the real parent chain, never trust client input) and `conversations`' owner-column naming:
+
+```ts
+// ---------- SectionAnswer ----------
+// #164: the non-interactive counterpart to a conversation -- one row per
+// (user, section), upserted on submit-and-revise (Resolved Design Decision
+// 19: not a history table, matches submitSection's own existing
+// update-in-place resubmission pattern; #128's actual ambiguity is about a
+// conversation's restart cycle, which doesn't exist for this section type).
+export const sectionAnswers = pgTable(
+  "section_answers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sectionId: uuid("section_id").notNull().references(() => sections.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    content: text("content").notNull(),
+    submittedAt: timestamp("submitted_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("section_answers_user_section_uq").on(t.userId, t.sectionId),
+    index("section_answers_org_idx").on(t.organizationId),
+  ],
+);
+
+export const sectionAnswersRelations = relations(sectionAnswers, ({ one }) => ({
+  section: one(sections, { fields: [sectionAnswers.sectionId], references: [sections.id] }),
+  user: one(users, { fields: [sectionAnswers.userId], references: [users.id] }),
+}));
+```
+
+`sections` is imported from `./content` in `runtime.ts` already (verify the existing import line and extend it, don't duplicate).
+
+- [ ] **Step 3:** `cd apps/web && npm run db:generate` -- verify the generated migration adds exactly the `type` column, the enum type, and the new `section_answers` table.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/db/schema/content.ts apps/web/src/db/schema/runtime.ts apps/web/src/db/migrations/
+git commit -m "feat(db): sections.type + section_answers table (#164)"
+```
+
+### Task 2: `planSectionDiff` threads `type` through change detection
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/sections.ts`
+- Modify: `apps/web/src/server/repositories/sections.test.ts`
+
+**Interfaces:**
+- `ExistingSection` gains `type: "conversation" | "non_interactive"`. `IncomingSection` gains `type?: "conversation" | "non_interactive"` (optional -- an omitted type on an existing section leaves it unchanged; a `toCreate` with no type defaults to `"conversation"` at the DB layer, matching the column default). `SectionCreatePlan`/`SectionUpdatePlan` gain `type: "conversation" | "non_interactive"` (always resolved, never optional, so downstream consumers never re-derive the default).
+
+- [ ] **Step 1: Extend the four interfaces** with the `type` field as described above.
+- [ ] **Step 2: Resolve the incoming type with a default** near the top of `planSectionDiff` (or per-item, whichever reads cleaner): `const incomingType = s.type ?? "conversation"`.
+- [ ] **Step 3: Thread `type` into `toCreate`** (`type: incomingType`) and **into the `toUpdate` change-detection**: add `const typeChanged = prior.type !== incomingType;` alongside `titleChanged`/`contentChanged`/`orderChanged`, include it in the `if (titleChanged || contentChanged || orderChanged || solutionChanged || typeChanged)` condition, and set `type: incomingType` on the pushed `SectionUpdatePlan`.
+- [ ] **Step 4: Tests** in `sections.test.ts`: an incoming section with a changed `type` (title/content/order unchanged) still produces a `toUpdate` entry; an incoming section with `type` omitted preserves the existing type untouched (not silently reset to `"conversation"`); a brand-new section's `toCreate` entry carries the incoming type or defaults to `"conversation"` when omitted.
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/web/src/server/repositories/sections.ts apps/web/src/server/repositories/sections.test.ts
+git commit -m "feat(sections): planSectionDiff detects section type changes (#164)"
+```
+
+### Task 3: `resolveSectionWrites`/`updateHomework` write the `type` column
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/homeworks.ts`
+- Modify: `apps/web/src/server/repositories/homeworks.test.ts`
+
+**Interfaces:**
+- `resolveSectionWrites`'s `pushSectionInsert`/`pushSectionUpdate` callback signatures both gain a `type` parameter (5 args total, inserted after `content`: `(id, order, title, content, type)`).
+
+- [ ] **Step 1: Extend `PendingWrite`'s two variants** with `type: "conversation" | "non_interactive"`, populate it in both `pending.push(...)` call sites (from `upd.type`/`create.type`), and pass `write.type` through in `apply()`'s two branches.
+- [ ] **Step 2: Update both callback signatures** and their five call sites (2 in the `db.batch()` production path, i.e. insert+update; 2 in the `db.transaction()` test/dev path; plus the two closures inside `resolveSectionWrites` itself if typed inline) to accept and use the new `type` parameter:
+
+```ts
+// production path
+(sectionId, order, title, content, type) => {
+  statements.push(db.insert(sections).values({ id: sectionId, homeworkId: id, title, content, order, type }));
+},
+(sectionId, order, title, content, type) => {
+  statements.push(db.update(sections).set({ title, content, order, type, updatedAt: new Date() }).where(eq(sections.id, sectionId)));
+},
+// test/dev path -- same shape, `await tx.insert/update` instead of `statements.push`
+```
+
+- [ ] **Step 3: Tests** in `homeworks.test.ts` (real-DB, gated by `DATABASE_URL` like the rest of this file's `updateHomework` suite): creating a homework with a `type: "non_interactive"` section persists it; editing an existing section's `type` from `"conversation"` to `"non_interactive"` (title/content/order unchanged) persists the change; omitting `type` on an edit leaves the existing type untouched.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/homeworks.ts apps/web/src/server/repositories/homeworks.test.ts
+git commit -m "feat(homeworks): updateHomework writes sections.type on both write paths (#164)"
+```
+
+### Task 4: Repository — `section_answers` read/upsert
+
+**Files:**
+- Create: `apps/web/src/server/repositories/sectionAnswers.ts`
+- Create: `apps/web/src/server/repositories/sectionAnswers.test.ts`
+
+**Interfaces:**
+- Produces: `upsertSectionAnswer(db: Db, scope: OrgScope, sectionId: string, userId: string, content: string): Promise<{id, sectionId, userId, content, submittedAt, updatedAt}>` -- verifies (via a real join, not trusting the caller) that `sectionId` resolves to a `non_interactive` section within `scope`'s org before writing; throws a plain `Error` otherwise (route layer maps to 403/404, matching `createSubmission`'s existing convention).
+- Produces: `getSectionAnswer(db: Db, scope: OrgScope, sectionId: string, userId: string): Promise<SectionAnswer | null>`.
+
+- [ ] **Step 1: `upsertSectionAnswer`**, modeled directly on `submitSection`'s existing-row-update pattern and `createSubmission`'s ownership-verification-via-join pattern:
+
+```ts
+export async function upsertSectionAnswer(db: Db, scope: OrgScope, sectionId: string, userId: string, content: string) {
+  const [owned] = await db
+    .select({ id: sections.id, type: sections.type })
+    .from(sections)
+    .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
+    .innerJoin(courses, eq(homeworks.courseId, courses.id))
+    .where(and(eq(sections.id, sectionId), eq(courses.organizationId, scope)));
+  if (!owned) throw new Error("Section not found in this org scope");
+  if (owned.type !== "non_interactive") throw new Error("Section does not accept a direct answer");
+
+  const [existing] = await db
+    .select({ id: sectionAnswers.id })
+    .from(sectionAnswers)
+    .where(and(eq(sectionAnswers.sectionId, sectionId), eq(sectionAnswers.userId, userId)));
+  if (existing) {
+    const [updated] = await db
+      .update(sectionAnswers)
+      .set({ content, updatedAt: new Date() })
+      .where(eq(sectionAnswers.id, existing.id))
+      .returning();
+    return updated!;
+  }
+  const [created] = await db
+    .insert(sectionAnswers)
+    .values({ sectionId, userId, organizationId: scope, content })
+    .returning();
+  return created!;
+}
+```
+
+- [ ] **Step 2: `getSectionAnswer`** -- plain scoped select, same shape as `getSubmissionByConversation`.
+- [ ] **Step 3: Tests** (mock-`db` style, matching `homeworks.test.ts`'s convention): first submit creates a row; second submit for the same (user, section) updates the same row (`updatedAt` changes, `id` stays the same, no second row); submitting against a `"conversation"`-type section throws; submitting against a section outside `scope`'s org throws; `getSectionAnswer` returns `null` when none exists.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/sectionAnswers.ts apps/web/src/server/repositories/sectionAnswers.test.ts
+git commit -m "feat(sections): section_answers upsert-on-revise repository (#164)"
+```
+
+### Task 5: Routes — student submit/revise + instructor read
+
+**Files:**
+- Create: `apps/web/src/server/routes/sectionAnswers.ts`
+- Create: `apps/web/src/server/routes/sectionAnswers.test.ts`
+- Modify: `apps/web/src/server/index.ts`
+- Modify: `apps/web/src/shared/types.ts`
+
+**Interfaces:**
+- Produces: `submitSectionAnswerHandler`, `PATCH /api/sections/:sectionId/answer`, guarded by `requireRole(["student"])` only -- no `:courseId`, mirroring `submitSectionHandler`'s exact pattern (org resolved via `getOrgScopesForUser`/`orgScopes[0]`, ownership verified inside the repository call via the real parent chain, not a route-layer guard param).
+- Produces: `getSectionAnswerHandler`, `GET /api/courses/:courseId/sections/:sectionId/answers/:studentId`, guarded by `requireInstructorOf()`, org resolved via `getOrgScopeForCourse(db, courseId)`.
+- Produces `SectionAnswerBody { content: string }`, `SectionAnswerResponse { id, sectionId, userId, content, submittedAt, updatedAt }` (all timestamps ISO strings) in `shared/types.ts`.
+
+- [ ] **Step 1: Add the two response types** to `shared/types.ts`.
+- [ ] **Step 2: `submitSectionAnswerHandler`**, modeled on `submitSectionHandler`:
+
+```ts
+export async function submitSectionAnswerHandler(c: Context<AppEnv>) {
+  const sectionId = c.req.param("sectionId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+  if (!authContext || !authContext.hasRole("student")) {
+    return c.json({ error: "Insufficient permissions" }, 403);
+  }
+  let body: SectionAnswerBody;
+  try {
+    body = await c.req.json<SectionAnswerBody>();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+  if (typeof body.content !== "string" || body.content.trim() === "") {
+    return c.json({ error: "content is required" }, 400);
+  }
+  const db = makeDb(c.env.DATABASE_URL);
+  const orgScopes = await getOrgScopesForUser(db, authContext.session.userId);
+  const orgScope = orgScopes[0];
+  if (!orgScope) return c.json({ error: "No organization membership found" }, 403);
+  try {
+    const answer = await upsertSectionAnswer(db, orgScope, sectionId!, authContext.session.userId, body.content);
+    const responseBody: SectionAnswerResponse = {
+      id: answer.id, sectionId: answer.sectionId, userId: answer.userId,
+      content: answer.content, submittedAt: answer.submittedAt.toISOString(), updatedAt: answer.updatedAt.toISOString(),
+    };
+    return c.json(responseBody);
+  } catch {
+    // Same uniform-403 rationale as submitSectionHandler: don't let a
+    // not-found-vs-wrong-type distinction leak section existence.
+    return c.json({ error: "Section not found or does not accept a direct answer" }, 403);
+  }
+}
+```
+
+- [ ] **Step 3: `getSectionAnswerHandler`**:
+
+```ts
+export async function getSectionAnswerHandler(c: Context<AppEnv>) {
+  const courseId = c.req.param("courseId");
+  const sectionId = c.req.param("sectionId");
+  const studentId = c.req.param("studentId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
+    return c.json({ error: "Instructor access denied" }, 403);
+  }
+  const db = makeDb(c.env.DATABASE_URL);
+  const orgScope = await getOrgScopeForCourse(db, courseId);
+  if (!orgScope) return c.json({ error: "Course access denied" }, 403);
+  const answer = await getSectionAnswer(db, orgScope, sectionId!, studentId!);
+  if (!answer) return c.json({ error: "Answer not found" }, 404);
+  const responseBody: SectionAnswerResponse = {
+    id: answer.id, sectionId: answer.sectionId, userId: answer.userId,
+    content: answer.content, submittedAt: answer.submittedAt.toISOString(), updatedAt: answer.updatedAt.toISOString(),
+  };
+  return c.json(responseBody);
+}
+```
+
+- [ ] **Step 4: Register both routes** in `index.ts`:
+
+```ts
+app.patch("/api/sections/:sectionId/answer", requireRole(["student"])(submitSectionAnswerHandler));
+app.get(
+  "/api/courses/:courseId/sections/:sectionId/answers/:studentId",
+  requireInstructorOf()(getSectionAnswerHandler),
+);
+```
+
+- [ ] **Step 5: Tests** in `sectionAnswers.test.ts` (mirrors `submissions.test.ts`'s route-test structure): non-student 403 on submit; empty/missing content 400; a successful submit returns 200 with the expected body; a `"conversation"`-type section 403s on submit; non-instructor 403 on the read route; a missing answer 404s; a found answer returns the expected body.
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/web/src/server/routes/sectionAnswers.ts apps/web/src/server/routes/sectionAnswers.test.ts apps/web/src/server/index.ts apps/web/src/shared/types.ts
+git commit -m "feat(api): section answer submit/revise + instructor read routes (#164)"
+```
+
+### Task 6: Status derivation — `deriveSectionStatus` gains `hasAnswer`
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/studentHomeworks.ts`
+- Modify: `apps/web/src/server/repositories/studentHomeworks.test.ts`
+
+**Interfaces:**
+- `deriveSectionStatus(input: { dueDate, hasActiveConversation, hasSubmission, hasAnswer })` -- `hasAnswer` treated identically to `hasSubmission`.
+
+- [ ] **Step 1: Extend the function**:
+
+```ts
+export function deriveSectionStatus(input: {
+  dueDate: Date;
+  hasActiveConversation: boolean;
+  hasSubmission: boolean;
+  hasAnswer: boolean;
+}): SectionStatusType {
+  const overdue = input.dueDate.getTime() < Date.now();
+  if (input.hasSubmission || input.hasAnswer) return "submitted";
+  if (input.hasActiveConversation) return overdue ? "in_progress_overdue" : "in_progress";
+  return overdue ? "overdue" : "not_started";
+}
+```
+
+- [ ] **Step 2: `getStudentHomeworksForUser`** -- fetch `section_answers` batched the same `inArray`-then-join-in-memory way conversations/submissions already are (one extra `db.select()`, still a fixed query count regardless of section count -- keep the #158 no-N+1 property this function was already built to preserve), and pass `hasAnswer: answersBySectionId.has(section.id)` at the per-section call site, `false` for `type === "conversation"` sections (they can never have an answer row, but pass explicitly rather than relying on an always-empty Set for clarity).
+- [ ] **Step 3: Tests** in `studentHomeworks.test.ts`: a non-interactive section with an answer row reports `"submitted"`; without one reports `"not_started"`/`"overdue"` per the existing due-date rules; a real-DB test (mirrors the existing "excludes hidden and expired" test's structure) creating a `non_interactive` section, submitting an answer via `upsertSectionAnswer`, and asserting the returned `StudentSectionProgress.status` is `"submitted"`.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/studentHomeworks.ts apps/web/src/server/repositories/studentHomeworks.test.ts
+git commit -m "feat(homeworks): deriveSectionStatus treats an answer as completion for non-interactive sections (#164)"
+```
+
+### Task 7: Submissions dashboard counts non-interactive sections correctly
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/submissions.ts`
+- Modify: `apps/web/src/server/repositories/submissions.test.ts`
+
+**Interfaces:**
+- No public signature change -- `getHomeworkSubmissionsMatrix`'s internals gain one more batched fetch.
+
+- [ ] **Step 1:** After the existing `allSubmissions` fetch, batch-fetch `section_answers` for `sectionIds` the same `inArray` way, build `const answeredByUserSection = new Set(allAnswers.map((a) => \`${a.userId}:${a.sectionId}\`))`.
+- [ ] **Step 2:** In the per-student/per-section loop, when `section.type === "non_interactive"`, compute `submitted` from `answeredByUserSection.has(\`${membership.userId}:${section.id}\`)` instead of the conversation-derived `submitted`/`activeConvo` (which will always be empty for this section type) -- everything else in the cell (`conversationCount: 0`, `hasDeletedConversation: false`, `lastActivityAt` from the answer's `updatedAt` if you want the cell to show recency, or `null` if that's out of scope for this pass -- keep it `null`, matching "no speculative fields" discipline, since nothing in #164's requirements asks for it) stays structurally the same `SubmissionCell` shape.
+- [ ] **Step 3: Tests**: a real-DB test creating a homework with one `non_interactive` section, a student answer via `upsertSectionAnswer`, and asserting the matrix's cell for that section reports `status: "submitted"` (not `"missing"`) and the student's `submissionCount`/`participationStatus` reflect it; `missingSectionWarnings` omits that section once every student has answered.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/submissions.ts apps/web/src/server/repositories/submissions.test.ts
+git commit -m "feat(submissions): dashboard counts non-interactive section answers correctly (#164)"
+```
+
+### Task 8: Admin — section type selector in `HomeworkForm`
+
+**Files:**
+- Modify: `apps/web/src/server/routes/homeworks.ts` (`SectionResponse` mapping in `getHomeworkDetailHandler` -- gains `type: s.type`)
+- Modify: `apps/web/src/shared/types.ts` (`SectionResponse` gains `type`, `SectionDiffInput` gains `type?`)
+- Modify: `apps/admin/src/client/lib/fixtures.ts` (`SectionSummary` gains `type`)
+- Modify: `apps/admin/src/client/lib/computeSectionDiff.ts` (`FormSection`/`SectionDiffOutput` gain `type?`)
+- Modify: `apps/admin/src/client/components/HomeworkForm.tsx`
+- Modify: `apps/admin/src/client/components/HomeworkForm.test.tsx`
+- Modify: `apps/admin/src/client/views/HomeworkEditView.tsx` (section-mapping in the `GET` handler gains `type: s.type`)
+
+**Interfaces:**
+- `FormSection.type?: "conversation" | "non_interactive"` (defaults to `"conversation"` via the `<select>`'s own default option, matching the server-side column default).
+
+- [ ] **Step 1: Backend response/body plumbing** -- add `type: "conversation" | "non_interactive"` to `SectionResponse` and `type?: "conversation" | "non_interactive"` to `SectionDiffInput` in `shared/types.ts` (distinct from Task 5's `SectionAnswerBody`/`SectionAnswerResponse`, which that task adds separately), and add `type: s.type` to the `SectionResponse` mapping in `getHomeworkDetailHandler` (`routes/homeworks.ts`).
+- [ ] **Step 2: Client type plumbing** -- add `type: "conversation" | "non_interactive"` to `SectionSummary` (`fixtures.ts`, flows into `SectionDetail`), `type?: "conversation" | "non_interactive"` to `FormSection`/`SectionDiffOutput` (`computeSectionDiff.ts`), thread it through `computeSectionDiff`'s mapping (`type: s.type`), and add `type: s.type` to `HomeworkEditView.tsx`'s section-mapping.
+- [ ] **Step 3: Add a type `<select>`** inside `HomeworkForm.tsx`'s per-section `<fieldset>`, right after the section title field:
+
+```tsx
+<label htmlFor={`section-${index}-type`}>Section type</label>
+<select id={`section-${index}-type`} {...register(`sections.${index}.type`)}>
+  <option value="conversation">Conversation</option>
+  <option value="non_interactive">Question (student types an answer)</option>
+</select>
+```
+
+- [ ] **Step 4: Tests** in `HomeworkForm.test.tsx`: a newly added section's type selector defaults to "Conversation"; changing it to "Question" and submitting includes `type: "non_interactive"` in the section's diff payload.
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/web/src/server/routes/homeworks.ts apps/web/src/shared/types.ts apps/admin/src/client/lib/fixtures.ts apps/admin/src/client/lib/computeSectionDiff.ts apps/admin/src/client/components/HomeworkForm.tsx apps/admin/src/client/components/HomeworkForm.test.tsx apps/admin/src/client/views/HomeworkEditView.tsx
+git commit -m "feat(admin): section type selector in HomeworkForm (#164)"
+```
+
+### Task 9: Phase close — full verification
+
+- [ ] **Step 1:** `npm test` (all three workspaces, `DATABASE_URL` set for the real-DB gated suites) -- 0 failures.
+- [ ] **Step 2:** `npm run typecheck` -- 0 new errors beyond the two pre-existing `TS2556`s recorded in Phase 8's closeout.
+- [ ] **Step 3:** Re-read #164's own requirements checklist verbatim; confirm every bullet is satisfied by a task above (the "admin homework form lets an author choose the section type" bullet is Task 8; "submissions dashboard counts non-interactive sections correctly" is Task 7; all others map 1:1 to Tasks 1-6).
+- [x] **Step 4:** Stop. Report to the requester and wait for review before starting Phase 10.
+
+**End of Phase 9.** All 8 tasks complete, committed individually. Full monorepo suite green (466 tests: 403 web + 45 admin + 18 ui, 0 failures) and typecheck clean (same two pre-existing `TS2556` errors recorded in Phase 8's closeout, still unrelated).
+
+21. **Found during Task 7 (verification): fixing the per-cell "missing" bug for non_interactive sections left `participationStatus`/`totalConversations`'s `no_interaction` check self-contradictory.** A student who only answered non_interactive sections (zero conversations) would have every cell correctly report `"submitted"` but the row-level `participationStatus` still read `"no_interaction"`, since that check was keyed on `totalConversations === 0` alone. Fixed in the same task, same file: a `totalEngagement` counter tracks conversations *and* non_interactive answers, and the `no_interaction`/`partial`/`active` split now reads from it instead of `totalConversations` (which keeps its original literal meaning for its own field). Not scope creep -- same root cause (a section type the aggregation logic never accounted for), same function, caught by tracing the fix through to every consumer of the values it touches rather than stopping at the first green test.
+22. **#165: no student-facing prompt UI, and more concretely blocked than #164's equivalent call (Decision 20).** The requirement text describes a real UI trigger ("before the first section is opened," "after the last section is submitted"), but tracing `apps/web/src/client/App.tsx` found no event in the current student client that corresponds to "a section was opened" -- `createConversation` still has zero production callers (Decision 11), so there is no stable hook to attach a pre-prompt to. Building the trigger now would mean inventing a fake event. The route/repository layer is still built correctly and independently of this gap, same relationship Decision 11 describes for `submitSection`/`getHomeworkSubmissionsMatrix` and M4.
+23. **#165: no instructor-facing read route at all in this phase, aggregate or per-student.** Checked #78 (the issue's own "intersects" pointer) directly: it's an open, PI-sign-off-required product/consent decision (not an engineering default) about individual-level student data visibility, with its own stated default of `aggregate_only` pending confirmation. #165's own requirement checklist doesn't actually ask for any instructor read surface -- only schema, the student response route, and admin authoring -- so building even an aggregate-stats endpoint now would be inventing a requirement, not just deferring a risky one. Widget responses are captured and stored; a future instructor view (aggregate or individual) is separate work gated on #78's resolution.
+24. **#165: no export support.** "Responses are exportable alongside other research data" names #91 (instructor export of transcripts/submissions/grades), which doesn't exist yet anywhere in the codebase. Out of scope here, same reasoning as Decision 12's #92 deferral.
+25. **#165: widget reorder gets its own smaller diff/collision-resolution, not a generalization of `resolveSectionWrites`.** The issue's Implementation Notes explicitly flag the same non-deferrable-unique-index problem sections already solved (Decision 7) and point at that solution -- but widgets carry no solution-equivalent sub-write, so a parallel, simpler pass-based-plus-scratch-bump implementation is meaningfully smaller than the section version. Extracting a shared generalization now would mean risk-touching the already-battle-tested section algorithm for an abstraction only two call sites will ever use -- not justified by this phase's actual requirement.
+
+---
+
+## Phase 10 — Issue #165: Pre/post self-assessment progress widgets
+
+**Goal:** Let instructors attach ordered pre/post self-assessment prompts to a homework; students record independent 0-10 values for each, partial completion allowed. See Resolved Design Decisions 22-25 for this phase's scope boundaries.
+
+### Task 1: Schema — `homework_progress_widgets` + `homework_progress_widget_responses` + migration
+
+**Files:**
+- Modify: `apps/web/src/db/schema/content.ts` (new `homeworkProgressWidgets` table + relations, alongside `sections`)
+- Modify: `apps/web/src/db/schema/runtime.ts` (new `homeworkProgressWidgetResponses` table + relations, alongside `sectionAnswers`)
+- Create: generated migration
+
+**Interfaces:**
+- Produces: `homeworkProgressWidgets` (`id`, `homeworkId`, `prePrompt`, `postPrompt`, `order` 1-20 unique-per-homework), `homeworkProgressWidgetResponses` (`id`, `widgetId`, `userId`, `preValue`/`postValue` nullable 0-10, `preSubmittedAt`/`postSubmittedAt` nullable, unique on `(widgetId, userId)`).
+
+- [ ] **Step 1: Add `homeworkProgressWidgets`** to `content.ts`, mirroring `sections`' order/uniqueness idiom exactly:
+
+```ts
+// ---------- HomeworkProgressWidget ----------
+// #165: an ordered pre/post self-assessment prompt pair, authored per
+// homework. order is 1-indexed, capped at 20 -- same idiom as sections.
+
+export const homeworkProgressWidgets = pgTable(
+  "homework_progress_widgets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    homeworkId: uuid("homework_id")
+      .notNull()
+      .references(() => homeworks.id, { onDelete: "cascade" }),
+    prePrompt: text("pre_prompt").notNull(),
+    postPrompt: text("post_prompt").notNull(),
+    order: integer("order").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("homework_progress_widgets_homework_order_uq").on(t.homeworkId, t.order),
+    check("homework_progress_widgets_order_range_chk", sql`${t.order} >= 1 AND ${t.order} <= 20`),
+  ],
+);
+```
+
+- [ ] **Step 2: Add `homeworkProgressWidgetResponses`** to `runtime.ts`, alongside `sectionAnswers`:
+
+```ts
+// ---------- HomeworkProgressWidgetResponse ----------
+// #165: one row per (user, widget) -- nullable pre/post pair on a single
+// row is deliberate (per the issue's own Implementation Notes): keeps the
+// pairing trivial to query and makes partial completion (pre answered,
+// post never answered) a natural state rather than a correlation problem
+// across two event rows.
+
+export const homeworkProgressWidgetResponses = pgTable(
+  "homework_progress_widget_responses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    widgetId: uuid("widget_id")
+      .notNull()
+      .references(() => homeworkProgressWidgets.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    preValue: integer("pre_value"),
+    preSubmittedAt: timestamp("pre_submitted_at", { withTimezone: true }),
+    postValue: integer("post_value"),
+    postSubmittedAt: timestamp("post_submitted_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("hpwr_widget_user_uq").on(t.widgetId, t.userId),
+    check("hpwr_pre_value_range_chk", sql`${t.preValue} IS NULL OR (${t.preValue} >= 0 AND ${t.preValue} <= 10)`),
+    check("hpwr_post_value_range_chk", sql`${t.postValue} IS NULL OR (${t.postValue} >= 0 AND ${t.postValue} <= 10)`),
+  ],
+);
+```
+
+`homeworkProgressWidgets` needs importing into `runtime.ts` alongside the existing `sections` import from `./content`.
+
+- [ ] **Step 3:** `cd apps/web && npm run db:generate` -- verify the generated migration adds exactly the two tables.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/db/schema/content.ts apps/web/src/db/schema/runtime.ts apps/web/src/db/migrations/
+git commit -m "feat(db): homework_progress_widgets + responses tables (#165)"
+```
+
+### Task 2: Widget diff planner (`planWidgetDiff`)
+
+**Files:**
+- Create: `apps/web/src/server/repositories/progressWidgets.ts`
+- Create: `apps/web/src/server/repositories/progressWidgets.test.ts`
+
+**Interfaces:**
+- Produces: `ExistingWidget { id, order, prePrompt, postPrompt }`, `IncomingWidget { id?, order, prePrompt, postPrompt }`, `WidgetCreatePlan { prePrompt, postPrompt, order }`, `WidgetUpdatePlan { id, prePrompt, postPrompt, order }`, `WidgetDeletePlan { id }`, `WidgetDiffPlan { toCreate, toUpdate, toDelete }`, `planWidgetDiff(existing, incoming): WidgetDiffPlan`.
+
+- [ ] **Step 1: Implement `planWidgetDiff`**, structurally identical to `planSectionDiff` (`repositories/sections.ts`) minus the solution dimension: duplicate-order detection, unknown-id detection, change-detection on `prePrompt`/`postPrompt`/`order` only, omitted-from-incoming ⇒ delete.
+- [ ] **Step 2: Tests**, mirroring `sections.test.ts`'s structure: creates with no id; updates on prompt/order change; omits unchanged widgets from `toUpdate`; deletes widgets omitted from incoming; duplicate-order throw; unknown-id throw.
+- [ ] **Step 3: Commit**
+
+```bash
+git add apps/web/src/server/repositories/progressWidgets.ts apps/web/src/server/repositories/progressWidgets.test.ts
+git commit -m "feat(widgets): planWidgetDiff -- pure diff logic for widget authoring (#165)"
+```
+
+### Task 3: `resolveWidgetWrites` + `updateHomework` integration
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/homeworks.ts`
+- Modify: `apps/web/src/server/repositories/homeworks.test.ts`
+
+**Interfaces:**
+- `HomeworkUpdateFields` gains `widgets?: IncomingWidget[]`. `updateHomework` diffs and applies widgets atomically alongside sections, on both write paths (production `db.batch()`, test/dev `db.transaction()`).
+
+- [ ] **Step 1: Implement `resolveWidgetWrites`** in `homeworks.ts` (or exported from `progressWidgets.ts` and imported here -- prefer co-locating with `resolveSectionWrites` since both are `updateHomework`-internal helpers), same pass-based-plus-scratch-bump technique as `resolveSectionWrites` (Decision 7), sized down: no solution callback, just `pushWidgetInsert(id, order, prePrompt, postPrompt)` / `pushWidgetUpdate(id, order, prePrompt, postPrompt)`.
+- [ ] **Step 2: Wire into `updateHomework`**: read existing widgets (`db.query.homeworkProgressWidgets.findMany({ where: eq(homeworkId, id) })`) the same way existing sections are read, run `planWidgetDiff` when `input.widgets` is present, apply `toDelete` directly and `toCreate`/`toUpdate` via `resolveWidgetWrites`, on both the batch-statements array and the `tx`-immediate paths -- same structure as the existing sections block, run alongside it (not nested inside), since sections and widgets are independent diffs sharing one atomic write.
+- [ ] **Step 3: Tests** (real-DB, mirrors the existing `updateHomework (real DB)` suite): creates widgets on a homework; edits an existing widget's prompts; reorders two widgets (swap, exercising the scratch-bump path); deletes a widget omitted from a later diff; a widget diff and a section diff in the same `updateHomework` call both apply correctly (proves they don't clobber each other inside one atomic write).
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/homeworks.ts apps/web/src/server/repositories/homeworks.test.ts
+git commit -m "feat(widgets): updateHomework diffs and writes widgets atomically alongside sections (#165)"
+```
+
+### Task 4: Repository — response upsert + `getHomeworkById` widget fetch
+
+**Files:**
+- Modify: `apps/web/src/server/repositories/progressWidgets.ts`
+- Modify: `apps/web/src/server/repositories/progressWidgets.test.ts`
+- Modify: `apps/web/src/server/repositories/homeworks.ts` (`getHomeworkById` gains a widgets fetch, same two-query style as its existing sections fetch)
+
+**Interfaces:**
+- Produces: `submitWidgetResponse(db: Db, scope: OrgScope, widgetId: string, userId: string, input: { which: "pre" | "post"; value: number }): Promise<WidgetResponse>` -- verifies (via the real parent chain: widget -> homework -> course -> org) that `widgetId` belongs to `scope`'s org; upserts only the `pre*`/`post*` pair matching `which`, leaving the other untouched (partial completion).
+- `getHomeworkById`'s return type gains `widgets: { id, prePrompt, postPrompt, order }[]`.
+
+- [ ] **Step 1: `submitWidgetResponse`**, modeled directly on `upsertSectionAnswer` (Phase 9 Task 4)'s ownership-verification-via-join pattern, branching on `which`:
+
+```ts
+export async function submitWidgetResponse(
+  db: Db, scope: OrgScope, widgetId: string, userId: string,
+  input: { which: "pre" | "post"; value: number },
+) {
+  const [owned] = await db
+    .select({ id: homeworkProgressWidgets.id })
+    .from(homeworkProgressWidgets)
+    .innerJoin(homeworks, eq(homeworkProgressWidgets.homeworkId, homeworks.id))
+    .innerJoin(courses, eq(homeworks.courseId, courses.id))
+    .where(and(eq(homeworkProgressWidgets.id, widgetId), eq(courses.organizationId, scope)));
+  if (!owned) throw new Error("Widget not found in this org scope");
+
+  const [existing] = await db
+    .select({ id: homeworkProgressWidgetResponses.id })
+    .from(homeworkProgressWidgetResponses)
+    .where(and(eq(homeworkProgressWidgetResponses.widgetId, widgetId), eq(homeworkProgressWidgetResponses.userId, userId)));
+
+  const columnSet = input.which === "pre"
+    ? { preValue: input.value, preSubmittedAt: new Date() }
+    : { postValue: input.value, postSubmittedAt: new Date() };
+
+  if (existing) {
+    const [updated] = await db
+      .update(homeworkProgressWidgetResponses)
+      .set(columnSet)
+      .where(eq(homeworkProgressWidgetResponses.id, existing.id))
+      .returning();
+    return updated!;
+  }
+  const [created] = await db
+    .insert(homeworkProgressWidgetResponses)
+    .values({ widgetId, userId, ...columnSet })
+    .returning();
+  return created!;
+}
+```
+
+- [ ] **Step 2: `getHomeworkById` widget fetch** -- add a `db.query.homeworkProgressWidgets.findMany({ where: eq(homeworkId, id), orderBy: (w, {asc}) => [asc(w.order)] })` call alongside the existing sections fetch, include in the returned object.
+- [ ] **Step 3: Tests**: first `which: "pre"` submit creates a row with `preValue` set, `postValue` null; a later `which: "post"` submit on the same (widget, user) updates the *same* row, setting `postValue` without touching the already-set `preValue` (proves independence); resubmitting the same `which` updates in place, not a new row; throws for a widget outside `scope`'s org.
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/web/src/server/repositories/progressWidgets.ts apps/web/src/server/repositories/progressWidgets.test.ts apps/web/src/server/repositories/homeworks.ts
+git commit -m "feat(widgets): submitWidgetResponse upsert (independent pre/post) + getHomeworkById widgets (#165)"
+```
+
+### Task 5: Route — student response submit
+
+**Files:**
+- Create: `apps/web/src/server/routes/progressWidgets.ts`
+- Create: `apps/web/src/server/routes/progressWidgets.test.ts`
+- Modify: `apps/web/src/server/index.ts`
+- Modify: `apps/web/src/shared/types.ts`
+
+**Interfaces:**
+- Produces: `submitWidgetResponseHandler`, `PATCH /api/widgets/:widgetId/response`, guarded by `requireRole(["student"])` only -- identical shape to #164's `submitSectionAnswerHandler` (org via `getOrgScopesForUser`/`orgScopes[0]`, ownership verified inside the repository call).
+- Produces `WidgetResponseBody { which: "pre" | "post"; value: number }`, `WidgetResponseResponse { id, widgetId, userId, preValue, preSubmittedAt, postValue, postSubmittedAt }` (nullable timestamp fields as ISO strings or null) in `shared/types.ts`.
+
+- [ ] **Step 1: Add the two types** to `shared/types.ts`.
+- [ ] **Step 2: `submitWidgetResponseHandler`**, modeled on `submitSectionAnswerHandler` (Phase 9 Task 5): 403 non-student, 400 for missing/invalid `which` or a `value` outside 0-10 (validate server-side, don't trust the client-side slider bound), 403 mapping the repository's not-found-in-org error, 403 for no org membership, 200 with the response body otherwise.
+- [ ] **Step 3: Register** `app.patch("/api/widgets/:widgetId/response", requireRole(["student"])(submitWidgetResponseHandler));` in `index.ts`.
+- [ ] **Step 4: Tests**, mirroring `sectionAnswers.test.ts` (Phase 9 Task 5): non-student 403; missing `which` 400; `value` of -1 or 11 400; successful pre submit 200; successful post submit 200; not-found-in-org repository error mapped to 403.
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/web/src/server/routes/progressWidgets.ts apps/web/src/server/routes/progressWidgets.test.ts apps/web/src/server/index.ts apps/web/src/shared/types.ts
+git commit -m "feat(api): widget pre/post response submit route (#165)"
+```
+
+### Task 6: Admin — widget authoring in `HomeworkForm`
+
+**Files:**
+- Modify: `apps/web/src/shared/types.ts` (`HomeworkUpdateBody` gains `widgets?: WidgetDiffInput[]`; `HomeworkDetailResponse` gains `widgets: WidgetResponse[]`)
+- Modify: `apps/web/src/server/routes/homeworks.ts` (`updateHomeworkHandler` passes `body.widgets` through to `updateHomework`; `getHomeworkDetailHandler`'s response body includes `widgets`)
+- Modify: `apps/admin/src/client/components/HomeworkForm.tsx`
+- Modify: `apps/admin/src/client/components/HomeworkForm.test.tsx`
+- Modify: `apps/admin/src/client/views/HomeworkEditView.tsx` (initial-data mapping gains `widgets`)
+- Modify: `apps/admin/src/client/views/HomeworkCreateView.tsx` (widgets ride the same follow-up `PATCH .../homeworkId` call sections already use -- no separate endpoint)
+
+**Interfaces:**
+- `HomeworkFormValues` gains `widgets: { id?: string; prePrompt: string; postPrompt: string }[]` (order is renumbered from array position, same convention `computeSectionDiff` already established for sections -- reuse that exact renumbering approach for widgets via a small parallel `computeWidgetDiff` helper in `computeSectionDiff.ts`, or inline if trivial enough not to warrant a second exported function).
+
+- [ ] **Step 1: Backend wiring** -- thread `widgets` through `HomeworkUpdateBody`/`updateHomeworkHandler`/`HomeworkDetailResponse`/`getHomeworkDetailHandler`, same shape as the existing `sections` plumbing.
+- [ ] **Step 2: Add a "Progress Widgets" fieldset array** in `HomeworkForm.tsx`, structurally parallel to the section fields (`useFieldArray({ control, name: "widgets" })`, add/remove buttons), each row with a pre-prompt and post-prompt text input. No solution-equivalent field, no type selector -- just the two prompts.
+- [ ] **Step 3: Wire `defaultValues.widgets`** from `initialData.widgets` on edit, empty array on create.
+- [ ] **Step 4: Tests** in `HomeworkForm.test.tsx`: adding a widget row renders both prompt inputs; filling them in and submitting includes the widget in the payload; removing a widget row drops it from the payload (no confirmation needed here, unlike section removal -- a widget row has no accumulated student content analogous to a section's conversations, so the existing section-delete confirm precedent doesn't apply; note this explicitly rather than copying the confirm behavior reflexively).
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/web/src/shared/types.ts apps/web/src/server/routes/homeworks.ts apps/admin/src/client/components/HomeworkForm.tsx apps/admin/src/client/components/HomeworkForm.test.tsx apps/admin/src/client/views/HomeworkEditView.tsx apps/admin/src/client/views/HomeworkCreateView.tsx
+git commit -m "feat(admin): progress widget authoring in HomeworkForm (#165)"
+```
+
+### Task 7: Phase close — full verification
+
+- [ ] **Step 1:** `npm test` (all three workspaces, `DATABASE_URL` set) -- 0 failures.
+- [ ] **Step 2:** `npm run typecheck` -- 0 new errors beyond the two pre-existing `TS2556`s.
+- [ ] **Step 3:** Re-read #165's own requirements checklist verbatim; confirm every bullet Phase 10 actually owns is satisfied (schema, partial completion, admin authoring, and the response-submit route) and that the two explicitly-deferred bullets (student surface UI, export) are recorded as deferred, not silently dropped.
+- [x] **Step 4:** Stop. Report to the requester -- this is the last phase in the currently-scoped follow-up set (#167 remains deferred behind #128, per the earlier scope decision).
+
+**End of Phase 10.** All 7 tasks complete, committed individually. Full monorepo suite green (487 tests: 422 web + 47 admin + 18 ui, 0 failures) and typecheck clean (same two pre-existing `TS2556` errors recorded in Phase 8's closeout, still unrelated). Of #165's six requirement bullets: schema, partial completion, and admin authoring are fully built and tested; the student-surface UI and export bullets are recorded as explicitly deferred (Decisions 22, 24), not silently dropped -- both confirmed with the requester during brainstorming.
+
+This closes out the currently-scoped M3 follow-up work (#166, #164, #165). #167 remains deferred behind #128 (Resolved Design Decision blocking it, recorded at the top of this section, plus the deferral comment posted on the issue itself).
+
+---
+
+---
+
+18. **Found during Task 7 (verification): `HomeworkForm`'s Publish-checkbox default broke once "hidden" could mask a draft.** `HomeworkFormInitialData`/`originalPublishState` both derived `publish` from `status !== "draft"` -- a proxy that was safe pre-#166 because "draft" was the only unpublished status. Once `deriveHomeworkStatus` can return `"hidden"` for a *never-published* homework an instructor hides (Decision 17's precedence checks hidden first, ahead of draft), that proxy breaks: a hidden-but-still-draft homework would show "Published" incorrectly checked, and saving would silently publish it. Fixed by threading `publishedAt` itself through `HomeworkFormInitialData` and `originalPublishState`, deriving `publish` from `publishedAt !== null` directly instead of the status-string proxy. Caught by re-deriving Task 5's exhaustiveness grep (every `HomeworkStatus` consumer) rather than by a task-scoped test, since this bug lived one level away from any file Task 6 itself touched for the obvious reason. Regression test added: a `status: "hidden", publishedAt: null` fixture must render the Published checkbox unchecked.
+19. **#164: `section_answers` is a single upsert row per (user, section), not a revision-history table.** The issue's own Implementation Notes flag this as an open question to align with #128 ("resubmission semantics"), which is out of scope here. Resolved by checking what #128 actually disputes: `conversations.ts`'s schema comment (`conversations_owner_section_active_uq`) says the real ambiguity is a *soft-delete-and-restart conversation cycle* producing multiple `submissions` rows for one section -- and `submitSection` (Phase 4, already shipped) already treats a *single* conversation's resubmission as a plain update-in-place (`existing ? update : create`), not a new row. Non-interactive sections have no conversation and no restart cycle at all, so #128's specific ambiguity doesn't reach them. `section_answers` gets a unique `(userId, sectionId)` index and "submit and revise" is the same upsert `submitSection` already established -- consistent with existing precedent, not blocked by #128, and avoids a history table with no reader (no requirement asks for showing prior revisions). Confirmed with the requester during brainstorming.
+20. **#164: no new student-facing answer UI in `apps/web/src/client`.** The issue's requirement is "a route," not a UI; building a real answer form now would risk conflicting with M4's chat UI work and isn't itself required. Mirrors Decision 11's precedent exactly (Phases 4/5 built `submitSection`/`getHomeworkSubmissionsMatrix` correctly with no production caller yet, deferred to M4's `ConversationStartView`). Confirmed with the requester during brainstorming.
+
+---
+
+## PR #173 Review Fix Wave (#174, #175, #176, #177)
+
+External code review (PR #173, @cdcore09 at `b5893105`) found two blocking tenancy bugs and two non-blocking gaps in Phases 8-10, filed as #174-#177. All four implemented directly (no SDD dispatch -- well-specified, few-file-scoped fixes each with exact requirements and implementation notes already in the issue text), same pattern as Decision 16's PR #154 fix wave.
+
+26. **#174/#175: `OrgScope` used where `CourseScope`/enrollment was needed, in opposite directions.** `getSectionAnswerHandler` authorized on `courseId` (`isInstructorOf`) but queried by org (`getOrgScopeForCourse`), so a section in a *different course of the same org* was reachable once the instructor's access to that course was revoked -- fixed by minting a `CourseScope` via `courseScopeFromAuthContext` and extending `getSectionAnswer`'s join to `sections -> homeworks`, filtered on `homeworks.courseId = scope` instead of `courses.organizationId = scope`. Symmetrically, `upsertSectionAnswer` and `submitWidgetResponse` (the two new student write paths) verified org membership only, never course enrollment -- unlike `submitSection`, which has no such gap because conversation ownership already implies enrollment (a student can't own a conversation in a course they were never in). Fixed by extending both repositories' existing parent-chain join one more step to `course_memberships`, filtered on the caller's `userId`, `role = 'student'`, and `droppedAt IS NULL` -- the same enrollment-scoping predicate `getStudentHomeworksForUser` already established. Both fixes reuse the routes' existing uniform-403 error mapping, so neither leaks course-existence or enrollment-status information through a status-code split.
+27. **#177: a passed `expires_at`/manual hide freezes work already in progress, not only new work.** The issue's own Implementation Notes call this "a real product question, not a technicality." Resolved in favor of the stricter reading: every student write (`upsertSectionAnswer`, `submitWidgetResponse`, `submitSection`) now rejects once its parent homework derives to `hidden`, with no carve-out for a section/widget the student had already started -- matching the requirements list's own literal wording ("reject a target whose homework derives to hidden," no exception stated) and preserving the single-source-of-truth property `deriveHomeworkStatus`/derive-on-read already relies on. A "grace period for in-flight work" would be a second, parallel notion of hidden that could silently drift from the read side -- exactly the failure mode #166 chose derive-on-read to avoid in the first place. Implemented by extracting the hidden/expired check out of `deriveHomeworkStatus` into its own `isHomeworkHidden(hw)` helper (`repositories/homeworks.ts`), which `deriveHomeworkStatus` itself now calls -- so the read and write sides can never hand-copy-drift apart. #167 (auto-submit overdue sections, still deferred behind #128) inherits this same answer when it's eventually built. Instructor writes are unaffected: all three repository functions have exactly one production caller each (the student-only routes), so the new check never reaches an instructor-authoring code path (`updateHomework`'s section/widget diff machinery is a separate, untouched call chain).
+28. **#176: `homework_progress_widget_responses.organization_id` backfilled via a hand-written two-step migration, not `drizzle-kit generate`'s plain output.** `drizzle-kit generate` (schema-diff-only, no data awareness) produced a single `ADD COLUMN ... NOT NULL` with no default -- correct for this environment (the table has zero rows anywhere it's been deployed, since it was introduced in this same unmerged PR) but not what the issue's own requirement asks for ("migration backfills existing rows... before applying the not-null constraint"), and not safe to replay against a environment where the table did pick up rows before this migration runs. Rewrote migration `0018` by hand: add the column nullable, `UPDATE ... FROM` the real parent chain (`widget -> homework -> course -> organization`) to backfill it, then `ALTER COLUMN ... SET NOT NULL`, matching the FK+index `section_answers_org_idx`'s sibling already established. Verified by running `drizzle-kit migrate` against a real Postgres and re-running the full repository test suite.
+
+**Status:** #174 and #175 (blocking) and #176 and #177 (non-blocking) all fully implemented and tested against a real Postgres -- see the four issues' own checked-off requirement lists for the itemized mapping. #167 remains deferred behind #128, unchanged by this fix wave.
+
+---

@@ -42,7 +42,7 @@ describe("HomeworkForm", () => {
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     const payload = onSubmit.mock.calls[0][0];
-    expect(payload.sections).toEqual([{ title: "Sec 1", content: "Sec 1 content", order: 1, solutionContent: undefined }]);
+    expect(payload.sections).toEqual([{ title: "Sec 1", content: "Sec 1 content", order: 1, solutionContent: undefined, type: "conversation" }]);
   });
 
   it("removing a section drops it and renumbers the rest", async () => {
@@ -129,6 +129,94 @@ describe("HomeworkForm", () => {
     const fieldset = title.closest("fieldset")!;
     const focusable = Array.from(fieldset.querySelectorAll("input, textarea, button"));
     expect(focusable[0]).toBe(title);
+  });
+
+  // #164
+  it("defaults a new section's type to Conversation, and includes a changed type in the submit payload", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
+    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
+    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, { target: { value: "Sec 1" } });
+    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, { target: { value: "c" } });
+
+    const typeSelect = screen.getByLabelText(/section type/i) as HTMLSelectElement;
+    expect(typeSelect.value).toBe("conversation");
+    fireEvent.change(typeSelect, { target: { value: "non_interactive" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.sections[0].type).toBe("non_interactive");
+  });
+
+  // #166
+  it("renders a controllable Hidden checkbox and expires-at field, included in the submit payload", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
+    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
+    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, { target: { value: "Sec 1" } });
+    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, { target: { value: "c" } });
+
+    const hiddenCheckbox = screen.getByLabelText(/^hidden/i) as HTMLInputElement;
+    expect(hiddenCheckbox.checked).toBe(false);
+    fireEvent.click(hiddenCheckbox);
+    expect(hiddenCheckbox.checked).toBe(true);
+    fireEvent.change(screen.getByLabelText(/expires at/i), { target: { value: "2099-06-01T00:00" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.hidden).toBe(true);
+    expect(payload.expiresAt).toBe("2099-06-01T00:00");
+  });
+
+  // #165
+  it("adding a progress widget row renders both prompt inputs and includes them in the submit payload", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
+    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
+    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, { target: { value: "Sec 1" } });
+    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, { target: { value: "c" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /add progress widget/i }));
+    expect(screen.getByLabelText(/pre-section prompt/i)).toBeTruthy();
+    expect(screen.getByLabelText(/post-section prompt/i)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(/pre-section prompt/i), { target: { value: "Confidence before?" } });
+    fireEvent.change(screen.getByLabelText(/post-section prompt/i), { target: { value: "Confidence after?" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.widgets).toEqual([{ prePrompt: "Confidence before?", postPrompt: "Confidence after?", order: 1 }]);
+  });
+
+  it("removing a progress widget row drops it from the submit payload, no confirmation required", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
+    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
+    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, { target: { value: "Sec 1" } });
+    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, { target: { value: "c" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /add progress widget/i }));
+    fireEvent.click(screen.getByRole("button", { name: /remove widget/i }));
+    expect(screen.queryByLabelText(/pre-section prompt/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.widgets).toEqual([]);
   });
 
   it("shows a friendly error and does not throw when onSubmit rejects", async () => {

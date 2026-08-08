@@ -15,7 +15,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { courseMemberships, courses, organizations, users } from "./identity";
-import { llmConfigs, llmProviderEnum, materialChunks, sections } from "./content";
+import { llmConfigs, llmProviderEnum, materialChunks, sections, homeworkProgressWidgets } from "./content";
 
 // ---------- Enums ----------
 
@@ -175,6 +175,81 @@ export const submissions = pgTable(
   (t) => [index("submissions_org_idx").on(t.organizationId)],
 );
 
+// ---------- SectionAnswer ----------
+// #164: the non-interactive counterpart to a conversation -- one row per
+// (user, section), upserted on submit-and-revise (Resolved Design Decision
+// 19 in the M3 plan: not a history table, matches submitSection's own
+// existing update-in-place resubmission pattern; #128's actual ambiguity is
+// about a conversation's restart cycle, which doesn't exist for this
+// section type). organization_id is denormalized, same rationale as
+// submissions above.
+
+export const sectionAnswers = pgTable(
+  "section_answers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sectionId: uuid("section_id")
+      .notNull()
+      .references(() => sections.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    content: text("content").notNull(),
+    submittedAt: timestamp("submitted_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("section_answers_user_section_uq").on(t.userId, t.sectionId),
+    index("section_answers_org_idx").on(t.organizationId),
+  ],
+);
+
+// ---------- HomeworkProgressWidgetResponse ----------
+// #165: one row per (user, widget) -- nullable pre/post pair on a single
+// row is deliberate (per the issue's own Implementation Notes): keeps the
+// pairing trivial to query and makes partial completion (pre answered,
+// post never answered) a natural state rather than a correlation problem
+// across two event rows.
+
+export const homeworkProgressWidgetResponses = pgTable(
+  "homework_progress_widget_responses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    widgetId: uuid("widget_id")
+      .notNull()
+      .references(() => homeworkProgressWidgets.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // #176: sole exception among runtime.ts's tenant-data tables until now --
+    // its sibling section_answers already carries this. No direct security
+    // hole today (submitWidgetResponse verifies the full parent chain before
+    // writing), but FERPA deletion (#51) and export (#91, #165) need a
+    // direct org predicate rather than a three-table join.
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    preValue: integer("pre_value"),
+    preSubmittedAt: timestamp("pre_submitted_at", { withTimezone: true }),
+    postValue: integer("post_value"),
+    postSubmittedAt: timestamp("post_submitted_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("hpwr_widget_user_uq").on(t.widgetId, t.userId),
+    index("hpwr_org_idx").on(t.organizationId),
+    check("hpwr_pre_value_range_chk", sql`${t.preValue} IS NULL OR (${t.preValue} >= 0 AND ${t.preValue} <= 10)`),
+    check("hpwr_post_value_range_chk", sql`${t.postValue} IS NULL OR (${t.postValue} >= 0 AND ${t.postValue} <= 10)`),
+  ],
+);
+
 // ---------- Grade ----------
 // N:1 from submission (AI-first, instructor override allowed as a second
 // row). CHECK enforces exactly one of (graded_by_ai, grader_membership_id
@@ -311,6 +386,32 @@ export const submissionsRelations = relations(submissions, ({ one, many }) => ({
     references: [organizations.id],
   }),
   grades: many(grades),
+}));
+
+export const sectionAnswersRelations = relations(sectionAnswers, ({ one }) => ({
+  section: one(sections, {
+    fields: [sectionAnswers.sectionId],
+    references: [sections.id],
+  }),
+  user: one(users, {
+    fields: [sectionAnswers.userId],
+    references: [users.id],
+  }),
+  organization: one(organizations, {
+    fields: [sectionAnswers.organizationId],
+    references: [organizations.id],
+  }),
+}));
+
+export const homeworkProgressWidgetResponsesRelations = relations(homeworkProgressWidgetResponses, ({ one }) => ({
+  widget: one(homeworkProgressWidgets, {
+    fields: [homeworkProgressWidgetResponses.widgetId],
+    references: [homeworkProgressWidgets.id],
+  }),
+  user: one(users, {
+    fields: [homeworkProgressWidgetResponses.userId],
+    references: [users.id],
+  }),
 }));
 
 export const gradesRelations = relations(grades, ({ one, many }) => ({

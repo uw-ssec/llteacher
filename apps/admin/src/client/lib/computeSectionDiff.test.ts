@@ -30,4 +30,15 @@ describe("computeSectionDiff", () => {
     expect(result.find((s) => "id" in s && s.id === "s2")).toBeUndefined();
     expect(result).toHaveLength(1);
   });
+
+  // #164
+  it("threads a section's type through to the output", () => {
+    const form: FormSection[] = [
+      { id: "s1", title: "Q", content: "c", type: "non_interactive" },
+      { title: "Chat", content: "c" },
+    ];
+    const result = computeSectionDiff(form);
+    expect(result[0]!.type).toBe("non_interactive");
+    expect(result[1]!.type).toBeUndefined();
+  });
 });

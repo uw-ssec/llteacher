@@ -17,7 +17,7 @@ import { StatusBadge } from "../components/StatusBadge";
  *  never imports from apps/web (the only cross-package import anywhere in
  *  apps/admin/src is @llteacher/ui), so this is the contract, same
  *  convention as SubmissionsView.tsx's local types. */
-export type HomeworkStatus = "draft" | "scheduled" | "active" | "past_due" | "archived";
+export type HomeworkStatus = "draft" | "scheduled" | "active" | "past_due" | "hidden" | "archived";
 
 export interface HomeworkListItemResponse {
   id: string;
@@ -26,6 +26,8 @@ export interface HomeworkListItemResponse {
   dueDate: string;
   llmConfigId: string | null;
   status: HomeworkStatus;
+  isHidden: boolean;
+  expiresAt: string | null;
   sectionCount: number;
 }
 
@@ -42,6 +44,7 @@ const STATUS_LABEL: Record<HomeworkStatus, string> = {
   scheduled: "scheduled",
   archived:  "archived",
   past_due:  "past due",
+  hidden:    "hidden",
 };
 
 function formatDueDate(iso: string): string {

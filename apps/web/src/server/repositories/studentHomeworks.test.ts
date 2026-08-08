@@ -6,24 +6,37 @@ describe("deriveSectionStatus", () => {
   const past = new Date("2020-01-01");
 
   it("is submitted when a submission exists, regardless of due date", () => {
-    expect(deriveSectionStatus({ dueDate: past, hasActiveConversation: true, hasSubmission: true })).toBe("submitted");
-    expect(deriveSectionStatus({ dueDate: future, hasActiveConversation: true, hasSubmission: true })).toBe("submitted");
+    expect(deriveSectionStatus({ dueDate: past, hasActiveConversation: true, hasSubmission: true, hasAnswer: false })).toBe("submitted");
+    expect(deriveSectionStatus({ dueDate: future, hasActiveConversation: true, hasSubmission: true, hasAnswer: false })).toBe("submitted");
   });
 
   it("is in_progress when a conversation exists, not submitted, due date in future", () => {
-    expect(deriveSectionStatus({ dueDate: future, hasActiveConversation: true, hasSubmission: false })).toBe("in_progress");
+    expect(deriveSectionStatus({ dueDate: future, hasActiveConversation: true, hasSubmission: false, hasAnswer: false })).toBe("in_progress");
   });
 
   it("is in_progress_overdue when a conversation exists, not submitted, due date passed", () => {
-    expect(deriveSectionStatus({ dueDate: past, hasActiveConversation: true, hasSubmission: false })).toBe("in_progress_overdue");
+    expect(deriveSectionStatus({ dueDate: past, hasActiveConversation: true, hasSubmission: false, hasAnswer: false })).toBe("in_progress_overdue");
   });
 
   it("is overdue when no conversation exists and due date passed", () => {
-    expect(deriveSectionStatus({ dueDate: past, hasActiveConversation: false, hasSubmission: false })).toBe("overdue");
+    expect(deriveSectionStatus({ dueDate: past, hasActiveConversation: false, hasSubmission: false, hasAnswer: false })).toBe("overdue");
   });
 
   it("is not_started when no conversation exists and due date is in the future", () => {
-    expect(deriveSectionStatus({ dueDate: future, hasActiveConversation: false, hasSubmission: false })).toBe("not_started");
+    expect(deriveSectionStatus({ dueDate: future, hasActiveConversation: false, hasSubmission: false, hasAnswer: false })).toBe("not_started");
+  });
+
+  // #164: a non-interactive section's answer is treated as completion,
+  // same as hasSubmission -- regardless of due date, and even with no
+  // conversation at all (which non-interactive sections never have).
+  it("is submitted when an answer exists, regardless of due date or conversation state", () => {
+    expect(deriveSectionStatus({ dueDate: past, hasActiveConversation: false, hasSubmission: false, hasAnswer: true })).toBe("submitted");
+    expect(deriveSectionStatus({ dueDate: future, hasActiveConversation: false, hasSubmission: false, hasAnswer: true })).toBe("submitted");
+  });
+
+  it("is not_started/overdue (not submitted) when no answer exists for a non-interactive section", () => {
+    expect(deriveSectionStatus({ dueDate: future, hasActiveConversation: false, hasSubmission: false, hasAnswer: false })).toBe("not_started");
+    expect(deriveSectionStatus({ dueDate: past, hasActiveConversation: false, hasSubmission: false, hasAnswer: false })).toBe("overdue");
   });
 });
 
@@ -34,7 +47,9 @@ import { makeNodeDb } from "../../db/nodeClient";
 import { unsafeCourseScope } from "./scope";
 import { organizations, courses, courseMemberships, users, conversations, submissions } from "../../db/schema";
 import { eq as eq2 } from "drizzle-orm";
-import { createHomework, updateHomework, updateHomeworkPublishState, getHomeworkById } from "./homeworks";
+import { createHomework, updateHomework, updateHomeworkPublishState, updateHomeworkHideState, getHomeworkById } from "./homeworks";
+import { upsertSectionAnswer } from "./sectionAnswers";
+import { unsafeOrgScope } from "./scope";
 
 describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)", () => {
   it("only returns homeworks for courses the student is enrolled in, excludes drafts, ignores soft-deleted conversations", async () => {
@@ -108,6 +123,98 @@ describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)
     await db.delete(organizations).where(eq2(organizations.id, org!.id));
   });
 
+  // #166: a hidden or expired homework is excluded from the student list
+  // the same way a draft/scheduled one is, even though it's published and
+  // otherwise active.
+  it("excludes hidden and expired homeworks, includes an unaffected one", async () => {
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const [org] = await db.insert(organizations).values({
+      slug: `m3-test-166-${crypto.randomUUID()}`, name: "M3 Test Org 166", workosOrganizationId: `wo-166-${crypto.randomUUID()}`,
+    }).returning();
+    const [course] = await db.insert(courses).values({
+      organizationId: org!.id, code: "TEST-166", term: "Test", title: "Course 166",
+    }).returning();
+    const [student] = await db.insert(users).values({
+      email: crypto.getRandomValues(new Uint8Array(32)) as never,
+      emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+    }).returning();
+    const [instructorUser] = await db.insert(users).values({
+      email: crypto.getRandomValues(new Uint8Array(32)) as never,
+      emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+    }).returning();
+    await db.insert(courseMemberships).values({ userId: student!.id, courseId: course!.id, role: "student" });
+    const [instructorMembership] = await db.insert(courseMemberships).values({
+      userId: instructorUser!.id, courseId: course!.id, role: "instructor",
+    }).returning();
+
+    const scope = unsafeCourseScope(course!.id);
+    const hwHidden = await createHomework(db, scope, {
+      createdById: instructorMembership!.id, title: "Manually Hidden", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    const hwExpired = await createHomework(db, scope, {
+      createdById: instructorMembership!.id, title: "Expired", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    const hwVisible = await createHomework(db, scope, {
+      createdById: instructorMembership!.id, title: "Still Visible", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    for (const hw of [hwHidden, hwExpired, hwVisible]) {
+      await updateHomeworkPublishState(db, scope, hw!.id, { publish: true, releasedAt: new Date("2020-01-01") });
+    }
+    await updateHomeworkHideState(db, scope, hwHidden!.id, { isHidden: true });
+    await updateHomeworkHideState(db, scope, hwExpired!.id, { isHidden: false, expiresAt: new Date("2020-01-01") });
+
+    const result = await getStudentHomeworksForUser(db, student!.id);
+
+    expect(result.map((hw) => hw.title)).toEqual(["Still Visible"]);
+
+    await db.delete(organizations).where(eq2(organizations.id, org!.id));
+  });
+
+  // #164: a non-interactive section's status reflects its answer, not the
+  // (always-absent) conversation/submission state.
+  it("reports a non-interactive section as submitted once answered, not_started before", async () => {
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const [org] = await db.insert(organizations).values({
+      slug: `m3-test-164-${crypto.randomUUID()}`, name: "M3 Test Org 164", workosOrganizationId: `wo-164-${crypto.randomUUID()}`,
+    }).returning();
+    const [course] = await db.insert(courses).values({
+      organizationId: org!.id, code: "TEST-164", term: "Test", title: "Course 164",
+    }).returning();
+    const [student] = await db.insert(users).values({
+      email: crypto.getRandomValues(new Uint8Array(32)) as never,
+      emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+    }).returning();
+    const [instructorUser] = await db.insert(users).values({
+      email: crypto.getRandomValues(new Uint8Array(32)) as never,
+      emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+    }).returning();
+    await db.insert(courseMemberships).values({ userId: student!.id, courseId: course!.id, role: "student" });
+    const [instructorMembership] = await db.insert(courseMemberships).values({
+      userId: instructorUser!.id, courseId: course!.id, role: "instructor",
+    }).returning();
+
+    const scope = unsafeCourseScope(course!.id);
+    const hw = await createHomework(db, scope, {
+      createdById: instructorMembership!.id, title: "HW164", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    await updateHomeworkPublishState(db, scope, hw!.id, { publish: true, releasedAt: new Date("2020-01-01") });
+    await updateHomework(db, scope, hw!.id, {
+      sections: [{ title: "Q", content: "q", order: 1, type: "non_interactive" }],
+    });
+    const withSections = await getHomeworkById(db, scope, hw!.id);
+    const section = withSections!.sections[0]!;
+
+    const before = await getStudentHomeworksForUser(db, student!.id);
+    expect(before[0]!.sections[0]!.status).toBe("not_started");
+
+    await upsertSectionAnswer(db, unsafeOrgScope(org!.id), section.id, student!.id, "my answer");
+
+    const after = await getStudentHomeworksForUser(db, student!.id);
+    expect(after[0]!.sections[0]!.status).toBe("submitted");
+
+    await db.delete(organizations).where(eq2(organizations.id, org!.id));
+  });
+
   // #158: query count must not grow with the number of homeworks/sections.
   it("uses a fixed number of db query round-trips regardless of section count", async () => {
     const db = makeNodeDb(process.env.DATABASE_URL!);
@@ -166,8 +273,9 @@ describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)
     // db.query.*.findMany are Drizzle's relational query builder, db.select
     // is the plain query builder -- getStudentHomeworksForUser calls
     // db.query.courseMemberships.findMany once, db.query.homeworks.findMany
-    // once, and db.select() twice (conversations, submissions) = 4 total,
-    // fixed regardless of how many homeworks/sections exist above.
+    // once, and db.select() three times (conversations, submissions,
+    // #164's sectionAnswers) = 5 total, fixed regardless of how many
+    // homeworks/sections exist above.
     let queryCount = 0;
     const targets: Array<[object, string]> = [
       [db.query.courseMemberships, "findMany"],
@@ -192,7 +300,7 @@ describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)
       targets.forEach(([obj, key], i) => { (obj as Record<string, unknown>)[key] = originals[i]; });
       (db as unknown as Record<string, unknown>).select = originalSelect;
     }
-    expect(queryCount).toBe(4);
+    expect(queryCount).toBe(5);
 
     await db.delete(organizations).where(eq2(organizations.id, org!.id));
   });

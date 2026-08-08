@@ -41,6 +41,14 @@ export const materialSourceEnum = pgEnum("material_source_type", [
   "other",
 ]);
 
+// #164: "conversation" is a student working the section via chat (the
+// existing behavior); "non_interactive" collects a section_answers row
+// instead (see runtime.ts's sectionAnswers table).
+export const sectionTypeEnum = pgEnum("section_type", [
+  "conversation",
+  "non_interactive",
+]);
+
 // ---------- LLMConfig ----------
 // Per-Organization pool of model configurations. is_default is per-org; at
 // most one row per org may have is_default = true (enforced via partial
@@ -175,6 +183,13 @@ export const homeworks = pgTable(
     // function of these three timestamps, and could drift out of sync.
     publishedAt: timestamp("published_at", { withTimezone: true }),
     releasedAt: timestamp("released_at", { withTimezone: true }),
+    // #166: is_hidden is the single source of truth for student access,
+    // independent of publish state (an instructor can pull a *published*
+    // homework from view without unpublishing it). expires_at is optional
+    // auto-hide once passed. See deriveHomeworkStatus and Resolved Design
+    // Decision 17 for the "hidden" vs "archived" call.
+    isHidden: boolean("is_hidden").notNull().default(false),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
     title: text("title").notNull(),
     description: text("description").notNull(),
     dueDate: timestamp("due_date", { withTimezone: true }).notNull(),
@@ -210,6 +225,10 @@ export const sections = pgTable(
     order: integer("order").notNull(),
     title: text("title").notNull(),
     content: text("content").notNull(),
+    // #164: defaults to "conversation" so every existing row is unchanged.
+    // non_interactive sections collect a section_answers row instead of a
+    // conversation -- see runtime.ts's sectionAnswers table.
+    type: sectionTypeEnum("type").notNull().default("conversation"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -221,6 +240,36 @@ export const sections = pgTable(
     uniqueIndex("sections_homework_order_uq").on(t.homeworkId, t.order),
     check(
       "sections_order_range_chk",
+      sql`${t.order} >= 1 AND ${t.order} <= 20`,
+    ),
+  ],
+);
+
+// ---------- HomeworkProgressWidget ----------
+// #165: an ordered pre/post self-assessment prompt pair, authored per
+// homework. order is 1-indexed, capped at 20 -- same idiom as sections.
+
+export const homeworkProgressWidgets = pgTable(
+  "homework_progress_widgets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    homeworkId: uuid("homework_id")
+      .notNull()
+      .references(() => homeworks.id, { onDelete: "cascade" }),
+    prePrompt: text("pre_prompt").notNull(),
+    postPrompt: text("post_prompt").notNull(),
+    order: integer("order").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("homework_progress_widgets_homework_order_uq").on(t.homeworkId, t.order),
+    check(
+      "homework_progress_widgets_order_range_chk",
       sql`${t.order} >= 1 AND ${t.order} <= 20`,
     ),
   ],
@@ -422,6 +471,13 @@ export const sectionsRelations = relations(sections, ({ one }) => ({
     references: [promptTemplates.id],
   }),
   solution: one(sectionSolutions),
+}));
+
+export const homeworkProgressWidgetsRelations = relations(homeworkProgressWidgets, ({ one }) => ({
+  homework: one(homeworks, {
+    fields: [homeworkProgressWidgets.homeworkId],
+    references: [homeworks.id],
+  }),
 }));
 
 export const sectionSolutionsRelations = relations(

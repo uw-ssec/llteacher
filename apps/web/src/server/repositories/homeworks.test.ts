@@ -31,6 +31,8 @@ describe("homeworks repository", () => {
       llmConfigId: null,
       publishedAt: new Date("2020-01-01"),
       releasedAt: new Date("2020-01-01"),
+      isHidden: false,
+      expiresAt: null,
     };
     const findMany = vi.fn().mockResolvedValue([hwRow]);
     const select = mockSectionCountsChain([{ homeworkId: "hw1", count: 3 }]);
@@ -46,6 +48,8 @@ describe("homeworks repository", () => {
         dueDate: hwRow.dueDate.toISOString(),
         llmConfigId: null,
         status: "past_due",
+        isHidden: false,
+        expiresAt: null,
         sectionCount: 3,
       },
     ]);
@@ -61,6 +65,8 @@ describe("homeworks repository", () => {
       llmConfigId: null,
       publishedAt: null,
       releasedAt: null,
+      isHidden: false,
+      expiresAt: null,
     };
     const findMany = vi.fn().mockResolvedValue([hwRow]);
     // The count query itself returns zero rows for hw2 (no sections exist),
@@ -78,6 +84,8 @@ describe("homeworks repository", () => {
         dueDate: hwRow.dueDate.toISOString(),
         llmConfigId: null,
         status: "draft",
+        isHidden: false,
+        expiresAt: null,
         sectionCount: 0,
       },
     ]);
@@ -102,7 +110,7 @@ describe("homeworks repository", () => {
   // mockResolvedValue would) so this test exercises the real sort
   // direction/key, not just that some orderBy option was passed.
   it("orders homeworks by createdAt ascending regardless of insertion/mock order", async () => {
-    const baseRow = { description: "d", dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null };
+    const baseRow = { description: "d", dueDate: new Date("2099-01-01"), llmConfigId: null, publishedAt: null, releasedAt: null, isHidden: false, expiresAt: null };
     const rows = [
       { ...baseRow, id: "hw-b", title: "B", createdAt: new Date("2020-01-02") },
       { ...baseRow, id: "hw-a", title: "A", createdAt: new Date("2020-01-01") },
@@ -151,7 +159,7 @@ describe("homeworks repository", () => {
 });
 
 describe("deriveHomeworkStatus", () => {
-  const base = { dueDate: new Date("2026-09-01T00:00:00Z") };
+  const base = { dueDate: new Date("2026-09-01T00:00:00Z"), isHidden: false, expiresAt: null };
 
   it("is draft when publishedAt is null", () => {
     expect(deriveHomeworkStatus({ ...base, publishedAt: null, releasedAt: null })).toBe("draft");
@@ -170,6 +178,7 @@ describe("deriveHomeworkStatus", () => {
   it("is active when released and due date is in the future", () => {
     expect(
       deriveHomeworkStatus({
+        ...base,
         dueDate: new Date("2099-01-01T00:00:00Z"),
         publishedAt: new Date("2026-08-01T00:00:00Z"),
         releasedAt: new Date("2026-08-01T00:00:00Z"),
@@ -180,11 +189,56 @@ describe("deriveHomeworkStatus", () => {
   it("is past_due when released and due date has passed", () => {
     expect(
       deriveHomeworkStatus({
+        ...base,
         dueDate: new Date("2020-01-01T00:00:00Z"),
         publishedAt: new Date("2019-01-01T00:00:00Z"),
         releasedAt: new Date("2019-01-01T00:00:00Z"),
       }),
     ).toBe("past_due");
+  });
+
+  // #166: isHidden/expiresAt take precedence over every other input,
+  // including draft -- the point of a single source of truth for access.
+  it("is hidden when isHidden is true, overriding an otherwise-draft homework", () => {
+    expect(
+      deriveHomeworkStatus({ ...base, publishedAt: null, releasedAt: null, isHidden: true }),
+    ).toBe("hidden");
+  });
+
+  it("is hidden when isHidden is true, overriding an otherwise-active homework", () => {
+    expect(
+      deriveHomeworkStatus({
+        ...base,
+        dueDate: new Date("2099-01-01T00:00:00Z"),
+        publishedAt: new Date("2026-08-01T00:00:00Z"),
+        releasedAt: new Date("2026-08-01T00:00:00Z"),
+        isHidden: true,
+      }),
+    ).toBe("hidden");
+  });
+
+  it("is hidden when expiresAt has passed, overriding an otherwise-active homework", () => {
+    expect(
+      deriveHomeworkStatus({
+        ...base,
+        dueDate: new Date("2099-01-01T00:00:00Z"),
+        publishedAt: new Date("2026-08-01T00:00:00Z"),
+        releasedAt: new Date("2026-08-01T00:00:00Z"),
+        expiresAt: new Date("2020-01-01T00:00:00Z"),
+      }),
+    ).toBe("hidden");
+  });
+
+  it("is not hidden when expiresAt is in the future", () => {
+    expect(
+      deriveHomeworkStatus({
+        ...base,
+        dueDate: new Date("2099-01-01T00:00:00Z"),
+        publishedAt: new Date("2026-08-01T00:00:00Z"),
+        releasedAt: new Date("2026-08-01T00:00:00Z"),
+        expiresAt: new Date("2099-01-01T00:00:00Z"),
+      }),
+    ).toBe("active");
   });
 
   // "archived" is intentionally not reachable from any input this function
@@ -198,7 +252,7 @@ describe("deriveHomeworkStatus", () => {
 // DATABASE_URL isn't set locally; always runs in CI per turbo.json's
 // declared env).
 import { makeNodeDb } from "../../db/nodeClient";
-import { organizations, courses, courseMemberships, users, conversations } from "../../db/schema";
+import { organizations, courses, courseMemberships, users, conversations, homeworkProgressWidgets } from "../../db/schema";
 import { eq as eq2 } from "drizzle-orm";
 
 // Fixed byte arrays would collide with users_email_blind_index_uq across
@@ -409,6 +463,96 @@ describe.skipIf(!process.env.DATABASE_URL)("updateHomework (real DB)", () => {
     await expect(
       updateHomework(db, scope, created!.id, { sections: rotated }),
     ).rejects.toThrow(/no free order slot/i);
+
+    await db.delete(organizations).where(eq2(organizations.id, org.id));
+  });
+
+  // #164
+  it("persists a section's type on create and on edit, and leaves it untouched when omitted", async () => {
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const { org, membership } = await seedCourseWithInstructor(db, `164-${crypto.randomUUID()}`);
+    const scope = unsafeCourseScope(membership.courseId);
+    const created = await createHomework(db, scope, {
+      createdById: membership.id, title: "HW164", description: "d", dueDate: new Date("2099-01-01"),
+    });
+
+    await updateHomework(db, scope, created!.id, {
+      sections: [
+        { title: "Q", content: "q", order: 1, type: "non_interactive" },
+        { title: "Chat", content: "c", order: 2 },
+      ],
+    });
+    const afterCreate = await getHomeworkById(db, scope, created!.id);
+    const q = afterCreate!.sections.find((s) => s.title === "Q")!;
+    const chat = afterCreate!.sections.find((s) => s.title === "Chat")!;
+    expect(q.type).toBe("non_interactive");
+    expect(chat.type).toBe("conversation");
+
+    // Edit: flip Chat to non_interactive, leave Q's type omitted (must stay
+    // non_interactive, not silently reset to the "conversation" default).
+    await updateHomework(db, scope, created!.id, {
+      sections: [
+        { id: q.id, title: "Q", content: "q", order: 1 },
+        { id: chat.id, title: "Chat", content: "c", order: 2, type: "non_interactive" },
+      ],
+    });
+    const afterEdit = await getHomeworkById(db, scope, created!.id);
+    expect(afterEdit!.sections.find((s) => s.id === q.id)!.type).toBe("non_interactive");
+    expect(afterEdit!.sections.find((s) => s.id === chat.id)!.type).toBe("non_interactive");
+
+    await db.delete(organizations).where(eq2(organizations.id, org.id));
+  });
+
+  // #165
+  async function widgetsFor(db: ReturnType<typeof makeNodeDb>, homeworkId: string) {
+    return db.query.homeworkProgressWidgets.findMany({
+      where: eq2(homeworkProgressWidgets.homeworkId, homeworkId),
+      orderBy: (w, { asc }) => [asc(w.order)],
+    });
+  }
+
+  it("creates, edits, reorders, and deletes widgets in one call, atomically alongside a section diff", async () => {
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const { org, membership } = await seedCourseWithInstructor(db, `165-${crypto.randomUUID()}`);
+    const scope = unsafeCourseScope(membership.courseId);
+    const created = await createHomework(db, scope, {
+      createdById: membership.id, title: "HW165", description: "d", dueDate: new Date("2099-01-01"),
+    });
+
+    await updateHomework(db, scope, created!.id, {
+      sections: [{ title: "Sec 1", content: "c", order: 1 }],
+      widgets: [
+        { prePrompt: "Confidence before?", postPrompt: "Confidence after?", order: 1 },
+        { prePrompt: "Understanding before?", postPrompt: "Understanding after?", order: 2 },
+      ],
+    });
+    const afterCreate = await widgetsFor(db, created!.id);
+    expect(afterCreate).toHaveLength(2);
+    const w1 = afterCreate.find((w) => w.prePrompt === "Confidence before?")!;
+    const w2 = afterCreate.find((w) => w.prePrompt === "Understanding before?")!;
+
+    // Swap orders (a genuine 2-cycle, exercises the scratch-bump path) and
+    // edit w1's prompt, in the same call as an unrelated section edit --
+    // proves the two diffs don't clobber each other inside one atomic write.
+    await updateHomework(db, scope, created!.id, {
+      sections: [{ id: (await getHomeworkById(db, scope, created!.id))!.sections[0]!.id, title: "Sec 1 revised", content: "c", order: 1 }],
+      widgets: [
+        { id: w1.id, prePrompt: "Confidence before? (revised)", postPrompt: "Confidence after?", order: 2 },
+        { id: w2.id, prePrompt: "Understanding before?", postPrompt: "Understanding after?", order: 1 },
+      ],
+    });
+    const afterEdit = await widgetsFor(db, created!.id);
+    expect(afterEdit.map((w) => w.prePrompt)).toEqual(["Understanding before?", "Confidence before? (revised)"]);
+    const afterEditSections = await getHomeworkById(db, scope, created!.id);
+    expect(afterEditSections!.sections[0]!.title).toBe("Sec 1 revised");
+
+    // Omit w2 -> deleted.
+    await updateHomework(db, scope, created!.id, {
+      widgets: [{ id: w1.id, prePrompt: "Confidence before? (revised)", postPrompt: "Confidence after?", order: 1 }],
+    });
+    const afterDelete = await widgetsFor(db, created!.id);
+    expect(afterDelete).toHaveLength(1);
+    expect(afterDelete[0]!.id).toBe(w1.id);
 
     await db.delete(organizations).where(eq2(organizations.id, org.id));
   });
