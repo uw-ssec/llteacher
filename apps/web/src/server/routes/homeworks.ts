@@ -55,7 +55,10 @@ export async function listHomeworksHandler(c: Context<AppEnv>) {
   const rows = await listHomeworksForCourse(db, scope);
   // #166: instructors continue to see hidden/expired homeworks (labelled as
   // such); students never see them, same gate as draft/scheduled.
-  const visibleRows = authContext!.isInstructorOf(courseId!)
+  // #172: now keyed on the unreleased-content capability rather than the
+  // authoring role, so a TA granted `can_view_drafts` on this course sees
+  // them too. Instructors/admins satisfy it unconditionally.
+  const visibleRows = authContext!.canViewDraftsIn(courseId!)
     ? rows
     : rows.filter((hw) => hw.status !== "draft" && hw.status !== "scheduled" && hw.status !== "hidden");
   return c.json({ homeworks: visibleRows });
@@ -140,13 +143,21 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
   // without the other -- reviewed together in #154 because they're the same
   // handler and the same class of bug (a role check the list route and the
   // student repository both already apply, that this route skipped).
-  const isInstructor = authContext!.isInstructorOf(courseId!);
+  // #172: three independent questions, previously conflated into one
+  // isInstructorOf check. Separated because a TA can hold any subset:
+  //   canEdit         -- authoring; never granted to a TA
+  //   canSeeUnreleased -- draft/scheduled/hidden visibility; TA opt-in
+  //   canSeeSolutions  -- the answer key; TA opt-in, granted separately
+  // Instructors/admins satisfy all three unconditionally.
+  const canEdit = authContext!.isInstructorOf(courseId!);
+  const canSeeUnreleased = authContext!.canViewDraftsIn(courseId!);
+  const canSeeSolutions = authContext!.canViewSolutionsIn(courseId!);
 
   const status = deriveHomeworkStatus(result.homework);
-  // #166: hidden/expired is the same gate as draft/scheduled for a
-  // non-instructor -- indistinguishable from not-found, so a guessed/leaked
-  // UUID can't be used to confirm a hidden/draft homework is real.
-  if (!isInstructor && (status === "draft" || status === "scheduled" || status === "hidden")) {
+  // #166: hidden/expired is the same gate as draft/scheduled for anyone
+  // without unreleased-content access -- indistinguishable from not-found,
+  // so a guessed/leaked UUID can't confirm a hidden/draft homework is real.
+  if (!canSeeUnreleased && (status === "draft" || status === "scheduled" || status === "hidden")) {
     return c.json({ error: "Homework not found" }, 404);
   }
 
@@ -156,7 +167,7 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
     content: s.content,
     order: s.order,
     type: s.type,
-    solution: isInstructor && s.solution ? { id: s.solution.id, content: s.solution.content } : null,
+    solution: canSeeSolutions && s.solution ? { id: s.solution.id, content: s.solution.content } : null,
     createdAt: s.createdAt.toISOString(),
     updatedAt: s.updatedAt.toISOString(),
   }));
@@ -175,7 +186,7 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
     expiresAt: result.homework.expiresAt?.toISOString() ?? null,
     sections: sectionsResponse,
     widgets: result.widgets.map((w) => ({ id: w.id, prePrompt: w.prePrompt, postPrompt: w.postPrompt, order: w.order })),
-    ...(isInstructor && { editableBy: true }),
+    ...(canEdit && { editableBy: true }),
   };
 
   return c.json(body);

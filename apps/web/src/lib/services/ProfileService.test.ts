@@ -57,7 +57,12 @@ describe("ProfileService.getProfileWithStats", () => {
     expect(profile.courseCount).toBe(1);
     expect(profile.instructorStats).toEqual({ homeworksCreated: 2 });
     expect(profile.studentStats).toBeUndefined();
-    expect(profile.courses).toEqual([{ id: "c1", title: "STATS 311" }]);
+    expect(profile.courses).toEqual([
+      // #172: each entry now carries the caller's role in that course plus
+      // the resolved capabilities, so apps/admin can gate per course rather
+      // than on the priority-ranked primary role.
+      { id: "c1", title: "STATS 311", role: "instructor", canViewSolutions: true, canViewDrafts: true },
+    ]);
   });
 
   it("excludes a dropped instructor membership's course from `courses`", async () => {
@@ -93,7 +98,12 @@ describe("ProfileService.getProfileWithStats", () => {
     } as unknown as Db;
 
     const profile = await new ProfileService(cipher, db).getProfileWithStats("u4");
-    expect(profile.courses).toEqual([{ id: "c1", title: "STATS 311" }]);
+    expect(profile.courses).toEqual([
+      // #172: each entry now carries the caller's role in that course plus
+      // the resolved capabilities, so apps/admin can gate per course rather
+      // than on the priority-ranked primary role.
+      { id: "c1", title: "STATS 311", role: "instructor", canViewSolutions: true, canViewDrafts: true },
+    ]);
   });
 
   it("stubs student stats to zero (no submissions/conversations table yet)", async () => {

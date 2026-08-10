@@ -86,9 +86,24 @@ export class ProfileService {
       // because a multi-course user can be an instructor in one course and
       // merely a student/observer in another -- only the former should
       // appear here.
+      // #172: each entry carries the caller's role in *that* course plus the
+      // resolved capabilities, so apps/admin can gate per course instead of
+      // on the priority-ranked primaryRole above. Capabilities are resolved
+      // here (instructor/admin unconditional, `ta` per grant) rather than
+      // shipping the raw columns, so the client can't drift from the
+      // server's own AuthContext.canViewSolutionsIn/canViewDraftsIn rule.
       profile.courses = memberships
         .filter((m) => INSTRUCTOR_TIER_ROLES.has(m.role) && !m.droppedAt)
-        .map((m) => ({ id: m.course.id, title: m.course.title }));
+        .map((m) => {
+          const authors = m.role === "instructor" || m.role === "admin";
+          return {
+            id: m.course.id,
+            title: m.course.title,
+            role: m.role,
+            canViewSolutions: authors || (m.role === "ta" && m.canViewSolutions),
+            canViewDrafts: authors || (m.role === "ta" && m.canViewDrafts),
+          };
+        });
     } else if (primaryRole === "student") {
       // TODO: real submission/completion counts once the conversation +
       // submission tables land (multi-tenant-data-model.md §6.3, M2). No

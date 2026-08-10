@@ -61,12 +61,13 @@ export async function getHomeworkSubmissionsHandler(c: Context<AppEnv>) {
   const authContext = c.get("authContext") as AuthContext | undefined;
 
   // Guarded again here even though production routing already wraps this
-  // handler in requireInstructorOf() -- mirrors submitSectionHandler's own
+  // handler in requireGraderOf() -- mirrors submitSectionHandler's own
   // fail-closed re-check above, so a direct call to the handler (as the
   // unit tests below do, and as buildSubmissionsApp does without the guard
   // middleware) still 403s rather than throwing past this point.
-  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
-    return c.json({ error: "Instructor access denied" }, 403);
+  // #172: grading authority, not authoring -- a TA may read this dashboard.
+  if (!authContext || !courseId || !authContext.isGraderOf(courseId)) {
+    return c.json({ error: "Grader access denied" }, 403);
   }
 
   const scope = courseScopeFromAuthContext(authContext, courseId);

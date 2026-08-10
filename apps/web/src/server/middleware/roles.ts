@@ -9,12 +9,35 @@ import { PUBLIC_API_PATHS } from "./auth";
 export type CourseRole = (typeof courseRoleEnum.enumValues)[number];
 type Membership = typeof courseMemberships.$inferSelect;
 
+/** Roles that may author course content (create/edit/delete/publish/hide a
+ *  homework). Deliberately excludes `ta` -- see GRADER_ROLES below. */
+const AUTHOR_ROLES: readonly CourseRole[] = ["instructor", "admin"];
+
+/** Roles that may read student work for grading (the submissions dashboard
+ *  and an individual student's section answer). #172: a TA is a grader, not
+ *  an author -- before this split, `ta` was granted admin-console access by
+ *  apps/admin while every instructor-gated API rejected it, so a TA loaded a
+ *  console where nothing worked. */
+const GRADER_ROLES: readonly CourseRole[] = ["instructor", "admin", "ta"];
+
 export interface AuthContext {
   session: SessionPayload;
   memberships: Membership[];
   hasRole(role: CourseRole): boolean;
   isMemberOf(courseId: string): boolean;
+  /** Authoring authority: create/edit/delete/publish/hide course content. */
   isInstructorOf(courseId: string): boolean;
+  /** Grading authority: read student work. Strictly wider than
+   *  isInstructorOf -- every instructor is a grader, not every grader is an
+   *  instructor. */
+  isGraderOf(courseId: string): boolean;
+  /** #172: instructors/admins always; a TA only where the instructor granted
+   *  it on that specific membership; nobody else. Solutions are the answer
+   *  key, so this stays opt-in per course rather than implied by the role. */
+  canViewSolutionsIn(courseId: string): boolean;
+  /** #172: same shape as canViewSolutionsIn, for draft/scheduled/hidden
+   *  homeworks -- content the instructor has not released to students. */
+  canViewDraftsIn(courseId: string): boolean;
 }
 
 /** Loads course_memberships once per request (not per guard) and attaches
@@ -54,15 +77,31 @@ export async function rolesMiddleware(c: Context<AppEnv>, next: Next) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
+  // listMembershipsForUser already filters droppedAt (#139), so every
+  // predicate below reads only live memberships -- a dropped TA loses each
+  // capability with the membership, without a second check here.
+  const membershipIn = (courseId: string) => memberships.find((m) => m.courseId === courseId);
+
+  /** Instructors/admins always hold the capability; a TA holds it only where
+   *  the per-membership flag was granted; every other role never does. */
+  const capability = (courseId: string, flag: "canViewSolutions" | "canViewDrafts") => {
+    const membership = membershipIn(courseId);
+    if (!membership) return false;
+    if (AUTHOR_ROLES.includes(membership.role)) return true;
+    return membership.role === "ta" && membership[flag];
+  };
+
   const authContext: AuthContext = {
     session,
     memberships,
     hasRole: (role) => memberships.some((m) => m.role === role),
     isMemberOf: (courseId) => memberships.some((m) => m.courseId === courseId),
     isInstructorOf: (courseId) =>
-      memberships.some(
-        (m) => m.courseId === courseId && (m.role === "instructor" || m.role === "admin"),
-      ),
+      memberships.some((m) => m.courseId === courseId && AUTHOR_ROLES.includes(m.role)),
+    isGraderOf: (courseId) =>
+      memberships.some((m) => m.courseId === courseId && GRADER_ROLES.includes(m.role)),
+    canViewSolutionsIn: (courseId) => capability(courseId, "canViewSolutions"),
+    canViewDraftsIn: (courseId) => capability(courseId, "canViewDrafts"),
   };
 
   c.set("authContext", authContext);

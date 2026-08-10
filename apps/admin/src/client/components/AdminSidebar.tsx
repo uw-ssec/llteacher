@@ -25,6 +25,12 @@ export type AdminSidebarProps = {
   onNavigate: (key: AdminNavKey) => void;
   onNewHomework: () => void;
   onNewLLMConfig: () => void;
+  /** #172: false for a TA, who may read this console but not author in it.
+     The whole QUICK ACTIONS block is authoring-only, so it's omitted rather
+     than shown disabled -- a disabled control still advertises an action
+     the caller can never complete. Defaults true so existing callers and
+     tests keep their behaviour. */
+  canAuthor?: boolean;
   /** When true, the sidebar collapses to a 64px rail showing only icons. */
   isCollapsed?: boolean;
   /** Called when the collapse toggle is clicked. */
@@ -50,6 +56,7 @@ export function AdminSidebar({
   onNavigate,
   onNewHomework,
   onNewLLMConfig,
+  canAuthor = true,
   isCollapsed = false,
   onToggleCollapse,
 }: AdminSidebarProps) {
@@ -110,31 +117,35 @@ export function AdminSidebar({
         </ul>
       </nav>
 
-      <div className="admin-sidebar__divider" />
+      {canAuthor && (
+        <>
+          <div className="admin-sidebar__divider" />
 
-      <div className="admin-sidebar__quick">
-        <div className="admin-sidebar__quick-label">QUICK ACTIONS</div>
-        <button
-          type="button"
-          className="admin-sidebar__quick-action"
-          onClick={onNewHomework}
-          aria-label={isCollapsed ? "New homework" : undefined}
-          title={isCollapsed ? "New homework" : undefined}
-        >
-          <Plus size={13} weight="bold" aria-hidden="true" />
-          <span className="admin-sidebar__quick-action-label">New homework</span>
-        </button>
-        <button
-          type="button"
-          className="admin-sidebar__quick-action"
-          onClick={onNewLLMConfig}
-          aria-label={isCollapsed ? "New LLM config" : undefined}
-          title={isCollapsed ? "New LLM config" : undefined}
-        >
-          <Plus size={13} weight="bold" aria-hidden="true" />
-          <span className="admin-sidebar__quick-action-label">New LLM config</span>
-        </button>
-      </div>
+          <div className="admin-sidebar__quick">
+            <div className="admin-sidebar__quick-label">QUICK ACTIONS</div>
+            <button
+              type="button"
+              className="admin-sidebar__quick-action"
+              onClick={onNewHomework}
+              aria-label={isCollapsed ? "New homework" : undefined}
+              title={isCollapsed ? "New homework" : undefined}
+            >
+              <Plus size={13} weight="bold" aria-hidden="true" />
+              <span className="admin-sidebar__quick-action-label">New homework</span>
+            </button>
+            <button
+              type="button"
+              className="admin-sidebar__quick-action"
+              onClick={onNewLLMConfig}
+              aria-label={isCollapsed ? "New LLM config" : undefined}
+              title={isCollapsed ? "New LLM config" : undefined}
+            >
+              <Plus size={13} weight="bold" aria-hidden="true" />
+              <span className="admin-sidebar__quick-action-label">New LLM config</span>
+            </button>
+          </div>
+        </>
+      )}
 
       <div className="admin-sidebar__spacer" />
 

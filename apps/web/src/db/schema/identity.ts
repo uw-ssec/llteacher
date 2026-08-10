@@ -235,6 +235,18 @@ export const courseMemberships = pgTable(
       .notNull()
       .references(() => courses.id, { onDelete: "cascade" }),
     role: courseRoleEnum("role").notNull(),
+    // #172: per-membership TA capabilities, granted by an instructor course
+    // by course. Deliberately NOT role-derived: "can a TA see solutions /
+    // drafts" is a per-course policy call the instructor makes, not a
+    // property of the `ta` role globally.
+    //
+    // Both default false, so granting someone a TA membership never widens
+    // access on its own -- the instructor has to opt each capability in.
+    // Instructors and admins bypass these entirely (see AuthContext's
+    // canViewSolutionsIn/canViewDraftsIn): the columns are only consulted
+    // for a `ta` membership, and are meaningless on any other role.
+    canViewSolutions: boolean("can_view_solutions").notNull().default(false),
+    canViewDrafts: boolean("can_view_drafts").notNull().default(false),
     canvasEnrollmentId: text("canvas_enrollment_id"),
     canvasRole: text("canvas_role"),
     enrolledAt: timestamp("enrolled_at", { withTimezone: true })

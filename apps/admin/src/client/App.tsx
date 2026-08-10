@@ -23,6 +23,7 @@ import type { HomeworkListItemResponse } from "./views/HomeworksView";
 import { HomeworkCreateView } from "./views/HomeworkCreateView";
 import { HomeworkEditView } from "./views/HomeworkEditView";
 import { SubmissionsView } from "./views/SubmissionsView";
+import { TaCapabilitiesView } from "./views/TaCapabilitiesView";
 import { LLMConfigsView } from "./views/LLMConfigsView";
 import {
   LLM_CONFIGS,
@@ -32,11 +33,21 @@ import { useAuth, type CourseRole } from "./components/AuthProvider";
 import { UnauthenticatedAdmin } from "./components/UnauthenticatedAdmin";
 import { Forbidden } from "./components/Forbidden";
 
-const INSTRUCTOR_ROLES: ReadonlySet<CourseRole> = new Set<CourseRole>([
+/* Roles admitted to the console at all. `ta` belongs here -- a TA has real
+   work to do in this console (the submissions dashboard, student answers).
+   What a TA must NOT get is authoring, which is gated per course by
+   AUTHOR_ROLES below rather than by shutting them out entirely (#172). */
+const CONSOLE_ROLES: ReadonlySet<CourseRole> = new Set<CourseRole>([
   "instructor",
   "ta",
   "admin",
 ]);
+
+/* Roles that may author course content in a given course. Mirrors the
+   server's AUTHOR_ROLES in apps/web/src/server/middleware/roles.ts -- if
+   these two disagree, the console shows controls whose requests 403, which
+   is the exact defect #172 exists to fix. */
+const AUTHOR_ROLES: ReadonlySet<CourseRole> = new Set<CourseRole>(["instructor", "admin"]);
 
 /* localStorage key for the admin sidebar collapsed preference. Namespaced
    separately from the student app — different surface, different user,
@@ -75,7 +86,13 @@ export default function App() {
   // for the full reasoning. An instructor with zero courses (a genuine edge
   // case, e.g. a brand-new admin account before any course assignment)
   // sees the "No course found" empty state below rather than a broken form.
-  const CURRENT_COURSE_ID = courses[0]?.id;
+  const CURRENT_COURSE = courses[0];
+  const CURRENT_COURSE_ID = CURRENT_COURSE?.id;
+
+  /* #172: authoring is decided per course, not by the priority-ranked
+     top-level `role`. Someone who instructs course A and assists on course B
+     must not be shown authoring controls while B is the active course. */
+  const canAuthor = CURRENT_COURSE ? AUTHOR_ROLES.has(CURRENT_COURSE.role) : false;
 
   const [view, setView] = useState<View>({ kind: "homeworks" });
 
@@ -140,7 +157,7 @@ export default function App() {
 
   if (authLoading) return null;
   if (!isAuthenticated) return <UnauthenticatedAdmin onLogin={login} error={authError} />;
-  if (!role || !INSTRUCTOR_ROLES.has(role)) return <Forbidden />;
+  if (!role || !CONSOLE_ROLES.has(role)) return <Forbidden />;
 
   return (
     <div className="app-shell-vertical">
@@ -163,6 +180,7 @@ export default function App() {
           onNavigate={navigate}
           isCollapsed={isSidebarCollapsed}
           onToggleCollapse={() => setIsSidebarCollapsed((c) => !c)}
+          canAuthor={canAuthor}
           onNewHomework={() => setView({ kind: "create-homework" })}
           onNewLLMConfig={() => {
             // eslint-disable-next-line no-console
@@ -179,6 +197,7 @@ export default function App() {
                     courseId={CURRENT_COURSE_ID}
                     onOpenHomework={(id) => setView({ kind: "edit-homework", homeworkId: id })}
                     onOpenSubmissions={(id) => setView({ kind: "submissions", homeworkId: id })}
+                    canAuthor={canAuthor}
                     onNewHomework={() => setView({ kind: "create-homework" })}
                   />
                 ) : (
@@ -186,8 +205,15 @@ export default function App() {
                 )
               )}
 
+              {/* #172: the authoring views are unreachable for a non-author
+                  through the UI (every entry point is gated on canAuthor),
+                  but they're guarded here too so a stale view state can't
+                  render a form whose every save 403s -- the precise failure
+                  this issue exists to remove. */}
               {view.kind === "create-homework" && (
-                CURRENT_COURSE_ID ? (
+                !canAuthor ? (
+                  <EmptyView label="You do not have permission to create homeworks in this course" />
+                ) : CURRENT_COURSE_ID ? (
                   <HomeworkCreateView
                     courseId={CURRENT_COURSE_ID}
                     llmConfigs={LLM_CONFIGS}
@@ -200,7 +226,9 @@ export default function App() {
               )}
 
               {view.kind === "edit-homework" && (
-                CURRENT_COURSE_ID ? (
+                !canAuthor ? (
+                  <EmptyView label="You do not have permission to edit homeworks in this course" />
+                ) : CURRENT_COURSE_ID ? (
                   <HomeworkEditView
                     courseId={CURRENT_COURSE_ID}
                     homeworkId={view.homeworkId}
@@ -240,7 +268,11 @@ export default function App() {
               )}
 
               {view.kind === "students" && (
-                <EmptyView label="Course roster — coming next" />
+                CURRENT_COURSE_ID ? (
+                  <TaCapabilitiesView courseId={CURRENT_COURSE_ID} canAuthor={canAuthor} />
+                ) : (
+                  <EmptyView label="No course found for your account yet" />
+                )
               )}
             </div>
           </div>
@@ -255,11 +287,13 @@ function HomeworksDataLoader({
   onOpenHomework,
   onOpenSubmissions,
   onNewHomework,
+  canAuthor = true,
 }: {
   courseId: string;
   onOpenHomework: (id: string) => void;
   onOpenSubmissions: (id: string) => void;
   onNewHomework: () => void;
+  canAuthor?: boolean;
 }) {
   const [homeworks, setHomeworks] = useState<HomeworkListItemResponse[] | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -280,6 +314,7 @@ function HomeworksDataLoader({
       onOpenHomework={onOpenHomework}
       onOpenSubmissions={onOpenSubmissions}
       onNewHomework={onNewHomework}
+      canAuthor={canAuthor}
     />
   );
 }

@@ -64,11 +64,13 @@ export async function getSectionAnswerHandler(c: Context<AppEnv>) {
   const studentId = c.req.param("studentId");
   const authContext = c.get("authContext") as AuthContext | undefined;
 
-  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
-    return c.json({ error: "Instructor access denied" }, 403);
+  // #172: grading authority, not authoring -- a TA may read a student's
+  // answer for the course they assist on.
+  if (!authContext || !courseId || !authContext.isGraderOf(courseId)) {
+    return c.json({ error: "Grader access denied" }, 403);
   }
 
-  // #174: mint a CourseScope, not an OrgScope -- isInstructorOf(courseId)
+  // #174: mint a CourseScope, not an OrgScope -- isGraderOf(courseId)
   // above only proves membership in *this* course, so the query below must
   // stay constrained to it rather than widening to the whole org.
   const scope = courseScopeFromAuthContext(authContext, courseId);

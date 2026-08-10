@@ -36,6 +36,11 @@ export type HomeworksViewProps = {
   onOpenHomework: (id: string) => void;
   onOpenSubmissions: (id: string) => void;
   onNewHomework: () => void;
+  /** #172: false for a TA. The list itself stays readable -- a TA needs it
+     to reach the submissions dashboard -- but the create affordance is
+     omitted, since POST /homeworks is instructor-only. Defaults true so
+     existing callers and tests are unaffected. */
+  canAuthor?: boolean;
 };
 
 const STATUS_LABEL: Record<HomeworkStatus, string> = {
@@ -60,6 +65,7 @@ export function HomeworksView({
   onOpenHomework,
   onOpenSubmissions,
   onNewHomework,
+  canAuthor = true,
 }: HomeworksViewProps) {
   const activeCount = homeworks.filter((h) => h.status === "active").length;
 
@@ -70,13 +76,15 @@ export function HomeworksView({
         title="STATS 311 · Autumn 2026"
         subtitle="Assignments, sections, and the AI tutor configuration backing each homework."
         actions={
-          <button
-            type="button"
-            className="admin-button admin-button--primary"
-            onClick={onNewHomework}
-          >
-            + New homework
-          </button>
+          canAuthor ? (
+            <button
+              type="button"
+              className="admin-button admin-button--primary"
+              onClick={onNewHomework}
+            >
+              + New homework
+            </button>
+          ) : undefined
         }
       />
 
