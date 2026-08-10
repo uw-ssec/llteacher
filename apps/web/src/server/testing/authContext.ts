@@ -1,4 +1,4 @@
-import type { AuthContext, CourseRole } from "../middleware/roles";
+import { AUTHOR_ROLES, GRADER_ROLES, type AuthContext, type CourseRole } from "../middleware/roles";
 
 type Membership = AuthContext["memberships"][number];
 
@@ -39,31 +39,33 @@ export function fakeMembership(overrides: Partial<Membership> & { courseId: stri
  *  empty suite. */
 export function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
   const memberships = overrides.memberships ?? [];
+
+  // Mirrors rolesMiddleware's structure exactly: resolve the course's
+  // membership once, then ask questions about that single row, using the
+  // same exported role lists production uses. Restating either the lookup
+  // shape or the role sets here would let the suite assert a rule
+  // production does not implement.
   const membershipIn = (courseId: string) => memberships.find((m) => m.courseId === courseId);
-  const authors = (courseId: string) => {
+  const roleIn = (courseId: string, allowed: readonly CourseRole[]) => {
     const m = membershipIn(courseId);
-    return m?.role === "instructor" || m?.role === "admin";
+    return m !== undefined && allowed.includes(m.role);
   };
+  const capability = (courseId: string, flag: "canViewSolutions" | "canViewDrafts") => {
+    const m = membershipIn(courseId);
+    if (!m) return false;
+    if (AUTHOR_ROLES.includes(m.role)) return true;
+    return m.role === "ta" && m[flag];
+  };
+
   return {
     session: { userId: "u1", workosUserId: "w1", sessionEpoch: 0, issuedAt: 0, expiresAt: 0 },
     memberships,
     hasRole: (role) => memberships.some((m) => m.role === role),
-    isMemberOf: (courseId) => memberships.some((m) => m.courseId === courseId),
-    isInstructorOf: (courseId) => authors(courseId),
-    isGraderOf: (courseId) => {
-      const m = membershipIn(courseId);
-      return m?.role === "instructor" || m?.role === "admin" || m?.role === "ta";
-    },
-    canViewSolutionsIn: (courseId) => {
-      const m = membershipIn(courseId);
-      if (!m) return false;
-      return authors(courseId) || (m.role === "ta" && m.canViewSolutions);
-    },
-    canViewDraftsIn: (courseId) => {
-      const m = membershipIn(courseId);
-      if (!m) return false;
-      return authors(courseId) || (m.role === "ta" && m.canViewDrafts);
-    },
+    isMemberOf: (courseId) => membershipIn(courseId) !== undefined,
+    isInstructorOf: (courseId) => roleIn(courseId, AUTHOR_ROLES),
+    isGraderOf: (courseId) => roleIn(courseId, GRADER_ROLES),
+    canViewSolutionsIn: (courseId) => capability(courseId, "canViewSolutions"),
+    canViewDraftsIn: (courseId) => capability(courseId, "canViewDrafts"),
     ...overrides,
   };
 }

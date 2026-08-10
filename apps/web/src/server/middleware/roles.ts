@@ -10,15 +10,20 @@ export type CourseRole = (typeof courseRoleEnum.enumValues)[number];
 type Membership = typeof courseMemberships.$inferSelect;
 
 /** Roles that may author course content (create/edit/delete/publish/hide a
- *  homework). Deliberately excludes `ta` -- see GRADER_ROLES below. */
-const AUTHOR_ROLES: readonly CourseRole[] = ["instructor", "admin"];
+ *  homework). Deliberately excludes `ta` -- see GRADER_ROLES below.
+ *
+ *  Exported so the AuthContext test double (server/testing/authContext.ts)
+ *  builds its predicates from the same list production uses, rather than
+ *  restating it -- otherwise a role moved between tiers leaves every route
+ *  test asserting the old rule while only roles.test.ts catches it. */
+export const AUTHOR_ROLES: readonly CourseRole[] = ["instructor", "admin"];
 
 /** Roles that may read student work for grading (the submissions dashboard
  *  and an individual student's section answer). #172: a TA is a grader, not
  *  an author -- before this split, `ta` was granted admin-console access by
  *  apps/admin while every instructor-gated API rejected it, so a TA loaded a
  *  console where nothing worked. */
-const GRADER_ROLES: readonly CourseRole[] = ["instructor", "admin", "ta"];
+export const GRADER_ROLES: readonly CourseRole[] = ["instructor", "admin", "ta"];
 
 export interface AuthContext {
   session: SessionPayload;
@@ -80,6 +85,18 @@ export async function rolesMiddleware(c: Context<AppEnv>, next: Next) {
   // listMembershipsForUser already filters droppedAt (#139), so every
   // predicate below reads only live memberships -- a dropped TA loses each
   // capability with the membership, without a second check here.
+  //
+  // Every course-scoped predicate resolves the membership ONCE through this
+  // helper and then asks a question about that single row. The alternative --
+  // each predicate scanning `memberships` with its own courseId+role
+  // condition -- is equivalent only while course_memberships_user_course_uq
+  // (db/schema/identity.ts) guarantees at most one row per (user, course).
+  // Relax or drop that index and the two styles diverge: a per-predicate
+  // `.some()` answers "does ANY row satisfy me" while a capability lookup
+  // answers "what does THE row say", so `isInstructorOf` could report true
+  // off one row while `canViewSolutionsIn` reads a different one. Resolving
+  // once makes every predicate describe the same membership by construction,
+  // so they agree regardless of what the index guarantees.
   const membershipIn = (courseId: string) => memberships.find((m) => m.courseId === courseId);
 
   /** Instructors/admins always hold the capability; a TA holds it only where
@@ -91,15 +108,20 @@ export async function rolesMiddleware(c: Context<AppEnv>, next: Next) {
     return membership.role === "ta" && membership[flag];
   };
 
+  const roleIn = (courseId: string, allowed: readonly CourseRole[]) => {
+    const membership = membershipIn(courseId);
+    return membership !== undefined && allowed.includes(membership.role);
+  };
+
   const authContext: AuthContext = {
     session,
     memberships,
+    // Not course-scoped: "do I hold this role anywhere" is a genuine
+    // any-membership question, so `.some()` is correct here.
     hasRole: (role) => memberships.some((m) => m.role === role),
-    isMemberOf: (courseId) => memberships.some((m) => m.courseId === courseId),
-    isInstructorOf: (courseId) =>
-      memberships.some((m) => m.courseId === courseId && AUTHOR_ROLES.includes(m.role)),
-    isGraderOf: (courseId) =>
-      memberships.some((m) => m.courseId === courseId && GRADER_ROLES.includes(m.role)),
+    isMemberOf: (courseId) => membershipIn(courseId) !== undefined,
+    isInstructorOf: (courseId) => roleIn(courseId, AUTHOR_ROLES),
+    isGraderOf: (courseId) => roleIn(courseId, GRADER_ROLES),
     canViewSolutionsIn: (courseId) => capability(courseId, "canViewSolutions"),
     canViewDraftsIn: (courseId) => capability(courseId, "canViewDrafts"),
   };

@@ -263,3 +263,58 @@ describe("AuthContext capability predicates (#172)", () => {
     });
   });
 });
+
+/** Regression guard for the reliability audit's find-vs-some finding.
+ *
+ *  The audit observed that `capability()` resolved a course's membership with
+ *  `.find()` while `isInstructorOf`/`isGraderOf` scanned with their own
+ *  `.some()` condition. Those agree only while
+ *  course_memberships_user_course_uq holds one row per (user, course) -- true
+ *  today, which is why the finding was not a live bug. But it made the
+ *  predicates' agreement a property of the schema rather than of the code.
+ *
+ *  Every course-scoped predicate now resolves the membership once and
+ *  describes that row, so they agree by construction. These tests feed the
+ *  middleware duplicate rows the database currently forbids: the point is not
+ *  that this state is reachable, it is that the predicates stay mutually
+ *  consistent if it ever becomes reachable. Under the old split they would
+ *  not have. */
+describe("course-scoped predicates describe one membership (#172 audit)", () => {
+  beforeEach(() => {
+    userRow = { isActive: true, sessionEpoch: 0 };
+    MEMBERSHIPS = DEFAULT_MEMBERSHIPS;
+  });
+
+  it("stays self-consistent when two rows exist for the same course", async () => {
+    // Row order deliberately puts the narrower role first: a per-predicate
+    // `.some()` would answer isInstructorOf=true off row 2 while the
+    // capability lookup read row 1, reporting an instructor with no access
+    // to their own course's solutions.
+    MEMBERSHIPS = [
+      { id: "m1", userId: "u1", courseId: "course-a", role: "ta", canViewSolutions: false, canViewDrafts: false },
+      { id: "m2", userId: "u1", courseId: "course-a", role: "instructor", canViewSolutions: false, canViewDrafts: false },
+    ];
+    const res = await buildCapabilityApp().request("/api/caps", {}, { DATABASE_URL: "ignored" } as Env);
+    const caps = (await res.json()) as Record<string, boolean>;
+
+    // Whichever row wins, the answers must come from that one row: an
+    // instructor holds every capability, a TA without grants holds none.
+    // The forbidden outcome is a mix -- isInstructor true with solutions
+    // false, or vice versa.
+    expect(caps.solutions).toBe(caps.isInstructor);
+    expect(caps.drafts).toBe(caps.isInstructor);
+    if (caps.isInstructor) expect(caps.isGrader).toBe(true);
+  });
+
+  it("resolves the same row for every predicate, in either row order", async () => {
+    const ordered = [
+      { id: "m2", userId: "u1", courseId: "course-a", role: "instructor", canViewSolutions: false, canViewDrafts: false },
+      { id: "m1", userId: "u1", courseId: "course-a", role: "ta", canViewSolutions: false, canViewDrafts: false },
+    ];
+    MEMBERSHIPS = ordered;
+    const res = await buildCapabilityApp().request("/api/caps", {}, { DATABASE_URL: "ignored" } as Env);
+    const caps = (await res.json()) as Record<string, boolean>;
+    // Instructor row first: every predicate must read it.
+    expect(caps).toEqual({ isGrader: true, isInstructor: true, solutions: true, drafts: true });
+  });
+});
