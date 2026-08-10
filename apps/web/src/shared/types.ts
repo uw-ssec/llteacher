@@ -56,6 +56,23 @@ export interface ConversationListItemResponse extends ConversationSummary {
   messageCount: number;
 }
 
+/** Wire shape of a row from GET /api/conversations/:id/messages (#4
+ *  fix-round -- added so the tutor-conversations rail's chat column can
+ *  seed useChat's `messages` on resume, not just so the UI shows history:
+ *  chatHandler builds the model's context from convertToModelMessages
+ *  (chat.ts) over exactly the client-sent messages array, so without this
+ *  the LLM itself loses all prior context on resume, not just the display).
+ *  `parts` is deliberately typed `unknown`, matching how the DB stores it
+ *  (jsonb) and how chat.ts's own replayPersistedPart already treats a
+ *  persisted row's parts at this boundary -- the client casts it to
+ *  @ai-sdk/react's UIMessage['parts'] when seeding useChat, the same
+ *  looseness this codebase already accepts elsewhere for this exact field. */
+export interface ConversationMessageResponse {
+  id: string;
+  role: "user" | "assistant" | "system";
+  parts: unknown;
+}
+
 export interface SectionResponse {
   id: string;
   title: string;

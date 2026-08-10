@@ -16,12 +16,14 @@ const createConversationMock = vi.fn();
 const updateConversationTitleMock = vi.fn();
 const softDeleteConversationMock = vi.fn();
 const getConversationByIdMock = vi.fn();
+const getMessagesForConversationMock = vi.fn();
 vi.mock("../repositories/conversations", () => ({
   listConversationsForOwner: (...args: unknown[]) => listConversationsForOwnerMock(...args),
   createConversation: (...args: unknown[]) => createConversationMock(...args),
   updateConversationTitle: (...args: unknown[]) => updateConversationTitleMock(...args),
   softDeleteConversation: (...args: unknown[]) => softDeleteConversationMock(...args),
   getConversationById: (...args: unknown[]) => getConversationByIdMock(...args),
+  getMessagesForConversation: (...args: unknown[]) => getMessagesForConversationMock(...args),
 }));
 
 function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
@@ -66,6 +68,7 @@ beforeEach(() => {
   updateConversationTitleMock.mockReset();
   softDeleteConversationMock.mockReset();
   getConversationByIdMock.mockReset();
+  getMessagesForConversationMock.mockReset();
 });
 
 describe("GET /api/conversations", () => {
@@ -322,5 +325,60 @@ describe("DELETE /api/conversations/:id", () => {
     const text = await res.text();
     expect(text).toBe("");
     expect(softDeleteConversationMock).toHaveBeenCalledWith(expect.anything(), "course-a", "conv-1");
+  });
+});
+
+// #4 fix-round: added after code review found that selecting an existing
+// tutor conversation reset the client's chat to empty with no way to
+// reseed it -- not just a visual gap, since chatHandler builds the model's
+// context from exactly what the client sends (chat.ts). Ownership tests
+// below mirror PATCH/DELETE's 404-not-403 pattern exactly (same
+// getOwnedConversationOrNull helper), not a new one.
+describe("GET /api/conversations/:id/messages", () => {
+  it("returns 401 when there is no authContext", async () => {
+    const res = await request(buildApp(undefined), "/api/conversations/conv-1/messages");
+    expect(res.status).toBe(401);
+    expect(getConversationByIdMock).not.toHaveBeenCalled();
+  });
+
+  it("404s when the conversation does not exist", async () => {
+    getConversationByIdMock.mockResolvedValue(null);
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1/messages");
+    expect(res.status).toBe(404);
+    expect(getMessagesForConversationMock).not.toHaveBeenCalled();
+  });
+
+  it("404s (not 403) when the conversation is owned by a different user", async () => {
+    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "someone-else", courseId: "course-a" });
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1/messages");
+    expect(res.status).toBe(404);
+    expect(getMessagesForConversationMock).not.toHaveBeenCalled();
+  });
+
+  it("returns the conversation's messages mapped to {id, role, parts}, scoped by the conversation's own courseId", async () => {
+    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    getMessagesForConversationMock.mockResolvedValue([
+      { id: "m1", conversationId: "conv-1", role: "user", parts: [{ type: "text", text: "hi" }], createdAt: new Date() },
+      { id: "m2", conversationId: "conv-1", role: "assistant", parts: [{ type: "text", text: "hello" }], createdAt: new Date() },
+    ]);
+
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1/messages");
+
+    expect(res.status).toBe(200);
+    expect(getMessagesForConversationMock).toHaveBeenCalledWith(expect.anything(), "course-a", "conv-1");
+    expect(await res.json()).toEqual([
+      { id: "m1", role: "user", parts: [{ type: "text", text: "hi" }] },
+      { id: "m2", role: "assistant", parts: [{ type: "text", text: "hello" }] },
+    ]);
+  });
+
+  it("returns an empty array (200), not 404, for a conversation with no messages yet", async () => {
+    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    getMessagesForConversationMock.mockResolvedValue([]);
+
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1/messages");
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
   });
 });

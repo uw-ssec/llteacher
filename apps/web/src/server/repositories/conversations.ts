@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { conversations, messages, sections, homeworks, courseMemberships } from "../../db/schema";
 import type { CourseScope } from "./scope";
@@ -210,4 +210,38 @@ export async function getLastMessages(db: Db, scope: CourseScope, conversationId
     .where(eq(messages.conversationId, conversationId))
     .orderBy(desc(messages.createdAt))
     .limit(limit);
+}
+
+// #4 fix-round: backs GET /api/conversations/:id/messages, added after code
+// review caught that selecting an *existing* tutor conversation reset the
+// client's useChat message list to empty with no way to reseed it -- not
+// just a visual gap, chat.ts's chatHandler builds the model's context
+// straight from convertToModelMessages(uiMessages) (the array the CLIENT
+// sends), so an empty client-side history meant the LLM silently lost every
+// prior turn on resume. Same scoping shape as getLastMessages above
+// (courseId match + not-deleted), but ascending by createdAt (oldest
+// first) and unlimited -- getLastMessages's newest-first order and small
+// limit exist for its own retry-detection purpose (index 0 = last message),
+// which is the opposite of what a client needs to seed useChat's initial
+// message list in original conversation order. Relies on the same
+// `messages_conversation_created_idx` (conversationId, createdAt) index
+// getLastMessages already does, so this ordering guarantee isn't new --
+// just the other direction over the same index.
+export async function getMessagesForConversation(db: Db, scope: CourseScope, conversationId: string) {
+  const [owned] = await db
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        eq(conversations.courseId, scope),
+        eq(conversations.isDeleted, false),
+      ),
+    );
+  if (!owned) return [];
+  return db
+    .select()
+    .from(messages)
+    .where(eq(messages.conversationId, conversationId))
+    .orderBy(asc(messages.createdAt));
 }

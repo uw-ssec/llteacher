@@ -15,9 +15,13 @@ import { ConversationListItem } from "../components/ConversationListItem";
    a chevron toggle + a `sidebar--collapsed`-equivalent width transition,
    persisted to localStorage by the caller (App.tsx) under its own key --
    because the issue's "Responsive behavior" requirement asks to match that
-   pattern, not invent a new one. This app has no CSS breakpoints at all yet
-   (grep confirms zero @media rules in packages/ui/styles.css), so "responsive"
-   here means this same collapse-by-choice mechanic, not viewport queries.
+   pattern, not invent a new one. This app has no viewport-width media
+   queries at all yet -- the only @media rules anywhere in
+   packages/ui/styles.css are `prefers-reduced-motion`, not layout
+   breakpoints (corrected during code review: an earlier version of this
+   comment claimed zero @media rules of any kind, which was wrong) -- so
+   "responsive" here means this same collapse-by-choice mechanic, not a
+   viewport breakpoint that doesn't exist yet.
    -------------------------------------------------------------------------- */
 
 export interface TutorConversationsListProps {

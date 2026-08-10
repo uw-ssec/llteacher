@@ -33,6 +33,7 @@ import {
   updateConversationTitle,
   softDeleteConversation,
   getConversationById,
+  getMessagesForConversation,
 } from "../repositories/conversations";
 import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
 import type { AuthContext } from "../middleware/roles";
@@ -218,10 +219,48 @@ export async function deleteConversationHandler(c: Context<AppEnv>) {
   return c.body(null, 204);
 }
 
+// #4 fix-round: GET /api/conversations/:id/messages -- added after code
+// review found that TutorConversationsList selecting an *existing*
+// conversation reset the client's chat to empty with no way to reseed it,
+// which wasn't just a visual gap: chatHandler (chat.ts) builds the model's
+// context from convertToModelMessages(uiMessages), the array the CLIENT
+// sends, so an empty client-side history meant the LLM had actually lost
+// every prior turn, not just the UI. Same ownership pattern as PATCH/DELETE
+// above (getOwnedConversationOrNull -> 404, never 403, on "doesn't exist or
+// isn't yours") rather than a new one.
+export async function listConversationMessagesHandler(c: Context<AppEnv>) {
+  const authContext = c.get("authContext") as AuthContext | undefined;
+  if (!authContext) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const id = c.req.param("id");
+  const db = makeDb(c.env.DATABASE_URL);
+
+  const existing = await getOwnedConversationOrNull(db, id!, authContext.session.userId);
+  if (!existing) {
+    return c.json({ error: "Conversation not found" }, 404);
+  }
+
+  const scope = unsafeCourseScope(existing.courseId);
+  const rows = await getMessagesForConversation(db, scope, id!);
+  // Only the three fields useChat's `messages` seed needs (id/role/parts) --
+  // `parts` is returned exactly as stored, which is exactly as the AI SDK
+  // produced it: chatHandler persists inboundMessage.parts (the client's
+  // own UIMessage part) for user turns and responseMessage.parts (the AI
+  // SDK's final UIMessage) for assistant turns, so a stored row's `parts`
+  // is already a valid UIMessage `parts` array -- no replay/reconstruction
+  // needed here the way chat.ts's SSE-retry path (replayPersistedPart)
+  // needs, since that path is rebuilding a *stream*, not seeding a
+  // pre-stream initial array.
+  return c.json(rows.map((r) => ({ id: r.id, role: r.role, parts: r.parts })));
+}
+
 // Sub-app preserved for direct unit testing; production routing happens via
 // app.get/post/patch/delete("/api/conversations...", ...) in server/index.ts.
 export const conversationsRoutes = new Hono<AppEnv>();
 conversationsRoutes.get("/", listConversationsHandler);
 conversationsRoutes.post("/", createConversationHandler);
+conversationsRoutes.get("/:id/messages", listConversationMessagesHandler);
 conversationsRoutes.patch("/:id", updateConversationHandler);
 conversationsRoutes.delete("/:id", deleteConversationHandler);

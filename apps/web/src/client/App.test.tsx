@@ -187,6 +187,7 @@ describe("App tutor-conversations rail (#4)", () => {
   function stubBaseFetch(extra: {
     onConversationsGet?: () => Response;
     onConversationsPost?: (body: unknown) => Response;
+    onConversationMessagesGet?: (conversationId: string) => Response;
   }) {
     vi.stubGlobal("CSS", { supports: () => true });
     Element.prototype.scrollIntoView = vi.fn();
@@ -214,6 +215,16 @@ describe("App tutor-conversations rail (#4)", () => {
           return extra.onConversationsPost
             ? extra.onConversationsPost(JSON.parse(String(init.body)))
             : new Response(JSON.stringify({ error: "unexpected POST" }), { status: 500 });
+        }
+        // #4 fix-round: history hydration -- defaults to an empty history so
+        // existing tests that don't care about hydration itself (e.g.
+        // "selecting a homework section switches back") don't need to know
+        // about this endpoint's existence.
+        const messagesMatch = url.match(/^\/api\/conversations\/([^/]+)\/messages$/);
+        if (messagesMatch) {
+          return extra.onConversationMessagesGet
+            ? extra.onConversationMessagesGet(messagesMatch[1]!)
+            : new Response(JSON.stringify([]), { status: 200 });
         }
         throw new Error(`unexpected fetch to ${url}`);
       }),
@@ -331,6 +342,90 @@ describe("App tutor-conversations rail (#4)", () => {
 
     expect(chatCalls).toHaveLength(1);
     expect(chatCalls[0]!.conversationId).toBe("tutor-conv-1");
+  });
+
+  // #4 fix-round: the core regression test for the code-review finding.
+  // Selecting an existing tutor conversation must not just *display* its
+  // prior messages -- chat.ts's chatHandler builds the model's context via
+  // convertToModelMessages(uiMessages) over exactly what the client sends,
+  // so the next /api/chat request must actually include the hydrated
+  // history, or the LLM silently forgets the whole prior exchange. This
+  // test fails on the pre-fix code (which hydrated nothing, so `/api/chat`
+  // would receive only the freshly-typed message).
+  it("selecting an existing tutor conversation hydrates its history into the chat column AND into the next /api/chat request", async () => {
+    const chatCalls: Array<{ conversationId?: string; messages: Array<{ role: string }> }> = [];
+    stubBaseFetch({
+      onConversationsGet: () =>
+        new Response(
+          JSON.stringify([
+            {
+              id: "tutor-conv-1",
+              ownerUserId: "u1",
+              courseId: "course-a",
+              sectionId: null,
+              kind: "tutor",
+              title: "Existing tutor chat",
+              isDeleted: false,
+              deletedAt: null,
+              createdAt: "2026-08-01T00:00:00.000Z",
+              updatedAt: "2026-08-01T00:00:00.000Z",
+              messageCount: 2,
+            },
+          ]),
+          { status: 200 },
+        ),
+      onConversationMessagesGet: (conversationId) => {
+        expect(conversationId).toBe("tutor-conv-1");
+        return new Response(
+          JSON.stringify([
+            { id: "m1", role: "user", parts: [{ type: "text", text: "prior question" }] },
+            { id: "m2", role: "assistant", parts: [{ type: "text", text: "prior answer" }] },
+          ]),
+          { status: 200 },
+        );
+      },
+    });
+    const baseFetch = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/chat") {
+          const body = JSON.parse(String(init?.body)) as {
+            conversationId?: string;
+            messages: Array<{ role: string }>;
+          };
+          chatCalls.push(body);
+          return chatStreamResponse(body.conversationId ?? "unexpected", "follow-up reply");
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("Existing tutor chat"));
+
+    // The chat column shows the persisted history, not an empty thread.
+    expect(await screen.findByText("prior question")).toBeTruthy();
+    expect(await screen.findByText("prior answer")).toBeTruthy();
+
+    const composer = await screen.findByLabelText("Message input");
+    await user.type(composer, "follow-up question{Enter}");
+    await screen.findByText("follow-up reply");
+
+    expect(chatCalls).toHaveLength(1);
+    expect(chatCalls[0]!.conversationId).toBe("tutor-conv-1");
+    // The actual bug: the outgoing model-context array must include the
+    // hydrated prior turns, not just the message just typed.
+    expect(chatCalls[0]!.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
   });
 
   it("selecting a homework section switches the chat column back out of the tutor surface", async () => {

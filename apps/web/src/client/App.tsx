@@ -261,6 +261,17 @@ export default function App() {
      this one nullable id fully determines which surface is active. */
   const [tutorConversationId, setTutorConversationId] = useState<string | undefined>(undefined);
 
+  /* #4 fix-round: seeds the tutor Chat instance's message list whenever
+     tutorConversationId changes (see selectTutorConversation below) --
+     empty for a brand-new conversation, or the persisted history for an
+     existing one. This is NOT just cosmetic: chatHandler (chat.ts) builds
+     the model's context via convertToModelMessages(uiMessages) over
+     exactly the array the client sends on each turn, so if this stayed
+     empty on resume, the LLM would receive zero prior context and respond
+     as if the conversation were brand new -- a real functional break code
+     review caught, not merely "the UI hasn't caught up visually." */
+  const [tutorInitialMessages, setTutorInitialMessages] = useState<UIMessage[]>([]);
+
   /* A second, independent Chat instance for tutor conversations -- NOT the
      same instance the homework-section chat above uses. Deliberately keyed
      by `id: tutorConversationId` (the opposite of the section chat's own
@@ -270,22 +281,62 @@ export default function App() {
      return an id before any message is sent), so there's no
      undefined-then-set staleness window here for `id` to corrupt -- and
      `id` changing (switching to a different tutor conversation, or back to
-     none) is exactly when we DO want useChat to reset to an empty message
-     list: this scaffold has no way to hydrate an existing conversation's
-     prior messages from the server yet (no GET-messages-by-id endpoint --
-     that's conversation-lifecycle scope, #27), so a reset is the honest
-     behavior rather than silently showing stale messages from whichever
-     conversation was open before. Plain `fetch` (not the section chat's
-     chatFetch wrapper): that wrapper writes into the *section* chat's
-     conversationId state, which would corrupt it if reused here. */
+     none) is exactly when we DO want useChat to reset and reseed from
+     `messages: tutorInitialMessages` -- selectTutorConversation below
+     always updates both together in the same event handler (batched into
+     one render), so the freshly fetched history is already in state by the
+     time `id` changes and useChat recreates its Chat instance off it. Plain
+     `fetch` (not the section chat's chatFetch wrapper): that wrapper writes
+     into the *section* chat's conversationId state, which would corrupt it
+     if reused here. */
   const {
     messages: tutorAiMessages,
     sendMessage: sendTutorMessage,
     status: tutorChatStatus,
   } = useChat({
     id: tutorConversationId,
+    messages: tutorInitialMessages,
     transport: new DefaultChatTransport({ api: "/api/chat" }),
   });
+
+  /* #4 fix-round: the single place that switches the tutor surface to a
+     given conversation, always setting its seed messages in the same
+     event-handler pass as its id (React batches both into one commit, so
+     useChat's `id` change and its `messages` seed are never torn apart
+     across renders -- see the useChat comment above). `initialMessages`
+     defaults to [] for the "just created, definitely empty" case
+     (onConversationCreated below); handleSelectExistingTutorConversation
+     fetches real history before calling this for the "picked an existing
+     row" case. */
+  const selectTutorConversation = (id: string, initialMessages: UIMessage[] = []) => {
+    setTutorInitialMessages(initialMessages);
+    setTutorConversationId(id);
+  };
+
+  /* #4 fix-round: TutorConversationsList's onSelectConversation -- fetches
+     that conversation's persisted history (GET /api/conversations/:id/messages,
+     added this fix-round) before switching the chat column to it, so the
+     LLM's context on the next turn actually includes the prior exchange,
+     not just the UI. A no-op re-fetch guard: re-selecting the
+     already-active conversation (e.g. a stray double-click) skips the
+     round-trip -- its messages are already showing correctly. Fails open to
+     an empty thread (not a thrown error) on a failed fetch, matching this
+     file's existing minimal-error-surface convention (see handleSubmit's
+     catch below) -- the student can still send a new message into the
+     right conversationId even if history hydration itself failed. */
+  const handleSelectExistingTutorConversation = async (id: string) => {
+    if (id === tutorConversationId) return;
+    try {
+      const res = await fetch(`/api/conversations/${id}/messages`);
+      if (!res.ok) throw new Error(`failed to load conversation history: ${res.status}`);
+      const history = (await res.json()) as UIMessage[];
+      selectTutorConversation(id, history);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[App] tutor conversation history fetch failed", err);
+      selectTutorConversation(id, []);
+    }
+  };
   // #160: was hardcoded to 3 regardless of what actually loaded -- a
   // homework with fewer than 3 sections left this pointing at a section
   // that doesn't exist. Starts at 1 (the Sidebar's own placeholder-free
@@ -371,10 +422,14 @@ export default function App() {
   };
 
   /* Selecting a homework section always means "I want the section chat" --
-     switches back out of the tutor surface if one was showing. */
+     switches back out of the tutor surface if one was showing. Clears
+     tutorInitialMessages too (not load-bearing -- selectTutorConversation
+     always resets it before the next tutor selection anyway -- but avoids
+     holding onto a stale conversation's history in memory for no reason). */
   const handleSectionSelect = (sectionNumber: number) => {
     setCurrentSection(sectionNumber);
     setTutorConversationId(undefined);
+    setTutorInitialMessages([]);
   };
 
   /* Submits the section's active conversation via the real API. No existing
@@ -477,8 +532,8 @@ export default function App() {
         <TutorConversationsList
           courseId={courseId}
           selectedConversationId={tutorConversationId}
-          onSelectConversation={setTutorConversationId}
-          onConversationCreated={setTutorConversationId}
+          onSelectConversation={handleSelectExistingTutorConversation}
+          onConversationCreated={(id) => selectTutorConversation(id)}
           isCollapsed={isTutorSidebarCollapsed}
           onToggleCollapse={() => setIsTutorSidebarCollapsed((c) => !c)}
         />

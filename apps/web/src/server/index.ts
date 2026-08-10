@@ -18,6 +18,7 @@ import {
   createConversationHandler,
   updateConversationHandler,
   deleteConversationHandler,
+  listConversationMessagesHandler,
 } from "./routes/conversations";
 import { studentHomeworksHandler } from "./routes/studentHomeworks";
 import { submitSectionHandler, getHomeworkSubmissionsHandler } from "./routes/submissions";
@@ -81,6 +82,9 @@ app.patch(
 app.get("/api/student/homeworks", requireRole(["student"])(studentHomeworksHandler));
 app.get("/api/conversations", listConversationsHandler);
 app.post("/api/conversations", createConversationHandler);
+// #4 fix-round: message-history hydration for the tutor-conversations rail
+// (see conversations.ts's doc comment above listConversationMessagesHandler).
+app.get("/api/conversations/:id/messages", listConversationMessagesHandler);
 app.patch("/api/conversations/:id", updateConversationHandler);
 app.delete("/api/conversations/:id", deleteConversationHandler);
 app.post("/api/conversations/:id/submit", requireRole(["student"])(submitSectionHandler));

@@ -724,10 +724,6 @@ body {
       padding-inline 240ms ease-out;
   }
 
-  .tutor-sidebar.sidebar--collapsed {
-    padding-inline: var(--space-2);
-  }
-
   .tutor-sidebar__top {
     display: flex;
     justify-content: flex-end;

@@ -11,6 +11,7 @@ import {
   appendMessage,
   getConversationById,
   getLastMessages,
+  getMessagesForConversation,
   updateConversationTitle,
 } from "./conversations";
 
@@ -259,6 +260,55 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     });
     const last = await getLastMessages(db, unsafeCourseScope(courseBId), created.id, 2);
     expect(last).toEqual([]);
+  });
+
+  it("getMessagesForConversation (#4 fix-round) returns full history oldest-first", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Full history target",
+    });
+    await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      role: "user",
+      parts: [{ type: "text", text: "first" }],
+    });
+    await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      role: "assistant",
+      parts: [{ type: "text", text: "second" }],
+    });
+    await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      role: "user",
+      parts: [{ type: "text", text: "third" }],
+    });
+
+    const history = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id);
+
+    // Oldest-first -- the opposite of getLastMessages' newest-first order
+    // above, since this is seeding a client's initial message list in
+    // conversation order, not detecting the most recent turn for a retry.
+    expect(history).toHaveLength(3);
+    expect(history[0]?.role).toBe("user");
+    expect(history[0]?.parts).toEqual([{ type: "text", text: "first" }]);
+    expect(history[1]?.role).toBe("assistant");
+    expect(history[1]?.parts).toEqual([{ type: "text", text: "second" }]);
+    expect(history[2]?.role).toBe("user");
+    expect(history[2]?.parts).toEqual([{ type: "text", text: "third" }]);
+  });
+
+  it("getMessagesForConversation returns an empty array for a conversation scoped to a different course", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Wrong-scope full-history target",
+    });
+    await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      role: "user",
+      parts: [{ type: "text", text: "hello" }],
+    });
+    const history = await getMessagesForConversation(db, unsafeCourseScope(courseBId), created.id);
+    expect(history).toEqual([]);
   });
 
   it("listConversationsForOwner's kind filter (#5) narrows to just that kind", async () => {
