@@ -22,6 +22,7 @@ import { HomeworksView } from "./views/HomeworksView";
 import type { HomeworkListItemResponse } from "./views/HomeworksView";
 import { HomeworkCreateView } from "./views/HomeworkCreateView";
 import { HomeworkEditView } from "./views/HomeworkEditView";
+import { HomeworkReadOnlyView } from "./views/HomeworkReadOnlyView";
 import { SubmissionsView } from "./views/SubmissionsView";
 import { TaCapabilitiesView } from "./views/TaCapabilitiesView";
 import { LLMConfigsView } from "./views/LLMConfigsView";
@@ -217,9 +218,19 @@ export default function App() {
                 )
               )}
 
+              {/* #172 audit (FUN-002): a non-author opening a homework gets a
+                  read-only view, not a dead end. Without it a granted
+                  can_view_solutions had no surface anywhere in the product --
+                  the API returned the solution and nothing rendered it. */}
               {view.kind === "edit-homework" && (
-                !canAuthor ? (
-                  <EmptyView label="You do not have permission to edit homeworks in this course" />
+                !CURRENT_COURSE_ID ? (
+                  <EmptyView label="No course found for your account yet" />
+                ) : !canAuthor ? (
+                  <HomeworkReadOnlyView
+                    courseId={CURRENT_COURSE_ID}
+                    homeworkId={view.homeworkId}
+                    onBack={() => setView({ kind: "homeworks" })}
+                  />
                 ) : CURRENT_COURSE_ID ? (
                   <HomeworkEditView
                     courseId={CURRENT_COURSE_ID}

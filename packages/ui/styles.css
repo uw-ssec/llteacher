@@ -2758,3 +2758,30 @@ body {
   padding: 1px 5px;
   border-radius: 3px;
 }
+
+/* #172 (FUN-002): read-only homework view for a non-authoring grader. */
+.admin-record-row__title-static {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-primary);
+}
+
+.admin-solution {
+  margin-block-start: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-inline-start: 2px solid var(--color-accent);
+  background: var(--color-surface-subtle, transparent);
+}
+
+.admin-solution summary {
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.admin-solution summary:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
