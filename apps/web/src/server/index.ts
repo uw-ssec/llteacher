@@ -28,6 +28,7 @@ import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireInstructorOf, requireRole } from "./utils/guards";
 import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "./utils/errors";
+import { TenancyMismatchError } from "./repositories/errors";
 import type { AppEnv } from "./context";
 
 const app = new Hono<AppEnv>();
@@ -36,7 +37,20 @@ const app = new Hono<AppEnv>();
 // locally -- e.g. a DB connection failure in rolesMiddleware or a profile
 // route. Logs the real error server-side; the client only ever sees the
 // generic message, never DB connection strings or driver internals.
+//
+// #141: a TenancyMismatchError (repositories/errors.ts) is the one
+// exception to that -- createConversation/appendMessage
+// (repositories/conversations.ts) throw it for an expected,
+// non-infra condition (a caller-supplied id that doesn't belong to the
+// scope it's used under), so it's mapped to an honest 404 here instead,
+// without logging it as a server-side failure. This is the single
+// route-layer mapping point for that error class -- see ARCHITECTURE.md's
+// "Tenancy Mismatch Errors" section. Checked before the generic case so it
+// takes precedence.
 app.onError((err, c) => {
+  if (err instanceof TenancyMismatchError) {
+    return c.json({ error: "Not found" }, 404);
+  }
   logServerError("server", err);
   return c.json({ error: SERVICE_UNAVAILABLE_MESSAGE }, 503);
 });

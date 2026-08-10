@@ -19,9 +19,11 @@
    existing conversationId-ownership check. Every "not found or not owned"
    case returns 404 (never 403) so a guessed/leaked conversation id can't be
    used to confirm one exists that isn't the caller's -- centralized in that
-   one helper (not duplicated per handler) so #141's typed
-   TenancyMismatchError -> 404 mapping has exactly one place to slot into
-   later.
+   one helper rather than duplicated per handler. A separate 404 path:
+   createConversation (repositories/conversations.ts) throws a typed
+   TenancyMismatchError on its own tenancy check (owner/section not in
+   scope), mapped to 404 by app.onError (server/index.ts, #141) -- a single
+   app-layer mapping point, not a per-route catch here.
    -------------------------------------------------------------------------- */
 
 import { Hono, type Context } from "hono";
@@ -55,8 +57,11 @@ const updateConversationSchema = z.object({
 // yours" -- callers must turn a null into a 404 (never 403), so a
 // guessed/leaked conversation id can't be used to confirm one exists that
 // isn't the caller's. Factored out (rather than duplicated in each handler,
-// as it was until this was flagged in review) so #141's future typed
-// TenancyMismatchError -> 404 mapping has exactly one place to slot into.
+// as it was until this was flagged in review). This is the route-level
+// ownership check, not the repository-level tenancy check #141's
+// TenancyMismatchError covers (see the file-level comment above) -- both
+// converge on the same "404, never 403" rule, but through two different
+// mechanisms.
 async function getOwnedConversationOrNull(db: Db, conversationId: string, userId: string) {
   const existing = await getConversationById(db, conversationId);
   if (!existing || existing.ownerUserId !== userId) {
@@ -130,12 +135,13 @@ export async function createConversationHandler(c: Context<AppEnv>) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
-  // createConversation (repositories/conversations.ts, #3/#141) re-verifies
+  // createConversation (repositories/conversations.ts, #3) re-verifies
   // course membership itself (courseScopeFromAuthContext already did, but
   // the repository doesn't trust callers to have checked) and throws a
-  // plain Error on a mismatch today -- that becomes app.onError's generic
-  // 503 until #141 lands a typed TenancyMismatchError -> 404 mapping here,
-  // same gap chatHandler's identical call already has.
+  // typed TenancyMismatchError on a mismatch -- app.onError (server/
+  // index.ts) maps that to a 404 (#141), not the generic 503 every other
+  // uncaught error gets. Same call shape as chatHandler's new-conversation
+  // branch (routes/chat.ts).
   const created = await createConversation(db, scope, {
     ownerUserId: authContext.session.userId,
     sectionId: null,

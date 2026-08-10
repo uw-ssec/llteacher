@@ -2,6 +2,7 @@ import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { conversations, messages, sections, homeworks, courseMemberships } from "../../db/schema";
 import type { CourseScope } from "./scope";
+import { TenancyMismatchError } from "./errors";
 
 export async function listConversationsForOwner(
   db: Db,
@@ -62,9 +63,11 @@ export async function createConversation(
   // mismatched id gets a conversation minted into the wrong course.
   // droppedAt IS NULL matches listMembershipsForUser (#139) -- a dropped
   // membership must not be able to originate new conversations either.
-  // Both throws below are plain Error, not yet a typed not-found error
-  // mapped to 404 at the route layer -- tracked in #141, to land when #5
-  // wires a real route to this function.
+  // Both throws below are TenancyMismatchError (repositories/errors.ts,
+  // #141), mapped to an honest 404 by app.onError (server/index.ts) at
+  // this function's two real callers -- createConversationHandler
+  // (routes/conversations.ts, #5) and chatHandler's new-conversation branch
+  // (routes/chat.ts, #3).
   const [membership] = await db
     .select({ id: courseMemberships.id })
     .from(courseMemberships)
@@ -76,7 +79,7 @@ export async function createConversation(
       ),
     );
   if (!membership) {
-    throw new Error("Owner is not a member of this course scope");
+    throw new TenancyMismatchError("Owner is not a member of this course scope");
   }
 
   if (input.sectionId) {
@@ -86,7 +89,7 @@ export async function createConversation(
       .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
       .where(and(eq(sections.id, input.sectionId), eq(homeworks.courseId, scope)));
     if (!section) {
-      throw new Error("Section not found in this course scope");
+      throw new TenancyMismatchError("Section not found in this course scope");
     }
   }
 
@@ -133,12 +136,15 @@ export async function updateConversationTitle(db: Db, scope: CourseScope, conver
 }
 
 // Same CourseScope-only gap as softDeleteConversation above -- see
-// ARCHITECTURE.md's "Row Ownership (Within a Scope)" section and #134.
-// The wrong-scope Error here (generic 503 once a route wires this up, vs.
-// the more honest 404 -- tracked in #141) and the non-transactional
-// check-then-insert are left as-is for now -- all three get tightened
-// together with the ownership work when #134/#141 land, not as a
-// standalone fix now.
+// ARCHITECTURE.md's "Row Ownership (Within a Scope)" section and #134;
+// that gap (no requesterId/ownership check here) is still open and out of
+// scope for #141, which only covers the wrong-scope case below. The
+// wrong-scope throw is now a TenancyMismatchError (repositories/errors.ts,
+// #141), mapped to an honest 404 by app.onError (server/index.ts) rather
+// than falling through to the generic 503 -- this function's callers are
+// chatHandler's persistence calls (routes/chat.ts, #3). The
+// non-transactional check-then-insert is left as-is; not part of #141's
+// scope either.
 // Also: this never bumps conversations.updatedAt ($onUpdate only fires on
 // an UPDATE to the conversations row itself, and appendMessage only
 // inserts into messages) -- fine today since nothing reads updatedAt for
@@ -161,7 +167,7 @@ export async function appendMessage(
       ),
     );
   if (!owned) {
-    throw new Error("Conversation not found in this course scope");
+    throw new TenancyMismatchError("Conversation not found in this course scope");
   }
   const [created] = await db
     .insert(messages)

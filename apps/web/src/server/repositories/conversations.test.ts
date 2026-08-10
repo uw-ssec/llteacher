@@ -4,6 +4,7 @@ import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import { organizations, courses, users, courseMemberships, homeworks, sections } from "../../db/schema";
 import { unsafeCourseScope } from "./scope";
+import { TenancyMismatchError } from "./errors";
 import {
   listConversationsForOwner,
   createConversation,
@@ -165,7 +166,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
         role: "user",
         parts: [{ type: "text", text: "hello" }],
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(TenancyMismatchError);
   });
 
   it("appendMessage rejects a soft-deleted conversation", async () => {
@@ -182,7 +183,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
         role: "user",
         parts: [{ type: "text", text: "hello" }],
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(TenancyMismatchError);
   });
 
   it("rejects an ownerUserId that is not a member of the scoped course", async () => {
@@ -193,7 +194,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
         kind: "tutor",
         title: "Should not be created",
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(TenancyMismatchError);
   });
 
   it("rejects a dropped owner even though a membership row exists (#139)", async () => {
@@ -204,7 +205,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
         kind: "tutor",
         title: "Should not be created",
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(TenancyMismatchError);
   });
 
   it("getConversationById returns the row regardless of scope (unscoped by design -- callers verify ownership themselves)", async () => {
@@ -441,7 +442,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
         kind: "section",
         title: "Should not be created",
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(TenancyMismatchError);
   });
 
   afterAll(async () => {

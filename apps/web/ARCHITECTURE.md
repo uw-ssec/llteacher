@@ -75,3 +75,40 @@ ownership check runs in the same query that already fetches the row --
 avoiding a separate read-then-check race -- but the *policy* (self-only, or
 self-or-instructor-override) is the calling route's decision to pass in, not
 something the repository infers on its own.
+
+## Tenancy Mismatch Errors
+
+A repository function's `CourseScope` check (see "Tenancy Enforcement"
+above) can fail two different ways: an unexpected infra failure (DB
+connection drop, etc.), or an expected condition -- the caller passed an id
+(an owner, a section, a conversation) that just doesn't belong to the scope
+it's being used under. Prior to [#141](https://github.com/uw-ssec/llteacher/issues/141)
+every repository function threw a plain `Error` for both cases, which meant
+neither the route layer nor `app.onError` (`server/index.ts`) could tell
+them apart -- a tenancy mismatch fell through to the same generic 503 a
+real DB outage gets, when the honest response is a 404 (mirroring the
+404-not-403 convention `getOwnedConversationOrNull`,
+`routes/conversations.ts`, already established for the route-level
+ownership check: never leak whether a row exists via the status code).
+
+**Convention:** a repository function that detects this specific condition
+throws `TenancyMismatchError` (`repositories/errors.ts`) instead of a plain
+`Error`. `server/index.ts`'s `app.onError` -- already the single place
+every uncaught error in the app funnels through -- checks
+`err instanceof TenancyMismatchError` first and maps it to a 404, before
+falling through to the generic 503 for everything else. This is a shared
+app-layer handler, not a per-route `try`/`catch`: any repository function
+that wants this behavior throws the same class, and every route gets the
+mapping for free without its own catch block.
+
+As of #141, `createConversation`/`appendMessage`
+(`repositories/conversations.ts`) throw it. `recordGrade`
+(`repositories/submissions.ts`) is expected to reuse it when
+[#75](https://github.com/uw-ssec/llteacher/issues/75) (M5) wires a route to
+it. `createSubmission` (`repositories/submissions.ts`) deliberately does
+**not** use this: [#22](https://github.com/uw-ssec/llteacher/issues/22)'s
+`submitSectionHandler` already has its own reasoned (403, not 404)
+convention for that call site (mapping both "doesn't exist" and "wrong
+owner" to a uniform 403, so a non-owner can't use a 404-vs-403 split to
+learn a conversation exists) -- a deliberate, documented exception to this
+convention, not an oversight to "fix."
