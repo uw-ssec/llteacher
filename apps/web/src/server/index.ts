@@ -96,6 +96,15 @@ app.patch(
   requireInstructorOf()(updateTaCapabilitiesHandler),
 );
 
+// #172 audit (CMP-005): an unmatched /api/* path fell through to the SPA
+// catch-all below, which serves index.html with a 200. A client calling a
+// route its server doesn't have yet -- the realistic rolling-deploy skew
+// when the admin bundle leads the Worker -- therefore saw `r.ok === true`
+// and only failed when JSON.parse choked on HTML. That failed closed by
+// accident of content type, not by design. A JSON 404 makes a missing API
+// route unambiguous for every current and future client.
+app.all("/api/*", (c) => c.json({ error: "Not found" }, 404));
+
 // Everything else: delegate to the static asset binding.
 // In dev, this proxies to Vite's pipeline (so HMR + source maps work).
 // In prod, it serves built assets, falling back to index.html for SPA routes
