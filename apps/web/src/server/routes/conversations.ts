@@ -13,19 +13,20 @@
    repository functions directly: GET/POST verify course membership via
    courseScopeFromAuthContext (the only sanctioned way to mint a CourseScope
    from request input); PATCH/DELETE take just a conversation id with no
-   courseId in the URL, so they fetch the row via the unscoped
-   getConversationById and manually compare ownerUserId against the caller,
-   exactly like chatHandler's existing conversationId-ownership check. Every
-   "not found or not owned" case returns 404 (never 403) so a guessed/leaked
-   conversation id can't be used to confirm one exists that isn't the
-   caller's -- kept as a single if-branch per handler so #141's typed
-   TenancyMismatchError -> 404 mapping can slot in later without touching
-   anything else in these handlers.
+   courseId in the URL, so they share getOwnedConversationOrNull below,
+   which fetches the row via the unscoped getConversationById and manually
+   compares ownerUserId against the caller, exactly like chatHandler's
+   existing conversationId-ownership check. Every "not found or not owned"
+   case returns 404 (never 403) so a guessed/leaked conversation id can't be
+   used to confirm one exists that isn't the caller's -- centralized in that
+   one helper (not duplicated per handler) so #141's typed
+   TenancyMismatchError -> 404 mapping has exactly one place to slot into
+   later.
    -------------------------------------------------------------------------- */
 
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { makeDb } from "../../db/client";
+import { makeDb, type Db } from "../../db/client";
 import {
   listConversationsForOwner,
   createConversation,
@@ -45,6 +46,23 @@ const createConversationSchema = z.object({
 const updateConversationSchema = z.object({
   title: z.string().trim().min(1).max(100),
 });
+
+// Shared "not found or not owned" check for PATCH/DELETE below: fetches via
+// the unscoped getConversationById and compares ownerUserId against the
+// caller, same pattern chatHandler (#3) established for conversationId
+// ownership. Returns null for BOTH "doesn't exist" and "exists but isn't
+// yours" -- callers must turn a null into a 404 (never 403), so a
+// guessed/leaked conversation id can't be used to confirm one exists that
+// isn't the caller's. Factored out (rather than duplicated in each handler,
+// as it was until this was flagged in review) so #141's future typed
+// TenancyMismatchError -> 404 mapping has exactly one place to slot into.
+async function getOwnedConversationOrNull(db: Db, conversationId: string, userId: string) {
+  const existing = await getConversationById(db, conversationId);
+  if (!existing || existing.ownerUserId !== userId) {
+    return null;
+  }
+  return existing;
+}
 
 export async function listConversationsHandler(c: Context<AppEnv>) {
   // authMiddleware/rolesMiddleware already gate every /api/* route (this
@@ -147,13 +165,8 @@ export async function updateConversationHandler(c: Context<AppEnv>) {
 
   const db = makeDb(c.env.DATABASE_URL);
 
-  // Ownership check (mirrors chatHandler's #3 conversationId check): a
-  // single if-branch mapping "not found" and "not owned" to the same 404,
-  // so a guessed conversation id can't be used to confirm one exists that
-  // isn't the caller's. getConversationById is deliberately unscoped (see
-  // its own docstring); this comparison is what makes reading it safe.
-  const existing = await getConversationById(db, id!);
-  if (!existing || existing.ownerUserId !== authContext.session.userId) {
+  const existing = await getOwnedConversationOrNull(db, id!, authContext.session.userId);
+  if (!existing) {
     return c.json({ error: "Conversation not found" }, 404);
   }
 
@@ -181,9 +194,8 @@ export async function deleteConversationHandler(c: Context<AppEnv>) {
   const id = c.req.param("id");
   const db = makeDb(c.env.DATABASE_URL);
 
-  // Same ownership check as updateConversationHandler above.
-  const existing = await getConversationById(db, id!);
-  if (!existing || existing.ownerUserId !== authContext.session.userId) {
+  const existing = await getOwnedConversationOrNull(db, id!, authContext.session.userId);
+  if (!existing) {
     return c.json({ error: "Conversation not found" }, 404);
   }
 
