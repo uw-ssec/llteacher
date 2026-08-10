@@ -34,8 +34,24 @@ export async function getOrgScopesForUser(db: Db, userId: string): Promise<OrgSc
  *  yet since nothing needs one; add it if/when an instructor roster view
  *  needs to see dropped rows too. */
 export async function listMembershipsForUser(db: Db, userId: string) {
+  // #172 audit (CMP-001/REL-002): explicitly projected rather than selecting
+  // every schema-declared column. rolesMiddleware runs this on EVERY
+  // authenticated request, and Drizzle's relational builder emits the column
+  // list from the compiled schema -- so any additive column shipped before
+  // its migration is applied takes the entire authenticated API down (every
+  // user, not just the new feature) with `column ... does not exist`.
+  // Naming what AuthContext actually consumes bounds that blast radius to
+  // the columns this middleware genuinely depends on.
   return db.query.courseMemberships.findMany({
     where: and(eq(courseMemberships.userId, userId), isNull(courseMemberships.droppedAt)),
+    columns: {
+      id: true,
+      userId: true,
+      courseId: true,
+      role: true,
+      canViewSolutions: true,
+      canViewDrafts: true,
+    },
   });
 }
 

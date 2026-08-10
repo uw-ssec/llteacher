@@ -1,9 +1,9 @@
-import { Hono, type Context } from "hono";
+import { type Context } from "hono";
 import { makeDb } from "../../db/client";
 import { upsertSectionAnswer, getSectionAnswer } from "../repositories/sectionAnswers";
 import { getOrgScopesForUser } from "../repositories/users";
+import { isUnreleased } from "../repositories/homeworks";
 import { courseScopeFromAuthContext } from "../repositories/scope";
-import { requireRole, requireInstructorOf } from "../utils/guards";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { SectionAnswerBody, SectionAnswerResponse } from "../../shared/types";
@@ -80,6 +80,13 @@ export async function getSectionAnswerHandler(c: Context<AppEnv>) {
   const answer = await getSectionAnswer(db, scope, sectionId!, studentId!);
   if (!answer) return c.json({ error: "Answer not found" }, 404);
 
+  // #172 audit (SEC-001): same gate as the submissions dashboard and the
+  // homework detail route -- grading authority does not carry access to a
+  // homework the instructor has withdrawn from release.
+  if (!authContext.canViewDraftsIn(courseId) && isUnreleased(answer.homeworkStatus)) {
+    return c.json({ error: "Answer not found" }, 404);
+  }
+
   const responseBody: SectionAnswerResponse = {
     id: answer.id,
     sectionId: answer.sectionId,
@@ -91,15 +98,3 @@ export async function getSectionAnswerHandler(c: Context<AppEnv>) {
   return c.json(responseBody);
 }
 
-// Sub-app preserved for direct unit testing; production routing happens via
-// app.patch/get(...) in server/index.ts (see homeworks.ts / submissions.ts
-// for the same pattern). The two routes have no common URL prefix (one is
-// student-facing and courseId-less, the other instructor-facing and
-// course-scoped), so both are registered here with their full production
-// path rather than a stripped-prefix relative one.
-export const sectionAnswersRoutes = new Hono<AppEnv>();
-sectionAnswersRoutes.patch("/api/sections/:sectionId/answer", requireRole(["student"])(submitSectionAnswerHandler));
-sectionAnswersRoutes.get(
-  "/api/courses/:courseId/sections/:sectionId/answers/:studentId",
-  requireInstructorOf()(getSectionAnswerHandler),
-);

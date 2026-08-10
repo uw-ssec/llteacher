@@ -1,4 +1,4 @@
-import { Hono, type Context } from "hono";
+import { type Context } from "hono";
 import { makeDb } from "../../db/client";
 import {
   listHomeworksForCourse,
@@ -10,12 +10,13 @@ import {
   updateHomeworkPublishState,
   updateHomeworkHideState,
   homeworkHasStudentActivity,
+  isUnreleased,
 } from "../repositories/homeworks";
 import { getOrgScopesForUser } from "../repositories/users";
 import { getOrgScopeForCourse } from "../repositories/organizations";
 import { llmConfigBelongsToOrg } from "../repositories/llmConfigs";
 import { courseScopeFromAuthContext } from "../repositories/scope";
-import { requireCourseMember, requireInstructorOf } from "../utils/guards";
+import { UUID_RE } from "../utils/uuid";
 import { AUDIT_ACTIONS, auditBestEffort } from "../utils/audit";
 import { logServerError } from "../utils/errors";
 import type { AuthContext } from "../middleware/roles";
@@ -29,8 +30,6 @@ import type {
   HomeworkUpdateBody,
   SectionResponse,
 } from "../../shared/types";
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface CreateHomeworkBody {
   title?: unknown;
@@ -60,7 +59,7 @@ export async function listHomeworksHandler(c: Context<AppEnv>) {
   // them too. Instructors/admins satisfy it unconditionally.
   const visibleRows = authContext!.canViewDraftsIn(courseId!)
     ? rows
-    : rows.filter((hw) => hw.status !== "draft" && hw.status !== "scheduled" && hw.status !== "hidden");
+    : rows.filter((hw) => !isUnreleased(hw.status));
   return c.json({ homeworks: visibleRows });
 }
 
@@ -157,7 +156,7 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
   // #166: hidden/expired is the same gate as draft/scheduled for anyone
   // without unreleased-content access -- indistinguishable from not-found,
   // so a guessed/leaked UUID can't confirm a hidden/draft homework is real.
-  if (!canSeeUnreleased && (status === "draft" || status === "scheduled" || status === "hidden")) {
+  if (!canSeeUnreleased && isUnreleased(status)) {
     return c.json({ error: "Homework not found" }, 404);
   }
 
@@ -465,14 +464,3 @@ export async function updateHomeworkHideHandler(c: Context<AppEnv>) {
   };
   return c.json(responseBody);
 }
-
-// Sub-app preserved for direct unit testing; production routing happens via
-// app.get/post("/api/courses/:courseId/homeworks", ...) in server/index.ts.
-export const homeworksRoutes = new Hono<AppEnv>();
-homeworksRoutes.get("/", requireCourseMember()(listHomeworksHandler));
-homeworksRoutes.post("/", requireInstructorOf()(createHomeworkHandler));
-homeworksRoutes.get("/:homeworkId", requireCourseMember()(getHomeworkDetailHandler));
-homeworksRoutes.patch("/:homeworkId", requireInstructorOf()(updateHomeworkHandler));
-homeworksRoutes.delete("/:homeworkId", requireInstructorOf()(deleteHomeworkHandler));
-homeworksRoutes.patch("/:homeworkId/publish", requireInstructorOf()(publishHomeworkHandler));
-homeworksRoutes.patch("/:homeworkId/hide", requireInstructorOf()(updateHomeworkHideHandler));

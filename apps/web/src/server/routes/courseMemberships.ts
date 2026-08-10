@@ -1,9 +1,9 @@
-import { Hono, type Context } from "hono";
+import { type Context } from "hono";
+import { UUID_RE } from "../utils/uuid";
 import { makeDb } from "../../db/client";
 import { listCourseTas, setTaCapabilities } from "../repositories/courseMemberships";
-import { getOrgScopesForUser } from "../repositories/users";
+import { getOrgScopeForCourse } from "../repositories/organizations";
 import { courseScopeFromAuthContext } from "../repositories/scope";
-import { requireInstructorOf } from "../utils/guards";
 import { AUDIT_ACTIONS, auditBestEffort } from "../utils/audit";
 import { logServerError } from "../utils/errors";
 import type { AuthContext } from "../middleware/roles";
@@ -42,6 +42,15 @@ export async function updateTaCapabilitiesHandler(c: Context<AppEnv>) {
     return c.json({ error: "Instructor access denied" }, 403);
   }
 
+  // #172 audit (SEC-003): a non-UUID path param would otherwise reach a
+  // uuid-typed column comparison, raise a Postgres syntax error, and surface
+  // as a 503 "try again later" for a permanently malformed client request.
+  // Same 404 the not-found path returns, so the response stays uniform and
+  // still leaks nothing about which memberships exist.
+  if (!membershipId || !UUID_RE.test(membershipId)) {
+    return c.json({ error: "TA membership not found in this course" }, 404);
+  }
+
   let body: TaCapabilitiesBody;
   try {
     body = await c.req.json<TaCapabilitiesBody>();
@@ -68,7 +77,7 @@ export async function updateTaCapabilitiesHandler(c: Context<AppEnv>) {
   if (!scope) return c.json({ error: "Course access denied" }, 403);
 
   const db = makeDb(c.env.DATABASE_URL);
-  const updated = await setTaCapabilities(db, scope, membershipId!, {
+  const updated = await setTaCapabilities(db, scope, membershipId, {
     canViewSolutions: body.canViewSolutions,
     canViewDrafts: body.canViewDrafts,
   });
@@ -79,9 +88,16 @@ export async function updateTaCapabilitiesHandler(c: Context<AppEnv>) {
 
   // Best-effort (#147): an audit-write failure must not fail a capability
   // change that already succeeded -- mirrors publishHomeworkHandler.
+  //
+  // #172 audit (SEC-002): scoped to the COURSE's org, not every org the
+  // acting instructor belongs to. auditBestEffort fans out one row per
+  // scope, which is right for personal actions (login, profile update) that
+  // genuinely concern several orgs -- but a capability grant concerns
+  // exactly one. Fanning out wrote another user's identity, a courseId and
+  // their resulting access level into the audit log of unrelated tenants.
   try {
-    const orgScopes = await getOrgScopesForUser(db, authContext.session.userId);
-    await auditBestEffort(db, orgScopes, {
+    const courseOrgScope = await getOrgScopeForCourse(db, courseId);
+    await auditBestEffort(db, courseOrgScope ? [courseOrgScope] : [], {
       actorUserId: authContext.session.userId,
       action: AUDIT_ACTIONS.TA_CAPABILITIES_UPDATED,
       targetType: "user",
@@ -100,13 +116,3 @@ export async function updateTaCapabilitiesHandler(c: Context<AppEnv>) {
   const responseBody: TaCapabilitiesResponse = updated;
   return c.json(responseBody);
 }
-
-// Sub-app preserved for direct unit testing; production routing happens via
-// app.get/app.patch(...) in server/index.ts (see homeworks.ts for the same
-// pattern).
-export const courseMembershipsRoutes = new Hono<AppEnv>();
-courseMembershipsRoutes.get("/:courseId/tas", requireInstructorOf()(listCourseTasHandler));
-courseMembershipsRoutes.patch(
-  "/:courseId/tas/:membershipId/capabilities",
-  requireInstructorOf()(updateTaCapabilitiesHandler),
-);

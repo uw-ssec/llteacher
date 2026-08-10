@@ -59,26 +59,13 @@ export async function setTaCapabilities(
     ...(input.canViewSolutions !== undefined && { canViewSolutions: input.canViewSolutions }),
     ...(input.canViewDrafts !== undefined && { canViewDrafts: input.canViewDrafts }),
   };
+  // #172 audit (FUN-005): the route rejects a body naming neither flag with
+  // a 400, so this is unreachable in production. An earlier version handled
+  // it with a read-back branch -- a second SELECT and ~20 lines that no
+  // caller could reach, kept alive only by a test written for it. Throwing
+  // states the precondition instead of quietly succeeding with a no-op.
   if (Object.keys(fields).length === 0) {
-    // Nothing to write -- read back instead of issuing an UPDATE with an
-    // empty SET, which Drizzle rejects at runtime.
-    const [found] = await db
-      .select({
-        membershipId: courseMemberships.id,
-        userId: courseMemberships.userId,
-        canViewSolutions: courseMemberships.canViewSolutions,
-        canViewDrafts: courseMemberships.canViewDrafts,
-      })
-      .from(courseMemberships)
-      .where(
-        and(
-          eq(courseMemberships.id, membershipId),
-          eq(courseMemberships.courseId, scope),
-          eq(courseMemberships.role, "ta"),
-          isNull(courseMemberships.droppedAt),
-        ),
-      );
-    return found ?? null;
+    throw new Error("setTaCapabilities requires at least one capability flag");
   }
 
   const [updated] = await db

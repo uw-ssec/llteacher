@@ -150,9 +150,11 @@ describe.skipIf(!DATABASE_URL)("courseMemberships repository (#172)", () => {
     expect(result).toBeNull();
   });
 
-  it("reads back the current row when no flags are supplied, without an empty UPDATE", async () => {
-    const result = await setTaCapabilities(db, unsafeCourseScope(courseAId), taAMembershipId, {});
-    expect(result).not.toBeNull();
-    expect(result!.membershipId).toBe(taAMembershipId);
+  it("rejects a call naming no capability, rather than issuing an empty UPDATE", async () => {
+    // Unreachable through the route (it 400s first); asserted so the
+    // precondition is stated rather than silently relied upon.
+    await expect(
+      setTaCapabilities(db, unsafeCourseScope(courseAId), taAMembershipId, {}),
+    ).rejects.toThrow(/at least one capability flag/);
   });
 });

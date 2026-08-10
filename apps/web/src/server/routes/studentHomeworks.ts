@@ -1,7 +1,6 @@
-import { Hono, type Context } from "hono";
+import { type Context } from "hono";
 import { makeDb } from "../../db/client";
 import { getStudentHomeworksForUser } from "../repositories/studentHomeworks";
-import { requireRole } from "../utils/guards";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { StudentHomeworkListResponse } from "../../shared/types";
@@ -24,8 +23,3 @@ export async function studentHomeworksHandler(c: Context<AppEnv>) {
   const body: StudentHomeworkListResponse = { homeworks: homeworksList };
   return c.json(body);
 }
-
-// Sub-app preserved for direct unit testing; production routing happens via
-// app.get("/api/student/homeworks", ...) in server/index.ts (see homeworks.ts).
-export const studentHomeworksRoutes = new Hono<AppEnv>();
-studentHomeworksRoutes.get("/", requireRole(["student"])(studentHomeworksHandler));

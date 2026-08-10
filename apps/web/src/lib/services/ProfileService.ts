@@ -1,8 +1,9 @@
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { courseMemberships, homeworks, users } from "../../db/schema";
 import type { Db } from "../../db/client";
 import type { IdentityCipher } from "../crypto/identity-cipher";
 import type { CourseRole } from "../../server/middleware/roles";
+import { CONSOLE_ROLES, resolveTaCapabilities } from "@llteacher/ui/auth/courseRole";
 import type { ProfileWithStats } from "../../shared/types";
 
 /** Highest-privilege-first ordering used to derive a deterministic
@@ -15,6 +16,10 @@ import type { ProfileWithStats } from "../../shared/types";
  *  enum at compile time -- adding a role to course_role without ranking it
  *  here fails to compile, instead of the new role silently never being
  *  selected as primary. */
+/** `count(*)::int` -- Postgres returns bigint for count(), which the driver
+ *  hands back as a string; the ::int cast keeps it a number. */
+const sqlCount = () => sql<number>`count(*)::int`;
+
 const ROLE_PRIORITY_RANK = {
   admin: 0,
   instructor: 1,
@@ -32,7 +37,7 @@ const ROLE_PRIORITY = (Object.keys(ROLE_PRIORITY_RANK) as CourseRole[]).sort(
  *  separate from ROLE_PRIORITY_RANK because that ranking answers a
  *  different question ("which single role wins as primary") than this one
  *  ("which memberships count as course-editing access"). */
-const INSTRUCTOR_TIER_ROLES: ReadonlySet<CourseRole> = new Set(["instructor", "ta", "admin"]);
+const INSTRUCTOR_TIER_ROLES: ReadonlySet<CourseRole> = new Set(CONSOLE_ROLES);
 
 export class ProfileService {
   constructor(
@@ -56,9 +61,21 @@ export class ProfileService {
     // hand-rolled select+join -- it reuses the courseMembershipsRelations
     // already defined in db/schema/identity.ts and keeps this file on the
     // same `db.query.*` style as every other lookup here.
+    // #172 audit (SCL-001/CMP-004/FUN-004): explicitly ordered. apps/admin
+    // treats courses[0] as the active course and, since #172, derives
+    // `canAuthor` from its role -- so an unordered result made an
+    // authorization posture nondeterministic across requests. Postgres
+    // guarantees no row order without ORDER BY, and this file already makes
+    // exactly that argument for ROLE_PRIORITY above.
+    //
+    // #172 audit (FUN-007): droppedAt filtered in SQL rather than in JS
+    // below, so `primaryRole` and `courseCount` stop counting memberships a
+    // user no longer holds -- a dropped TA was passing the console's role
+    // gate and landing on an empty-course state instead of a 403.
     const memberships = await this.db.query.courseMemberships.findMany({
-      where: eq(courseMemberships.userId, userId),
+      where: and(eq(courseMemberships.userId, userId), isNull(courseMemberships.droppedAt)),
       with: { course: true },
+      orderBy: (m, { asc }) => [asc(m.enrolledAt), asc(m.id)],
     });
     const primaryRole =
       ROLE_PRIORITY.find((role) => memberships.some((m) => m.role === role)) ?? null;
@@ -72,13 +89,20 @@ export class ProfileService {
     };
 
     if (primaryRole === "instructor" || primaryRole === "ta" || primaryRole === "admin") {
+      // #172 audit (SCL-003): a COUNT aggregate rather than loading every
+      // homework row across every membership to read `.length`. At one
+      // course the difference is invisible; at fifty it is the piece that
+      // turns a slow profile into a console that will not load, and
+      // `canAuthor` defaults to false when courses is empty -- so a timed
+      // out profile silently renders an instructor as a non-author.
       const membershipIds = memberships.map((m) => m.id);
-      const createdHomeworks = membershipIds.length
-        ? await this.db.query.homeworks.findMany({
-            where: inArray(homeworks.createdById, membershipIds),
-          })
-        : [];
-      profile.instructorStats = { homeworksCreated: createdHomeworks.length };
+      const [homeworkCount] = membershipIds.length
+        ? await this.db
+            .select({ count: sqlCount() })
+            .from(homeworks)
+            .where(inArray(homeworks.createdById, membershipIds))
+        : [{ count: 0 }];
+      profile.instructorStats = { homeworksCreated: Number(homeworkCount?.count ?? 0) };
       // Stopgap for apps/admin's course context until #70's real course
       // switcher lands (see docs/superpowers/plans/2026-08-05-m3-homeworks-
       // submissions-parity.md, Resolved Design Decision 8). Per-membership
@@ -88,22 +112,22 @@ export class ProfileService {
       // appear here.
       // #172: each entry carries the caller's role in *that* course plus the
       // resolved capabilities, so apps/admin can gate per course instead of
-      // on the priority-ranked primaryRole above. Capabilities are resolved
-      // here (instructor/admin unconditional, `ta` per grant) rather than
-      // shipping the raw columns, so the client can't drift from the
-      // server's own AuthContext.canViewSolutionsIn/canViewDraftsIn rule.
+      // on the priority-ranked primaryRole above.
+      //
+      // Capabilities come from @llteacher/ui's resolveTaCapabilities -- the
+      // same function rolesMiddleware enforces with. An earlier version
+      // re-derived the rule here and claimed in this comment that resolving
+      // server-side stopped the client drifting; that only moved the drift
+      // risk from client-vs-server to server-vs-server. Calling the shared
+      // resolver is what actually removes it.
       profile.courses = memberships
-        .filter((m) => INSTRUCTOR_TIER_ROLES.has(m.role) && !m.droppedAt)
-        .map((m) => {
-          const authors = m.role === "instructor" || m.role === "admin";
-          return {
-            id: m.course.id,
-            title: m.course.title,
-            role: m.role,
-            canViewSolutions: authors || (m.role === "ta" && m.canViewSolutions),
-            canViewDrafts: authors || (m.role === "ta" && m.canViewDrafts),
-          };
-        });
+        .filter((m) => INSTRUCTOR_TIER_ROLES.has(m.role))
+        .map((m) => ({
+          id: m.course.id,
+          title: m.course.title,
+          role: m.role,
+          ...resolveTaCapabilities(m),
+        }));
     } else if (primaryRole === "student") {
       // TODO: real submission/completion counts once the conversation +
       // submission tables land (multi-tenant-data-model.md §6.3, M2). No

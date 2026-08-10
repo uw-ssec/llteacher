@@ -1,8 +1,8 @@
-import { Hono, type Context } from "hono";
+import { type Context } from "hono";
 import { makeDb } from "../../db/client";
 import { submitSection, getHomeworkSubmissionsMatrix } from "../repositories/submissions";
+import { isUnreleased } from "../repositories/homeworks";
 import { getOrgScopesForUser } from "../repositories/users";
-import { requireRole } from "../utils/guards";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
@@ -80,11 +80,13 @@ export async function getHomeworkSubmissionsHandler(c: Context<AppEnv>) {
   const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
   const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId!);
   if (!matrix) return c.json({ error: "Homework not found" }, 404);
+  // #172 audit (SEC-001): grading authority does not imply access to
+  // unreleased content. A TA the instructor denied `can_view_drafts` must
+  // not read a draft/scheduled/hidden homework's title, due date or section
+  // titles here after the detail route already 404s them for it. Same 404
+  // shape, so the two routes stay indistinguishable to a prober.
+  if (!authContext.canViewDraftsIn(courseId) && isUnreleased(matrix.homeworkStatus)) {
+    return c.json({ error: "Homework not found" }, 404);
+  }
   return c.json(matrix);
 }
-
-// Sub-app preserved for direct unit testing; production routing happens via
-// app.post("/api/conversations/:id/submit", ...) in server/index.ts (see
-// homeworks.ts / studentHomeworks.ts for the same pattern).
-export const submissionsRoutes = new Hono<AppEnv>();
-submissionsRoutes.post("/:id/submit", requireRole(["student"])(submitSectionHandler));

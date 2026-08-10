@@ -4,26 +4,29 @@ import { courseMemberships, courseRoleEnum } from "../../db/schema";
 import { listMembershipsForUser, getUserActivationState } from "../repositories/users";
 import type { SessionPayload } from "../../lib/session";
 import type { AppEnv } from "../context";
+import {
+  AUTHOR_ROLES,
+  GRADER_ROLES,
+  resolveTaCapabilities,
+  type TaCapabilityField,
+} from "@llteacher/ui/auth/courseRole";
 import { PUBLIC_API_PATHS } from "./auth";
 
+// Re-exported so server-side callers (guards, the AuthContext test double)
+// have one import path for the tiers without reaching across to the UI
+// package themselves. @llteacher/ui remains the single definition.
+export { AUTHOR_ROLES, GRADER_ROLES };
+
 export type CourseRole = (typeof courseRoleEnum.enumValues)[number];
-type Membership = typeof courseMemberships.$inferSelect;
-
-/** Roles that may author course content (create/edit/delete/publish/hide a
- *  homework). Deliberately excludes `ta` -- see GRADER_ROLES below.
- *
- *  Exported so the AuthContext test double (server/testing/authContext.ts)
- *  builds its predicates from the same list production uses, rather than
- *  restating it -- otherwise a role moved between tiers leaves every route
- *  test asserting the old rule while only roles.test.ts catches it. */
-export const AUTHOR_ROLES: readonly CourseRole[] = ["instructor", "admin"];
-
-/** Roles that may read student work for grading (the submissions dashboard
- *  and an individual student's section answer). #172: a TA is a grader, not
- *  an author -- before this split, `ta` was granted admin-console access by
- *  apps/admin while every instructor-gated API rejected it, so a TA loaded a
- *  console where nothing worked. */
-export const GRADER_ROLES: readonly CourseRole[] = ["instructor", "admin", "ta"];
+/** Exactly what listMembershipsForUser projects, and therefore exactly what
+ *  AuthContext can honestly offer. Previously `$inferSelect` (the full row),
+ *  which advertised columns the query no longer fetches -- a consumer
+ *  reading `enrolledAt` off this would have compiled and then read
+ *  undefined at runtime. */
+type Membership = Pick<
+  typeof courseMemberships.$inferSelect,
+  "id" | "userId" | "courseId" | "role" | "canViewSolutions" | "canViewDrafts"
+>;
 
 export interface AuthContext {
   session: SessionPayload;
@@ -99,13 +102,14 @@ export async function rolesMiddleware(c: Context<AppEnv>, next: Next) {
   // so they agree regardless of what the index guarantees.
   const membershipIn = (courseId: string) => memberships.find((m) => m.courseId === courseId);
 
-  /** Instructors/admins always hold the capability; a TA holds it only where
-   *  the per-membership flag was granted; every other role never does. */
-  const capability = (courseId: string, flag: "canViewSolutions" | "canViewDrafts") => {
+  /** Delegates to @llteacher/ui's resolveTaCapabilities -- the single
+   *  definition both this middleware and ProfileService use, so the rule
+   *  enforced at request time and the rule shipped to apps/admin cannot
+   *  diverge. */
+  const capability = (courseId: string, flag: TaCapabilityField) => {
     const membership = membershipIn(courseId);
     if (!membership) return false;
-    if (AUTHOR_ROLES.includes(membership.role)) return true;
-    return membership.role === "ta" && membership[flag];
+    return resolveTaCapabilities(membership)[flag];
   };
 
   const roleIn = (courseId: string, allowed: readonly CourseRole[]) => {

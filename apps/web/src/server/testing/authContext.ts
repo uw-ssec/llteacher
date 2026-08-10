@@ -1,4 +1,5 @@
 import { AUTHOR_ROLES, GRADER_ROLES, type AuthContext, type CourseRole } from "../middleware/roles";
+import { resolveTaCapabilities, type TaCapabilityField } from "@llteacher/ui/auth/courseRole";
 
 type Membership = AuthContext["memberships"][number];
 
@@ -50,11 +51,9 @@ export function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthConte
     const m = membershipIn(courseId);
     return m !== undefined && allowed.includes(m.role);
   };
-  const capability = (courseId: string, flag: "canViewSolutions" | "canViewDrafts") => {
+  const capability = (courseId: string, flag: TaCapabilityField) => {
     const m = membershipIn(courseId);
-    if (!m) return false;
-    if (AUTHOR_ROLES.includes(m.role)) return true;
-    return m.role === "ta" && m[flag];
+    return m ? resolveTaCapabilities(m)[flag] : false;
   };
 
   return {

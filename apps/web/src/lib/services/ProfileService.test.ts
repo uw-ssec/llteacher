@@ -47,6 +47,9 @@ describe("ProfileService.getProfileWithStats", () => {
           findMany: async () => [{ id: "h1" }, { id: "h2" }],
         },
       },
+      // #172 audit (SCL-003): instructorStats now uses a COUNT aggregate
+      // rather than loading every homework row to read `.length`.
+      select: () => ({ from: () => ({ where: async () => [{ count: 2 }] }) }),
     } as unknown as Db;
 
     const profile = await new ProfileService(cipher, db).getProfileWithStats("u1");
@@ -65,7 +68,16 @@ describe("ProfileService.getProfileWithStats", () => {
     ]);
   });
 
-  it("excludes a dropped instructor membership's course from `courses`", async () => {
+  // #172 audit (FUN-007): dropped memberships are now filtered in SQL rather
+  // than in JS, so `primaryRole`, `courseCount` and `courses` all derive from
+  // the same live set -- previously a dropped TA's role still passed the
+  // console's role gate while their course was correctly absent, landing them
+  // on an empty-course state instead of a 403.
+  //
+  // This mock returns only live rows, as the real query now does. The
+  // assertion that the SQL predicate is actually present belongs to the
+  // real-database layer, not a hand-rolled mock that cannot interpret it.
+  it("derives role, courseCount and courses from the same live membership set", async () => {
     const cipher = new IdentityCipher(keys);
     const encryptedEmail = await cipher.encryptString("multi-course@uw.edu");
     const db = {
@@ -83,21 +95,19 @@ describe("ProfileService.getProfileWithStats", () => {
               droppedAt: null,
               course: { id: "c1", title: "STATS 311" },
             },
-            {
-              id: "m2",
-              userId: "u4",
-              courseId: "c2",
-              role: "instructor",
-              droppedAt: new Date("2026-01-01"),
-              course: { id: "c2", title: "STATS 412" },
-            },
           ],
         },
         homeworks: { findMany: async () => [] },
       },
+      // #172 audit (SCL-003): instructorStats now uses a COUNT aggregate
+      // rather than loading every homework row to read `.length`.
+      select: () => ({ from: () => ({ where: async () => [{ count: 0 }] }) }),
     } as unknown as Db;
 
     const profile = await new ProfileService(cipher, db).getProfileWithStats("u4");
+    // All three derive from the same filtered set, so they cannot disagree.
+    expect(profile.courseCount).toBe(1);
+    expect(profile.role).toBe("instructor");
     expect(profile.courses).toEqual([
       // #172: each entry now carries the caller's role in that course plus
       // the resolved capabilities, so apps/admin can gate per course rather
@@ -117,6 +127,9 @@ describe("ProfileService.getProfileWithStats", () => {
         },
         homeworks: { findMany: async () => [] },
       },
+      // #172 audit (SCL-003): instructorStats now uses a COUNT aggregate
+      // rather than loading every homework row to read `.length`.
+      select: () => ({ from: () => ({ where: async () => [{ count: 0 }] }) }),
     } as unknown as Db;
 
     const profile = await new ProfileService(cipher, db).getProfileWithStats("u2");
@@ -146,6 +159,9 @@ describe("ProfileService.getProfileWithStats", () => {
               })),
           },
           homeworks: { findMany: async () => [] },
+      },
+      select: () => ({ from: () => ({ where: async () => [{ count: 0 }] }) }),
+      _unused: {
         },
       }) as unknown as Db;
 

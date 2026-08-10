@@ -7,17 +7,20 @@ import { fakeAuthContext, fakeMembership } from "../testing/authContext";
 
 const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
 
+// A real UUID: the PATCH route validates the path param's shape (SEC-003).
+const MEMBERSHIP_ID = "11111111-2222-4333-8444-555555555555";
+
 const listCourseTasMock = vi.fn();
 const setTaCapabilitiesMock = vi.fn();
-const getOrgScopesForUserMock = vi.fn();
+const getOrgScopeForCourseMock = vi.fn();
 const auditBestEffortMock = vi.fn();
 
 vi.mock("../repositories/courseMemberships", () => ({
   listCourseTas: (...a: unknown[]) => listCourseTasMock(...a),
   setTaCapabilities: (...a: unknown[]) => setTaCapabilitiesMock(...a),
 }));
-vi.mock("../repositories/users", () => ({
-  getOrgScopesForUser: (...a: unknown[]) => getOrgScopesForUserMock(...a),
+vi.mock("../repositories/organizations", () => ({
+  getOrgScopeForCourse: (...a: unknown[]) => getOrgScopeForCourseMock(...a),
 }));
 vi.mock("../utils/audit", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../utils/audit")>()),
@@ -43,7 +46,7 @@ const instructorOfA = () =>
 const taOfA = () =>
   fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "ta" })] });
 
-function patch(authContext: AuthContext | undefined, body: unknown, membershipId = "m-1") {
+function patch(authContext: AuthContext | undefined, body: unknown, membershipId = MEMBERSHIP_ID) {
   return buildApp(authContext).request(
     `/api/courses/course-a/tas/${membershipId}/capabilities`,
     { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
@@ -54,19 +57,19 @@ function patch(authContext: AuthContext | undefined, body: unknown, membershipId
 beforeEach(() => {
   listCourseTasMock.mockReset().mockResolvedValue([]);
   setTaCapabilitiesMock.mockReset().mockResolvedValue({
-    membershipId: "m-1",
+    membershipId: MEMBERSHIP_ID,
     userId: "u-ta",
     canViewSolutions: true,
     canViewDrafts: false,
   });
-  getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
+  getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
   auditBestEffortMock.mockReset().mockResolvedValue(undefined);
 });
 
 describe("GET /api/courses/:courseId/tas", () => {
   it("returns the course's TAs for an instructor", async () => {
     listCourseTasMock.mockResolvedValue([
-      { membershipId: "m-1", userId: "u-ta", canViewSolutions: false, canViewDrafts: true },
+      { membershipId: MEMBERSHIP_ID, userId: "u-ta", canViewSolutions: false, canViewDrafts: true },
     ]);
     const res = await buildApp(instructorOfA()).request("/api/courses/course-a/tas", {}, TEST_ENV);
     expect(res.status).toBe(200);
@@ -97,7 +100,7 @@ describe("PATCH /api/courses/:courseId/tas/:membershipId/capabilities", () => {
     const res = await patch(instructorOfA(), { canViewSolutions: true });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
-      membershipId: "m-1",
+      membershipId: MEMBERSHIP_ID,
       userId: "u-ta",
       canViewSolutions: true,
       canViewDrafts: false,
@@ -137,7 +140,7 @@ describe("PATCH /api/courses/:courseId/tas/:membershipId/capabilities", () => {
 
   it("returns 400 for malformed JSON rather than a 503", async () => {
     const res = await buildApp(instructorOfA()).request(
-      "/api/courses/course-a/tas/m-1/capabilities",
+      `/api/courses/course-a/tas/${MEMBERSHIP_ID}/capabilities`,
       { method: "PATCH", headers: { "content-type": "application/json" }, body: "{not json" },
       TEST_ENV,
     );
@@ -147,7 +150,10 @@ describe("PATCH /api/courses/:courseId/tas/:membershipId/capabilities", () => {
   it("audits the change against the affected TA, not the acting instructor", async () => {
     await patch(instructorOfA(), { canViewSolutions: true });
     expect(auditBestEffortMock).toHaveBeenCalledTimes(1);
-    const [, , input] = auditBestEffortMock.mock.calls[0]!;
+    const [, scopes, input] = auditBestEffortMock.mock.calls[0]!;
+    // #172 audit (SEC-002): exactly the course's own org, not every org the
+    // acting instructor belongs to.
+    expect(scopes).toEqual(["org-1"]);
     expect(input).toMatchObject({
       action: "membership.ta_capabilities_updated",
       targetId: "u-ta",
