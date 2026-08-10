@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { conversations, messages, sections, homeworks, courseMemberships } from "../../db/schema";
 import type { CourseScope } from "./scope";
@@ -25,11 +25,30 @@ export async function listConversationsForOwner(
   if (opts?.kind) {
     conditions.push(eq(conversations.kind, opts.kind));
   }
-  return db
+  const rows = await db
     .select()
     .from(conversations)
     .where(and(...conditions))
     .orderBy(desc(conversations.updatedAt));
+
+  if (rows.length === 0) return [];
+
+  // #4: the tutor-conversations list surface needs a per-conversation
+  // message count (its "message-count or preview snippet" requirement --
+  // count was chosen over a last-message snippet, see task-4-report.md).
+  // A second grouped query rather than a LEFT JOIN + GROUP BY on the
+  // primary select above -- same fan-out-avoidance pattern
+  // listHomeworksForCourse (homeworks.ts) already uses for sectionCount,
+  // merged back in application code via a Map instead of reasoning about
+  // duplicate conversation rows a JOIN would produce.
+  const counts = await db
+    .select({ conversationId: messages.conversationId, count: sql<number>`count(*)::int` })
+    .from(messages)
+    .where(inArray(messages.conversationId, rows.map((r) => r.id)))
+    .groupBy(messages.conversationId);
+  const countByConversationId = new Map(counts.map((c) => [c.conversationId, c.count]));
+
+  return rows.map((r) => ({ ...r, messageCount: countByConversationId.get(r.id) ?? 0 }));
 }
 
 export async function createConversation(

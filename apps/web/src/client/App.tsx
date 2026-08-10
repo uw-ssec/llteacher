@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
+import { DefaultChatTransport, type UIMessage } from "ai";
 import { useNavigate } from "react-router";
 import { Sidebar, TopNav, ConversationView, renderToolPart } from "@llteacher/ui";
 import type { SidebarSection, MessageData, ToolPart } from "@llteacher/ui";
 import { useAuth } from "./components/AuthProvider";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
+import { TutorConversationsList } from "./views/TutorConversationsList";
 import type { StudentHomeworkListResponse } from "../shared/types";
 
 /* ==========================================================================
@@ -56,6 +57,12 @@ function useWorkerStatus() {
     doesn't collide with future preference keys (`llteacher:*`). */
 const SIDEBAR_COLLAPSED_KEY = "llteacher:sidebar-collapsed";
 
+/** #4: separate key for the tutor-conversations rail's own collapse state --
+    a distinct zone from the homework Sidebar (see TutorConversationsList's
+    doc comment for the IA decision), so it gets its own preference rather
+    than sharing (and fighting over) SIDEBAR_COLLAPSED_KEY. */
+const TUTOR_SIDEBAR_COLLAPSED_KEY = "llteacher:tutor-sidebar-collapsed";
+
 /** Fetches the current student's homework list and adapts it into the
     Sidebar's section shape. SidebarSection's status union ("submitted" |
     "current" | "pending") has no direct equivalent for "not_started" /
@@ -65,6 +72,12 @@ const SIDEBAR_COLLAPSED_KEY = "llteacher:sidebar-collapsed";
 export function useStudentHomework() {
   const [sections, setSections] = useState<SidebarSection[]>([]);
   const [hwTitle, setHwTitle] = useState("");
+  // #4: the tutor-conversations rail (TutorConversationsList) needs a
+  // courseId to scope GET/POST /api/conversations -- this hook's homework
+  // fetch is the client's only source of course context today (see
+  // StudentHomeworkSummary.courseId's doc comment), so it's threaded
+  // through here rather than added as a second fetch.
+  const [courseId, setCourseId] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   // #160: distinct from "loaded, zero homeworks" -- a 401/403/503 must not
   // render as an indistinguishable empty sidebar. r.ok was never checked
@@ -86,6 +99,7 @@ export function useStudentHomework() {
           return;
         }
         setHwTitle(hw.title);
+        setCourseId(hw.courseId);
         setSections(
           hw.sections.map((s) => ({
             number: s.order,
@@ -107,7 +121,76 @@ export function useStudentHomework() {
       });
   }, []);
 
-  return { sections, setSections, hwTitle, loading, loadError };
+  return { sections, setSections, hwTitle, courseId, loading, loadError };
+}
+
+/* Translates the AI SDK's UIMessage[] + status into the design system's
+   MessageData[] -- shared by both the homework-section chat and the tutor
+   chat below (#4 introduced the second consumer; this was inlined in App
+   before). See the two useChat call sites for why they're separate Chat
+   instances rather than one shared one. */
+function buildMessageData(
+  aiMessages: UIMessage[],
+  chatStatus: ReturnType<typeof useChat>["status"],
+): MessageData[] {
+  const messages: MessageData[] = aiMessages.map((m, idx) => {
+    const isLast = idx === aiMessages.length - 1;
+    const isStreaming = isLast && chatStatus === "streaming";
+
+    if (m.role === "assistant") {
+      const content = (
+        <>
+          {m.parts.map((part, i) => {
+            if (part.type === "text") {
+              return <p key={`text-${m.id}-${i}`}>{part.text}</p>;
+            }
+            return renderToolPart(part as ToolPart, `tool-${m.id}-${i}`);
+          })}
+        </>
+      );
+      return {
+        id: m.id,
+        role: "ai" as const,
+        content,
+        isStreaming,
+      };
+    }
+
+    if (m.role === "user") {
+      const text = m.parts
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("");
+      return {
+        id: m.id,
+        role: "student" as const,
+        content: text,
+      };
+    }
+
+    /* system role messages — not user-facing in this UI; render empty */
+    return {
+      id: m.id,
+      role: "system" as const,
+      content: "",
+    };
+  });
+
+  /* While the request is in flight but no tokens have streamed yet, the AI
+     SDK has no assistant message in `aiMessages` -- so the streaming dots
+     have nothing to attach to. Append a synthetic placeholder so the user
+     sees the AI is thinking; it drops out the moment the first real part
+     arrives and chatStatus transitions to "streaming". */
+  if (chatStatus === "submitted") {
+    messages.push({
+      id: "__pending__",
+      role: "ai" as const,
+      content: null,
+      isStreaming: true,
+    });
+  }
+
+  return messages;
 }
 
 /* ==========================================================================
@@ -169,7 +252,40 @@ export default function App() {
     }),
   });
 
-  const { sections, setSections, hwTitle, loadError } = useStudentHomework();
+  const { sections, setSections, hwTitle, courseId, loadError } = useStudentHomework();
+
+  /* #4: the tutor-conversations rail. Undefined = the homework section chat
+     is showing (default); set = the selected/created tutor conversation is
+     showing instead. Selecting a homework section (handleSectionSelect
+     below) switches back. No separate "activeSurface" enum is needed --
+     this one nullable id fully determines which surface is active. */
+  const [tutorConversationId, setTutorConversationId] = useState<string | undefined>(undefined);
+
+  /* A second, independent Chat instance for tutor conversations -- NOT the
+     same instance the homework-section chat above uses. Deliberately keyed
+     by `id: tutorConversationId` (the opposite of the section chat's own
+     choice, see the useChat comment above): every tutor turn already knows
+     its conversationId upfront (TutorConversationsList only lets you send
+     into a conversation you've selected or just created, both of which
+     return an id before any message is sent), so there's no
+     undefined-then-set staleness window here for `id` to corrupt -- and
+     `id` changing (switching to a different tutor conversation, or back to
+     none) is exactly when we DO want useChat to reset to an empty message
+     list: this scaffold has no way to hydrate an existing conversation's
+     prior messages from the server yet (no GET-messages-by-id endpoint --
+     that's conversation-lifecycle scope, #27), so a reset is the honest
+     behavior rather than silently showing stale messages from whichever
+     conversation was open before. Plain `fetch` (not the section chat's
+     chatFetch wrapper): that wrapper writes into the *section* chat's
+     conversationId state, which would corrupt it if reused here. */
+  const {
+    messages: tutorAiMessages,
+    sendMessage: sendTutorMessage,
+    status: tutorChatStatus,
+  } = useChat({
+    id: tutorConversationId,
+    transport: new DefaultChatTransport({ api: "/api/chat" }),
+  });
   // #160: was hardcoded to 3 regardless of what actually loaded -- a
   // homework with fewer than 3 sections left this pointing at a section
   // that doesn't exist. Starts at 1 (the Sidebar's own placeholder-free
@@ -207,67 +323,31 @@ export default function App() {
     }
   }, [isSidebarCollapsed]);
 
-  /* Translate AI SDK UIMessages into the design system's MessageData. AI
-     messages get a ReactNode body assembled from their `parts` — text parts
-     become paragraphs, tool-* parts go through the renderToolPart registry
-     in @llteacher/ui/generative. Streaming state applies only to the last
-     AI message. */
-  const messages: MessageData[] = aiMessages.map((m, idx) => {
-    const isLast = idx === aiMessages.length - 1;
-    const isStreaming = isLast && chatStatus === "streaming";
-
-    if (m.role === "assistant") {
-      const content = (
-        <>
-          {m.parts.map((part, i) => {
-            if (part.type === "text") {
-              return <p key={`text-${m.id}-${i}`}>{part.text}</p>;
-            }
-            return renderToolPart(part as ToolPart, `tool-${m.id}-${i}`);
-          })}
-        </>
-      );
-      return {
-        id: m.id,
-        role: "ai" as const,
-        content,
-        isStreaming,
-      };
+  /* #4: the tutor rail's own collapse preference -- same lazy-init-then-
+     write-effect pattern as the homework sidebar above, distinct key. */
+  const [isTutorSidebarCollapsed, setIsTutorSidebarCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return window.localStorage.getItem(TUTOR_SIDEBAR_COLLAPSED_KEY) === "true";
+    } catch {
+      return false;
     }
-
-    if (m.role === "user") {
-      const text = m.parts
-        .filter((p): p is { type: "text"; text: string } => p.type === "text")
-        .map((p) => p.text)
-        .join("");
-      return {
-        id: m.id,
-        role: "student" as const,
-        content: text,
-      };
-    }
-
-    /* system role messages — not user-facing in this UI; render empty */
-    return {
-      id: m.id,
-      role: "system" as const,
-      content: "",
-    };
   });
 
-  /* While the request is in flight but no tokens have streamed yet, the AI
-     SDK has no assistant message in `aiMessages` -- so the streaming dots
-     have nothing to attach to. Append a synthetic placeholder so the user
-     sees the AI is thinking; it drops out the moment the first real part
-     arrives and chatStatus transitions to "streaming". */
-  if (chatStatus === "submitted") {
-    messages.push({
-      id: "__pending__",
-      role: "ai" as const,
-      content: null,
-      isStreaming: true,
-    });
-  }
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(TUTOR_SIDEBAR_COLLAPSED_KEY, String(isTutorSidebarCollapsed));
+    } catch {
+      /* localStorage may throw (private mode quota, etc.) — silently ignore */
+    }
+  }, [isTutorSidebarCollapsed]);
+
+  /* Translate AI SDK UIMessages into the design system's MessageData --
+     one call per Chat instance (buildMessageData, defined above the
+     component). Whichever one is showing depends on tutorConversationId. */
+  const messages = buildMessageData(aiMessages, chatStatus);
+  const tutorMessages = buildMessageData(tutorAiMessages, tutorChatStatus);
 
   const handleSendMessage = (text: string) => {
     /* conversationId flows per-call (not via the transport's own `body`,
@@ -279,6 +359,22 @@ export default function App() {
     /* Each AI response counts as a hint — increments trigger the gold flash
        on the sidebar's hint-history-row count numeral. */
     setHintCount((n) => n + 1);
+  };
+
+  /* #4: sends into whichever tutor conversation is currently selected.
+     Guarded (rather than trusted) even though the composer that calls this
+     is only reachable once tutorConversationId is set -- cheap insurance
+     against a future caller wiring the tutor composer up before selection. */
+  const handleSendTutorMessage = (text: string) => {
+    if (!tutorConversationId) return;
+    sendTutorMessage({ text }, { body: { conversationId: tutorConversationId } });
+  };
+
+  /* Selecting a homework section always means "I want the section chat" --
+     switches back out of the tutor surface if one was showing. */
+  const handleSectionSelect = (sectionNumber: number) => {
+    setCurrentSection(sectionNumber);
+    setTutorConversationId(undefined);
   };
 
   /* Submits the section's active conversation via the real API. No existing
@@ -369,18 +465,41 @@ export default function App() {
           justSubmittedSection={justSubmittedSection}
           isCollapsed={isSidebarCollapsed}
           onToggleCollapse={() => setIsSidebarCollapsed((c) => !c)}
-          onSectionSelect={setCurrentSection}
+          onSectionSelect={handleSectionSelect}
           onSubmit={handleSubmit}
           workerStatus={workerStatus}
           workerLoading={workerLoading}
         />
 
-        {/* Main conversation column — warm paper surface */}
-        <ConversationView
-          breadcrumb="STATS 311 · HW 3 · Section 3 P-VALUES"
-          messages={messages}
-          onSendMessage={handleSendMessage}
+        {/* #4: second rail — course-scoped tutor conversations. A distinct
+            surface from the homework Sidebar above (see
+            TutorConversationsList's doc comment for the IA decision). */}
+        <TutorConversationsList
+          courseId={courseId}
+          selectedConversationId={tutorConversationId}
+          onSelectConversation={setTutorConversationId}
+          onConversationCreated={setTutorConversationId}
+          isCollapsed={isTutorSidebarCollapsed}
+          onToggleCollapse={() => setIsTutorSidebarCollapsed((c) => !c)}
         />
+
+        {/* Main conversation column — warm paper surface. Shows the
+            selected tutor conversation when one is active, otherwise the
+            homework section chat (default). */}
+        {tutorConversationId ? (
+          <ConversationView
+            key={tutorConversationId}
+            breadcrumb="STATS 311 · TUTOR CHAT"
+            messages={tutorMessages}
+            onSendMessage={handleSendTutorMessage}
+          />
+        ) : (
+          <ConversationView
+            breadcrumb="STATS 311 · HW 3 · Section 3 P-VALUES"
+            messages={messages}
+            onSendMessage={handleSendMessage}
+          />
+        )}
       </div>
     </div>
   );

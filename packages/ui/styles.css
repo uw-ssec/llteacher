@@ -700,6 +700,198 @@ body {
   }
 
   /* -------------------------------------------------------------------------
+     .tutor-sidebar — the tutor-conversations rail (#4).
+     A deliberately different surface from .sidebar above: that rail is
+     Husky Purple chrome for a homework syllabus; this one is a plain paper
+     surface for a course-scoped conversation thread list -- a different
+     mental model (see TutorConversationsList.tsx's doc comment for the IA
+     decision). Reuses the shared `.sidebar--collapsed` width/padding rule
+     for its collapse mechanic (the same technique .admin-sidebar below
+     uses) rather than duplicating that transition.
+     ------------------------------------------------------------------------- */
+  .tutor-sidebar {
+    width: 220px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    background-color: var(--color-bg);
+    border-inline-end: 1px solid var(--color-border);
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: var(--space-6) var(--space-4);
+    transition:
+      width 240ms ease-out,
+      padding-inline 240ms ease-out;
+  }
+
+  .tutor-sidebar.sidebar--collapsed {
+    padding-inline: var(--space-2);
+  }
+
+  .tutor-sidebar__top {
+    display: flex;
+    justify-content: flex-end;
+    margin-block-end: var(--space-3);
+    flex-shrink: 0;
+  }
+
+  .sidebar--collapsed .tutor-sidebar__top {
+    justify-content: center;
+  }
+
+  .tutor-sidebar__collapse-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    background: none;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    color: var(--color-text-muted);
+    padding: 0;
+    transition:
+      background-color 120ms ease-out,
+      color 120ms ease-out;
+  }
+
+  .tutor-sidebar__collapse-toggle:hover {
+    background-color: var(--color-border);
+    color: var(--color-text);
+  }
+
+  .tutor-sidebar__label {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    font-weight: var(--weight-medium);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    margin-block-end: var(--space-3);
+    line-height: var(--leading-tight);
+  }
+
+  .tutor-sidebar__new-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    margin-block-end: var(--space-4);
+    background: none;
+    border: 1px dashed var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--color-accent);
+    font-size: var(--font-size-sm);
+    cursor: pointer;
+    transition:
+      background-color 120ms ease-out,
+      border-color 120ms ease-out;
+  }
+
+  .tutor-sidebar__new-btn:hover:not(:disabled) {
+    background-color: var(--color-accent-faint);
+    border-color: var(--color-accent);
+  }
+
+  .tutor-sidebar__new-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .sidebar--collapsed .tutor-sidebar__new-btn {
+    padding-inline: 0;
+  }
+
+  .tutor-sidebar__error {
+    font-size: var(--font-size-sm);
+    color: var(--color-error);
+  }
+
+  .tutor-sidebar__empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-6) var(--space-2);
+    color: var(--color-text-muted);
+    font-size: var(--font-size-sm);
+    text-align: center;
+  }
+
+  .tutor-sidebar__empty p {
+    margin: 0;
+  }
+
+  .tutor-sidebar__list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .sidebar--collapsed .tutor-sidebar__label,
+  .sidebar--collapsed .tutor-sidebar__new-btn-label,
+  .sidebar--collapsed .tutor-sidebar__empty,
+  .sidebar--collapsed .tutor-sidebar__list {
+    display: none;
+  }
+
+  /* -------------------------------------------------------------------------
+     .tutor-conversation-item — one row in the tutor-conversations rail.
+     Echoes .section-item's rhythm (see below) on the rail's paper surface.
+     ------------------------------------------------------------------------- */
+  .tutor-conversation-item-wrap {
+    list-style: none;
+  }
+
+  .tutor-conversation-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: 100%;
+    padding: var(--space-2);
+    background: none;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    text-align: start;
+    color: var(--color-text);
+    transition: background-color 120ms ease-out;
+  }
+
+  .tutor-conversation-item:hover {
+    background-color: var(--color-border);
+  }
+
+  .tutor-conversation-item--selected {
+    background-color: var(--color-accent-faint);
+  }
+
+  .tutor-conversation-item__title {
+    font-size: var(--font-size-sm);
+    font-weight: var(--weight-medium);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    width: 100%;
+  }
+
+  .tutor-conversation-item__meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+  }
+
+  /* -------------------------------------------------------------------------
      .hint-history-row — three-column row: indicator · label · count.
      Echoes .section-item rhythm: small square mark · readable text · meta.
      ------------------------------------------------------------------------- */

@@ -157,3 +157,279 @@ describe("App chat conversationId propagation (#3 follow-up)", () => {
     expect(chatCalls[1]!.conversationId).toBe("conv-1");
   });
 });
+
+/* #4: the tutor-conversations rail. Renders the real App (not a mocked
+   TutorConversationsList) against a fake backend, exercising the same
+   integration points the #3 follow-up test above does -- these cover the
+   issue's own Testing Strategy items 3-4 ("New conversation button creates
+   and navigates" / "Conversation selection updates ... state used to show
+   the chat") at the App level, where TutorConversationsList's own tests
+   only go as far as "reports the id up" without checking that App actually
+   switches the chat column on it. */
+describe("App tutor-conversations rail (#4)", () => {
+  const HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [
+          { id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null },
+        ],
+      },
+    ],
+  };
+
+  function stubBaseFetch(extra: {
+    onConversationsGet?: () => Response;
+    onConversationsPost?: (body: unknown) => Response;
+  }) {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(
+            JSON.stringify({ message: "ok", ping_id: "11111111-1111-1111-1111-111111111111" }),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations?")) {
+          return extra.onConversationsGet
+            ? extra.onConversationsGet()
+            : new Response(JSON.stringify([]), { status: 200 });
+        }
+        if (url === "/api/conversations" && init?.method === "POST") {
+          return extra.onConversationsPost
+            ? extra.onConversationsPost(JSON.parse(String(init.body)))
+            : new Response(JSON.stringify({ error: "unexpected POST" }), { status: 500 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+  }
+
+  it("renders the tutor rail scoped to the homework's courseId, alongside the homework sidebar", async () => {
+    const conversationsGetUrls: string[] = [];
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          conversationsGetUrls.push(url);
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Tutor Chats")).toBeTruthy();
+    expect(await screen.findByText("No conversations yet")).toBeTruthy();
+    // Data leakage guard (Testing Strategy #1): the fetch must be scoped to
+    // this student's actual courseId ("course-a" from HOMEWORK_FIXTURE),
+    // never a hardcoded or missing one.
+    await waitFor(() =>
+      expect(conversationsGetUrls).toContain("/api/conversations?courseId=course-a&kind=tutor"),
+    );
+    // The homework sidebar (a different surface, see TutorConversationsList's
+    // doc comment) still renders alongside it.
+    expect(screen.getByRole("button", { name: /Sec 1/ })).toBeTruthy();
+  });
+
+  it("creating a tutor conversation switches the chat column to it, and sends chat turns with its conversationId", async () => {
+    const chatCalls: Array<{ conversationId?: string }> = [];
+    stubBaseFetch({
+      onConversationsPost: () =>
+        new Response(
+          JSON.stringify({
+            id: "tutor-conv-1",
+            ownerUserId: "u1",
+            courseId: "course-a",
+            sectionId: null,
+            kind: "tutor",
+            title: "New Conversation",
+            isDeleted: false,
+            deletedAt: null,
+            createdAt: "2026-08-01T00:00:00.000Z",
+            updatedAt: "2026-08-01T00:00:00.000Z",
+          }),
+          { status: 201 },
+        ),
+    });
+    // Layer the /api/chat handler on top of the shared base stub.
+    const baseFetch = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/chat") {
+          const body = JSON.parse(String(init?.body)) as { conversationId?: string };
+          chatCalls.push(body);
+          const chunks = [
+            { type: "start" },
+            { type: "start-step" },
+            { type: "text-start", id: "t1" },
+            { type: "text-delta", id: "t1", delta: "tutor reply" },
+            { type: "text-end", id: "t1" },
+            { type: "finish-step" },
+            { type: "finish" },
+          ];
+          const streamBody = chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
+          return new Response(streamBody, {
+            status: 200,
+            headers: { "content-type": "text/event-stream", "x-conversation-id": body.conversationId ?? "unexpected" },
+          });
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("No conversations yet");
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+
+    // The chat column switched to the tutor surface (breadcrumb changed).
+    await screen.findByText("STATS 311 · TUTOR CHAT");
+
+    const composer = await screen.findByLabelText("Message input");
+    await user.type(composer, "hello tutor{Enter}");
+    await screen.findByText("tutor reply");
+
+    expect(chatCalls).toHaveLength(1);
+    expect(chatCalls[0]!.conversationId).toBe("tutor-conv-1");
+  });
+
+  it("selecting a homework section switches the chat column back out of the tutor surface", async () => {
+    stubBaseFetch({
+      onConversationsGet: () =>
+        new Response(
+          JSON.stringify([
+            {
+              id: "tutor-conv-1",
+              ownerUserId: "u1",
+              courseId: "course-a",
+              sectionId: null,
+              kind: "tutor",
+              title: "Existing tutor chat",
+              isDeleted: false,
+              deletedAt: null,
+              createdAt: "2026-08-01T00:00:00.000Z",
+              updatedAt: "2026-08-01T00:00:00.000Z",
+              messageCount: 2,
+            },
+          ]),
+          { status: 200 },
+        ),
+    });
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("Existing tutor chat"));
+    await screen.findByText("STATS 311 · TUTOR CHAT");
+
+    await user.click(screen.getByRole("button", { name: /Sec 1/ }));
+    await screen.findByText("STATS 311 · HW 3 · Section 3 P-VALUES");
+    expect(screen.queryByText("STATS 311 · TUTOR CHAT")).toBeNull();
+  });
+});
+
+// Testing Strategy #5 ("Sidebar collapse state persists"): the tutor rail's
+// own localStorage key (TUTOR_SIDEBAR_COLLAPSED_KEY) must be independent of
+// the homework sidebar's -- toggling one must not move the other, and the
+// preference must survive a remount (the localStorage-backed lazy
+// initializer, same mechanism the homework sidebar already had covered
+// only implicitly before #4).
+describe("App tutor sidebar collapse persistence (#4)", () => {
+  afterEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("persists the tutor rail's collapsed state across a remount, independently of the homework sidebar's", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    const { unmount } = render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const toggle = await screen.findByRole("button", { name: "Collapse tutor conversations" });
+    const user = userEvent.setup();
+    await user.click(toggle);
+
+    await waitFor(() =>
+      expect(window.localStorage.getItem("llteacher:tutor-sidebar-collapsed")).toBe("true"),
+    );
+    // The homework sidebar's own key is untouched by toggling the tutor rail.
+    expect(window.localStorage.getItem("llteacher:sidebar-collapsed")).not.toBe("true");
+
+    unmount();
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("button", { name: "Expand tutor conversations" })).toBeTruthy();
+  });
+});

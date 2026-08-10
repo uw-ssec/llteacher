@@ -117,6 +117,13 @@ describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)
 
     expect(result).toHaveLength(1);
     expect(result[0]!.title).toBe("HW in Course A");
+    // #4: the tutor-conversations rail (apps/web/src/client/hooks/
+    // useTutorConversations.ts) reads this off the homework summary to
+    // scope GET/POST /api/conversations -- must be course A's id (the
+    // course the student is actually enrolled in), never course B's, since
+    // this is also this function's only enrollment-scoping guarantee this
+    // test already exercises above.
+    expect(result[0]!.courseId).toBe(courseA!.id);
     const sec1Status = result[0]!.sections.find((s) => s.title === "Sec 1")!;
     expect(sec1Status.status).toBe("not_started");
 

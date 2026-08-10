@@ -31,6 +31,31 @@ export interface StudentHomeworkListResponse {
   homeworks: StudentHomeworkSummary[];
 }
 
+/* -- Conversations (#4/#5) --------------------------------------------------
+   Wire shape of a row from GET /api/conversations -- listConversationsForOwner
+   (repositories/conversations.ts) returns the raw conversations columns plus
+   a computed messageCount (#4). POST /api/conversations returns the same
+   columns via createConversation's plain `.returning()` insert, but a
+   brand-new conversation never has messages yet, so that response has no
+   messageCount key at all -- callers (useTutorConversations) default it to
+   0 rather than treating its absence as a fetch bug. */
+export interface ConversationSummary {
+  id: string;
+  ownerUserId: string;
+  courseId: string;
+  sectionId: string | null;
+  kind: "section" | "tutor";
+  title: string;
+  isDeleted: boolean;
+  deletedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ConversationListItemResponse extends ConversationSummary {
+  messageCount: number;
+}
+
 export interface SectionResponse {
   id: string;
   title: string;

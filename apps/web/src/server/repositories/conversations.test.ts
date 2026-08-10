@@ -319,6 +319,35 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     expect(olderIdx).toBeLessThan(newerIdx);
   });
 
+  it("listConversationsForOwner reports messageCount per conversation (#4)", async () => {
+    const withMessages = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Message count: has messages",
+    });
+    await appendMessage(db, unsafeCourseScope(courseAId), withMessages.id, {
+      role: "user",
+      parts: [{ type: "text", text: "one" }],
+    });
+    await appendMessage(db, unsafeCourseScope(courseAId), withMessages.id, {
+      role: "assistant",
+      parts: [{ type: "text", text: "two" }],
+    });
+    const withoutMessages = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Message count: no messages",
+    });
+
+    const rows = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId);
+    const withMessagesRow = rows.find((r) => r.id === withMessages.id);
+    const withoutMessagesRow = rows.find((r) => r.id === withoutMessages.id);
+    expect(withMessagesRow?.messageCount).toBe(2);
+    expect(withoutMessagesRow?.messageCount).toBe(0);
+  });
+
   it("updateConversationTitle updates and returns the row within scope", async () => {
     const created = await createConversation(db, unsafeCourseScope(courseAId), {
       ownerUserId: userId,
