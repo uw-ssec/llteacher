@@ -731,6 +731,251 @@ describe("App tutor conversation header rename (#6)", () => {
   });
 });
 
+// #144: chat crashes on malformed model output; failures are silent.
+// Covers the two useChat-status-driven requirements for the SECTION chat
+// (the homework/syllabus chat, App's first useChat instance): guarding
+// send-while-streaming, and surfacing a failed turn instead of it silently
+// vanishing. The tutor chat's equivalents (App's SECOND, independently
+// wired useChat instance) are covered separately below -- the issue's own
+// context flags that both instances need the fix, not just whichever is
+// nearer the top of the file.
+describe("App section chat streaming guard + error surfacing (#144)", () => {
+  function stubHomeworkFetch(chatFetch: typeof fetch) {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url === "/api/chat") return chatFetch(input, init);
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+  }
+
+  it("disables the composer while a turn is in flight and does not fire a second /api/chat request for a same-message Enter", async () => {
+    let chatCallCount = 0;
+    let resolveChat!: (res: Response) => void;
+    const pendingChat = new Promise<Response>((resolve) => {
+      resolveChat = resolve;
+    });
+    stubHomeworkFetch(async () => {
+      chatCallCount += 1;
+      return pendingChat;
+    });
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "first message{Enter}");
+
+    // Status flips to "submitted" synchronously inside sendMessage, before
+    // the (still-pending) fetch resolves -- the composer must reflect that
+    // immediately, not just once a response eventually arrives.
+    await waitFor(() => expect(composer.disabled).toBe(true));
+    expect(chatCallCount).toBe(1);
+
+    // Disabled textareas reject keystrokes/Enter entirely in jsdom -- this
+    // proves the guard is load-bearing (AI SDK v5's Chat#sendMessage has no
+    // internal guard of its own against being called while already in
+    // flight), not merely a visual flag nobody enforces.
+    await user.type(composer, "second message{Enter}");
+    expect(chatCallCount).toBe(1);
+    // The composer's draft was already cleared on the first submit (see
+    // ConversationView's handleSubmit) -- disabled textareas reject further
+    // keystrokes entirely, so it stays empty rather than accumulating
+    // "second message".
+    expect(composer.value).toBe("");
+
+    // Let the first turn resolve, and confirm the composer comes back.
+    resolveChat(
+      new Response(
+        [
+          `data: ${JSON.stringify({ type: "start" })}\n\n`,
+          `data: ${JSON.stringify({ type: "start-step" })}\n\n`,
+          `data: ${JSON.stringify({ type: "text-start", id: "t1" })}\n\n`,
+          `data: ${JSON.stringify({ type: "text-delta", id: "t1", delta: "reply" })}\n\n`,
+          `data: ${JSON.stringify({ type: "text-end", id: "t1" })}\n\n`,
+          `data: ${JSON.stringify({ type: "finish-step" })}\n\n`,
+          `data: ${JSON.stringify({ type: "finish" })}\n\n`,
+          "data: [DONE]\n\n",
+        ].join(""),
+        { status: 200, headers: { "content-type": "text/event-stream", "x-conversation-id": "conv-1" } },
+      ),
+    );
+    await screen.findByText("reply");
+    await waitFor(() => expect(composer.disabled).toBe(false));
+  });
+
+  it("surfaces a failed turn as an inline retryable error instead of silently disappearing, and regenerate() recovers it", async () => {
+    let chatCallCount = 0;
+    stubHomeworkFetch(async () => {
+      chatCallCount += 1;
+      if (chatCallCount === 1) {
+        // HttpChatTransport throws `new Error(await response.text())` for a
+        // non-ok response -- this is the exact path a failed/rate-limited
+        // /api/chat request takes in production.
+        return new Response("rate limited", { status: 429 });
+      }
+      return new Response(
+        [
+          `data: ${JSON.stringify({ type: "start" })}\n\n`,
+          `data: ${JSON.stringify({ type: "start-step" })}\n\n`,
+          `data: ${JSON.stringify({ type: "text-start", id: "t1" })}\n\n`,
+          `data: ${JSON.stringify({ type: "text-delta", id: "t1", delta: "recovered reply" })}\n\n`,
+          `data: ${JSON.stringify({ type: "text-end", id: "t1" })}\n\n`,
+          `data: ${JSON.stringify({ type: "finish-step" })}\n\n`,
+          `data: ${JSON.stringify({ type: "finish" })}\n\n`,
+          "data: [DONE]\n\n",
+        ].join(""),
+        { status: 200, headers: { "content-type": "text/event-stream", "x-conversation-id": "conv-1" } },
+      );
+    });
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "will fail{Enter}");
+
+    // The synthetic "thinking" placeholder (chatStatus === "submitted") must
+    // resolve into a visible, retryable error row -- not just vanish, which
+    // was #144's actual complaint.
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(await screen.findByText("rate limited")).toBeTruthy();
+    expect(composer.disabled).toBe(true); // status "error" is not "ready" either
+
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+
+    await screen.findByText("recovered reply");
+    expect(chatCallCount).toBe(2);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect((screen.getByLabelText("Message input") as HTMLTextAreaElement).disabled).toBe(false);
+  });
+});
+
+// #144: same two requirements as directly above, but for App's SECOND,
+// independently-wired useChat instance (the tutor chat) -- confirms the fix
+// isn't scoped to only whichever useChat call happens to sit nearer the top
+// of App.tsx.
+describe("App tutor chat streaming guard + error surfacing (#144)", () => {
+  const HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
+      },
+    ],
+  };
+
+  function stubTutorFetch(chatFetch: typeof fetch) {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url === "/api/conversations" && init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              id: "tutor-conv-1",
+              ownerUserId: "u1",
+              courseId: "course-a",
+              sectionId: null,
+              kind: "tutor",
+              title: "New Conversation",
+              isDeleted: false,
+              deletedAt: null,
+              createdAt: "2026-08-01T00:00:00.000Z",
+              updatedAt: "2026-08-01T00:00:00.000Z",
+            }),
+            { status: 201 },
+          );
+        }
+        if (url === "/api/chat") return chatFetch(input, init);
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+  }
+
+  it("surfaces a failed tutor turn as an inline retryable error, and disables the tutor composer while errored", async () => {
+    let chatCallCount = 0;
+    stubTutorFetch(async () => {
+      chatCallCount += 1;
+      if (chatCallCount === 1) return new Response("tutor stream failed", { status: 500 });
+      return new Response(
+        [
+          `data: ${JSON.stringify({ type: "start" })}\n\n`,
+          `data: ${JSON.stringify({ type: "start-step" })}\n\n`,
+          `data: ${JSON.stringify({ type: "text-start", id: "t1" })}\n\n`,
+          `data: ${JSON.stringify({ type: "text-delta", id: "t1", delta: "tutor recovered" })}\n\n`,
+          `data: ${JSON.stringify({ type: "text-end", id: "t1" })}\n\n`,
+          `data: ${JSON.stringify({ type: "finish-step" })}\n\n`,
+          `data: ${JSON.stringify({ type: "finish" })}\n\n`,
+          "data: [DONE]\n\n",
+        ].join(""),
+        { status: 200, headers: { "content-type": "text/event-stream", "x-conversation-id": "tutor-conv-1" } },
+      );
+    });
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "New conversation" }));
+    await screen.findByText("STATS 311 · TUTOR CHAT");
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    await user.type(composer, "tutor question{Enter}");
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(await screen.findByText("tutor stream failed")).toBeTruthy();
+    expect(composer.disabled).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+
+    await screen.findByText("tutor recovered");
+    expect(chatCallCount).toBe(2);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
 // Testing Strategy #5 ("Sidebar collapse state persists"): the tutor rail's
 // own localStorage key (TUTOR_SIDEBAR_COLLAPSED_KEY) must be independent of
 // the homework sidebar's -- toggling one must not move the other, and the

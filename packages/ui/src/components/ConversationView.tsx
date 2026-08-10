@@ -15,6 +15,7 @@ import { Message } from "./Message";
 import { Composer } from "./Composer";
 import { CodeBlock } from "./CodeBlock";
 import { EditableTitle } from "./EditableTitle";
+import { Button } from "./Button";
 
 /* -- Message data shape ---------------------------------------------------- */
 
@@ -62,6 +63,22 @@ export interface ConversationViewProps {
   isTitleEditable?: boolean;
   messages: MessageData[];
   onSendMessage?: (text: string) => void;
+  /** #144: true while the owning `useChat` request is in flight (status
+   *  "submitted" or "streaming") or has errored (status "error") -- i.e.
+   *  anything other than "ready". Disables the composer so pressing Enter
+   *  mid-stream can't fire a second, overlapping `sendMessage` call (AI
+   *  SDK v5's `Chat#sendMessage` has no internal guard against being
+   *  called while already in flight or errored -- it just pushes another
+   *  message and starts another request). Defaults to false so callers
+   *  that don't track a `useChat` status (e.g. a fixture in tests) keep
+   *  the composer usable. */
+  isSending?: boolean;
+  /** #144: set when the owning `useChat`'s last turn failed (status
+   *  "error") so a failed/rate-limited stream doesn't just silently
+   *  disappear. Rendered as an inline row below the messages with a Retry
+   *  action; `onRetry` should call that `useChat` instance's own
+   *  `regenerate()`. `null`/`undefined` renders nothing. */
+  error?: { message: string; onRetry: () => void } | null;
 }
 
 /* -- Component ------------------------------------------------------------- */
@@ -73,6 +90,8 @@ export function ConversationView({
   isTitleEditable = true,
   messages,
   onSendMessage,
+  isSending = false,
+  error = null,
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -139,16 +158,32 @@ export function ConversationView({
             );
           })}
 
+          {/* #144: inline retryable error row -- shown when the owning
+              useChat's last turn failed (status "error"), so a failed or
+              rate-limited stream surfaces something instead of the
+              synthetic "thinking" placeholder just vanishing. */}
+          {error && (
+            <div className="conversation-error-row" role="alert">
+              <p className="conversation-error-row__message">{error.message}</p>
+              <Button variant="danger" size="sm" outlined onClick={error.onRetry}>
+                Retry
+              </Button>
+            </div>
+          )}
+
           {/* Bottom sentinel for scroll-to-latest */}
           <div ref={bottomRef} aria-hidden="true" />
         </div>
       </div>
 
-      {/* Sticky composer */}
+      {/* Sticky composer -- #144: disabled whenever a request is in flight
+          or has errored (anything but "ready"), so Enter mid-stream can't
+          fire a second, overlapping send. */}
       <Composer
         value={draft}
         onChange={setDraft}
         onSubmit={handleSubmit}
+        disabled={isSending}
         history={composerHistory}
       />
     </div>

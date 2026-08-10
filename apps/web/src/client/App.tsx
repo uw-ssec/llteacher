@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { useNavigate } from "react-router";
-import { Sidebar, TopNav, ConversationView, renderToolPart } from "@llteacher/ui";
-import type { SidebarSection, MessageData, ToolPart } from "@llteacher/ui";
+import { Sidebar, TopNav, ConversationView, renderToolPart, isToolPart, ErrorBoundary } from "@llteacher/ui";
+import type { SidebarSection, MessageData } from "@llteacher/ui";
 import { useAuth } from "./components/AuthProvider";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
 import { TutorConversationsList } from "./views/TutorConversationsList";
@@ -144,7 +144,16 @@ function buildMessageData(
             if (part.type === "text") {
               return <p key={`text-${m.id}-${i}`}>{part.text}</p>;
             }
-            return renderToolPart(part as ToolPart, `tool-${m.id}-${i}`);
+            /* #144: no `part as ToolPart` cast -- useChat isn't given the
+               server's tool-input generics, so the AI SDK's UIMessagePart
+               union can't statically prove a `tool-*` part carries
+               `input`/`state`. isToolPart runtime-checks the one thing
+               actually needed (a string `type`) before handing off to
+               renderToolPart, which validates the tool-specific `input`
+               shape itself (parseShowDefinitionInput) rather than trusting
+               a blind cast all the way through. */
+            if (!isToolPart(part)) return null;
+            return renderToolPart(part, `tool-${m.id}-${i}`);
           })}
         </>
       );
@@ -245,6 +254,8 @@ export default function App() {
     messages: aiMessages,
     sendMessage,
     status: chatStatus,
+    error: chatError,
+    regenerate: regenerateChat,
   } = useChat({
     transport: new DefaultChatTransport({
       api: "/api/chat",
@@ -293,6 +304,8 @@ export default function App() {
     messages: tutorAiMessages,
     sendMessage: sendTutorMessage,
     status: tutorChatStatus,
+    error: tutorChatError,
+    regenerate: regenerateTutorChat,
   } = useChat({
     id: tutorConversationId,
     messages: tutorInitialMessages,
@@ -468,7 +481,42 @@ export default function App() {
   const messages = buildMessageData(aiMessages, chatStatus);
   const tutorMessages = buildMessageData(tutorAiMessages, tutorChatStatus);
 
+  /* #144: inline retryable error rows for ConversationView, one per useChat
+     instance. `regenerate` re-issues the last turn's request through the
+     SAME transport, so it needs the same per-call `body` as sendMessage
+     (see the useChat comment above) -- without it, a retry after the
+     conversation was already created would omit conversationId and the
+     server would mint a second, unrelated conversation. Only shown when
+     status is actually "error" (not just "error object happens to be set" --
+     AI SDK v5 clears status but may leave a stale error reference on some
+     paths, so status is the source of truth here, matching how chatStatus
+     already gates the composer's disabled state below). */
+  const sectionChatErrorRow =
+    chatStatus === "error"
+      ? {
+          message: chatError?.message || "Something went wrong. Please try again.",
+          onRetry: () => regenerateChat({ body: conversationId ? { conversationId } : {} }),
+        }
+      : null;
+  const tutorChatErrorRow =
+    tutorChatStatus === "error"
+      ? {
+          message: tutorChatError?.message || "Something went wrong. Please try again.",
+          onRetry: () =>
+            regenerateTutorChat({ body: tutorConversationId ? { conversationId: tutorConversationId } : {} }),
+        }
+      : null;
+
   const handleSendMessage = (text: string) => {
+    /* #144: AI SDK v5's Chat#sendMessage has no internal guard against
+       being called while a previous turn is still in flight or has
+       errored -- it just pushes another message and starts another
+       request. Composer's own `disabled` (wired via ConversationView's
+       `isSending` below) already prevents this from typing + Enter, but
+       this handler is guarded independently too -- cheap insurance against
+       any other caller (future keyboard shortcut, programmatic resend,
+       etc.) that doesn't go through the composer. */
+    if (chatStatus !== "ready") return;
     /* conversationId flows per-call (not via the transport's own `body`,
        see the useChat comment above) so each turn after the first actually
        carries whatever the previous turn's x-conversation-id response
@@ -483,9 +531,12 @@ export default function App() {
   /* #4: sends into whichever tutor conversation is currently selected.
      Guarded (rather than trusted) even though the composer that calls this
      is only reachable once tutorConversationId is set -- cheap insurance
-     against a future caller wiring the tutor composer up before selection. */
+     against a future caller wiring the tutor composer up before selection.
+     #144: also guarded on tutorChatStatus === "ready" for the same reason
+     as handleSendMessage above. */
   const handleSendTutorMessage = (text: string) => {
     if (!tutorConversationId) return;
+    if (tutorChatStatus !== "ready") return;
     sendTutorMessage({ text }, { body: { conversationId: tutorConversationId } });
   };
 
@@ -618,22 +669,35 @@ export default function App() {
 
         {/* Main conversation column — warm paper surface. Shows the
             selected tutor conversation when one is active, otherwise the
-            homework section chat (default). */}
+            homework section chat (default). #144: each wrapped in its own
+            ErrorBoundary (keyed to the surface/conversation showing) so a
+            render throw in one contains itself to the chat column instead
+            of white-screening the whole app -- the sidebar/nav stay usable,
+            and switching surfaces/conversations remounts a fresh boundary
+            rather than being stuck on a stale caught error. */}
         {tutorConversationId ? (
-          <ConversationView
-            key={tutorConversationId}
-            breadcrumb="STATS 311 · TUTOR CHAT"
-            title={tutorConversationTitle}
-            onRenameTitle={handleRenameTutorConversation}
-            messages={tutorMessages}
-            onSendMessage={handleSendTutorMessage}
-          />
+          <ErrorBoundary key={`tutor-${tutorConversationId}`}>
+            <ConversationView
+              key={tutorConversationId}
+              breadcrumb="STATS 311 · TUTOR CHAT"
+              title={tutorConversationTitle}
+              onRenameTitle={handleRenameTutorConversation}
+              messages={tutorMessages}
+              onSendMessage={handleSendTutorMessage}
+              isSending={tutorChatStatus !== "ready"}
+              error={tutorChatErrorRow}
+            />
+          </ErrorBoundary>
         ) : (
-          <ConversationView
-            breadcrumb="STATS 311 · HW 3 · Section 3 P-VALUES"
-            messages={messages}
-            onSendMessage={handleSendMessage}
-          />
+          <ErrorBoundary key="section">
+            <ConversationView
+              breadcrumb="STATS 311 · HW 3 · Section 3 P-VALUES"
+              messages={messages}
+              onSendMessage={handleSendMessage}
+              isSending={chatStatus !== "ready"}
+              error={sectionChatErrorRow}
+            />
+          </ErrorBoundary>
         )}
       </div>
     </div>
