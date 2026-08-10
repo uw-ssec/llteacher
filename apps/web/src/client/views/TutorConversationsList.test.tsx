@@ -100,12 +100,13 @@ describe("TutorConversationsList", () => {
   // clicking an existing row must report that row's id, not fire the
   // "created" callback used for new conversations.
   //
-  // #6: clicking the SELECT control (time + count), not the title text --
-  // clicking the title now enters rename mode instead (see the "rename
-  // (#6)" describe block below). ConversationListItem.test.tsx already
-  // covers the row/select-vs-rename split in isolation; this just confirms
+  // #6: the row itself (which the title is part of, per #4's original
+  // contract restored after review) is the select control -- a small
+  // pencil icon, not the title, is what enters rename mode instead (see
+  // the "rename (#6)" describe block below). ConversationListItem.test.tsx
+  // already covers the row/pencil split in isolation; this just confirms
   // TutorConversationsList wires onSelect through unchanged.
-  it("clicking an existing conversation's select control calls onSelectConversation with its id", async () => {
+  it("clicking an existing conversation's row calls onSelectConversation with its id", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([CONV_A]), { status: 200 })));
     const { onSelectConversation, onConversationCreated } = renderList();
 

@@ -33,14 +33,22 @@ function ControlledEditableTitle(props: Omit<EditableTitleProps, "value" | "onSa
 }
 
 describe("EditableTitle", () => {
-  it("renders the value read-only with a keyboard-reachable rename trigger", () => {
+  // #6 redesign (post-review): the title TEXT is plain/non-interactive --
+  // only the small pencil-icon button beside it enters edit mode. This
+  // lets a consumer like ConversationListItem make the title text part of
+  // a bigger "select this row" click target without it also triggering
+  // rename (see that file's doc comment).
+  it("renders the value as plain text with a separate, keyboard-reachable pencil rename trigger", () => {
     render(<EditableTitle value="Understanding p-values" onSave={() => {}} />);
     const trigger = screen.getByRole("button", { name: "Rename: Understanding p-values" });
     expect(trigger).toBeTruthy();
-    expect(screen.getByText("Understanding p-values")).toBeTruthy();
     // Native <button> -- reachable via Tab and activatable via Enter/Space
     // with no extra tabIndex plumbing needed.
     expect(trigger.tagName).toBe("BUTTON");
+    // The value text itself is NOT inside that button -- it's a sibling,
+    // non-interactive span.
+    const value = screen.getByText("Understanding p-values");
+    expect(value.closest("button")).toBeNull();
   });
 
   it("does not render a rename affordance when isEditable is false (non-owner)", async () => {
@@ -54,7 +62,13 @@ describe("EditableTitle", () => {
     expect(screen.queryByLabelText("Edit title")).toBeNull();
   });
 
-  it("clicking the title enters edit mode with a pre-filled, focused input carrying an aria-label", async () => {
+  it("clicking the title TEXT (not the pencil) does not enter edit mode", async () => {
+    render(<EditableTitle value="Original title" onSave={() => {}} />);
+    await userEvent.click(screen.getByText("Original title"));
+    expect(screen.queryByLabelText("Edit title")).toBeNull();
+  });
+
+  it("clicking the pencil enters edit mode with a pre-filled, focused input carrying an aria-label", async () => {
     render(<EditableTitle value="Original title" onSave={() => {}} />);
     await userEvent.click(screen.getByRole("button", { name: "Rename: Original title" }));
 
@@ -62,6 +76,22 @@ describe("EditableTitle", () => {
     expect(input).toBeTruthy();
     expect(input.value).toBe("Original title");
     expect(document.activeElement).toBe(input);
+  });
+
+  // The scenario ConversationListItem actually relies on: the pencil sits
+  // inside a larger clickable "select this row" element, so its own click
+  // must never bubble into that ancestor's handler.
+  it("clicking the pencil does not propagate to an ancestor click handler", async () => {
+    const onAncestorClick = vi.fn();
+    render(
+      // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
+      <div onClick={onAncestorClick}>
+        <EditableTitle value="Original title" onSave={() => {}} />
+      </div>,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Original title" }));
+    expect(onAncestorClick).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Edit title")).toBeTruthy();
   });
 
   it("Enter saves the trimmed value", async () => {

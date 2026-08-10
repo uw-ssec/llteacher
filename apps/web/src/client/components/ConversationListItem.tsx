@@ -12,22 +12,37 @@ import type { ConversationListItemResponse } from "../../shared/types";
    own "apps/admin never imports from apps/web" convention noted in
    SubmissionsView.tsx).
 
-   #6: this row used to be ONE big <button> -- clicking anywhere (including
-   the title text) selected the conversation. Renaming needed the title
-   itself to become its own click target ("click the title... enters edit
-   mode", per the issue), which can't share a click handler with "select
-   this row" without one interaction swallowing the other. So the row is
-   now a plain <div> containing two sibling interactive controls:
-     - EditableTitle (title) -- click enters rename mode. Its own trigger
-       button calls stopPropagation() internally, so clicking it never
-       also selects the row.
-     - .tutor-conversation-item__meta-btn (time + message count) -- the
-       real, keyboard-reachable "select this conversation" control.
-   The row div also keeps onClick={onSelect} as a mouse-only convenience
-   (clicking padding/background still selects) but isn't itself part of
-   the accessibility tree as an interactive element -- the meta button is
-   the sanctioned keyboard/AT path for selecting, exactly mirroring what
-   the single big <button> gave keyboard users before this split. */
+   #6 (redesigned post-review): #4's original contract is restored -- the
+   whole row (including the title text) is clickable/keyboard-activatable
+   to select the conversation, exactly like before this task touched it.
+   Renaming now lives behind a small pencil-icon button (EditableTitle's
+   own rename trigger, see that component's doc comment) nested inside the
+   row.
+
+   This makes the row a <div role="button" tabIndex="0">, not a literal
+   <button>: a literal <button> cannot contain another literal <button>
+   (invalid HTML -- the browser would silently close the outer one early
+   the moment it hit the nested one), and EditableTitle's pencil trigger
+   IS a real nested <button>. A clickable row containing a smaller nested
+   action button is a well-established, widely-shipped pattern (the same
+   shape as a Gmail/Linear/GitHub Issues list row with an inline icon
+   action) even though it sits outside the strictest ARIA "don't nest
+   interactive controls" guidance -- accepted here deliberately rather than
+   duplicating EditableTitle's entire trigger+input+error state outside
+   the component just to keep the outer element a literal <button>.
+
+   Two propagation guards this requires, both in this file (EditableTitle's
+   own pencil button already stopPropagation()s its OWN click, unrelated to
+   these):
+     - onKeyDown checks `e.target === e.currentTarget` before treating
+       Enter/Space as "select the row" -- keydown bubbles from a focused
+       pencil button up through this row, so without the check, keyboard-
+       activating the pencil (Enter/Space on it) would ALSO fire onSelect
+       on the row underneath it.
+     - No such check is needed for onClick: EditableTitle's pencil button
+       already stops its own click from propagating up to this row's
+       onClick, covering both the mouse-click and the keyboard-activation-
+       fires-a-real-click-event cases in one place. -------------------------------------------------------------------------- */
 
 export interface ConversationListItemProps {
   conversation: ConversationListItemResponse;
@@ -79,7 +94,20 @@ export function ConversationListItem({
             ? "tutor-conversation-item tutor-conversation-item--selected"
             : "tutor-conversation-item"
         }
+        role="button"
+        tabIndex={0}
+        aria-current={isSelected ? "true" : undefined}
+        aria-label={`Select conversation: ${title}`}
         onClick={onSelect}
+        onKeyDown={(e) => {
+          // See this file's doc comment -- without this check, keyboard-
+          // activating the nested pencil button would also select the row.
+          if (e.target !== e.currentTarget) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onSelect();
+          }
+        }}
       >
         <EditableTitle
           value={title}
@@ -87,30 +115,15 @@ export function ConversationListItem({
           isEditable={isEditable}
           className="tutor-conversation-item__title"
         />
-        <button
-          type="button"
-          className="tutor-conversation-item__meta-btn"
-          aria-current={isSelected ? "true" : undefined}
-          aria-label={`Select conversation: ${title}`}
-          onClick={(e) => {
-            // Redundant with the row div's own onClick=onSelect above for
-            // mouse users, but this is the actual keyboard/AT-reachable
-            // control (see this file's doc comment) -- stopPropagation
-            // just avoids onSelect firing twice for a single mouse click.
-            e.stopPropagation();
-            onSelect();
-          }}
-        >
-          <span className="tutor-conversation-item__meta">
-            <span className="tutor-conversation-item__time">{formatUpdatedAt(updatedAt)}</span>
-            <span
-              className="tutor-conversation-item__count"
-              aria-label={`${messageCount} message${messageCount === 1 ? "" : "s"}`}
-            >
-              {messageCount}
-            </span>
+        <span className="tutor-conversation-item__meta">
+          <span className="tutor-conversation-item__time">{formatUpdatedAt(updatedAt)}</span>
+          <span
+            className="tutor-conversation-item__count"
+            aria-label={`${messageCount} message${messageCount === 1 ? "" : "s"}`}
+          >
+            {messageCount}
           </span>
-        </button>
+        </span>
       </div>
     </li>
   );

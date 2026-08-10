@@ -4,13 +4,26 @@ import { PencilSimple } from "@phosphor-icons/react";
 /* --------------------------------------------------------------------------
    EditableTitle — inline click-to-rename primitive (#6).
 
-   The shared component behind "click a title, get an inline text input"
-   wherever it shows up in the app: the tutor-conversations list row
-   (ConversationListItem) and the tutor chat column's header. Both callers
-   own their own persistence (an onSave that PATCHes and reconciles/reverts
-   optimistic state) -- this component only owns the *local* edit-mode UI:
-   entering/exiting edit mode, the input's value, client-side validation,
-   in-flight/disabled state, and surfacing whatever onSave does.
+   The shared component behind "click a pencil icon next to a title, get an
+   inline text input" wherever it shows up in the app: the tutor-
+   conversations list row (ConversationListItem) and the tutor chat
+   column's header. Both callers own their own persistence (an onSave that
+   PATCHes and reconciles/reverts optimistic state) -- this component only
+   owns the *local* edit-mode UI: entering/exiting edit mode, the input's
+   value, client-side validation, in-flight/disabled state, and surfacing
+   whatever onSave does.
+
+   #6 redesign (post-review): the title TEXT itself is no longer the rename
+   trigger -- it's plain, non-interactive display text. A small, dedicated
+   pencil-icon button next to it is the ONLY way to enter edit mode. This
+   reverses the first version of this component, where clicking the whole
+   title (text + icon, one button) entered edit mode -- which meant the
+   list row could no longer use a click on its title to select the
+   conversation (that's #4's original, and now restored, contract: click
+   the row/title selects; a separate pencil renames). See
+   ConversationListItem's doc comment for how the list row's outer
+   click-to-select and this component's nested pencil button coexist
+   without a nested-<button> HTML violation.
 
    Two distinct error paths, matching the issue's two separate requirement
    lines ("show inline guidance for invalid input" vs "on failure, revert
@@ -27,7 +40,7 @@ import { PencilSimple } from "@phosphor-icons/react";
        shows inline error").
 
    Owner-only: when `isEditable` is false, this renders inert text with no
-   button at all (not a disabled button) -- a non-owner should not even
+   pencil button at all (not a disabled one) -- a non-owner should not even
    discover a rename affordance exists, matching the issue's "Only the
    conversation owner sees the edit affordance."
    -------------------------------------------------------------------------- */
@@ -45,7 +58,7 @@ export interface EditableTitleProps {
    *  from somewhere other than this component's own onSave call. */
   error?: string;
   className?: string;
-  /** aria-label prefix for the read-only rename trigger, e.g. "Rename". */
+  /** aria-label prefix for the pencil rename trigger, e.g. "Rename". */
   renameLabel?: string;
 }
 
@@ -149,9 +162,15 @@ export function EditableTitle({
   if (!isEditing) {
     return (
       <span className={`editable-title ${className}`.trim()}>
+        {/* Plain, non-interactive display text -- NOT a click target for
+            entering edit mode (see this file's doc comment for why the
+            first version of this component had that, and why it changed:
+            a list row needs its title click-able for "select this row"
+            instead, restoring #4's original contract). */}
+        <span className="editable-title__value">{value}</span>
         <button
           type="button"
-          className="editable-title__trigger"
+          className="editable-title__pencil-btn"
           onClick={(e) => {
             // Renaming and "select this row" (a likely ancestor click
             // handler in list contexts) are separate interactions --
@@ -161,7 +180,6 @@ export function EditableTitle({
           }}
           aria-label={`${renameLabel}: ${value}`}
         >
-          <span className="editable-title__value">{value}</span>
           <PencilSimple
             className="editable-title__pencil"
             size={12}

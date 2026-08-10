@@ -411,9 +411,9 @@ describe("App tutor-conversations rail (#4)", () => {
     );
 
     const user = userEvent.setup();
-    // #6: the row's title is now a rename trigger, not the select control
-    // -- select via the meta button (see ConversationListItem's doc
-    // comment for the split and why).
+    // #6: the row (which the title is part of, per #4's original contract)
+    // is the select control -- a small pencil icon is the rename trigger
+    // instead (see ConversationListItem's doc comment for the split).
     await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
 
     // The chat column shows the persisted history, not an empty thread.
@@ -498,8 +498,6 @@ describe("App tutor-conversations rail (#4)", () => {
 
     const user = userEvent.setup();
     // Click order: A, then B, both before either /messages response lands.
-    // #6: select via the meta button, not the title (which now enters
-    // rename mode) -- see ConversationListItem's doc comment.
     await user.click(await screen.findByRole("button", { name: "Select conversation: Conversation A" }));
     await user.click(screen.getByRole("button", { name: "Select conversation: Conversation B" }));
 
@@ -562,8 +560,6 @@ describe("App tutor-conversations rail (#4)", () => {
     );
 
     const user = userEvent.setup();
-    // #6: select via the meta button, not the title (which now enters
-    // rename mode) -- see ConversationListItem's doc comment.
     await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
     await screen.findByText("STATS 311 · TUTOR CHAT");
 
