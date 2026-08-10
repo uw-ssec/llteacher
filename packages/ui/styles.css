@@ -845,6 +845,15 @@ body {
     list-style: none;
   }
 
+  /* #6: this row used to be a single <button> (title + meta together) --
+     now the title (EditableTitle) and "select this conversation" are two
+     distinct interactions (click the title to rename it, click the rest
+     of the row to select it), so this outer element is a plain <div>
+     containing two sibling controls rather than one big button. It keeps
+     its own onClick=onSelect purely as a mouse convenience (clicking the
+     row's padding/background still selects) -- the real, keyboard-
+     reachable "select" control is .tutor-conversation-item__meta-btn
+     below, a native button in its own right. */
   .tutor-conversation-item {
     display: flex;
     flex-direction: column;
@@ -852,11 +861,8 @@ body {
     gap: 2px;
     width: 100%;
     padding: var(--space-2);
-    background: none;
-    border: none;
     border-radius: var(--radius-sm);
     cursor: pointer;
-    text-align: start;
     color: var(--color-text);
     transition: background-color 120ms ease-out;
   }
@@ -870,12 +876,29 @@ body {
   }
 
   .tutor-conversation-item__title {
+    display: block;
+    width: 100%;
+  }
+
+  .tutor-conversation-item__title .editable-title__trigger,
+  .tutor-conversation-item__title .editable-title__input {
+    width: 100%;
+  }
+
+  .tutor-conversation-item__title .editable-title__value {
     font-size: var(--font-size-sm);
     font-weight: var(--weight-medium);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+  }
+
+  .tutor-conversation-item__meta-btn {
+    display: flex;
+    align-items: center;
     width: 100%;
+    padding: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: start;
   }
 
   .tutor-conversation-item__meta {
@@ -885,6 +908,82 @@ body {
     font-family: var(--font-mono);
     font-size: var(--font-size-xs);
     color: var(--color-text-muted);
+  }
+
+  /* -------------------------------------------------------------------------
+     .editable-title — inline click-to-rename primitive (#6). Shared by
+     the tutor-conversation-item row (.tutor-conversation-item__title
+     above) and the tutor chat column's header
+     (.conversation-header-title below) -- kept generic here rather than
+     styled per-consumer, with each consumer's own class only adjusting
+     layout (width/display), not the look of the trigger/input themselves.
+     ------------------------------------------------------------------------- */
+  .editable-title {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    max-width: 100%;
+  }
+
+  .editable-title__trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    max-width: 100%;
+    padding: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+  }
+
+  .editable-title__value {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .editable-title__pencil {
+    flex-shrink: 0;
+    color: var(--color-text-muted);
+    opacity: 0;
+    transition: opacity 120ms ease-out;
+  }
+
+  .editable-title__trigger:hover .editable-title__pencil,
+  .editable-title__trigger:focus-visible .editable-title__pencil {
+    opacity: 1;
+  }
+
+  .editable-title__text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .editable-title__input {
+    font: inherit;
+    color: inherit;
+    background-color: var(--color-bg);
+    border: 1px solid var(--color-accent);
+    border-radius: var(--radius-sm);
+    padding: 1px var(--space-1);
+    min-width: 0;
+  }
+
+  .editable-title__input:disabled {
+    opacity: 0.6;
+  }
+
+  .editable-title__error {
+    font-family: var(--font-sans);
+    font-size: var(--font-size-xs);
+    color: var(--color-error);
   }
 
   /* -------------------------------------------------------------------------
@@ -1205,6 +1304,23 @@ body {
     padding-block-end: var(--space-6);
     border-block-end: 1px solid var(--color-border);
     margin-block-end: var(--space-6);
+  }
+
+  /* -------------------------------------------------------------------------
+     .conversation-header-title — the active conversation's own editable
+     title (#6), directly under .breadcrumb above. Only rendered by
+     ConversationView when its `title` prop is passed (tutor conversations
+     today; the homework-section chat has no per-conversation title and
+     never sets it).
+     ------------------------------------------------------------------------- */
+  .conversation-header-title {
+    font-size: var(--font-size-lg);
+    font-weight: var(--weight-medium);
+    margin: 0 0 var(--space-6) 0;
+  }
+
+  .conversation-header-title .editable-title__value {
+    max-width: 60ch;
   }
 
   /* -------------------------------------------------------------------------

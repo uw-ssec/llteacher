@@ -40,6 +40,9 @@ export type { BadgeProps, BadgeVariant, BadgeSize } from "./components/Badge";
 export { Spinner } from "./components/Spinner";
 export type { SpinnerProps, SpinnerSize } from "./components/Spinner";
 
+export { EditableTitle } from "./components/EditableTitle";
+export type { EditableTitleProps } from "./components/EditableTitle";
+
 /* -- Generative-UI surfaces (rendered inline inside AI messages) ----------- */
 
 export { DefinitionCard, renderToolPart } from "./generative";

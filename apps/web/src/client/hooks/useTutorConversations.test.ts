@@ -140,4 +140,136 @@ describe("useTutorConversations", () => {
     expect(returned).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  // #6
+  describe("renameConversation", () => {
+    it("optimistically updates the title before the PATCH resolves", async () => {
+      let resolvePatch!: (res: Response) => void;
+      const pending = new Promise<Response>((resolve) => {
+        resolvePatch = resolve;
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = typeof input === "string" ? input : input.toString();
+          if (init?.method === "PATCH") return pending;
+          expect(url).toBe("/api/conversations?courseId=course-a&kind=tutor");
+          return new Response(JSON.stringify([CONV_A]), { status: 200 });
+        }),
+      );
+
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      let renamePromise!: Promise<unknown>;
+      act(() => {
+        renamePromise = result.current.renameConversation("conv-a", "Renamed while in flight");
+      });
+
+      await waitFor(() =>
+        expect(result.current.conversations[0]!.title).toBe("Renamed while in flight"),
+      );
+
+      resolvePatch(
+        new Response(JSON.stringify({ ...CONV_A, title: "Renamed while in flight" }), { status: 200 }),
+      );
+      await act(async () => {
+        await renamePromise;
+      });
+    });
+
+    it("PATCHes /api/conversations/:id with a JSON {title} body, reconciles with the response, and resolves with it", async () => {
+      const patchCalls: Array<{ url: string; body: unknown }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = typeof input === "string" ? input : input.toString();
+          if (init?.method === "PATCH") {
+            patchCalls.push({ url, body: JSON.parse(String(init.body)) });
+            return new Response(JSON.stringify({ ...CONV_A, title: "Renamed" }), { status: 200 });
+          }
+          return new Response(JSON.stringify([CONV_A]), { status: 200 });
+        }),
+      );
+
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      let returned: unknown;
+      await act(async () => {
+        returned = await result.current.renameConversation("conv-a", "Renamed");
+      });
+
+      expect(patchCalls).toEqual([
+        { url: "/api/conversations/conv-a", body: { title: "Renamed" } },
+      ]);
+      // messageCount isn't in PATCH's response body -- carried forward
+      // from the row being renamed, not defaulted to 0 (unlike a
+      // brand-new conversation from createConversation).
+      expect(returned).toEqual({ ...CONV_A, title: "Renamed", messageCount: CONV_A.messageCount });
+      expect(result.current.conversations[0]).toEqual({
+        ...CONV_A,
+        title: "Renamed",
+        messageCount: CONV_A.messageCount,
+      });
+    });
+
+    it("reverts the optimistic update and rejects with the server's error message on a failed PATCH", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+          if (init?.method === "PATCH") {
+            return new Response(
+              JSON.stringify({ error: "title is required and must be 1-100 chars after trimming" }),
+              { status: 400 },
+            );
+          }
+          return new Response(JSON.stringify([CONV_A]), { status: 200 });
+        }),
+      );
+
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      let caught: unknown;
+      await act(async () => {
+        try {
+          await result.current.renameConversation("conv-a", "Attempted rename");
+        } catch (err) {
+          caught = err;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toBe("title is required and must be 1-100 chars after trimming");
+      // Reverted -- back to the original title, not left showing the
+      // failed attempt.
+      expect(result.current.conversations[0]!.title).toBe(CONV_A.title);
+    });
+
+    it("rejects with a generic error on a network failure, and reverts the optimistic update", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+          if (init?.method === "PATCH") throw new TypeError("network error");
+          return new Response(JSON.stringify([CONV_A]), { status: 200 });
+        }),
+      );
+
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      let caught: unknown;
+      await act(async () => {
+        try {
+          await result.current.renameConversation("conv-a", "Attempted rename");
+        } catch (err) {
+          caught = err;
+        }
+      });
+
+      expect(caught).toBeInstanceOf(Error);
+      expect(result.current.conversations[0]!.title).toBe(CONV_A.title);
+    });
+  });
 });

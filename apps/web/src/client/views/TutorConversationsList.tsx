@@ -1,6 +1,8 @@
+import { useEffect } from "react";
 import { CaretDoubleLeft, CaretDoubleRight, ChatCircleDots, Plus } from "@phosphor-icons/react";
 import { useTutorConversations } from "../hooks/useTutorConversations";
 import { ConversationListItem } from "../components/ConversationListItem";
+import type { ConversationListItemResponse } from "../../shared/types";
 
 /* --------------------------------------------------------------------------
    TutorConversationsList — the tutor-conversations rail (#4).
@@ -37,6 +39,23 @@ export interface TutorConversationsListProps {
   onConversationCreated: (conversationId: string) => void;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
+  /** #6: fires whenever the selected conversation's data changes (initial
+   *  load, a different row selected, or a rename resolving) -- lets the
+   *  parent (App.tsx) mirror the currently-active tutor conversation's
+   *  title into the chat column's header without this component needing
+   *  to know that header exists. Undefined when nothing is selected, or
+   *  selectedConversationId doesn't (yet) match any loaded row. */
+  onSelectedConversationChange?: (conversation: ConversationListItemResponse | undefined) => void;
+  /** #6: hands the parent this hook instance's renameConversation function
+   *  once it's available (and again whenever it's recreated) -- so the
+   *  chat column's header (rendered by App.tsx, not this component) can
+   *  rename the SAME conversation this list displays through the SAME
+   *  hook instance/state, rather than duplicating fetch+optimistic-update
+   *  logic in a second place that could drift out of sync with this row's
+   *  own display. */
+  onRenameHandlerReady?: (
+    renameConversation: (id: string, title: string) => Promise<ConversationListItemResponse>,
+  ) => void;
 }
 
 export function TutorConversationsList({
@@ -46,13 +65,24 @@ export function TutorConversationsList({
   onConversationCreated,
   isCollapsed,
   onToggleCollapse,
+  onSelectedConversationChange,
+  onRenameHandlerReady,
 }: TutorConversationsListProps) {
-  const { conversations, loading, loadError, createConversation } = useTutorConversations(courseId);
+  const { conversations, loading, loadError, createConversation, renameConversation } =
+    useTutorConversations(courseId);
 
   const handleCreate = async () => {
     const created = await createConversation();
     if (created) onConversationCreated(created.id);
   };
+
+  useEffect(() => {
+    onRenameHandlerReady?.(renameConversation);
+  }, [renameConversation, onRenameHandlerReady]);
+
+  useEffect(() => {
+    onSelectedConversationChange?.(conversations.find((c) => c.id === selectedConversationId));
+  }, [conversations, selectedConversationId, onSelectedConversationChange]);
 
   return (
     <nav
@@ -110,6 +140,9 @@ export function TutorConversationsList({
               conversation={conv}
               isSelected={conv.id === selectedConversationId}
               onSelect={() => onSelectConversation(conv.id)}
+              onRename={async (title) => {
+                await renameConversation(conv.id, title);
+              }}
             />
           ))}
         </ul>

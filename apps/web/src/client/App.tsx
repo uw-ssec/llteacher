@@ -7,7 +7,7 @@ import type { SidebarSection, MessageData, ToolPart } from "@llteacher/ui";
 import { useAuth } from "./components/AuthProvider";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
 import { TutorConversationsList } from "./views/TutorConversationsList";
-import type { StudentHomeworkListResponse } from "../shared/types";
+import type { ConversationListItemResponse, StudentHomeworkListResponse } from "../shared/types";
 
 /* ==========================================================================
    LLTeacher v2 — Chat-with-syllabus shell
@@ -312,6 +312,39 @@ export default function App() {
      async callback without waiting on a re-render. */
   const latestTutorSelectionRef = useRef<string | undefined>(undefined);
 
+  /* #6: the currently-selected tutor conversation's own title, shown as an
+     editable heading in the chat column via ConversationView's `title`
+     prop. Mirrored up from TutorConversationsList's onSelectedConversationChange
+     (see that prop's doc comment) rather than fetched separately here --
+     TutorConversationsList already owns the one `conversations` array this
+     comes from (via its own useTutorConversations instance), so this is
+     just a read of that same state, not a second source of truth that
+     could drift from what the list row shows. */
+  const [tutorConversationTitle, setTutorConversationTitle] = useState<string | undefined>(undefined);
+
+  /* #6: TutorConversationsList hands this its own renameConversation
+     function (via onRenameHandlerReady) once mounted -- stored in a ref,
+     not state, purely because it's a function the header's onSave callback
+     below needs to call, not something that should itself trigger a
+     re-render when it's (re)assigned. See TutorConversationsListProps'
+     onRenameHandlerReady doc comment for why the rename call is routed
+     through TutorConversationsList's hook instance instead of a second,
+     independent PATCH call living here. */
+  const renameTutorConversationRef = useRef<
+    ((id: string, title: string) => Promise<ConversationListItemResponse>) | undefined
+  >(undefined);
+
+  /* #6: the conversation header's EditableTitle onSave -- routes through
+     whatever renameConversation TutorConversationsList last handed up.
+     Guarded (not trusted) even though the header is only rendered once
+     tutorConversationId is set and TutorConversationsList mounts on every
+     render of this component: cheap insurance against an ordering change
+     that would otherwise throw on a null ref call. */
+  const handleRenameTutorConversation = async (newTitle: string) => {
+    if (!tutorConversationId || !renameTutorConversationRef.current) return;
+    await renameTutorConversationRef.current(tutorConversationId, newTitle);
+  };
+
   /* #4 fix-round: the single place that switches the tutor surface to a
      given conversation, always setting its seed messages in the same
      event-handler pass as its id (React batches both into one commit, so
@@ -577,6 +610,10 @@ export default function App() {
           onConversationCreated={(id) => selectTutorConversation(id)}
           isCollapsed={isTutorSidebarCollapsed}
           onToggleCollapse={() => setIsTutorSidebarCollapsed((c) => !c)}
+          onSelectedConversationChange={(conv) => setTutorConversationTitle(conv?.title)}
+          onRenameHandlerReady={(fn) => {
+            renameTutorConversationRef.current = fn;
+          }}
         />
 
         {/* Main conversation column — warm paper surface. Shows the
@@ -586,6 +623,8 @@ export default function App() {
           <ConversationView
             key={tutorConversationId}
             breadcrumb="STATS 311 · TUTOR CHAT"
+            title={tutorConversationTitle}
+            onRenameTitle={handleRenameTutorConversation}
             messages={tutorMessages}
             onSendMessage={handleSendTutorMessage}
           />

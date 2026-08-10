@@ -411,7 +411,10 @@ describe("App tutor-conversations rail (#4)", () => {
     );
 
     const user = userEvent.setup();
-    await user.click(await screen.findByText("Existing tutor chat"));
+    // #6: the row's title is now a rename trigger, not the select control
+    // -- select via the meta button (see ConversationListItem's doc
+    // comment for the split and why).
+    await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
 
     // The chat column shows the persisted history, not an empty thread.
     expect(await screen.findByText("prior question")).toBeTruthy();
@@ -495,8 +498,10 @@ describe("App tutor-conversations rail (#4)", () => {
 
     const user = userEvent.setup();
     // Click order: A, then B, both before either /messages response lands.
-    await user.click(await screen.findByText("Conversation A"));
-    await user.click(screen.getByText("Conversation B"));
+    // #6: select via the meta button, not the title (which now enters
+    // rename mode) -- see ConversationListItem's doc comment.
+    await user.click(await screen.findByRole("button", { name: "Select conversation: Conversation A" }));
+    await user.click(screen.getByRole("button", { name: "Select conversation: Conversation B" }));
 
     // Resolve OUT of click order: B (clicked second) resolves first, A
     // (clicked first) resolves last -- exactly the interleaving the race
@@ -520,7 +525,9 @@ describe("App tutor-conversations rail (#4)", () => {
 
     expect(screen.queryByText("message from A")).toBeNull();
     expect(screen.getByText("message from B")).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Conversation B/ }).getAttribute("aria-current")).toBe("true");
+    expect(
+      screen.getByRole("button", { name: "Select conversation: Conversation B" }).getAttribute("aria-current"),
+    ).toBe("true");
   });
 
   it("selecting a homework section switches the chat column back out of the tutor surface", async () => {
@@ -555,12 +562,176 @@ describe("App tutor-conversations rail (#4)", () => {
     );
 
     const user = userEvent.setup();
-    await user.click(await screen.findByText("Existing tutor chat"));
+    // #6: select via the meta button, not the title (which now enters
+    // rename mode) -- see ConversationListItem's doc comment.
+    await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
     await screen.findByText("STATS 311 · TUTOR CHAT");
 
     await user.click(screen.getByRole("button", { name: /Sec 1/ }));
     await screen.findByText("STATS 311 · HW 3 · Section 3 P-VALUES");
     expect(screen.queryByText("STATS 311 · TUTOR CHAT")).toBeNull();
+  });
+});
+
+// #6: the tutor chat column's header title -- mirrors whatever
+// TutorConversationsList's onSelectedConversationChange last reported (see
+// that prop's doc comment on why App.tsx doesn't fetch this itself), and
+// renames route through the SAME renameConversation TutorConversationsList
+// exposes via onRenameHandlerReady, so a header rename shows up in the list
+// row too and vice versa -- one hook instance, one `conversations` array.
+describe("App tutor conversation header rename (#6)", () => {
+  const HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
+      },
+    ],
+  };
+
+  function stubFetch(extra: {
+    onPatch?: (id: string, body: unknown) => Response;
+  }) {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(
+            JSON.stringify([
+              {
+                id: "tutor-conv-1",
+                ownerUserId: "u1",
+                courseId: "course-a",
+                sectionId: null,
+                kind: "tutor",
+                title: "Existing tutor chat",
+                isDeleted: false,
+                deletedAt: null,
+                createdAt: "2026-08-01T00:00:00.000Z",
+                updatedAt: "2026-08-01T00:00:00.000Z",
+                messageCount: 2,
+              },
+            ]),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/conversations/tutor-conv-1/messages") return new Response(JSON.stringify([]), { status: 200 });
+        const patchMatch = url.match(/^\/api\/conversations\/([^/]+)$/);
+        if (patchMatch && init?.method === "PATCH") {
+          const body = JSON.parse(String(init.body));
+          return extra.onPatch
+            ? extra.onPatch(patchMatch[1]!, body)
+            : new Response(JSON.stringify({ error: "unexpected PATCH" }), { status: 500 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+  }
+
+  it("shows the selected tutor conversation's title as an editable heading in the chat column", async () => {
+    stubFetch({});
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
+    await screen.findByText("STATS 311 · TUTOR CHAT");
+
+    // The heading itself: dom-accessibility-api computes an ancestor's
+    // "name from content" from descendants' visible text, not a nested
+    // element's own aria-label -- so the h1's accessible name is the plain
+    // title text, not the button's "Rename conversation: ..." label.
+    expect(await screen.findByRole("heading", { name: "Existing tutor chat" })).toBeTruthy();
+    // The header's own rename trigger -- queried directly (its aria-label
+    // is its own accessible name, just not one that propagates up to the
+    // ancestor heading above) -- a second, distinct occurrence of this
+    // "Rename conversation: ..." pattern from the list row's own trigger,
+    // which is scoped to a DIFFERENT className ("Rename: ...", no
+    // "conversation" -- see ConversationView's renameLabel prop) so the two
+    // never collide.
+    expect(
+      await screen.findByRole("button", { name: "Rename conversation: Existing tutor chat" }),
+    ).toBeTruthy();
+  });
+
+  it("renaming from the header PATCHes the conversation and updates both the header and the list row", async () => {
+    const patchCalls: Array<{ id: string; body: unknown }> = [];
+    stubFetch({
+      onPatch: (id, body) => {
+        patchCalls.push({ id, body });
+        return new Response(
+          JSON.stringify({
+            id: "tutor-conv-1",
+            ownerUserId: "u1",
+            courseId: "course-a",
+            sectionId: null,
+            kind: "tutor",
+            title: "Renamed from header",
+            isDeleted: false,
+            deletedAt: null,
+            createdAt: "2026-08-01T00:00:00.000Z",
+            updatedAt: "2026-08-01T00:05:00.000Z",
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
+    await screen.findByRole("button", { name: "Rename conversation: Existing tutor chat" });
+
+    await user.click(screen.getByRole("button", { name: "Rename conversation: Existing tutor chat" }));
+    const input = screen.getByLabelText("Edit title");
+    await user.clear(input);
+    await user.type(input, "Renamed from header{Enter}");
+
+    expect(patchCalls).toEqual([{ id: "tutor-conv-1", body: { title: "Renamed from header" } }]);
+    // The header reflects the new title.
+    await screen.findByRole("heading", { name: "Renamed from header" });
+    // ...and so does the list row -- same underlying hook state, not a
+    // second copy that could drift.
+    expect(await screen.findByRole("button", { name: "Select conversation: Renamed from header" })).toBeTruthy();
+  });
+
+  it("does not show a header title for the homework-section chat (no per-conversation title there)", async () => {
+    stubFetch({});
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("STATS 311 · HW 3 · Section 3 P-VALUES");
+    expect(screen.queryByRole("button", { name: /Rename conversation/ })).toBeNull();
   });
 });
 

@@ -14,6 +14,7 @@ import { useRef, useEffect, useState } from "react";
 import { Message } from "./Message";
 import { Composer } from "./Composer";
 import { CodeBlock } from "./CodeBlock";
+import { EditableTitle } from "./EditableTitle";
 
 /* -- Message data shape ---------------------------------------------------- */
 
@@ -45,6 +46,20 @@ export type MessageData =
 
 export interface ConversationViewProps {
   breadcrumb: string;
+  /** #6: the active conversation's own title, shown as an editable heading
+   *  below the breadcrumb -- omitted entirely (no heading rendered) for
+   *  surfaces with no per-conversation title of their own, e.g. the
+   *  homework-section chat, which only ever passes `breadcrumb`. */
+  title?: string;
+  /** Required alongside `title` to make the heading actually editable --
+   *  see EditableTitle's onSave for the resolve/reject contract. */
+  onRenameTitle?: (newTitle: string) => void | Promise<void>;
+  /** False hides the rename affordance on the header title, matching the
+   *  issue's "Only the conversation owner sees the edit affordance".
+   *  Defaults to true (every conversation this column ever shows is the
+   *  signed-in student's own -- see ConversationListItem's isEditable doc
+   *  comment for the same reasoning applied to the list row). */
+  isTitleEditable?: boolean;
   messages: MessageData[];
   onSendMessage?: (text: string) => void;
 }
@@ -53,6 +68,9 @@ export interface ConversationViewProps {
 
 export function ConversationView({
   breadcrumb,
+  title,
+  onRenameTitle,
+  isTitleEditable = true,
   messages,
   onSendMessage,
 }: ConversationViewProps) {
@@ -83,6 +101,20 @@ export function ConversationView({
         <div className="conversation-inner">
           {/* Breadcrumb */}
           <p className="breadcrumb" aria-label="Location">{breadcrumb}</p>
+
+          {/* #6: conversation header title -- only for surfaces that pass
+              one (the homework-section chat has no per-conversation title
+              and omits `title` entirely, so nothing renders here for it). */}
+          {title !== undefined && onRenameTitle && (
+            <h1 className="conversation-header-title">
+              <EditableTitle
+                value={title}
+                onSave={onRenameTitle}
+                isEditable={isTitleEditable}
+                renameLabel="Rename conversation"
+              />
+            </h1>
+          )}
 
           {/* Messages */}
           {messages.map((msg) => {
