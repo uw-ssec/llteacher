@@ -1,5 +1,5 @@
 import { describe, it, vi, afterEach, expect } from "vitest";
-import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, fireEvent, within } from "@testing-library/react";
 import { TaCapabilitiesView } from "./TaCapabilitiesView";
 
 afterEach(cleanup);
@@ -117,5 +117,104 @@ describe("TaCapabilitiesView (#172)", () => {
     await waitFor(() => screen.getByText("Ada Lovelace"));
     fireEvent.click(screen.getByLabelText(/Model solutions for/i));
     await waitFor(() => expect(screen.getAllByText(/not found in this course/i).length).toBeGreaterThan(0));
+  });
+
+  /** #172 re-audit (USE-010): a 404 save triggers load() to drop the stale
+   *  row. The error message used to live inside the table body, so the
+   *  refetch unmounted the only explanation the instructor ever got -- and
+   *  since the refetched roster no longer contains that TA, it never came
+   *  back. The toggle just reverted, silently. */
+  it("keeps the 404 explanation on screen after the refetch removes the row", async () => {
+    let listCall = 0;
+    stubFetch((_url, init) => {
+      if (init?.method === "PATCH") {
+        return new Response(JSON.stringify({ error: "TA membership not found in this course" }), {
+          status: 404,
+        });
+      }
+      // First load has the TA; the refetch reflects that they are gone.
+      listCall += 1;
+      return new Response(JSON.stringify({ tas: listCall === 1 ? [TA] : [] }), { status: 200 });
+    });
+    render(<TaCapabilitiesView courseId="c1" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    fireEvent.click(screen.getByLabelText(/Model solutions for/i));
+
+    // The row is gone (empty roster) ...
+    await waitFor(() => screen.getByText(/No teaching assistants/i));
+    // ... and the reason it went is still on screen VISIBLY. Asserted
+    // through role="alert" rather than by text: the polite live region
+    // mirrors every message too, but it is .admin-visually-hidden, so a
+    // plain text query passes even with no visible explanation at all --
+    // which is exactly the state this test exists to reject.
+    expect(within(screen.getByRole("alert")).getByText(/not found in this course/i)).toBeTruthy();
+  });
+
+  /** #172 re-audit (REL-012): the echo used to be spread over the local row
+   *  (`parseTa({ ...ta, ...response })`), which meant an empty or
+   *  wrong-membership response could not be rejected -- every required field
+   *  was already supplied by `ta`, so the UI re-rendered the OLD value and
+   *  announced success. */
+  it("rejects a PATCH echo for a different membership instead of applying it", async () => {
+    stubFetch((_url, init) => {
+      if (init?.method === "PATCH") {
+        // Right shape, wrong row.
+        return new Response(
+          JSON.stringify({ membershipId: "m-999", userId: "u-other", canViewSolutions: true, canViewDrafts: true }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
+    });
+    render(<TaCapabilitiesView courseId="c1" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    fireEvent.click(screen.getByLabelText(/Model solutions for/i));
+
+    await waitFor(() => expect(screen.getAllByText(/unexpected response/i).length).toBeGreaterThan(0));
+    // Crucially: the other row's values were NOT written onto this TA.
+    expect(screen.getAllByText("Not allowed")).toHaveLength(2);
+  });
+
+  it("rejects an empty PATCH echo rather than reporting a save that did not happen", async () => {
+    stubFetch((_url, init) => {
+      if (init?.method === "PATCH") return new Response(JSON.stringify({}), { status: 200 });
+      return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
+    });
+    render(<TaCapabilitiesView courseId="c1" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    fireEvent.click(screen.getByLabelText(/Model solutions for/i));
+
+    await waitFor(() => expect(screen.getAllByText(/unexpected response/i).length).toBeGreaterThan(0));
+    expect(screen.getAllByText("Not allowed")).toHaveLength(2);
+  });
+
+  /** #172 re-audit (REL-015): savingIds keyed by membership alone made the
+   *  two capabilities on one row share a lock -- toggling Solutions blocked
+   *  Drafts, and showed "Saving..." under both. */
+  it("tracks saving state per capability, not per row", async () => {
+    let releasePatch: (() => void) | undefined;
+    stubFetch((_url, init) => {
+      if (init?.method === "PATCH") {
+        // Never resolves during the assertions below.
+        return new Promise<Response>((resolve) => {
+          releasePatch = () => resolve(new Response(JSON.stringify({ ...TA, canViewSolutions: true }), { status: 200 }));
+        }) as unknown as Response;
+      }
+      return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
+    });
+    render(<TaCapabilitiesView courseId="c1" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    fireEvent.click(screen.getByLabelText(/Model solutions for/i));
+
+    // Exactly one cell reports saving; the other still shows its value and
+    // remains operable.
+    await waitFor(() => expect(screen.getAllByText("Saving…")).toHaveLength(1));
+    expect(screen.getAllByText("Not allowed")).toHaveLength(1);
+
+    releasePatch?.();
   });
 });

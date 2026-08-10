@@ -68,6 +68,17 @@ export class ProfileService {
     // guarantees no row order without ORDER BY, and this file already makes
     // exactly that argument for ROLE_PRIORITY above.
     //
+    // #172 re-audit (FUN-103): most recent enrollment FIRST, and the
+    // `courses` projection below is then re-sorted authority-first. The
+    // first fix used `asc(enrolledAt)`, which made a real case
+    // *consistently* broken instead of intermittently so: a grad student
+    // who TA'd in an earlier term and now instructs their own course got
+    // their oldest membership as courses[0] on every request, so canAuthor
+    // was false everywhere, the authoring nav was hidden, and -- with no
+    // course switcher until #70 -- they had no way to reach the course they
+    // actually run. Determinism was necessary but not sufficient; it also
+    // has to land on the right course.
+    //
     // #172 audit (FUN-007): droppedAt filtered in SQL rather than in JS
     // below, so `primaryRole` and `courseCount` stop counting memberships a
     // user no longer holds -- a dropped TA was passing the console's role
@@ -75,7 +86,7 @@ export class ProfileService {
     const memberships = await this.db.query.courseMemberships.findMany({
       where: and(eq(courseMemberships.userId, userId), isNull(courseMemberships.droppedAt)),
       with: { course: true },
-      orderBy: (m, { asc }) => [asc(m.enrolledAt), asc(m.id)],
+      orderBy: (m, { desc, asc }) => [desc(m.enrolledAt), asc(m.id)],
     });
     const primaryRole =
       ROLE_PRIORITY.find((role) => memberships.some((m) => m.role === role)) ?? null;
@@ -120,6 +131,15 @@ export class ProfileService {
       // server-side stopped the client drifting; that only moved the drift
       // risk from client-vs-server to server-vs-server. Calling the shared
       // resolver is what actually removes it.
+      //
+      // Authority-first, then most-recent (#172 re-audit, FUN-103). Array
+      // sort is stable, so within a tier the SQL `desc(enrolledAt)` ordering
+      // above survives. This is what guarantees that a user who instructs
+      // *anywhere* gets an authoring course as courses[0] -- the console's
+      // active course -- rather than whichever course they happened to join
+      // most recently. It uses ROLE_PRIORITY_RANK rather than a second
+      // hand-written ordering so "which role outranks which" has one answer
+      // in this file.
       profile.courses = memberships
         .filter((m) => INSTRUCTOR_TIER_ROLES.has(m.role))
         .map((m) => ({
@@ -127,7 +147,8 @@ export class ProfileService {
           title: m.course.title,
           role: m.role,
           ...resolveTaCapabilities(m),
-        }));
+        }))
+        .sort((a, b) => ROLE_PRIORITY_RANK[a.role] - ROLE_PRIORITY_RANK[b.role]);
     } else if (primaryRole === "student") {
       // TODO: real submission/completion counts once the conversation +
       // submission tables land (multi-tenant-data-model.md §6.3, M2). No

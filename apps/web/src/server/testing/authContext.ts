@@ -7,16 +7,25 @@ type Membership = AuthContext["memberships"][number];
  *  stubbing a predicate directly (`isInstructorOf: () => true`): the
  *  predicates below derive from memberships exactly as production does, so
  *  a test built on real data can't assert behaviour the real rule wouldn't
- *  produce. Capability flags default false, matching the column defaults. */
-export function fakeMembership(overrides: Partial<Membership> & { courseId: string; role: CourseRole }): Membership {
+ *  produce. Capability flags default false, matching the column defaults.
+ *
+ *  #172 re-audit (MNT-006): no `as unknown as Membership` and no `droppedAt`.
+ *  AuthContext's Membership is the six-column projection
+ *  listMembershipsForUser returns, which does not include droppedAt -- that
+ *  filter is applied in SQL, so a row reaching AuthContext is active by
+ *  construction. The stale field was what forced the double cast, and the
+ *  double cast was in turn suppressing any error if the projection and this
+ *  double ever diverged again. Typed straight through, they cannot. */
+export function fakeMembership(
+  overrides: Partial<Membership> & { courseId: string; role: CourseRole },
+): Membership {
   return {
     id: `membership-${overrides.courseId}-${overrides.role}`,
     userId: "u1",
     canViewSolutions: false,
     canViewDrafts: false,
-    droppedAt: null,
     ...overrides,
-  } as unknown as Membership;
+  };
 }
 
 /** Shared AuthContext test double.

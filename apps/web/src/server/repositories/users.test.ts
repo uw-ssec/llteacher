@@ -363,3 +363,60 @@ describe.skipIf(!DATABASE_URL)("getOrgScopesForUser (#147, real DB)", () => {
     await db.delete(users).where(eq(users.id, freshUser.id));
   });
 });
+
+/** #172 re-audit (SEC-006): deprovisioning revokes the TA capability grants,
+ *  not just the membership.
+ *
+ *  The gap this closes: listCourseTas filters `droppedAt IS NULL`, so a
+ *  dropped TA never appears in the instructor's TA-permissions table -- the
+ *  only surface for revoking a grant cannot show the row. Meanwhile
+ *  UserIdentityService.reconcileExisting restores exactly these memberships
+ *  on the next successful login. Left set, the answer-key grant came back
+ *  silently, with no instructor action and nothing in the audit log. */
+describe.skipIf(!DATABASE_URL)("deactivateByWorkosUserId clears TA grants (#172, SEC-006)", () => {
+  it("drops the membership AND clears both capability flags", async () => {
+    const db = makeNodeDb(DATABASE_URL!);
+    const [org] = await db
+      .insert(organizations)
+      .values({
+        slug: `sec006-${crypto.randomUUID()}`,
+        name: "SEC-006 Org",
+        workosOrganizationId: `w-${crypto.randomUUID()}`,
+      })
+      .returning({ id: organizations.id });
+    const [course] = await db
+      .insert(courses)
+      .values({ organizationId: org.id, code: "C", term: "T", title: "T" })
+      .returning({ id: courses.id });
+
+    const workosUserId = `workos-${crypto.randomUUID()}`;
+    const emailBytes = crypto.getRandomValues(new Uint8Array(32));
+    const [user] = await db
+      .insert(users)
+      .values({ workosUserId, email: emailBytes as never, emailBlindIndex: emailBytes as never })
+      .returning({ id: users.id });
+
+    // A TA holding both grants at the moment of deprovisioning.
+    await db.insert(courseMemberships).values({
+      userId: user.id,
+      courseId: course.id,
+      role: "ta",
+      canViewSolutions: true,
+      canViewDrafts: true,
+    });
+
+    await deactivateByWorkosUserId(db, workosUserId);
+
+    const membership = await db.query.courseMemberships.findFirst({
+      where: eq(courseMemberships.userId, user.id),
+    });
+    expect(membership?.droppedAt).not.toBeNull();
+    // The assertion that matters: an un-revokable grant must not survive the
+    // drop, because the restore on next login would hand it straight back.
+    expect(membership?.canViewSolutions).toBe(false);
+    expect(membership?.canViewDrafts).toBe(false);
+
+    await db.delete(organizations).where(eq(organizations.id, org.id));
+    await db.delete(users).where(eq(users.id, user.id));
+  });
+});

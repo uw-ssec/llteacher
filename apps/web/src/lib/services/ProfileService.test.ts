@@ -161,8 +161,6 @@ describe("ProfileService.getProfileWithStats", () => {
           homeworks: { findMany: async () => [] },
       },
       select: () => ({ from: () => ({ where: async () => [{ count: 0 }] }) }),
-      _unused: {
-        },
       }) as unknown as Db;
 
     const instructorFirst = makeDb([

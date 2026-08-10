@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Users, Warning } from "@phosphor-icons/react";
 import { PageHeader } from "../components/PageHeader";
+import { abortAfter } from "../lib/abortAfter";
 
 export interface TaCapabilities {
   membershipId: string;
@@ -68,6 +69,27 @@ function parseTa(raw: unknown): TaCapabilities | null {
   };
 }
 
+/** The PATCH echo is a `TaCapabilityGrant`: the two flags plus the ids, and
+ *  deliberately no identity (the server does not decrypt a name to answer a
+ *  write). Validated on its own terms rather than by spreading it over the
+ *  local row — `parseTa({ ...ta, ...response })` could not reject an empty
+ *  or wrong-membership response, because every required field was already
+ *  supplied by `ta`. The UI then re-rendered the *old* value and announced
+ *  success (#172 audit, REL-012). */
+type TaCapabilityGrant = Pick<TaCapabilities, "membershipId" | CapabilityField>;
+
+function parseGrant(raw: unknown): TaCapabilityGrant | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const g = raw as Record<string, unknown>;
+  if (typeof g.membershipId !== "string") return null;
+  if (typeof g.canViewSolutions !== "boolean" || typeof g.canViewDrafts !== "boolean") return null;
+  return {
+    membershipId: g.membershipId,
+    canViewSolutions: g.canViewSolutions,
+    canViewDrafts: g.canViewDrafts,
+  };
+}
+
 /** Surfaces the server's own message when it sent one, so a 404 ("this TA
  *  may have been removed") isn't reported as "please try again" — advice
  *  that would never succeed (#172 audit, USE-003). */
@@ -91,9 +113,12 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
   const [tas, setTas] = useState<TaCapabilities[] | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [saveError, setSaveError] = useState<{ membershipId: string; message: string } | null>(null);
-  /** A set, not a single id: one in-flight save must not re-enable a
-   *  different row still saving (#172 audit, REL-004). */
+  /** Keyed `membershipId:field`, not by membership alone (#172 audit,
+   *  REL-004 then REL-015). Two capabilities sit on the same row, so keying
+   *  by membership made toggling Solutions block Drafts on that row, and
+   *  showed "Saving…" under both checkboxes when only one was in flight. */
   const [savingIds, setSavingIds] = useState<ReadonlySet<string>>(new Set());
+  const savingKey = (membershipId: string, field: CapabilityField) => `${membershipId}:${field}`;
   /** Announced politely so a screen reader learns the save landed; the region
    *  is mounted for the view's lifetime, since conditionally mounting a live
    *  region is the pattern that silently fails to announce (ACC-004). */
@@ -103,7 +128,14 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
   const load = useCallback(() => {
     setTas(null);
     setLoadError(false);
-    fetch(`/api/courses/${courseId}/tas`, { signal: AbortSignal.timeout(15_000) })
+    // NOT setSaveError(null): a 404 on a save calls load() to drop the stale
+    // row, and clearing the error here unmounted the only explanation the
+    // instructor ever got. The refetched roster no longer contains that TA,
+    // so the inline message had nowhere to render either -- the toggle
+    // simply reverted with no stated reason (#172 audit, USE-010). The
+    // orphan notice below is what keeps it on screen.
+    const { signal, dispose } = abortAfter(15_000, abortRef.current?.signal);
+    fetch(`/api/courses/${courseId}/tas`, { signal })
       .then((r) => {
         if (!r.ok) throw new Error(`failed: ${r.status}`);
         return r.json() as Promise<{ tas: unknown }>;
@@ -112,35 +144,46 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
         const rows = Array.isArray(data.tas) ? data.tas : [];
         setTas(rows.map(parseTa).filter((t): t is TaCapabilities => t !== null));
       })
-      .catch(() => setLoadError(true));
+      .catch((err: unknown) => {
+        // An unmount/course-change abort is not a load failure -- reporting
+        // it would flash an error banner on the way out.
+        if ((err as Error)?.name === "AbortError") return;
+        setLoadError(true);
+      })
+      .finally(dispose);
   }, [courseId]);
 
   useEffect(() => {
-    load();
+    // Established before load() so the list fetch is covered by the same
+    // lifecycle signal the PATCHes are (#172 audit, REL-005).
     const controller = new AbortController();
     abortRef.current = controller;
-    // Aborts any in-flight PATCH when the course changes or the view
-    // unmounts, so a resolved save can't write state into a different
-    // course's roster (#172 audit, REL-005).
+    load();
     return () => controller.abort();
   }, [load]);
 
   const toggle = useCallback(
     async (ta: TaCapabilities, field: CapabilityField) => {
-      if (savingIds.has(ta.membershipId)) return;
+      const key = savingKey(ta.membershipId, field);
+      if (savingIds.has(key)) return;
       const next = !ta[field];
       const column = CAPABILITY_COLUMNS.find((c) => c.field === field)!;
       const who = ta.displayName || ta.email || ta.userId;
 
-      setSavingIds((prev) => new Set(prev).add(ta.membershipId));
+      setSavingIds((prev) => new Set(prev).add(key));
       setSaveError(null);
       setLiveMessage(`Saving ${column.label} for ${who}…`);
+      // Composed, not `abortRef.current?.signal` alone: the lifecycle signal
+      // has no timeout, so a PATCH against a hung Worker stayed pending
+      // forever with the row stuck on "Saving…" and no way back except a
+      // reload (#172 audit, REL-011).
+      const { signal, dispose } = abortAfter(15_000, abortRef.current?.signal);
       try {
         const res = await fetch(`/api/courses/${courseId}/tas/${ta.membershipId}/capabilities`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ [field]: next }),
-          signal: abortRef.current?.signal,
+          signal,
         });
         if (!res.ok) {
           const message = await errorMessageFor(res);
@@ -150,28 +193,46 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
           if (res.status === 404) load();
           return;
         }
-        const updated = parseTa({ ...ta, ...((await res.json()) as object) });
-        if (!updated) {
+        const grant = parseGrant(await res.json());
+        // The membership check is the point: a proxy or a mis-keyed handler
+        // answering with a *different* TA's grant would otherwise be written
+        // onto the row the instructor was actually editing.
+        if (!grant || grant.membershipId !== ta.membershipId) {
           const message = "The server returned an unexpected response. Reload the console.";
           setSaveError({ membershipId: ta.membershipId, message });
           setLiveMessage(message);
           return;
         }
+        // Identity comes from the row we already have -- the echo carries
+        // only the flags, by design.
+        const updated: TaCapabilities = {
+          ...ta,
+          canViewSolutions: grant.canViewSolutions,
+          canViewDrafts: grant.canViewDrafts,
+        };
         setTas((prev) =>
-          prev ? prev.map((t) => (t.membershipId === updated.membershipId ? updated : t)) : prev,
+          prev ? prev.map((t) => (t.membershipId === ta.membershipId ? updated : t)) : prev,
         );
         setLiveMessage(
           `${column.label} ${updated[field] ? "allowed" : "not allowed"} for ${who}.`,
         );
       } catch (err) {
-        if ((err as Error)?.name === "AbortError") return;
-        const message = "Could not update that permission. Please try again.";
+        const name = (err as Error)?.name;
+        // The lifecycle abort means this component is going away; the
+        // timeout means the request genuinely gave up and the instructor
+        // needs to hear about it.
+        if (name === "AbortError") return;
+        const message =
+          name === "TimeoutError"
+            ? "That permission change timed out. It may not have been saved — reload to check."
+            : "Could not update that permission. Please try again.";
         setSaveError({ membershipId: ta.membershipId, message });
         setLiveMessage(message);
       } finally {
+        dispose();
         setSavingIds((prev) => {
           const next = new Set(prev);
-          next.delete(ta.membershipId);
+          next.delete(key);
           return next;
         });
       }
@@ -191,6 +252,20 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
       <div className="admin-visually-hidden" role="status" aria-live="polite">
         {liveMessage}
       </div>
+
+      {/* A save error whose row is no longer on screen -- because load() is
+          refetching after a 404, or because the refetch confirmed the TA is
+          gone. Rendered here, outside the roster conditional below, so the
+          explanation outlives the row it was attached to (#172 audit,
+          USE-010). */}
+      {saveError && !tas?.some((t) => t.membershipId === saveError.membershipId) && (
+        <div className="admin-alert" role="alert">
+          <span className="admin-alert__icon" aria-hidden="true">
+            <Warning size={16} weight="regular" />
+          </span>
+          <span>{saveError.message}</span>
+        </div>
+      )}
 
       {loadError ? (
         <div className="admin-alert" role="alert">
@@ -232,11 +307,13 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
           </thead>
           <tbody>
             {tas.map((ta) => {
-              const saving = savingIds.has(ta.membershipId);
+              const rowSaving = CAPABILITY_COLUMNS.some((c) =>
+                savingIds.has(savingKey(ta.membershipId, c.field)),
+              );
               const rowError = saveError?.membershipId === ta.membershipId ? saveError : null;
               const errorId = `ta-error-${ta.membershipId}`;
               return (
-                <tr key={ta.membershipId} aria-busy={saving || undefined}>
+                <tr key={ta.membershipId} aria-busy={rowSaving || undefined}>
                   <th scope="row">
                     <span className="admin-submission-row__name-label">
                       {ta.displayName || "(no name on file)"}
@@ -248,7 +325,9 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
                       </span>
                     )}
                   </th>
-                  {CAPABILITY_COLUMNS.map((c) => (
+                  {CAPABILITY_COLUMNS.map((c) => {
+                    const cellSaving = savingIds.has(savingKey(ta.membershipId, c.field));
+                    return (
                     <td key={c.field}>
                       <label className="admin-toggle">
                         <input
@@ -264,11 +343,12 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
                           onChange={() => toggle(ta, c.field)}
                         />
                         <span className="admin-toggle__label">
-                          {saving ? "Saving…" : ta[c.field] ? "Allowed" : "Not allowed"}
+                          {cellSaving ? "Saving…" : ta[c.field] ? "Allowed" : "Not allowed"}
                         </span>
                       </label>
                     </td>
-                  ))}
+                    );
+                  })}
                 </tr>
               );
             })}

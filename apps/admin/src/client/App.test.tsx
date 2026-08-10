@@ -184,3 +184,106 @@ describe("TA console gating (#172)", () => {
     await waitFor(() => screen.getByText(/No course found/i));
   });
 });
+
+/** #172 FUN-002 and its re-audit (FUN-101).
+ *
+ *  The gating above covers who sees which affordances. What had no test at
+ *  all was the ROUTING: which view a non-author actually lands on when they
+ *  open a homework, and whether the instructor-only surface is reachable. A
+ *  mutation run confirmed the read-only routing could be deleted outright
+ *  with the admin suite green -- restoring the dead end FUN-002 fixed. */
+describe("homework routing by per-course role (#172, FUN-002)", () => {
+  function stubProfile(role: string) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/profile")) {
+          return new Response(
+            JSON.stringify({
+              userId: "u1",
+              role,
+              courses: [
+                { id: "c1", title: "STATS 311", role, canViewSolutions: false, canViewDrafts: false },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        // Homework detail -- checked before the list, since both paths
+        // contain "/homeworks". One payload serves both views: the editor
+        // reads the publish/hide/widget fields, the read-only view ignores
+        // them, and using the same fixture for both is what makes the two
+        // tests below a genuine comparison.
+        if (/\/homeworks\/[^/]+$/.test(url)) {
+          return new Response(
+            JSON.stringify({
+              id: "hw-1", title: "Probability", description: "d",
+              dueDate: "2099-01-01T00:00:00.000Z", status: "active",
+              llmConfigId: null, releasedAt: null, publishedAt: null,
+              isHidden: false, expiresAt: null, widgets: [],
+              sections: [
+                { id: "s1", title: "Sec 1", content: "body", order: 1, type: "conversation", solution: null },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/homeworks")) {
+          return new Response(
+            JSON.stringify({
+              homeworks: [
+                { id: "hw-1", title: "Probability", description: "d",
+                  dueDate: "2099-01-01T00:00:00.000Z", llmConfigId: null,
+                  status: "active", isHidden: false, expiresAt: null, sectionCount: 1 },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ tas: [] }), { status: 200 });
+      }),
+    );
+  }
+
+  async function openFirstHomework() {
+    const opener = await waitFor(() => screen.getByRole("button", { name: /^Open / }));
+    fireEvent.click(opener);
+  }
+
+  it("routes a TA to the read-only view rather than a permission dead end", async () => {
+    stubProfile("ta");
+    renderApp();
+    await waitFor(() => screen.getByText(/Instructor Console/i));
+    await openFirstHomework();
+
+    await waitFor(() => screen.getByText(/read-only/i));
+    // The dead end this replaced, and the absence of any write affordance.
+    expect(screen.queryByText(/do not have permission/i)).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("routes an instructor on the same route to the editor", async () => {
+    stubProfile("instructor");
+    renderApp();
+    await waitFor(() => screen.getByText(/Instructor Console/i));
+    await openFirstHomework();
+
+    // The contrast that makes the assertion above about the ROLE rather
+    // than about this route always being read-only.
+    await waitFor(() => expect(screen.queryByText(/read-only/i)).toBeNull());
+    await waitFor(() => expect(screen.getAllByRole("textbox").length).toBeGreaterThan(0));
+  });
+
+  it("hides the TA-permissions nav entry from a TA and shows it to an instructor", async () => {
+    stubProfile("ta");
+    const asTa = renderApp();
+    await waitFor(() => screen.getByText(/Instructor Console/i));
+    expect(screen.queryByText("TA permissions")).toBeNull();
+    asTa.unmount();
+
+    stubProfile("instructor");
+    renderApp();
+    await waitFor(() => screen.getByText("TA permissions"));
+  });
+});

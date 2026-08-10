@@ -230,6 +230,7 @@ export default function App() {
                     courseId={CURRENT_COURSE_ID}
                     homeworkId={view.homeworkId}
                     onBack={() => setView({ kind: "homeworks" })}
+                    canViewSolutions={CURRENT_COURSE?.canViewSolutions === true}
                   />
                 ) : CURRENT_COURSE_ID ? (
                   <HomeworkEditView

@@ -4,11 +4,6 @@ import { courseMemberships, users } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
 
-/** #172: one TA's standing in a course, as the instructor-facing capability
- *  UI needs it. `userId` rather than any identifying field -- names/emails
- *  are encrypted and decrypting a roster is the submissions dashboard's job
- *  (it already builds an IdentityCipher for exactly that); this endpoint
- *  stays a thin capability read. */
 /** The stored grant on one TA membership. The PATCH echo returns exactly
  *  this -- no identity, because the caller already knows who they edited and
  *  decrypting to answer a write would be gratuitous PII handling. */
@@ -61,9 +56,15 @@ export async function listCourseTas(
       ),
     );
 
-  // Decrypted in one parallel pass rather than sequentially per row: a TA
-  // roster is small, but the sibling submissions dashboard's serial
-  // per-student await is a known cost and there is no reason to repeat it.
+  // Promise.all over the rows. To be accurate about why: IdentityCipher's
+  // decryptString is CPU-bound WebCrypto on a single-threaded runtime, so
+  // this does NOT make the decryptions run in parallel -- an earlier version
+  // of this comment claimed it did, contrasting it with the submissions
+  // dashboard's serial await. It is written this way because it reads
+  // better than an accumulating for-loop, and because a TA roster is small
+  // enough (single digits per course) that the distinction does not matter
+  // either way. If roster decryption ever shows up in a profile, the fix is
+  // to stop decrypting per row, not to re-shape this loop.
   return Promise.all(
     rows.map(async (r) => ({
       membershipId: r.membershipId,
