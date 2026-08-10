@@ -1,5 +1,7 @@
 import { type Context } from "hono";
 import { UUID_RE } from "../utils/uuid";
+import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
+import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { makeDb } from "../../db/client";
 import { listCourseTas, setTaCapabilities } from "../repositories/courseMemberships";
 import { getOrgScopeForCourse } from "../repositories/organizations";
@@ -8,7 +10,7 @@ import { AUDIT_ACTIONS, auditBestEffort } from "../utils/audit";
 import { logServerError } from "../utils/errors";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
-import type { TaCapabilitiesBody, TaCapabilitiesResponse, CourseTaListResponse } from "../../shared/types";
+import type { TaCapabilitiesBody, TaCapabilityGrantResponse, CourseTaListResponse } from "../../shared/types";
 
 /** #172: granting capabilities is authoring-tier authority, not grading --
  *  a TA must never be able to widen their own access, nor another TA's. So
@@ -28,7 +30,10 @@ export async function listCourseTasHandler(c: Context<AppEnv>) {
   if (!scope) return c.json({ error: "Course access denied" }, 403);
 
   const db = makeDb(c.env.DATABASE_URL);
-  const tas = await listCourseTas(db, scope);
+  // Same construction as getHomeworkSubmissionsHandler, the existing
+  // precedent for decrypting a roster at the route layer.
+  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
+  const tas = await listCourseTas(db, scope, cipher);
   const body: CourseTaListResponse = { tas };
   return c.json(body);
 }
@@ -113,6 +118,6 @@ export async function updateTaCapabilitiesHandler(c: Context<AppEnv>) {
     logServerError("updateTaCapabilitiesHandler", err);
   }
 
-  const responseBody: TaCapabilitiesResponse = updated;
+  const responseBody: TaCapabilityGrantResponse = updated;
   return c.json(responseBody);
 }

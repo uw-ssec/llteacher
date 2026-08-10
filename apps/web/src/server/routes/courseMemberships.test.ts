@@ -27,6 +27,10 @@ vi.mock("../utils/audit", async (importOriginal) => ({
   auditBestEffort: (...a: unknown[]) => auditBestEffortMock(...a),
 }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
+// listCourseTas decrypts identities (#172 audit, USE-001), so the handler
+// now builds a cipher; stub the key load rather than the cipher itself.
+vi.mock("../../lib/secrets-loader", () => ({ loadIdentityCipherKeys: async () => ({}) }));
+vi.mock("../../lib/crypto/identity-cipher", () => ({ IdentityCipher: class {} }));
 
 function buildApp(authContext: AuthContext | undefined) {
   const app = new Hono<AppEnv>();
@@ -69,7 +73,14 @@ beforeEach(() => {
 describe("GET /api/courses/:courseId/tas", () => {
   it("returns the course's TAs for an instructor", async () => {
     listCourseTasMock.mockResolvedValue([
-      { membershipId: MEMBERSHIP_ID, userId: "u-ta", canViewSolutions: false, canViewDrafts: true },
+      {
+        membershipId: MEMBERSHIP_ID,
+        userId: "u-ta",
+        displayName: "Ada Lovelace",
+        email: "ada@uw.edu",
+        canViewSolutions: false,
+        canViewDrafts: true,
+      },
     ]);
     const res = await buildApp(instructorOfA()).request("/api/courses/course-a/tas", {}, TEST_ENV);
     expect(res.status).toBe(200);

@@ -1,32 +1,58 @@
 import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { courseMemberships } from "../../db/schema";
+import { courseMemberships, users } from "../../db/schema";
 import type { CourseScope } from "./scope";
+import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
 
 /** #172: one TA's standing in a course, as the instructor-facing capability
  *  UI needs it. `userId` rather than any identifying field -- names/emails
  *  are encrypted and decrypting a roster is the submissions dashboard's job
  *  (it already builds an IdentityCipher for exactly that); this endpoint
  *  stays a thin capability read. */
-export interface CourseTaCapabilities {
+/** The stored grant on one TA membership. The PATCH echo returns exactly
+ *  this -- no identity, because the caller already knows who they edited and
+ *  decrypting to answer a write would be gratuitous PII handling. */
+export interface TaCapabilityGrant {
   membershipId: string;
   userId: string;
   canViewSolutions: boolean;
   canViewDrafts: boolean;
 }
 
+/** A grant plus the decrypted identity the instructor-facing list needs.
+ *  #172 audit (USE-001): the list previously shipped a raw UUID, which made
+ *  its whole task -- granting the answer key to a *named person* --
+ *  uncompletable, since nothing else in the product maps a membership id to
+ *  a human. */
+export interface CourseTaCapabilities extends TaCapabilityGrant {
+  displayName: string;
+  email: string;
+}
+
 /** Lists the course's non-dropped TA memberships. Course-scoped, never
  *  org-scoped: the caller is authorized on one course, so the query is
  *  constrained by the same key (#174's lesson). */
-export async function listCourseTas(db: Db, scope: CourseScope): Promise<CourseTaCapabilities[]> {
+export async function listCourseTas(
+  db: Db,
+  scope: CourseScope,
+  cipher: IdentityCipher,
+): Promise<CourseTaCapabilities[]> {
+  // Flat select+join, never a relational `with:` traversal -- Drizzle's
+  // relational builder serializes bytea through JSON, which hands
+  // encryptedText.fromDriver a hex string instead of a Buffer. The same
+  // hazard is documented at length in repositories/submissions.ts, which
+  // decrypts the student roster the same way.
   const rows = await db
     .select({
       membershipId: courseMemberships.id,
       userId: courseMemberships.userId,
+      displayName: users.displayName,
+      email: users.email,
       canViewSolutions: courseMemberships.canViewSolutions,
       canViewDrafts: courseMemberships.canViewDrafts,
     })
     .from(courseMemberships)
+    .innerJoin(users, eq(courseMemberships.userId, users.id))
     .where(
       and(
         eq(courseMemberships.courseId, scope),
@@ -34,7 +60,20 @@ export async function listCourseTas(db: Db, scope: CourseScope): Promise<CourseT
         isNull(courseMemberships.droppedAt),
       ),
     );
-  return rows;
+
+  // Decrypted in one parallel pass rather than sequentially per row: a TA
+  // roster is small, but the sibling submissions dashboard's serial
+  // per-student await is a known cost and there is no reason to repeat it.
+  return Promise.all(
+    rows.map(async (r) => ({
+      membershipId: r.membershipId,
+      userId: r.userId,
+      displayName: r.displayName ? await cipher.decryptString(r.displayName) : "",
+      email: await cipher.decryptString(r.email),
+      canViewSolutions: r.canViewSolutions,
+      canViewDrafts: r.canViewDrafts,
+    })),
+  );
 }
 
 /** Sets one or both capability flags on a TA membership.
@@ -54,7 +93,7 @@ export async function setTaCapabilities(
   scope: CourseScope,
   membershipId: string,
   input: { canViewSolutions?: boolean; canViewDrafts?: boolean },
-): Promise<CourseTaCapabilities | null> {
+): Promise<TaCapabilityGrant | null> {
   const fields = {
     ...(input.canViewSolutions !== undefined && { canViewSolutions: input.canViewSolutions }),
     ...(input.canViewDrafts !== undefined && { canViewDrafts: input.canViewDrafts }),

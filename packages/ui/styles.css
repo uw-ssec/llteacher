@@ -2587,11 +2587,13 @@ body {
   color: var(--color-text-secondary);
 }
 
-.admin-toggle:has(input:disabled) {
-  cursor: not-allowed;
-  opacity: 0.6;
-}
-
+/* #172 audit (ACC-006): the previous `opacity: 0.6` on the whole wrapper
+   rendered the "Allowed"/"Not allowed" state text at 2.44:1 against the page
+   ground, well under the 4.5:1 AA threshold for 12px text. WCAG's incidental
+   exception covers inactive controls, but that exception was carrying the
+   surface's entire informational payload. The toggles are no longer disabled
+   at all -- an in-flight save shows "Saving…" instead -- so the rule is gone
+   rather than merely narrowed. */
 .admin-toggle input {
   accent-color: var(--color-accent);
   inline-size: 0.95rem;
@@ -2607,6 +2609,85 @@ body {
 .admin-toggle__label {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
+}
+
+/* Visually hidden but exposed to assistive technology. Used for the live
+   region and the table caption -- not `display: none`, which would remove
+   them from the accessibility tree entirely. */
+.admin-visually-hidden {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* #172 (ACC-005): a real table for the TA permission grid, so row and column
+   relationships are programmatically determinable rather than implied by CSS
+   Grid behind an aria-hidden header. */
+.admin-table {
+  inline-size: 100%;
+  border-collapse: collapse;
+  margin-block-start: var(--space-4);
+}
+
+.admin-table th,
+.admin-table td {
+  text-align: start;
+  padding: var(--space-3);
+  border-block-end: 1px solid var(--color-border);
+  vertical-align: top;
+}
+
+.admin-table thead th {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.admin-table__help {
+  display: block;
+  margin-block-start: var(--space-1);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--color-text-secondary);
+}
+
+.admin-table tbody th {
+  font-weight: 500;
+}
+
+/* Inline, row-scoped error so a failure is associated with the control that
+   produced it rather than a single generic banner above the whole table
+   (#172 audit, ACC-003). */
+.admin-field-error {
+  display: block;
+  margin-block-start: var(--space-1);
+  font-size: var(--font-size-xs);
+  color: var(--color-danger, #b3261e);
+}
+
+.admin-link-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--color-accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.admin-link-button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
 
 .admin-submission-row__activity {

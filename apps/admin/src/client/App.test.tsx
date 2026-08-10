@@ -159,11 +159,28 @@ describe("TA console gating (#172)", () => {
   });
 
   /* Version skew: an older apps/web returns courses without role/capability
-     fields. Those entries must still be usable (falling back to the primary
-     role) rather than dropped, which would render "No course found". */
-  it("falls back to the primary role for a pre-#172 profile payload", async () => {
-    stubProfile([{ id: "c1", title: "STATS 311" }]);
+     fields. The entry must stay usable rather than being dropped (which
+     would render "No course found") -- but it degrades to the NARROWEST
+     console role, not the caller's priority-ranked widest one.
+     #172 audit (SEC-005/REL-007/CMP-003): falling back to the primary role
+     showed authoring controls for a course the server refuses, which is the
+     defect #172 exists to fix, resurrected for the length of a deploy. */
+  it("degrades a pre-#172 profile payload to the narrowest console role", async () => {
+    stubProfile([{ id: "c1", title: "STATS 311" }], "instructor");
     renderApp();
-    await waitFor(() => screen.getAllByText(/New homework/i));
+    await waitFor(() => screen.getByText(/Instructor Console/i));
+    // Usable (not dropped) ...
+    expect(screen.queryByText(/No course found/i)).toBeNull();
+    // ... but not granted authoring on the strength of a missing field.
+    expect(screen.queryByText(/New homework/i)).toBeNull();
+  });
+
+  /* A role this bundle does not recognise means a NEWER server. Inheriting
+     the primary role there widens on a value that was explicitly narrower,
+     so the entry is dropped instead. */
+  it("drops a course whose role this bundle does not recognise", async () => {
+    stubProfile([{ id: "c1", title: "STATS 311", role: "grader", canViewSolutions: true, canViewDrafts: true }]);
+    renderApp();
+    await waitFor(() => screen.getByText(/No course found/i));
   });
 });

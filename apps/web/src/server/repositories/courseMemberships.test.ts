@@ -4,6 +4,8 @@ import type { Db } from "../../db/client";
 import { organizations, courses, users, courseMemberships } from "../../db/schema";
 import { unsafeCourseScope } from "./scope";
 import { listCourseTas, setTaCapabilities } from "./courseMemberships";
+import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
+import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -15,6 +17,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
  *  whatever the query builder was handed. */
 describe.skipIf(!DATABASE_URL)("courseMemberships repository (#172)", () => {
   let db: Db;
+  let cipher: IdentityCipher;
   let courseAId: string;
   let courseBId: string;
   let taAMembershipId: string;
@@ -22,17 +25,29 @@ describe.skipIf(!DATABASE_URL)("courseMemberships repository (#172)", () => {
   let instructorMembershipId: string;
   let droppedTaMembershipId: string;
 
-  async function makeUser(): Promise<string> {
-    const bytes = crypto.getRandomValues(new Uint8Array(32));
+  /** Real encrypted identity, so listCourseTas's decrypt path is exercised
+   *  rather than stubbed -- #172 audit (USE-001) added the join + decrypt so
+   *  an instructor sees names instead of UUIDs. */
+  async function makeUser(displayName = "Ada Lovelace", email = `ta-${crypto.randomUUID()}@uw.edu`) {
     const [u] = await db
       .insert(users)
-      .values({ email: bytes as never, emailBlindIndex: bytes as never })
+      .values({
+        email: await cipher.encryptString(email),
+        emailBlindIndex: await cipher.computeBlindIndex(IdentityCipher.normalizeEmail(email)),
+        displayName: await cipher.encryptString(displayName),
+      })
       .returning({ id: users.id });
     return u!.id;
   }
 
   beforeAll(async () => {
     db = makeNodeDb(DATABASE_URL!);
+    cipher = new IdentityCipher(
+      await loadIdentityCipherKeys({
+        ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+        BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+      } as Env),
+    );
     const [org] = await db
       .insert(organizations)
       .values({
@@ -80,8 +95,15 @@ describe.skipIf(!DATABASE_URL)("courseMemberships repository (#172)", () => {
     droppedTaMembershipId = droppedTa!.id;
   });
 
+  it("decrypts each TA's identity rather than returning a raw id", async () => {
+    const tas = await listCourseTas(db, unsafeCourseScope(courseAId), cipher);
+    const ta = tas.find((t) => t.membershipId === taAMembershipId);
+    expect(ta!.displayName).toBe("Ada Lovelace");
+    expect(ta!.email).toMatch(/@uw\.edu$/);
+  });
+
   it("both capabilities default to false on a new TA membership", async () => {
-    const tas = await listCourseTas(db, unsafeCourseScope(courseAId));
+    const tas = await listCourseTas(db, unsafeCourseScope(courseAId), cipher);
     const ta = tas.find((t) => t.membershipId === taAMembershipId);
     expect(ta).toBeDefined();
     expect(ta!.canViewSolutions).toBe(false);
@@ -89,7 +111,7 @@ describe.skipIf(!DATABASE_URL)("courseMemberships repository (#172)", () => {
   });
 
   it("lists only non-dropped TA memberships of the given course", async () => {
-    const ids = (await listCourseTas(db, unsafeCourseScope(courseAId))).map((t) => t.membershipId);
+    const ids = (await listCourseTas(db, unsafeCourseScope(courseAId), cipher)).map((t) => t.membershipId);
     expect(ids).toContain(taAMembershipId);
     expect(ids).not.toContain(instructorMembershipId); // not a TA
     expect(ids).not.toContain(droppedTaMembershipId); // dropped
@@ -125,7 +147,7 @@ describe.skipIf(!DATABASE_URL)("courseMemberships repository (#172)", () => {
     expect(result).toBeNull();
 
     // And the target row is genuinely untouched, not just unreported.
-    const [row] = await listCourseTas(db, unsafeCourseScope(courseBId));
+    const [row] = await listCourseTas(db, unsafeCourseScope(courseBId), cipher);
     expect(row!.canViewSolutions).toBe(false);
   });
 

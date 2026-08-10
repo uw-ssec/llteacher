@@ -2,6 +2,10 @@ import { createAuthProvider, parseCourseRole, type AuthSessionState, type Course
 
 export type { CourseRole };
 
+/** The least-privileged role that still admits someone to the console.
+ *  Used only as a degrade target, so a skewed payload never widens access. */
+const NARROWEST_CONSOLE_ROLE: CourseRole = "ta";
+
 /** #172: carries the caller's role and resolved capabilities *for this
  *  course*. The top-level `role` below is a priority-ranked primary role
  *  across every membership, which is the wrong thing to gate a course-scoped
@@ -27,15 +31,32 @@ export type AuthState = AuthSessionState & { role: CourseRole | null; courses: C
  *  dropping those entries would leave the console claiming the instructor
  *  has no courses at all.
  *
- *  Degradation is deny-by-default: a missing `role` falls back to the
- *  caller's top-level primary role, restoring exactly the pre-#172
- *  behaviour, and absent capability flags read as false rather than
- *  granting anything the payload never claimed. */
+ *  Degradation is genuinely deny-by-default: a missing `role` falls back to
+ *  the NARROWEST console role (not the caller's widest), an unrecognized
+ *  role drops the entry outright, and absent capability flags read as false
+ *  rather than granting anything the payload never claimed. */
 function parseCourse(raw: unknown, fallbackRole: CourseRole | null): CourseOption | null {
   if (typeof raw !== "object" || raw === null) return null;
   const c = raw as Record<string, unknown>;
   if (typeof c.id !== "string" || typeof c.title !== "string") return null;
-  const role = (typeof c.role === "string" ? parseCourseRole(c.role) : null) ?? fallbackRole;
+
+  // #172 audit (SEC-005/REL-007/CMP-003): two distinct cases, previously
+  // collapsed into one permissive fallback.
+  //
+  // `role` ABSENT means a pre-#172 server -- degrade, but to the narrowest
+  // console role rather than the caller's priority-ranked primary role. The
+  // primary role is the WIDEST role they hold anywhere, so an instructor in
+  // course A who assists course B was shown authoring controls for B that
+  // every write 403s: the exact defect #172 fixes, resurrected for the
+  // length of a rolling deploy.
+  //
+  // `role` PRESENT but unrecognized means a NEWER server added a course role
+  // this bundle doesn't know. Inheriting the primary role there is strictly
+  // worse -- it widens on a value that was explicitly narrower. Drop the
+  // entry so the warning below fires and nothing is granted on a guess.
+  if (c.role !== undefined && parseCourseRole(c.role) === null) return null;
+  const role = (typeof c.role === "string" ? parseCourseRole(c.role) : null)
+    ?? (fallbackRole ? NARROWEST_CONSOLE_ROLE : null);
   if (!role) return null;
   return {
     id: c.id,

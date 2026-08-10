@@ -38,9 +38,11 @@ export type HomeworksViewProps = {
   onNewHomework: () => void;
   /** #172: false for a TA. The list itself stays readable -- a TA needs it
      to reach the submissions dashboard -- but the create affordance is
-     omitted, since POST /homeworks is instructor-only. Defaults true so
-     existing callers and tests are unaffected. */
-  canAuthor?: boolean;
+     omitted, since POST /homeworks is instructor-only.
+
+     Required, not defaulted: a permission-shaped prop defaulting to
+     "allowed" fails open when a caller forgets it (#172 audit, MNT-003). */
+  canAuthor: boolean;
 };
 
 const STATUS_LABEL: Record<HomeworkStatus, string> = {
@@ -65,7 +67,7 @@ export function HomeworksView({
   onOpenHomework,
   onOpenSubmissions,
   onNewHomework,
-  canAuthor = true,
+  canAuthor,
 }: HomeworksViewProps) {
   const activeCount = homeworks.filter((h) => h.status === "active").length;
 

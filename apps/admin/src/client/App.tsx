@@ -15,7 +15,7 @@
    -------------------------------------------------------------------------- */
 
 import { useEffect, useState } from "react";
-import { TopNav } from "@llteacher/ui";
+import { TopNav, AUTHOR_ROLES, CONSOLE_ROLES } from "@llteacher/ui";
 import { AdminSidebar } from "./components/AdminSidebar";
 import type { AdminNavKey } from "./components/AdminSidebar";
 import { HomeworksView } from "./views/HomeworksView";
@@ -33,21 +33,13 @@ import { useAuth, type CourseRole } from "./components/AuthProvider";
 import { UnauthenticatedAdmin } from "./components/UnauthenticatedAdmin";
 import { Forbidden } from "./components/Forbidden";
 
-/* Roles admitted to the console at all. `ta` belongs here -- a TA has real
-   work to do in this console (the submissions dashboard, student answers).
-   What a TA must NOT get is authoring, which is gated per course by
-   AUTHOR_ROLES below rather than by shutting them out entirely (#172). */
-const CONSOLE_ROLES: ReadonlySet<CourseRole> = new Set<CourseRole>([
-  "instructor",
-  "ta",
-  "admin",
-]);
-
-/* Roles that may author course content in a given course. Mirrors the
-   server's AUTHOR_ROLES in apps/web/src/server/middleware/roles.ts -- if
-   these two disagree, the console shows controls whose requests 403, which
-   is the exact defect #172 exists to fix. */
-const AUTHOR_ROLES: ReadonlySet<CourseRole> = new Set<CourseRole>(["instructor", "admin"]);
+/* #172 audit (FLX-003/MNT-002): imported, not re-declared. These were
+   hand-mirrored here with a comment warning that a disagreement with the
+   server reintroduces #172's own defect -- a comment is not a mechanism.
+   They now live beside COURSE_ROLES in @llteacher/ui, which both apps
+   already depend on and which courseRoleParity.test.ts already guards. */
+const CONSOLE_ROLE_SET: ReadonlySet<CourseRole> = new Set(CONSOLE_ROLES);
+const AUTHOR_ROLE_SET: ReadonlySet<CourseRole> = new Set(AUTHOR_ROLES);
 
 /* localStorage key for the admin sidebar collapsed preference. Namespaced
    separately from the student app — different surface, different user,
@@ -70,7 +62,7 @@ const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "edit-homework":    "Instructor Console · Edit Homework",
   "submissions":      "Instructor Console · Submissions",
   "llm-configs":      "Instructor Console · LLM Configs",
-  "students":         "Instructor Console · Students",
+  "students":         "Instructor Console · TA permissions",
 };
 
 export default function App() {
@@ -92,7 +84,7 @@ export default function App() {
   /* #172: authoring is decided per course, not by the priority-ranked
      top-level `role`. Someone who instructs course A and assists on course B
      must not be shown authoring controls while B is the active course. */
-  const canAuthor = CURRENT_COURSE ? AUTHOR_ROLES.has(CURRENT_COURSE.role) : false;
+  const canAuthor = CURRENT_COURSE ? AUTHOR_ROLE_SET.has(CURRENT_COURSE.role) : false;
 
   const [view, setView] = useState<View>({ kind: "homeworks" });
 
@@ -157,7 +149,7 @@ export default function App() {
 
   if (authLoading) return null;
   if (!isAuthenticated) return <UnauthenticatedAdmin onLogin={login} error={authError} />;
-  if (!role || !CONSOLE_ROLES.has(role)) return <Forbidden />;
+  if (!role || !CONSOLE_ROLE_SET.has(role)) return <Forbidden />;
 
   return (
     <div className="app-shell-vertical">
@@ -267,9 +259,14 @@ export default function App() {
                 />
               )}
 
+              {/* #172 audit: instructor-only. The nav entry is filtered for
+                  a TA, and the route is guarded too so a stale view state
+                  can't land them on a surface whose only fetch 403s. */}
               {view.kind === "students" && (
-                CURRENT_COURSE_ID ? (
-                  <TaCapabilitiesView courseId={CURRENT_COURSE_ID} canAuthor={canAuthor} />
+                !canAuthor ? (
+                  <EmptyView label="Only instructors can manage TA permissions in this course" />
+                ) : CURRENT_COURSE_ID ? (
+                  <TaCapabilitiesView courseId={CURRENT_COURSE_ID} />
                 ) : (
                   <EmptyView label="No course found for your account yet" />
                 )
@@ -287,13 +284,13 @@ function HomeworksDataLoader({
   onOpenHomework,
   onOpenSubmissions,
   onNewHomework,
-  canAuthor = true,
+  canAuthor,
 }: {
   courseId: string;
   onOpenHomework: (id: string) => void;
   onOpenSubmissions: (id: string) => void;
   onNewHomework: () => void;
-  canAuthor?: boolean;
+  canAuthor: boolean;
 }) {
   const [homeworks, setHomeworks] = useState<HomeworkListItemResponse[] | null>(null);
   const [loadError, setLoadError] = useState(false);

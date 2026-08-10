@@ -4,7 +4,14 @@ import { TaCapabilitiesView } from "./TaCapabilitiesView";
 
 afterEach(cleanup);
 
-const TA = { membershipId: "m-1", userId: "u-ta", canViewSolutions: false, canViewDrafts: false };
+const TA = {
+  membershipId: "m-1",
+  userId: "u-ta",
+  displayName: "Ada Lovelace",
+  email: "ada@uw.edu",
+  canViewSolutions: false,
+  canViewDrafts: false,
+};
 
 function stubFetch(handler: (url: string, init?: RequestInit) => Response) {
   const mock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
@@ -18,7 +25,7 @@ describe("TaCapabilitiesView (#172)", () => {
   it("renders each TA with both capabilities shown as not allowed by default", async () => {
     stubFetch(() => new Response(JSON.stringify({ tas: [TA] }), { status: 200 }));
     render(<TaCapabilitiesView courseId="c1" />);
-    await waitFor(() => screen.getByText("u-ta"));
+    await waitFor(() => screen.getByText("Ada Lovelace"));
     expect(screen.getAllByText("Not allowed")).toHaveLength(2);
   });
 
@@ -42,9 +49,9 @@ describe("TaCapabilitiesView (#172)", () => {
       return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
     });
     render(<TaCapabilitiesView courseId="c1" />);
-    await waitFor(() => screen.getByText("u-ta"));
+    await waitFor(() => screen.getByText("Ada Lovelace"));
 
-    fireEvent.click(screen.getByLabelText(/Allow model solutions/i));
+    fireEvent.click(screen.getByLabelText(/Model solutions for/i));
 
     await waitFor(() => expect(screen.getByText("Allowed")).toBeTruthy());
     const patchCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit)?.method === "PATCH");
@@ -61,21 +68,54 @@ describe("TaCapabilitiesView (#172)", () => {
       return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
     });
     render(<TaCapabilitiesView courseId="c1" />);
-    await waitFor(() => screen.getByText("u-ta"));
+    await waitFor(() => screen.getByText("Ada Lovelace"));
 
-    fireEvent.click(screen.getByLabelText(/Allow model solutions/i));
+    fireEvent.click(screen.getByLabelText(/Model solutions for/i));
 
-    await waitFor(() => screen.getByRole("alert"));
+    // The message is rendered inline against the failing row (associated via
+    // aria-errormessage) and mirrored into the live region for announcement,
+    // so it legitimately appears twice in the DOM.
+    await waitFor(() => expect(screen.getAllByText(/Could not update/i).length).toBeGreaterThan(0));
     expect(screen.getAllByText("Not allowed")).toHaveLength(2);
   });
 
-  it("renders the toggles read-only for a caller who cannot author", async () => {
+  it("identifies each TA by name and email, not by a raw id", async () => {
+    // #172 audit (USE-001): granting the answer key to a *named person* is
+    // the whole task; a UUID made it uncompletable.
     stubFetch(() => new Response(JSON.stringify({ tas: [TA] }), { status: 200 }));
-    render(<TaCapabilitiesView courseId="c1" canAuthor={false} />);
-    await waitFor(() => screen.getByText("u-ta"));
-    // Plain DOM property rather than a jest-dom matcher -- this workspace
-    // doesn't register @testing-library/jest-dom.
-    expect((screen.getByLabelText(/Allow model solutions/i) as HTMLInputElement).disabled).toBe(true);
-    expect((screen.getByLabelText(/Allow unreleased homeworks/i) as HTMLInputElement).disabled).toBe(true);
+    render(<TaCapabilitiesView courseId="c1" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+    expect(screen.getByText("ada@uw.edu")).toBeTruthy();
+    expect(screen.queryByText("u-ta")).toBeNull();
+  });
+
+  it("drops a malformed row instead of rendering an uncontrolled checkbox", async () => {
+    // #172 audit (CMP-005): a row missing a boolean flag would otherwise
+    // render checked={undefined} and PATCH a value never shown to the user.
+    stubFetch(() =>
+      new Response(JSON.stringify({ tas: [TA, { membershipId: "m-2", userId: "u2" }] }), {
+        status: 200,
+      }),
+    );
+    render(<TaCapabilitiesView courseId="c1" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+    expect(screen.getAllByRole("row")).toHaveLength(2); // header + one valid row
+  });
+
+  it("surfaces the server's message on a 404 rather than telling the user to retry", async () => {
+    // #172 audit (USE-003): "please try again" is advice that never succeeds
+    // when the TA has been removed from the course.
+    stubFetch((_url, init) => {
+      if (init?.method === "PATCH") {
+        return new Response(JSON.stringify({ error: "TA membership not found in this course" }), {
+          status: 404,
+        });
+      }
+      return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
+    });
+    render(<TaCapabilitiesView courseId="c1" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+    fireEvent.click(screen.getByLabelText(/Model solutions for/i));
+    await waitFor(() => expect(screen.getAllByText(/not found in this course/i).length).toBeGreaterThan(0));
   });
 });

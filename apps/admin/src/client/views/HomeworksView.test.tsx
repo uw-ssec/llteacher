@@ -37,6 +37,7 @@ describe("HomeworksView", () => {
         onOpenHomework={vi.fn()}
         onOpenSubmissions={vi.fn()}
         onNewHomework={vi.fn()}
+        canAuthor
       />,
     );
 
@@ -51,6 +52,7 @@ describe("HomeworksView", () => {
         onOpenHomework={vi.fn()}
         onOpenSubmissions={vi.fn()}
         onNewHomework={vi.fn()}
+        canAuthor
       />,
     );
 
@@ -66,6 +68,7 @@ describe("HomeworksView", () => {
         onOpenHomework={vi.fn()}
         onOpenSubmissions={vi.fn()}
         onNewHomework={vi.fn()}
+        canAuthor
       />,
     );
 
@@ -85,6 +88,7 @@ describe("HomeworksView", () => {
         onOpenHomework={vi.fn()}
         onOpenSubmissions={vi.fn()}
         onNewHomework={vi.fn()}
+        canAuthor
       />,
     );
 
@@ -106,6 +110,7 @@ describe("HomeworksView", () => {
         onOpenHomework={vi.fn()}
         onOpenSubmissions={vi.fn()}
         onNewHomework={vi.fn()}
+        canAuthor
       />,
     );
 

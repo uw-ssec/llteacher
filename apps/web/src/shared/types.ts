@@ -45,14 +45,19 @@ export interface CourseMembershipSummary {
  *  *resolved* capability for the caller themselves -- here the flags are the
  *  stored grant on someone else's membership, which is what an instructor
  *  toggles. */
-export interface CourseTaCapabilitiesResponse {
+export interface TaCapabilityGrantResponse {
   membershipId: string;
   userId: string;
   canViewSolutions: boolean;
   canViewDrafts: boolean;
 }
 
-export type TaCapabilitiesResponse = CourseTaCapabilitiesResponse;
+export interface CourseTaCapabilitiesResponse extends TaCapabilityGrantResponse {
+  /** #172 audit (USE-001): decrypted server-side. An instructor granting the
+   *  answer key needs to identify a person, not a UUID. */
+  displayName: string;
+  email: string;
+}
 
 export interface CourseTaListResponse {
   tas: CourseTaCapabilitiesResponse[];

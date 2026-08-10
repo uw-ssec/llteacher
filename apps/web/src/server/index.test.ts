@@ -114,3 +114,69 @@ describe("app composition", () => {
     consoleSpy.mockRestore();
   });
 });
+
+/** #172 audit (FUN-003): pins the guard assigned to each route in the REAL
+ *  route table.
+ *
+ *  Every route suite builds its own Hono app registering the bare handler,
+ *  relying on each handler's defensive re-check -- so nothing observed the
+ *  `requireGraderOf` vs `requireInstructorOf` assignment in index.ts.
+ *  Reverting a grading route to requireInstructorOf would have left the
+ *  entire suite green while silently removing TA access, and that exact
+ *  drift had already happened once in this feature (an exported sub-app
+ *  still declared the old guard).
+ *
+ *  Asserts only the authorization outcome -- 403 or not-403 -- so it stays a
+ *  guard test rather than duplicating each handler's behaviour. */
+describe("route table guard assignment (#172)", () => {
+  const TA_MEMBERSHIP = {
+    id: "m-ta",
+    userId: "u1",
+    courseId: "course-a",
+    role: "ta",
+    canViewSolutions: false,
+    canViewDrafts: false,
+  };
+
+  async function requestAs(path: string, method = "GET") {
+    findMany.mockResolvedValue([TA_MEMBERSHIP]);
+    const key = await loadSessionKey(ENV);
+    const sealed = await sealSession(createSessionPayload("u1", "w1", 0), key);
+    return app.request(
+      path,
+      { method, headers: { cookie: `${SESSION_COOKIE_NAME}=${sealed}` } },
+      ENV,
+    );
+  }
+
+  // Grading reads: a TA of the course must get past the guard. They may fail
+  // later for unrelated reasons (no such homework), so assert only "not 403".
+  it.each([
+    ["/api/courses/course-a/homeworks/hw-1/submissions", "GET"],
+    ["/api/courses/course-a/sections/sec-1/answers/stu-1", "GET"],
+  ])("admits a TA to %s", async (path, method) => {
+    const res = await requestAs(path, method);
+    expect(res.status).not.toBe(403);
+  });
+
+  // Authoring routes: the same TA must be refused by the guard itself.
+  it.each([
+    ["/api/courses/course-a/homeworks", "POST"],
+    ["/api/courses/course-a/homeworks/hw-1", "PATCH"],
+    ["/api/courses/course-a/homeworks/hw-1", "DELETE"],
+    ["/api/courses/course-a/homeworks/hw-1/publish", "PATCH"],
+    ["/api/courses/course-a/homeworks/hw-1/hide", "PATCH"],
+  ])("refuses a TA %s %s", async (path, method) => {
+    const res = await requestAs(path, method);
+    expect(res.status).toBe(403);
+  });
+
+  // Granting is authoring-tier: a TA must not read or widen capabilities.
+  it.each([
+    ["/api/courses/course-a/tas", "GET"],
+    ["/api/courses/course-a/tas/11111111-2222-4333-8444-555555555555/capabilities", "PATCH"],
+  ])("refuses a TA %s %s", async (path, method) => {
+    const res = await requestAs(path, method);
+    expect(res.status).toBe(403);
+  });
+});
