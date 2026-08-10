@@ -68,6 +68,20 @@ export async function createConversation(
   // this function's two real callers -- createConversationHandler
   // (routes/conversations.ts, #5) and chatHandler's new-conversation branch
   // (routes/chat.ts, #3).
+  //
+  // Reachability today: neither throw is actually hit by either caller as
+  // of #141. Both callers mint `scope` via courseScopeFromAuthContext,
+  // which already checks input.ownerUserId (always authContext.session.
+  // userId, never a different caller-supplied id) against this exact same
+  // membership query before this function is even called -- so the
+  // membership throw below can only fire via a narrow TOCTOU race (the
+  // membership gets dropped between that check and this insert), not a
+  // realistic caller mismatch. And both callers always pass
+  // `sectionId: null`, so the section throw can never fire at all today.
+  // This is defense-in-depth for a future caller that passes a
+  // caller-supplied ownerUserId or a non-null sectionId directly (neither
+  // does today) -- kept typed and mapped now so that future caller gets
+  // the 404 mapping for free, rather than needing its own follow-up issue.
   const [membership] = await db
     .select({ id: courseMemberships.id })
     .from(courseMemberships)
