@@ -295,4 +295,53 @@ describe("TaCapabilitiesView (#172)", () => {
     expect(names[1]).toContain("Bob Zeal");
     expect(names[2]).toContain("Zoe Adams");
   });
+
+  /** #196 (#172 re-audit, ACC-020): the 404 path unmounts the table under the
+   *  user. Without restoration the browser drops focus to <body>, resetting a
+   *  screen reader's virtual cursor to the top of the document. */
+  it("moves focus to the explanation when the row it belonged to is gone", async () => {
+    let listCall = 0;
+    stubFetch((_url, init) => {
+      if (init?.method === "PATCH") {
+        return new Response(JSON.stringify({ error: "That teaching assistant is no longer in this course." }), {
+          status: 404,
+        });
+      }
+      listCall += 1;
+      return new Response(JSON.stringify({ tas: listCall === 1 ? [TA] : [] }), { status: 200 });
+    });
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    screen.getByLabelText(/Model solutions for/i).focus();
+    fireEvent.click(screen.getByLabelText(/Model solutions for/i));
+
+    await waitFor(() => screen.getByText(/No teaching assistants/i));
+    // Focus is on the alert saying why, not on <body>.
+    const alert = screen.getByRole("alert");
+    expect(document.activeElement).toBe(alert);
+    expect(alert.textContent).toMatch(/no longer in this course/i);
+  });
+
+  it("returns focus to the same checkbox when the row survives the refetch", async () => {
+    stubFetch((_url, init) => {
+      if (init?.method === "PATCH") {
+        return new Response(JSON.stringify({ error: "That teaching assistant is no longer in this course." }), {
+          status: 404,
+        });
+      }
+      // The refetch still has the TA -- e.g. a transient mismatch.
+      return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
+    });
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    const before = screen.getByLabelText(/Model solutions for/i);
+    before.focus();
+    fireEvent.click(before);
+
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByLabelText(/Model solutions for/i)),
+    );
+  });
 });

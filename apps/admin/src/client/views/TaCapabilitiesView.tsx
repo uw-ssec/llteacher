@@ -167,6 +167,18 @@ export function TaCapabilitiesView({
    *  region is the pattern that silently fails to announce (ACC-004). */
   const [liveMessage, setLiveMessage] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  /** #196 (#172 re-audit, ACC-020): focus survives a teardown.
+   *
+   *  A 404 save calls load(), whose first statement is setTas(null) -- which
+   *  unmounts the whole <table>, including the checkbox the user is standing
+   *  on. Nothing restored focus, so the browser dropped it to <body>: an NVDA
+   *  user's virtual cursor reset to the top of the document and they had to
+   *  tab back through the TopNav and the entire sidebar. The happy path is
+   *  fine (React keys are stable, so the focused node survives a normal
+   *  save); it is only the teardown paths that needed this. */
+  const checkboxRefs = useRef(new Map<string, HTMLInputElement>());
+  const restoreFocusTo = useRef<string | null>(null);
+  const orphanAlertRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(() => {
     setTas(null);
@@ -209,6 +221,18 @@ export function TaCapabilitiesView({
       .finally(dispose);
   }, [courseId]);
 
+  // Runs after the roster re-renders. If the row survived, put focus back on
+  // the exact checkbox; if it did not, put it on the notice explaining why,
+  // so the user lands on the answer rather than on <body> (#196).
+  useEffect(() => {
+    const pending = restoreFocusTo.current;
+    if (!pending || tas === null) return;
+    restoreFocusTo.current = null;
+    const control = checkboxRefs.current.get(pending);
+    if (control) control.focus();
+    else orphanAlertRef.current?.focus();
+  }, [tas]);
+
   useEffect(() => {
     // Established before load() so the list fetch is covered by the same
     // lifecycle signal the PATCHes are (#172 audit, REL-005).
@@ -246,7 +270,12 @@ export function TaCapabilitiesView({
           setSaveError({ membershipId: ta.membershipId, field, message });
           setLiveMessage(message);
           // A 404 means the row is stale — refetch so it stops being offered.
-          if (res.status === 404) load();
+          if (res.status === 404) {
+            // Remember where the user was standing; the refetch is about to
+            // unmount it (#196).
+            restoreFocusTo.current = key;
+            load();
+          }
           return;
         }
         const grant = parseGrant(await res.json());
@@ -319,7 +348,9 @@ export function TaCapabilitiesView({
           explanation outlives the row it was attached to (#172 audit,
           USE-010). */}
       {saveError && !tas?.some((t) => t.membershipId === saveError.membershipId) && (
-        <div className="admin-alert" role="alert">
+        // tabIndex -1 so focus can be moved here programmatically when the
+        // row the error belonged to is gone (#196) -- not reachable by Tab.
+        <div className="admin-alert" role="alert" tabIndex={-1} ref={orphanAlertRef}>
           <span className="admin-alert__icon" aria-hidden="true">
             <Warning size={16} weight="regular" />
           </span>
@@ -405,6 +436,11 @@ export function TaCapabilitiesView({
                       <label className="admin-toggle">
                         <input
                           type="checkbox"
+                          ref={(el) => {
+                            const k = savingKey(ta.membershipId, c.field);
+                            if (el) checkboxRefs.current.set(k, el);
+                            else checkboxRefs.current.delete(k);
+                          }}
                           checked={ta[c.field]}
                           // Deliberately NOT disabled while saving: disabling
                           // the focused control blurs it and drops the
