@@ -428,6 +428,101 @@ describe("App tutor-conversations rail (#4)", () => {
     expect(chatCalls[0]!.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
   });
 
+  // #4 fix-round 2: the hydration fix above introduced an async gap
+  // (fetch /messages, then apply) that didn't exist when selection was a
+  // synchronous setState. Regression test for the resulting race: select
+  // conversation A, then B before A's /messages response lands, then let
+  // A's response resolve LAST (after B's) -- the exact interleaving a
+  // slower/earlier-started request can produce. Without the
+  // latestTutorSelectionRef guard, A's late response would silently flip
+  // the chat column (and the sidebar's selected-row highlight) back to A
+  // even though B was the student's actual last action.
+  it("discards a stale /messages response when a later selection supersedes it before the first resolves", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    let resolveA!: (res: Response) => void;
+    let resolveB!: (res: Response) => void;
+    const pendingA = new Promise<Response>((resolve) => {
+      resolveA = resolve;
+    });
+    const pendingB = new Promise<Response>((resolve) => {
+      resolveB = resolve;
+    });
+
+    const conversationFixture = (id: string, title: string) => ({
+      id,
+      ownerUserId: "u1",
+      courseId: "course-a",
+      sectionId: null,
+      kind: "tutor" as const,
+      title,
+      isDeleted: false,
+      deletedAt: null,
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+      messageCount: 1,
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(
+            JSON.stringify([conversationFixture("conv-a", "Conversation A"), conversationFixture("conv-b", "Conversation B")]),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/conversations/conv-a/messages") return pendingA;
+        if (url === "/api/conversations/conv-b/messages") return pendingB;
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    // Click order: A, then B, both before either /messages response lands.
+    await user.click(await screen.findByText("Conversation A"));
+    await user.click(screen.getByText("Conversation B"));
+
+    // Resolve OUT of click order: B (clicked second) resolves first, A
+    // (clicked first) resolves last -- exactly the interleaving the race
+    // permits (A's history could plausibly take longer to fetch/parse).
+    resolveB(
+      new Response(JSON.stringify([{ id: "mb", role: "user", parts: [{ type: "text", text: "message from B" }] }]), {
+        status: 200,
+      }),
+    );
+    await screen.findByText("message from B");
+
+    resolveA(
+      new Response(JSON.stringify([{ id: "ma", role: "user", parts: [{ type: "text", text: "message from A" }] }]), {
+        status: 200,
+      }),
+    );
+    // Flush A's now-resolved (but stale) promise through microtasks/effects.
+    // Without the fix this is exactly where the UI would silently flip back
+    // to conversation A.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.queryByText("message from A")).toBeNull();
+    expect(screen.getByText("message from B")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Conversation B/ }).getAttribute("aria-current")).toBe("true");
+  });
+
   it("selecting a homework section switches the chat column back out of the tutor surface", async () => {
     stubBaseFetch({
       onConversationsGet: () =>

@@ -299,6 +299,19 @@ export default function App() {
     transport: new DefaultChatTransport({ api: "/api/chat" }),
   });
 
+  /* #4 fix-round 2: tracks whichever tutor-surface switch was requested
+     most recently -- a target conversation id, or undefined when the
+     student switched away entirely (handleSectionSelect below). Written
+     synchronously at the START of every switch (selectTutorConversation,
+     and handleSelectExistingTutorConversation before its await), so it's
+     always current the instant a new request is made, regardless of
+     whether an earlier request's fetch is still in flight. Read back after
+     handleSelectExistingTutorConversation's await resolves to detect
+     whether that fetch has since been superseded (see below) -- a plain
+     ref, not state, because it must be readable synchronously inside an
+     async callback without waiting on a re-render. */
+  const latestTutorSelectionRef = useRef<string | undefined>(undefined);
+
   /* #4 fix-round: the single place that switches the tutor surface to a
      given conversation, always setting its seed messages in the same
      event-handler pass as its id (React batches both into one commit, so
@@ -307,8 +320,11 @@ export default function App() {
      defaults to [] for the "just created, definitely empty" case
      (onConversationCreated below); handleSelectExistingTutorConversation
      fetches real history before calling this for the "picked an existing
-     row" case. */
+     row" case. Also stamps latestTutorSelectionRef -- every switch, sync
+     or async, funnels through here, so this is the one place that needs to
+     mark "this is now the latest requested switch." */
   const selectTutorConversation = (id: string, initialMessages: UIMessage[] = []) => {
+    latestTutorSelectionRef.current = id;
     setTutorInitialMessages(initialMessages);
     setTutorConversationId(id);
   };
@@ -323,17 +339,36 @@ export default function App() {
      an empty thread (not a thrown error) on a failed fetch, matching this
      file's existing minimal-error-surface convention (see handleSubmit's
      catch below) -- the student can still send a new message into the
-     right conversationId even if history hydration itself failed. */
+     right conversationId even if history hydration itself failed.
+
+     #4 fix-round 2: stale-response guard. The pre-fetch `id ===
+     tutorConversationId` check only rules out re-selecting the conversation
+     already showing -- it says nothing about a SECOND selection made while
+     THIS fetch is still in flight (student clicks conversation A, then B,
+     before A's /messages response lands). Without a post-await recheck,
+     whichever response resolves last would win regardless of click order,
+     silently reverting the UI to a conversation the student already
+     navigated away from. Fixed by stamping latestTutorSelectionRef.current
+     = id synchronously before the fetch starts (so a later call -- to this
+     function again, or to selectTutorConversation directly via "New
+     conversation," or to undefined via handleSectionSelect -- immediately
+     overwrites it), then rechecking it still equals `id` once the await
+     resolves: a mismatch means a newer selection superseded this one while
+     it was in flight, so this (now-stale) response is discarded instead of
+     applied. */
   const handleSelectExistingTutorConversation = async (id: string) => {
     if (id === tutorConversationId) return;
+    latestTutorSelectionRef.current = id;
     try {
       const res = await fetch(`/api/conversations/${id}/messages`);
       if (!res.ok) throw new Error(`failed to load conversation history: ${res.status}`);
       const history = (await res.json()) as UIMessage[];
+      if (latestTutorSelectionRef.current !== id) return; // superseded while in flight -- discard
       selectTutorConversation(id, history);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("[App] tutor conversation history fetch failed", err);
+      if (latestTutorSelectionRef.current !== id) return; // superseded while in flight -- discard
       selectTutorConversation(id, []);
     }
   };
@@ -425,9 +460,15 @@ export default function App() {
      switches back out of the tutor surface if one was showing. Clears
      tutorInitialMessages too (not load-bearing -- selectTutorConversation
      always resets it before the next tutor selection anyway -- but avoids
-     holding onto a stale conversation's history in memory for no reason). */
+     holding onto a stale conversation's history in memory for no reason).
+     #4 fix-round 2: also marks latestTutorSelectionRef as "nothing tutor
+     selected" -- otherwise a tutor-conversation /messages fetch already in
+     flight when the student jumps to a homework section would still match
+     its own id on resolve and incorrectly flip the surface back to a
+     tutor conversation the student explicitly navigated away from. */
   const handleSectionSelect = (sectionNumber: number) => {
     setCurrentSection(sectionNumber);
+    latestTutorSelectionRef.current = undefined;
     setTutorConversationId(undefined);
     setTutorInitialMessages([]);
   };
