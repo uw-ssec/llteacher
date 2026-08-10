@@ -83,14 +83,14 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId/submissions", () => {
   it("denies a non-instructor with 403", async () => {
     const res = await buildSubmissionsApp(
       fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
-    ).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
     expect(res.status).toBe(403);
   });
 
   it("denies a student with 403", async () => {
     const res = await buildSubmissionsApp(
       fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false, hasRole: (r) => r === "student" }),
-    ).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
     expect(res.status).toBe(403);
   });
 
@@ -102,7 +102,7 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId/submissions", () => {
     });
     const res = await buildSubmissionsApp(
       fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
-    ).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { homeworkId: string };
     expect(body.homeworkId).toBe("hw-1");
@@ -112,7 +112,7 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId/submissions", () => {
     getHomeworkSubmissionsMatrixMock.mockReset().mockResolvedValue(null);
     const res = await buildSubmissionsApp(
       fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
-    ).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
     expect(res.status).toBe(404);
   });
 });
@@ -138,7 +138,7 @@ describe("GET .../submissions — grader access (#172)", () => {
     getHomeworkSubmissionsMatrixMock.mockReset().mockResolvedValue(MATRIX);
     const res = await buildSubmissionsApp(
       fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "ta" })] }),
-    ).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
     expect(res.status).toBe(200);
   });
 
@@ -146,7 +146,7 @@ describe("GET .../submissions — grader access (#172)", () => {
     getHomeworkSubmissionsMatrixMock.mockReset().mockResolvedValue(MATRIX);
     const res = await buildSubmissionsApp(
       fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "student" })] }),
-    ).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
     expect(res.status).toBe(403);
   });
 
@@ -154,7 +154,7 @@ describe("GET .../submissions — grader access (#172)", () => {
     getHomeworkSubmissionsMatrixMock.mockReset().mockResolvedValue(MATRIX);
     const res = await buildSubmissionsApp(
       fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-b", role: "ta" })] }),
-    ).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
     expect(res.status).toBe(403);
     expect(getHomeworkSubmissionsMatrixMock).not.toHaveBeenCalled();
   });
@@ -179,7 +179,7 @@ describe("GET .../submissions — unreleased-content gate (#172 audit)", () => {
     aggregateStats: { totalStudents: 0, activeStudents: 0, inactiveStudents: 0, totalSubmissions: 0, submissionRate: 0 },
   });
   const req = (ctx: AuthContext) =>
-    buildSubmissionsApp(ctx).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+    buildSubmissionsApp(ctx).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
 
   it.each(["draft", "scheduled", "hidden"])("404s %s for an ungranted TA", async (status) => {
     getHomeworkSubmissionsMatrixMock.mockReset().mockResolvedValue(matrixWith(status));

@@ -72,7 +72,15 @@ export async function createHomeworkHandler(c: Context<AppEnv>) {
   // listHomeworksHandler -- so a dropped/reordered guard fails closed with
   // a 403 instead of throwing past this point (unguarded .memberships
   // access) into the generic 503 handler.
-  if (!authContext || !courseId) {
+  // #200 (#172 re-audit, MNT-025): the isInstructorOf re-check that every
+  // sibling authoring handler already had and this one did not. Not reachable
+  // through the production route table -- requireInstructorOf wraps it there,
+  // and routeGuards.test.ts pins that -- so this is defence in depth, closing
+  // the gap the moment a new sub-app or test harness wires the handler
+  // unguarded, which is exactly how the drift #172 fixed happened the first
+  // time. It also makes true a comment in courseMemberships.ts that claimed
+  // "every other instructor-gated handler" re-checks; four of five did.
+  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
     return c.json({ error: "Course access denied" }, 403);
   }
 
@@ -131,7 +139,22 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
-  const result = await getHomeworkById(db, scope, homeworkId!);
+  // #206 (#172 re-audit, SEC-020): shape-checked before the id reaches a
+  // uuid-typed column comparison. Postgres raises `invalid input syntax for
+  // type uuid` on a malformed value, app.onError maps any throw to a generic
+  // 503, and a permanent client error therefore reported itself as a backend
+  // outage -- pollutable by any authenticated member on attacker-chosen
+  // input. SEC-003 fixed exactly this for membershipId and its shared helper
+  // claimed to cover "every UUID path param"; three were left behind.
+  //
+  // Returns this route's OWN not-found body, not a shared one: a distinct
+  // message here would distinguish "malformed" from "no such row" and hand
+  // back an existence oracle.
+  if (!homeworkId || !UUID_RE.test(homeworkId)) {
+    return c.json({ error: "Homework not found" }, 404);
+  }
+
+  const result = await getHomeworkById(db, scope, homeworkId);
   if (!result) {
     return c.json({ error: "Homework not found" }, 404);
   }

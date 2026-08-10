@@ -88,7 +88,7 @@ describe("PATCH /api/sections/:sectionId/answer", () => {
 describe("GET /api/courses/:courseId/sections/:sectionId/answers/:studentId", () => {
   it("denies a non-instructor with 403", async () => {
     const res = await buildApp(fakeAuthContext({ isInstructorOf: () => false })).request(
-      "/api/courses/course-a/sections/sec-1/answers/student-1", {}, TEST_ENV,
+      "/api/courses/course-a/sections/11111111-2222-4333-8444-555555555556/answers/11111111-2222-4333-8444-555555555557", {}, TEST_ENV,
     );
     expect(res.status).toBe(403);
   });
@@ -99,7 +99,7 @@ describe("GET /api/courses/:courseId/sections/:sectionId/answers/:studentId", ()
   it("returns 403 when isInstructorOf passes but isMemberOf doesn't (should be unreachable in practice)", async () => {
     getSectionAnswerMock.mockReset();
     const res = await buildApp(fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })], isMemberOf: () => false })).request(
-      "/api/courses/course-a/sections/sec-1/answers/student-1", {}, TEST_ENV,
+      "/api/courses/course-a/sections/11111111-2222-4333-8444-555555555556/answers/11111111-2222-4333-8444-555555555557", {}, TEST_ENV,
     );
     expect(res.status).toBe(403);
     expect(getSectionAnswerMock).not.toHaveBeenCalled();
@@ -108,7 +108,7 @@ describe("GET /api/courses/:courseId/sections/:sectionId/answers/:studentId", ()
   it("returns 404 when no answer exists", async () => {
     getSectionAnswerMock.mockReset().mockResolvedValue(null);
     const res = await buildApp(fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] })).request(
-      "/api/courses/course-a/sections/sec-1/answers/student-1", {}, TEST_ENV,
+      "/api/courses/course-a/sections/11111111-2222-4333-8444-555555555556/answers/11111111-2222-4333-8444-555555555557", {}, TEST_ENV,
     );
     expect(res.status).toBe(404);
   });
@@ -116,9 +116,14 @@ describe("GET /api/courses/:courseId/sections/:sectionId/answers/:studentId", ()
   it("passes a course-scoped (not org-scoped) query down to the repository", async () => {
     getSectionAnswerMock.mockReset().mockResolvedValue(null);
     await buildApp(fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] })).request(
-      "/api/courses/course-a/sections/sec-1/answers/student-1", {}, TEST_ENV,
+      "/api/courses/course-a/sections/11111111-2222-4333-8444-555555555556/answers/11111111-2222-4333-8444-555555555557", {}, TEST_ENV,
     );
-    expect(getSectionAnswerMock).toHaveBeenCalledWith(expect.anything(), "course-a", "sec-1", "student-1");
+    expect(getSectionAnswerMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "course-a",
+      "11111111-2222-4333-8444-555555555556",
+      "11111111-2222-4333-8444-555555555557",
+    );
   });
 
   it("returns the found answer", async () => {
@@ -127,7 +132,7 @@ describe("GET /api/courses/:courseId/sections/:sectionId/answers/:studentId", ()
       submittedAt: new Date("2026-01-01T00:00:00.000Z"), updatedAt: new Date("2026-01-01T00:00:00.000Z"), homeworkStatus: "active",
     });
     const res = await buildApp(fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] })).request(
-      "/api/courses/course-a/sections/sec-1/answers/student-1", {}, TEST_ENV,
+      "/api/courses/course-a/sections/11111111-2222-4333-8444-555555555556/answers/11111111-2222-4333-8444-555555555557", {}, TEST_ENV,
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as SectionAnswerResponse;
@@ -147,7 +152,7 @@ describe("GET .../answers/:studentId — grader access (#172)", () => {
     });
     const res = await buildApp(
       fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "ta" })] }),
-    ).request("/api/courses/course-a/sections/sec-1/answers/stu-1", {}, TEST_ENV);
+    ).request("/api/courses/course-a/sections/11111111-2222-4333-8444-555555555556/answers/11111111-2222-4333-8444-555555555557", {}, TEST_ENV);
     expect(res.status).toBe(200);
   });
 
@@ -155,7 +160,7 @@ describe("GET .../answers/:studentId — grader access (#172)", () => {
     getSectionAnswerMock.mockReset();
     const res = await buildApp(
       fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-b", role: "ta" })] }),
-    ).request("/api/courses/course-a/sections/sec-1/answers/stu-1", {}, TEST_ENV);
+    ).request("/api/courses/course-a/sections/11111111-2222-4333-8444-555555555556/answers/11111111-2222-4333-8444-555555555557", {}, TEST_ENV);
     expect(res.status).toBe(403);
     expect(getSectionAnswerMock).not.toHaveBeenCalled();
   });
@@ -164,7 +169,7 @@ describe("GET .../answers/:studentId — grader access (#172)", () => {
     getSectionAnswerMock.mockReset();
     const res = await buildApp(
       fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "student" })] }),
-    ).request("/api/courses/course-a/sections/sec-1/answers/stu-1", {}, TEST_ENV);
+    ).request("/api/courses/course-a/sections/11111111-2222-4333-8444-555555555556/answers/11111111-2222-4333-8444-555555555557", {}, TEST_ENV);
     expect(res.status).toBe(403);
   });
 });
@@ -193,7 +198,7 @@ describe("GET .../answers/:studentId — unreleased homework gate (#172, SEC-001
 
   const request = (authContext: ReturnType<typeof fakeAuthContext>) =>
     buildApp(authContext).request(
-      "/api/courses/course-a/sections/sec-1/answers/stu-1",
+      "/api/courses/course-a/sections/11111111-2222-4333-8444-555555555556/answers/11111111-2222-4333-8444-555555555557",
       {},
       TEST_ENV,
     );

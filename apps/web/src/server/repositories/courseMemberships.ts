@@ -54,7 +54,21 @@ export async function listCourseTas(
         eq(courseMemberships.role, "ta"),
         isNull(courseMemberships.droppedAt),
       ),
-    );
+    )
+    // #189 (#172 re-audit, USE-028): explicitly ordered. setTaCapabilities
+    // issues an UPDATE, and under MVCC that writes a new tuple -- so without
+    // an ORDER BY the TA an instructor just edited can move position on the
+    // next fetch, and TaCapabilitiesView refetches on any 404 save and on
+    // every remount. Same class of defect as SCL-001/FUN-103 in
+    // ProfileService: an unordered query feeding a UI that treats row
+    // position as meaningful.
+    //
+    // Sorted on the ENCRYPTED email column, so this is a stable arbitrary
+    // order rather than an alphabetical one -- ciphertext does not collate
+    // like plaintext, and the plaintext only exists after the decrypt pass
+    // below. Stability is what this fixes; presentation order is the
+    // client's to choose, and TaCapabilitiesView sorts by display name.
+    .orderBy(users.email, courseMemberships.id);
 
   // Promise.all over the rows. To be accurate about why: IdentityCipher's
   // decryptString is CPU-bound WebCrypto on a single-threaded runtime, so

@@ -202,22 +202,41 @@ describe("route table guard assignment (#172)", () => {
     }
   }
 
+  /** #201 (#172 re-audit, MNT-031): these two used to derive a value from the
+   *  ROUTES literal above and compare it to a hardcoded copy of that same
+   *  literal -- no request issued, nothing awaited, so neither could fail for
+   *  any reason except someone editing the fixture. They now drive the real
+   *  route table and count what the guards actually did, which is the claim
+   *  they were always meant to make. */
   it("admits a student to exactly two routes in the whole table", async () => {
-    // A standing summary so the student column cannot be relaxed one row at
-    // a time. Students read homeworks; they touch nothing else here.
-    const admitted = ROUTES.filter((r) => r.admits.includes("student")).map((r) => r.path);
+    const admitted: string[] = [];
+    for (const route of ROUTES) {
+      const res = await requestAs("student", route.method, route.path);
+      if (res.status === 200) admitted.push(`${route.method} ${route.path}`);
+    }
+    // A student reads homeworks. They touch nothing else here -- not the
+    // submissions dashboard, not a peer's answer, not the grant roster.
     expect(admitted).toEqual([
-      "/api/courses/course-a/homeworks",
-      `/api/courses/course-a/homeworks/${HW}`,
+      "GET /api/courses/course-a/homeworks",
+      `GET /api/courses/course-a/homeworks/${HW}`,
     ]);
   });
 
-  it("admits a TA to no authoring or granting route", async () => {
-    const taAuthoring = ROUTES.filter(
-      (r) => r.admits.includes("ta") && !r.admits.includes("student"),
-    );
-    // The TA's entire additional reach over a student: the two grading reads.
-    expect(taAuthoring.map((r) => r.handler)).toEqual([
+  it("gives a TA exactly two routes more than a student, both grading reads", async () => {
+    const reach = async (persona: Persona) => {
+      const out: HandlerName[] = [];
+      for (const route of ROUTES) {
+        const res = await requestAs(persona, route.method, route.path);
+        if (res.status === 200) out.push(route.handler);
+      }
+      return out;
+    };
+    const student = await reach("student");
+    const ta = await reach("ta");
+
+    // The TA's entire additional reach over a student, measured rather than
+    // restated: the two grading reads, and no authoring or granting route.
+    expect(ta.filter((h) => !student.includes(h))).toEqual([
       "getHomeworkSubmissions",
       "getSectionAnswer",
     ]);

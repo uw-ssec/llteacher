@@ -57,10 +57,13 @@ describe("AdminSidebar authoring affordances (#172)", () => {
     render(<AdminSidebar {...props} canAuthor={false} />);
     const taItems = screen.getAllByRole("listitem").length;
 
-    // Pinned as a count, not just "TA permissions is absent": a filter that
-    // accidentally removed Submissions too would otherwise pass every
-    // assertion above.
-    expect(authorItems).toBe(4);
-    expect(taItems).toBe(3);
+    // #201 (#172 re-audit, MNT-033): the RELATIONSHIP, not the totals. The
+    // old form asserted authorItems === 4 and taItems === 3 -- the size of
+    // NAV_ITEMS, which is unrelated to the filter under test, so adding any
+    // nav entry failed this test with a message about a number. What it
+    // means to pin is "the filter removes exactly one entry"; the entries a
+    // TA keeps are asserted by name in the test above.
+    expect(authorItems - taItems).toBe(1);
+    expect(taItems).toBeGreaterThan(0);
   });
 });

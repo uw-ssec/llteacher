@@ -191,10 +191,11 @@ export default function App() {
                     onOpenHomework={(id) => setView({ kind: "edit-homework", homeworkId: id })}
                     onOpenSubmissions={(id) => setView({ kind: "submissions", homeworkId: id })}
                     canAuthor={canAuthor}
+                    canViewDrafts={CURRENT_COURSE?.canViewDrafts === true}
                     onNewHomework={() => setView({ kind: "create-homework" })}
                   />
                 ) : (
-                  <EmptyView label="No course found for your account yet" />
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
                 )
               )}
 
@@ -205,7 +206,10 @@ export default function App() {
                   this issue exists to remove. */}
               {view.kind === "create-homework" && (
                 !canAuthor ? (
-                  <EmptyView label="You do not have permission to create homeworks in this course" />
+                  <EmptyView
+                    label="You do not have permission to create homeworks in this course"
+                    body={NOT_INSTRUCTOR_BODY}
+                  />
                 ) : CURRENT_COURSE_ID ? (
                   <HomeworkCreateView
                     courseId={CURRENT_COURSE_ID}
@@ -214,7 +218,7 @@ export default function App() {
                     onCancel={() => setView({ kind: "homeworks" })}
                   />
                 ) : (
-                  <EmptyView label="No course found for your account yet" />
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
                 )
               )}
 
@@ -224,7 +228,7 @@ export default function App() {
                   the API returned the solution and nothing rendered it. */}
               {view.kind === "edit-homework" && (
                 !CURRENT_COURSE_ID ? (
-                  <EmptyView label="No course found for your account yet" />
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
                 ) : !canAuthor ? (
                   <HomeworkReadOnlyView
                     courseId={CURRENT_COURSE_ID}
@@ -232,7 +236,12 @@ export default function App() {
                     onBack={() => setView({ kind: "homeworks" })}
                     canViewSolutions={CURRENT_COURSE?.canViewSolutions === true}
                   />
-                ) : CURRENT_COURSE_ID ? (
+                ) : (
+                  /* #202 (MNT-027): no third CURRENT_COURSE_ID test. The
+                     first branch already returned for a falsy id, so the
+                     trailing EmptyView was unreachable -- and reading as
+                     though the id could still be absent here invites further
+                     defensive handling that is equally dead. */
                   <HomeworkEditView
                     courseId={CURRENT_COURSE_ID}
                     homeworkId={view.homeworkId}
@@ -240,8 +249,6 @@ export default function App() {
                     onSaved={() => setView({ kind: "homeworks" })}
                     onCancel={() => setView({ kind: "homeworks" })}
                   />
-                ) : (
-                  <EmptyView label="No course found for your account yet" />
                 )
               )}
 
@@ -253,7 +260,7 @@ export default function App() {
                     onBack={() => setView({ kind: "homeworks" })}
                   />
                 ) : (
-                  <EmptyView label="No course found for your account yet" />
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
                 )
               )}
 
@@ -276,11 +283,14 @@ export default function App() {
                   can't land them on a surface whose only fetch 403s. */}
               {view.kind === "students" && (
                 !canAuthor ? (
-                  <EmptyView label="Only instructors can manage TA permissions in this course" />
+                  <EmptyView
+                    label="Only instructors can manage TA permissions in this course"
+                    body={NOT_INSTRUCTOR_BODY}
+                  />
                 ) : CURRENT_COURSE_ID ? (
-                  <TaCapabilitiesView courseId={CURRENT_COURSE_ID} />
+                  <TaCapabilitiesView courseId={CURRENT_COURSE_ID} courseTitle={CURRENT_COURSE.title} />
                 ) : (
-                  <EmptyView label="No course found for your account yet" />
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
                 )
               )}
             </div>
@@ -297,12 +307,14 @@ function HomeworksDataLoader({
   onOpenSubmissions,
   onNewHomework,
   canAuthor,
+  canViewDrafts,
 }: {
   courseId: string;
   onOpenHomework: (id: string) => void;
   onOpenSubmissions: (id: string) => void;
   onNewHomework: () => void;
   canAuthor: boolean;
+  canViewDrafts: boolean;
 }) {
   const [homeworks, setHomeworks] = useState<HomeworkListItemResponse[] | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -324,6 +336,7 @@ function HomeworksDataLoader({
       onOpenSubmissions={onOpenSubmissions}
       onNewHomework={onNewHomework}
       canAuthor={canAuthor}
+      canViewDrafts={canViewDrafts}
     />
   );
 }
@@ -355,15 +368,37 @@ function SubmissionsDataLoader({
   return <SubmissionsView data={data} onBack={onBack} />;
 }
 
-function EmptyView({ label }: { label: string }) {
+/* #186 (#172 re-audit, USE-026): `body` is explicit and NOT defaulted to the
+   scaffolding sentence.
+
+   This component was written for genuinely unbuilt views, and its fixed body
+   read "This view is scaffolded in the navigation but not yet implemented.
+   Wire it next -- the data shape lives in lib/fixtures.ts." #172 then reused
+   it for permission and no-course states, so a TA refused the TA-permissions
+   page was told the feature does not exist and handed an internal file path.
+   They would reasonably tell their instructor not to look for it -- and the
+   instructor is the one person who could have granted them access.
+
+   Defaulting to no body rather than to the old text is deliberate: a call
+   site that forgets to say why the view is empty shows nothing, which is
+   merely unhelpful, instead of asserting something false.
+
+   The scaffolding sentence itself is gone, not parameterised: every remaining
+   call site is a permission or no-course state, so it had no honest user
+   left. Reinstate it as a `body` prop if a genuinely stubbed view returns. */
+function EmptyView({ label, body }: { label: string; body?: React.ReactNode }) {
   return (
     <div className="admin-coming-soon">
       <div className="admin-coming-soon__mark" aria-hidden="true">¶</div>
       <h2 className="admin-coming-soon__title">{label}</h2>
-      <p className="admin-coming-soon__body">
-        This view is scaffolded in the navigation but not yet implemented.
-        Wire it next — the data shape lives in <code>lib/fixtures.ts</code>.
-      </p>
+      {body && <p className="admin-coming-soon__body">{body}</p>}
     </div>
   );
 }
+
+/** Shared copy for the two states #172 introduced, so the same situation
+ *  reads the same way wherever it is reached. */
+const NO_COURSE_BODY =
+  "Your account is not attached to a course yet. Contact your program administrator.";
+const NOT_INSTRUCTOR_BODY =
+  "Ask the course instructor to grant you access, or switch to a course where you are the instructor.";

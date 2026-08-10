@@ -1,5 +1,6 @@
 import { type Context } from "hono";
 import { makeDb } from "../../db/client";
+import { UUID_RE } from "../utils/uuid";
 import { submitSection, getHomeworkSubmissionsMatrix } from "../repositories/submissions";
 import { isUnreleased } from "../repositories/homeworks";
 import { getOrgScopesForUser } from "../repositories/users";
@@ -78,7 +79,22 @@ export async function getHomeworkSubmissionsHandler(c: Context<AppEnv>) {
   // already do -- the one existing precedent for building a cipher from
   // c.env at the route layer.
   const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
-  const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId!);
+  // #206 (#172 re-audit, SEC-020): shape-checked before the id reaches a
+  // uuid-typed column comparison. Postgres raises `invalid input syntax for
+  // type uuid` on a malformed value, app.onError maps any throw to a generic
+  // 503, and a permanent client error therefore reported itself as a backend
+  // outage -- pollutable by any authenticated member on attacker-chosen
+  // input. SEC-003 fixed exactly this for membershipId and its shared helper
+  // claimed to cover "every UUID path param"; three were left behind.
+  //
+  // Returns this route's OWN not-found body, not a shared one: a distinct
+  // message here would distinguish "malformed" from "no such row" and hand
+  // back an existence oracle.
+  if (!homeworkId || !UUID_RE.test(homeworkId)) {
+    return c.json({ error: "Homework not found" }, 404);
+  }
+
+  const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId);
   if (!matrix) return c.json({ error: "Homework not found" }, 404);
   // #172 audit (SEC-001): grading authority does not imply access to
   // unreleased content. A TA the instructor denied `can_view_drafts` must

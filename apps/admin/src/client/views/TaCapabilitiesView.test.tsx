@@ -24,20 +24,20 @@ function stubFetch(handler: (url: string, init?: RequestInit) => Response) {
 describe("TaCapabilitiesView (#172)", () => {
   it("renders each TA with both capabilities shown as not allowed by default", async () => {
     stubFetch(() => new Response(JSON.stringify({ tas: [TA] }), { status: 200 }));
-    render(<TaCapabilitiesView courseId="c1" />);
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
     await waitFor(() => screen.getByText("Ada Lovelace"));
     expect(screen.getAllByText("Not allowed")).toHaveLength(2);
   });
 
   it("shows an empty state when the course has no TAs", async () => {
     stubFetch(() => new Response(JSON.stringify({ tas: [] }), { status: 200 }));
-    render(<TaCapabilitiesView courseId="c1" />);
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
     await waitFor(() => screen.getByText(/No teaching assistants/i));
   });
 
   it("surfaces a load failure instead of rendering an empty roster", async () => {
     stubFetch(() => new Response(null, { status: 500 }));
-    render(<TaCapabilitiesView courseId="c1" />);
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
     await waitFor(() => screen.getByRole("alert"));
   });
 
@@ -48,7 +48,7 @@ describe("TaCapabilitiesView (#172)", () => {
       }
       return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
     });
-    render(<TaCapabilitiesView courseId="c1" />);
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
     await waitFor(() => screen.getByText("Ada Lovelace"));
 
     fireEvent.click(screen.getByLabelText(/Model solutions for/i));
@@ -67,7 +67,7 @@ describe("TaCapabilitiesView (#172)", () => {
       if (init?.method === "PATCH") return new Response(null, { status: 500 });
       return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
     });
-    render(<TaCapabilitiesView courseId="c1" />);
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
     await waitFor(() => screen.getByText("Ada Lovelace"));
 
     fireEvent.click(screen.getByLabelText(/Model solutions for/i));
@@ -83,21 +83,21 @@ describe("TaCapabilitiesView (#172)", () => {
     // #172 audit (USE-001): granting the answer key to a *named person* is
     // the whole task; a UUID made it uncompletable.
     stubFetch(() => new Response(JSON.stringify({ tas: [TA] }), { status: 200 }));
-    render(<TaCapabilitiesView courseId="c1" />);
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
     await waitFor(() => screen.getByText("Ada Lovelace"));
     expect(screen.getByText("ada@uw.edu")).toBeTruthy();
     expect(screen.queryByText("u-ta")).toBeNull();
   });
 
   it("drops a malformed row instead of rendering an uncontrolled checkbox", async () => {
-    // #172 audit (CMP-005): a row missing a boolean flag would otherwise
+    // #172 audit: a row missing a boolean flag would otherwise
     // render checked={undefined} and PATCH a value never shown to the user.
     stubFetch(() =>
       new Response(JSON.stringify({ tas: [TA, { membershipId: "m-2", userId: "u2" }] }), {
         status: 200,
       }),
     );
-    render(<TaCapabilitiesView courseId="c1" />);
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
     await waitFor(() => screen.getByText("Ada Lovelace"));
     expect(screen.getAllByRole("row")).toHaveLength(2); // header + one valid row
   });
@@ -113,7 +113,7 @@ describe("TaCapabilitiesView (#172)", () => {
       }
       return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
     });
-    render(<TaCapabilitiesView courseId="c1" />);
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
     await waitFor(() => screen.getByText("Ada Lovelace"));
     fireEvent.click(screen.getByLabelText(/Model solutions for/i));
     await waitFor(() => expect(screen.getAllByText(/not found in this course/i).length).toBeGreaterThan(0));
@@ -136,7 +136,7 @@ describe("TaCapabilitiesView (#172)", () => {
       listCall += 1;
       return new Response(JSON.stringify({ tas: listCall === 1 ? [TA] : [] }), { status: 200 });
     });
-    render(<TaCapabilitiesView courseId="c1" />);
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
     await waitFor(() => screen.getByText("Ada Lovelace"));
 
     fireEvent.click(screen.getByLabelText(/Model solutions for/i));
@@ -167,7 +167,7 @@ describe("TaCapabilitiesView (#172)", () => {
       }
       return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
     });
-    render(<TaCapabilitiesView courseId="c1" />);
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
     await waitFor(() => screen.getByText("Ada Lovelace"));
 
     fireEvent.click(screen.getByLabelText(/Model solutions for/i));
@@ -182,7 +182,7 @@ describe("TaCapabilitiesView (#172)", () => {
       if (init?.method === "PATCH") return new Response(JSON.stringify({}), { status: 200 });
       return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
     });
-    render(<TaCapabilitiesView courseId="c1" />);
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
     await waitFor(() => screen.getByText("Ada Lovelace"));
 
     fireEvent.click(screen.getByLabelText(/Model solutions for/i));
@@ -205,7 +205,7 @@ describe("TaCapabilitiesView (#172)", () => {
       }
       return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
     });
-    render(<TaCapabilitiesView courseId="c1" />);
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
     await waitFor(() => screen.getByText("Ada Lovelace"));
 
     fireEvent.click(screen.getByLabelText(/Model solutions for/i));
@@ -216,5 +216,83 @@ describe("TaCapabilitiesView (#172)", () => {
     expect(screen.getAllByText("Not allowed")).toHaveLength(1);
 
     releasePatch?.();
+  });
+
+  /** #185 (USE-023): this page grants the answer key and used to name no
+   *  course at all, while the only course string in the chrome was a
+   *  hardcoded literal. */
+  it("names the active course in the header", async () => {
+    stubFetch(() => new Response(JSON.stringify({ tas: [TA] }), { status: 200 }));
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 390" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+    expect(screen.getByRole("heading", { name: /STATS 390/ })).toBeTruthy();
+  });
+
+  /** #194 (ACC-022): savingIds was re-keyed per field for REL-015; saveError
+   *  was not, so a failure on one capability marked the OTHER checkbox
+   *  aria-invalid and pointed it at the wrong error. A screen-reader user
+   *  told the drafts grant failed would "retry" it and revoke a working one. */
+  it("marks only the failing capability invalid, not the whole row", async () => {
+    stubFetch((_url, init) => {
+      if (init?.method === "PATCH") return new Response(null, { status: 500 });
+      return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
+    });
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    const solutions = screen.getByLabelText(/Model solutions for/i);
+    fireEvent.click(solutions);
+    await waitFor(() => expect(screen.getAllByText(/Could not update/i).length).toBeGreaterThan(0));
+
+    expect(solutions.getAttribute("aria-invalid")).toBe("true");
+    // The capability that did NOT fail must carry no error association.
+    const drafts = screen.getByLabelText(/Unreleased homeworks for/i);
+    expect(drafts.getAttribute("aria-invalid")).toBeNull();
+    expect(drafts.getAttribute("aria-errormessage")).toBeNull();
+    expect(drafts.getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("associates the error with the failing checkbox by a resolvable id", async () => {
+    stubFetch((_url, init) => {
+      if (init?.method === "PATCH") return new Response(null, { status: 500 });
+      return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
+    });
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+    fireEvent.click(screen.getByLabelText(/Model solutions for/i));
+    await waitFor(() => expect(screen.getAllByText(/Could not update/i).length).toBeGreaterThan(0));
+
+    const solutions = screen.getByLabelText(/Model solutions for/i);
+    const id = solutions.getAttribute("aria-errormessage");
+    expect(id).toBeTruthy();
+    // #204 (ACC-023): describedby carries the same id, because VoiceOver
+    // does not implement aria-errormessage at all.
+    expect(solutions.getAttribute("aria-describedby")).toBe(id);
+    expect(document.getElementById(id!)?.textContent).toMatch(/Could not update/i);
+  });
+
+  /** #195 (ACC-021): Voice Control and Dragon match on the accessible name.
+   *  A name omitting the visible word left the page's only control type
+   *  unaddressable by voice. */
+  it("includes the visible state text in the accessible name", async () => {
+    stubFetch(() => new Response(JSON.stringify({ tas: [TA] }), { status: 200 }));
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+    // Visible text is "Not allowed"; the accessible name must contain it.
+    expect(screen.getByLabelText(/^Not allowed — Model solutions for Ada Lovelace$/)).toBeTruthy();
+  });
+
+  /** #189 (USE-028): the server orders by ciphertext, which is stable but
+   *  not alphabetical; the readable order can only be produced here. */
+  it("sorts the roster by the name the instructor reads", async () => {
+    const zoe = { ...TA, membershipId: "m-z", userId: "u-z", displayName: "Zoe Adams", email: "zoe@uw.edu" };
+    const bob = { ...TA, membershipId: "m-b", userId: "u-b", displayName: "Bob Zeal", email: "bob@uw.edu" };
+    stubFetch(() => new Response(JSON.stringify({ tas: [zoe, bob, TA] }), { status: 200 }));
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
+    await waitFor(() => screen.getByText("Zoe Adams"));
+    const names = screen.getAllByRole("rowheader").map((th) => th.textContent);
+    expect(names[0]).toContain("Ada Lovelace");
+    expect(names[1]).toContain("Bob Zeal");
+    expect(names[2]).toContain("Zoe Adams");
   });
 });

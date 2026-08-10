@@ -21,6 +21,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Users, Warning } from "@phosphor-icons/react";
 import { PageHeader } from "../components/PageHeader";
 import { abortAfter } from "../lib/abortAfter";
+import type { TaCapabilityField } from "@llteacher/ui";
 
 export interface TaCapabilities {
   membershipId: string;
@@ -31,7 +32,15 @@ export interface TaCapabilities {
   canViewDrafts: boolean;
 }
 
-type CapabilityField = "canViewSolutions" | "canViewDrafts";
+/** #202 (#172 re-audit, MNT-028): aliased from @llteacher/ui, not re-typed.
+ *  The file header's "apps/admin never imports from apps/web" convention does
+ *  not apply -- this is the shared UI package, which App.tsx already imports
+ *  from, and courseRole.ts derives TaCapabilityField from the same
+ *  TA_CAPABILITY_FIELDS the server enforces with. A third hand-written copy in
+ *  a third package is exactly what that derivation exists to prevent: rename
+ *  canViewDrafts and every other layer updates and typechecks while this view
+ *  keeps the old key and PATCHes a body the server 400s. */
+type CapabilityField = TaCapabilityField;
 
 /** Column copy names the homework statuses the grant actually covers, in the
  *  instructor's own vocabulary (#172 audit, USE-005). "Unreleased" appears
@@ -50,10 +59,14 @@ const CAPABILITY_COLUMNS: { field: CapabilityField; label: string; help: string 
   },
 ];
 
-/** Runtime-validated rather than cast (#172 audit, CMP-005). A wrong-shaped
- *  row would otherwise render a checkbox with `checked={undefined}` — React
- *  flips it to uncontrolled and the next toggle PATCHes a value the user was
- *  never actually shown. */
+/** Runtime-validated rather than cast (#172 audit). A wrong-shaped row would
+ *  otherwise render a checkbox with `checked={undefined}` — React flips it to
+ *  uncontrolled and the next toggle PATCHes a value the user was never
+ *  actually shown.
+ *
+ *  (#200/MNT-026: this used to cite CMP-005, which is the SPA-shell 404 in
+ *  server/index.ts — a different finding entirely. Citation dropped rather
+ *  than guessed at; the reason above stands on its own.) */
 function parseTa(raw: unknown): TaCapabilities | null {
   if (typeof raw !== "object" || raw === null) return null;
   const t = raw as Record<string, unknown>;
@@ -102,17 +115,47 @@ async function errorMessageFor(res: Response): Promise<string> {
     /* non-JSON body — fall through to the status-based advice */
   }
   if (res.status === 404) {
-    return `${serverMessage || "That teaching assistant was not found."} They may have been removed from this course.`;
+    // #188 (#172 re-audit, USE-025): returned as-is, not concatenated with a
+    // trailing sentence. The old form glued a fixed clause on with a bare
+    // space, and since the server's body carried no terminal punctuation the
+    // instructor read one run-on line ("...not found in this course They may
+    // have been removed from this course."). The server now sends a complete
+    // human sentence naming a person rather than a membership row, so the
+    // client's job is to show it, not to repair it.
+    return serverMessage || "That teaching assistant is no longer in this course.";
   }
   if (res.status === 403) return "Your permissions changed. Reload the console.";
   if (res.status >= 500) return "Could not update that permission. Please try again.";
   return serverMessage || "Could not update that permission.";
 }
 
-export function TaCapabilitiesView({ courseId }: { courseId: string }) {
+export function TaCapabilitiesView({
+  courseId,
+  courseTitle,
+}: {
+  courseId: string;
+  /** #185 (#172 re-audit, USE-023). This page grants the answer key, and it
+   *  used to name no course at all -- the only course string in the chrome is
+   *  TopNav's hardcoded "STATS 311", while the course actually written to is
+   *  `courses[0]`, chosen authority-first by ProfileService. An instructor
+   *  with two courses could grant on one while the only visible label named
+   *  the other, and nothing in the console would ever show them the mistake:
+   *  the record of it lives in the server-side audit log. */
+  courseTitle: string;
+}) {
   const [tas, setTas] = useState<TaCapabilities[] | null>(null);
   const [loadError, setLoadError] = useState(false);
-  const [saveError, setSaveError] = useState<{ membershipId: string; message: string } | null>(null);
+  /** #194 (#172 re-audit, ACC-022): carries the FIELD as well as the
+   *  membership. savingIds was re-keyed to `membershipId:field` for REL-015;
+   *  the error state was left keyed by membership alone, so a failure saving
+   *  Model solutions marked the Unreleased-homeworks checkbox on the same row
+   *  aria-invalid and pointed its aria-errormessage at the other capability's
+   *  error. A screen-reader user, told the drafts grant had failed, would
+   *  press Space to retry it -- revoking a grant that was working. Fixing one
+   *  instance of a keying bug and not the other is what made that reachable. */
+  const [saveError, setSaveError] = useState<
+    { membershipId: string; field: CapabilityField; message: string } | null
+  >(null);
   /** Keyed `membershipId:field`, not by membership alone (#172 audit,
    *  REL-004 then REL-015). Two capabilities sit on the same row, so keying
    *  by membership made toggling Solutions block Drafts on that row, and
@@ -142,7 +185,20 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
       })
       .then((data) => {
         const rows = Array.isArray(data.tas) ? data.tas : [];
-        setTas(rows.map(parseTa).filter((t): t is TaCapabilities => t !== null));
+        setTas(
+          rows
+            .map(parseTa)
+            .filter((t): t is TaCapabilities => t !== null)
+            // #189 (#172 re-audit, USE-028): sorted by the name the
+            // instructor actually reads. The server orders too, but only by
+            // the ENCRYPTED email -- stable, and deliberately not
+            // alphabetical, since ciphertext does not collate. The plaintext
+            // exists only here, so this is the only place an instructor-
+            // meaningful order can be produced.
+            .sort((a, b) =>
+              (a.displayName || a.email).localeCompare(b.displayName || b.email),
+            ),
+        );
       })
       .catch((err: unknown) => {
         // An unmount/course-change abort is not a load failure -- reporting
@@ -187,7 +243,7 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
         });
         if (!res.ok) {
           const message = await errorMessageFor(res);
-          setSaveError({ membershipId: ta.membershipId, message });
+          setSaveError({ membershipId: ta.membershipId, field, message });
           setLiveMessage(message);
           // A 404 means the row is stale — refetch so it stops being offered.
           if (res.status === 404) load();
@@ -199,7 +255,7 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
         // onto the row the instructor was actually editing.
         if (!grant || grant.membershipId !== ta.membershipId) {
           const message = "The server returned an unexpected response. Reload the console.";
-          setSaveError({ membershipId: ta.membershipId, message });
+          setSaveError({ membershipId: ta.membershipId, field, message });
           setLiveMessage(message);
           return;
         }
@@ -226,7 +282,7 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
           name === "TimeoutError"
             ? "That permission change timed out. It may not have been saved — reload to check."
             : "Could not update that permission. Please try again.";
-        setSaveError({ membershipId: ta.membershipId, message });
+        setSaveError({ membershipId: ta.membershipId, field, message });
         setLiveMessage(message);
       } finally {
         dispose();
@@ -244,8 +300,12 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
     <div className="admin-view">
       <PageHeader
         eyebrow="TEACHING ASSISTANTS"
-        title="TA permissions"
-        subtitle="TAs can always read the submissions dashboard and student answers. Model solutions and unreleased homeworks are granted per course."
+        title={`TA permissions · ${courseTitle}`}
+        // "for this course only" rather than "per course": the old wording
+        // described the permission MODEL, which the instructor already
+        // gathered, while leaving the thing they actually needed -- which
+        // course this page writes to -- unstated (#185, USE-023).
+        subtitle="TAs can always read the submissions dashboard and student answers. Model solutions and unreleased homeworks are granted for this course only."
       />
 
       {/* Mounted unconditionally so announcements are reliable (ACC-004). */}
@@ -310,8 +370,7 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
               const rowSaving = CAPABILITY_COLUMNS.some((c) =>
                 savingIds.has(savingKey(ta.membershipId, c.field)),
               );
-              const rowError = saveError?.membershipId === ta.membershipId ? saveError : null;
-              const errorId = `ta-error-${ta.membershipId}`;
+              const who = ta.displayName || ta.email || ta.userId;
               return (
                 <tr key={ta.membershipId} aria-busy={rowSaving || undefined}>
                   <th scope="row">
@@ -319,14 +378,28 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
                       {ta.displayName || "(no name on file)"}
                     </span>
                     <span className="admin-submission-row__name-id">{ta.email}</span>
-                    {rowError && (
-                      <span id={errorId} className="admin-field-error">
-                        {rowError.message}
-                      </span>
-                    )}
                   </th>
                   {CAPABILITY_COLUMNS.map((c) => {
                     const cellSaving = savingIds.has(savingKey(ta.membershipId, c.field));
+                    // #194 (ACC-022): matched on membership AND field, so a
+                    // failure on one capability leaves the other's checkbox
+                    // valid and unassociated.
+                    const cellError =
+                      saveError?.membershipId === ta.membershipId && saveError.field === c.field
+                        ? saveError
+                        : null;
+                    const errorId = `ta-error-${ta.membershipId}-${c.field}`;
+                    // #195 (ACC-021): the visible text is computed once and
+                    // used BOTH as the label the user reads and as the prefix
+                    // of the accessible name. Voice Control and Dragon match
+                    // on the accessible name, so a name that omitted the one
+                    // word on screen ("Allowed") left the page's only control
+                    // type unaddressable by voice.
+                    const stateText = cellSaving
+                      ? "Saving…"
+                      : ta[c.field]
+                        ? "Allowed"
+                        : "Not allowed";
                     return (
                     <td key={c.field}>
                       <label className="admin-toggle">
@@ -337,15 +410,27 @@ export function TaCapabilitiesView({ courseId }: { courseId: string }) {
                           // the focused control blurs it and drops the
                           // keyboard user out of the row (ACC-002). Re-entry
                           // is guarded in `toggle` instead.
-                          aria-label={`${c.label} for ${ta.displayName || ta.email || ta.userId}`}
-                          aria-invalid={rowError ? true : undefined}
-                          aria-errormessage={rowError ? errorId : undefined}
+                          aria-label={`${stateText} — ${c.label} for ${who}`}
+                          aria-invalid={cellError ? true : undefined}
+                          // #204 (ACC-023): describedby ALONGSIDE errormessage,
+                          // not instead of it. VoiceOver does not implement
+                          // aria-errormessage at all, so it was the sole
+                          // association on the one platform that ignores it.
+                          aria-errormessage={cellError ? errorId : undefined}
+                          aria-describedby={cellError ? errorId : undefined}
                           onChange={() => toggle(ta, c.field)}
                         />
-                        <span className="admin-toggle__label">
-                          {cellSaving ? "Saving…" : ta[c.field] ? "Allowed" : "Not allowed"}
-                        </span>
+                        <span className="admin-toggle__label">{stateText}</span>
                       </label>
+                      {/* In the failing cell, not the row header (#204,
+                          ACC-023): sitting in <th scope="row"> made every
+                          cell traversal re-read the whole error sentence as
+                          part of the row's name. */}
+                      {cellError && (
+                        <span id={errorId} className="admin-field-error">
+                          {cellError.message}
+                        </span>
+                      )}
                     </td>
                     );
                   })}

@@ -218,9 +218,7 @@ If the view needs sidebar selection state, extend `AdminNavKey` and add a `NAV_I
 | New admin component placed in `packages/ui/src/` | Couples it to the design system contract too early | Keep admin-only components in `apps/admin/src/client/components/` until they're proven reusable. Promote later. |
 | Forgetting an `aria-label` on a collapsed nav item | Screen readers see only an icon | Pass `aria-label={isCollapsed ? item.label : undefined}` and the same string to `title` for hover tooltips. Already wired in `AdminSidebar.tsx`. |
 
-## What's not yet built
-
-Scaffolded in the navigation but stubbed:
+## Implemented views
 
 - **TA permissions view** (`TaCapabilitiesView`, #172) — instructor-only. Lists the course's non-dropped `ta` memberships and toggles two per-course capabilities on each.
   - `GET /api/courses/:courseId/tas` — `requireInstructorOf`. Returns `{ tas: [{ membershipId, userId, displayName, email, canViewSolutions, canViewDrafts }] }`; identities are decrypted server-side.
@@ -228,7 +226,18 @@ Scaffolded in the navigation but stubbed:
   - **What the capabilities gate:** `canViewSolutions` — the `solution` field on every section of every homework in the course. `canViewDrafts` — homeworks in `draft`, `scheduled` or `hidden` status, on the list route, the detail route, the submissions dashboard, and the section-answer read. Instructors and admins hold both unconditionally; the stored flags are only consulted for a `ta` membership and are rejected on any other role by a database CHECK.
   - The nav entry is `authorOnly`, so a TA never sees it — a surface whose only endpoint 403s is the defect #172 exists to remove.
   - The student roster originally planned for this slot needs its own nav entry; this one is taken.
-- **HomeworkEditView** — clicking a homework row currently routes to its Submissions view (faster path to the most-used affordance). A full form view with the section CRUD pattern from the Django `homeworks/form.html` template is the natural next addition.
+
+- **Homework detail routing** (#172, FUN-002) — a homework row opens
+  `HomeworkEditView` for an author and `HomeworkReadOnlyView` for a
+  non-authoring grader. Both are implemented. The read-only view renders what
+  the detail payload contains and offers no writes: `solution` simply arrives
+  `null` when the caller was not granted it, so the view shows what the caller
+  may see without re-deriving any policy client-side.
+
+## What's not yet built
+
+Scaffolded in the navigation but stubbed:
+
 - **LLMConfigEditView** — drilling into a config row currently logs. The form view from `llm/config_form.html` (with the OpenAI getting-started help section) is the natural next addition.
 - **Conversation viewer** — drilling from a submission row into a student's chat transcript would close the loop on grading workflows.
 

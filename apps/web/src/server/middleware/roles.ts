@@ -12,9 +12,18 @@ import {
 } from "@llteacher/ui/auth/courseRole";
 import { PUBLIC_API_PATHS } from "./auth";
 
-// Re-exported so server-side callers (guards, the AuthContext test double)
-// have one import path for the tiers without reaching across to the UI
-// package themselves. @llteacher/ui remains the single definition.
+// Re-exported for server/testing/authContext.ts, which must derive its
+// predicates from the same tiers rolesMiddleware uses. @llteacher/ui remains
+// the definition; server code needing the tiers directly (ProfileService,
+// courseRoleParity.test.ts) imports from there.
+//
+// #200 (#172 re-audit, MNT-024): an earlier version of this comment named
+// `guards` as a consumer and claimed the re-export gave server callers "one
+// import path". Neither was true -- guards.ts imports no tier at all (it
+// calls authContext.isInstructorOf/isGraderOf), and two other server files
+// import straight from @llteacher/ui. The risk was specific: a future guard
+// author reads it and adds a guards.ts -> middleware/roles.ts edge that
+// exists only because the comment said it should.
 export { AUTHOR_ROLES, GRADER_ROLES };
 
 export type CourseRole = (typeof courseRoleEnum.enumValues)[number];

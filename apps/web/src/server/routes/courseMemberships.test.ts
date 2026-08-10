@@ -178,3 +178,39 @@ describe("PATCH /api/courses/:courseId/tas/:membershipId/capabilities", () => {
     expect(res.status).toBe(200);
   });
 });
+
+/** #206 (#172 re-audit, SEC-020): the shape check SEC-003 added was never
+ *  pinned by a test. Deleting it left all 14 tests in this file green,
+ *  because every one of them uses a valid UUID and the file only *commented*
+ *  that the route validates. */
+describe("PATCH .../tas/:membershipId/capabilities — path param shape (#172, SEC-020)", () => {
+  it.each(["not-a-uuid", "1", "'; DROP TABLE course_memberships; --", "../../etc/passwd"])(
+    "returns 404, never 503, for membershipId %j",
+    async (bad) => {
+      const res = await buildApp(
+        fakeAuthContext({
+          memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })],
+        }),
+      ).request(
+        `/api/courses/course-a/tas/${encodeURIComponent(bad)}/capabilities`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ canViewSolutions: true }),
+        },
+        TEST_ENV,
+      );
+      // 503 is what an unvalidated param produces: Postgres raises
+      // `invalid input syntax for type uuid`, app.onError maps any throw to
+      // a generic 503, and a permanent client error reports itself as a
+      // backend outage.
+      expect(res.status).toBe(404);
+      // Identical to the genuine-miss body, so a malformed id is not an
+      // existence oracle.
+      expect(((await res.json()) as { error: string }).error).toBe(
+        "That teaching assistant is no longer in this course.",
+      );
+      expect(setTaCapabilitiesMock).not.toHaveBeenCalled();
+    },
+  );
+});

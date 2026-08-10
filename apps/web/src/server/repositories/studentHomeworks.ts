@@ -1,7 +1,7 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { conversations, submissions, courseMemberships, sectionAnswers } from "../../db/schema";
-import { deriveHomeworkStatus } from "./homeworks";
+import { deriveHomeworkStatus, isUnreleased } from "./homeworks";
 
 export type SectionStatusType = "not_started" | "in_progress" | "in_progress_overdue" | "submitted" | "overdue";
 
@@ -66,7 +66,15 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
     // #166: "hidden" folds in both is_hidden and a passed expires_at (see
     // deriveHomeworkStatus) -- filtered here the same way draft/scheduled
     // are, by comparing the derived status, never a raw column.
-    return status !== "draft" && status !== "scheduled" && status !== "hidden";
+    //
+    // #197 (#172 re-audit, MNT-020): via isUnreleased, not the literal
+    // triple this used to spell out. #172 extracted that constant precisely
+    // so release-state gates stop being hand-written -- and then missed this
+    // one, the gate protecting students, while its JSDoc claimed to cover
+    // "every route". #166 added `hidden` to this vocabulary a milestone ago,
+    // so the next status added would have reached the four instructor-facing
+    // gates from one edit and left every student still seeing it here.
+    return !isUnreleased(status);
   });
 
   // #158: batch the per-section conversation/submission lookups instead of

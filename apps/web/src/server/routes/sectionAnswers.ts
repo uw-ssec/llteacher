@@ -1,5 +1,6 @@
 import { type Context } from "hono";
 import { makeDb } from "../../db/client";
+import { UUID_RE } from "../utils/uuid";
 import { upsertSectionAnswer, getSectionAnswer } from "../repositories/sectionAnswers";
 import { getOrgScopesForUser } from "../repositories/users";
 import { isUnreleased } from "../repositories/homeworks";
@@ -77,7 +78,22 @@ export async function getSectionAnswerHandler(c: Context<AppEnv>) {
   if (!scope) return c.json({ error: "Course access denied" }, 403);
 
   const db = makeDb(c.env.DATABASE_URL);
-  const answer = await getSectionAnswer(db, scope, sectionId!, studentId!);
+  // #206 (#172 re-audit, SEC-020): shape-checked before the id reaches a
+  // uuid-typed column comparison. Postgres raises `invalid input syntax for
+  // type uuid` on a malformed value, app.onError maps any throw to a generic
+  // 503, and a permanent client error therefore reported itself as a backend
+  // outage -- pollutable by any authenticated member on attacker-chosen
+  // input. SEC-003 fixed exactly this for membershipId and its shared helper
+  // claimed to cover "every UUID path param"; three were left behind.
+  //
+  // Returns this route's OWN not-found body, not a shared one: a distinct
+  // message here would distinguish "malformed" from "no such row" and hand
+  // back an existence oracle.
+  if (!sectionId || !UUID_RE.test(sectionId) || !studentId || !UUID_RE.test(studentId)) {
+    return c.json({ error: "Answer not found" }, 404);
+  }
+
+  const answer = await getSectionAnswer(db, scope, sectionId, studentId);
   if (!answer) return c.json({ error: "Answer not found" }, 404);
 
   // #172 audit (SEC-001): same gate as the submissions dashboard and the

@@ -32,12 +32,23 @@ const ROLE_PRIORITY = (Object.keys(ROLE_PRIORITY_RANK) as CourseRole[]).sort(
   (a, b) => ROLE_PRIORITY_RANK[a] - ROLE_PRIORITY_RANK[b],
 );
 
-/** Roles that make a membership "instructor-tier" for the purposes of the
- *  `courses` stopgap field below (#21 Resolved Design Decision 8) -- kept
- *  separate from ROLE_PRIORITY_RANK because that ranking answers a
- *  different question ("which single role wins as primary") than this one
- *  ("which memberships count as course-editing access"). */
-const INSTRUCTOR_TIER_ROLES: ReadonlySet<CourseRole> = new Set(CONSOLE_ROLES);
+/** Roles admitted to the admin console, and therefore to the `courses`
+ *  stopgap field below (#21 Resolved Design Decision 8). Kept separate from
+ *  ROLE_PRIORITY_RANK because that ranking answers a different question
+ *  ("which single role wins as primary") than this one ("which memberships
+ *  may open the console at all").
+ *
+ *  #198 (#172 re-audit, MNT-021): named CONSOLE_TIER_ROLES, not
+ *  INSTRUCTOR_TIER_ROLES, and this really matters. It is literally
+ *  `new Set(CONSOLE_ROLES)`, which INCLUDES `ta` -- but the old name and the
+ *  old doc ("which memberships count as course-editing access") both said
+ *  the opposite, and a TA having no course-editing access is the central
+ *  premise of #172. A consumer of `profile.courses` who trusted either would
+ *  conclude the array is pre-filtered to editable courses and skip the
+ *  per-entry role check, showing a TA authoring affordances for a course
+ *  they assist on. This array is WIDER than authoring: gate each entry on
+ *  its own `role`, never on membership in this set. */
+const CONSOLE_TIER_ROLES: ReadonlySet<CourseRole> = new Set(CONSOLE_ROLES);
 
 export class ProfileService {
   constructor(
@@ -99,7 +110,16 @@ export class ProfileService {
       courseCount: memberships.length,
     };
 
-    if (primaryRole === "instructor" || primaryRole === "ta" || primaryRole === "admin") {
+    // #199 (#172 re-audit, MNT-022): a set membership test, not a literal
+    // disjunction restating the console tier 60 lines below the set that
+    // already imports it from @llteacher/ui. This is the outer gate deciding
+    // whether `profile.courses` is populated at all, so when a fourth console
+    // role lands -- and App.test.tsx already exercises an unrecognized role
+    // arriving from a newer server -- a hand-written list here would leave
+    // that user with an empty courses array, canAuthor false, and the console
+    // showing "No course found for your account yet" for someone who has
+    // courses. Silent, in the auth path, and failing no test.
+    if (primaryRole !== null && CONSOLE_TIER_ROLES.has(primaryRole)) {
       // #172 audit (SCL-003): a COUNT aggregate rather than loading every
       // homework row across every membership to read `.length`. At one
       // course the difference is invisible; at fifty it is the piece that
@@ -141,7 +161,7 @@ export class ProfileService {
       // hand-written ordering so "which role outranks which" has one answer
       // in this file.
       profile.courses = memberships
-        .filter((m) => INSTRUCTOR_TIER_ROLES.has(m.role))
+        .filter((m) => CONSOLE_TIER_ROLES.has(m.role))
         .map((m) => ({
           id: m.course.id,
           title: m.course.title,

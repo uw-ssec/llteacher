@@ -199,4 +199,39 @@ describe.skipIf(!RAW_DATABASE_URL)("ProfileService (real DB, #172 re-audit)", ()
       { id: courseId, title: "TA Course", role: "ta", canViewSolutions: true, canViewDrafts: false },
     ]);
   });
+
+  /** #199 (#172 re-audit, MNT-022): the branch deciding whether
+   *  `profile.courses` is populated at all must be derived from CONSOLE_ROLES,
+   *  not a hand-written disjunction of role literals.
+   *
+   *  Parametrised over every console role precisely so that dropping one from
+   *  the condition fails here. A literal list that forgets a role produces an
+   *  empty courses array -> canAuthor false -> "No course found for your
+   *  account yet" for a user who has courses. Silent, in the auth path, and
+   *  caught by nothing else. */
+  it.each(["instructor", "ta", "admin"] as const)(
+    "populates courses for a %s membership",
+    async (role) => {
+      const userId = await makeUser(`${role}-tier-${crypto.randomUUID()}@uw.edu`);
+      const courseId = await makeCourse(`${role} Course`);
+      await db.insert(courseMemberships).values({ userId, courseId, role });
+
+      const profile = await new ProfileService(cipher, db).getProfileWithStats(userId);
+      expect(profile.courses?.map((c) => c.id)).toEqual([courseId]);
+      expect(profile.courses?.[0].role).toBe(role);
+    },
+  );
+
+  it.each(["student", "observer"] as const)(
+    "leaves courses undefined for a %s membership",
+    async (role) => {
+      // The other half of the same gate: widening it must fail too.
+      const userId = await makeUser(`${role}-tier-${crypto.randomUUID()}@uw.edu`);
+      const courseId = await makeCourse(`${role} Course`);
+      await db.insert(courseMemberships).values({ userId, courseId, role });
+
+      const profile = await new ProfileService(cipher, db).getProfileWithStats(userId);
+      expect(profile.courses).toBeUndefined();
+    },
+  );
 });

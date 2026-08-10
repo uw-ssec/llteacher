@@ -20,9 +20,13 @@ export async function listCourseTasHandler(c: Context<AppEnv>) {
   const courseId = c.req.param("courseId");
   const authContext = c.get("authContext") as AuthContext | undefined;
 
-  // Defensive re-check mirroring every other instructor-gated handler, so a
-  // direct call (as the unit tests make) fails closed rather than throwing
-  // past this point into the generic 503.
+  // Defensive re-check, as updateHomeworkHandler / deleteHomeworkHandler /
+  // publishHomeworkHandler do, so a direct call (as the unit tests make)
+  // fails closed rather than throwing past this point into the generic 503.
+  // (#200, MNT-025: this said "every other instructor-gated handler" while
+  // createHomeworkHandler had no such re-check. It has one now -- but the
+  // comment names the handlers rather than quantifying over them, so the
+  // next one added without a re-check does not silently falsify it.)
   if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
     return c.json({ error: "Instructor access denied" }, 403);
   }
@@ -53,7 +57,7 @@ export async function updateTaCapabilitiesHandler(c: Context<AppEnv>) {
   // Same 404 the not-found path returns, so the response stays uniform and
   // still leaks nothing about which memberships exist.
   if (!membershipId || !UUID_RE.test(membershipId)) {
-    return c.json({ error: "TA membership not found in this course" }, 404);
+    return c.json({ error: "That teaching assistant is no longer in this course." }, 404);
   }
 
   let body: TaCapabilitiesBody;
@@ -89,7 +93,7 @@ export async function updateTaCapabilitiesHandler(c: Context<AppEnv>) {
   // Null covers "no such membership", "belongs to another course", "not a
   // TA", and "already dropped" -- all indistinguishable to the caller by
   // design, so a probing instructor learns nothing about other courses.
-  if (!updated) return c.json({ error: "TA membership not found in this course" }, 404);
+  if (!updated) return c.json({ error: "That teaching assistant is no longer in this course." }, 404);
 
   // Best-effort (#147): an audit-write failure must not fail a capability
   // change that already succeeded -- mirrors publishHomeworkHandler.
