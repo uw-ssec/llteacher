@@ -1133,3 +1133,77 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId — TA capabilities (
     expect(body.sections[0]!.solution).toBeNull();
   });
 });
+
+/** #172 re-audit (FUN-104): the LIST route's unreleased-content gate had no
+ *  capability-level coverage.
+ *
+ *  The detail route's three questions are each pinned above, but the list
+ *  route only had "instructor sees everything / student sees released". A
+ *  mutation swapping `canViewDraftsIn` for `isInstructorOf` there left all
+ *  61 tests green -- silently taking unreleased homeworks back off a granted
+ *  TA's list while the detail route still served them, so the TA could open
+ *  a draft by URL but could not find it. */
+describe("GET /api/courses/:courseId/homeworks — TA capabilities (#172)", () => {
+  const base = {
+    description: "d",
+    dueDate: new Date("2099-01-02"),
+    llmConfigId: null,
+    isHidden: false,
+    expiresAt: null,
+  };
+  const ROWS = [
+    { ...base, id: "hw-draft", title: "Draft HW", publishedAt: null, releasedAt: null },
+    {
+      ...base, id: "hw-scheduled", title: "Scheduled HW",
+      publishedAt: new Date("2020-01-01"), releasedAt: new Date("2099-01-01"),
+    },
+    {
+      ...base, id: "hw-active", title: "Active HW",
+      publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+    },
+  ];
+
+  const taWith = (caps: { canViewDrafts?: boolean }) =>
+    fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "course-a", role: "ta", ...caps })],
+    });
+
+  async function listAs(authContext: ReturnType<typeof fakeAuthContext>) {
+    findManyHomeworks.mockReset().mockResolvedValue(ROWS);
+    const res = await buildApp(authContext).request(
+      "/api/courses/course-a/homeworks", {}, TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { homeworks: Array<{ id: string }> };
+    return body.homeworks.map((h) => h.id);
+  }
+
+  it("omits unreleased homeworks from an ungranted TA's list", async () => {
+    expect(await listAs(taWith({}))).toEqual(["hw-active"]);
+  });
+
+  it("includes unreleased homeworks in a granted TA's list", async () => {
+    // The assertion the mutation run wanted: this must key on the CAPABILITY,
+    // not on the authoring role. A TA holding can_view_drafts sees exactly
+    // what the detail route would serve them.
+    expect(await listAs(taWith({ canViewDrafts: true }))).toEqual([
+      "hw-draft",
+      "hw-scheduled",
+      "hw-active",
+    ]);
+  });
+
+  it("keeps a student on released homeworks only", async () => {
+    const student = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "course-a", role: "student" })],
+    });
+    expect(await listAs(student)).toEqual(["hw-active"]);
+  });
+
+  it("shows an instructor everything without any stored grant", async () => {
+    const instructor = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })],
+    });
+    expect(await listAs(instructor)).toEqual(["hw-draft", "hw-scheduled", "hw-active"]);
+  });
+});
