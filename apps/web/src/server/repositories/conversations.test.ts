@@ -11,6 +11,7 @@ import {
   appendMessage,
   getConversationById,
   getLastMessages,
+  updateConversationTitle,
 } from "./conversations";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -258,6 +259,99 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     });
     const last = await getLastMessages(db, unsafeCourseScope(courseBId), created.id, 2);
     expect(last).toEqual([]);
+  });
+
+  it("listConversationsForOwner's kind filter (#5) narrows to just that kind", async () => {
+    await createConversation(db, unsafeCourseScope(courseBId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Kind filter: tutor chat",
+    });
+    await createConversation(db, unsafeCourseScope(courseBId), {
+      ownerUserId: userId,
+      sectionId: sectionBId,
+      kind: "section",
+      title: "Kind filter: section chat",
+    });
+
+    const tutorOnly = await listConversationsForOwner(db, unsafeCourseScope(courseBId), userId, { kind: "tutor" });
+    expect(tutorOnly.map((r) => r.title)).toContain("Kind filter: tutor chat");
+    expect(tutorOnly.map((r) => r.title)).not.toContain("Kind filter: section chat");
+
+    const sectionOnly = await listConversationsForOwner(db, unsafeCourseScope(courseBId), userId, {
+      kind: "section",
+    });
+    expect(sectionOnly.map((r) => r.title)).toContain("Kind filter: section chat");
+    expect(sectionOnly.map((r) => r.title)).not.toContain("Kind filter: tutor chat");
+
+    // No kind filter (omitted opts.kind) -- unchanged pre-#5 behavior, both
+    // kinds still come back.
+    const both = await listConversationsForOwner(db, unsafeCourseScope(courseBId), userId);
+    expect(both.map((r) => r.title)).toEqual(
+      expect.arrayContaining(["Kind filter: tutor chat", "Kind filter: section chat"]),
+    );
+  });
+
+  it("listConversationsForOwner orders by updatedAt desc (#5)", async () => {
+    const older = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Ordering: created first",
+    });
+    const newer = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Ordering: created second",
+    });
+    // Bump `older`'s updatedAt past `newer`'s so creation order and
+    // updatedAt order genuinely disagree -- proves the list is ordered by
+    // updatedAt, not insertion/created_at order.
+    await updateConversationTitle(db, unsafeCourseScope(courseAId), older.id, "Ordering: now most recently updated");
+
+    const rows = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId);
+    const olderIdx = rows.findIndex((r) => r.id === older.id);
+    const newerIdx = rows.findIndex((r) => r.id === newer.id);
+    expect(olderIdx).toBeGreaterThanOrEqual(0);
+    expect(newerIdx).toBeGreaterThanOrEqual(0);
+    expect(olderIdx).toBeLessThan(newerIdx);
+  });
+
+  it("updateConversationTitle updates and returns the row within scope", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Original title",
+    });
+    const updated = await updateConversationTitle(db, unsafeCourseScope(courseAId), created.id, "Renamed");
+    expect(updated?.id).toBe(created.id);
+    expect(updated?.title).toBe("Renamed");
+  });
+
+  it("updateConversationTitle returns null for a conversation scoped to a different course", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Wrong-scope update target",
+    });
+    const updated = await updateConversationTitle(db, unsafeCourseScope(courseBId), created.id, "Should not apply");
+    expect(updated).toBeNull();
+  });
+
+  it("updateConversationTitle returns null for a soft-deleted conversation", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Soft-deleted update target",
+    });
+    await softDeleteConversation(db, unsafeCourseScope(courseAId), created.id);
+    const updated = await updateConversationTitle(db, unsafeCourseScope(courseAId), created.id, "Should not apply");
+    expect(updated).toBeNull();
   });
 
   it("rejects a sectionId that belongs to a different course", async () => {

@@ -7,7 +7,7 @@ export async function listConversationsForOwner(
   db: Db,
   scope: CourseScope,
   ownerUserId: string,
-  opts?: { includeDeleted?: boolean },
+  opts?: { includeDeleted?: boolean; kind?: "section" | "tutor" },
 ) {
   const conditions = [
     eq(conversations.courseId, scope),
@@ -16,7 +16,20 @@ export async function listConversationsForOwner(
   if (!opts?.includeDeleted) {
     conditions.push(eq(conversations.isDeleted, false));
   }
-  return db.select().from(conversations).where(and(...conditions));
+  // Optional: #5's GET /api/conversations?kind=tutor route always passes
+  // this (defaulting to "tutor" itself, not here -- this function stays a
+  // no-op filter when omitted so the #3-era repo tests that call it without
+  // a kind still see both kinds). desc(updatedAt) matches #5's
+  // "ordered by updatedAt desc" requirement -- also harmless for those
+  // older tests, none of which assert on ordering.
+  if (opts?.kind) {
+    conditions.push(eq(conversations.kind, opts.kind));
+  }
+  return db
+    .select()
+    .from(conversations)
+    .where(and(...conditions))
+    .orderBy(desc(conversations.updatedAt));
 }
 
 export async function createConversation(
@@ -75,6 +88,29 @@ export async function softDeleteConversation(db: Db, scope: CourseScope, convers
     .update(conversations)
     .set({ isDeleted: true, deletedAt: new Date() })
     .where(and(eq(conversations.id, conversationId), eq(conversations.courseId, scope)));
+}
+
+// #5's PATCH /api/conversations/:id (rename). Same CourseScope-only gap as
+// softDeleteConversation above -- the route (routes/conversations.ts) does
+// the ownerUserId check itself via getConversationById before calling this,
+// same pattern chatHandler (#3) established for conversationId ownership,
+// rather than this function taking a requesterId. isDeleted is checked so a
+// soft-deleted conversation can't be renamed back to life through PATCH;
+// the route treats a null return (not found under scope, or soft-deleted)
+// as the same 404 as an ownership mismatch.
+export async function updateConversationTitle(db: Db, scope: CourseScope, conversationId: string, title: string) {
+  const [updated] = await db
+    .update(conversations)
+    .set({ title })
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        eq(conversations.courseId, scope),
+        eq(conversations.isDeleted, false),
+      ),
+    )
+    .returning();
+  return updated ?? null;
 }
 
 // Same CourseScope-only gap as softDeleteConversation above -- see

@@ -13,6 +13,12 @@ import {
   updateHomeworkHideHandler,
 } from "./routes/homeworks";
 import { workosWebhookHandler } from "./routes/webhooksWorkos";
+import {
+  listConversationsHandler,
+  createConversationHandler,
+  updateConversationHandler,
+  deleteConversationHandler,
+} from "./routes/conversations";
 import { studentHomeworksHandler } from "./routes/studentHomeworks";
 import { submitSectionHandler, getHomeworkSubmissionsHandler } from "./routes/submissions";
 import { submitSectionAnswerHandler, getSectionAnswerHandler } from "./routes/sectionAnswers";
@@ -73,6 +79,10 @@ app.patch(
   requireInstructorOf()(updateHomeworkHideHandler),
 );
 app.get("/api/student/homeworks", requireRole(["student"])(studentHomeworksHandler));
+app.get("/api/conversations", listConversationsHandler);
+app.post("/api/conversations", createConversationHandler);
+app.patch("/api/conversations/:id", updateConversationHandler);
+app.delete("/api/conversations/:id", deleteConversationHandler);
 app.post("/api/conversations/:id/submit", requireRole(["student"])(submitSectionHandler));
 app.get(
   "/api/courses/:courseId/homeworks/:homeworkId/submissions",
