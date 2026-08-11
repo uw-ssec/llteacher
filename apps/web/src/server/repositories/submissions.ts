@@ -2,7 +2,6 @@ import { and, eq, inArray, isNull, or } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { submissions, grades, conversations, courses, courseMemberships, homeworks, sections, users, sectionAnswers } from "../../db/schema";
 import type { OrgScope, CourseScope } from "./scope";
-import { runAtomically } from "./atomic";
 import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { deriveHomeworkStatus, isHomeworkHidden, type HomeworkStatus } from "./homeworks";
 
@@ -71,6 +70,7 @@ export async function submitSection(
     .select({
       id: conversations.id,
       ownerUserId: conversations.ownerUserId,
+      isTeacherTest: conversations.isTeacherTest,
       isHidden: homeworks.isHidden,
       expiresAt: homeworks.expiresAt,
     })
@@ -102,6 +102,16 @@ export async function submitSection(
   if (isHomeworkHidden(owned)) {
     throw new Error("Homework is hidden or expired");
   }
+  // #27 (Django parity): ConversationService's `can_submit` excludes teacher
+  // test conversations -- an instructor trying out their own prompts is not
+  // producing a submission, and one appearing in the roster matrix would be
+  // counted as student work. Enforced here rather than only in the route
+  // because #128's composite FK deliberately does not encode it: a teacher
+  // test conversation is a perfectly valid section conversation, it just
+  // isn't submittable.
+  if (owned.isTeacherTest) {
+    throw new Error("Teacher test conversations cannot be submitted");
+  }
 
   const existing = await getSubmissionByConversation(db, scope, conversationId);
   if (existing) {
@@ -131,87 +141,6 @@ export class SubmissionGradedError extends Error {
     super("Submission has already been graded and cannot be restarted");
     this.name = "SubmissionGradedError";
   }
-}
-
-/** Delete-and-restart's data-layer half (#128), for #27 to wire to a route.
- *
- *  Restarting a section VOIDS its submission: the student returns to a
- *  not-submitted state and re-submits the new conversation when they are
- *  done. The alternatives were considered and rejected in
- *  docs/superpowers/specs/2026-08-11-submission-uniqueness-design.md --
- *  superseding would report "submitted" for a conversation containing no
- *  work, and locking would make an unbuilt instructor reopen flow a hard
- *  dependency of restart.
- *
- *  A graded submission cannot be restarted. The check below exists to
- *  produce a useful error, but it is not the only thing enforcing the rule:
- *  grades.submission_id is a RESTRICT foreign key, so Postgres refuses the
- *  delete whether or not a caller remembered to check first.
- *
- *  Does NOT create the replacement conversation -- #27 owns that, along with
- *  the route, the greeting message, and writing a `submission.voided` audit
- *  event from the value returned here. No AUDIT_ACTIONS entry is added by
- *  this change on purpose: a constant with no writer is dead code. */
-export async function restartSectionConversation(
-  db: Db,
-  scope: OrgScope,
-  conversationId: string,
-  requesterId: string,
-): Promise<{ voidedSubmission: { id: string; submittedAt: Date } | null }> {
-  // Same check shape, and the same deliberate two-message split, as
-  // submitSection above: the repository reports "absent" and "not yours"
-  // distinctly so the route can decide which to collapse, rather than having
-  // that choice forced on it by a single indistinguishable message.
-  const [owned] = await db
-    .select({ id: conversations.id, ownerUserId: conversations.ownerUserId })
-    .from(conversations)
-    .innerJoin(courses, eq(conversations.courseId, courses.id))
-    .where(
-      and(
-        eq(conversations.id, conversationId),
-        eq(courses.organizationId, scope),
-        eq(conversations.isDeleted, false),
-        eq(conversations.kind, "section"),
-      ),
-    );
-  if (!owned) {
-    throw new Error("Conversation not found or not accessible");
-  }
-  if (owned.ownerUserId !== requesterId) {
-    throw new Error("Conversation is not owned by requester");
-  }
-
-  const [submission] = await db
-    .select({ id: submissions.id, submittedAt: submissions.submittedAt })
-    .from(submissions)
-    .where(and(eq(submissions.conversationId, conversationId), eq(submissions.organizationId, scope)));
-
-  if (submission) {
-    const [grade] = await db
-      .select({ id: grades.id })
-      .from(grades)
-      .where(eq(grades.submissionId, submission.id));
-    if (grade) {
-      throw new SubmissionGradedError();
-    }
-  }
-
-  // One atomic group. Split into two independent awaits, a failure between
-  // them would leave a submission row referencing a soft-deleted
-  // conversation -- the exact shape #128 exists to make unrepresentable.
-  await runAtomically(db, (t) => [
-    t
-      .update(conversations)
-      .set({ isDeleted: true, deletedAt: new Date() })
-      .where(eq(conversations.id, conversationId)),
-    ...(submission ? [t.delete(submissions).where(eq(submissions.id, submission.id))] : []),
-  ]);
-
-  return {
-    voidedSubmission: submission
-      ? { id: submission.id, submittedAt: submission.submittedAt }
-      : null,
-  };
 }
 
 export async function getSubmissionByConversation(db: Db, scope: OrgScope, conversationId: string) {

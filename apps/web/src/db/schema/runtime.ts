@@ -57,6 +57,22 @@ export const conversations = pgTable(
     }),
     kind: conversationKindEnum("kind").notNull(),
     title: text("title").notNull(),
+    // #27: an instructor working a section to try out their own prompt, as
+    // opposed to a student doing the assignment. Django derived this at read
+    // time (`hasattr(user, 'teacher_profile')`); stored here instead because
+    // a derived check is retroactive -- promote a student to TA and every
+    // conversation they ever had silently becomes a "teacher test". What was
+    // true when the conversation started is the thing being recorded.
+    //
+    // Deliberately NOT the `conversation_type` enum #27's text points at.
+    // docs/architecture/multi-tenant-data-model.md's `conversation_type` is
+    // `recall | discovery | critical_thinking | tutor | evaluator` -- a
+    // pedagogical mode, an unrelated concept that isn't being built here, and
+    // taking that name now would collide when it is. That same doc says
+    // is_teacher_test should "collapse into a CourseMembership.role check",
+    // which is what this column deliberately does not do, for the reason
+    // above. Also avoids a second "type"-shaped column beside `kind`.
+    isTeacherTest: boolean("is_teacher_test").notNull().default(false),
     isDeleted: boolean("is_deleted").notNull().default(false),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })

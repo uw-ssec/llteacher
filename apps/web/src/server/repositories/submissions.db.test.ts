@@ -19,7 +19,8 @@ import { eq } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import { unsafeCourseScope, unsafeOrgScope } from "./scope";
-import { createSubmission, restartSectionConversation } from "./submissions";
+import { createSubmission } from "./submissions";
+import { restartSectionConversation } from "./sectionConversations";
 import { softDeleteConversation } from "./conversations";
 import {
   organizations,
@@ -245,16 +246,26 @@ describe.skipIf(!RAW_DATABASE_URL)("submissions uniqueness (real DB, #128)", () 
     const convA = await makeSectionConversation();
     await createSubmission(db, scope, convA);
 
-    const { voidedSubmission } = await restartSectionConversation(db, scope, convA, userId);
+    const { voidedSubmission, conversation } = await restartSectionConversation(
+      db,
+      scope,
+      convA,
+      userId,
+    );
     expect(voidedSubmission).not.toBeNull();
+
+    // #27: restart creates the replacement itself, in the same atomic group.
+    // The old conversation is soft-deleted, which is what frees
+    // conversations_owner_section_active_uq for the new one.
+    const [old] = await db.select().from(conversations).where(eq(conversations.id, convA));
+    expect(old!.isDeleted).toBe(true);
 
     // The point of voiding: the section is submittable again, which the
     // unique index would otherwise forbid.
-    const convB = await makeSectionConversation();
-    await expect(createSubmission(db, scope, convB)).resolves.toBeDefined();
+    await expect(createSubmission(db, scope, conversation.id)).resolves.toBeDefined();
 
     const rows = await db.select().from(submissions).where(eq(submissions.userId, userId));
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.conversationId).toBe(convB);
+    expect(rows[0]!.conversationId).toBe(conversation.id);
   });
 });
