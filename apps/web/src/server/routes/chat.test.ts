@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 import { chatHandler } from "./chat";
 import type { AuthContext } from "../middleware/roles";
+import { fakeAuthContext as buildFakeAuthContext, fakeMembership } from "../testing/authContext";
 import type { AppEnv } from "../context";
 
 // Route test (mock db, mock the repository layer, mock streamText) -- per
@@ -46,17 +47,10 @@ vi.mock("ai", async (importOriginal) => {
 });
 
 function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
-  const memberships =
-    overrides.memberships ??
-    ([{ id: "m1", userId: "u1", courseId: "course-a", role: "student" }] as AuthContext["memberships"]);
-  return {
-    session: { userId: "u1", workosUserId: "w1", sessionEpoch: 0, issuedAt: 0, expiresAt: 0 },
-    memberships,
-    hasRole: (role) => memberships.some((m) => m.role === role),
-    isMemberOf: (courseId) => memberships.some((m) => m.courseId === courseId),
-    isInstructorOf: () => false,
+  return buildFakeAuthContext({
+    memberships: [fakeMembership({ courseId: "course-a", role: "student" })],
     ...overrides,
-  };
+  });
 }
 
 function buildApp(authContext: AuthContext | undefined) {

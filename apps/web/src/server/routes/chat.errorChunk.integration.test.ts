@@ -36,6 +36,7 @@ import { simulateReadableStream } from "ai";
 import type { LanguageModelV2, LanguageModelV2StreamPart } from "@ai-sdk/provider";
 import { chatHandler } from "./chat";
 import type { AuthContext } from "../middleware/roles";
+import { fakeAuthContext as buildFakeAuthContext, fakeMembership } from "../testing/authContext";
 import type { AppEnv } from "../context";
 
 const TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "test-key" } as Env;
@@ -115,14 +116,9 @@ vi.mock("../repositories/conversations", () => ({
 }));
 
 function fakeAuthContext(): AuthContext {
-  const memberships = [{ id: "m1", userId: "u1", courseId: "course-a", role: "student" }] as AuthContext["memberships"];
-  return {
-    session: { userId: "u1", workosUserId: "w1", sessionEpoch: 0, issuedAt: 0, expiresAt: 0 },
-    memberships,
-    hasRole: (role) => memberships.some((m) => m.role === role),
-    isMemberOf: (courseId) => memberships.some((m) => m.courseId === courseId),
-    isInstructorOf: () => false,
-  };
+  return buildFakeAuthContext({
+    memberships: [fakeMembership({ courseId: "course-a", role: "student" })],
+  });
 }
 
 function buildApp() {
