@@ -94,13 +94,13 @@ export async function submitSection(
   // but that's a route-layer choice, not something the repository should
   // force by only offering one indistinguishable message).
   if (!owned) {
-    throw new Error("Conversation not found or not accessible");
+    throw new ConversationNotSubmittableError();
   }
   if (owned.ownerUserId !== requesterId) {
-    throw new Error("Conversation is not owned by requester");
+    throw new NotSubmissionOwnerError();
   }
   if (isHomeworkHidden(owned)) {
-    throw new Error("Homework is hidden or expired");
+    throw new HomeworkClosedError();
   }
   // #27 (Django parity): ConversationService's `can_submit` excludes teacher
   // test conversations -- an instructor trying out their own prompts is not
@@ -136,18 +136,66 @@ export async function submitSection(
  *  introduces `repositories/errors.ts` with `TenancyMismatchError`. Creating
  *  that same file from this branch would mean two branches racing to author
  *  one module. Move this class alongside that one once #212 lands. */
+/* --------------------------------------------------------------------------
+   Typed submit refusals (#251).
+
+   submitSection's refusals were plain Errors, so routes/submissions.ts could
+   only catch them with a bare `catch` that also swallowed unexpected
+   failures -- a dropped connection was reported to the student as
+   "Conversation not found or not accessible" and never reached app.onError's
+   log or 503. Same shape #236 fixed in sectionConversations.ts; missed here
+   because this file's catch was edited for #242 without the standard being
+   applied to it. Caught in review by @KshitijDani.
+
+   Defined in this module rather than a shared errors file: PR #212
+   introduces repositories/errors.ts, and sectionConversations.ts already
+   imports from here, so a shared module would either race #212 or create a
+   cycle. Consolidate once #212 lands.
+   -------------------------------------------------------------------------- */
+
+/** Base for every refusal submitSection raises deliberately, so a route can
+ *  exclude the unexpected structurally rather than by message. */
+export class SubmissionError extends Error {}
+
+/** The conversation is absent, soft-deleted, the wrong kind, or in another
+ *  org. Kept distinct from NotSubmissionOwnerError at the repository layer so
+ *  the route chooses what to collapse -- it deliberately collapses both. */
+export class ConversationNotSubmittableError extends SubmissionError {
+  constructor() {
+    super("Conversation not found or not accessible");
+    this.name = "ConversationNotSubmittableError";
+  }
+}
+
+export class NotSubmissionOwnerError extends SubmissionError {
+  constructor() {
+    super("Conversation is not owned by requester");
+    this.name = "NotSubmissionOwnerError";
+  }
+}
+
+/** #166/#177: the homework is hidden or past its expiry. The student had
+ *  legitimate access, so naming the reason leaks nothing they did not
+ *  already know -- and "not found" would send them looking for a bug. */
+export class HomeworkClosedError extends SubmissionError {
+  constructor() {
+    super("Homework is hidden or expired");
+    this.name = "HomeworkClosedError";
+  }
+}
+
 /** #242: an instructor's own test conversation is not submittable. Typed so
  *  submitSectionHandler can say that plainly instead of folding it into the
  *  uniform "not found or not accessible" 403 -- the caller owns the
  *  conversation, so naming the real reason leaks nothing. */
-export class TeacherTestNotSubmittableError extends Error {
+export class TeacherTestNotSubmittableError extends SubmissionError {
   constructor() {
     super("Teacher test conversations cannot be submitted");
     this.name = "TeacherTestNotSubmittableError";
   }
 }
 
-export class SubmissionGradedError extends Error {
+export class SubmissionGradedError extends SubmissionError {
   constructor() {
     super("Submission has already been graded and cannot be restarted");
     this.name = "SubmissionGradedError";

@@ -1,7 +1,14 @@
 import { type Context } from "hono";
 import { makeDb } from "../../db/client";
 import { UUID_RE } from "../utils/uuid";
-import { submitSection, getHomeworkSubmissionsMatrix, TeacherTestNotSubmittableError } from "../repositories/submissions";
+import {
+  submitSection,
+  getHomeworkSubmissionsMatrix,
+  TeacherTestNotSubmittableError,
+  HomeworkClosedError,
+  ConversationNotSubmittableError,
+  NotSubmissionOwnerError,
+} from "../repositories/submissions";
 import { isUnreleased } from "../repositories/homeworks";
 import { getOrgScopesForUser } from "../repositories/users";
 import { courseScopeFromAuthContext } from "../repositories/scope";
@@ -53,12 +60,26 @@ export async function submitSectionHandler(c: Context<AppEnv>) {
     if (err instanceof TeacherTestNotSubmittableError) {
       return c.json({ error: err.message }, 409);
     }
-    // submitSection (Task 16) throws two distinct messages -- "Conversation
-    // not found or not accessible" vs "Conversation is not owned by
-    // requester" -- deliberately mapped to the same uniform 403 here rather
-    // than distinguished by message, so a non-owner can't use a 404-vs-403
-    // split to learn a conversation exists.
-    return c.json({ error: "Conversation not found or not accessible" }, 403);
+    // #251: the homework closing is a state the student can act on and
+    // already had access to -- "not found" would send them hunting a bug
+    // that isn't there.
+    if (err instanceof HomeworkClosedError) {
+      return c.json({ error: err.message }, 409);
+    }
+    // submitSection throws these two distinctly -- deliberately mapped to the
+    // same uniform 403 here rather than distinguished, so a non-owner can't
+    // use a 404-vs-403 split to learn a conversation exists.
+    if (
+      err instanceof ConversationNotSubmittableError ||
+      err instanceof NotSubmissionOwnerError
+    ) {
+      return c.json({ error: "Conversation not found or not accessible" }, 403);
+    }
+    // #251: anything else is not a refusal this route knows how to translate.
+    // Rethrow so app.onError logs it and answers 503 -- the same standard
+    // #236 applied to the section-conversation handlers, which this catch
+    // was missing even after being edited for #242.
+    throw err;
   }
 }
 
