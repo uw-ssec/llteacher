@@ -3,6 +3,7 @@ import {
   boolean,
   check,
   doublePrecision,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -10,6 +11,7 @@ import {
   pgTable,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -92,6 +94,12 @@ export const conversations = pgTable(
       sql`(${t.kind} = 'tutor' AND ${t.sectionId} IS NULL)
           OR (${t.kind} = 'section' AND ${t.sectionId} IS NOT NULL)`,
     ),
+    // #128: referenceable target for submissions' composite FK. `id` is
+    // already the primary key, so this adds no new integrity rule to
+    // conversations -- it exists solely because Postgres will only accept a
+    // foreign key whose referenced columns carry a unique constraint of
+    // exactly that shape.
+    unique("conversations_id_owner_section_uq").on(t.id, t.ownerUserId, t.sectionId),
   ],
 );
 
@@ -165,6 +173,24 @@ export const submissions = pgTable(
       .notNull()
       .unique()
       .references(() => conversations.id, { onDelete: "cascade" }),
+    // #128: denormalized from the owning conversation so that "one submission
+    // per (student, section)" becomes expressible at all. submissions
+    // previously carried neither column, which is why the
+    // soft-delete-and-recreate cycle could accumulate rows with nothing to
+    // detect it: UNIQUE(conversation_id) only ever caught a second submit of
+    // the *same* conversation.
+    //
+    // Kept honest by submissions_conversation_owner_section_fk below, not by
+    // convention. Without that FK these would be correct only as long as
+    // every writer remembered to copy them from the conversation, and the
+    // unique index would be enforcing a pair free to drift from the
+    // conversation it names.
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    sectionId: uuid("section_id")
+      .notNull()
+      .references(() => sections.id, { onDelete: "cascade" }),
     organizationId: uuid("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
@@ -172,7 +198,22 @@ export const submissions = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (t) => [index("submissions_org_idx").on(t.organizationId)],
+  (t) => [
+    index("submissions_org_idx").on(t.organizationId),
+    // #128. Two consequences beyond keeping the denormalized pair honest:
+    // (1) section_id is NOT NULL here while a tutor conversation's is NULL,
+    // and a NOT NULL value never matches NULL, so a submission against a
+    // tutor conversation becomes structurally impossible rather than merely
+    // rejected by createSubmission's kind check; (2) it is what makes the
+    // unique index below trustworthy.
+    foreignKey({
+      name: "submissions_conversation_owner_section_fk",
+      columns: [t.conversationId, t.userId, t.sectionId],
+      foreignColumns: [conversations.id, conversations.ownerUserId, conversations.sectionId],
+    }).onDelete("cascade"),
+    // #128, the actual fix.
+    uniqueIndex("submissions_user_section_uq").on(t.userId, t.sectionId),
+  ],
 );
 
 // ---------- SectionAnswer ----------
