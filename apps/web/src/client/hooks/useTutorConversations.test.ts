@@ -271,5 +271,68 @@ describe("useTutorConversations", () => {
       expect(caught).toBeInstanceOf(Error);
       expect(result.current.conversations[0]!.title).toBe(CONV_A.title);
     });
+
+    // #223: renameConversation must not change identity when the
+    // conversations list changes for an unrelated reason (e.g. a #216
+    // bumpConversation call) -- previously it depended on `conversations`
+    // directly, so every list update (including on a completely different
+    // row) produced a new renameConversation function, which was the actual
+    // cause of TutorConversationsList's effects re-running every render.
+    it("keeps the same function identity across a bumpConversation-driven list update", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([CONV_A]), { status: 200 })));
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      const before = result.current.renameConversation;
+      act(() => {
+        result.current.bumpConversation("conv-a");
+      });
+      expect(result.current.conversations[0]!.messageCount).toBe(CONV_A.messageCount + 1);
+      expect(result.current.renameConversation).toBe(before);
+    });
+  });
+
+  // #216
+  describe("bumpConversation", () => {
+    it("increments messageCount and updates updatedAt for the given conversation", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([CONV_A]), { status: 200 })));
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      act(() => {
+        result.current.bumpConversation("conv-a");
+      });
+
+      expect(result.current.conversations[0]!.messageCount).toBe(CONV_A.messageCount + 1);
+      expect(result.current.conversations[0]!.updatedAt).not.toBe(CONV_A.updatedAt);
+    });
+
+    it("re-sorts the bumped conversation to the top, matching the server's updatedAt-desc ordering", async () => {
+      const CONV_B = { ...CONV_A, id: "conv-b", title: "Chat B", updatedAt: "2026-08-05T00:00:00.000Z" };
+      // CONV_B is more recently updated than CONV_A, so it's returned first
+      // (matches listConversationsForOwner's desc(updatedAt) ordering).
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([CONV_B, CONV_A]), { status: 200 })));
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-b", "conv-a"]);
+
+      act(() => {
+        result.current.bumpConversation("conv-a");
+      });
+
+      expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-a", "conv-b"]);
+    });
+
+    it("is a no-op for an id not currently in the list", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([CONV_A]), { status: 200 })));
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      act(() => {
+        result.current.bumpConversation("conv-nonexistent");
+      });
+
+      expect(result.current.conversations).toEqual([CONV_A]);
+    });
   });
 });

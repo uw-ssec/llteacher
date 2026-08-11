@@ -16,14 +16,14 @@ const listConversationsForOwnerMock = vi.fn();
 const createConversationMock = vi.fn();
 const updateConversationTitleMock = vi.fn();
 const softDeleteConversationMock = vi.fn();
-const getConversationByIdMock = vi.fn();
+const getOwnedConversationOrNullMock = vi.fn();
 const getMessagesForConversationMock = vi.fn();
 vi.mock("../repositories/conversations", () => ({
   listConversationsForOwner: (...args: unknown[]) => listConversationsForOwnerMock(...args),
   createConversation: (...args: unknown[]) => createConversationMock(...args),
   updateConversationTitle: (...args: unknown[]) => updateConversationTitleMock(...args),
   softDeleteConversation: (...args: unknown[]) => softDeleteConversationMock(...args),
-  getConversationById: (...args: unknown[]) => getConversationByIdMock(...args),
+  getOwnedConversationOrNull: (...args: unknown[]) => getOwnedConversationOrNullMock(...args),
   getMessagesForConversation: (...args: unknown[]) => getMessagesForConversationMock(...args),
 }));
 
@@ -56,12 +56,31 @@ function patchConv(app: Hono<AppEnv>, id: string, body: unknown) {
   });
 }
 
+// Full raw-row shape every repository mock resolves with -- #218 projects
+// this down to ConversationSummary in the route layer, so the projector
+// needs real Date objects (not undefined) for createdAt/updatedAt.
+function fakeConversationRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "conv-1",
+    ownerUserId: "u1",
+    courseId: "course-a",
+    sectionId: null,
+    kind: "tutor" as const,
+    title: "New Conversation",
+    isDeleted: false,
+    deletedAt: null,
+    createdAt: new Date("2026-08-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-08-01T00:05:00.000Z"),
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   listConversationsForOwnerMock.mockReset();
   createConversationMock.mockReset();
   updateConversationTitleMock.mockReset();
   softDeleteConversationMock.mockReset();
-  getConversationByIdMock.mockReset();
+  getOwnedConversationOrNullMock.mockReset();
   getMessagesForConversationMock.mockReset();
 });
 
@@ -90,18 +109,29 @@ describe("GET /api/conversations", () => {
     expect(listConversationsForOwnerMock).not.toHaveBeenCalled();
   });
 
-  it("defaults kind to 'tutor' and lists only the caller's conversations for the course", async () => {
-    listConversationsForOwnerMock.mockResolvedValue([{ id: "conv-1", title: "Chat 1" }]);
+  it("defaults kind to 'tutor' and lists only the caller's conversations for the course, projected to the wire DTO", async () => {
+    listConversationsForOwnerMock.mockResolvedValue([{ ...fakeConversationRow({ title: "Chat 1" }), messageCount: 3 }]);
 
     const res = await request(buildApp(fakeAuthContext()), "/api/conversations?courseId=course-a");
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual([{ id: "conv-1", title: "Chat 1" }]);
+    // #218: only the wire fields -- ownerUserId/courseId/sectionId/isDeleted/
+    // deletedAt are dropped.
+    expect(await res.json()).toEqual([
+      {
+        id: "conv-1",
+        kind: "tutor",
+        title: "Chat 1",
+        createdAt: "2026-08-01T00:00:00.000Z",
+        updatedAt: "2026-08-01T00:05:00.000Z",
+        messageCount: 3,
+      },
+    ]);
     expect(listConversationsForOwnerMock).toHaveBeenCalledWith(
       expect.anything(),
       "course-a",
       "u1",
-      { kind: "tutor" },
+      { kind: "tutor", limit: undefined, before: undefined },
     );
   });
 
@@ -112,8 +142,41 @@ describe("GET /api/conversations", () => {
       expect.anything(),
       "course-a",
       "u1",
-      { kind: "tutor" },
+      { kind: "tutor", limit: undefined, before: undefined },
     );
+  });
+
+  // #224
+  describe("pagination", () => {
+    it("passes a valid limit/before through to the repository", async () => {
+      listConversationsForOwnerMock.mockResolvedValue([]);
+      await request(
+        buildApp(fakeAuthContext()),
+        "/api/conversations?courseId=course-a&limit=10&before=2026-08-01T00:00:00.000Z",
+      );
+      const [, , , opts] = listConversationsForOwnerMock.mock.calls[0]!;
+      expect(opts.limit).toBe(10);
+      expect(opts.before).toEqual(new Date("2026-08-01T00:00:00.000Z"));
+    });
+
+    it("400s on a limit outside 1-200", async () => {
+      const res = await request(buildApp(fakeAuthContext()), "/api/conversations?courseId=course-a&limit=0");
+      expect(res.status).toBe(400);
+      expect(listConversationsForOwnerMock).not.toHaveBeenCalled();
+    });
+
+    it("400s on a non-numeric limit", async () => {
+      const res = await request(buildApp(fakeAuthContext()), "/api/conversations?courseId=course-a&limit=abc");
+      expect(res.status).toBe(400);
+    });
+
+    it("400s on an invalid before timestamp", async () => {
+      const res = await request(
+        buildApp(fakeAuthContext()),
+        "/api/conversations?courseId=course-a&before=not-a-date",
+      );
+      expect(res.status).toBe(400);
+    });
   });
 });
 
@@ -157,11 +220,13 @@ describe("POST /api/conversations", () => {
     expect(createConversationMock).not.toHaveBeenCalled();
   });
 
-  it("creates a tutor conversation with the default title when title is omitted, and returns 201", async () => {
+  it("creates a tutor conversation with the default title when title is omitted, and returns 201 with the projected DTO", async () => {
     const authContext = fakeAuthContext({
-      memberships: [{ id: "m1", userId: "u1", courseId: "11111111-1111-1111-1111-111111111111", role: "student" }] as AuthContext["memberships"],
+      memberships: [fakeMembership({ courseId: "11111111-1111-1111-1111-111111111111", role: "student" })],
     });
-    createConversationMock.mockResolvedValue({ id: "conv-1", title: "New Conversation" });
+    createConversationMock.mockResolvedValue(
+      fakeConversationRow({ id: "conv-1", courseId: "11111111-1111-1111-1111-111111111111", title: "New Conversation" }),
+    );
 
     const res = await request(buildApp(authContext), "/api/conversations", {
       method: "POST",
@@ -175,13 +240,23 @@ describe("POST /api/conversations", () => {
       "11111111-1111-1111-1111-111111111111",
       { ownerUserId: "u1", sectionId: null, kind: "tutor", title: "New Conversation" },
     );
+    // #218: no ownerUserId/courseId/etc. in the response.
+    expect(await res.json()).toEqual({
+      id: "conv-1",
+      kind: "tutor",
+      title: "New Conversation",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:05:00.000Z",
+    });
   });
 
   it("creates a tutor conversation using the supplied title", async () => {
     const authContext = fakeAuthContext({
-      memberships: [{ id: "m1", userId: "u1", courseId: "11111111-1111-1111-1111-111111111111", role: "student" }] as AuthContext["memberships"],
+      memberships: [fakeMembership({ courseId: "11111111-1111-1111-1111-111111111111", role: "student" })],
     });
-    createConversationMock.mockResolvedValue({ id: "conv-1", title: "My chat" });
+    createConversationMock.mockResolvedValue(
+      fakeConversationRow({ id: "conv-1", courseId: "11111111-1111-1111-1111-111111111111", title: "My chat" }),
+    );
 
     await request(buildApp(authContext), "/api/conversations", {
       method: "POST",
@@ -198,7 +273,7 @@ describe("POST /api/conversations", () => {
 
   it("400s when the supplied title is whitespace-only (empty after trim)", async () => {
     const authContext = fakeAuthContext({
-      memberships: [{ id: "m1", userId: "u1", courseId: "11111111-1111-1111-1111-111111111111", role: "student" }] as AuthContext["memberships"],
+      memberships: [fakeMembership({ courseId: "11111111-1111-1111-1111-111111111111", role: "student" })],
     });
     const res = await request(buildApp(authContext), "/api/conversations", {
       method: "POST",
@@ -211,7 +286,7 @@ describe("POST /api/conversations", () => {
 
   it("400s when the supplied title is over 100 chars", async () => {
     const authContext = fakeAuthContext({
-      memberships: [{ id: "m1", userId: "u1", courseId: "11111111-1111-1111-1111-111111111111", role: "student" }] as AuthContext["memberships"],
+      memberships: [fakeMembership({ courseId: "11111111-1111-1111-1111-111111111111", role: "student" })],
     });
     const res = await request(buildApp(authContext), "/api/conversations", {
       method: "POST",
@@ -227,39 +302,43 @@ describe("PATCH /api/conversations/:id", () => {
   it("returns 401 when there is no authContext", async () => {
     const res = await patchConv(buildApp(undefined), "conv-1", { title: "New title" });
     expect(res.status).toBe(401);
-    expect(getConversationByIdMock).not.toHaveBeenCalled();
+    expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
   });
 
-  it("404s when the conversation does not exist", async () => {
-    getConversationByIdMock.mockResolvedValue(null);
+  // #217: getOwnedConversationOrNull itself collapses "doesn't exist",
+  // "not owned", and "soft-deleted" into one null -- these three tests
+  // exercise the route's response to that null, not three different repo
+  // return shapes (that collapsing is getOwnedConversationOrNull's own
+  // responsibility, covered directly in conversations repository tests).
+  it("404s when getOwnedConversationOrNull returns null (not found, not owned, or soft-deleted)", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(null);
     const res = await patchConv(buildApp(fakeAuthContext()), "conv-1", { title: "New title" });
     expect(res.status).toBe(404);
     expect(updateConversationTitleMock).not.toHaveBeenCalled();
   });
 
-  it("404s (not 403) when the conversation is owned by a different user", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "someone-else", courseId: "course-a" });
-    const res = await patchConv(buildApp(fakeAuthContext()), "conv-1", { title: "New title" });
-    expect(res.status).toBe(404);
-    expect(updateConversationTitleMock).not.toHaveBeenCalled();
+  it("passes the caller's userId to getOwnedConversationOrNull", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(null);
+    await patchConv(buildApp(fakeAuthContext()), "conv-1", { title: "New title" });
+    expect(getOwnedConversationOrNullMock).toHaveBeenCalledWith(expect.anything(), "conv-1", "u1");
   });
 
   it("400s when title is empty after trimming whitespace", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
     const res = await patchConv(buildApp(fakeAuthContext()), "conv-1", { title: "   " });
     expect(res.status).toBe(400);
     expect(updateConversationTitleMock).not.toHaveBeenCalled();
   });
 
   it("400s when title exceeds 100 chars", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
     const res = await patchConv(buildApp(fakeAuthContext()), "conv-1", { title: "x".repeat(101) });
     expect(res.status).toBe(400);
     expect(updateConversationTitleMock).not.toHaveBeenCalled();
   });
 
   it("400s when the request body is not valid JSON", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
     const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1", {
       method: "PATCH",
       body: "not json",
@@ -268,19 +347,25 @@ describe("PATCH /api/conversations/:id", () => {
     expect(res.status).toBe(400);
   });
 
-  it("trims the title before persisting and returns the updated row", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
-    updateConversationTitleMock.mockResolvedValue({ id: "conv-1", title: "Trimmed" });
+  it("trims the title before persisting and returns the projected updated row", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+    updateConversationTitleMock.mockResolvedValue(fakeConversationRow({ title: "Trimmed" }));
 
     const res = await patchConv(buildApp(fakeAuthContext()), "conv-1", { title: "  Trimmed  " });
 
     expect(res.status).toBe(200);
     expect(updateConversationTitleMock).toHaveBeenCalledWith(expect.anything(), "course-a", "conv-1", "Trimmed");
-    expect(await res.json()).toEqual({ id: "conv-1", title: "Trimmed" });
+    expect(await res.json()).toEqual({
+      id: "conv-1",
+      kind: "tutor",
+      title: "Trimmed",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:05:00.000Z",
+    });
   });
 
   it("404s when updateConversationTitle finds nothing to update (e.g. concurrently soft-deleted)", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
     updateConversationTitleMock.mockResolvedValue(null);
 
     const res = await patchConv(buildApp(fakeAuthContext()), "conv-1", { title: "New title" });
@@ -292,25 +377,18 @@ describe("DELETE /api/conversations/:id", () => {
   it("returns 401 when there is no authContext", async () => {
     const res = await request(buildApp(undefined), "/api/conversations/conv-1", { method: "DELETE" });
     expect(res.status).toBe(401);
-    expect(getConversationByIdMock).not.toHaveBeenCalled();
+    expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
   });
 
-  it("404s when the conversation does not exist", async () => {
-    getConversationByIdMock.mockResolvedValue(null);
-    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1", { method: "DELETE" });
-    expect(res.status).toBe(404);
-    expect(softDeleteConversationMock).not.toHaveBeenCalled();
-  });
-
-  it("404s (not 403) when the conversation is owned by a different user", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "someone-else", courseId: "course-a" });
+  it("404s when getOwnedConversationOrNull returns null", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(null);
     const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1", { method: "DELETE" });
     expect(res.status).toBe(404);
     expect(softDeleteConversationMock).not.toHaveBeenCalled();
   });
 
   it("soft-deletes and returns 204 with no body when owned by the caller", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
     softDeleteConversationMock.mockResolvedValue(undefined);
 
     const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1", { method: "DELETE" });
@@ -319,26 +397,6 @@ describe("DELETE /api/conversations/:id", () => {
     const text = await res.text();
     expect(text).toBe("");
     expect(softDeleteConversationMock).toHaveBeenCalledWith(expect.anything(), "course-a", "conv-1");
-  });
-
-  // PR-1 whole-branch review (Important): getOwnedConversationOrNull now
-  // checks isDeleted (previously only updateConversationTitle's/
-  // getMessagesForConversation's own queries did), so a second DELETE of
-  // an already soft-deleted, caller-owned conversation 404s -- idempotent
-  // in the "the resource is gone" sense, not "returns 204 again as if the
-  // delete just happened".
-  it("404s (not 204 again) when the conversation is already soft-deleted", async () => {
-    getConversationByIdMock.mockResolvedValue({
-      id: "conv-1",
-      ownerUserId: "u1",
-      courseId: "course-a",
-      isDeleted: true,
-    });
-
-    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1", { method: "DELETE" });
-
-    expect(res.status).toBe(404);
-    expect(softDeleteConversationMock).not.toHaveBeenCalled();
   });
 });
 
@@ -352,34 +410,32 @@ describe("GET /api/conversations/:id/messages", () => {
   it("returns 401 when there is no authContext", async () => {
     const res = await request(buildApp(undefined), "/api/conversations/conv-1/messages");
     expect(res.status).toBe(401);
-    expect(getConversationByIdMock).not.toHaveBeenCalled();
+    expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
   });
 
-  it("404s when the conversation does not exist", async () => {
-    getConversationByIdMock.mockResolvedValue(null);
-    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1/messages");
-    expect(res.status).toBe(404);
-    expect(getMessagesForConversationMock).not.toHaveBeenCalled();
-  });
-
-  it("404s (not 403) when the conversation is owned by a different user", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "someone-else", courseId: "course-a" });
+  it("404s when getOwnedConversationOrNull returns null (not found, not owned, or soft-deleted)", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(null);
     const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1/messages");
     expect(res.status).toBe(404);
     expect(getMessagesForConversationMock).not.toHaveBeenCalled();
   });
 
   it("returns the conversation's messages mapped to {id, role, parts}, scoped by the conversation's own courseId", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
     getMessagesForConversationMock.mockResolvedValue([
-      { id: "m1", conversationId: "conv-1", role: "user", parts: [{ type: "text", text: "hi" }], createdAt: new Date() },
-      { id: "m2", conversationId: "conv-1", role: "assistant", parts: [{ type: "text", text: "hello" }], createdAt: new Date() },
+      { id: "m1", conversationId: "conv-1", role: "user", parts: [{ type: "text", text: "hi" }], createdAt: new Date(), seq: 1 },
+      { id: "m2", conversationId: "conv-1", role: "assistant", parts: [{ type: "text", text: "hello" }], createdAt: new Date(), seq: 2 },
     ]);
 
     const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1/messages");
 
     expect(res.status).toBe(200);
-    expect(getMessagesForConversationMock).toHaveBeenCalledWith(expect.anything(), "course-a", "conv-1");
+    expect(getMessagesForConversationMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "course-a",
+      "conv-1",
+      { limit: undefined, before: undefined },
+    );
     expect(await res.json()).toEqual([
       { id: "m1", role: "user", parts: [{ type: "text", text: "hi" }] },
       { id: "m2", role: "assistant", parts: [{ type: "text", text: "hello" }] },
@@ -387,7 +443,7 @@ describe("GET /api/conversations/:id/messages", () => {
   });
 
   it("returns an empty array (200), not 404, for a conversation with no messages yet", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
     getMessagesForConversationMock.mockResolvedValue([]);
 
     const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1/messages");
@@ -396,26 +452,31 @@ describe("GET /api/conversations/:id/messages", () => {
     expect(await res.json()).toEqual([]);
   });
 
-  // PR-1 whole-branch review (Important): before this fix,
-  // getOwnedConversationOrNull didn't check isDeleted at all -- only
-  // getMessagesForConversation's own query did, and that only affects which
-  // MESSAGE ROWS come back, not whether the conversation itself is treated
-  // as found. So a soft-deleted (but owned) conversation's id returned 200
-  // [] here -- indistinguishable from "a real, non-deleted conversation
-  // with zero messages" -- while PATCH/DELETE on the identical row already
-  // correctly 404'd. Same conversation row, three handlers, one shared
-  // helper: they must agree.
-  it("404s (not 200 []) when the conversation is owned by the caller but soft-deleted", async () => {
-    getConversationByIdMock.mockResolvedValue({
-      id: "conv-1",
-      ownerUserId: "u1",
-      courseId: "course-a",
-      isDeleted: true,
+  // #215
+  describe("pagination", () => {
+    it("passes a valid limit/before through to the repository", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+      getMessagesForConversationMock.mockResolvedValue([]);
+      await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1/messages?limit=50&before=12");
+      expect(getMessagesForConversationMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "course-a",
+        "conv-1",
+        { limit: 50, before: 12 },
+      );
     });
 
-    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1/messages");
+    it("400s on a limit outside 1-500", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+      const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1/messages?limit=0");
+      expect(res.status).toBe(400);
+      expect(getMessagesForConversationMock).not.toHaveBeenCalled();
+    });
 
-    expect(res.status).toBe(404);
-    expect(getMessagesForConversationMock).not.toHaveBeenCalled();
+    it("400s on a non-integer before", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+      const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1/messages?before=abc");
+      expect(res.status).toBe(400);
+    });
   });
 });

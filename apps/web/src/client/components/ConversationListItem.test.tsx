@@ -9,13 +9,8 @@ afterEach(cleanup);
 
 const CONVERSATION: ConversationListItemResponse = {
   id: "conv-1",
-  ownerUserId: "u1",
-  courseId: "course-a",
-  sectionId: null,
   kind: "tutor",
   title: "Understanding p-values",
-  isDeleted: false,
-  deletedAt: null,
   createdAt: "2026-08-01T10:00:00.000Z",
   updatedAt: "2026-08-01T12:30:00.000Z",
   messageCount: 6,
@@ -38,14 +33,31 @@ function renderItem(overrides: Partial<React.ComponentProps<typeof ConversationL
 
 describe("ConversationListItem", () => {
   it("renders the title and message count", () => {
-    renderItem();
+    const { container } = renderItem();
     expect(screen.getByText("Understanding p-values")).toBeTruthy();
-    expect(screen.getByLabelText("6 messages").textContent).toBe("6");
+    const countEl = container.querySelector(".tutor-conversation-item__count")!;
+    expect(countEl.textContent).toBe("6 messages");
   });
 
-  it("singularizes the message count label for exactly one message", () => {
-    renderItem({ conversation: { ...CONVERSATION, messageCount: 1 } });
-    expect(screen.getByLabelText("1 message")).toBeTruthy();
+  it("singularizes the message count's visually-hidden word for exactly one message", () => {
+    const { container } = renderItem({ conversation: { ...CONVERSATION, messageCount: 1 } });
+    const countEl = container.querySelector(".tutor-conversation-item__count")!;
+    expect(countEl.textContent).toBe("1 message");
+  });
+
+  // #233: the row's aria-label stays a short, stable "Select conversation:
+  // {title}" (matching every other query in this file) -- the time and
+  // count reach assistive tech via aria-describedby instead, pointing at
+  // the meta block that renders them (see ConversationListItem.tsx's own
+  // #233 doc comment for why this is preferred over cramming everything
+  // into one aria-label).
+  it("exposes the time and count to assistive tech via aria-describedby on the row", () => {
+    renderItem();
+    const row = screen.getByRole("button", { name: "Select conversation: Understanding p-values" });
+    const describedById = row.getAttribute("aria-describedby");
+    expect(describedById).toBeTruthy();
+    const description = document.getElementById(describedById!);
+    expect(description?.textContent).toContain("6 messages");
   });
 
   // #6 (redesigned post-review): #4's original contract is restored --

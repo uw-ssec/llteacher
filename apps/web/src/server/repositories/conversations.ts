@@ -1,14 +1,17 @@
-import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { conversations, messages, sections, homeworks, courseMemberships } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import { TenancyMismatchError } from "./errors";
 
+const DEFAULT_CONVERSATIONS_PAGE_SIZE = 50;
+const DEFAULT_MESSAGES_PAGE_SIZE = 200;
+
 export async function listConversationsForOwner(
   db: Db,
   scope: CourseScope,
   ownerUserId: string,
-  opts?: { includeDeleted?: boolean; kind?: "section" | "tutor" },
+  opts?: { includeDeleted?: boolean; kind?: "section" | "tutor"; limit?: number; before?: Date },
 ) {
   const conditions = [
     eq(conversations.courseId, scope),
@@ -26,11 +29,19 @@ export async function listConversationsForOwner(
   if (opts?.kind) {
     conditions.push(eq(conversations.kind, opts.kind));
   }
+  // #224: cursor pagination on updatedAt, the same column the ordering
+  // already sorts by -- a page boundary is just "strictly older than the
+  // last row of the previous page."
+  if (opts?.before) {
+    conditions.push(lt(conversations.updatedAt, opts.before));
+  }
+  const limit = opts?.limit ?? DEFAULT_CONVERSATIONS_PAGE_SIZE;
   const rows = await db
     .select()
     .from(conversations)
     .where(and(...conditions))
-    .orderBy(desc(conversations.updatedAt));
+    .orderBy(desc(conversations.updatedAt))
+    .limit(limit);
 
   if (rows.length === 0) return [];
 
@@ -42,6 +53,9 @@ export async function listConversationsForOwner(
   // listHomeworksForCourse (homeworks.ts) already uses for sectionCount,
   // merged back in application code via a Map instead of reasoning about
   // duplicate conversation rows a JOIN would produce.
+  //
+  // #224: bounded by construction now that `rows` is itself limited above --
+  // the inArray parameter list can never grow past the page size.
   const counts = await db
     .select({ conversationId: messages.conversationId, count: sql<number>`count(*)::int` })
     .from(messages)
@@ -64,24 +78,12 @@ export async function createConversation(
   // droppedAt IS NULL matches listMembershipsForUser (#139) -- a dropped
   // membership must not be able to originate new conversations either.
   // Both throws below are TenancyMismatchError (repositories/errors.ts,
-  // #141), mapped to an honest 404 by app.onError (server/index.ts) at
-  // this function's two real callers -- createConversationHandler
-  // (routes/conversations.ts, #5) and chatHandler's new-conversation branch
-  // (routes/chat.ts, #3).
+  // #141), mapped to an honest 404 by app.onError (server/index.ts) at this
+  // function's callers -- createConversationHandler (routes/conversations.ts,
+  // #5) and chatHandler's new-conversation branch (routes/chat.ts, #3).
   //
-  // Reachability today: neither throw is actually hit by either caller as
-  // of #141. Both callers mint `scope` via courseScopeFromAuthContext,
-  // which already checks input.ownerUserId (always authContext.session.
-  // userId, never a different caller-supplied id) against this exact same
-  // membership query before this function is even called -- so the
-  // membership throw below can only fire via a narrow TOCTOU race (the
-  // membership gets dropped between that check and this insert), not a
-  // realistic caller mismatch. And both callers always pass
-  // `sectionId: null`, so the section throw can never fire at all today.
-  // This is defense-in-depth for a future caller that passes a
-  // caller-supplied ownerUserId or a non-null sectionId directly (neither
-  // does today) -- kept typed and mapped now so that future caller gets
-  // the 404 mapping for free, rather than needing its own follow-up issue.
+  // #214: the section-tenancy check below is reachable now -- chatHandler's
+  // section-chat path passes a real sectionId (see routes/chat.ts).
   const [membership] = await db
     .select({ id: courseMemberships.id })
     .from(courseMemberships)
@@ -128,12 +130,12 @@ export async function softDeleteConversation(db: Db, scope: CourseScope, convers
 
 // #5's PATCH /api/conversations/:id (rename). Same CourseScope-only gap as
 // softDeleteConversation above -- the route (routes/conversations.ts) does
-// the ownerUserId check itself via getConversationById before calling this,
-// same pattern chatHandler (#3) established for conversationId ownership,
-// rather than this function taking a requesterId. isDeleted is checked so a
-// soft-deleted conversation can't be renamed back to life through PATCH;
-// the route treats a null return (not found under scope, or soft-deleted)
-// as the same 404 as an ownership mismatch.
+// the ownerUserId check itself via getOwnedConversationOrNull before calling
+// this, same pattern chatHandler (#3) established for conversationId
+// ownership, rather than this function taking a requesterId. isDeleted is
+// checked so a soft-deleted conversation can't be renamed back to life
+// through PATCH; the route treats a null return (not found under scope, or
+// soft-deleted) as the same 404 as an ownership mismatch.
 export async function updateConversationTitle(db: Db, scope: CourseScope, conversationId: string, title: string) {
   const [updated] = await db
     .update(conversations)
@@ -150,32 +152,32 @@ export async function updateConversationTitle(db: Db, scope: CourseScope, conver
 }
 
 // Same CourseScope-only gap as softDeleteConversation above -- see
-// ARCHITECTURE.md's "Row Ownership (Within a Scope)" section and #134;
-// that gap (no requesterId/ownership check here) is still open and out of
-// scope for #141, which only covers the wrong-scope case below. The
-// wrong-scope throw is now a TenancyMismatchError (repositories/errors.ts,
-// #141), mapped to an honest 404 by app.onError (server/index.ts) rather
-// than falling through to the generic 503 -- this function's callers are
-// chatHandler's persistence calls (routes/chat.ts, #3). The
-// non-transactional check-then-insert(-then-touch) is left as-is; not part
-// of #141's scope either.
+// ARCHITECTURE.md's "Row Ownership (Within a Scope)" section and #134; that
+// gap (no requesterId/ownership check here) is still open. The membership
+// check-then-insert(-then-touch) below is not wrapped together -- a
+// conversation soft-deleted between the check and the insert is a narrow
+// TOCTOU race, documented in ARCHITECTURE.md rather than closed here.
 //
-// PR-1 whole-branch review (#140): this used to never bump
-// conversations.updatedAt ($onUpdate only fires on an UPDATE to the
-// conversations row itself, and this function used to only insert into
-// messages) -- but listConversationsForOwner (#5) already orders by
-// `desc(conversations.updatedAt)` as its "recently active first" ordering,
-// so a conversation's row was frozen at creation time for that ordering's
-// purposes: renaming it (PATCH, the only other writer of this row) moved
-// it in the list, chatting in it did not. The explicit touch below fixes
-// that inconsistency -- best-effort/non-blocking relative to the message
-// insert above (not wrapped in a transaction together), same
-// non-transactional posture this function already had.
+// #220: the insert and the `updatedAt` touch below are now atomic with each
+// other. Branches on driver capability at runtime -- same reasoning and
+// pattern as updateHomework (repositories/homeworks.ts): production's
+// neon-http driver supports `db.batch()` but not `db.transaction()` (throws
+// "No transactions support in neon-http driver"); the node-postgres driver
+// real-DB tests use (`makeNodeDb`) is the mirror image -- `db.transaction()`
+// works, `db.batch` doesn't exist at runtime despite the shared `Db` type
+// claiming it does. Feature-detect via `typeof db.batch === "function"` (a
+// missing method is a TypeError at the call site, not something to
+// try/catch). Before this fix (on either path) a failure between the two
+// statements could leave a persisted message whose parent conversation's
+// updatedAt never moved, so the conversation would have messages but sort
+// as though it did not.
+type BatchStatement = Parameters<Db["batch"]>[0][number];
+
 export async function appendMessage(
   db: Db,
   scope: CourseScope,
   conversationId: string,
-  input: { role: "user" | "assistant" | "system"; parts: unknown },
+  input: { role: "user" | "assistant" | "system"; parts: unknown; clientMessageId?: string | null },
 ) {
   const [owned] = await db
     .select({ id: conversations.id })
@@ -190,15 +192,35 @@ export async function appendMessage(
   if (!owned) {
     throw new TenancyMismatchError("Conversation not found in this course scope");
   }
-  const [created] = await db
-    .insert(messages)
-    .values({ conversationId, role: input.role, parts: input.parts })
-    .returning();
-  // #140: keep the parent conversation's "last activity" timestamp (and
-  // therefore its position in listConversationsForOwner's updatedAt-desc
-  // ordering) current with actual chat activity, not just renames.
-  await db.update(conversations).set({ updatedAt: new Date() }).where(eq(conversations.id, conversationId));
-  return created;
+
+  const messageValues = {
+    conversationId,
+    role: input.role,
+    parts: input.parts,
+    clientMessageId: input.clientMessageId ?? null,
+  };
+
+  if (typeof db.batch === "function") {
+    // Production path: neon-http, one atomic HTTP round-trip.
+    const [[created]] = await db.batch([
+      db.insert(messages).values(messageValues).returning(),
+      // #140/#220: keep the parent conversation's "last activity" timestamp
+      // (and therefore its position in listConversationsForOwner's
+      // updatedAt-desc ordering) current with actual chat activity, not
+      // just renames -- atomic with the insert above.
+      db.update(conversations).set({ updatedAt: new Date() }).where(eq(conversations.id, conversationId)),
+    ] as [BatchStatement, BatchStatement]);
+    return created;
+  }
+
+  // Test/dev path: node-postgres (makeNodeDb) has no runtime db.batch().
+  // A real db.transaction() gives the same all-or-nothing guarantee
+  // through a different Drizzle primitive.
+  return db.transaction(async (tx) => {
+    const [created] = await tx.insert(messages).values(messageValues).returning();
+    await tx.update(conversations).set({ updatedAt: new Date() }).where(eq(conversations.id, conversationId));
+    return created;
+  });
 }
 
 // Unscoped by design (chatHandler needs to look a conversation up by id
@@ -213,16 +235,60 @@ export async function getConversationById(db: Db, conversationId: string) {
   return row ?? null;
 }
 
-// Used by chatHandler's retry/idempotency check (#3): the most recently
-// persisted messages in a conversation, newest first (index 0 = last
-// message). limit=2 is what chatHandler needs to distinguish its two retry
-// cases -- "the user message already landed but the assistant hasn't
+// #217/#222: shared "not found, not owned, or soft-deleted" check --
+// originally routes/conversations.ts-local (PATCH/DELETE/GET-messages);
+// moved here so routes/chat.ts's conversationId ownership check can reuse
+// the exact same rule instead of hand-rolling its own (#217) and inherit
+// the isDeleted check for free (#222) rather than depending on a downstream
+// TenancyMismatchError to accidentally produce the same 404. Returns null
+// for "doesn't exist", "exists but isn't yours", AND "exists, is yours, but
+// is soft-deleted" -- callers must turn a null into a 404 (never 401/403),
+// so a guessed/leaked conversation id can't be used to confirm one exists
+// that isn't the caller's.
+export async function getOwnedConversationOrNull(db: Db, conversationId: string, userId: string) {
+  const existing = await getConversationById(db, conversationId);
+  if (!existing || existing.ownerUserId !== userId || existing.isDeleted) {
+    return null;
+  }
+  return existing;
+}
+
+// #219: per-user request budget for /api/chat. Counts this user's own user-
+// authored messages across every conversation they own (not scoped to one
+// conversation -- the limit is per-user, matching the issue title) created
+// within the trailing window. Reuses the messages/conversations tables
+// already written on every turn rather than a new counter table or an
+// external rate-limit binding.
+export async function countRecentUserMessagesForUser(db: Db, userId: string, since: Date) {
+  const [row] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(messages)
+    .innerJoin(conversations, eq(messages.conversationId, conversations.id))
+    .where(
+      and(
+        eq(conversations.ownerUserId, userId),
+        eq(messages.role, "user"),
+        gt(messages.createdAt, since),
+      ),
+    );
+  return row?.count ?? 0;
+}
+
+// Used by chatHandler's retry/idempotency check (#3, reworked #213): the
+// most recently persisted messages in a conversation, newest first (index 0
+// = last message). limit=2 is what chatHandler needs to distinguish its two
+// retry cases -- "the user message already landed but the assistant hasn't
 // answered yet" (last row is that same user message) from "the assistant
 // already answered but the client never received it" (last row is the
 // assistant reply, and the row before it is that same user message) --
 // without a second round-trip. Scoped the same way appendMessage is
 // (courseId match + not-deleted) so a caller can't probe a message via a
 // conversationId scoped to the wrong course.
+//
+// #221: ordered by `seq` (a monotonic bigserial), not `createdAt` alone --
+// createdAt is timestamptz (microsecond resolution) and safe today only
+// because each append is its own transaction, so two rows can never share a
+// timestamp; `seq` makes that guarantee independent of that fact.
 export async function getLastMessages(db: Db, scope: CourseScope, conversationId: string, limit = 2) {
   const [owned] = await db
     .select({ id: conversations.id })
@@ -239,7 +305,7 @@ export async function getLastMessages(db: Db, scope: CourseScope, conversationId
     .select()
     .from(messages)
     .where(eq(messages.conversationId, conversationId))
-    .orderBy(desc(messages.createdAt))
+    .orderBy(desc(messages.seq))
     .limit(limit);
 }
 
@@ -250,15 +316,20 @@ export async function getLastMessages(db: Db, scope: CourseScope, conversationId
 // straight from convertToModelMessages(uiMessages) (the array the CLIENT
 // sends), so an empty client-side history meant the LLM silently lost every
 // prior turn on resume. Same scoping shape as getLastMessages above
-// (courseId match + not-deleted), but ascending by createdAt (oldest
-// first) and unlimited -- getLastMessages's newest-first order and small
-// limit exist for its own retry-detection purpose (index 0 = last message),
-// which is the opposite of what a client needs to seed useChat's initial
-// message list in original conversation order. Relies on the same
-// `messages_conversation_created_idx` (conversationId, createdAt) index
-// getLastMessages already does, so this ordering guarantee isn't new --
-// just the other direction over the same index.
-export async function getMessagesForConversation(db: Db, scope: CourseScope, conversationId: string) {
+// (courseId match + not-deleted), ascending by `seq` (#221; oldest first --
+// the opposite of getLastMessages' retry-detection order, same underlying
+// tiebreaker).
+//
+// #215: bounded by default (DEFAULT_MESSAGES_PAGE_SIZE) instead of
+// returning the entire conversation -- `before` (a seq cursor) lets a
+// caller page further back; omitted, this returns the most recent page in
+// chronological order, which is what App.tsx's hydration fetch needs today.
+export async function getMessagesForConversation(
+  db: Db,
+  scope: CourseScope,
+  conversationId: string,
+  opts?: { limit?: number; before?: number },
+) {
   const [owned] = await db
     .select({ id: conversations.id })
     .from(conversations)
@@ -270,9 +341,21 @@ export async function getMessagesForConversation(db: Db, scope: CourseScope, con
       ),
     );
   if (!owned) return [];
-  return db
+
+  const limit = opts?.limit ?? DEFAULT_MESSAGES_PAGE_SIZE;
+  const conditions = [eq(messages.conversationId, conversationId)];
+  if (opts?.before !== undefined) {
+    conditions.push(lt(messages.seq, opts.before));
+  }
+  // Fetch the most recent `limit` rows (desc), then reverse in application
+  // code -- the same "take the tail, then re-sort ascending" trick as a SQL
+  // window would need anyway, without a subquery, since this table has no
+  // natural "give me the last N in ascending order" clause.
+  const rows = await db
     .select()
     .from(messages)
-    .where(eq(messages.conversationId, conversationId))
-    .orderBy(asc(messages.createdAt));
+    .where(and(...conditions))
+    .orderBy(desc(messages.seq))
+    .limit(limit);
+  return rows.reverse();
 }

@@ -47,6 +47,11 @@ export interface ComposerProps {
   placeholder?: string;
   /** Prior student messages, oldest→newest. Up/Down navigate this list. */
   history?: string[];
+  /** #235: focuses the textarea once on mount -- used when a brand-new
+   *  conversation was just created, so a keyboard user lands where the
+   *  visual focus implicitly went (the chat column switched to it)
+   *  instead of needing to click/tab into the composer manually. */
+  autoFocus?: boolean;
 }
 
 /* Cursor is on the first visual line iff there's no newline before it and no
@@ -68,8 +73,17 @@ export function Composer({
   disabled = false,
   placeholder = "Ask, explore, or push back…",
   history,
+  autoFocus = false,
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // #235: run once on mount only (empty deps) -- a later autoFocus prop
+  // change must not steal focus back from wherever the user has since
+  // moved it.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (autoFocus) textareaRef.current?.focus();
+  }, []);
 
   /* History navigation state. `historyIndex === null` means the user is on
      their in-progress draft (the bottom of the stack). `savedDraft` preserves

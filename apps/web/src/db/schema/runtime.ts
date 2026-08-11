@@ -1,5 +1,6 @@
 import { relations, sql } from "drizzle-orm";
 import {
+  bigserial,
   boolean,
   check,
   doublePrecision,
@@ -110,6 +111,22 @@ export const messages = pgTable(
       .references(() => conversations.id, { onDelete: "cascade" }),
     role: messageRoleEnum("role").notNull(),
     parts: jsonb("parts").notNull(),
+    // #213: the AI SDK's own per-send UIMessage.id, persisted for user rows
+    // so a retry (same id, resent) can be told apart from a genuinely new
+    // message with identical text (new id) -- chatHandler's idempotency
+    // check keys off this instead of JSON.stringify(parts) equality. Null
+    // for assistant/system rows (server-authored, no client id to record);
+    // Postgres unique indexes treat NULL as distinct from every other NULL,
+    // so those rows never collide against each other or against a real id.
+    clientMessageId: text("client_message_id"),
+    // #221: monotonic tiebreaker for ordering. createdAt alone is
+    // timestamptz (microsecond resolution) -- safe today only because each
+    // append is its own transaction, so two rows can never share a
+    // timestamp; stops being safe the moment appends are ever batched.
+    // Global (not per-conversation) bigserial, per the issue's own
+    // suggestion -- ordering only ever needs to be correct within one
+    // conversation's rows, and a global sequence guarantees that trivially.
+    seq: bigserial("seq", { mode: "number" }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -118,6 +135,11 @@ export const messages = pgTable(
     index("messages_conversation_created_idx").on(
       t.conversationId,
       t.createdAt,
+    ),
+    index("messages_conversation_seq_idx").on(t.conversationId, t.seq),
+    uniqueIndex("messages_conversation_client_message_id_idx").on(
+      t.conversationId,
+      t.clientMessageId,
     ),
   ],
 );

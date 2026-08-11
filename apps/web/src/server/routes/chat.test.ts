@@ -13,15 +13,17 @@ const TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "test-key" } as 
 
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
-const getConversationByIdMock = vi.fn();
+const getOwnedConversationOrNullMock = vi.fn();
 const createConversationMock = vi.fn();
 const appendMessageMock = vi.fn();
 const getLastMessagesMock = vi.fn();
+const countRecentUserMessagesForUserMock = vi.fn();
 vi.mock("../repositories/conversations", () => ({
-  getConversationById: (...args: unknown[]) => getConversationByIdMock(...args),
+  getOwnedConversationOrNull: (...args: unknown[]) => getOwnedConversationOrNullMock(...args),
   createConversation: (...args: unknown[]) => createConversationMock(...args),
   appendMessage: (...args: unknown[]) => appendMessageMock(...args),
   getLastMessages: (...args: unknown[]) => getLastMessagesMock(...args),
+  countRecentUserMessagesForUser: (...args: unknown[]) => countRecentUserMessagesForUserMock(...args),
 }));
 
 // streamText is mocked so no real model call happens and the test controls
@@ -67,7 +69,7 @@ const userUiMessage = { id: "client-1", role: "user", parts: [{ type: "text", te
 
 function postChat(
   app: Hono<AppEnv>,
-  payload: { messages: unknown[]; conversationId?: string; courseId?: string },
+  payload: { messages: unknown[]; conversationId?: string; courseId?: string; kind?: string; sectionId?: string },
 ) {
   return app.request(
     "/api/chat",
@@ -82,12 +84,15 @@ function postChat(
 
 describe("POST /api/chat", () => {
   beforeEach(() => {
-    getConversationByIdMock.mockReset();
+    getOwnedConversationOrNullMock.mockReset();
     createConversationMock.mockReset();
     appendMessageMock.mockReset();
     getLastMessagesMock.mockReset();
     streamTextMock.mockClear();
     capturedOnFinish = undefined;
+    // #219: under the rate limit by default -- individual rate-limit tests
+    // override this.
+    countRecentUserMessagesForUserMock.mockReset().mockResolvedValue(0);
   });
 
   it("returns 401 when there is no authContext", async () => {
@@ -119,43 +124,131 @@ describe("POST /api/chat", () => {
     expect(appendMessageMock).not.toHaveBeenCalled();
   });
 
-  it("creates a new tutor conversation with a default title when conversationId is omitted", async () => {
-    createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
-    getLastMessagesMock.mockResolvedValue([]);
+  it("400s when the last message has no id (pre-#213 clients)", async () => {
+    const res = await postChat(buildApp(fakeAuthContext()), {
+      messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }],
+    });
+    expect(res.status).toBe(400);
+  });
 
-    const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+  describe("#219 rate limiting", () => {
+    it("429s with Retry-After when the caller is over the per-minute budget, without touching the model", async () => {
+      countRecentUserMessagesForUserMock.mockResolvedValue(20);
 
-    expect(res.status).toBe(200);
-    expect(createConversationMock).toHaveBeenCalledTimes(1);
-    const [, , input] = createConversationMock.mock.calls[0]!;
-    expect(input).toEqual({
-      ownerUserId: "u1",
-      sectionId: null,
-      kind: "tutor",
-      title: "New Conversation",
+      const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+
+      expect(res.status).toBe(429);
+      expect(res.headers.get("Retry-After")).toBeTruthy();
+      expect(createConversationMock).not.toHaveBeenCalled();
+      expect(streamTextMock).not.toHaveBeenCalled();
+    });
+
+    it("proceeds normally when under budget", async () => {
+      countRecentUserMessagesForUserMock.mockResolvedValue(19);
+      createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+
+      expect(res.status).toBe(200);
     });
   });
 
-  it("falls back to the caller's own course membership when courseId is omitted", async () => {
-    createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
-    getLastMessagesMock.mockResolvedValue([]);
+  describe("new conversations (#214/#231)", () => {
+    it("creates a new tutor conversation, auto-titled from the first message, when conversationId is omitted", async () => {
+      createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      getLastMessagesMock.mockResolvedValue([]);
 
-    await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+      const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
 
-    // scope.ts's courseScopeFromAuthContext mints a CourseScope only from a
-    // courseId the authContext actually reports membership in -- asserting
-    // createConversation was called at all (rather than 403ing) is itself
-    // proof the fallback resolved to "course-a", the one membership fakeAuthContext sets up.
-    expect(createConversationMock).toHaveBeenCalledTimes(1);
+      expect(res.status).toBe(200);
+      expect(createConversationMock).toHaveBeenCalledTimes(1);
+      const [, , input] = createConversationMock.mock.calls[0]!;
+      expect(input).toEqual({
+        ownerUserId: "u1",
+        sectionId: null,
+        kind: "tutor",
+        title: "hi there",
+      });
+    });
+
+    it("truncates a long first message to derive the title", async () => {
+      createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      getLastMessagesMock.mockResolvedValue([]);
+      const longText = "a".repeat(80);
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [{ id: "client-1", role: "user", parts: [{ type: "text", text: longText }] }],
+      });
+
+      const [, , input] = createConversationMock.mock.calls[0]!;
+      expect(input.title).toBe(`${"a".repeat(60)}…`);
+    });
+
+    it("falls back to 'New Conversation' when the first message has no text part", async () => {
+      createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [{ id: "client-1", role: "user", parts: [{ type: "custom-thing" }] }],
+      });
+
+      const [, , input] = createConversationMock.mock.calls[0]!;
+      expect(input.title).toBe("New Conversation");
+    });
+
+    it("falls back to the caller's own course membership when courseId is omitted", async () => {
+      createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+
+      // scope.ts's courseScopeFromAuthContext mints a CourseScope only from a
+      // courseId the authContext actually reports membership in -- asserting
+      // createConversation was called at all (rather than 403ing) is itself
+      // proof the fallback resolved to "course-a", the one membership fakeAuthContext sets up.
+      expect(createConversationMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("403s when the caller has no course membership to fall back to", async () => {
+      const res = await postChat(buildApp(fakeAuthContext({ memberships: [] })), { messages: [userUiMessage] });
+      expect(res.status).toBe(403);
+      expect(createConversationMock).not.toHaveBeenCalled();
+    });
+
+    it("creates a kind:'section' conversation with the given sectionId when kind is 'section'", async () => {
+      createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        kind: "section",
+        sectionId: "11111111-1111-1111-1111-111111111111",
+      });
+
+      const [, , input] = createConversationMock.mock.calls[0]!;
+      expect(input).toEqual({
+        ownerUserId: "u1",
+        sectionId: "11111111-1111-1111-1111-111111111111",
+        kind: "section",
+        // #231: auto-titling is tutor-only -- a section conversation isn't
+        // shown in a titled rail, so it keeps the plain default even though
+        // this turn's text is derivable.
+        title: "New Conversation",
+      });
+    });
+
+    it("400s when kind is 'section' but sectionId is missing", async () => {
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        kind: "section",
+      });
+      expect(res.status).toBe(400);
+      expect(createConversationMock).not.toHaveBeenCalled();
+    });
   });
 
-  it("403s when the caller has no course membership to fall back to", async () => {
-    const res = await postChat(buildApp(fakeAuthContext({ memberships: [] })), { messages: [userUiMessage] });
-    expect(res.status).toBe(403);
-    expect(createConversationMock).not.toHaveBeenCalled();
-  });
-
-  it("persists the inbound user message before the model call", async () => {
+  it("persists the inbound user message (with its clientMessageId) before the model call", async () => {
     createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
     getLastMessagesMock.mockResolvedValue([]);
 
@@ -165,7 +258,7 @@ describe("POST /api/chat", () => {
       expect.anything(),
       expect.anything(),
       "conv-1",
-      { role: "user", parts: userUiMessage.parts },
+      { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
     );
     // Persisted before streamText is invoked -- the model call must not be
     // able to race ahead of the DB write it depends on being durable.
@@ -184,7 +277,7 @@ describe("POST /api/chat", () => {
   });
 
   it("uses an existing conversationId instead of creating a new one, when owned by the caller", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    getOwnedConversationOrNullMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
     getLastMessagesMock.mockResolvedValue([]);
 
     const res = await postChat(buildApp(fakeAuthContext()), {
@@ -197,120 +290,158 @@ describe("POST /api/chat", () => {
     expect(res.headers.get("x-conversation-id")).toBe("conv-1");
   });
 
-  it("404s when conversationId does not exist", async () => {
-    getConversationByIdMock.mockResolvedValue(null);
+  // #217/#222: getOwnedConversationOrNull collapses "doesn't exist", "exists
+  // but isn't yours", and "exists, is yours, but soft-deleted" into null --
+  // chatHandler must turn that into a uniform 404 in every case, never a
+  // 401/403 that would let a caller distinguish them.
+  describe("#217/#222 conversationId ownership -- uniform 404", () => {
+    it("404s when conversationId does not exist, is not owned, or is soft-deleted", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(null);
 
-    const res = await postChat(buildApp(fakeAuthContext()), {
-      messages: [userUiMessage],
-      conversationId: "missing-conv",
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "missing-or-not-owned-or-deleted",
+      });
+
+      expect(res.status).toBe(404);
+      expect(appendMessageMock).not.toHaveBeenCalled();
+      expect(streamTextMock).not.toHaveBeenCalled();
     });
 
-    expect(res.status).toBe(404);
-    expect(appendMessageMock).not.toHaveBeenCalled();
+    it("passes the caller's userId to getOwnedConversationOrNull, not just the raw conversationId", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(null);
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "conv-1",
+      });
+
+      expect(getOwnedConversationOrNullMock).toHaveBeenCalledWith(expect.anything(), "conv-1", "u1");
+    });
   });
 
-  it("401s when conversationId belongs to a different user (ownership check)", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "someone-else", courseId: "course-a" });
+  describe("#213 idempotency keyed on clientMessageId, not content", () => {
+    it("does not double-write the user message on a retry before it was answered (same clientMessageId)", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      // Last row already in the conversation is this exact user message
+      // (persisted by a request that never got its response back to the
+      // client), and the client is now retrying with the SAME clientMessageId.
+      getLastMessagesMock.mockResolvedValue([
+        { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+      ]);
 
-    const res = await postChat(buildApp(fakeAuthContext()), {
-      messages: [userUiMessage],
-      conversationId: "conv-1",
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "conv-1",
+      });
+
+      expect(appendMessageMock).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        "conv-1",
+        expect.objectContaining({ role: "user" }),
+      );
+      expect(streamTextMock).toHaveBeenCalledTimes(1);
     });
 
-    expect(res.status).toBe(401);
-    expect(appendMessageMock).not.toHaveBeenCalled();
-    expect(streamTextMock).not.toHaveBeenCalled();
-  });
+    it("persists a genuinely repeated message (identical text, new id) as a new row and a new model call (FUN-001)", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      // Last row is the SAME text ("hi there") but a DIFFERENT clientMessageId
+      // -- a student legitimately sending the same reply twice in a row
+      // (e.g. "yes", "ok"), not a transport retry of the same send.
+      getLastMessagesMock.mockResolvedValue([
+        { role: "user", parts: userUiMessage.parts, clientMessageId: "client-0-a-different-send" },
+      ]);
 
-  it("does not double-write the user message on a retry before it was answered (idempotency case 1)", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
-    // Simulates the disconnect/retry race from the issue's pitfall #1: the
-    // last row already in the conversation is this exact user message
-    // (persisted by a request that never got its response back to the
-    // client), and the client is now retrying with the same message. No
-    // assistant row exists yet, so this must fall through to a normal model
-    // call (not the "already answered" replay path) -- just without
-    // re-inserting the user row.
-    getLastMessagesMock.mockResolvedValue([{ role: "user", parts: userUiMessage.parts }]);
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "conv-1",
+      });
 
-    await postChat(buildApp(fakeAuthContext()), {
-      messages: [userUiMessage],
-      conversationId: "conv-1",
+      expect(appendMessageMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        "conv-1",
+        { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+      );
+      expect(streamTextMock).toHaveBeenCalledTimes(1);
     });
 
-    expect(appendMessageMock).not.toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
-      "conv-1",
-      expect.objectContaining({ role: "user" }),
-    );
-    expect(streamTextMock).toHaveBeenCalledTimes(1);
-  });
+    it("still persists a genuinely new user message even when the conversation has prior messages", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      getLastMessagesMock.mockResolvedValue([
+        { role: "assistant", parts: [{ type: "text", text: "previous reply" }], clientMessageId: null },
+        { role: "user", parts: [{ type: "text", text: "an earlier, different message" }], clientMessageId: "client-0" },
+      ]);
 
-  it("still persists a genuinely new user message even when the conversation has prior messages", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
-    // Last row is an assistant reply, but the user message before it does
-    // NOT match this turn's inbound message -- a genuinely new turn in an
-    // existing conversation, not a retry of anything.
-    getLastMessagesMock.mockResolvedValue([
-      { role: "assistant", parts: [{ type: "text", text: "previous reply" }] },
-      { role: "user", parts: [{ type: "text", text: "an earlier, different message" }] },
-    ]);
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "conv-1",
+      });
 
-    await postChat(buildApp(fakeAuthContext()), {
-      messages: [userUiMessage],
-      conversationId: "conv-1",
+      expect(appendMessageMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        "conv-1",
+        { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+      );
     });
 
-    expect(appendMessageMock).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
-      "conv-1",
-      { role: "user", parts: userUiMessage.parts },
-    );
-  });
+    it("does not double-write or re-call the model when the assistant already answered this exact turn (same clientMessageId)", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      const persistedAssistantParts = [
+        { type: "text", text: "already answered this one" },
+        {
+          type: "tool-showDefinition",
+          toolCallId: "call-1",
+          state: "output-available",
+          input: { term: "p-value", body: "..." },
+          output: { status: "displayed", term: "p-value" },
+        },
+      ];
+      getLastMessagesMock.mockResolvedValue([
+        { role: "assistant", parts: persistedAssistantParts, clientMessageId: null },
+        { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+      ]);
 
-  it("does not double-write or re-call the model when the assistant already answered this exact turn (idempotency case 2)", async () => {
-    getConversationByIdMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
-    const persistedAssistantParts = [
-      { type: "text", text: "already answered this one" },
-      {
-        type: "tool-showDefinition",
-        toolCallId: "call-1",
-        state: "output-available",
-        input: { term: "p-value", body: "..." },
-        output: { status: "displayed", term: "p-value" },
-      },
-    ];
-    // The scenario the reviewer flagged: the model already ran and its
-    // response is already persisted for this exact user turn (last row is
-    // the assistant reply; the row before it is this exact user message) --
-    // the client just never received it (e.g. dropped after the last
-    // streamed byte). A retry here must not touch the model or the DB a
-    // second time.
-    getLastMessagesMock.mockResolvedValue([
-      { role: "assistant", parts: persistedAssistantParts },
-      { role: "user", parts: userUiMessage.parts },
-    ]);
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "conv-1",
+      });
 
-    const res = await postChat(buildApp(fakeAuthContext()), {
-      messages: [userUiMessage],
-      conversationId: "conv-1",
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-conversation-id")).toBe("conv-1");
+      expect(appendMessageMock).not.toHaveBeenCalled();
+      expect(streamTextMock).not.toHaveBeenCalled();
+
+      const text = await res.text();
+      expect(text).toContain("already answered this one");
+      expect(text).toContain('"toolCallId":"call-1"');
+      expect(text).toContain('"type":"tool-output-available"');
     });
 
-    expect(res.status).toBe(200);
-    expect(res.headers.get("x-conversation-id")).toBe("conv-1");
-    expect(appendMessageMock).not.toHaveBeenCalled();
-    expect(streamTextMock).not.toHaveBeenCalled();
+    it("calls the model again (not a replay) when the persisted assistant row for a DIFFERENT clientMessageId has content", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      // Same shape as the "already answered" case, but the persisted user
+      // row's clientMessageId does not match this turn's -- must not replay.
+      getLastMessagesMock.mockResolvedValue([
+        { role: "assistant", parts: [{ type: "text", text: "answer to a different turn" }], clientMessageId: null },
+        { role: "user", parts: userUiMessage.parts, clientMessageId: "some-other-send" },
+      ]);
 
-    // The "existing assistant response is what's effectively returned" --
-    // this uses the REAL createUIMessageStream/createUIMessageStreamResponse
-    // (only streamText is mocked in this file), so the response body is a
-    // genuine UI message stream replaying the persisted text and tool parts.
-    const text = await res.text();
-    expect(text).toContain("already answered this one");
-    expect(text).toContain('"toolCallId":"call-1"');
-    expect(text).toContain('"type":"tool-output-available"');
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "conv-1",
+      });
+
+      expect(streamTextMock).toHaveBeenCalledTimes(1);
+      expect(appendMessageMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        "conv-1",
+        { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+      );
+    });
   });
 
   it("persists the streamed assistant message (full text + tool parts) on stream completion", async () => {
@@ -352,5 +483,25 @@ describe("POST /api/chat", () => {
     await expect(
       capturedOnFinish!({ responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] } }),
     ).resolves.not.toThrow();
+  });
+
+  // #215
+  it("bounds the message array sent to the model to the trailing window on a long conversation", async () => {
+    createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    getLastMessagesMock.mockResolvedValue([]);
+
+    const longHistory = Array.from({ length: 60 }, (_, i) => ({
+      id: `hist-${i}`,
+      role: i % 2 === 0 ? "user" : "assistant",
+      parts: [{ type: "text", text: `turn ${i}` }],
+    }));
+    // The schema requires the LAST message to be a well-formed user turn --
+    // append the real inbound message on top of the long history.
+    await postChat(buildApp(fakeAuthContext()), { messages: [...longHistory, userUiMessage] });
+
+    expect(streamTextMock).toHaveBeenCalledTimes(1);
+    const callArgs = streamTextMock.mock.calls[0]![0] as { messages: unknown[] };
+    // 61 total messages in, bounded to MAX_HISTORY_MESSAGES (40).
+    expect(callArgs.messages.length).toBe(40);
   });
 });

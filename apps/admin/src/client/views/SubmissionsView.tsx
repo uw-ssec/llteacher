@@ -96,7 +96,9 @@ export function SubmissionsView({ data, onBack }: SubmissionsViewProps) {
       <PageHeader
         eyebrow="SUBMISSIONS"
         title={data.homeworkTitle}
-        subtitle={`${data.sectionHeaders.length} sections · due ${new Date(data.homeworkDueDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`}
+        // #228: undefined locale -- Intl resolves the viewer's own runtime
+        // default instead of always formatting as en-US.
+        subtitle={`${data.sectionHeaders.length} sections · due ${new Date(data.homeworkDueDate).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`}
       />
 
       {counts.no_interaction > 0 && (
@@ -197,7 +199,7 @@ export function SubmissionsView({ data, onBack }: SubmissionsViewProps) {
             </div>
             <div className="admin-submission-row__activity">
               {row.lastActivityAt
-                ? new Date(row.lastActivityAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+                ? new Date(row.lastActivityAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
                 : <span className="admin-muted">—</span>}
             </div>
           </article>

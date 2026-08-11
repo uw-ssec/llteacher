@@ -68,13 +68,20 @@ function fakeLanguageModel(chunks: LanguageModelV2StreamPart[]): LanguageModelV2
   };
 }
 
-/* In-memory stand-in for the two repository functions chatHandler's
+/* In-memory stand-in for the repository functions chatHandler's
    idempotency/persistence logic actually depends on -- faithful enough to
    exercise that REAL branching logic (routes/chat.ts is untouched by this
    mock) without a real Postgres. Rows carry an incrementing `createdAt` so
-   getLastMessages' desc(createdAt) ordering is deterministic. */
+   getLastMessages' desc(seq) ordering is deterministic. */
 interface FakeConversation { id: string; ownerUserId: string; courseId: string }
-interface FakeMessageRow { id: string; conversationId: string; role: string; parts: unknown; createdAt: number }
+interface FakeMessageRow {
+  id: string;
+  conversationId: string;
+  role: string;
+  parts: unknown;
+  clientMessageId: string | null;
+  createdAt: number;
+}
 
 let conversationsStore: Map<string, FakeConversation>;
 let messagesStore: FakeMessageRow[];
@@ -82,7 +89,10 @@ let nextMessageId: number;
 let nextCreatedAt: number;
 
 vi.mock("../repositories/conversations", () => ({
-  getConversationById: async (_db: unknown, id: string) => conversationsStore.get(id) ?? null,
+  getOwnedConversationOrNull: async (_db: unknown, id: string, userId: string) => {
+    const conv = conversationsStore.get(id);
+    return conv && conv.ownerUserId === userId ? conv : null;
+  },
   createConversation: async (
     _db: unknown,
     scope: string,
@@ -96,13 +106,14 @@ vi.mock("../repositories/conversations", () => ({
     _db: unknown,
     _scope: string,
     conversationId: string,
-    input: { role: "user" | "assistant" | "system"; parts: unknown },
+    input: { role: "user" | "assistant" | "system"; parts: unknown; clientMessageId?: string | null },
   ) => {
     const row: FakeMessageRow = {
       id: `m${nextMessageId++}`,
       conversationId,
       role: input.role,
       parts: input.parts,
+      clientMessageId: input.clientMessageId ?? null,
       createdAt: nextCreatedAt++,
     };
     messagesStore.push(row);
@@ -113,6 +124,9 @@ vi.mock("../repositories/conversations", () => ({
       .filter((m) => m.conversationId === conversationId)
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, limit),
+  // #219: unmetered in this integration test -- rate limiting itself is
+  // covered directly in chat.test.ts.
+  countRecentUserMessagesForUser: async () => 0,
 }));
 
 function fakeAuthContext(): AuthContext {

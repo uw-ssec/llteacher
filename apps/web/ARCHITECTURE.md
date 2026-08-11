@@ -112,3 +112,61 @@ convention for that call site (mapping both "doesn't exist" and "wrong
 owner" to a uniform 403, so a non-owner can't use a 404-vs-403 split to
 learn a conversation exists) -- a deliberate, documented exception to this
 convention, not an oversight to "fix."
+
+## Known Non-Atomic Sequences
+
+`appendMessage` (`repositories/conversations.ts`) checks the conversation is
+owned-and-not-deleted, then inserts the message and touches the parent
+conversation's `updatedAt` -- the insert and the touch are atomic with each
+other (`db.batch`, since `neon-http` has no `db.transaction` -- see that
+function's own doc comment), but the ownership check is a separate,
+earlier read. A conversation soft-deleted between the check and the insert
+is a narrow TOCTOU window ([#220](https://github.com/uw-ssec/llteacher/issues/220)):
+not closed here, left open deliberately rather than adding a second
+`db.batch` round or a `WHERE` clause on the insert itself, which would need
+its own design pass (an insert can't conditionally no-op the way an update
+can). Revisit if this ever becomes reachable at meaningful concurrency.
+
+## Message Ordering
+
+`messages.seq` (a global `bigserial`, [#221](https://github.com/uw-ssec/llteacher/issues/221))
+is the sort key for every "give me messages in order" query
+(`getLastMessages`, `getMessagesForConversation`) -- not `createdAt`.
+`createdAt` is `timestamptz` (microsecond resolution) and was safe as the
+sole ordering key only because each `appendMessage` call is its own
+separate transaction, so two rows could never share a timestamp; `seq`
+makes that guarantee independent of that fact, and survives a future change
+to batch multiple message writes into one transaction. Keep `createdAt` for
+display (it's the value `formatUpdatedAt`-style UI code wants); use `seq`
+for ordering only.
+
+## Pinned AI SDK Versions
+
+`apps/web/package.json` pins `ai`, `@ai-sdk/react`, and `@ai-sdk/openai` to
+exact versions ([#229](https://github.com/uw-ssec/llteacher/issues/229)),
+not a `^` range. `routes/chat.ts` depends on two undocumented internals of
+`ai@5.0.195`: the AI SDK's step machinery unconditionally pushing a
+`{ type: "step-start" }` marker part onto `responseMessage.parts` (see
+`hasRenderableContent`'s doc comment in that file), and the exact
+`UIMessageChunk` shapes `replayPersistedPart` hand-constructs to impersonate
+a `streamText` response on the idempotency-replay path. A `^5.0.0` range
+would let `npm install` float either out from under the code with no
+review. `chat.errorChunk.integration.test.ts` drives a real `streamText()`
+against an erroring model and would catch a `step-start` regression in CI;
+the replay-chunk shapes have thinner coverage, so treat any bump of these
+three packages as a deliberate, reviewed change, not a routine update.
+
+## Client Architecture Notes
+
+Two decisions live in code comments in `apps/web/src/client/` rather than
+here, because they're small enough to stay next to the code they explain --
+noted here only as a pointer so they're easy to find:
+
+- **Two independent `useChat` instances in `App.tsx`** (one for the
+  homework-section chat, one for the tutor rail's active conversation) --
+  see the doc comment above the tutor `useChat` call in `App.tsx` for why
+  they're deliberately not unified into one, including why one is keyed by
+  `id` and the other isn't.
+- **The tutor rail's IA** (a second collapsible sidebar zone, not a new
+  route or a merge into the homework `Sidebar`) -- see
+  `TutorConversationsList.tsx`'s file-level doc comment.

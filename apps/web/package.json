@@ -17,12 +17,12 @@
     "db:seed": "tsx scripts/seed.ts"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^2.0.106",
-    "@ai-sdk/react": "^2.0.197",
+    "@ai-sdk/openai": "2.0.106",
+    "@ai-sdk/react": "2.0.197",
     "@llteacher/ui": "*",
     "@neondatabase/serverless": "^0.10.0",
     "@workos-inc/node": "^7.0.0",
-    "ai": "^5.0.0",
+    "ai": "5.0.195",
     "drizzle-orm": "^0.36.0",
     "hono": "^4.6.0",
     "jose": "^5.9.0",

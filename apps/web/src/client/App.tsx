@@ -7,7 +7,8 @@ import type { SidebarSection, MessageData } from "@llteacher/ui";
 import { useAuth } from "./components/AuthProvider";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
 import { TutorConversationsList } from "./views/TutorConversationsList";
-import type { ConversationListItemResponse, StudentHomeworkListResponse } from "../shared/types";
+import { useTutorConversations } from "./hooks/useTutorConversations";
+import type { ConversationMessageResponse, StudentHomeworkListResponse } from "../shared/types";
 
 /* ==========================================================================
    LLTeacher v2 — Chat-with-syllabus shell
@@ -63,6 +64,16 @@ const SIDEBAR_COLLAPSED_KEY = "llteacher:sidebar-collapsed";
     than sharing (and fighting over) SIDEBAR_COLLAPSED_KEY. */
 const TUTOR_SIDEBAR_COLLAPSED_KEY = "llteacher:tutor-sidebar-collapsed";
 
+/** #214: a section's real database id + its pre-existing conversation id
+ *  (if the student has already started it) -- SidebarSection (below) drops
+ *  both, since @llteacher/ui's Sidebar only ever needed `number`/`title`/
+ *  `status`. Keyed by `order` (== SidebarSection.number), the same key the
+ *  Sidebar/handleSectionSelect already navigate by. */
+interface SectionMeta {
+  id: string;
+  conversationId: string | null;
+}
+
 /** Fetches the current student's homework list and adapts it into the
     Sidebar's section shape. SidebarSection's status union ("submitted" |
     "current" | "pending") has no direct equivalent for "not_started" /
@@ -71,6 +82,7 @@ const TUTOR_SIDEBAR_COLLAPSED_KEY = "llteacher:tutor-sidebar-collapsed";
     scope for this issue. */
 export function useStudentHomework() {
   const [sections, setSections] = useState<SidebarSection[]>([]);
+  const [sectionMetaByOrder, setSectionMetaByOrder] = useState<Map<number, SectionMeta>>(new Map());
   const [hwTitle, setHwTitle] = useState("");
   // #4: the tutor-conversations rail (TutorConversationsList) needs a
   // courseId to scope GET/POST /api/conversations -- this hook's homework
@@ -113,6 +125,9 @@ export function useStudentHomework() {
             conversationId: s.conversationId ?? undefined,
           })),
         );
+        setSectionMetaByOrder(
+          new Map(hw.sections.map((s) => [s.order, { id: s.id, conversationId: s.conversationId }])),
+        );
         setLoading(false);
       })
       .catch(() => {
@@ -121,7 +136,7 @@ export function useStudentHomework() {
       });
   }, []);
 
-  return { sections, setSections, hwTitle, courseId, loading, loadError };
+  return { sections, setSections, sectionMetaByOrder, hwTitle, courseId, loading, loadError };
 }
 
 /* Translates the AI SDK's UIMessage[] + status into the design system's
@@ -252,6 +267,7 @@ export default function App() {
      `id: conversationId` into useChat's options would cause. */
   const {
     messages: aiMessages,
+    setMessages: setSectionMessages,
     sendMessage,
     status: chatStatus,
     error: chatError,
@@ -263,7 +279,8 @@ export default function App() {
     }),
   });
 
-  const { sections, setSections, hwTitle, courseId, loadError } = useStudentHomework();
+  const { sections, setSections, sectionMetaByOrder, hwTitle, courseId, loading: homeworkLoading, loadError } =
+    useStudentHomework();
 
   /* #4: the tutor-conversations rail. Undefined = the homework section chat
      is showing (default); set = the selected/created tutor conversation is
@@ -325,37 +342,43 @@ export default function App() {
      async callback without waiting on a re-render. */
   const latestTutorSelectionRef = useRef<string | undefined>(undefined);
 
-  /* #6: the currently-selected tutor conversation's own title, shown as an
-     editable heading in the chat column via ConversationView's `title`
-     prop. Mirrored up from TutorConversationsList's onSelectedConversationChange
-     (see that prop's doc comment) rather than fetched separately here --
-     TutorConversationsList already owns the one `conversations` array this
-     comes from (via its own useTutorConversations instance), so this is
-     just a read of that same state, not a second source of truth that
-     could drift from what the list row shows. */
-  const [tutorConversationTitle, setTutorConversationTitle] = useState<string | undefined>(undefined);
+  /* #235: which tutor conversation (if any) was just created this session,
+     so the chat column can autofocus its composer once on mount -- a
+     keyboard user should land where the visual focus implicitly went
+     (the chat column switched to the new conversation) instead of needing
+     an extra Tab. Cleared on every OTHER way of changing the active tutor
+     conversation, so returning to a created conversation via the rail
+     later doesn't re-steal focus. */
+  const [justCreatedTutorConversationId, setJustCreatedTutorConversationId] = useState<string | undefined>(
+    undefined,
+  );
 
-  /* #6: TutorConversationsList hands this its own renameConversation
-     function (via onRenameHandlerReady) once mounted -- stored in a ref,
-     not state, purely because it's a function the header's onSave callback
-     below needs to call, not something that should itself trigger a
-     re-render when it's (re)assigned. See TutorConversationsListProps'
-     onRenameHandlerReady doc comment for why the rename call is routed
-     through TutorConversationsList's hook instance instead of a second,
-     independent PATCH call living here. */
-  const renameTutorConversationRef = useRef<
-    ((id: string, title: string) => Promise<ConversationListItemResponse>) | undefined
-  >(undefined);
+  /* #4/#6, lifted here per #223: one useTutorConversations instance shared
+     by the rail (TutorConversationsList, now presentational -- it takes
+     `conversations`/etc. as props) and this chat column's header, instead
+     of the rail owning it privately and handing the parent a rename
+     function + a "selected conversation changed" callback through two refs
+     and two effects. That ref-handoff was the actual root cause of #223's
+     finding: `onSelectedConversationChange`/`onRenameHandlerReady` were new
+     function identities every App render, so both of TutorConversationsList's
+     effects re-ran on every render, including every streamed token. Lifting
+     the hook removes both effects entirely -- the header title below is now
+     just a derived read of `tutorConversations`, the same array the rail
+     renders from, so it can never drift out of sync with the list row. */
+  const {
+    conversations: tutorConversations,
+    loading: tutorConversationsLoading,
+    loadError: tutorConversationsLoadError,
+    createConversation: createTutorConversationRow,
+    renameConversation: renameTutorConversationRow,
+    bumpConversation: bumpTutorConversation,
+  } = useTutorConversations(courseId);
 
-  /* #6: the conversation header's EditableTitle onSave -- routes through
-     whatever renameConversation TutorConversationsList last handed up.
-     Guarded (not trusted) even though the header is only rendered once
-     tutorConversationId is set and TutorConversationsList mounts on every
-     render of this component: cheap insurance against an ordering change
-     that would otherwise throw on a null ref call. */
+  const tutorConversationTitle = tutorConversations.find((c) => c.id === tutorConversationId)?.title;
+
   const handleRenameTutorConversation = async (newTitle: string) => {
-    if (!tutorConversationId || !renameTutorConversationRef.current) return;
-    await renameTutorConversationRef.current(tutorConversationId, newTitle);
+    if (!tutorConversationId) return;
+    await renameTutorConversationRow(tutorConversationId, newTitle);
   };
 
   /* #4 fix-round: the single place that switches the tutor surface to a
@@ -405,10 +428,22 @@ export default function App() {
   const handleSelectExistingTutorConversation = async (id: string) => {
     if (id === tutorConversationId) return;
     latestTutorSelectionRef.current = id;
+    setJustCreatedTutorConversationId(undefined);
     try {
       const res = await fetch(`/api/conversations/${id}/messages`);
       if (!res.ok) throw new Error(`failed to load conversation history: ${res.status}`);
-      const history = (await res.json()) as UIMessage[];
+      // #226: parsed against the actual wire contract (ConversationMessageResponse),
+      // not asserted straight to UIMessage[] -- the server's `parts` column is
+      // jsonb (genuinely `unknown` at this boundary, same as chat.ts's own
+      // replayPersistedPart treats it), so that one field still needs an
+      // inner cast; every other field is now the checked DTO shape rather
+      // than a blind assertion across the whole array.
+      const rows = (await res.json()) as ConversationMessageResponse[];
+      const history: UIMessage[] = rows.map((r) => ({
+        id: r.id,
+        role: r.role,
+        parts: r.parts as UIMessage["parts"],
+      }));
       if (latestTutorSelectionRef.current !== id) return; // superseded while in flight -- discard
       selectTutorConversation(id, history);
     } catch (err) {
@@ -417,6 +452,18 @@ export default function App() {
       if (latestTutorSelectionRef.current !== id) return; // superseded while in flight -- discard
       selectTutorConversation(id, []);
     }
+  };
+
+  /* #4: TutorConversationsList's "New conversation" button -- lifted here
+     (#223) alongside the useTutorConversations instance it used to own
+     privately. Returns whether it succeeded so the rail can surface a
+     failure itself (#235) instead of the button silently doing nothing. */
+  const handleCreateTutorConversation = async (): Promise<boolean> => {
+    const created = await createTutorConversationRow();
+    if (!created) return false;
+    selectTutorConversation(created.id);
+    setJustCreatedTutorConversationId(created.id);
+    return true;
   };
   // #160: was hardcoded to 3 regardless of what actually loaded -- a
   // homework with fewer than 3 sections left this pointing at a section
@@ -428,10 +475,17 @@ export default function App() {
   const hasAutoSelectedSection = useRef(false);
   useEffect(() => {
     if (!hasAutoSelectedSection.current && sections.length > 0) {
-      setCurrentSection(sections[0]!.number);
+      const first = sections[0]!.number;
+      setCurrentSection(first);
+      // #214: resume the section's own conversation if it already has one
+      // (a returning student), rather than always starting `conversationId`
+      // at undefined regardless of prior progress -- sectionMetaByOrder
+      // carries the same conversationId StudentSectionProgress already
+      // returns, just not dropped the way SidebarSection's mapping drops it.
+      setConversationId(sectionMetaByOrder.get(first)?.conversationId ?? undefined);
       hasAutoSelectedSection.current = true;
     }
-  }, [sections]);
+  }, [sections, sectionMetaByOrder]);
   const [hintCount, setHintCount] = useState(3);
   const [justSubmittedSection, setJustSubmittedSection] = useState<number | null>(null);
   /* Sidebar collapse persists across reloads via localStorage. Lazy initializer
@@ -495,7 +549,12 @@ export default function App() {
     chatStatus === "error"
       ? {
           message: chatError?.message || "Something went wrong. Please try again.",
-          onRetry: () => regenerateChat({ body: conversationId ? { conversationId } : {} }),
+          onRetry: () =>
+            regenerateChat({
+              body: conversationId
+                ? { conversationId }
+                : { courseId, kind: "section" as const, sectionId: sectionMetaByOrder.get(currentSection)?.id },
+            }),
         }
       : null;
   const tutorChatErrorRow =
@@ -507,6 +566,25 @@ export default function App() {
         }
       : null;
 
+  /* #216: bumps the rail row's messageCount/updatedAt (and re-sorts it to
+     the top) the moment a tutor turn finishes -- /api/chat writes bypass
+     useTutorConversations entirely, so without this the rail kept showing
+     a conversation's original creation timestamp and a stuck messageCount
+     of 0 for the entire session. Fires on the submitted/streaming -> ready
+     transition specifically (not on every render where status happens to
+     be "ready"), via a ref tracking the previous status -- an "error"
+     transition deliberately does not bump (no new message was actually
+     persisted, see chat.ts's hasRenderableContent-gated onFinish). */
+  const prevTutorChatStatusRef = useRef(tutorChatStatus);
+  useEffect(() => {
+    const previousStatus = prevTutorChatStatusRef.current;
+    prevTutorChatStatusRef.current = tutorChatStatus;
+    const wasInFlight = previousStatus === "submitted" || previousStatus === "streaming";
+    if (tutorConversationId && wasInFlight && tutorChatStatus === "ready") {
+      bumpTutorConversation(tutorConversationId);
+    }
+  }, [tutorChatStatus, tutorConversationId, bumpTutorConversation]);
+
   const handleSendMessage = (text: string) => {
     /* #144: AI SDK v5's Chat#sendMessage has no internal guard against
        being called while a previous turn is still in flight -- it just
@@ -517,7 +595,7 @@ export default function App() {
        (future keyboard shortcut, programmatic resend, etc.) that doesn't
        go through the composer.
 
-       PR-1 whole-branch review (Important): "error" is deliberately NOT
+       #144: "error" is deliberately NOT
        blocked here (unlike "submitted"/"streaming") -- useChat's own
        makeRequest() unconditionally resets status to "submitted" and
        clears `error` the moment a new message is sent (verified in
@@ -532,8 +610,23 @@ export default function App() {
        see the useChat comment above) so each turn after the first actually
        carries whatever the previous turn's x-conversation-id response
        header set -- letting the server continue the same conversation
-       instead of minting a new one on every message. */
-    sendMessage({ text }, { body: conversationId ? { conversationId } : {} });
+       instead of minting a new one on every message.
+
+       #214: when there's no conversationId yet (this section's first
+       turn), kind: "section" + the section's real id tell chatHandler to
+       create a kind:"section" conversation instead of defaulting to
+       kind:"tutor" -- previously omitted entirely, so every section's
+       first-ever turn minted a tutor-rail row indistinguishable from an
+       actual tutor conversation. */
+    const currentSectionMeta = sectionMetaByOrder.get(currentSection);
+    sendMessage(
+      { text },
+      {
+        body: conversationId
+          ? { conversationId }
+          : { courseId, kind: "section" as const, sectionId: currentSectionMeta?.id },
+      },
+    );
     /* Each AI response counts as a hint — increments trigger the gold flash
        on the sidebar's hint-history-row count numeral. */
     setHintCount((n) => n + 1);
@@ -543,9 +636,9 @@ export default function App() {
      Guarded (rather than trusted) even though the composer that calls this
      is only reachable once tutorConversationId is set -- cheap insurance
      against a future caller wiring the tutor composer up before selection.
-     #144 / PR-1 whole-branch review: guarded on tutorChatStatus for the
-     same reason, and with the same "error" is not "in flight" carve-out,
-     as handleSendMessage above. */
+     #144: guarded on tutorChatStatus for the same reason, and with the
+     same "error" is not "in flight" carve-out, as handleSendMessage
+     above. */
   const handleSendTutorMessage = (text: string) => {
     if (!tutorConversationId) return;
     if (tutorChatStatus === "submitted" || tutorChatStatus === "streaming") return;
@@ -564,9 +657,24 @@ export default function App() {
      tutor conversation the student explicitly navigated away from. */
   const handleSectionSelect = (sectionNumber: number) => {
     setCurrentSection(sectionNumber);
+    // #214: switch to (or clear, if this section has none yet) that
+    // section's own conversationId -- see the auto-select effect above for
+    // why this must come from sectionMetaByOrder rather than staying
+    // whatever the previously-viewed section's conversationId was. Also
+    // clears the visible section-chat messages: without this, switching to
+    // a section with a *different* (or no) conversationId would keep
+    // showing the just-left section's history attached to the new
+    // conversationId. Doesn't re-hydrate the target section's own prior
+    // history from the server the way the tutor rail does (#4) -- this
+    // demo homework has exactly one section today, so that gap has no
+    // reachable user-facing effect yet; full section history hydration on
+    // switch is conversation-lifecycle scope (#27), not this fix.
+    setConversationId(sectionMetaByOrder.get(sectionNumber)?.conversationId ?? undefined);
+    setSectionMessages([]);
     latestTutorSelectionRef.current = undefined;
     setTutorConversationId(undefined);
     setTutorInitialMessages([]);
+    setJustCreatedTutorConversationId(undefined);
   };
 
   /* Submits the section's active conversation via the real API. No existing
@@ -665,18 +773,22 @@ export default function App() {
 
         {/* #4: second rail — course-scoped tutor conversations. A distinct
             surface from the homework Sidebar above (see
-            TutorConversationsList's doc comment for the IA decision). */}
+            TutorConversationsList's doc comment for the IA decision).
+            Presentational as of #223 -- conversations/loading/etc. all come
+            from the useTutorConversations instance this component shares
+            with the chat column's header, above. */}
         <TutorConversationsList
           courseId={courseId}
+          courseContextLoading={homeworkLoading}
+          conversations={tutorConversations}
+          loading={tutorConversationsLoading}
+          loadError={tutorConversationsLoadError}
           selectedConversationId={tutorConversationId}
           onSelectConversation={handleSelectExistingTutorConversation}
-          onConversationCreated={(id) => selectTutorConversation(id)}
+          onCreateConversation={handleCreateTutorConversation}
+          onRenameConversation={renameTutorConversationRow}
           isCollapsed={isTutorSidebarCollapsed}
           onToggleCollapse={() => setIsTutorSidebarCollapsed((c) => !c)}
-          onSelectedConversationChange={(conv) => setTutorConversationTitle(conv?.title)}
-          onRenameHandlerReady={(fn) => {
-            renameTutorConversationRef.current = fn;
-          }}
         />
 
         {/* Main conversation column — warm paper surface. Shows the
@@ -696,12 +808,11 @@ export default function App() {
               onRenameTitle={handleRenameTutorConversation}
               messages={tutorMessages}
               onSendMessage={handleSendTutorMessage}
-              /* PR-1 whole-branch review: "error" no longer disables the
-                 composer (only genuinely "in flight" does) -- see
-                 handleSendTutorMessage's doc comment above for why sending
-                 a fresh message is the intended way out of an error. */
+              /* #144: "error" deliberately excluded -- see isSending's own
+                 doc comment (ConversationView.tsx) for why. */
               isSending={tutorChatStatus === "submitted" || tutorChatStatus === "streaming"}
               error={tutorChatErrorRow}
+              autoFocusComposer={tutorConversationId === justCreatedTutorConversationId}
             />
           </ErrorBoundary>
         ) : (
@@ -710,14 +821,10 @@ export default function App() {
               breadcrumb="STATS 311 · HW 3 · Section 3 P-VALUES"
               messages={messages}
               onSendMessage={handleSendMessage}
-              /* PR-1 whole-branch review: "error" no longer disables the
-                 composer -- see handleSendMessage's doc comment above.
-                 This matters most for the section chat specifically: its
-                 useChat instance has no `id` (unlike the tutor chat), so
-                 nothing else ever resets it out of an error state -- if
-                 the composer stayed disabled here too, Retry (which
-                 replays the exact request that just failed) would be the
-                 *only* way out. */
+              /* #144: "error" excluded here matters most for the section
+                 chat specifically -- its useChat instance has no `id`
+                 (unlike the tutor chat), so nothing else ever resets it
+                 out of an error state; see isSending's own doc comment. */
               isSending={chatStatus === "submitted" || chatStatus === "streaming"}
               error={sectionChatErrorRow}
             />

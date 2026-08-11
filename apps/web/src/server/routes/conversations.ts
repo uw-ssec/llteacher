@@ -4,42 +4,43 @@
    List/create/rename/delete for the free-standing, course-scoped "tutor"
    conversations #3's /api/chat auto-creates (kind: "tutor", sectionId:
    null) -- distinct from the section-scoped conversations a student works
-   a specific homework Section through, which a later task in this epic
-   (#27) will add a `type` column to further distinguish on the wire. This
-   route set doesn't anticipate that; `kind` here is the real
-   conversations.kind enum column ("section" | "tutor") that already exists.
+   a specific homework Section through (kind: "section", #214), which a
+   later task in this epic (#27) will add a `type` column to further
+   distinguish on the wire. This route set doesn't anticipate that; `kind`
+   here is the real conversations.kind enum column ("section" | "tutor")
+   that already exists.
 
-   Ownership pattern follows chat.ts (#3), not the CourseScope-only
-   repository functions directly: GET/POST verify course membership via
-   courseScopeFromAuthContext (the only sanctioned way to mint a CourseScope
-   from request input); PATCH/DELETE take just a conversation id with no
-   courseId in the URL, so they share getOwnedConversationOrNull below,
-   which fetches the row via the unscoped getConversationById and manually
-   compares ownerUserId against the caller, exactly like chatHandler's
-   existing conversationId-ownership check. Every "not found or not owned"
-   case returns 404 (never 403) so a guessed/leaked conversation id can't be
-   used to confirm one exists that isn't the caller's -- centralized in that
-   one helper rather than duplicated per handler. A separate 404 path:
-   createConversation (repositories/conversations.ts) throws a typed
-   TenancyMismatchError on its own tenancy check (owner/section not in
-   scope), mapped to 404 by app.onError (server/index.ts, #141) -- a single
-   app-layer mapping point, not a per-route catch here.
+   Ownership pattern follows chat.ts (#3): GET/POST verify course membership
+   via courseScopeFromAuthContext (the only sanctioned way to mint a
+   CourseScope from request input); PATCH/DELETE take just a conversation id
+   with no courseId in the URL, so they share getOwnedConversationOrNull
+   (repositories/conversations.ts, moved there so chat.ts can reuse the
+   identical rule -- #217), which fetches the row via the unscoped
+   getConversationById and manually compares ownerUserId against the caller.
+   Every "not found or not owned" case returns 404 (never 401/403) so a
+   guessed/leaked conversation id can't be used to confirm one exists that
+   isn't the caller's. A separate 404 path: createConversation
+   (repositories/conversations.ts) throws a typed TenancyMismatchError on
+   its own tenancy check (owner/section not in scope), mapped to 404 by
+   app.onError (server/index.ts, #141) -- a single app-layer mapping point,
+   not a per-route catch here.
    -------------------------------------------------------------------------- */
 
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { makeDb, type Db } from "../../db/client";
+import { makeDb } from "../../db/client";
 import {
   listConversationsForOwner,
   createConversation,
   updateConversationTitle,
   softDeleteConversation,
-  getConversationById,
+  getOwnedConversationOrNull,
   getMessagesForConversation,
 } from "../repositories/conversations";
 import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
+import type { ConversationSummary, ConversationListItemResponse, ConversationMessageResponse } from "../../shared/types";
 
 const createConversationSchema = z.object({
   courseId: z.string().uuid(),
@@ -50,37 +51,23 @@ const updateConversationSchema = z.object({
   title: z.string().trim().min(1).max(100),
 });
 
-// Shared "not found or not owned" check for PATCH/DELETE/GET-messages below:
-// fetches via the unscoped getConversationById and compares ownerUserId
-// against the caller, same pattern chatHandler (#3) established for
-// conversationId ownership. Returns null for "doesn't exist", "exists but
-// isn't yours", AND "exists, is yours, but is soft-deleted" -- callers must
-// turn a null into a 404 (never 403), so a guessed/leaked conversation id
-// can't be used to confirm one exists that isn't the caller's. Factored out
-// (rather than duplicated in each handler, as it was until this was flagged
-// in review). This is the route-level ownership check, not the
-// repository-level tenancy check #141's TenancyMismatchError covers (see
-// the file-level comment above) -- both converge on the same "404, never
-// 403" rule, but through two different mechanisms.
-//
-// PR-1 whole-branch review (Important): the isDeleted check was missing
-// here until this fix -- updateConversationTitle/softDeleteConversation's
-// own queries independently filter isDeleted, so PATCH and DELETE already
-// 404'd correctly on a soft-deleted conversation, but GET
-// /:id/messages (listConversationMessagesHandler) only ever called this
-// helper and getMessagesForConversation (which also filters isDeleted, but
-// only affects which MESSAGES come back, not the existence check itself) --
-// so a soft-deleted conversation's id returned 200 [] instead of 404,
-// inconsistent with PATCH/DELETE on the identical row. Adding the check
-// here (once, for every caller of this helper) also makes DELETE correctly
-// idempotent-404 on an already-deleted conversation instead of silently
-// returning 204 again.
-async function getOwnedConversationOrNull(db: Db, conversationId: string, userId: string) {
-  const existing = await getConversationById(db, conversationId);
-  if (!existing || existing.ownerUserId !== userId || existing.isDeleted) {
-    return null;
-  }
-  return existing;
+// #218: projects a raw `conversations` row to the wire contract -- drops
+// ownerUserId/courseId/sectionId/isDeleted/deletedAt, none of which any
+// client reads (see ConversationSummary's doc comment, shared/types.ts).
+function toConversationSummary(row: {
+  id: string;
+  kind: "section" | "tutor";
+  title: string;
+  createdAt: Date;
+  updatedAt: Date;
+}): ConversationSummary {
+  return {
+    id: row.id,
+    kind: row.kind,
+    title: row.title,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
 }
 
 export async function listConversationsHandler(c: Context<AppEnv>) {
@@ -109,6 +96,29 @@ export async function listConversationsHandler(c: Context<AppEnv>) {
     return c.json({ error: "kind must be 'tutor' or 'section'" }, 400);
   }
 
+  // #224: optional pagination. `limit` clamped to a sane range rather than
+  // trusted verbatim -- a client-supplied 1000000 would defeat the point of
+  // bounding the page. `before` is an updatedAt cursor (ISO timestamp): the
+  // caller passes back the last row's updatedAt to fetch the next page.
+  const limitParam = c.req.query("limit");
+  let limit: number | undefined;
+  if (limitParam !== undefined) {
+    const parsed = Number(limitParam);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 200) {
+      return c.json({ error: "limit must be an integer between 1 and 200" }, 400);
+    }
+    limit = parsed;
+  }
+  const beforeParam = c.req.query("before");
+  let before: Date | undefined;
+  if (beforeParam !== undefined) {
+    const parsed = new Date(beforeParam);
+    if (Number.isNaN(parsed.getTime())) {
+      return c.json({ error: "before must be a valid ISO timestamp" }, 400);
+    }
+    before = parsed;
+  }
+
   // The only sanctioned way to mint a CourseScope from request input (see
   // scope.ts's courseScopeFromAuthContext docstring) -- verifies the caller
   // is actually a member of courseId before this can proceed.
@@ -118,8 +128,12 @@ export async function listConversationsHandler(c: Context<AppEnv>) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
-  const rows = await listConversationsForOwner(db, scope, authContext.session.userId, { kind });
-  return c.json(rows);
+  const rows = await listConversationsForOwner(db, scope, authContext.session.userId, { kind, limit, before });
+  const body: ConversationListItemResponse[] = rows.map((r) => ({
+    ...toConversationSummary(r),
+    messageCount: r.messageCount,
+  }));
+  return c.json(body);
 }
 
 export async function createConversationHandler(c: Context<AppEnv>) {
@@ -162,7 +176,7 @@ export async function createConversationHandler(c: Context<AppEnv>) {
     title: parsed.data.title || "New Conversation",
   });
 
-  return c.json(created, 201);
+  return c.json(toConversationSummary(created), 201);
 }
 
 export async function updateConversationHandler(c: Context<AppEnv>) {
@@ -202,7 +216,7 @@ export async function updateConversationHandler(c: Context<AppEnv>) {
     return c.json({ error: "Conversation not found" }, 404);
   }
 
-  return c.json(updated);
+  return c.json(toConversationSummary(updated));
 }
 
 export async function deleteConversationHandler(c: Context<AppEnv>) {
@@ -261,18 +275,37 @@ export async function listConversationMessagesHandler(c: Context<AppEnv>) {
     return c.json({ error: "Conversation not found" }, 404);
   }
 
+  // #215: bounded page (limit/before -- a seq cursor), not the entire
+  // conversation. Same clamp shape as the list route's `limit` above.
+  const limitParam = c.req.query("limit");
+  let limit: number | undefined;
+  if (limitParam !== undefined) {
+    const parsed = Number(limitParam);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 500) {
+      return c.json({ error: "limit must be an integer between 1 and 500" }, 400);
+    }
+    limit = parsed;
+  }
+  const beforeParam = c.req.query("before");
+  let before: number | undefined;
+  if (beforeParam !== undefined) {
+    const parsed = Number(beforeParam);
+    if (!Number.isInteger(parsed)) {
+      return c.json({ error: "before must be an integer seq value" }, 400);
+    }
+    before = parsed;
+  }
+
   const scope = unsafeCourseScope(existing.courseId);
-  const rows = await getMessagesForConversation(db, scope, id!);
-  // Only the three fields useChat's `messages` seed needs (id/role/parts) --
-  // `parts` is returned exactly as stored, which is exactly as the AI SDK
-  // produced it: chatHandler persists inboundMessage.parts (the client's
-  // own UIMessage part) for user turns and responseMessage.parts (the AI
-  // SDK's final UIMessage) for assistant turns, so a stored row's `parts`
-  // is already a valid UIMessage `parts` array -- no replay/reconstruction
-  // needed here the way chat.ts's SSE-retry path (replayPersistedPart)
-  // needs, since that path is rebuilding a *stream*, not seeding a
-  // pre-stream initial array.
-  return c.json(rows.map((r) => ({ id: r.id, role: r.role, parts: r.parts })));
+  const rows = await getMessagesForConversation(db, scope, id!, { limit, before });
+  // #226: the shape is checked against ConversationMessageResponse now
+  // (previously an untyped literal the client asserted a different type
+  // over -- neither side of the wire boundary actually enforced it). `parts`
+  // stays `unknown`, matching how it's stored (jsonb) and how chat.ts's own
+  // replayPersistedPart already treats a persisted row's parts at this same
+  // boundary.
+  const body: ConversationMessageResponse[] = rows.map((r) => ({ id: r.id, role: r.role, parts: r.parts }));
+  return c.json(body);
 }
 
 // Sub-app preserved for direct unit testing; production routing happens via

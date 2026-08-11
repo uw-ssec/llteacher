@@ -81,22 +81,20 @@ export interface StudentHomeworkListResponse {
 }
 
 /* -- Conversations (#4/#5) --------------------------------------------------
-   Wire shape of a row from GET /api/conversations -- listConversationsForOwner
-   (repositories/conversations.ts) returns the raw conversations columns plus
-   a computed messageCount (#4). POST /api/conversations returns the same
-   columns via createConversation's plain `.returning()` insert, but a
-   brand-new conversation never has messages yet, so that response has no
-   messageCount key at all -- callers (useTutorConversations) default it to
-   0 rather than treating its absence as a fetch bug. */
+   Wire shape of a row from GET /api/conversations -- a projection of the
+   `conversations` table, not the raw Drizzle row (#218: the raw row also
+   carries ownerUserId/courseId/sectionId/isDeleted/deletedAt, none of which
+   any client reads -- every row returned is already scoped to the caller's
+   own, so this was never a cross-tenant leak, but it needlessly widened the
+   public wire contract). GET/POST/PATCH /api/conversations all project to
+   this shape server-side (routes/conversations.ts's toConversationSummary).
+   POST's response has no messageCount key at all -- a brand-new conversation
+   never has messages yet -- callers (useTutorConversations) default it to 0
+   rather than treating its absence as a fetch bug. */
 export interface ConversationSummary {
   id: string;
-  ownerUserId: string;
-  courseId: string;
-  sectionId: string | null;
   kind: "section" | "tutor";
   title: string;
-  isDeleted: boolean;
-  deletedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

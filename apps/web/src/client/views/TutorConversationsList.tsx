@@ -1,94 +1,100 @@
-import { useEffect } from "react";
+import { useState } from "react";
 import { CaretDoubleLeft, CaretDoubleRight, ChatCircleDots, Plus } from "@phosphor-icons/react";
-import { useTutorConversations } from "../hooks/useTutorConversations";
 import { ConversationListItem } from "../components/ConversationListItem";
 import type { ConversationListItemResponse } from "../../shared/types";
 
 /* --------------------------------------------------------------------------
    TutorConversationsList — the tutor-conversations rail (#4).
 
-   IA decision (see task-4-report.md for the full writeup): a second,
-   visually distinct collapsible sidebar zone sitting between the homework
-   Sidebar and the chat column -- not a new top-level route. The homework
-   Sidebar is course+homework-scoped (a syllabus); this rail is course-scoped
-   only (a thread list) and deliberately does NOT reuse the Husky-Purple
-   Sidebar surface, matching the issue's own note that the two "may warrant
-   a different surface." It DOES reuse the exact same collapse mechanic --
-   a chevron toggle + a `sidebar--collapsed`-equivalent width transition,
-   persisted to localStorage by the caller (App.tsx) under its own key --
-   because the issue's "Responsive behavior" requirement asks to match that
-   pattern, not invent a new one. This app has no viewport-width media
-   queries at all yet -- the only @media rules anywhere in
-   packages/ui/styles.css are `prefers-reduced-motion`, not layout
-   breakpoints (corrected during code review: an earlier version of this
-   comment claimed zero @media rules of any kind, which was wrong) -- so
-   "responsive" here means this same collapse-by-choice mechanic, not a
-   viewport breakpoint that doesn't exist yet.
+   A second, visually distinct collapsible sidebar zone sitting between the
+   homework Sidebar and the chat column -- not a new top-level route (see
+   task-4-report.md for the full IA writeup). It reuses the homework
+   Sidebar's collapse mechanic (chevron toggle, width transition, state
+   persisted by the caller under its own localStorage key) but is otherwise
+   a distinct surface.
+
+   Presentational (#223): owns no data-fetching of its own. `conversations`/
+   `loading`/`loadError` and the create/rename actions all come from a
+   single `useTutorConversations` instance App.tsx owns and shares with the
+   chat column's header -- moved there specifically so this component and
+   the chat column read/write the exact same state rather than syncing two
+   copies through a ref-handoff.
    -------------------------------------------------------------------------- */
 
 export interface TutorConversationsListProps {
   /** Undefined while the homework list (the client's only source of course
-   *  context, see StudentHomeworkSummary.courseId) hasn't loaded yet. */
+   *  context) hasn't loaded yet. */
   courseId: string | undefined;
+  /** #232: true while that homework fetch is still in flight -- lets the
+   *  disabled "New conversation" button distinguish "give it a moment"
+   *  from "there's genuinely no course to scope this to." */
+  courseContextLoading: boolean;
+  conversations: ConversationListItemResponse[];
+  loading: boolean;
+  loadError: boolean;
   selectedConversationId: string | undefined;
   /** Fired when an existing row is clicked. */
   onSelectConversation: (conversationId: string) => void;
-  /** Fired after a new conversation is successfully created and selected
-   *  locally -- lets the parent switch the chat column to the tutor
-   *  surface without this component knowing about that concept. */
-  onConversationCreated: (conversationId: string) => void;
+  /** Creates a new conversation (and, on success, selects/switches to it --
+   *  owned by the caller). Returns whether it succeeded; this component
+   *  surfaces a visible failure itself (#235) rather than failing silently. */
+  onCreateConversation: () => Promise<boolean>;
+  /** Return value ignored -- callers may resolve it to the updated
+   *  conversation (useTutorConversations' own renameConversation does) or
+   *  to nothing; this component only awaits it. */
+  onRenameConversation: (id: string, title: string) => Promise<unknown>;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
-  /** #6: fires whenever the selected conversation's data changes (initial
-   *  load, a different row selected, or a rename resolving) -- lets the
-   *  parent (App.tsx) mirror the currently-active tutor conversation's
-   *  title into the chat column's header without this component needing
-   *  to know that header exists. Undefined when nothing is selected, or
-   *  selectedConversationId doesn't (yet) match any loaded row. */
-  onSelectedConversationChange?: (conversation: ConversationListItemResponse | undefined) => void;
-  /** #6: hands the parent this hook instance's renameConversation function
-   *  once it's available (and again whenever it's recreated) -- so the
-   *  chat column's header (rendered by App.tsx, not this component) can
-   *  rename the SAME conversation this list displays through the SAME
-   *  hook instance/state, rather than duplicating fetch+optimistic-update
-   *  logic in a second place that could drift out of sync with this row's
-   *  own display. */
-  onRenameHandlerReady?: (
-    renameConversation: (id: string, title: string) => Promise<ConversationListItemResponse>,
-  ) => void;
 }
 
 export function TutorConversationsList({
   courseId,
+  courseContextLoading,
+  conversations,
+  loading,
+  loadError,
   selectedConversationId,
   onSelectConversation,
-  onConversationCreated,
+  onCreateConversation,
+  onRenameConversation,
   isCollapsed,
   onToggleCollapse,
-  onSelectedConversationChange,
-  onRenameHandlerReady,
 }: TutorConversationsListProps) {
-  const { conversations, loading, loadError, createConversation, renameConversation } =
-    useTutorConversations(courseId);
+  // #235: visible + announced create-failure message (reuses the same
+  // .tutor-sidebar__error role="alert" element the list-load failure uses,
+  // rather than a second, differently-styled error surface) and a polite
+  // live region for non-error status changes (create success, rename
+  // success, loading) that don't otherwise interrupt anything.
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [liveMessage, setLiveMessage] = useState("");
 
   const handleCreate = async () => {
-    const created = await createConversation();
-    if (created) onConversationCreated(created.id);
+    setCreateError(null);
+    const ok = await onCreateConversation();
+    if (ok) {
+      setLiveMessage("Conversation created");
+    } else {
+      setCreateError("Couldn't create a new conversation. Please try again.");
+    }
   };
 
-  useEffect(() => {
-    onRenameHandlerReady?.(renameConversation);
-  }, [renameConversation, onRenameHandlerReady]);
-
-  useEffect(() => {
-    onSelectedConversationChange?.(conversations.find((c) => c.id === selectedConversationId));
-  }, [conversations, selectedConversationId, onSelectedConversationChange]);
+  const disabledReasonId = "tutor-sidebar-new-btn-reason";
+  const disabledReason = courseContextLoading
+    ? "Loading course information…"
+    : "No course selected yet — new conversations aren't available.";
 
   return (
     <nav
       className={isCollapsed ? "tutor-sidebar sidebar--collapsed" : "tutor-sidebar"}
       aria-label="Tutor conversations"
     >
+      {/* #235: announces create/rename outcomes and loading transitions --
+          visually hidden, doesn't duplicate what role="alert" already
+          announces for the two error states below. */}
+      <div aria-live="polite" className="sr-only">
+        {loading ? "Loading conversations…" : liveMessage}
+      </div>
+
       <div className="tutor-sidebar__top">
         <button
           className="tutor-sidebar__collapse-toggle"
@@ -109,16 +115,32 @@ export function TutorConversationsList({
         onClick={handleCreate}
         disabled={!courseId}
         aria-label="New conversation"
+        aria-describedby={!courseId ? disabledReasonId : undefined}
+        title={!courseId ? disabledReason : undefined}
       >
         <Plus size={14} weight="regular" aria-hidden="true" />
         <span className="tutor-sidebar__new-btn-label">New conversation</span>
       </button>
+      {/* #232: explains WHY the button is disabled instead of leaving it a
+          silent dead end -- distinct message for "still loading" vs
+          "nothing to scope to," visually hidden (the title attribute above
+          is the sighted-mouse-user affordance) but reachable via
+          aria-describedby either way. */}
+      {!courseId && (
+        <p id={disabledReasonId} className="sr-only">
+          {disabledReason}
+        </p>
+      )}
+
+      {createError && (
+        <p className="tutor-sidebar__error" role="alert">
+          {createError}
+        </p>
+      )}
 
       {/* Only a genuinely-empty API response ([]) gets the empty state --
           while a fetch is in flight (loading, and nothing loaded yet), show
-          nothing rather than an empty state that would flash then vanish,
-          matching pitfall #3's "do not show a loading spinner if the list
-          is truly empty" by not showing either state prematurely. */}
+          nothing rather than an empty state that would flash then vanish. */}
       {loadError && (
         <p className="tutor-sidebar__error" role="alert">
           Couldn't load conversations.
@@ -141,7 +163,8 @@ export function TutorConversationsList({
               isSelected={conv.id === selectedConversationId}
               onSelect={() => onSelectConversation(conv.id)}
               onRename={async (title) => {
-                await renameConversation(conv.id, title);
+                await onRenameConversation(conv.id, title);
+                setLiveMessage(`Renamed to ${title}`);
               }}
             />
           ))}

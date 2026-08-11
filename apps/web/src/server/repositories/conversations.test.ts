@@ -11,9 +11,11 @@ import {
   softDeleteConversation,
   appendMessage,
   getConversationById,
+  getOwnedConversationOrNull,
   getLastMessages,
   getMessagesForConversation,
   updateConversationTitle,
+  countRecentUserMessagesForUser,
 } from "./conversations";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -473,6 +475,238 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
         title: "Should not be created",
       }),
     ).rejects.toThrow(TenancyMismatchError);
+  });
+
+  // #213: clientMessageId round-trips through appendMessage/getLastMessages,
+  // and Postgres's unique index tolerates multiple NULLs (assistant rows)
+  // without colliding against each other.
+  describe("#213 clientMessageId", () => {
+    it("persists and round-trips a user row's clientMessageId", async () => {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "clientMessageId round-trip",
+      });
+      await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+        role: "user",
+        parts: [{ type: "text", text: "hi" }],
+        clientMessageId: "client-abc",
+      });
+      const [last] = await getLastMessages(db, unsafeCourseScope(courseAId), created.id, 1);
+      expect(last?.clientMessageId).toBe("client-abc");
+    });
+
+    it("allows multiple assistant rows with a null clientMessageId in the same conversation (unique index tolerates NULLs)", async () => {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Multiple null clientMessageId rows",
+      });
+      await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+        role: "assistant",
+        parts: [{ type: "text", text: "one" }],
+      });
+      await expect(
+        appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+          role: "assistant",
+          parts: [{ type: "text", text: "two" }],
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it("rejects a second row with the same clientMessageId in the same conversation (unique index)", async () => {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Duplicate clientMessageId",
+      });
+      await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+        role: "user",
+        parts: [{ type: "text", text: "first" }],
+        clientMessageId: "dupe-id",
+      });
+      await expect(
+        appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+          role: "user",
+          parts: [{ type: "text", text: "second" }],
+          clientMessageId: "dupe-id",
+        }),
+      ).rejects.toThrow();
+    });
+  });
+
+  // #221: seq is the real ordering key -- this proves it tracks insertion
+  // order (createdAt alone already does in practice; seq's whole point is
+  // to be correct even when two rows share a millisecond, which a
+  // millisecond-resolution real-DB test can't force deterministically, but
+  // the ordering it produces here must still match insertion order).
+  it("#221 orders getLastMessages/getMessagesForConversation by seq, matching insertion order", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Seq ordering target",
+    });
+    for (const text of ["a", "b", "c", "d"]) {
+      await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+        role: "user",
+        parts: [{ type: "text", text }],
+      });
+    }
+    const forward = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id);
+    expect(forward.map((m) => (m.parts as { text: string }[])[0]?.text)).toEqual(["a", "b", "c", "d"]);
+    const backward = await getLastMessages(db, unsafeCourseScope(courseAId), created.id, 4);
+    expect(backward.map((m) => (m.parts as { text: string }[])[0]?.text)).toEqual(["d", "c", "b", "a"]);
+  });
+
+  // #215
+  describe("pagination", () => {
+    it("getMessagesForConversation limits to the most recent page in chronological order, and `before` pages further back", async () => {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Messages pagination target",
+      });
+      const inserted = [];
+      for (const text of ["1", "2", "3", "4", "5"]) {
+        inserted.push(
+          await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+            role: "user",
+            parts: [{ type: "text", text }],
+          }),
+        );
+      }
+
+      const lastPage = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id, { limit: 2 });
+      expect(lastPage.map((m) => (m.parts as { text: string }[])[0]?.text)).toEqual(["4", "5"]);
+
+      const olderPage = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id, {
+        limit: 2,
+        before: inserted[3]!.seq,
+      });
+      expect(olderPage.map((m) => (m.parts as { text: string }[])[0]?.text)).toEqual(["2", "3"]);
+    });
+
+    it("listConversationsForOwner respects limit and before (updatedAt cursor)", async () => {
+      const c1 = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Pagination: first",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const c2 = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Pagination: second",
+      });
+
+      const firstPage = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId, {
+        limit: 1,
+        kind: "tutor",
+      });
+      expect(firstPage).toHaveLength(1);
+      expect(firstPage[0]!.id).toBe(c2.id); // most recently updated first
+
+      const secondPage = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId, {
+        limit: 5,
+        kind: "tutor",
+        before: firstPage[0]!.updatedAt,
+      });
+      expect(secondPage.map((r) => r.id)).toContain(c1.id);
+      expect(secondPage.map((r) => r.id)).not.toContain(c2.id);
+    });
+  });
+
+  describe("getOwnedConversationOrNull", () => {
+    it("returns the row when it exists, is owned, and is not soft-deleted", async () => {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Owned and findable",
+      });
+      const found = await getOwnedConversationOrNull(db, created.id, userId);
+      expect(found?.id).toBe(created.id);
+    });
+
+    it("returns null when owned by a different user", async () => {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Not owned by otherUserId",
+      });
+      const found = await getOwnedConversationOrNull(db, created.id, otherUserId);
+      expect(found).toBeNull();
+    });
+
+    it("returns null for a nonexistent id", async () => {
+      const found = await getOwnedConversationOrNull(db, "00000000-0000-0000-0000-000000000000", userId);
+      expect(found).toBeNull();
+    });
+
+    it("returns null when the row is owned but soft-deleted", async () => {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Owned but soft-deleted",
+      });
+      await softDeleteConversation(db, unsafeCourseScope(courseAId), created.id);
+      const found = await getOwnedConversationOrNull(db, created.id, userId);
+      expect(found).toBeNull();
+    });
+  });
+
+  // #219
+  describe("countRecentUserMessagesForUser", () => {
+    it("counts only this user's own user-role messages created after `since`, across conversations", async () => {
+      const convA = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Rate limit count target A",
+      });
+      const convB = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Rate limit count target B",
+      });
+      const since = new Date(Date.now() - 1000);
+
+      await appendMessage(db, unsafeCourseScope(courseAId), convA.id, { role: "user", parts: [{ type: "text", text: "1" }] });
+      await appendMessage(db, unsafeCourseScope(courseAId), convA.id, { role: "assistant", parts: [{ type: "text", text: "reply" }] });
+      await appendMessage(db, unsafeCourseScope(courseAId), convB.id, { role: "user", parts: [{ type: "text", text: "2" }] });
+
+      const count = await countRecentUserMessagesForUser(db, userId, since);
+      // Exactly the 2 user-role rows above -- the assistant row and any
+      // rows from other tests' users don't count.
+      expect(count).toBeGreaterThanOrEqual(2);
+
+      const countForOtherUser = await countRecentUserMessagesForUser(db, otherUserId, since);
+      expect(countForOtherUser).toBe(0);
+    });
+
+    it("excludes messages created before `since`", async () => {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Rate limit window target",
+      });
+      await appendMessage(db, unsafeCourseScope(courseAId), created.id, { role: "user", parts: [{ type: "text", text: "old" }] });
+
+      const future = new Date(Date.now() + 60_000);
+      const count = await countRecentUserMessagesForUser(db, userId, future);
+      expect(count).toBe(0);
+    });
   });
 
   afterAll(async () => {

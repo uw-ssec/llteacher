@@ -15,19 +15,21 @@
 
    Persistence (#3): every turn writes to the DB so a conversation survives a
    reload --
-     1. resolve/create the conversation (conversationId from the client, or a
-        brand-new "tutor" conversation if absent)
-     2. check the two retry/idempotency cases (see the comment at the
-        getLastMessages call below) -- either short-circuits without
+     1. resolve/create the conversation (conversationId from the client, or
+        a brand-new conversation if absent -- kind/sectionId decide which
+        surface it belongs to, see ChatRequestBody, #214)
+     2. check the two retry/idempotency cases (see hasRenderableContent and
+        the getLastMessages call below) -- either short-circuits without
         touching the model, or persists the inbound user message before
         calling it
      3. stream the response, persisting the full final UIMessage (text + any
         tool parts) via toUIMessageStreamResponse's onFinish hook
      4. return the conversationId to the client via the x-conversation-id
         response header, so it can send it back on the next turn
-   System prompt + model stay hardcoded (unchanged from before #3) --
-   prompt assembly (#25) and LLM config resolution (#26) are later tasks in
-   this epic, not in scope here.
+
+   System prompt + model stay hardcoded, per #230: this is FLX-001's own
+   filed scope, a duplicate of #25 (prompt assembly) and #26 (LLM config
+   resolution), later tasks in this epic -- not in scope here.
    -------------------------------------------------------------------------- */
 
 import type { Context } from "hono";
@@ -46,10 +48,11 @@ import { z } from "zod";
 import { getOpenRouter } from "../../lib/ai";
 import { makeDb } from "../../db/client";
 import {
-  getConversationById,
   createConversation,
   appendMessage,
   getLastMessages,
+  getOwnedConversationOrNull,
+  countRecentUserMessagesForUser,
 } from "../repositories/conversations";
 import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
 import { logServerError } from "../utils/errors";
@@ -116,38 +119,52 @@ interface ChatRequestBody {
   // same "single course/org per user" assumption submissionsHandler already
   // makes elsewhere in this file's sibling routes.
   courseId?: string;
+  // #214: which surface a brand-new conversation belongs to. Defaults to
+  // "tutor" when omitted, preserving every existing caller's behavior --
+  // the free-standing tutor rail (#4) never sends this. The homework-section
+  // chat instance (App.tsx) sends "section" + its real sectionId, so its
+  // auto-created conversation is properly scoped and never shows up in the
+  // tutor rail's kind=tutor listing.
+  kind?: "section" | "tutor";
+  // Required when kind is "section"; ignored otherwise. Validated against
+  // scope by createConversation's own tenancy check (repositories/
+  // conversations.ts), which throws TenancyMismatchError -> 404 on a
+  // mismatch, the same mapping every other tenancy check in this app uses.
+  sectionId?: string;
 }
 
-// Validates only the shape chatHandler actually depends on (role, and parts
-// being a non-empty array of `{ type, ... }` objects) -- not the full AI SDK
-// UIMessage schema. A buggy or malicious client sending a malformed parts
-// array must 400 here rather than reach appendMessage's jsonb insert, which
-// would happily store whatever it's given (#3 pitfall 4).
+// Validates only the shape chatHandler actually depends on (id, role, and
+// parts being a non-empty array of `{ type, ... }` objects) -- not the full
+// AI SDK UIMessage schema. A buggy or malicious client sending a malformed
+// parts array must 400 here rather than reach appendMessage's jsonb insert,
+// which would happily store whatever it's given (#3 pitfall 4). `id` is
+// required as of #213: it's the AI SDK's own per-send UIMessage id, used as
+// the idempotency key below instead of comparing message content.
 const chatPartSchema = z.object({ type: z.string() }).passthrough();
 const inboundUserMessageSchema = z.object({
+  id: z.string().min(1),
   role: z.literal("user"),
   parts: z.array(chatPartSchema).min(1),
 });
 
-// PR-1 whole-branch review (Critical): in ai@5.0.195, a provider failure
-// (e.g. a 429) arrives as an `error` chunk mid-stream, not a stream
-// rejection -- the stream still closes normally, so `onFinish` below still
-// fires. The AI SDK's own step machinery unconditionally pushes a
-// `{ type: "step-start" }` marker part onto `responseMessage.parts` the
-// moment the first chunk of a step arrives (before it even looks at what
-// that chunk is) -- so a `responseMessage.parts?.length` check alone is
-// NOT enough to detect "the model produced nothing": an error-only turn
-// still has `parts: [{ type: "step-start" }]`, length 1, not 0 (verified
-// empirically via chat.errorChunk.integration.test.ts, which drives a real
-// streamText() against a model that errors immediately). This checks for
-// actual renderable content instead -- anything other than a bare
-// step-start marker, and a text part only counts if it has non-empty text
-// (defensive: a text-start/text-end pair with a zero-length delta is
-// possible and shouldn't count as "answered" either). Used both to decide
-// whether onFinish should persist an assistant row at all, and to decide
-// whether an already-persisted row is complete enough to replay -- so
-// neither path can treat "the model said nothing" as "the model
-// answered."
+// In ai@5.0.195, a provider failure (e.g. a 429) arrives as an `error`
+// chunk mid-stream, not a stream rejection -- the stream still closes
+// normally, so `onFinish` below still fires. The AI SDK's own step
+// machinery unconditionally pushes a `{ type: "step-start" }` marker part
+// onto `responseMessage.parts` the moment the first chunk of a step
+// arrives, before it even looks at what that chunk is -- so a
+// `responseMessage.parts?.length` check alone is NOT enough to detect "the
+// model produced nothing": an error-only turn still has
+// `parts: [{ type: "step-start" }]`, length 1, not 0 (verified empirically
+// via chat.errorChunk.integration.test.ts, which drives a real streamText()
+// against a model that errors immediately). This checks for actual
+// renderable content instead -- anything other than a bare step-start
+// marker, and a text part only counts if it has non-empty text (defensive:
+// a text-start/text-end pair with a zero-length delta is possible and
+// shouldn't count as "answered" either). Used both to decide whether
+// onFinish should persist an assistant row at all, and to decide whether an
+// already-persisted row is complete enough to replay -- so neither path can
+// treat "the model said nothing" as "the model answered."
 function hasRenderableContent(parts: unknown): boolean {
   if (!Array.isArray(parts)) return false;
   return parts.some((part) => {
@@ -219,6 +236,50 @@ function replayResponse(conversationId: string, persistedParts: unknown) {
   });
 }
 
+// #231: derives an initial title for a brand-new tutor conversation from
+// its first user message, instead of leaving every row titled "New
+// Conversation" until the student manually renames it. Only ever called at
+// creation time (the new-conversation branch below), so "only while the
+// title is still the default" is automatic: this never re-touches an
+// existing conversation's title on a later turn, whether or not the
+// student has since renamed it. Truncates the first text part; returns
+// null (falls back to "New Conversation") for a message with no text part
+// (a tool-only first message isn't a shape this app's own composer can
+// currently produce, but the fallback keeps this honest either way).
+const AUTO_TITLE_MAX_LENGTH = 60;
+function deriveTutorConversationTitle(parts: unknown): string | null {
+  if (!Array.isArray(parts)) return null;
+  const textPart = parts.find(
+    (p): p is { type: "text"; text: string } =>
+      !!p && typeof p === "object" && (p as { type?: unknown }).type === "text" && typeof (p as { text?: unknown }).text === "string",
+  );
+  const text = textPart?.text.trim();
+  if (!text) return null;
+  return text.length > AUTO_TITLE_MAX_LENGTH ? `${text.slice(0, AUTO_TITLE_MAX_LENGTH).trimEnd()}…` : text;
+}
+
+// #219: per-user request budget. A Socratic tutoring turn is human-paced,
+// so this is generous, not a real throttle -- it exists to bound the cost
+// of a runaway client/script, not to shape normal usage. Checked against
+// the same messages table every turn already writes to (see
+// countRecentUserMessagesForUser's doc comment) rather than a new counter
+// table or an external rate-limit binding.
+const RATE_LIMIT_MAX_PER_MINUTE = 20;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+
+// #215: bounds what the model sees on every turn. The client still sends
+// its full local history (useChat's own state), but only the trailing
+// window is forwarded to convertToModelMessages -- per-turn token cost is
+// therefore bounded regardless of how long the conversation has run.
+// Decision (documented per the issue's own request): a plain trailing
+// window, dropped silently -- no rolling summary. A summarization strategy
+// is real, separate work (tracked as #88, context-window management);
+// until it lands, the oldest turns beyond this window are simply not seen
+// by the model on a given turn, which is a graceful degradation (the
+// student can still reference them in the visible UI transcript) rather
+// than a hard failure.
+const MAX_HISTORY_MESSAGES = 40;
+
 export async function chatHandler(c: Context<AppEnv>) {
   const apiKey = c.env.OPENROUTER_API_KEY;
   if (!apiKey) {
@@ -248,17 +309,17 @@ export async function chatHandler(c: Context<AppEnv>) {
   } catch {
     return c.json({ error: "Request body must be valid JSON" }, 400);
   }
-  const { messages: uiMessages, conversationId, courseId: requestedCourseId } = body;
+  const { messages: uiMessages, conversationId, courseId: requestedCourseId, sectionId: requestedSectionId } = body;
   if (!Array.isArray(uiMessages) || uiMessages.length === 0) {
     return c.json({ error: "messages is required" }, 400);
   }
 
   // Full history vs. incremental (#3 pitfall 3): the client still sends the
   // whole UIMessage[] history (it's what streamText needs for model
-  // context), but only the LAST message -- the one just typed -- gets
-  // persisted per turn. Everything before it either came from the DB on a
-  // future "load conversation" path (not built yet, #27) or was already
-  // persisted on a prior turn.
+  // context, subject to the #215 trailing-window truncation below), but
+  // only the LAST message -- the one just typed -- gets persisted per turn.
+  // Everything before it either came from the DB on a "load conversation"
+  // path (#4) or was already persisted on a prior turn.
   const inboundMessage = uiMessages[uiMessages.length - 1];
   const parsedInbound = inboundUserMessageSchema.safeParse(inboundMessage);
   if (!parsedInbound.success) {
@@ -267,20 +328,39 @@ export async function chatHandler(c: Context<AppEnv>) {
 
   const db = makeDb(c.env.DATABASE_URL);
 
+  // #219: per-user rate limit, checked before any persistence or model
+  // call. 429 + Retry-After, surfaced through useChat's existing #144
+  // error row (its onError sees the response status; the retryable row
+  // already wires `regenerate`).
+  const recentCount = await countRecentUserMessagesForUser(
+    db,
+    authContext.session.userId,
+    new Date(Date.now() - RATE_LIMIT_WINDOW_MS),
+  );
+  if (recentCount >= RATE_LIMIT_MAX_PER_MINUTE) {
+    return c.json(
+      { error: "You're sending messages too quickly. Please wait a moment and try again." },
+      429,
+      { "Retry-After": String(Math.ceil(RATE_LIMIT_WINDOW_MS / 1000)) },
+    );
+  }
+
   let conv: { id: string; ownerUserId: string; courseId: string };
   if (conversationId) {
-    const existing = await getConversationById(db, conversationId);
+    // #217/#222: getOwnedConversationOrNull collapses "doesn't exist",
+    // "exists but isn't yours", and "exists, is yours, but soft-deleted"
+    // into the same null -> 404, matching routes/conversations.ts's
+    // PATCH/DELETE/GET-messages handlers exactly (moved to the repository
+    // layer, repositories/conversations.ts, precisely so this route could
+    // reuse it instead of hand-rolling its own 404-vs-401 split, which was
+    // the existence oracle this rule exists to avoid). Previously this
+    // checked existence and ownership as two separate branches returning
+    // 404 and 401 respectively; a caller could tell "doesn't exist" apart
+    // from "exists, not yours" by response code, which the uniform-401
+    // comment on the old code claimed not to be possible.
+    const existing = await getOwnedConversationOrNull(db, conversationId, authContext.session.userId);
     if (!existing) {
       return c.json({ error: "Conversation not found" }, 404);
-    }
-    // Ownership check (#3): a conversationId the client supplies is an
-    // unvalidated UUID -- proven to belong to the requester only by this
-    // comparison, never by trusting the client's say-so. Uniform 401
-    // (matches submitSectionHandler's uniform 403 for the analogous check)
-    // rather than a 404-vs-401 split, so a guessed conversationId can't be
-    // used to confirm one exists that isn't the caller's.
-    if (existing.ownerUserId !== authContext.session.userId) {
-      return c.json({ error: "Unauthorized" }, 401);
     }
     conv = existing;
   } else {
@@ -289,11 +369,25 @@ export async function chatHandler(c: Context<AppEnv>) {
     if (!scope) {
       return c.json({ error: "Course access denied" }, 403);
     }
+    // #214: kind defaults to "tutor" (every existing caller's behavior) --
+    // only a caller that explicitly asks for "section" (App.tsx's
+    // homework-section chat instance) needs a sectionId, which
+    // createConversation validates against scope itself (throws
+    // TenancyMismatchError -> 404 on a mismatch, same as every other
+    // tenancy check in this app).
+    const kind = body.kind === "section" ? "section" : "tutor";
+    if (kind === "section" && !requestedSectionId) {
+      return c.json({ error: "sectionId is required when kind is 'section'" }, 400);
+    }
+    // #231: auto-title tutor conversations from their first message; a
+    // section conversation isn't shown in a titled rail today, so it keeps
+    // the plain default.
+    const title = (kind === "tutor" && deriveTutorConversationTitle(inboundMessage.parts)) || "New Conversation";
     conv = await createConversation(db, scope, {
       ownerUserId: authContext.session.userId,
-      sectionId: null,
-      kind: "tutor",
-      title: "New Conversation",
+      sectionId: kind === "section" ? requestedSectionId! : null,
+      kind,
+      title,
     });
   }
 
@@ -302,8 +396,9 @@ export async function chatHandler(c: Context<AppEnv>) {
   // unsafeCourseScope docstring.
   const scope = unsafeCourseScope(conv.courseId);
 
-  // Idempotency (#3) -- two distinct retry shapes, both covered so neither
-  // the user row nor the assistant row can be double-written:
+  // Idempotency (#3, reworked #213) -- two distinct retry shapes, both
+  // covered so neither the user row nor the assistant row can be
+  // double-written:
   //
   //   1. "Not answered yet": the user message already landed but the
   //      assistant hasn't responded (or its response hasn't been persisted)
@@ -318,15 +413,18 @@ export async function chatHandler(c: Context<AppEnv>) {
   //      the model call entirely -- replay the persisted assistant message
   //      instead, so retrying can't produce a second user/assistant row
   //      pair or a second (paid) model call.
+  //
+  // Both cases key off the AI SDK's own per-send UIMessage id
+  // (clientMessageId, persisted alongside the row -- see the messages
+  // schema's #213 doc comment) instead of comparing message content: a
+  // student legitimately sending the same text twice ("yes", "ok", "why?"
+  // -- the highest-frequency replies in a Socratic tutor) gets a NEW id
+  // each send, so it is correctly treated as a new message, not a retry of
+  // the old one.
   const [lastMessage, secondLastMessage] = await getLastMessages(db, scope, conv.id, 2);
-  const matchesInboundUser = (msg: { role: string; parts: unknown } | undefined) =>
-    msg?.role === "user" && JSON.stringify(msg.parts) === JSON.stringify(parsedInbound.data.parts);
+  const matchesInboundUser = (msg: { role: string; clientMessageId: string | null } | undefined) =>
+    msg?.role === "user" && msg.clientMessageId === parsedInbound.data.id;
 
-  // PR-1 whole-branch review (Critical): require the persisted assistant
-  // row to actually have renderable content before treating it as "already
-  // answered" -- otherwise a turn that errored out with nothing produced
-  // (see hasRenderableContent's doc comment above) would replay that
-  // emptiness forever instead of ever calling the model again for it.
   if (
     lastMessage?.role === "assistant" &&
     hasRenderableContent(lastMessage.parts) &&
@@ -335,20 +433,29 @@ export async function chatHandler(c: Context<AppEnv>) {
     return replayResponse(conv.id, lastMessage.parts);
   }
   if (!matchesInboundUser(lastMessage)) {
-    await appendMessage(db, scope, conv.id, { role: "user", parts: inboundMessage.parts });
+    await appendMessage(db, scope, conv.id, {
+      role: "user",
+      parts: inboundMessage.parts,
+      clientMessageId: parsedInbound.data.id,
+    });
   }
 
   const openrouter = getOpenRouter(apiKey);
 
+  // #215: trailing window -- see MAX_HISTORY_MESSAGES' doc comment above
+  // for the drop-silently decision.
+  const windowedMessages =
+    uiMessages.length > MAX_HISTORY_MESSAGES ? uiMessages.slice(-MAX_HISTORY_MESSAGES) : uiMessages;
+
   const result = streamText({
-    /* Gemma 4 31B (instruction-tuned) on OpenRouter's free tier.
-       Released 2026-04-02, 262K context, native function calling (custom
-       XML format that OpenRouter normalizes to the OpenAI-compatible tool
-       call shape the AI SDK expects). Strong on reasoning + Socratic-style
-       instruction following per Google's docs. Free, with rate limits. */
+    // Gemma 4 31B (instruction-tuned) on OpenRouter's free tier. Released
+    // 2026-04-02, 262K context, native function calling (custom XML format
+    // OpenRouter normalizes to the OpenAI-compatible tool call shape the AI
+    // SDK expects). Free, with rate limits. #230: hardcoded pending #26
+    // (LLM config resolution).
     model: openrouter("google/gemma-4-31b-it:free"),
     system: SYSTEM_PROMPT,
-    messages: convertToModelMessages(uiMessages),
+    messages: convertToModelMessages(windowedMessages),
     tools: TOOLS,
     /* Allow up to 5 steps so the model can call a display tool and then
        continue with the follow-up Socratic question in the same turn.
@@ -369,19 +476,18 @@ export async function chatHandler(c: Context<AppEnv>) {
     // disconnecting), the assistant message is lost and the client's retry
     // will only re-send the user message (already deduped above), so no
     // response ever gets generated for that turn. That gap is a documented
-    // limitation (#3 pitfall 2), not fixed here -- would need a
-    // status/resume endpoint, out of scope for this task.
+    // limitation (#3 pitfall 2), not fixed here -- tracked as #96
+    // (streaming resilience).
     onFinish: async ({ responseMessage }) => {
-      // PR-1 whole-branch review (Critical): a provider failure mid-stream
-      // (ai@5.0.195 delivers this as an `error` chunk, not a rejection --
-      // see hasRenderableContent's doc comment) still lands here with a
-      // `responseMessage` that has no real content. Persisting it anyway
-      // would write a permanently-empty assistant row that the idempotency
-      // check above would then treat as "already answered" on every future
-      // retry -- silently defeating the client's retry affordance (#144)
-      // forever. Returning early instead leaves nothing persisted for this
-      // turn, so a retry's idempotency check falls through to a genuine
-      // model call again.
+      // A provider failure mid-stream (ai@5.0.195 delivers this as an
+      // `error` chunk, not a rejection -- see hasRenderableContent's doc
+      // comment) still lands here with a `responseMessage` that has no
+      // real content. Persisting it anyway would write a permanently-empty
+      // assistant row that the idempotency check above would then treat as
+      // "already answered" on every future retry -- silently defeating the
+      // client's retry affordance (#144) forever. Returning early instead
+      // leaves nothing persisted for this turn, so a retry's idempotency
+      // check falls through to a genuine model call again.
       if (!hasRenderableContent(responseMessage.parts)) return;
       try {
         await appendMessage(db, scope, conv.id, { role: "assistant", parts: responseMessage.parts });

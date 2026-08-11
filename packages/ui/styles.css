@@ -895,12 +895,24 @@ body {
     font-weight: var(--weight-medium);
   }
 
-  /* Hovering/focusing anywhere on the row reveals its pencil, not just
-     hovering the tiny icon itself -- matches the row-wide discoverability
-     the old single-button row gave for free. */
-  .tutor-conversation-item:hover .editable-title__pencil,
+  /* #234: hovering/focusing anywhere on the row reveals its pencil, not
+     just hovering the tiny icon itself -- matches the row-wide
+     discoverability the old single-button row gave for free. Gated behind
+     (hover: hover) -- a touch device has no hover, so this rule would
+     otherwise never fire and the pencil would stay invisible-but-hit-
+     testable there (see .editable-title__pencil's own opacity/visibility
+     default below for the touch fallback). Keyboard focus is unaffected --
+     :focus-within is not a hover-capability question. */
+  @media (hover: hover) {
+    .tutor-conversation-item:hover .editable-title__pencil {
+      opacity: 1;
+      visibility: visible;
+    }
+  }
+
   .tutor-conversation-item:focus-within .editable-title__pencil {
     opacity: 1;
+    visibility: visible;
   }
 
   .tutor-conversation-item__meta {
@@ -953,18 +965,50 @@ body {
     color: var(--color-text-muted);
   }
 
+  /* #234: visibility:hidden alongside opacity:0 -- opacity alone hides the
+     icon but leaves the underlying <button> laid out, focusable, and
+     CLICKABLE, so a touch tap landing on its box entered rename mode
+     instead of selecting the conversation, with no visual cue why (there
+     is no hover on touch, so the reveal rules below never fired for that
+     device class in the first place). visibility:hidden removes it from
+     hit-testing whenever it isn't actually shown, regardless of input
+     type; the reveal rules below flip both properties back together. A
+     touch device (hover: none) gets the pencil shown persistently instead
+     of hidden-by-default -- it has no hover and nothing is focused until
+     something is already tapped, so there is no other discovery path. */
   .editable-title__pencil {
     opacity: 0;
-    transition: opacity 120ms ease-out;
+    visibility: hidden;
+    transition: opacity 120ms ease-out, visibility 120ms ease-out;
   }
 
-  /* Revealed on hovering/focusing the title area itself (e.g. the header,
-     where there's no larger row to hover) -- a consumer like
-     .tutor-conversation-item above can additionally reveal it on hovering
-     a bigger surrounding area for easier discovery. */
-  .editable-title:hover .editable-title__pencil,
+  @media (hover: none) {
+    .editable-title__pencil {
+      opacity: 1;
+      visibility: visible;
+    }
+  }
+
+  /* Revealed on hovering the title area itself (e.g. the header, where
+     there's no larger row to hover) -- gated behind (hover: hover), same
+     reasoning as .tutor-conversation-item's own hover rule above. */
+  @media (hover: hover) {
+    .editable-title:hover .editable-title__pencil {
+      opacity: 1;
+      visibility: visible;
+    }
+  }
+
+  /* Keyboard-focus reveals are never gated on hover capability.
+     :focus-within on .editable-title itself covers the header instance
+     (previously only :focus-visible on the button, with no fallback for
+     focus landing elsewhere in the title first -- .tutor-conversation-item
+     above already had its own :focus-within; this brings the header
+     instance to parity). */
+  .editable-title:focus-within .editable-title__pencil,
   .editable-title__pencil-btn:focus-visible .editable-title__pencil {
     opacity: 1;
+    visibility: visible;
   }
 
   .editable-title__text {

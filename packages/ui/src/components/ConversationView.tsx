@@ -64,14 +64,21 @@ export interface ConversationViewProps {
   messages: MessageData[];
   onSendMessage?: (text: string) => void;
   /** #144: true while the owning `useChat` request is in flight (status
-   *  "submitted" or "streaming") or has errored (status "error") -- i.e.
-   *  anything other than "ready". Disables the composer so pressing Enter
-   *  mid-stream can't fire a second, overlapping `sendMessage` call (AI
-   *  SDK v5's `Chat#sendMessage` has no internal guard against being
-   *  called while already in flight or errored -- it just pushes another
-   *  message and starts another request). Defaults to false so callers
-   *  that don't track a `useChat` status (e.g. a fixture in tests) keep
-   *  the composer usable. */
+   *  "submitted" or "streaming") -- i.e. a send is genuinely outstanding.
+   *  Disables the composer so pressing Enter mid-stream can't fire a
+   *  second, overlapping `sendMessage` call (AI SDK v5's `Chat#sendMessage`
+   *  has no internal guard against being called while already in flight --
+   *  it just pushes another message and starts another request). Defaults
+   *  to false so callers that don't track a `useChat` status (e.g. a
+   *  fixture in tests) keep the composer usable.
+   *
+   *  Deliberately does NOT include status "error": `useChat`'s own
+   *  `sendMessage` unconditionally resets status to "submitted" and clears
+   *  `error` the moment a new message is sent, so sending a fresh message
+   *  is the correct way out of a failed turn -- for a `useChat` instance
+   *  with no `id` (nothing else ever resets it, e.g. the homework-section
+   *  chat), disabling the composer on "error" too would leave Retry (which
+   *  replays the exact request that just failed) as the only way out. */
   isSending?: boolean;
   /** #144: set when the owning `useChat`'s last turn failed (status
    *  "error") so a failed/rate-limited stream doesn't just silently
@@ -79,6 +86,10 @@ export interface ConversationViewProps {
    *  action; `onRetry` should call that `useChat` instance's own
    *  `regenerate()`. `null`/`undefined` renders nothing. */
   error?: { message: string; onRetry: () => void } | null;
+  /** #235: focuses the composer once on mount -- pass true for the one
+   *  render right after a brand-new conversation was created and switched
+   *  to, so a keyboard user lands in the composer without an extra Tab. */
+  autoFocusComposer?: boolean;
 }
 
 /* -- Component ------------------------------------------------------------- */
@@ -92,6 +103,7 @@ export function ConversationView({
   onSendMessage,
   isSending = false,
   error = null,
+  autoFocusComposer = false,
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -176,15 +188,17 @@ export function ConversationView({
         </div>
       </div>
 
-      {/* Sticky composer -- #144: disabled whenever a request is in flight
-          or has errored (anything but "ready"), so Enter mid-stream can't
-          fire a second, overlapping send. */}
+      {/* Sticky composer -- #144: disabled while a send is genuinely in
+          flight, so Enter mid-stream can't fire a second, overlapping
+          send (see isSending's doc comment above for why "error" is
+          deliberately excluded). */}
       <Composer
         value={draft}
         onChange={setDraft}
         onSubmit={handleSubmit}
         disabled={isSending}
         history={composerHistory}
+        autoFocus={autoFocusComposer}
       />
     </div>
   );
