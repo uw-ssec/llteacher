@@ -229,11 +229,15 @@ export const submissions = pgTable(
     }).onDelete("cascade"),
     // #128, the actual fix.
     //
-    // #250: this cap is an accepted simplification, not a settled product
-    // rule. It keeps ONE submission per (student, section) and restart voids
-    // the previous one, so the platform retains no attempt history. If
-    // attempts ever become first-class, this becomes a partial unique index
-    // over live rows -- see #250 before widening or removing it.
+    // This cap is an accepted simplification, not a settled product rule. It
+    // keeps ONE submission per (student, section) and restart voids the
+    // previous one, so the platform retains no attempt history.
+    //
+    // The reasoning -- and the argument that `submissions` should instead be
+    // an append-only attempt table, which was deferred rather than refuted --
+    // is discussion #249. #250 is the work item. If attempts become
+    // first-class this becomes a partial unique index over live rows; read
+    // #249 before widening or removing it.
     uniqueIndex("submissions_user_section_uq").on(t.userId, t.sectionId),
   ],
 );

@@ -111,13 +111,25 @@ and throws `SubmissionGradedError` (route layer maps it to 409), but the rule
 does not depend on that check: `grades.submission_id` is `ON DELETE RESTRICT`,
 so Postgres refuses the delete regardless.
 
-**This cap is an accepted simplification, not a settled product rule (#250).**
+**This cap is an accepted simplification, not a settled product rule.**
 Restart deletes the submission row outright, so the platform keeps no attempt
 history — no record that an earlier submission existed, when it happened, or
-how many tries a student took. That is a decision to revisit, and #250 is
-where it gets revisited; it also carries the student-facing requirement that
-the restart confirmation must say the previous submission is *discarded*,
-not merely that a new conversation begins.
+how many tries a student took. Discussion
+[#249](https://github.com/uw-ssec/llteacher/discussions/249) argues
+`submissions` should instead be an append-only attempt table; that was
+deferred to ship #27, not refuted. Work item:
+[#250](https://github.com/uw-ssec/llteacher/issues/250). Read #249 before
+changing the shape of this table.
+
+Two consequences worth knowing before you touch either path:
+
+- **A graded section can still be resubmitted**, which silently leaves the
+  grade describing replaced work, even though it cannot be *restarted*
+  ([#258](https://github.com/uw-ssec/llteacher/issues/258)). That asymmetry
+  falls out of `grades`' RESTRICT FK, not from a decision.
+- **The student must be told what restart discards** before they commit to
+  it. That disclosure contract is
+  [#248](https://github.com/uw-ssec/llteacher/issues/248), not this document.
 
 Rationale, and the superseded/locked alternatives that were rejected:
 [docs/superpowers/specs/2026-08-11-submission-uniqueness-design.md](../../docs/superpowers/specs/2026-08-11-submission-uniqueness-design.md)

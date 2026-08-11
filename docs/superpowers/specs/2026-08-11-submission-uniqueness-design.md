@@ -54,13 +54,29 @@ to turn that into a 409 with a useful message rather than a driver error.
 
 ### Accepted scope of this decision
 
-Voiding deletes the `submissions` row, so no attempt history survives. This
-was accepted deliberately in order to ship #27's lifecycle, and is tracked for
-revisiting in [#250](https://github.com/uw-ssec/llteacher/issues/250) rather
-than treated as final. #250 also owns the student-facing requirement that
-follows from it: a restart confirmation must state that the previous
-submission is discarded, since a student who reads "start over" as "add
-another attempt" would lose work believing the opposite.
+Voiding deletes the `submissions` row, so no attempt history survives.
+
+This decision was taken *within* the one-mutable-row model, and that model is
+itself contested. Discussion
+[#249](https://github.com/uw-ssec/llteacher/discussions/249) argues
+`submissions` should be an append-only attempt table, and recommended that
+change land **before** #27 rather than after. It did not; the deferral was
+accepted to unblock #27's lifecycle, and the argument against deferring stands
+unrefuted rather than answered. Work item:
+[#250](https://github.com/uw-ssec/llteacher/issues/250).
+
+Two related items this spec does not cover:
+
+- The student-facing disclosure contract is
+  [#248](https://github.com/uw-ssec/llteacher/issues/248).
+- A graded section can still be *resubmitted* even though it cannot be
+  *restarted*, silently staling the grade —
+  [#258](https://github.com/uw-ssec/llteacher/issues/258).
+
+If #249 settles on an attempt table, this spec's "void" decision still holds
+for restarts of *unsubmitted* conversations: an attempt voided before
+submission was never a submitted attempt and should not receive an attempt
+number. What changes is the handling of previously submitted attempts.
 
 ## Data model
 
