@@ -17,9 +17,10 @@ import { studentHomeworksHandler } from "./routes/studentHomeworks";
 import { submitSectionHandler, getHomeworkSubmissionsHandler } from "./routes/submissions";
 import { submitSectionAnswerHandler, getSectionAnswerHandler } from "./routes/sectionAnswers";
 import { submitWidgetResponseHandler } from "./routes/progressWidgets";
+import { listCourseTasHandler, updateTaCapabilitiesHandler } from "./routes/courseMemberships";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
-import { requireCourseMember, requireInstructorOf, requireRole } from "./utils/guards";
+import { requireCourseMember, requireGraderOf, requireInstructorOf, requireRole } from "./utils/guards";
 import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "./utils/errors";
 import type { AppEnv } from "./context";
 
@@ -74,16 +75,35 @@ app.patch(
 );
 app.get("/api/student/homeworks", requireRole(["student"])(studentHomeworksHandler));
 app.post("/api/conversations/:id/submit", requireRole(["student"])(submitSectionHandler));
+// #172: grading reads, not authoring -- requireGraderOf admits `ta`
+// alongside instructor/admin. Every content-mutating route above stays on
+// requireInstructorOf.
 app.get(
   "/api/courses/:courseId/homeworks/:homeworkId/submissions",
-  requireInstructorOf()(getHomeworkSubmissionsHandler),
+  requireGraderOf()(getHomeworkSubmissionsHandler),
 );
 app.patch("/api/sections/:sectionId/answer", requireRole(["student"])(submitSectionAnswerHandler));
 app.get(
   "/api/courses/:courseId/sections/:sectionId/answers/:studentId",
-  requireInstructorOf()(getSectionAnswerHandler),
+  requireGraderOf()(getSectionAnswerHandler),
 );
 app.patch("/api/widgets/:widgetId/response", requireRole(["student"])(submitWidgetResponseHandler));
+// #172: granting a capability is authoring-tier -- a TA must not be able to
+// widen their own or another TA's access, so these stay requireInstructorOf.
+app.get("/api/courses/:courseId/tas", requireInstructorOf()(listCourseTasHandler));
+app.patch(
+  "/api/courses/:courseId/tas/:membershipId/capabilities",
+  requireInstructorOf()(updateTaCapabilitiesHandler),
+);
+
+// #172 audit (CMP-005): an unmatched /api/* path fell through to the SPA
+// catch-all below, which serves index.html with a 200. A client calling a
+// route its server doesn't have yet -- the realistic rolling-deploy skew
+// when the admin bundle leads the Worker -- therefore saw `r.ok === true`
+// and only failed when JSON.parse choked on HTML. That failed closed by
+// accident of content type, not by design. A JSON 404 makes a missing API
+// route unambiguous for every current and future client.
+app.all("/api/*", (c) => c.json({ error: "Not found" }, 404));
 
 // Everything else: delegate to the static asset binding.
 // In dev, this proxies to Vite's pipeline (so HMR + source maps work).

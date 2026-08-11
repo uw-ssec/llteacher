@@ -4,6 +4,7 @@ import { submitWidgetResponseHandler } from "./progressWidgets";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { WidgetResponseResponse } from "../../shared/types";
+import { fakeAuthContext } from "../testing/authContext";
 
 const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
 
@@ -15,14 +16,6 @@ const getOrgScopesForUserMock = vi.fn();
 vi.mock("../repositories/users", () => ({ getOrgScopesForUser: (...a: unknown[]) => getOrgScopesForUserMock(...a) }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
-function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
-  const memberships = overrides.memberships ?? [];
-  return {
-    session: { userId: "u1", workosUserId: "w1", sessionEpoch: 0, issuedAt: 0, expiresAt: 0 },
-    memberships, hasRole: (r) => memberships.some((m) => m.role === r),
-    isMemberOf: () => false, isInstructorOf: () => false, ...overrides,
-  };
-}
 
 function buildApp(authContext: AuthContext | undefined) {
   const app = new Hono<AppEnv>();

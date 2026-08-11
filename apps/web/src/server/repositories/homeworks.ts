@@ -73,6 +73,32 @@ export function isHomeworkHidden(hw: { isHidden: boolean; expiresAt: Date | null
   return hw.isHidden || (hw.expiresAt !== null && hw.expiresAt.getTime() <= Date.now());
 }
 
+/** Statuses that mean "the instructor has not released this to students".
+ *
+ *  #172 audit (SEC-001): the three statuses were spelled out inline at each
+ *  gate, and the two grading routes widened to TAs were given no gate at
+ *  all -- so a TA denied `can_view_drafts` could still read a hidden
+ *  homework's title, due date and section titles through the submissions
+ *  dashboard, content the detail route explicitly 404s them for.
+ *
+ *  #197 (#172 re-audit, MNT-020): the five gates that key on release state
+ *  are the instructor list route, the detail route, the submissions
+ *  dashboard, the section-answer read, and the student list in
+ *  studentHomeworks.ts. An earlier version of this comment said "every
+ *  route" and "the four gates" while the student list still spelled the
+ *  triple out inline -- so the one gate protecting students was the one the
+ *  comment had quietly written out of the count. Naming them is the point:
+ *  a reader adding a status can check the list rather than trust a number. */
+const UNRELEASED_STATUSES: ReadonlySet<HomeworkStatus> = new Set([
+  "draft",
+  "scheduled",
+  "hidden",
+]);
+
+export function isUnreleased(status: HomeworkStatus): boolean {
+  return UNRELEASED_STATUSES.has(status);
+}
+
 export function deriveHomeworkStatus(hw: {
   dueDate: Date;
   publishedAt: Date | null;

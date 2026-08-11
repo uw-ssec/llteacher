@@ -32,12 +32,33 @@ export function requireCourseMember(courseIdParam = "courseId") {
   };
 }
 
+/** Authoring authority. Keep using this for anything that mutates course
+ *  content -- create/edit/delete/publish/hide. */
 export function requireInstructorOf(courseIdParam = "courseId") {
   return (handler: GuardedHandler) => async (c: Context<AppEnv>) => {
     const authContext = getAuthContext(c);
     const courseId = c.req.param(courseIdParam);
     if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
       return c.json({ error: "Instructor access denied" }, 403);
+    }
+    return handler(c);
+  };
+}
+
+/** Grading authority (#172): strictly wider than requireInstructorOf --
+ *  admits `ta` alongside instructor/admin. Use this for routes that *read*
+ *  student work; keep requireInstructorOf for routes that author content.
+ *
+ *  Deliberately a separate guard rather than a parameter on
+ *  requireInstructorOf: the two answer different questions, and a boolean
+ *  flag at each call site would make the wider case easy to select by
+ *  accident. The narrower guard stays the default. */
+export function requireGraderOf(courseIdParam = "courseId") {
+  return (handler: GuardedHandler) => async (c: Context<AppEnv>) => {
+    const authContext = getAuthContext(c);
+    const courseId = c.req.param(courseIdParam);
+    if (!authContext || !courseId || !authContext.isGraderOf(courseId)) {
+      return c.json({ error: "Grader access denied" }, 403);
     }
     return handler(c);
   };

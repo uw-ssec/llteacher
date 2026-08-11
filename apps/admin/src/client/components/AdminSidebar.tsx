@@ -25,6 +25,15 @@ export type AdminSidebarProps = {
   onNavigate: (key: AdminNavKey) => void;
   onNewHomework: () => void;
   onNewLLMConfig: () => void;
+  /** #172: false for a TA, who may read this console but not author in it.
+     The QUICK ACTIONS block and any authoring-only nav entry are omitted
+     rather than shown disabled -- a disabled control still advertises an
+     action the caller can never complete.
+
+     Required, not defaulted: a permission-shaped prop that falls back to
+     "allowed" when a caller forgets to thread it fails open, silently, with
+     no compile error (#172 audit, MNT-003). */
+  canAuthor: boolean;
   /** When true, the sidebar collapses to a 64px rail showing only icons. */
   isCollapsed?: boolean;
   /** Called when the collapse toggle is clicked. */
@@ -36,13 +45,21 @@ type NavItem = {
   label: string;
   icon: React.ReactNode;
   description: string;
+  /** #172 audit: entries whose backing endpoint is instructor-only. Rendering
+     them for a TA produced a reachable surface whose every request 403s --
+     the precise defect this feature exists to remove, reintroduced at a
+     different nav item. */
+  authorOnly?: boolean;
 };
 
 const NAV_ITEMS: NavItem[] = [
   { key: "homeworks",    label: "Homeworks",   icon: <BookOpen size={15} weight="regular" />,      description: "Course assignments" },
   { key: "submissions",  label: "Submissions", icon: <ClipboardText size={15} weight="regular" />, description: "Student work" },
   { key: "llm-configs",  label: "LLM configs", icon: <Sparkle size={15} weight="regular" />,       description: "Tutor models" },
-  { key: "students",     label: "Students",    icon: <Users size={15} weight="regular" />,         description: "Course roster" },
+  // #172 audit (USE-004): named for what the page is. "Students / Course
+  // roster" pointed at the one role this page does not list, and was the
+  // only entry point to it.
+  { key: "students",     label: "TA permissions", icon: <Users size={15} weight="regular" />,      description: "Grant solutions and drafts", authorOnly: true },
 ];
 
 export function AdminSidebar({
@@ -50,6 +67,7 @@ export function AdminSidebar({
   onNavigate,
   onNewHomework,
   onNewLLMConfig,
+  canAuthor,
   isCollapsed = false,
   onToggleCollapse,
 }: AdminSidebarProps) {
@@ -80,7 +98,7 @@ export function AdminSidebar({
 
       <nav className="admin-sidebar__nav">
         <ul className="admin-sidebar__nav-list">
-          {NAV_ITEMS.map((item) => {
+          {NAV_ITEMS.filter((item) => canAuthor || !item.authorOnly).map((item) => {
             const isActive = item.key === active;
             return (
               <li key={item.key}>
@@ -110,31 +128,35 @@ export function AdminSidebar({
         </ul>
       </nav>
 
-      <div className="admin-sidebar__divider" />
+      {canAuthor && (
+        <>
+          <div className="admin-sidebar__divider" />
 
-      <div className="admin-sidebar__quick">
-        <div className="admin-sidebar__quick-label">QUICK ACTIONS</div>
-        <button
-          type="button"
-          className="admin-sidebar__quick-action"
-          onClick={onNewHomework}
-          aria-label={isCollapsed ? "New homework" : undefined}
-          title={isCollapsed ? "New homework" : undefined}
-        >
-          <Plus size={13} weight="bold" aria-hidden="true" />
-          <span className="admin-sidebar__quick-action-label">New homework</span>
-        </button>
-        <button
-          type="button"
-          className="admin-sidebar__quick-action"
-          onClick={onNewLLMConfig}
-          aria-label={isCollapsed ? "New LLM config" : undefined}
-          title={isCollapsed ? "New LLM config" : undefined}
-        >
-          <Plus size={13} weight="bold" aria-hidden="true" />
-          <span className="admin-sidebar__quick-action-label">New LLM config</span>
-        </button>
-      </div>
+          <div className="admin-sidebar__quick">
+            <div className="admin-sidebar__quick-label">QUICK ACTIONS</div>
+            <button
+              type="button"
+              className="admin-sidebar__quick-action"
+              onClick={onNewHomework}
+              aria-label={isCollapsed ? "New homework" : undefined}
+              title={isCollapsed ? "New homework" : undefined}
+            >
+              <Plus size={13} weight="bold" aria-hidden="true" />
+              <span className="admin-sidebar__quick-action-label">New homework</span>
+            </button>
+            <button
+              type="button"
+              className="admin-sidebar__quick-action"
+              onClick={onNewLLMConfig}
+              aria-label={isCollapsed ? "New LLM config" : undefined}
+              title={isCollapsed ? "New LLM config" : undefined}
+            >
+              <Plus size={13} weight="bold" aria-hidden="true" />
+              <span className="admin-sidebar__quick-action-label">New LLM config</span>
+            </button>
+          </div>
+        </>
+      )}
 
       <div className="admin-sidebar__spacer" />
 

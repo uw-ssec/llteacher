@@ -169,9 +169,23 @@ export class UserIdentityService {
     // roster removal), which must stay dropped. The droppedReason tag
     // written by deactivateByWorkosUserId is what makes that distinction
     // possible; restoring on droppedAt alone would be indiscriminate.
+    //
+    // #172 re-audit (SEC-006): restores the *membership*, never the
+    // capability grants that sat on it. deactivateByWorkosUserId already
+    // clears both flags on the way down, so this is belt-and-braces -- but
+    // it is the half that states the invariant at the point where access is
+    // handed back, and it holds even for a membership dropped by some future
+    // path that forgets to clear them. Re-granting the answer key is an
+    // instructor's deliberate act; it must not be a side effect of the
+    // grantee logging in.
     await this.db
       .update(courseMemberships)
-      .set({ droppedAt: null, droppedReason: null })
+      .set({
+        droppedAt: null,
+        droppedReason: null,
+        canViewSolutions: false,
+        canViewDrafts: false,
+      })
       .where(
         and(
           eq(courseMemberships.userId, existing.id),

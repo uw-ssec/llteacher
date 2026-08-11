@@ -1,0 +1,2 @@
+ALTER TABLE "course_memberships" ADD COLUMN "can_view_solutions" boolean DEFAULT false NOT NULL;--> statement-breakpoint
+ALTER TABLE "course_memberships" ADD COLUMN "can_view_drafts" boolean DEFAULT false NOT NULL;

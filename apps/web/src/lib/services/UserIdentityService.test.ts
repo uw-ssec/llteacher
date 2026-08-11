@@ -176,7 +176,18 @@ describe("UserIdentityService.createOrClaimUser", () => {
     // #142: reactivation also restores memberships this deactivation
     // dropped -- the mock can't express the droppedReason WHERE predicate,
     // but proves the restore write itself clears both columns.
-    expect(membershipRestore).toEqual({ droppedAt: null, droppedReason: null });
+    //
+    // #172 re-audit (SEC-006): and that it restores the MEMBERSHIP without
+    // the capability grants that sat on it. Asserted as an exact object, so
+    // quietly carrying a grant back through a restore fails here. Re-granting
+    // the answer key is an instructor's deliberate act; it must never be a
+    // side effect of the grantee logging back in.
+    expect(membershipRestore).toEqual({
+      droppedAt: null,
+      droppedReason: null,
+      canViewSolutions: false,
+      canViewDrafts: false,
+    });
   });
 
   it("re-encrypts email when it changed on the WorkOS side since the last login", async () => {
@@ -337,7 +348,9 @@ describe("UserIdentityService.createOrClaimUser", () => {
     // the mock's courseMemberships branch above), not another merge.
     expect(membershipUpdates).toEqual([
       { userId: "existing-user-1" },
-      { droppedAt: null, droppedReason: null },
+      // #172 re-audit (SEC-006): the restore brings the membership back
+      // without the capability grants that were on it when it was dropped.
+      { droppedAt: null, droppedReason: null, canViewSolutions: false, canViewDrafts: false },
     ]);
     // course-B existed on both -- the pending row's duplicate is dropped,
     // not the row that already had it.

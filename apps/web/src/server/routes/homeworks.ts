@@ -1,4 +1,4 @@
-import { Hono, type Context } from "hono";
+import { type Context } from "hono";
 import { makeDb } from "../../db/client";
 import {
   listHomeworksForCourse,
@@ -10,12 +10,13 @@ import {
   updateHomeworkPublishState,
   updateHomeworkHideState,
   homeworkHasStudentActivity,
+  isUnreleased,
 } from "../repositories/homeworks";
 import { getOrgScopesForUser } from "../repositories/users";
 import { getOrgScopeForCourse } from "../repositories/organizations";
 import { llmConfigBelongsToOrg } from "../repositories/llmConfigs";
 import { courseScopeFromAuthContext } from "../repositories/scope";
-import { requireCourseMember, requireInstructorOf } from "../utils/guards";
+import { UUID_RE } from "../utils/uuid";
 import { AUDIT_ACTIONS, auditBestEffort } from "../utils/audit";
 import { logServerError } from "../utils/errors";
 import type { AuthContext } from "../middleware/roles";
@@ -29,8 +30,6 @@ import type {
   HomeworkUpdateBody,
   SectionResponse,
 } from "../../shared/types";
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface CreateHomeworkBody {
   title?: unknown;
@@ -55,9 +54,12 @@ export async function listHomeworksHandler(c: Context<AppEnv>) {
   const rows = await listHomeworksForCourse(db, scope);
   // #166: instructors continue to see hidden/expired homeworks (labelled as
   // such); students never see them, same gate as draft/scheduled.
-  const visibleRows = authContext!.isInstructorOf(courseId!)
+  // #172: now keyed on the unreleased-content capability rather than the
+  // authoring role, so a TA granted `can_view_drafts` on this course sees
+  // them too. Instructors/admins satisfy it unconditionally.
+  const visibleRows = authContext!.canViewDraftsIn(courseId!)
     ? rows
-    : rows.filter((hw) => hw.status !== "draft" && hw.status !== "scheduled" && hw.status !== "hidden");
+    : rows.filter((hw) => !isUnreleased(hw.status));
   return c.json({ homeworks: visibleRows });
 }
 
@@ -70,7 +72,15 @@ export async function createHomeworkHandler(c: Context<AppEnv>) {
   // listHomeworksHandler -- so a dropped/reordered guard fails closed with
   // a 403 instead of throwing past this point (unguarded .memberships
   // access) into the generic 503 handler.
-  if (!authContext || !courseId) {
+  // #200 (#172 re-audit, MNT-025): the isInstructorOf re-check that every
+  // sibling authoring handler already had and this one did not. Not reachable
+  // through the production route table -- requireInstructorOf wraps it there,
+  // and routeGuards.test.ts pins that -- so this is defence in depth, closing
+  // the gap the moment a new sub-app or test harness wires the handler
+  // unguarded, which is exactly how the drift #172 fixed happened the first
+  // time. It also makes true a comment in courseMemberships.ts that claimed
+  // "every other instructor-gated handler" re-checks; four of five did.
+  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
     return c.json({ error: "Course access denied" }, 403);
   }
 
@@ -129,7 +139,22 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
-  const result = await getHomeworkById(db, scope, homeworkId!);
+  // #206 (#172 re-audit, SEC-020): shape-checked before the id reaches a
+  // uuid-typed column comparison. Postgres raises `invalid input syntax for
+  // type uuid` on a malformed value, app.onError maps any throw to a generic
+  // 503, and a permanent client error therefore reported itself as a backend
+  // outage -- pollutable by any authenticated member on attacker-chosen
+  // input. SEC-003 fixed exactly this for membershipId and its shared helper
+  // claimed to cover "every UUID path param"; three were left behind.
+  //
+  // Returns this route's OWN not-found body, not a shared one: a distinct
+  // message here would distinguish "malformed" from "no such row" and hand
+  // back an existence oracle.
+  if (!homeworkId || !UUID_RE.test(homeworkId)) {
+    return c.json({ error: "Homework not found" }, 404);
+  }
+
+  const result = await getHomeworkById(db, scope, homeworkId);
   if (!result) {
     return c.json({ error: "Homework not found" }, 404);
   }
@@ -140,13 +165,21 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
   // without the other -- reviewed together in #154 because they're the same
   // handler and the same class of bug (a role check the list route and the
   // student repository both already apply, that this route skipped).
-  const isInstructor = authContext!.isInstructorOf(courseId!);
+  // #172: three independent questions, previously conflated into one
+  // isInstructorOf check. Separated because a TA can hold any subset:
+  //   canEdit         -- authoring; never granted to a TA
+  //   canSeeUnreleased -- draft/scheduled/hidden visibility; TA opt-in
+  //   canSeeSolutions  -- the answer key; TA opt-in, granted separately
+  // Instructors/admins satisfy all three unconditionally.
+  const canEdit = authContext!.isInstructorOf(courseId!);
+  const canSeeUnreleased = authContext!.canViewDraftsIn(courseId!);
+  const canSeeSolutions = authContext!.canViewSolutionsIn(courseId!);
 
   const status = deriveHomeworkStatus(result.homework);
-  // #166: hidden/expired is the same gate as draft/scheduled for a
-  // non-instructor -- indistinguishable from not-found, so a guessed/leaked
-  // UUID can't be used to confirm a hidden/draft homework is real.
-  if (!isInstructor && (status === "draft" || status === "scheduled" || status === "hidden")) {
+  // #166: hidden/expired is the same gate as draft/scheduled for anyone
+  // without unreleased-content access -- indistinguishable from not-found,
+  // so a guessed/leaked UUID can't confirm a hidden/draft homework is real.
+  if (!canSeeUnreleased && isUnreleased(status)) {
     return c.json({ error: "Homework not found" }, 404);
   }
 
@@ -156,7 +189,7 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
     content: s.content,
     order: s.order,
     type: s.type,
-    solution: isInstructor && s.solution ? { id: s.solution.id, content: s.solution.content } : null,
+    solution: canSeeSolutions && s.solution ? { id: s.solution.id, content: s.solution.content } : null,
     createdAt: s.createdAt.toISOString(),
     updatedAt: s.updatedAt.toISOString(),
   }));
@@ -175,7 +208,7 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
     expiresAt: result.homework.expiresAt?.toISOString() ?? null,
     sections: sectionsResponse,
     widgets: result.widgets.map((w) => ({ id: w.id, prePrompt: w.prePrompt, postPrompt: w.postPrompt, order: w.order })),
-    ...(isInstructor && { editableBy: true }),
+    ...(canEdit && { editableBy: true }),
   };
 
   return c.json(body);
@@ -193,6 +226,22 @@ export async function updateHomeworkHandler(c: Context<AppEnv>) {
   // throwing past this point into the generic 503 handler.
   if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
     return c.json({ error: "Instructor access denied" }, 403);
+  }
+
+  // #211 (review of #209): SEC-020 shape-checked :homeworkId on the three
+  // read routes but left the four mutation routes in this file passing it
+  // straight to a uuid-typed column comparison -- same bug class, same
+  // consequence (Postgres `invalid input syntax for type uuid` -> app.onError
+  // -> a generic 503 for what is a permanent client error). Instructor-gated,
+  // so not an authorization or disclosure issue, only a misreported one.
+  //
+  // Placed after the authorization guard and before body parsing, so the
+  // ordering is uniform across all four handlers: authorize, then validate
+  // the path param, then validate the body. Returns this route's own
+  // not-found body -- a distinct "malformed" message would separate it from
+  // "no such row" and hand back an existence oracle.
+  if (!homeworkId || !UUID_RE.test(homeworkId)) {
+    return c.json({ error: "Homework not found" }, 404);
   }
 
   let body: HomeworkUpdateBody;
@@ -292,6 +341,12 @@ export async function deleteHomeworkHandler(c: Context<AppEnv>) {
   if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
     return c.json({ error: "Instructor access denied" }, 403);
   }
+
+  // #211, same guard and same rationale as updateHomeworkHandler above.
+  if (!homeworkId || !UUID_RE.test(homeworkId)) {
+    return c.json({ error: "Homework not found" }, 404);
+  }
+
   const scope = courseScopeFromAuthContext(authContext, courseId);
   if (!scope) return c.json({ error: "Course access denied" }, 403);
 
@@ -308,6 +363,11 @@ export async function publishHomeworkHandler(c: Context<AppEnv>) {
 
   if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
     return c.json({ error: "Instructor access denied" }, 403);
+  }
+
+  // #211, same guard and same rationale as updateHomeworkHandler above.
+  if (!homeworkId || !UUID_RE.test(homeworkId)) {
+    return c.json({ error: "Homework not found" }, 404);
   }
 
   let body: HomeworkPublishBody;
@@ -402,6 +462,11 @@ export async function updateHomeworkHideHandler(c: Context<AppEnv>) {
     return c.json({ error: "Instructor access denied" }, 403);
   }
 
+  // #211, same guard and same rationale as updateHomeworkHandler above.
+  if (!homeworkId || !UUID_RE.test(homeworkId)) {
+    return c.json({ error: "Homework not found" }, 404);
+  }
+
   let body: HomeworkHideBody;
   try {
     body = await c.req.json<HomeworkHideBody>();
@@ -454,14 +519,3 @@ export async function updateHomeworkHideHandler(c: Context<AppEnv>) {
   };
   return c.json(responseBody);
 }
-
-// Sub-app preserved for direct unit testing; production routing happens via
-// app.get/post("/api/courses/:courseId/homeworks", ...) in server/index.ts.
-export const homeworksRoutes = new Hono<AppEnv>();
-homeworksRoutes.get("/", requireCourseMember()(listHomeworksHandler));
-homeworksRoutes.post("/", requireInstructorOf()(createHomeworkHandler));
-homeworksRoutes.get("/:homeworkId", requireCourseMember()(getHomeworkDetailHandler));
-homeworksRoutes.patch("/:homeworkId", requireInstructorOf()(updateHomeworkHandler));
-homeworksRoutes.delete("/:homeworkId", requireInstructorOf()(deleteHomeworkHandler));
-homeworksRoutes.patch("/:homeworkId/publish", requireInstructorOf()(publishHomeworkHandler));
-homeworksRoutes.patch("/:homeworkId/hide", requireInstructorOf()(updateHomeworkHideHandler));

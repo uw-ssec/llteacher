@@ -1,9 +1,10 @@
-import { Hono, type Context } from "hono";
+import { type Context } from "hono";
 import { makeDb } from "../../db/client";
+import { UUID_RE } from "../utils/uuid";
 import { upsertSectionAnswer, getSectionAnswer } from "../repositories/sectionAnswers";
 import { getOrgScopesForUser } from "../repositories/users";
+import { isUnreleased } from "../repositories/homeworks";
 import { courseScopeFromAuthContext } from "../repositories/scope";
-import { requireRole, requireInstructorOf } from "../utils/guards";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { SectionAnswerBody, SectionAnswerResponse } from "../../shared/types";
@@ -64,19 +65,43 @@ export async function getSectionAnswerHandler(c: Context<AppEnv>) {
   const studentId = c.req.param("studentId");
   const authContext = c.get("authContext") as AuthContext | undefined;
 
-  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
-    return c.json({ error: "Instructor access denied" }, 403);
+  // #172: grading authority, not authoring -- a TA may read a student's
+  // answer for the course they assist on.
+  if (!authContext || !courseId || !authContext.isGraderOf(courseId)) {
+    return c.json({ error: "Grader access denied" }, 403);
   }
 
-  // #174: mint a CourseScope, not an OrgScope -- isInstructorOf(courseId)
+  // #174: mint a CourseScope, not an OrgScope -- isGraderOf(courseId)
   // above only proves membership in *this* course, so the query below must
   // stay constrained to it rather than widening to the whole org.
   const scope = courseScopeFromAuthContext(authContext, courseId);
   if (!scope) return c.json({ error: "Course access denied" }, 403);
 
   const db = makeDb(c.env.DATABASE_URL);
-  const answer = await getSectionAnswer(db, scope, sectionId!, studentId!);
+  // #206 (#172 re-audit, SEC-020): shape-checked before the id reaches a
+  // uuid-typed column comparison. Postgres raises `invalid input syntax for
+  // type uuid` on a malformed value, app.onError maps any throw to a generic
+  // 503, and a permanent client error therefore reported itself as a backend
+  // outage -- pollutable by any authenticated member on attacker-chosen
+  // input. SEC-003 fixed exactly this for membershipId and its shared helper
+  // claimed to cover "every UUID path param"; three were left behind.
+  //
+  // Returns this route's OWN not-found body, not a shared one: a distinct
+  // message here would distinguish "malformed" from "no such row" and hand
+  // back an existence oracle.
+  if (!sectionId || !UUID_RE.test(sectionId) || !studentId || !UUID_RE.test(studentId)) {
+    return c.json({ error: "Answer not found" }, 404);
+  }
+
+  const answer = await getSectionAnswer(db, scope, sectionId, studentId);
   if (!answer) return c.json({ error: "Answer not found" }, 404);
+
+  // #172 audit (SEC-001): same gate as the submissions dashboard and the
+  // homework detail route -- grading authority does not carry access to a
+  // homework the instructor has withdrawn from release.
+  if (!authContext.canViewDraftsIn(courseId) && isUnreleased(answer.homeworkStatus)) {
+    return c.json({ error: "Answer not found" }, 404);
+  }
 
   const responseBody: SectionAnswerResponse = {
     id: answer.id,
@@ -89,15 +114,3 @@ export async function getSectionAnswerHandler(c: Context<AppEnv>) {
   return c.json(responseBody);
 }
 
-// Sub-app preserved for direct unit testing; production routing happens via
-// app.patch/get(...) in server/index.ts (see homeworks.ts / submissions.ts
-// for the same pattern). The two routes have no common URL prefix (one is
-// student-facing and courseId-less, the other instructor-facing and
-// course-scoped), so both are registered here with their full production
-// path rather than a stripped-prefix relative one.
-export const sectionAnswersRoutes = new Hono<AppEnv>();
-sectionAnswersRoutes.patch("/api/sections/:sectionId/answer", requireRole(["student"])(submitSectionAnswerHandler));
-sectionAnswersRoutes.get(
-  "/api/courses/:courseId/sections/:sectionId/answers/:studentId",
-  requireInstructorOf()(getSectionAnswerHandler),
-);

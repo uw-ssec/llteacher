@@ -4,6 +4,7 @@ import { submitSectionHandler, getHomeworkSubmissionsHandler } from "./submissio
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { SubmissionResponse } from "../../shared/types";
+import { fakeAuthContext, fakeMembership } from "../testing/authContext";
 
 // ENCRYPTION_KEY/BLIND_INDEX_KEY (real, random) let getHomeworkSubmissionsHandler
 // construct a real IdentityCipher via loadIdentityCipherKeys -- same
@@ -26,14 +27,6 @@ vi.mock("../repositories/submissions", () => ({
 vi.mock("../repositories/users", () => ({ getOrgScopesForUser: (...a: unknown[]) => getOrgScopesForUserMock(...a) }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
-function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
-  const memberships = overrides.memberships ?? [];
-  return {
-    session: { userId: "u1", workosUserId: "w1", sessionEpoch: 0, issuedAt: 0, expiresAt: 0 },
-    memberships, hasRole: (r) => memberships.some((m) => m.role === r),
-    isMemberOf: () => false, isInstructorOf: () => false, ...overrides,
-  };
-}
 function buildApp(authContext: AuthContext | undefined) {
   const app = new Hono<AppEnv>();
   app.use("*", async (c, next) => { if (authContext) c.set("authContext", authContext); await next(); });
@@ -90,14 +83,14 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId/submissions", () => {
   it("denies a non-instructor with 403", async () => {
     const res = await buildSubmissionsApp(
       fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
-    ).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
     expect(res.status).toBe(403);
   });
 
   it("denies a student with 403", async () => {
     const res = await buildSubmissionsApp(
       fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false, hasRole: (r) => r === "student" }),
-    ).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
     expect(res.status).toBe(403);
   });
 
@@ -108,8 +101,8 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId/submissions", () => {
       aggregateStats: { totalStudents: 0, activeStudents: 0, inactiveStudents: 0, totalSubmissions: 0, submissionRate: 0 },
     });
     const res = await buildSubmissionsApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { homeworkId: string };
     expect(body.homeworkId).toBe("hw-1");
@@ -118,8 +111,107 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId/submissions", () => {
   it("returns 404 when the homework isn't found in scope", async () => {
     getHomeworkSubmissionsMatrixMock.mockReset().mockResolvedValue(null);
     const res = await buildSubmissionsApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1/submissions", {}, TEST_ENV);
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
     expect(res.status).toBe(404);
+  });
+});
+
+/** #172: the submissions dashboard is grading, not authoring -- a TA of the
+ *  course may read it, and needs no capability grant to do so. The grants
+ *  govern solutions and unreleased content, not student work. */
+describe("GET .../submissions — grader access (#172)", () => {
+  function buildSubmissionsApp(authContext: AuthContext | undefined) {
+    const app = new Hono<AppEnv>();
+    app.use("*", async (c, next) => { if (authContext) c.set("authContext", authContext); await next(); });
+    app.get("/api/courses/:courseId/homeworks/:homeworkId/submissions", (c) => getHomeworkSubmissionsHandler(c));
+    return app;
+  }
+
+  const MATRIX = {
+    homeworkId: "hw-1", homeworkTitle: "HW 1", homeworkDueDate: "2099-01-01T00:00:00.000Z",
+    sectionHeaders: [], students: [], missingSectionWarnings: [],
+    aggregateStats: { totalStudents: 0, activeStudents: 0, inactiveStudents: 0, totalSubmissions: 0, submissionRate: 0 },
+  };
+
+  it("allows a TA with no capability grants at all", async () => {
+    getHomeworkSubmissionsMatrixMock.mockReset().mockResolvedValue(MATRIX);
+    const res = await buildSubmissionsApp(
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "ta" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
+    expect(res.status).toBe(200);
+  });
+
+  it("denies a student of the same course", async () => {
+    getHomeworkSubmissionsMatrixMock.mockReset().mockResolvedValue(MATRIX);
+    const res = await buildSubmissionsApp(
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "student" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
+    expect(res.status).toBe(403);
+  });
+
+  it("denies a TA of a different course", async () => {
+    getHomeworkSubmissionsMatrixMock.mockReset().mockResolvedValue(MATRIX);
+    const res = await buildSubmissionsApp(
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-b", role: "ta" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
+    expect(res.status).toBe(403);
+    expect(getHomeworkSubmissionsMatrixMock).not.toHaveBeenCalled();
+  });
+});
+
+/** #172 audit (SEC-001): grading authority does not carry access to content
+ *  the instructor has withdrawn from release. Before this gate, a TA denied
+ *  can_view_drafts could still read a hidden homework's title, due date and
+ *  section titles here -- content getHomeworkDetailHandler 404s them for. */
+describe("GET .../submissions — unreleased-content gate (#172 audit)", () => {
+  function buildSubmissionsApp(authContext: AuthContext | undefined) {
+    const app = new Hono<AppEnv>();
+    app.use("*", async (c, next) => { if (authContext) c.set("authContext", authContext); await next(); });
+    app.get("/api/courses/:courseId/homeworks/:homeworkId/submissions", (c) => getHomeworkSubmissionsHandler(c));
+    return app;
+  }
+  const matrixWith = (homeworkStatus: string) => ({
+    homeworkId: "hw-1", homeworkStatus, homeworkTitle: "Secret HW",
+    homeworkDueDate: "2099-01-01T00:00:00.000Z",
+    sectionHeaders: [{ id: "s1", order: 1, title: "Unreleased section" }],
+    students: [], missingSectionWarnings: [],
+    aggregateStats: { totalStudents: 0, activeStudents: 0, inactiveStudents: 0, totalSubmissions: 0, submissionRate: 0 },
+  });
+  const req = (ctx: AuthContext) =>
+    buildSubmissionsApp(ctx).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/submissions", {}, TEST_ENV);
+
+  it.each(["draft", "scheduled", "hidden"])("404s %s for an ungranted TA", async (status) => {
+    getHomeworkSubmissionsMatrixMock.mockReset().mockResolvedValue(matrixWith(status));
+    const res = await req(
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "ta" })] }),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("returns a hidden homework to a TA granted canViewDrafts", async () => {
+    getHomeworkSubmissionsMatrixMock.mockReset().mockResolvedValue(matrixWith("hidden"));
+    const res = await req(
+      fakeAuthContext({
+        memberships: [fakeMembership({ courseId: "course-a", role: "ta", canViewDrafts: true })],
+      }),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("returns a hidden homework to an instructor unconditionally", async () => {
+    getHomeworkSubmissionsMatrixMock.mockReset().mockResolvedValue(matrixWith("hidden"));
+    const res = await req(
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("still returns an active homework to an ungranted TA", async () => {
+    getHomeworkSubmissionsMatrixMock.mockReset().mockResolvedValue(matrixWith("active"));
+    const res = await req(
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "ta" })] }),
+    );
+    expect(res.status).toBe(200);
   });
 });
