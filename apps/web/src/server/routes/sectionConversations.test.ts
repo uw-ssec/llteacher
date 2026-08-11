@@ -20,7 +20,7 @@ const restartMock = vi.fn();
 const getByIdMock = vi.fn();
 const getActiveMock = vi.fn();
 const getMessagesMock = vi.fn();
-const getOrgScopesForUserMock = vi.fn();
+const getOrgScopeForCourseMock = vi.fn();
 
 // The access predicates are NOT mocked -- they are the rule under test at
 // this layer, and stubbing them would let a route wire them backwards while
@@ -37,13 +37,21 @@ vi.mock("../repositories/sectionConversations", async (importOriginal) => {
     getSectionConversationMessages: (...a: unknown[]) => getMessagesMock(...a),
   };
 });
-vi.mock("../repositories/users", () => ({
-  getOrgScopesForUser: (...a: unknown[]) => getOrgScopesForUserMock(...a),
-}));
+// #239: the restart handler resolves the org from the course in the path.
+vi.mock("../repositories/organizations", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../repositories/organizations")>();
+  return { ...actual, getOrgScopeForCourse: (...a: unknown[]) => getOrgScopeForCourseMock(...a) };
+});
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
+/** Mirrors server/index.ts's app.onError so a rethrown error is observed the
+ *  way production observes it: logged, and answered with the generic 503.
+ *  Without this the test app would report Hono's default 500 and the
+ *  distinction #236 is about -- 404 vs. "the server had a problem" -- would
+ *  not actually be under test. */
 function buildApp(authContext: AuthContext | undefined) {
   const app = new Hono<AppEnv>();
+  app.onError((_err, c) => c.json({ error: "SERVICE_UNAVAILABLE" }, 503));
   app.use("*", async (c, next) => {
     if (authContext) c.set("authContext", authContext);
     await next();
@@ -83,7 +91,7 @@ beforeEach(() => {
   getByIdMock.mockReset();
   getActiveMock.mockReset();
   getMessagesMock.mockReset().mockResolvedValue([]);
-  getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
+  getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
 });
 
 describe("POST /api/courses/:courseId/sections/:sectionId/conversations", () => {
@@ -139,6 +147,40 @@ describe("POST /api/courses/:courseId/sections/:sectionId/conversations", () => 
       TEST_ENV,
     );
     expect(startMock.mock.calls[0]![2]).toMatchObject({ isTeacherTest: true });
+  });
+
+  it("lets an unexpected repository failure propagate instead of reporting 404 (#236)", async () => {
+    startMock.mockRejectedValue(new Error("connection terminated unexpectedly"));
+    const res = await buildApp(student()).request(
+      `/api/courses/${COURSE}/sections/${SECTION}/conversations`,
+      { method: "POST" },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(503);
+  });
+
+  it("returns 409 for a non-interactive section, not 404 (#241)", async () => {
+    const { SectionNotInteractiveError } = await import("../repositories/sectionConversations");
+    startMock.mockRejectedValue(new SectionNotInteractiveError());
+    const res = await buildApp(student()).request(
+      `/api/courses/${COURSE}/sections/${SECTION}/conversations`,
+      { method: "POST" },
+      TEST_ENV,
+    );
+    // The section exists and the caller can see it in the homework detail
+    // response -- a 404 would contradict what is already on their screen.
+    expect(res.status).toBe(409);
+  });
+
+  it("returns 404 for a missing section or non-member owner", async () => {
+    const { SectionNotFoundError } = await import("../repositories/sectionConversations");
+    startMock.mockRejectedValue(new SectionNotFoundError());
+    const res = await buildApp(student()).request(
+      `/api/courses/${COURSE}/sections/${SECTION}/conversations`,
+      { method: "POST" },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(404);
   });
 
   it("returns 409 when one already exists", async () => {
@@ -276,13 +318,33 @@ describe("POST /api/courses/:courseId/conversations/:conversationId/restart", ()
     expect(res.status).toBe(409);
   });
 
-  it("collapses not-found and not-owned into one 404", async () => {
-    restartMock.mockRejectedValue(new Error("Conversation is not owned by requester"));
+  it.each(["ConversationNotFoundError", "NotConversationOwnerError"] as const)(
+    "collapses %s into one opaque 404",
+    async (errorName) => {
+      const mod = await import("../repositories/sectionConversations");
+      restartMock.mockRejectedValue(new mod[errorName]());
+      const res = await buildApp(student()).request(
+        `/api/courses/${COURSE}/conversations/${CONV}/restart`,
+        { method: "POST" },
+        TEST_ENV,
+      );
+      expect(res.status).toBe(404);
+      // Same body either way -- a non-owner must not be able to tell that the
+      // conversation exists from the one they simply cannot see.
+      expect(await res.json()).toEqual({ error: "Conversation not found" });
+    },
+  );
+
+  it("lets an unexpected repository failure propagate instead of reporting 404 (#236)", async () => {
+    // A dropped connection is not a refusal this route knows how to
+    // translate. Before #236 the bare catch turned it into a routine 404,
+    // so a real outage never reached app.onError's log or its 503.
+    restartMock.mockRejectedValue(new Error("connection terminated unexpectedly"));
     const res = await buildApp(student()).request(
       `/api/courses/${COURSE}/conversations/${CONV}/restart`,
       { method: "POST" },
       TEST_ENV,
     );
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(503);
   });
 });

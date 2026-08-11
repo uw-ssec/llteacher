@@ -1,7 +1,7 @@
 import { type Context } from "hono";
 import { makeDb } from "../../db/client";
 import { UUID_RE } from "../utils/uuid";
-import { submitSection, getHomeworkSubmissionsMatrix } from "../repositories/submissions";
+import { submitSection, getHomeworkSubmissionsMatrix, TeacherTestNotSubmittableError } from "../repositories/submissions";
 import { isUnreleased } from "../repositories/homeworks";
 import { getOrgScopesForUser } from "../repositories/users";
 import { courseScopeFromAuthContext } from "../repositories/scope";
@@ -46,7 +46,13 @@ export async function submitSectionHandler(c: Context<AppEnv>) {
       isResubmission: result.isResubmission,
     };
     return c.json(body, result.isResubmission ? 200 : 201);
-  } catch {
+  } catch (err) {
+    // #242: the caller owns this conversation -- it is their own test run --
+    // so naming the real reason leaks nothing, and "not found or not
+    // accessible" would be simply false.
+    if (err instanceof TeacherTestNotSubmittableError) {
+      return c.json({ error: err.message }, 409);
+    }
     // submitSection (Task 16) throws two distinct messages -- "Conversation
     // not found or not accessible" vs "Conversation is not owned by
     // requester" -- deliberately mapped to the same uniform 403 here rather

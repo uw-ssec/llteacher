@@ -39,11 +39,79 @@ function greetingParts(text: string) {
   return [{ type: "text", text }];
 }
 
-export class SectionConversationExistsError extends Error {
+/* --------------------------------------------------------------------------
+   Typed errors (#236).
+
+   Every throw below is a class, not a plain Error, so route handlers can
+   catch exactly the conditions they know how to translate and let everything
+   else propagate to app.onError -- which logs it and returns 503. The first
+   draft of these routes ended in a bare `catch { return 404 }`, which meant a
+   dropped database connection was reported to the client as a routine
+   not-found and never logged.
+   -------------------------------------------------------------------------- */
+
+/** Base class so a route can catch "an expected repository refusal" in one
+ *  clause without enumerating every subclass, and so an unexpected error is
+ *  structurally excluded rather than excluded by a message match. */
+export class SectionConversationError extends Error {}
+
+export class SectionConversationExistsError extends SectionConversationError {
   constructor() {
     super("An active conversation already exists for this section");
     this.name = "SectionConversationExistsError";
   }
+}
+
+/** The section does not exist in this course, or the caller is not a member.
+ *  Deliberately one class for both: the route must not let a caller tell
+ *  those apart and use the difference to probe which sections exist. */
+export class SectionNotFoundError extends SectionConversationError {
+  constructor(message = "Section not found") {
+    super(message);
+    this.name = "SectionNotFoundError";
+  }
+}
+
+/** #164: the section exists and is visible to the caller, it just never has a
+ *  conversation. Distinct from SectionNotFoundError because reporting it as
+ *  "not found" contradicts what the client already has on screen (#241). */
+export class SectionNotInteractiveError extends SectionConversationError {
+  constructor() {
+    super("Section is not interactive and cannot hold a conversation");
+    this.name = "SectionNotInteractiveError";
+  }
+}
+
+/** The conversation is absent, soft-deleted, the wrong kind, or owned by
+ *  someone else. Kept as two subclasses so the repository still reports the
+ *  distinction (routes choose to collapse it); see the comment in
+ *  restartSectionConversation. */
+export class ConversationNotFoundError extends SectionConversationError {
+  constructor() {
+    super("Conversation not found or not accessible");
+    this.name = "ConversationNotFoundError";
+  }
+}
+
+export class NotConversationOwnerError extends SectionConversationError {
+  constructor() {
+    super("Conversation is not owned by requester");
+    this.name = "NotConversationOwnerError";
+  }
+}
+
+/** Postgres unique-violation SQLSTATE. */
+const PG_UNIQUE_VIOLATION = "23505";
+
+/** True when `err` is a Postgres unique-violation naming `constraint`.
+ *
+ *  Both drivers surface the SQLSTATE on a `code` property; neon-http also
+ *  carries `constraint`, and node-postgres does too. Checked structurally
+ *  rather than by message, which is locale- and version-dependent. */
+function isUniqueViolation(err: unknown, constraint: string): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const e = err as { code?: unknown; constraint?: unknown };
+  return e.code === PG_UNIQUE_VIOLATION && e.constraint === constraint;
 }
 
 type StartInput = {
@@ -87,7 +155,9 @@ export async function startSectionConversation(
       ),
     );
   if (!membership) {
-    throw new Error("Owner is not a member of this course scope");
+    // Same class as a genuinely missing section (#236/#241): a non-member
+    // must not learn from the error which sections exist.
+    throw new SectionNotFoundError();
   }
 
   const [section] = await db
@@ -102,14 +172,14 @@ export async function startSectionConversation(
     .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
     .where(and(eq(sections.id, input.sectionId), eq(homeworks.courseId, scope)));
   if (!section) {
-    throw new Error("Section not found in this course scope");
+    throw new SectionNotFoundError();
   }
   // #164: a non_interactive section has no conversation by design -- it
   // collects a single answer instead. Without this, a client could mint a
   // chat against one and the submissions matrix would report a conversation
   // for a section type that is defined never to have any.
   if (section.type === "non_interactive") {
-    throw new Error("Section is not interactive and cannot hold a conversation");
+    throw new SectionNotInteractiveError();
   }
 
   const [existing] = await db
@@ -130,23 +200,35 @@ export async function startSectionConversation(
   const greetingMessageId = crypto.randomUUID();
   const title = `Section ${section.order}: ${section.title}`;
 
-  await runAtomically(db, (t) => [
-    t.insert(conversations).values({
-      id: conversationId,
-      ownerUserId: input.ownerUserId,
-      courseId: scope,
-      sectionId: input.sectionId,
-      kind: "section",
-      title,
-      isTeacherTest: input.isTeacherTest,
-    }),
-    t.insert(messages).values({
-      id: greetingMessageId,
-      conversationId,
-      role: "assistant",
-      parts: greetingParts(sectionGreeting(section)),
-    }),
-  ]);
+  // #238: the pre-check above is a courtesy, not the guarantee -- it and the
+  // insert are separate round-trips, so a double-clicked "Start" can put two
+  // requests past it. conversations_owner_section_active_uq is what actually
+  // holds; translating its violation here means the racing caller gets the
+  // same 409 as the caller that lost the check, instead of a generic 503.
+  try {
+    await runAtomically(db, (t) => [
+      t.insert(conversations).values({
+        id: conversationId,
+        ownerUserId: input.ownerUserId,
+        courseId: scope,
+        sectionId: input.sectionId,
+        kind: "section",
+        title,
+        isTeacherTest: input.isTeacherTest,
+      }),
+      t.insert(messages).values({
+        id: greetingMessageId,
+        conversationId,
+        role: "assistant",
+        parts: greetingParts(sectionGreeting(section)),
+      }),
+    ]);
+  } catch (err) {
+    if (isUniqueViolation(err, "conversations_owner_section_active_uq")) {
+      throw new SectionConversationExistsError();
+    }
+    throw err;
+  }
 
   return { id: conversationId, title, greetingMessageId };
 }
@@ -203,10 +285,10 @@ export async function restartSectionConversation(
       ),
     );
   if (!owned) {
-    throw new Error("Conversation not found or not accessible");
+    throw new ConversationNotFoundError();
   }
   if (owned.ownerUserId !== requesterId) {
-    throw new Error("Conversation is not owned by requester");
+    throw new NotConversationOwnerError();
   }
 
   const [submission] = await db

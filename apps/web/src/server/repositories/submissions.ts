@@ -110,7 +110,7 @@ export async function submitSection(
   // test conversation is a perfectly valid section conversation, it just
   // isn't submittable.
   if (owned.isTeacherTest) {
-    throw new Error("Teacher test conversations cannot be submitted");
+    throw new TeacherTestNotSubmittableError();
   }
 
   const existing = await getSubmissionByConversation(db, scope, conversationId);
@@ -136,6 +136,17 @@ export async function submitSection(
  *  introduces `repositories/errors.ts` with `TenancyMismatchError`. Creating
  *  that same file from this branch would mean two branches racing to author
  *  one module. Move this class alongside that one once #212 lands. */
+/** #242: an instructor's own test conversation is not submittable. Typed so
+ *  submitSectionHandler can say that plainly instead of folding it into the
+ *  uniform "not found or not accessible" 403 -- the caller owns the
+ *  conversation, so naming the real reason leaks nothing. */
+export class TeacherTestNotSubmittableError extends Error {
+  constructor() {
+    super("Teacher test conversations cannot be submitted");
+    this.name = "TeacherTestNotSubmittableError";
+  }
+}
+
 export class SubmissionGradedError extends Error {
   constructor() {
     super("Submission has already been graded and cannot be restarted");

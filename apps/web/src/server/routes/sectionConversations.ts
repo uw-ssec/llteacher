@@ -9,9 +9,13 @@ import {
   getSectionConversationMessages,
   canReadSectionConversation,
   SectionConversationExistsError,
+  SectionNotFoundError,
+  SectionNotInteractiveError,
+  ConversationNotFoundError,
+  NotConversationOwnerError,
 } from "../repositories/sectionConversations";
+import { getOrgScopeForCourse } from "../repositories/organizations";
 import { SubmissionGradedError } from "../repositories/submissions";
-import { getOrgScopesForUser } from "../repositories/users";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
@@ -23,6 +27,20 @@ import type { AppEnv } from "../context";
    different resource, different access rules, and keeping them apart avoids
    two branches rewriting one file.
    -------------------------------------------------------------------------- */
+
+/** True only when the caller's membership in this course is `student`.
+ *
+ *  #237: deliberately not `!authContext.isInstructorOf(courseId)`. That
+ *  predicate is backed by AUTHOR_ROLES (instructor, admin), so a `ta` or
+ *  `observer` fails it and would be classified as a student. Roles other
+ *  than student are never doing the assignment, so the safe default for an
+ *  unrecognized or missing membership is "not a student" -- a conversation
+ *  wrongly marked as a teacher test is merely unsubmittable, whereas one
+ *  wrongly marked as a student's pollutes real coursework. */
+function isStudentOf(authContext: AuthContext, courseId: string): boolean {
+  const membership = authContext.memberships.find((m) => m.courseId === courseId);
+  return membership?.role === "student";
+}
 
 /** Shared shape for "the id in the path isn't even a UUID". Returns the same
  *  body a genuine miss returns, so shape is never an existence oracle --
@@ -49,10 +67,14 @@ export async function startSectionConversationHandler(c: Context<AppEnv>) {
     const created = await startSectionConversation(db, scope, {
       sectionId,
       ownerUserId: authContext.session.userId,
-      // #27: an instructor working a section is testing their own prompt,
-      // not doing the assignment. Recorded now rather than derived later --
-      // see the isTeacherTest column comment.
-      isTeacherTest: authContext.isInstructorOf(courseId!),
+      // #27/#237: anyone who is not a student working this section is
+      // testing it, not doing it. Derived from the caller's actual course
+      // role rather than isInstructorOf, whose AUTHOR_ROLES tier is
+      // instructor+admin only -- a TA or observer would otherwise be
+      // recorded as a student and their conversation would be submittable.
+      // Recorded now rather than derived later; see the isTeacherTest
+      // column comment for why storing beats deriving.
+      isTeacherTest: !isStudentOf(authContext, courseId!),
     });
     return c.json(created, 201);
   } catch (err) {
@@ -61,11 +83,22 @@ export async function startSectionConversationHandler(c: Context<AppEnv>) {
       // the resource just already exists. The client's move is to GET it.
       return c.json({ error: err.message }, 409);
     }
-    // startSectionConversation's remaining throws are all "you named
-    // something that isn't yours or isn't there" (non-member owner, section
-    // outside the course, non-interactive section). Uniform 404 so a
+    // #241: the section exists and the caller can see it -- it just never
+    // holds a conversation. Reporting that as 404 contradicts the homework
+    // detail response the client already rendered.
+    if (err instanceof SectionNotInteractiveError) {
+      return c.json({ error: err.message }, 409);
+    }
+    // Non-member owner and section-outside-course collapse to one 404, so a
     // caller can't probe which sections exist in courses they can see.
-    return c.json({ error: "Section not found" }, 404);
+    if (err instanceof SectionNotFoundError) {
+      return c.json({ error: err.message }, 404);
+    }
+    // #236: anything else is not a refusal this route knows how to
+    // translate -- a dropped connection, a constraint nobody anticipated.
+    // Rethrow so app.onError logs it and answers 503, instead of reporting
+    // an outage to the client as a routine not-found.
+    throw err;
   }
 }
 
@@ -171,13 +204,13 @@ export async function restartSectionConversationHandler(c: Context<AppEnv>) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
-  // Restarting voids a submission, which is an org-scoped write. Same
-  // single-org-per-user assumption submitSectionHandler already makes;
-  // restartSectionConversation's own ownership check is what actually
-  // narrows this to the right conversation.
-  const orgScopes = await getOrgScopesForUser(db, authContext.session.userId);
-  const orgScope = orgScopes[0];
-  if (!orgScope) return c.json({ error: "No organization membership found" }, 403);
+  // Restarting voids a submission, which is an org-scoped write. #239: the
+  // org comes from the course named in the path, not from the caller's
+  // membership list -- a course belongs to exactly one org, whereas
+  // getOrgScopesForUser(...)[0] picks an arbitrary one and silently 404s a
+  // legitimate restart for anyone who belongs to more than one.
+  const orgScope = await getOrgScopeForCourse(db, courseId!);
+  if (!orgScope) return c.json({ error: "Course access denied" }, 403);
 
   try {
     const result = await restartSectionConversation(
@@ -210,6 +243,11 @@ export async function restartSectionConversationHandler(c: Context<AppEnv>) {
     // one 404 -- the same reasoning submitSectionHandler documents: a
     // non-owner must not be able to tell the two apart and learn that a
     // conversation exists.
-    return notFound(c);
+    if (err instanceof ConversationNotFoundError || err instanceof NotConversationOwnerError) {
+      return notFound(c);
+    }
+    // #236: see startSectionConversationHandler -- unexpected failures must
+    // reach app.onError rather than being laundered into a 404.
+    throw err;
   }
 }

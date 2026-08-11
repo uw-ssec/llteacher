@@ -166,3 +166,63 @@ describe("restartSectionConversation (#27, #128)", () => {
     expect(batch).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("startSectionConversation constraint race (#238)", () => {
+  /** db double whose insert batch rejects with a Postgres unique violation,
+   *  the way a concurrent "Start" loses the race after both requests pass the
+   *  pre-check. */
+  function racingDb(constraint: string) {
+    const joinable: Record<string, unknown> = {
+      // membership found, section found, no existing conversation
+      where: async () => queue.shift() ?? [],
+      get innerJoin() {
+        return () => joinable;
+      },
+    };
+    const queue: unknown[][] = [
+      [{ id: "membership-1" }],
+      [{ id: "section-1", order: 1, title: "A", content: "c", type: "conversation" }],
+      [],
+    ];
+    return {
+      select: () => ({ from: () => joinable }),
+      insert: () => ({ values: () => "stmt" }),
+      batch: vi.fn().mockRejectedValue(Object.assign(new Error("duplicate key"), {
+        code: "23505",
+        constraint,
+      })),
+    } as unknown as Db;
+  }
+
+  it("translates the unique violation into the same 409 the pre-check produces", async () => {
+    const { startSectionConversation, SectionConversationExistsError } = await import(
+      "./sectionConversations"
+    );
+    const { unsafeCourseScope } = await import("./scope");
+
+    await expect(
+      startSectionConversation(racingDb("conversations_owner_section_active_uq"), unsafeCourseScope("course-1"), {
+        sectionId: "section-1",
+        ownerUserId: OWNER,
+        isTeacherTest: false,
+      }),
+    ).rejects.toBeInstanceOf(SectionConversationExistsError);
+  });
+
+  it("does not swallow a unique violation on some other constraint", async () => {
+    const { startSectionConversation, SectionConversationExistsError } = await import(
+      "./sectionConversations"
+    );
+    const { unsafeCourseScope } = await import("./scope");
+
+    // A 23505 naming a different constraint is not "you already started this
+    // section" -- laundering it into a 409 would hide a real bug.
+    const promise = startSectionConversation(racingDb("some_other_uq"), unsafeCourseScope("course-1"), {
+      sectionId: "section-1",
+      ownerUserId: OWNER,
+      isTeacherTest: false,
+    });
+    await expect(promise).rejects.toThrow("duplicate key");
+    await expect(promise).rejects.not.toBeInstanceOf(SectionConversationExistsError);
+  });
+});

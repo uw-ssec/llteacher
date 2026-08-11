@@ -20,10 +20,17 @@ const TEST_ENV = {
 const submitSectionMock = vi.fn();
 const getOrgScopesForUserMock = vi.fn();
 const getHomeworkSubmissionsMatrixMock = vi.fn();
-vi.mock("../repositories/submissions", () => ({
-  submitSection: (...a: unknown[]) => submitSectionMock(...a),
-  getHomeworkSubmissionsMatrix: (...a: unknown[]) => getHomeworkSubmissionsMatrixMock(...a),
-}));
+vi.mock("../repositories/submissions", async (importOriginal) => {
+  // importOriginal, not a bare factory: the handler now narrows on
+  // TeacherTestNotSubmittableError (#242), and a factory that omits the class
+  // makes `err instanceof undefined` throw inside the catch block.
+  const actual = await importOriginal<typeof import("../repositories/submissions")>();
+  return {
+    ...actual,
+    submitSection: (...a: unknown[]) => submitSectionMock(...a),
+    getHomeworkSubmissionsMatrix: (...a: unknown[]) => getHomeworkSubmissionsMatrixMock(...a),
+  };
+});
 vi.mock("../repositories/users", () => ({ getOrgScopesForUser: (...a: unknown[]) => getOrgScopesForUserMock(...a) }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
@@ -213,5 +220,23 @@ describe("GET .../submissions — unreleased-content gate (#172 audit)", () => {
       fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "ta" })] }),
     );
     expect(res.status).toBe(200);
+  });
+});
+
+describe("POST /api/conversations/:id/submit — teacher test (#242)", () => {
+  it("returns 409 naming the real reason, not the uniform 403", async () => {
+    const { TeacherTestNotSubmittableError } = await import("../repositories/submissions");
+    submitSectionMock.mockReset().mockRejectedValue(new TeacherTestNotSubmittableError());
+    getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
+
+    const res = await buildApp(
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "student" })] }),
+    ).request("/api/conversations/11111111-2222-4333-8444-555555555555/submit", { method: "POST" }, TEST_ENV);
+
+    // The caller owns this conversation -- it is their own test run -- so
+    // "not found or not accessible" would simply be false, and naming the
+    // real reason leaks nothing.
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toMatch(/Teacher test/);
   });
 });

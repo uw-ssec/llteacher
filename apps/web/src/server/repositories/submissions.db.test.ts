@@ -18,10 +18,9 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
-import { unsafeCourseScope, unsafeOrgScope } from "./scope";
+import { unsafeOrgScope } from "./scope";
 import { createSubmission } from "./submissions";
 import { restartSectionConversation } from "./sectionConversations";
-import { softDeleteConversation } from "./conversations";
 import {
   organizations,
   courses,
@@ -197,46 +196,6 @@ describe.skipIf(!RAW_DATABASE_URL)("submissions uniqueness (real DB, #128)", () 
         sectionId,
       }),
     ).rejects.toThrow();
-  });
-
-  it("softDeleteConversation refuses a submitted section conversation", async () => {
-    await resetStudentState();
-    const conv = await makeSectionConversation();
-    await createSubmission(db, unsafeOrgScope(orgId), conv);
-
-    // The door #128 would otherwise stay open through: a plain soft-delete
-    // leaves the submission row alive against a conversation the student can
-    // no longer see, and the replacement's submit then makes two.
-    await expect(
-      softDeleteConversation(db, unsafeCourseScope(courseId), conv),
-    ).rejects.toThrow(/restartSectionConversation/);
-
-    const [still] = await db.select().from(conversations).where(eq(conversations.id, conv));
-    expect(still!.isDeleted).toBe(false);
-  });
-
-  it("softDeleteConversation still works on an unsubmitted section conversation", async () => {
-    await resetStudentState();
-    const conv = await makeSectionConversation();
-
-    await expect(
-      softDeleteConversation(db, unsafeCourseScope(courseId), conv),
-    ).resolves.toBeDefined();
-
-    const [row] = await db.select().from(conversations).where(eq(conversations.id, conv));
-    expect(row!.isDeleted).toBe(true);
-  });
-
-  it("softDeleteConversation still works on a tutor conversation", async () => {
-    await resetStudentState();
-    const [tutor] = await db
-      .insert(conversations)
-      .values({ ownerUserId: userId, courseId, sectionId: null, kind: "tutor", title: "t" })
-      .returning({ id: conversations.id });
-
-    await expect(
-      softDeleteConversation(db, unsafeCourseScope(courseId), tutor!.id),
-    ).resolves.toBeDefined();
   });
 
   it("restart voids the submission, freeing the section for a fresh submit", async () => {

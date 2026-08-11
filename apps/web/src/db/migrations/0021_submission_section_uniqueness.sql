@@ -15,15 +15,32 @@
 ALTER TABLE "submissions" ADD COLUMN "user_id" uuid;--> statement-breakpoint
 ALTER TABLE "submissions" ADD COLUMN "section_id" uuid;--> statement-breakpoint
 
---> Backfill from the owning conversation. Every existing submission is
---> against a kind='section' conversation -- createSubmission has required
---> that since M2 -- so section_id is non-null for every row this touches,
---> and the SET NOT NULL below cannot fail on well-formed data.
+--> Backfill from the owning conversation.
+-->
+--> #240: `createSubmission` has refused non-section conversations since M2,
+--> but the SCHEMA never enforced it -- a submission against a `tutor`
+--> conversation (section_id NULL) was insertable, and this repo's own tests
+--> were creating exactly that shape until the change this migration belongs
+--> to. So the invariant holds for application-written rows only, and an
+--> existing database can legitimately violate it. Those rows would backfill
+--> to NULL and fail the SET NOT NULL below with an opaque column error.
+--> The check below turns that into a message naming the actual problem.
 UPDATE "submissions" s
    SET "user_id" = c."owner_user_id",
        "section_id" = c."section_id"
   FROM "conversations" c
  WHERE c."id" = s."conversation_id";--> statement-breakpoint
+
+DO $$
+DECLARE orphaned bigint;
+BEGIN
+  SELECT count(*) INTO orphaned FROM "submissions" WHERE "section_id" IS NULL;
+  IF orphaned > 0 THEN
+    RAISE EXCEPTION
+      'Migration 0021: % submission row(s) are attached to a non-section conversation and cannot be backfilled. These were insertable before this migration but are not representable after it. Inspect with: SELECT s.id, s.conversation_id, c.kind FROM submissions s JOIN conversations c ON c.id = s.conversation_id WHERE c.section_id IS NULL; then delete or re-point them, and re-run.',
+      orphaned;
+  END IF;
+END $$;--> statement-breakpoint
 
 ALTER TABLE "submissions" ALTER COLUMN "user_id" SET NOT NULL;--> statement-breakpoint
 ALTER TABLE "submissions" ALTER COLUMN "section_id" SET NOT NULL;--> statement-breakpoint

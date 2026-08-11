@@ -48,9 +48,21 @@ describe.skipIf(!CAN_SEED)("db:seed script", () => {
   it("decrypts a seeded user's email via the same key-loading path the app uses", async () => {
     const keys = await loadIdentityCipherKeys(process.env as unknown as Env);
     const cipher = new IdentityCipher(keys);
-    const [row] = await db.select().from(users).where(eq(users.isPending, true)).limit(1);
+    // #245: selected by the blind index of a *known* seed email, not
+    // `limit(1)` over every pending user. reset() deletes seeded users by
+    // blind index computed with the current BLIND_INDEX_KEY, so users seeded
+    // under a previous run's key survive; an arbitrary pending row could
+    // therefore be one encrypted with a key that no longer exists, and the
+    // decrypt below would fail for reasons that have nothing to do with the
+    // key-loading path this test exists to cover. CI never sees it (fresh
+    // container per run); locally it fails on the second run onward.
+    const blindIndex = await cipher.computeBlindIndex(
+      IdentityCipher.normalizeEmail("student1@test.com"),
+    );
+    const [row] = await db.select().from(users).where(eq(users.emailBlindIndex, blindIndex));
+    expect(row).toBeDefined();
     const email = await cipher.decryptString(row.email);
-    expect(email).toMatch(/@test\.com$/);
+    expect(email).toBe("student1@test.com");
   });
 
   it("running without --reset a second time fails with a friendly 'already seeded' message, not a raw pg dump", () => {

@@ -20,8 +20,11 @@ import {
   getActiveSectionConversation,
   getSectionConversationMessages,
   SectionConversationExistsError,
+  SectionNotFoundError,
+  SectionNotInteractiveError,
 } from "./sectionConversations";
 import { submitSection, getHomeworkSubmissionsMatrix } from "./submissions";
+import { softDeleteConversation } from "./conversations";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import {
@@ -175,7 +178,7 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
         ownerUserId: studentId,
         isTeacherTest: false,
       }),
-    ).rejects.toThrow(/not interactive/);
+    ).rejects.toBeInstanceOf(SectionNotInteractiveError);
   });
 
   it("refuses a conversation for a non-member", async () => {
@@ -191,7 +194,10 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
         ownerUserId: outsider!.id,
         isTeacherTest: false,
       }),
-    ).rejects.toThrow(/not a member/);
+      // #236/#241: a non-member gets the same SectionNotFoundError a genuinely
+      // missing section produces -- deliberately indistinguishable, so the
+      // error cannot be used to probe which sections exist.
+    ).rejects.toBeInstanceOf(SectionNotFoundError);
 
     await db.delete(users).where(eq(users.id, outsider!.id));
   });
@@ -233,6 +239,56 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
     const messages = await getSectionConversationMessages(db, conversation.id);
     expect(messages).toHaveLength(1);
     expect(messages[0]!.role).toBe("assistant");
+  });
+
+  /* ------- the fail-closed guard on the bare soft-delete (#128) ------- */
+
+  it("softDeleteConversation refuses a submitted section conversation", async () => {
+    await reset();
+    const started = await startSectionConversation(db, unsafeCourseScope(courseId), {
+      sectionId,
+      ownerUserId: studentId,
+      isTeacherTest: false,
+    });
+    await submitSection(db, unsafeOrgScope(orgId), started.id, studentId);
+
+    // The door #128 would otherwise stay open through: a plain soft-delete
+    // leaves the submission row alive against a conversation the student can
+    // no longer see, and the replacement's submit then makes two.
+    await expect(
+      softDeleteConversation(db, unsafeCourseScope(courseId), started.id),
+    ).rejects.toThrow(/restartSectionConversation/);
+
+    const [still] = await db.select().from(conversations).where(eq(conversations.id, started.id));
+    expect(still!.isDeleted).toBe(false);
+  });
+
+  it("softDeleteConversation still works on an unsubmitted section conversation", async () => {
+    await reset();
+    const started = await startSectionConversation(db, unsafeCourseScope(courseId), {
+      sectionId,
+      ownerUserId: studentId,
+      isTeacherTest: false,
+    });
+
+    await expect(
+      softDeleteConversation(db, unsafeCourseScope(courseId), started.id),
+    ).resolves.toBeDefined();
+
+    const [row] = await db.select().from(conversations).where(eq(conversations.id, started.id));
+    expect(row!.isDeleted).toBe(true);
+  });
+
+  it("softDeleteConversation still works on a tutor conversation", async () => {
+    await reset();
+    const [tutor] = await db
+      .insert(conversations)
+      .values({ ownerUserId: studentId, courseId, sectionId: null, kind: "tutor", title: "t" })
+      .returning({ id: conversations.id });
+
+    await expect(
+      softDeleteConversation(db, unsafeCourseScope(courseId), tutor!.id),
+    ).resolves.toBeDefined();
   });
 
   /* ---------------- #22 / #23 end-to-end verification ---------------- */
