@@ -228,6 +228,22 @@ export async function updateHomeworkHandler(c: Context<AppEnv>) {
     return c.json({ error: "Instructor access denied" }, 403);
   }
 
+  // #211 (review of #209): SEC-020 shape-checked :homeworkId on the three
+  // read routes but left the four mutation routes in this file passing it
+  // straight to a uuid-typed column comparison -- same bug class, same
+  // consequence (Postgres `invalid input syntax for type uuid` -> app.onError
+  // -> a generic 503 for what is a permanent client error). Instructor-gated,
+  // so not an authorization or disclosure issue, only a misreported one.
+  //
+  // Placed after the authorization guard and before body parsing, so the
+  // ordering is uniform across all four handlers: authorize, then validate
+  // the path param, then validate the body. Returns this route's own
+  // not-found body -- a distinct "malformed" message would separate it from
+  // "no such row" and hand back an existence oracle.
+  if (!homeworkId || !UUID_RE.test(homeworkId)) {
+    return c.json({ error: "Homework not found" }, 404);
+  }
+
   let body: HomeworkUpdateBody;
   try {
     body = await c.req.json<HomeworkUpdateBody>();
@@ -325,6 +341,12 @@ export async function deleteHomeworkHandler(c: Context<AppEnv>) {
   if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
     return c.json({ error: "Instructor access denied" }, 403);
   }
+
+  // #211, same guard and same rationale as updateHomeworkHandler above.
+  if (!homeworkId || !UUID_RE.test(homeworkId)) {
+    return c.json({ error: "Homework not found" }, 404);
+  }
+
   const scope = courseScopeFromAuthContext(authContext, courseId);
   if (!scope) return c.json({ error: "Course access denied" }, 403);
 
@@ -341,6 +363,11 @@ export async function publishHomeworkHandler(c: Context<AppEnv>) {
 
   if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
     return c.json({ error: "Instructor access denied" }, 403);
+  }
+
+  // #211, same guard and same rationale as updateHomeworkHandler above.
+  if (!homeworkId || !UUID_RE.test(homeworkId)) {
+    return c.json({ error: "Homework not found" }, 404);
   }
 
   let body: HomeworkPublishBody;
@@ -433,6 +460,11 @@ export async function updateHomeworkHideHandler(c: Context<AppEnv>) {
 
   if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
     return c.json({ error: "Instructor access denied" }, 403);
+  }
+
+  // #211, same guard and same rationale as updateHomeworkHandler above.
+  if (!homeworkId || !UUID_RE.test(homeworkId)) {
+    return c.json({ error: "Homework not found" }, 404);
   }
 
   let body: HomeworkHideBody;

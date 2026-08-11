@@ -1249,3 +1249,59 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId — path param shape 
     expect(findFirstHomework).toHaveBeenCalled();
   });
 });
+
+// #211 (review of #209): the SEC-020 guard above covered the read routes
+// only. These four mutation routes took the same :homeworkId the same way
+// and passed it straight to a uuid-typed column comparison, so a malformed
+// id surfaced as a generic 503 instead of a 404. Instructor-gated, so the
+// auth context below is an instructor -- a student would 403 before ever
+// reaching the shape check and the test would pass for the wrong reason.
+describe("homework mutation routes — path param shape (#211)", () => {
+  const MUTATIONS = [
+    { name: "PATCH (update)", path: "", init: { method: "PATCH", body: { title: "New title" } }, repo: updateHomeworkMock },
+    { name: "DELETE", path: "", init: { method: "DELETE" }, repo: deleteHomeworkMock },
+    { name: "PATCH /publish", path: "/publish", init: { method: "PATCH", body: { publish: true } }, repo: publishHomeworkMock },
+    { name: "PATCH /hide", path: "/hide", init: { method: "PATCH", body: { isHidden: true } }, repo: hideHomeworkMock },
+  ] as const;
+
+  function request(homeworkId: string, m: (typeof MUTATIONS)[number]) {
+    return buildApp(
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request(
+      `/api/courses/course-a/homeworks/${encodeURIComponent(homeworkId)}${m.path}`,
+      {
+        method: m.init.method,
+        ...("body" in m.init
+          ? { headers: { "content-type": "application/json" }, body: JSON.stringify(m.init.body) }
+          : {}),
+      },
+      TEST_ENV,
+    );
+  }
+
+  describe.each(MUTATIONS)("$name", (m) => {
+    it.each(["not-a-uuid", "1", "%00", "'; SELECT 1; --"])(
+      "returns 404, never 503, for homeworkId %j",
+      async (bad) => {
+        m.repo.mockReset();
+        const res = await request(bad, m);
+
+        expect(res.status).toBe(404);
+        // Same body a genuine miss returns, so shape is not an existence oracle.
+        expect(((await res.json()) as { error: string }).error).toBe("Homework not found");
+        // Never reached the repository at all.
+        expect(m.repo).not.toHaveBeenCalled();
+      },
+    );
+
+    it("still reaches the repository for a well-formed id", async () => {
+      // Resolving null keeps every route on its own 404-not-found path, so
+      // this asserts the gate is shape-based and not a blanket rejection.
+      m.repo.mockReset().mockResolvedValue(null);
+      const res = await request("11111111-2222-4333-8444-555555555555", m);
+
+      expect(res.status).toBe(404);
+      expect(m.repo).toHaveBeenCalled();
+    });
+  });
+});
