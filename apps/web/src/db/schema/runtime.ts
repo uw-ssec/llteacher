@@ -228,6 +228,12 @@ export const submissions = pgTable(
       foreignColumns: [conversations.id, conversations.ownerUserId, conversations.sectionId],
     }).onDelete("cascade"),
     // #128, the actual fix.
+    //
+    // #250: this cap is an accepted simplification, not a settled product
+    // rule. It keeps ONE submission per (student, section) and restart voids
+    // the previous one, so the platform retains no attempt history. If
+    // attempts ever become first-class, this becomes a partial unique index
+    // over live rows -- see #250 before widening or removing it.
     uniqueIndex("submissions_user_section_uq").on(t.userId, t.sectionId),
   ],
 );

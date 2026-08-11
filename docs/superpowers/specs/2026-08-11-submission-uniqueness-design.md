@@ -52,6 +52,16 @@ policy bolted on top: `grades.submission_id` is a `RESTRICT` foreign key, so
 deleting a graded submission is refused by Postgres. The application check exists
 to turn that into a 409 with a useful message rather than a driver error.
 
+### Accepted scope of this decision
+
+Voiding deletes the `submissions` row, so no attempt history survives. This
+was accepted deliberately in order to ship #27's lifecycle, and is tracked for
+revisiting in [#250](https://github.com/uw-ssec/llteacher/issues/250) rather
+than treated as final. #250 also owns the student-facing requirement that
+follows from it: a restart confirmation must state that the previous
+submission is discarded, since a student who reads "start over" as "add
+another attempt" would lose work believing the opposite.
+
 ## Data model
 
 Add `user_id` and `section_id` to `submissions`, both `NOT NULL`, and three

@@ -111,6 +111,14 @@ and throws `SubmissionGradedError` (route layer maps it to 409), but the rule
 does not depend on that check: `grades.submission_id` is `ON DELETE RESTRICT`,
 so Postgres refuses the delete regardless.
 
+**This cap is an accepted simplification, not a settled product rule (#250).**
+Restart deletes the submission row outright, so the platform keeps no attempt
+history — no record that an earlier submission existed, when it happened, or
+how many tries a student took. That is a decision to revisit, and #250 is
+where it gets revisited; it also carries the student-facing requirement that
+the restart confirmation must say the previous submission is *discarded*,
+not merely that a new conversation begins.
+
 Rationale, and the superseded/locked alternatives that were rejected:
 [docs/superpowers/specs/2026-08-11-submission-uniqueness-design.md](../../docs/superpowers/specs/2026-08-11-submission-uniqueness-design.md)
 ([#128](https://github.com/uw-ssec/llteacher/issues/128)).
