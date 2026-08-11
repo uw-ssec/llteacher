@@ -3,7 +3,7 @@ import type { Db } from "../../db/client";
 import { submissions, grades, conversations, courses, courseMemberships, homeworks, sections, users, sectionAnswers } from "../../db/schema";
 import type { OrgScope, CourseScope } from "./scope";
 import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
-import { isHomeworkHidden } from "./homeworks";
+import { deriveHomeworkStatus, isHomeworkHidden, type HomeworkStatus } from "./homeworks";
 
 export async function createSubmission(db: Db, scope: OrgScope, conversationId: string) {
   // The conversation isn't guaranteed to belong to `scope`'s org just
@@ -192,6 +192,11 @@ export interface StudentSubmissionRow {
 
 export interface HomeworkSubmissionsMatrix {
   homeworkId: string;
+  /** #172 audit (SEC-001): surfaced so the route can apply the same
+   *  unreleased-content gate the homework detail route applies. Without it
+   *  this dashboard leaked a hidden homework's title, due date and section
+   *  titles to a TA the instructor denied `can_view_drafts`. */
+  homeworkStatus: HomeworkStatus;
   homeworkTitle: string;
   homeworkDueDate: string;
   sectionHeaders: { id: string; order: number; title: string }[];
@@ -378,6 +383,7 @@ export async function getHomeworkSubmissionsMatrix(
   const submittedStudents = students.filter((s) => s.submissionCount > 0).length;
   return {
     homeworkId: homework.id,
+    homeworkStatus: deriveHomeworkStatus(homework),
     homeworkTitle: homework.title,
     homeworkDueDate: homework.dueDate.toISOString(),
     sectionHeaders: homework.sections.map((s) => ({ id: s.id, order: s.order, title: s.title })).sort((a, b) => a.order - b.order),

@@ -17,8 +17,57 @@ export interface ProfileWithStats {
    *  membership. Stopgap for apps/admin's course context until #70's real
    *  course switcher lands (see docs/superpowers/plans/2026-08-05-m3-
    *  homeworks-submissions-parity.md, Resolved Design Decision 8) -- do not
-   *  extend this into a general course-listing API; that's #68's job. */
-  courses?: { id: string; title: string }[];
+   *  extend this into a general course-listing API; that's #68's job.
+   *
+   *  #172: each entry carries the caller's role *in that course* plus their
+   *  granted capabilities. The top-level `role` above is a single
+   *  priority-ranked "primary role" across all memberships, which is the
+   *  wrong thing to gate a course-scoped UI on -- an instructor in course A
+   *  who is a TA in course B has primaryRole "instructor" and would
+   *  otherwise be shown authoring controls for B that the server refuses. */
+  courses?: CourseMembershipSummary[];
+}
+
+/** #172: the caller's standing in one specific course. `canViewSolutions`
+ *  and `canViewDrafts` are already resolved server-side -- they are true
+ *  unconditionally for instructor/admin and per-grant for `ta`, so the
+ *  client never re-derives the policy and the two can't disagree. */
+export interface CourseMembershipSummary {
+  id: string;
+  title: string;
+  role: CourseRole;
+  canViewSolutions: boolean;
+  canViewDrafts: boolean;
+}
+
+/** #172: one TA's raw capability grants, as the instructor-facing editor
+ *  sees them. Distinct from CourseMembershipSummary above, which reports the
+ *  *resolved* capability for the caller themselves -- here the flags are the
+ *  stored grant on someone else's membership, which is what an instructor
+ *  toggles. */
+export interface TaCapabilityGrantResponse {
+  membershipId: string;
+  userId: string;
+  canViewSolutions: boolean;
+  canViewDrafts: boolean;
+}
+
+export interface CourseTaCapabilitiesResponse extends TaCapabilityGrantResponse {
+  /** #172 audit (USE-001): decrypted server-side. An instructor granting the
+   *  answer key needs to identify a person, not a UUID. */
+  displayName: string;
+  email: string;
+}
+
+export interface CourseTaListResponse {
+  tas: CourseTaCapabilitiesResponse[];
+}
+
+/** Both optional so one capability can be flipped without restating the
+ *  other; the route rejects a body that names neither. */
+export interface TaCapabilitiesBody {
+  canViewSolutions?: boolean;
+  canViewDrafts?: boolean;
 }
 
 import type { HomeworkStatus } from "../server/repositories/homeworks";

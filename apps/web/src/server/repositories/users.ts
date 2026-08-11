@@ -34,8 +34,24 @@ export async function getOrgScopesForUser(db: Db, userId: string): Promise<OrgSc
  *  yet since nothing needs one; add it if/when an instructor roster view
  *  needs to see dropped rows too. */
 export async function listMembershipsForUser(db: Db, userId: string) {
+  // #172 audit (CMP-001/REL-002): explicitly projected rather than selecting
+  // every schema-declared column. rolesMiddleware runs this on EVERY
+  // authenticated request, and Drizzle's relational builder emits the column
+  // list from the compiled schema -- so any additive column shipped before
+  // its migration is applied takes the entire authenticated API down (every
+  // user, not just the new feature) with `column ... does not exist`.
+  // Naming what AuthContext actually consumes bounds that blast radius to
+  // the columns this middleware genuinely depends on.
   return db.query.courseMemberships.findMany({
     where: and(eq(courseMemberships.userId, userId), isNull(courseMemberships.droppedAt)),
+    columns: {
+      id: true,
+      userId: true,
+      courseId: true,
+      role: true,
+      canViewSolutions: true,
+      canViewDrafts: true,
+    },
   });
 }
 
@@ -127,9 +143,31 @@ export async function deactivateByWorkosUserId(db: Db, workosUserId: string) {
     .set({ isActive: false, sessionEpoch: sql`${users.sessionEpoch} + 1` })
     .where(and(eq(users.workosUserId, workosUserId), eq(users.isActive, true)));
 
+  // #172 re-audit (SEC-006): the capability grants are revoked with the
+  // membership, not carried through it. Two reasons, both concrete:
+  //
+  //  - listCourseTas filters `droppedAt IS NULL`, so a dropped TA is absent
+  //    from the instructor's TA permissions table. Their grant was therefore
+  //    invisible AND unrevokable through the product -- the only surface for
+  //    revoking it cannot show the row.
+  //  - reconcileExisting restores exactly these memberships on the next
+  //    successful login. Leaving the flags set meant answer-key access came
+  //    back silently, with no instructor action and nothing in the audit log
+  //    saying it had been re-granted.
+  //
+  // Clearing here makes the restore fail closed: the membership returns, the
+  // grant does not, and an instructor re-grants deliberately. No backfill
+  // migration accompanies this -- both columns are introduced by 0019 in
+  // this same branch with DEFAULT false, so no already-dropped row can be
+  // carrying a grant.
   await db
     .update(courseMemberships)
-    .set({ droppedAt: sql`now()`, droppedReason: "user_deprovisioned" })
+    .set({
+      droppedAt: sql`now()`,
+      droppedReason: "user_deprovisioned",
+      canViewSolutions: false,
+      canViewDrafts: false,
+    })
     .where(and(eq(courseMemberships.userId, existingUser.id), isNull(courseMemberships.droppedAt)));
 
   const orgScopes = await getOrgScopesForDeprovisioning(db, existingUser.id);

@@ -157,3 +157,34 @@ describe("app composition", () => {
     consoleSpy.mockRestore();
   });
 });
+
+/** #172 audit (CMP-005): a missing API route must be an unambiguous JSON
+ *  404, not the SPA shell with a 200. During a rolling deploy where the
+ *  admin bundle leads the Worker, the 200 made `r.ok` true and left the
+ *  client failing only because JSON.parse choked on HTML. */
+describe("unmatched /api/* routes (#172 audit)", () => {
+  it("404s with JSON rather than serving the SPA shell", async () => {
+    // Authenticated: authMiddleware gates /api/* ahead of this catch-all, so
+    // an anonymous caller gets 401 and cannot probe which routes exist --
+    // which is the behaviour we want, and why this test needs a session.
+    findMany.mockResolvedValue([]);
+    const key = await loadSessionKey(ENV);
+    const sealed = await sealSession(createSessionPayload("u1", "w1", 0), key);
+    const res = await app.request(
+      "/api/does-not-exist",
+      { headers: { cookie: `${SESSION_COOKIE_NAME}=${sealed}` } },
+      ENV,
+    );
+    expect(res.status).toBe(404);
+    expect(res.headers.get("content-type")).toContain("application/json");
+  });
+
+  it("leaves non-API paths to the asset binding", async () => {
+    // ENV's ASSETS stub answers every request with "not found"/404, so the
+    // meaningful assertion is that the SPA path reached it rather than being
+    // answered by the JSON catch-all above.
+    const res = await app.request("/some/spa/route", {}, ENV);
+    expect(res.headers.get("content-type")).not.toContain("application/json");
+    expect(await res.text()).toBe("not found");
+  });
+});

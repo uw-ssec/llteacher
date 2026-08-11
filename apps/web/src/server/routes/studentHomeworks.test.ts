@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { studentHomeworksHandler } from "./studentHomeworks";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
+import { fakeAuthContext } from "../testing/authContext";
 
 const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
 const getStudentHomeworksForUser = vi.fn();
@@ -18,17 +19,6 @@ function buildApp(authContext: AuthContext | undefined) {
   return app;
 }
 
-function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
-  const memberships = overrides.memberships ?? [];
-  return {
-    session: { userId: "u1", workosUserId: "w1", sessionEpoch: 0, issuedAt: 0, expiresAt: 0 },
-    memberships,
-    hasRole: (role) => memberships.some((m) => m.role === role),
-    isMemberOf: (courseId) => memberships.some((m) => m.courseId === courseId),
-    isInstructorOf: () => false,
-    ...overrides,
-  };
-}
 
 describe("GET /api/student/homeworks", () => {
   it("returns 401-shaped 403 when unauthenticated", async () => {

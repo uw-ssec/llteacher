@@ -1,8 +1,7 @@
-import { Hono, type Context } from "hono";
+import { type Context } from "hono";
 import { makeDb } from "../../db/client";
 import { submitWidgetResponse } from "../repositories/progressWidgets";
 import { getOrgScopesForUser } from "../repositories/users";
-import { requireRole } from "../utils/guards";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { WidgetResponseBody, WidgetResponseResponse } from "../../shared/types";
@@ -61,9 +60,3 @@ export async function submitWidgetResponseHandler(c: Context<AppEnv>) {
     return c.json({ error: "Widget not found in this org scope" }, 403);
   }
 }
-
-// Sub-app preserved for direct unit testing; production routing happens via
-// app.patch(...) in server/index.ts (see sectionAnswers.ts for the same
-// pattern).
-export const progressWidgetsRoutes = new Hono<AppEnv>();
-progressWidgetsRoutes.patch("/api/widgets/:widgetId/response", requireRole(["student"])(submitWidgetResponseHandler));

@@ -1,8 +1,71 @@
 import { createAuthProvider, parseCourseRole, type AuthSessionState, type CourseRole } from "@llteacher/ui";
 
 export type { CourseRole };
-export interface CourseOption { id: string; title: string }
+
+/** The least-privileged role that still admits someone to the console.
+ *  Used only as a degrade target, so a skewed payload never widens access. */
+const NARROWEST_CONSOLE_ROLE: CourseRole = "ta";
+
+/** #172: carries the caller's role and resolved capabilities *for this
+ *  course*. The top-level `role` below is a priority-ranked primary role
+ *  across every membership, which is the wrong thing to gate a course-scoped
+ *  UI on -- an instructor in course A who is a TA in course B has primary
+ *  role "instructor" and would otherwise be shown authoring controls for B
+ *  that the server refuses. Prefer the per-course values everywhere. */
+export interface CourseOption {
+  id: string;
+  title: string;
+  role: CourseRole;
+  canViewSolutions: boolean;
+  canViewDrafts: boolean;
+}
+
 export type AuthState = AuthSessionState & { role: CourseRole | null; courses: CourseOption[] };
+
+/** Runtime-validated rather than cast (#124).
+ *
+ *  `id` and `title` are structural -- an entry without them is unusable and
+ *  gets dropped. The #172 fields degrade instead of dropping, because
+ *  apps/admin and apps/web deploy independently: during a rolling deploy an
+ *  older server still returns the pre-#172 `{ id, title }` shape, and
+ *  dropping those entries would leave the console claiming the instructor
+ *  has no courses at all.
+ *
+ *  Degradation is genuinely deny-by-default: a missing `role` falls back to
+ *  the NARROWEST console role (not the caller's widest), an unrecognized
+ *  role drops the entry outright, and absent capability flags read as false
+ *  rather than granting anything the payload never claimed. */
+function parseCourse(raw: unknown, fallbackRole: CourseRole | null): CourseOption | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const c = raw as Record<string, unknown>;
+  if (typeof c.id !== "string" || typeof c.title !== "string") return null;
+
+  // #172 audit (SEC-005/REL-007/CMP-003): two distinct cases, previously
+  // collapsed into one permissive fallback.
+  //
+  // `role` ABSENT means a pre-#172 server -- degrade, but to the narrowest
+  // console role rather than the caller's priority-ranked primary role. The
+  // primary role is the WIDEST role they hold anywhere, so an instructor in
+  // course A who assists course B was shown authoring controls for B that
+  // every write 403s: the exact defect #172 fixes, resurrected for the
+  // length of a rolling deploy.
+  //
+  // `role` PRESENT but unrecognized means a NEWER server added a course role
+  // this bundle doesn't know. Inheriting the primary role there is strictly
+  // worse -- it widens on a value that was explicitly narrower. Drop the
+  // entry so the warning below fires and nothing is granted on a guess.
+  if (c.role !== undefined && parseCourseRole(c.role) === null) return null;
+  const role = (typeof c.role === "string" ? parseCourseRole(c.role) : null)
+    ?? (fallbackRole ? NARROWEST_CONSOLE_ROLE : null);
+  if (!role) return null;
+  return {
+    id: c.id,
+    title: c.title,
+    role,
+    canViewSolutions: c.canViewSolutions === true,
+    canViewDrafts: c.canViewDrafts === true,
+  };
+}
 
 export const { AuthProvider, useAuth } = createAuthProvider<{ role: CourseRole | null; courses: CourseOption[] }>({
   parseExtra: (body) => {
@@ -16,7 +79,16 @@ export const { AuthProvider, useAuth } = createAuthProvider<{ role: CourseRole |
       }
       role = parsed;
     }
-    const courses: CourseOption[] = Array.isArray(raw?.courses) ? (raw.courses as CourseOption[]) : [];
+    const rawCourses = Array.isArray(raw?.courses) ? raw.courses : [];
+    const courses = rawCourses
+      .map((c) => parseCourse(c, role))
+      .filter((c): c is CourseOption => c !== null);
+    if (courses.length !== rawCourses.length) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[AuthProvider] /api/profile returned ${rawCourses.length - courses.length} malformed course entr(ies); dropped`,
+      );
+    }
     return { role, courses };
   },
   defaultExtra: { role: null, courses: [] },

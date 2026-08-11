@@ -18,6 +18,10 @@ export const AUDIT_ACTIONS = {
   HOMEWORK_UNPUBLISHED: "homework.unpublished",
   HOMEWORK_HIDDEN: "homework.hidden",
   HOMEWORK_UNHIDDEN: "homework.unhidden",
+  /** #172: a TA's per-course capability grant changed. Audited because it
+   *  widens or narrows one person's access to student work and answer keys
+   *  -- the kind of change #50's audit viewer exists to make reviewable. */
+  TA_CAPABILITIES_UPDATED: "membership.ta_capabilities_updated",
 } as const;
 
 /** Fans an audit write out across every org scope it's relevant to (a

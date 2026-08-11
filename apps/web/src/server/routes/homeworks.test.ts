@@ -12,6 +12,7 @@ import {
 import { auditEvents } from "../../db/schema";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
+import { fakeAuthContext, fakeMembership } from "../testing/authContext";
 
 const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
 
@@ -125,18 +126,6 @@ vi.mock("../repositories/llmConfigs", async (importOriginal) => {
 // consistent predicates for free -- callers can still override any
 // individual predicate to test a mismatch (e.g. isInstructorOf true but no
 // matching membership row).
-function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
-  const memberships = overrides.memberships ?? [];
-  return {
-    session: { userId: "u1", workosUserId: "w1", sessionEpoch: 0, issuedAt: 0, expiresAt: 0 },
-    memberships,
-    hasRole: (role) => memberships.some((m) => m.role === role),
-    isMemberOf: (courseId) => memberships.some((m) => m.courseId === courseId),
-    isInstructorOf: (courseId) =>
-      memberships.some((m) => m.courseId === courseId && (m.role === "instructor" || m.role === "admin")),
-    ...overrides,
-  };
-}
 
 function buildApp(authContext: AuthContext | undefined) {
   const app = new Hono<AppEnv>();
@@ -258,7 +247,7 @@ describe("GET /api/courses/:courseId/homeworks", () => {
   it("returns every homework unfiltered for an instructor, including hidden", async () => {
     mixedStatusHomeworks();
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
     ).request("/api/courses/course-a/homeworks", {}, TEST_ENV);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { homeworks: { id: string }[] };
@@ -287,7 +276,7 @@ describe("POST /api/courses/:courseId/homeworks", () => {
   it("denies an instructor of a different course (cross-course) with 403", async () => {
     insertHomework.mockReset();
     const res = await buildApp(
-      fakeAuthContext({ isInstructorOf: (id) => id === "course-b" }),
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-b", role: "instructor" })] }),
     ).request(
       "/api/courses/course-a/homeworks",
       {
@@ -304,10 +293,9 @@ describe("POST /api/courses/:courseId/homeworks", () => {
     insertHomework.mockReset().mockReturnValue({
       values: () => ({ returning: async () => [{ id: "hw-new" }] }),
     });
-    const membership = { id: "membership-1", userId: "u1", courseId: "course-a", role: "instructor" } as unknown as AuthContext["memberships"][number];
+    const membership = fakeMembership({ id: "membership-1", courseId: "course-a", role: "instructor" });
     const res = await buildApp(
       fakeAuthContext({
-        isInstructorOf: (id) => id === "course-a",
         memberships: [membership],
       }),
     ).request(
@@ -325,9 +313,9 @@ describe("POST /api/courses/:courseId/homeworks", () => {
   });
 
   it("returns 400 when required fields are missing", async () => {
-    const membership = { id: "membership-1", userId: "u1", courseId: "course-a", role: "instructor" } as unknown as AuthContext["memberships"][number];
+    const membership = fakeMembership({ id: "membership-1", courseId: "course-a", role: "instructor" });
     const res = await buildApp(
-      fakeAuthContext({ isInstructorOf: (id) => id === "course-a", memberships: [membership] }),
+      fakeAuthContext({ memberships: [membership] }),
     ).request(
       "/api/courses/course-a/homeworks",
       {
@@ -342,9 +330,9 @@ describe("POST /api/courses/:courseId/homeworks", () => {
 
   it("returns 400 (not 503) for an unparseable dueDate", async () => {
     insertHomework.mockReset();
-    const membership = { id: "membership-1", userId: "u1", courseId: "course-a", role: "instructor" } as unknown as AuthContext["memberships"][number];
+    const membership = fakeMembership({ id: "membership-1", courseId: "course-a", role: "instructor" });
     const res = await buildApp(
-      fakeAuthContext({ isInstructorOf: (id) => id === "course-a", memberships: [membership] }),
+      fakeAuthContext({ memberships: [membership] }),
     ).request(
       "/api/courses/course-a/homeworks",
       {
@@ -360,9 +348,9 @@ describe("POST /api/courses/:courseId/homeworks", () => {
 
   it("returns 400 (not 503) for a malformed JSON body", async () => {
     insertHomework.mockReset();
-    const membership = { id: "membership-1", userId: "u1", courseId: "course-a", role: "instructor" } as unknown as AuthContext["memberships"][number];
+    const membership = fakeMembership({ id: "membership-1", courseId: "course-a", role: "instructor" });
     const res = await buildApp(
-      fakeAuthContext({ isInstructorOf: (id) => id === "course-a", memberships: [membership] }),
+      fakeAuthContext({ memberships: [membership] }),
     ).request(
       "/api/courses/course-a/homeworks",
       {
@@ -395,7 +383,7 @@ describe("POST /api/courses/:courseId/homeworks", () => {
 describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
   it("denies a non-member with 403", async () => {
     const res = await buildApp(fakeAuthContext()).request(
-      "/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV,
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV,
     );
     expect(res.status).toBe(403);
   });
@@ -404,7 +392,7 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     findFirstHomework.mockReset().mockResolvedValue(undefined);
     const res = await buildApp(
       fakeAuthContext({ isMemberOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV);
     expect(res.status).toBe(404);
   });
 
@@ -422,7 +410,7 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     ]);
     const res = await buildApp(
       fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { editableBy?: boolean; status: string; sections: unknown[] };
     expect(body.editableBy).toBeUndefined();
@@ -438,8 +426,8 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     });
     findManySections.mockReset().mockResolvedValue([]);
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV);
     const body = (await res.json()) as { editableBy?: boolean };
     expect(body.editableBy).toBe(true);
   });
@@ -456,7 +444,7 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     ]);
     const res = await buildApp(
       fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { sections: Array<{ solution: unknown }> };
     expect(body.sections[0]!.solution).toBeNull();
@@ -472,8 +460,8 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
       { id: "s1", title: "Sec 1", content: "c1", order: 1, solution: { id: "sol-1", content: "the answer is 42" }, createdAt: new Date(), updatedAt: new Date() },
     ]);
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { sections: Array<{ solution: { content: string } | null }> };
     expect(body.sections[0]!.solution).toEqual({ id: "sol-1", content: "the answer is 42" });
@@ -490,7 +478,7 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     findManySections.mockReset().mockResolvedValue([]);
     const res = await buildApp(
       fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV);
     expect(res.status).toBe(404);
   });
 
@@ -503,7 +491,7 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     findManySections.mockReset().mockResolvedValue([]);
     const res = await buildApp(
       fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV);
     expect(res.status).toBe(404);
   });
 
@@ -518,7 +506,7 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     findManySections.mockReset().mockResolvedValue([]);
     const res = await buildApp(
       fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV);
     expect(res.status).toBe(404);
   });
 
@@ -530,8 +518,8 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     });
     findManySections.mockReset().mockResolvedValue([]);
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { status: string };
     expect(body.status).toBe("hidden");
@@ -545,8 +533,8 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     });
     findManySections.mockReset().mockResolvedValue([]);
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { status: string };
     expect(body.status).toBe("draft");
@@ -560,8 +548,8 @@ describe("GET /api/courses/:courseId/homeworks/:homeworkId", () => {
     });
     findManySections.mockReset().mockResolvedValue([]);
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {}, TEST_ENV);
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { status: string };
     expect(body.status).toBe("scheduled");
@@ -572,7 +560,7 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
   it("denies a non-instructor with 403", async () => {
     const res = await buildApp(
       fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: () => false }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({ sections: [] }),
     }, TEST_ENV);
@@ -587,8 +575,8 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
       // scope from isMemberOf, not isInstructorOf; in production a course
       // membership row is what backs both predicates, but the fakeAuthContext
       // test double lets them diverge, so each override must be set explicitly.
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "New title" }),
     }, TEST_ENV);
@@ -598,8 +586,8 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
   it("returns 422 with a friendly message when the diff violates the order constraint", async () => {
     updateHomeworkMock.mockReset().mockRejectedValue(new Error("duplicate order 1 in incoming sections"));
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({ sections: [{ title: "A", content: "a", order: 1 }, { title: "B", content: "b", order: 1 }] }),
     }, TEST_ENV);
@@ -611,8 +599,8 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
   it("applies a valid update and returns 200", async () => {
     updateHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1" });
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "Updated" }),
     }, TEST_ENV);
@@ -627,8 +615,8 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
   it("normalizes llmConfigId: '' to null and returns 200 (not 503)", async () => {
     updateHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", llmConfigId: null });
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({ llmConfigId: "" }),
     }, TEST_ENV);
@@ -638,7 +626,7 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
     expect(updateHomeworkMock).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
-      "hw-1",
+      "11111111-2222-4333-8444-555555555555",
       expect.objectContaining({ llmConfigId: null }),
     );
   });
@@ -646,8 +634,8 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
   it("rejects a non-UUID llmConfigId with 400", async () => {
     updateHomeworkMock.mockReset();
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({ llmConfigId: "not-a-uuid" }),
     }, TEST_ENV);
@@ -662,8 +650,8 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
     updateHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", llmConfigId: validUuid });
     llmConfigBelongsToOrgMock.mockClear().mockResolvedValue(true);
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({ llmConfigId: validUuid }),
     }, TEST_ENV);
@@ -671,7 +659,7 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
     expect(updateHomeworkMock).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
-      "hw-1",
+      "11111111-2222-4333-8444-555555555555",
       expect.objectContaining({ llmConfigId: validUuid }),
     );
   });
@@ -683,8 +671,8 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
     updateHomeworkMock.mockReset();
     llmConfigBelongsToOrgMock.mockClear().mockResolvedValue(false);
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({ llmConfigId: otherOrgUuid }),
     }, TEST_ENV);
@@ -698,8 +686,8 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
     updateHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1" });
     llmConfigBelongsToOrgMock.mockClear();
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", {
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "Updated" }),
     }, TEST_ENV);
@@ -712,7 +700,7 @@ describe("DELETE /api/courses/:courseId/homeworks/:homeworkId", () => {
   it("denies a non-instructor with 403", async () => {
     const res = await buildApp(
       fakeAuthContext({ isInstructorOf: () => false }),
-    ).request("/api/courses/course-a/homeworks/hw-1", { method: "DELETE" }, TEST_ENV);
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", { method: "DELETE" }, TEST_ENV);
     expect(res.status).toBe(403);
   });
 
@@ -722,16 +710,16 @@ describe("DELETE /api/courses/:courseId/homeworks/:homeworkId", () => {
       // isMemberOf must also be true -- courseScopeFromAuthContext requires
       // it independent of isInstructorOf (same gap found and fixed in Tasks
       // 5/6's test fixtures; fixed proactively here before dispatch).
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", { method: "DELETE" }, TEST_ENV);
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", { method: "DELETE" }, TEST_ENV);
     expect(res.status).toBe(404);
   });
 
   it("deletes and returns 204", async () => {
     deleteHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1" });
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
-    ).request("/api/courses/course-a/homeworks/hw-1", { method: "DELETE" }, TEST_ENV);
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", { method: "DELETE" }, TEST_ENV);
     expect(res.status).toBe(204);
   });
 });
@@ -739,7 +727,7 @@ describe("DELETE /api/courses/:courseId/homeworks/:homeworkId", () => {
 describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
   it("denies a non-instructor with 403", async () => {
     const res = await buildApp(fakeAuthContext({ isInstructorOf: () => false })).request(
-      "/api/courses/course-a/homeworks/hw-1/publish",
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/publish",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: true }) },
       TEST_ENV,
     );
@@ -748,7 +736,7 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
 
   it("rejects a past releasedAt with 400", async () => {
     const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a" })).request(
-      "/api/courses/course-a/homeworks/hw-1/publish",
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/publish",
       {
         method: "PATCH", headers: { "content-type": "application/json" },
         body: JSON.stringify({ publish: true, releasedAt: "2020-01-01T00:00:00Z" }),
@@ -764,8 +752,8 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
     // courseScopeFromAuthContext (the 400/past-releasedAt test above does
     // not, since that check runs before scope minting). Same gap found in
     // Tasks 5/6/7; fixed proactively here before dispatch.
-    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
-      "/api/courses/course-a/homeworks/hw-1/publish",
+    const res = await buildApp(fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] })).request(
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/publish",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: true }) },
       TEST_ENV,
     );
@@ -783,8 +771,8 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
     });
     findManySections.mockReset().mockResolvedValue([]);
     publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
-    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
-      "/api/courses/course-a/homeworks/hw-1/publish",
+    const res = await buildApp(fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] })).request(
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/publish",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: false }) },
       TEST_ENV,
     );
@@ -806,8 +794,8 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
     });
     findManySections.mockReset().mockResolvedValue([]);
     publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
-    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
-      "/api/courses/course-a/homeworks/hw-1/publish",
+    const res = await buildApp(fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] })).request(
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/publish",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: false, releasedAt: "" }) },
       TEST_ENV,
     );
@@ -824,8 +812,8 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
     findManySections.mockReset().mockResolvedValue([]);
     homeworkHasStudentActivityMock.mockReset().mockResolvedValue(false);
     publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
-    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
-      "/api/courses/course-a/homeworks/hw-1/publish",
+    const res = await buildApp(fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] })).request(
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/publish",
       {
         method: "PATCH", headers: { "content-type": "application/json" },
         body: JSON.stringify({ publish: false, releasedAt: "2020-01-01T00:00:00.000Z" }),
@@ -837,8 +825,8 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
 
   it("publishes immediately when releasedAt is '' (leave-at-default), same as omitted", async () => {
     publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: new Date(), releasedAt: new Date() });
-    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
-      "/api/courses/course-a/homeworks/hw-1/publish",
+    const res = await buildApp(fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] })).request(
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/publish",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: true, releasedAt: "" }) },
       TEST_ENV,
     );
@@ -862,9 +850,9 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
     publishHomeworkMock.mockReset();
 
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
     ).request(
-      "/api/courses/course-a/homeworks/hw-1/publish",
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/publish",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: false }) },
       TEST_ENV,
     );
@@ -881,9 +869,9 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
     publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
 
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
     ).request(
-      "/api/courses/course-a/homeworks/hw-1/publish",
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/publish",
       {
         method: "PATCH", headers: { "content-type": "application/json" },
         body: JSON.stringify({ publish: false, confirm: true }),
@@ -903,9 +891,9 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
     publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: null, releasedAt: null });
 
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
     ).request(
-      "/api/courses/course-a/homeworks/hw-1/publish",
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/publish",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: false }) },
       TEST_ENV,
     );
@@ -919,9 +907,9 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
     publishHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", publishedAt: new Date(), releasedAt: new Date() });
 
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
     ).request(
-      "/api/courses/course-a/homeworks/hw-1/publish",
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/publish",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: true }) },
       TEST_ENV,
     );
@@ -939,9 +927,9 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
     auditInserts = [];
 
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
     ).request(
-      "/api/courses/course-a/homeworks/hw-1/publish",
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/publish",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: false }) },
       TEST_ENV,
     );
@@ -959,9 +947,9 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
     auditInserts = [];
 
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
     ).request(
-      "/api/courses/course-a/homeworks/hw-1/publish",
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/publish",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ publish: true }) },
       TEST_ENV,
     );
@@ -978,7 +966,7 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
 describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/hide", () => {
   it("denies a non-instructor with 403", async () => {
     const res = await buildApp(fakeAuthContext({ isInstructorOf: () => false })).request(
-      "/api/courses/course-a/homeworks/hw-1/hide",
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/hide",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ isHidden: true }) },
       TEST_ENV,
     );
@@ -987,7 +975,7 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/hide", () => {
 
   it("returns 400 when isHidden is missing/non-boolean", async () => {
     const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a" })).request(
-      "/api/courses/course-a/homeworks/hw-1/hide",
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/hide",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({}) },
       TEST_ENV,
     );
@@ -996,7 +984,7 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/hide", () => {
 
   it("returns 400 for an invalid expiresAt", async () => {
     const res = await buildApp(fakeAuthContext({ isInstructorOf: (id) => id === "course-a" })).request(
-      "/api/courses/course-a/homeworks/hw-1/hide",
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/hide",
       {
         method: "PATCH", headers: { "content-type": "application/json" },
         body: JSON.stringify({ isHidden: false, expiresAt: "banana" }),
@@ -1012,9 +1000,9 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/hide", () => {
     auditInserts = [];
 
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
     ).request(
-      "/api/courses/course-a/homeworks/hw-1/hide",
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/hide",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ isHidden: true }) },
       TEST_ENV,
     );
@@ -1034,9 +1022,9 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/hide", () => {
     auditInserts = [];
 
     const res = await buildApp(
-      fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" }),
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
     ).request(
-      "/api/courses/course-a/homeworks/hw-1/hide",
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/hide",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ isHidden: false }) },
       TEST_ENV,
     );
@@ -1047,8 +1035,8 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/hide", () => {
 
   it("returns 404 when the homework isn't found in this course scope", async () => {
     hideHomeworkMock.mockReset().mockResolvedValue(null);
-    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
-      "/api/courses/course-a/homeworks/hw-1/hide",
+    const res = await buildApp(fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] })).request(
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/hide",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ isHidden: true }) },
       TEST_ENV,
     );
@@ -1057,14 +1045,263 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/hide", () => {
 
   it("treats expiresAt: '' the same as null (explicit clear)", async () => {
     hideHomeworkMock.mockReset().mockResolvedValue({ id: "hw-1", isHidden: false, expiresAt: null });
-    const res = await buildApp(fakeAuthContext({ isMemberOf: (id) => id === "course-a", isInstructorOf: (id) => id === "course-a" })).request(
-      "/api/courses/course-a/homeworks/hw-1/hide",
+    const res = await buildApp(fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] })).request(
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555/hide",
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ isHidden: false, expiresAt: "" }) },
       TEST_ENV,
     );
     expect(res.status).toBe(200);
     expect(hideHomeworkMock).toHaveBeenCalledWith(
-      expect.anything(), expect.anything(), "hw-1", { isHidden: false, expiresAt: null },
+      expect.anything(), expect.anything(), "11111111-2222-4333-8444-555555555555", { isHidden: false, expiresAt: null },
     );
+  });
+});
+
+/** #172: the detail route now answers three separate questions -- may I
+ *  edit, may I see unreleased work, may I see the answer key. A TA can hold
+ *  any subset, so each is asserted independently rather than as one
+ *  "instructor or not" branch. */
+describe("GET /api/courses/:courseId/homeworks/:homeworkId — TA capabilities (#172)", () => {
+  const PUBLISHED = {
+    id: "hw-1", courseId: "course-a", title: "HW1", description: "d",
+    dueDate: new Date("2099-01-02"), llmConfigId: null,
+    publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+    isHidden: false, expiresAt: null,
+  };
+  const DRAFT = { ...PUBLISHED, publishedAt: null, releasedAt: null };
+  const WITH_SOLUTION = [
+    { id: "s1", title: "Sec 1", content: "c1", order: 1, solution: { id: "sol-1", content: "the answer is 42" }, createdAt: new Date(), updatedAt: new Date() },
+  ];
+
+  function taWith(caps: { canViewSolutions?: boolean; canViewDrafts?: boolean }) {
+    return fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "course-a", role: "ta", ...caps })],
+    });
+  }
+
+  it("hides solutions from an ungranted TA", async () => {
+    findFirstHomework.mockReset().mockResolvedValue(PUBLISHED);
+    findManySections.mockReset().mockResolvedValue(WITH_SOLUTION);
+    const res = await buildApp(taWith({})).request(
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { sections: Array<{ solution: unknown }>; editableBy?: boolean };
+    expect(body.sections[0]!.solution).toBeNull();
+    // Reading the homework must never imply authoring it.
+    expect(body.editableBy).toBeUndefined();
+  });
+
+  it("shows solutions to a TA granted canViewSolutions", async () => {
+    findFirstHomework.mockReset().mockResolvedValue(PUBLISHED);
+    findManySections.mockReset().mockResolvedValue(WITH_SOLUTION);
+    const res = await buildApp(taWith({ canViewSolutions: true })).request(
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV,
+    );
+    const body = (await res.json()) as { sections: Array<{ solution: unknown }>; editableBy?: boolean };
+    expect(body.sections[0]!.solution).toEqual({ id: "sol-1", content: "the answer is 42" });
+    expect(body.editableBy).toBeUndefined();
+  });
+
+  it("404s a draft for an ungranted TA", async () => {
+    findFirstHomework.mockReset().mockResolvedValue(DRAFT);
+    findManySections.mockReset().mockResolvedValue([]);
+    const res = await buildApp(taWith({})).request(
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("returns a draft to a TA granted canViewDrafts", async () => {
+    findFirstHomework.mockReset().mockResolvedValue(DRAFT);
+    findManySections.mockReset().mockResolvedValue([]);
+    const res = await buildApp(taWith({ canViewDrafts: true })).request(
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { status: string }).status).toBe("draft");
+  });
+
+  it("grants the two capabilities independently -- drafts without solutions", async () => {
+    findFirstHomework.mockReset().mockResolvedValue(DRAFT);
+    findManySections.mockReset().mockResolvedValue(WITH_SOLUTION);
+    const res = await buildApp(taWith({ canViewDrafts: true })).request(
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {}, TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { sections: Array<{ solution: unknown }> };
+    expect(body.sections[0]!.solution).toBeNull();
+  });
+});
+
+/** #172 re-audit (FUN-104): the LIST route's unreleased-content gate had no
+ *  capability-level coverage.
+ *
+ *  The detail route's three questions are each pinned above, but the list
+ *  route only had "instructor sees everything / student sees released". A
+ *  mutation swapping `canViewDraftsIn` for `isInstructorOf` there left all
+ *  61 tests green -- silently taking unreleased homeworks back off a granted
+ *  TA's list while the detail route still served them, so the TA could open
+ *  a draft by URL but could not find it. */
+describe("GET /api/courses/:courseId/homeworks — TA capabilities (#172)", () => {
+  const base = {
+    description: "d",
+    dueDate: new Date("2099-01-02"),
+    llmConfigId: null,
+    isHidden: false,
+    expiresAt: null,
+  };
+  const ROWS = [
+    { ...base, id: "hw-draft", title: "Draft HW", publishedAt: null, releasedAt: null },
+    {
+      ...base, id: "hw-scheduled", title: "Scheduled HW",
+      publishedAt: new Date("2020-01-01"), releasedAt: new Date("2099-01-01"),
+    },
+    {
+      ...base, id: "hw-active", title: "Active HW",
+      publishedAt: new Date("2020-01-01"), releasedAt: new Date("2020-01-01"),
+    },
+  ];
+
+  const taWith = (caps: { canViewDrafts?: boolean }) =>
+    fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "course-a", role: "ta", ...caps })],
+    });
+
+  async function listAs(authContext: ReturnType<typeof fakeAuthContext>) {
+    findManyHomeworks.mockReset().mockResolvedValue(ROWS);
+    const res = await buildApp(authContext).request(
+      "/api/courses/course-a/homeworks", {}, TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { homeworks: Array<{ id: string }> };
+    return body.homeworks.map((h) => h.id);
+  }
+
+  it("omits unreleased homeworks from an ungranted TA's list", async () => {
+    expect(await listAs(taWith({}))).toEqual(["hw-active"]);
+  });
+
+  it("includes unreleased homeworks in a granted TA's list", async () => {
+    // The assertion the mutation run wanted: this must key on the CAPABILITY,
+    // not on the authoring role. A TA holding can_view_drafts sees exactly
+    // what the detail route would serve them.
+    expect(await listAs(taWith({ canViewDrafts: true }))).toEqual([
+      "hw-draft",
+      "hw-scheduled",
+      "hw-active",
+    ]);
+  });
+
+  it("keeps a student on released homeworks only", async () => {
+    const student = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "course-a", role: "student" })],
+    });
+    expect(await listAs(student)).toEqual(["hw-active"]);
+  });
+
+  it("shows an instructor everything without any stored grant", async () => {
+    const instructor = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })],
+    });
+    expect(await listAs(instructor)).toEqual(["hw-draft", "hw-scheduled", "hw-active"]);
+  });
+});
+
+/** #206 (#172 re-audit, SEC-020). SEC-003's helper claimed to cover "every
+ *  UUID path param"; only membershipId got the check. A malformed id reached
+ *  a uuid column, Postgres raised a syntax error, and app.onError turned a
+ *  permanent client error into a 503 -- reachable by any authenticated
+ *  member, including a student, on attacker-chosen input. */
+describe("GET /api/courses/:courseId/homeworks/:homeworkId — path param shape (#172, SEC-020)", () => {
+  it.each(["not-a-uuid", "1", "%00", "'; SELECT 1; --"])(
+    "returns 404, never 503, for homeworkId %j",
+    async (bad) => {
+      findFirstHomework.mockReset();
+      const res = await buildApp(
+        fakeAuthContext({
+          memberships: [fakeMembership({ courseId: "course-a", role: "student" })],
+        }),
+      ).request(`/api/courses/course-a/homeworks/${encodeURIComponent(bad)}`, {}, TEST_ENV);
+
+      expect(res.status).toBe(404);
+      // Same body a genuine miss returns, so shape is not an existence oracle.
+      expect(((await res.json()) as { error: string }).error).toBe("Homework not found");
+      // Never reached the repository at all.
+      expect(findFirstHomework).not.toHaveBeenCalled();
+    },
+  );
+
+  it("still serves a well-formed id", async () => {
+    findFirstHomework.mockReset().mockResolvedValue(undefined);
+    const res = await buildApp(
+      fakeAuthContext({
+        memberships: [fakeMembership({ courseId: "course-a", role: "student" })],
+      }),
+    ).request(
+      "/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555",
+      {},
+      TEST_ENV,
+    );
+    // Same 404, but this time because the repository was asked and found
+    // nothing -- which is what distinguishes a real gate from a blanket one.
+    expect(res.status).toBe(404);
+    expect(findFirstHomework).toHaveBeenCalled();
+  });
+});
+
+// #211 (review of #209): the SEC-020 guard above covered the read routes
+// only. These four mutation routes took the same :homeworkId the same way
+// and passed it straight to a uuid-typed column comparison, so a malformed
+// id surfaced as a generic 503 instead of a 404. Instructor-gated, so the
+// auth context below is an instructor -- a student would 403 before ever
+// reaching the shape check and the test would pass for the wrong reason.
+describe("homework mutation routes — path param shape (#211)", () => {
+  const MUTATIONS = [
+    { name: "PATCH (update)", path: "", init: { method: "PATCH", body: { title: "New title" } }, repo: updateHomeworkMock },
+    { name: "DELETE", path: "", init: { method: "DELETE" }, repo: deleteHomeworkMock },
+    { name: "PATCH /publish", path: "/publish", init: { method: "PATCH", body: { publish: true } }, repo: publishHomeworkMock },
+    { name: "PATCH /hide", path: "/hide", init: { method: "PATCH", body: { isHidden: true } }, repo: hideHomeworkMock },
+  ] as const;
+
+  function request(homeworkId: string, m: (typeof MUTATIONS)[number]) {
+    return buildApp(
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request(
+      `/api/courses/course-a/homeworks/${encodeURIComponent(homeworkId)}${m.path}`,
+      {
+        method: m.init.method,
+        ...("body" in m.init
+          ? { headers: { "content-type": "application/json" }, body: JSON.stringify(m.init.body) }
+          : {}),
+      },
+      TEST_ENV,
+    );
+  }
+
+  describe.each(MUTATIONS)("$name", (m) => {
+    it.each(["not-a-uuid", "1", "%00", "'; SELECT 1; --"])(
+      "returns 404, never 503, for homeworkId %j",
+      async (bad) => {
+        m.repo.mockReset();
+        const res = await request(bad, m);
+
+        expect(res.status).toBe(404);
+        // Same body a genuine miss returns, so shape is not an existence oracle.
+        expect(((await res.json()) as { error: string }).error).toBe("Homework not found");
+        // Never reached the repository at all.
+        expect(m.repo).not.toHaveBeenCalled();
+      },
+    );
+
+    it("still reaches the repository for a well-formed id", async () => {
+      // Resolving null keeps every route on its own 404-not-found path, so
+      // this asserts the gate is shape-based and not a blanket rejection.
+      m.repo.mockReset().mockResolvedValue(null);
+      const res = await request("11111111-2222-4333-8444-555555555555", m);
+
+      expect(res.status).toBe(404);
+      expect(m.repo).toHaveBeenCalled();
+    });
   });
 });

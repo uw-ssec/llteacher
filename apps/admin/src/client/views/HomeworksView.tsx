@@ -8,7 +8,7 @@
    live catalog, not static documentation."
    -------------------------------------------------------------------------- */
 
-import { ArrowRight, CalendarBlank, Folder } from "@phosphor-icons/react";
+import { ArrowRight, CalendarBlank, Folder, Lock } from "@phosphor-icons/react";
 import { PageHeader } from "../components/PageHeader";
 import { RecordId } from "../components/RecordId";
 import { StatusBadge } from "../components/StatusBadge";
@@ -36,6 +36,28 @@ export type HomeworksViewProps = {
   onOpenHomework: (id: string) => void;
   onOpenSubmissions: (id: string) => void;
   onNewHomework: () => void;
+  /** #172: false for a TA. The list itself stays readable -- a TA needs it
+     to reach the submissions dashboard -- but the create affordance is
+     omitted, since POST /homeworks is instructor-only.
+
+     Required, not defaulted: a permission-shaped prop defaulting to
+     "allowed" fails open when a caller forgets it (#172 audit, MNT-003). */
+  canAuthor: boolean;
+  /** #187 (#172 re-audit, USE-022): whether the caller holds
+     `can_view_drafts` in this course.
+
+     The list route silently filters draft/scheduled/hidden homeworks out of
+     the response for anyone without it, and this view rendered the filtered
+     result as fact -- "N RECORDS" over a truncated list. The solutions half
+     of the same grant explains itself (HomeworkReadOnlyView says so and
+     names where it is granted); the drafts half did not, so a TA told
+     "I've drafted HW4, take a look" simply could not see it and had no way
+     to tell "not granted" from "never saved" from "the console is broken".
+
+     Required for the same reason canAuthor is: defaulting a
+     permission-shaped prop to the permissive value hides the notice from
+     exactly the callers who need it. */
+  canViewDrafts: boolean;
 };
 
 const STATUS_LABEL: Record<HomeworkStatus, string> = {
@@ -60,6 +82,8 @@ export function HomeworksView({
   onOpenHomework,
   onOpenSubmissions,
   onNewHomework,
+  canAuthor,
+  canViewDrafts,
 }: HomeworksViewProps) {
   const activeCount = homeworks.filter((h) => h.status === "active").length;
 
@@ -70,15 +94,32 @@ export function HomeworksView({
         title="STATS 311 · Autumn 2026"
         subtitle="Assignments, sections, and the AI tutor configuration backing each homework."
         actions={
-          <button
-            type="button"
-            className="admin-button admin-button--primary"
-            onClick={onNewHomework}
-          >
-            + New homework
-          </button>
+          canAuthor ? (
+            <button
+              type="button"
+              className="admin-button admin-button--primary"
+              onClick={onNewHomework}
+            >
+              + New homework
+            </button>
+          ) : undefined
         }
       />
+
+      {!canViewDrafts && (
+        // Same admin-alert + role="status" treatment as the solutions notice
+        // in HomeworkReadOnlyView, so the two halves of one grant explain
+        // themselves identically (#187, USE-022).
+        <div className="admin-alert" role="status">
+          <span className="admin-alert__icon" aria-hidden="true">
+            <Lock size={16} weight="regular" />
+          </span>
+          <span>
+            Homeworks in draft, scheduled, or hidden status are not shown. An instructor grants
+            access to them per course under TA permissions.
+          </span>
+        </div>
+      )}
 
       <div className="admin-stat-row" role="list" aria-label="Catalog summary">
         <div className="admin-stat" role="listitem">

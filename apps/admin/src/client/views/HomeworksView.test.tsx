@@ -37,6 +37,8 @@ describe("HomeworksView", () => {
         onOpenHomework={vi.fn()}
         onOpenSubmissions={vi.fn()}
         onNewHomework={vi.fn()}
+        canAuthor
+        canViewDrafts
       />,
     );
 
@@ -51,6 +53,8 @@ describe("HomeworksView", () => {
         onOpenHomework={vi.fn()}
         onOpenSubmissions={vi.fn()}
         onNewHomework={vi.fn()}
+        canAuthor
+        canViewDrafts
       />,
     );
 
@@ -66,6 +70,8 @@ describe("HomeworksView", () => {
         onOpenHomework={vi.fn()}
         onOpenSubmissions={vi.fn()}
         onNewHomework={vi.fn()}
+        canAuthor
+        canViewDrafts
       />,
     );
 
@@ -85,6 +91,8 @@ describe("HomeworksView", () => {
         onOpenHomework={vi.fn()}
         onOpenSubmissions={vi.fn()}
         onNewHomework={vi.fn()}
+        canAuthor
+        canViewDrafts
       />,
     );
 
@@ -106,10 +114,43 @@ describe("HomeworksView", () => {
         onOpenHomework={vi.fn()}
         onOpenSubmissions={vi.fn()}
         onNewHomework={vi.fn()}
+        canAuthor
+        canViewDrafts
       />,
     );
 
     expect(screen.getByText("hidden")).toBeTruthy();
     expect(document.querySelector(".admin-status--hidden")).toBeTruthy();
+  });
+});
+
+/** #187 (#172 re-audit, USE-022): the list route silently filters
+ *  draft/scheduled/hidden homeworks for a caller without can_view_drafts,
+ *  and this view rendered the truncated result as fact ("N RECORDS"). The
+ *  solutions half of the same grant explained itself; the drafts half did
+ *  not, so a TA could not tell "not granted" from "never saved". */
+describe("HomeworksView unreleased-content notice (#172, USE-022)", () => {
+  const props = {
+    homeworks: HOMEWORKS,
+    onOpenHomework: vi.fn(),
+    onOpenSubmissions: vi.fn(),
+    onNewHomework: vi.fn(),
+  };
+
+  it("explains the filtered list to a caller without the drafts grant", () => {
+    render(<HomeworksView {...props} canAuthor={false} canViewDrafts={false} />);
+    expect(screen.getByText(/draft, scheduled, or hidden status are not shown/i)).toBeTruthy();
+    // Names where the grant comes from, so the reader has a next action.
+    expect(screen.getByText(/TA permissions/i)).toBeTruthy();
+  });
+
+  it("shows no notice to a caller who holds the grant", () => {
+    render(<HomeworksView {...props} canAuthor={false} canViewDrafts />);
+    expect(screen.queryByText(/are not shown/i)).toBeNull();
+  });
+
+  it("shows no notice to an instructor", () => {
+    render(<HomeworksView {...props} canAuthor canViewDrafts />);
+    expect(screen.queryByText(/are not shown/i)).toBeNull();
   });
 });

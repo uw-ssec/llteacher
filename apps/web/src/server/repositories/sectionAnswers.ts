@@ -2,7 +2,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { sections, homeworks, courses, courseMemberships, sectionAnswers } from "../../db/schema";
 import type { OrgScope, CourseScope } from "./scope";
-import { isHomeworkHidden } from "./homeworks";
+import { deriveHomeworkStatus, isHomeworkHidden } from "./homeworks";
 
 /** #164: verifies (via the real parent chain, never trusting the caller)
  *  that sectionId resolves to a non_interactive section within scope's org
@@ -79,6 +79,14 @@ export async function getSectionAnswer(db: Db, scope: CourseScope, sectionId: st
       content: sectionAnswers.content,
       submittedAt: sectionAnswers.submittedAt,
       updatedAt: sectionAnswers.updatedAt,
+      // #172 audit (SEC-001): the parent homework's release state, so the
+      // route can apply the same unreleased-content gate the detail route
+      // applies. The join to `homeworks` already exists for course scoping.
+      dueDate: homeworks.dueDate,
+      publishedAt: homeworks.publishedAt,
+      releasedAt: homeworks.releasedAt,
+      isHidden: homeworks.isHidden,
+      expiresAt: homeworks.expiresAt,
     })
     .from(sectionAnswers)
     .innerJoin(sections, eq(sectionAnswers.sectionId, sections.id))
@@ -90,5 +98,12 @@ export async function getSectionAnswer(db: Db, scope: CourseScope, sectionId: st
         eq(homeworks.courseId, scope),
       ),
     );
-  return found ?? null;
+  if (!found) return null;
+  // Derive here rather than handing the route five raw columns to reassemble:
+  // one field, and the route cannot get the derivation subtly wrong.
+  const { dueDate, publishedAt, releasedAt, isHidden, expiresAt, ...answer } = found;
+  return {
+    ...answer,
+    homeworkStatus: deriveHomeworkStatus({ dueDate, publishedAt, releasedAt, isHidden, expiresAt }),
+  };
 }
