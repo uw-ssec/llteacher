@@ -129,6 +129,41 @@ const inboundUserMessageSchema = z.object({
   parts: z.array(chatPartSchema).min(1),
 });
 
+// PR-1 whole-branch review (Critical): in ai@5.0.195, a provider failure
+// (e.g. a 429) arrives as an `error` chunk mid-stream, not a stream
+// rejection -- the stream still closes normally, so `onFinish` below still
+// fires. The AI SDK's own step machinery unconditionally pushes a
+// `{ type: "step-start" }` marker part onto `responseMessage.parts` the
+// moment the first chunk of a step arrives (before it even looks at what
+// that chunk is) -- so a `responseMessage.parts?.length` check alone is
+// NOT enough to detect "the model produced nothing": an error-only turn
+// still has `parts: [{ type: "step-start" }]`, length 1, not 0 (verified
+// empirically via chat.errorChunk.integration.test.ts, which drives a real
+// streamText() against a model that errors immediately). This checks for
+// actual renderable content instead -- anything other than a bare
+// step-start marker, and a text part only counts if it has non-empty text
+// (defensive: a text-start/text-end pair with a zero-length delta is
+// possible and shouldn't count as "answered" either). Used both to decide
+// whether onFinish should persist an assistant row at all, and to decide
+// whether an already-persisted row is complete enough to replay -- so
+// neither path can treat "the model said nothing" as "the model
+// answered."
+function hasRenderableContent(parts: unknown): boolean {
+  if (!Array.isArray(parts)) return false;
+  return parts.some((part) => {
+    if (!part || typeof part !== "object" || !("type" in part)) return false;
+    const type = (part as { type: unknown }).type;
+    if (type === "step-start") return false;
+    if (type === "text") {
+      const text = (part as { text?: unknown }).text;
+      return typeof text === "string" && text.length > 0;
+    }
+    // Any other known part shape (tool-*, file, source-url/document, etc.)
+    // is real content the moment it exists.
+    return true;
+  });
+}
+
 // Replays an already-persisted assistant message's `parts` (jsonb, so typed
 // unknown at the DB boundary) as UIMessageChunk writes -- used only by the
 // "already answered" retry path below, never by a fresh model turn. Only
@@ -287,7 +322,16 @@ export async function chatHandler(c: Context<AppEnv>) {
   const matchesInboundUser = (msg: { role: string; parts: unknown } | undefined) =>
     msg?.role === "user" && JSON.stringify(msg.parts) === JSON.stringify(parsedInbound.data.parts);
 
-  if (lastMessage?.role === "assistant" && matchesInboundUser(secondLastMessage)) {
+  // PR-1 whole-branch review (Critical): require the persisted assistant
+  // row to actually have renderable content before treating it as "already
+  // answered" -- otherwise a turn that errored out with nothing produced
+  // (see hasRenderableContent's doc comment above) would replay that
+  // emptiness forever instead of ever calling the model again for it.
+  if (
+    lastMessage?.role === "assistant" &&
+    hasRenderableContent(lastMessage.parts) &&
+    matchesInboundUser(secondLastMessage)
+  ) {
     return replayResponse(conv.id, lastMessage.parts);
   }
   if (!matchesInboundUser(lastMessage)) {
@@ -328,6 +372,17 @@ export async function chatHandler(c: Context<AppEnv>) {
     // limitation (#3 pitfall 2), not fixed here -- would need a
     // status/resume endpoint, out of scope for this task.
     onFinish: async ({ responseMessage }) => {
+      // PR-1 whole-branch review (Critical): a provider failure mid-stream
+      // (ai@5.0.195 delivers this as an `error` chunk, not a rejection --
+      // see hasRenderableContent's doc comment) still lands here with a
+      // `responseMessage` that has no real content. Persisting it anyway
+      // would write a permanently-empty assistant row that the idempotency
+      // check above would then treat as "already answered" on every future
+      // retry -- silently defeating the client's retry affordance (#144)
+      // forever. Returning early instead leaves nothing persisted for this
+      // turn, so a retry's idempotency check falls through to a genuine
+      // model call again.
+      if (!hasRenderableContent(responseMessage.parts)) return;
       try {
         await appendMessage(db, scope, conv.id, { role: "assistant", parts: responseMessage.parts });
       } catch (err) {
