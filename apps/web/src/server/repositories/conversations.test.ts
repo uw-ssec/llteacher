@@ -186,6 +186,36 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     ).rejects.toThrow(TenancyMismatchError);
   });
 
+  // PR-1 whole-branch review (#140): appendMessage previously only wrote to
+  // `messages`, never touching the parent conversation row -- so
+  // listConversationsForOwner's `ORDER BY updatedAt DESC` (#5) never
+  // reflected actual chat activity, only renames (the only other writer of
+  // this row). Real DB test (not the mocked route-level one) specifically
+  // because the fix relies on Postgres's own clock advancing between the
+  // two inserts, which a mock can't meaningfully simulate.
+  it("appendMessage bumps the parent conversation's updatedAt (#140)", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Chat whose updatedAt should move",
+    });
+    const before = await getConversationById(db, created.id);
+
+    // Ensure a measurable clock gap regardless of how fast the two queries
+    // resolve -- timestamp columns have millisecond, not nanosecond,
+    // resolution.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      role: "user",
+      parts: [{ type: "text", text: "hello" }],
+    });
+
+    const after = await getConversationById(db, created.id);
+    expect(after!.updatedAt.getTime()).toBeGreaterThan(before!.updatedAt.getTime());
+  });
+
   it("rejects an ownerUserId that is not a member of the scoped course", async () => {
     await expect(
       createConversation(db, unsafeCourseScope(courseAId), {

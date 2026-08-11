@@ -157,13 +157,20 @@ export async function updateConversationTitle(db: Db, scope: CourseScope, conver
 // #141), mapped to an honest 404 by app.onError (server/index.ts) rather
 // than falling through to the generic 503 -- this function's callers are
 // chatHandler's persistence calls (routes/chat.ts, #3). The
-// non-transactional check-then-insert is left as-is; not part of #141's
-// scope either.
-// Also: this never bumps conversations.updatedAt ($onUpdate only fires on
-// an UPDATE to the conversations row itself, and appendMessage only
-// inserts into messages) -- fine today since nothing reads updatedAt for
-// "recently active" ordering yet, but note it here for whenever something
-// does (#140).
+// non-transactional check-then-insert(-then-touch) is left as-is; not part
+// of #141's scope either.
+//
+// PR-1 whole-branch review (#140): this used to never bump
+// conversations.updatedAt ($onUpdate only fires on an UPDATE to the
+// conversations row itself, and this function used to only insert into
+// messages) -- but listConversationsForOwner (#5) already orders by
+// `desc(conversations.updatedAt)` as its "recently active first" ordering,
+// so a conversation's row was frozen at creation time for that ordering's
+// purposes: renaming it (PATCH, the only other writer of this row) moved
+// it in the list, chatting in it did not. The explicit touch below fixes
+// that inconsistency -- best-effort/non-blocking relative to the message
+// insert above (not wrapped in a transaction together), same
+// non-transactional posture this function already had.
 export async function appendMessage(
   db: Db,
   scope: CourseScope,
@@ -187,6 +194,10 @@ export async function appendMessage(
     .insert(messages)
     .values({ conversationId, role: input.role, parts: input.parts })
     .returning();
+  // #140: keep the parent conversation's "last activity" timestamp (and
+  // therefore its position in listConversationsForOwner's updatedAt-desc
+  // ordering) current with actual chat activity, not just renames.
+  await db.update(conversations).set({ updatedAt: new Date() }).where(eq(conversations.id, conversationId));
   return created;
 }
 

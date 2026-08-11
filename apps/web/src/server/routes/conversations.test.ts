@@ -326,6 +326,26 @@ describe("DELETE /api/conversations/:id", () => {
     expect(text).toBe("");
     expect(softDeleteConversationMock).toHaveBeenCalledWith(expect.anything(), "course-a", "conv-1");
   });
+
+  // PR-1 whole-branch review (Important): getOwnedConversationOrNull now
+  // checks isDeleted (previously only updateConversationTitle's/
+  // getMessagesForConversation's own queries did), so a second DELETE of
+  // an already soft-deleted, caller-owned conversation 404s -- idempotent
+  // in the "the resource is gone" sense, not "returns 204 again as if the
+  // delete just happened".
+  it("404s (not 204 again) when the conversation is already soft-deleted", async () => {
+    getConversationByIdMock.mockResolvedValue({
+      id: "conv-1",
+      ownerUserId: "u1",
+      courseId: "course-a",
+      isDeleted: true,
+    });
+
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1", { method: "DELETE" });
+
+    expect(res.status).toBe(404);
+    expect(softDeleteConversationMock).not.toHaveBeenCalled();
+  });
 });
 
 // #4 fix-round: added after code review found that selecting an existing
@@ -380,5 +400,28 @@ describe("GET /api/conversations/:id/messages", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([]);
+  });
+
+  // PR-1 whole-branch review (Important): before this fix,
+  // getOwnedConversationOrNull didn't check isDeleted at all -- only
+  // getMessagesForConversation's own query did, and that only affects which
+  // MESSAGE ROWS come back, not whether the conversation itself is treated
+  // as found. So a soft-deleted (but owned) conversation's id returned 200
+  // [] here -- indistinguishable from "a real, non-deleted conversation
+  // with zero messages" -- while PATCH/DELETE on the identical row already
+  // correctly 404'd. Same conversation row, three handlers, one shared
+  // helper: they must agree.
+  it("404s (not 200 []) when the conversation is owned by the caller but soft-deleted", async () => {
+    getConversationByIdMock.mockResolvedValue({
+      id: "conv-1",
+      ownerUserId: "u1",
+      courseId: "course-a",
+      isDeleted: true,
+    });
+
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/conv-1/messages");
+
+    expect(res.status).toBe(404);
+    expect(getMessagesForConversationMock).not.toHaveBeenCalled();
   });
 });

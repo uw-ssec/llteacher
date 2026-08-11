@@ -862,7 +862,15 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
     // was #144's actual complaint.
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(await screen.findByText("rate limited")).toBeTruthy();
-    expect(composer.disabled).toBe(true); // status "error" is not "ready" either
+    // PR-1 whole-branch review (Important): the composer must stay USABLE
+    // in the "error" state, not locked -- only a genuinely in-flight
+    // request ("submitted"/"streaming") disables it. The section chat's
+    // useChat has no `id` (unlike the tutor chat), so nothing else ever
+    // resets it out of an error state; if the composer stayed disabled
+    // here too, Retry (which replays the exact request that just failed)
+    // would be the only way out, with no way to instead send a corrected
+    // or different message.
+    expect(composer.disabled).toBe(false);
 
     await user.click(screen.getByRole("button", { name: "Retry" }));
 
@@ -870,6 +878,49 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
     expect(chatCallCount).toBe(2);
     expect(screen.queryByRole("alert")).toBeNull();
     expect((screen.getByLabelText("Message input") as HTMLTextAreaElement).disabled).toBe(false);
+  });
+
+  it("recovers from an error by sending a fresh message directly, without using Retry", async () => {
+    let chatCallCount = 0;
+    stubHomeworkFetch(async () => {
+      chatCallCount += 1;
+      if (chatCallCount === 1) return new Response("rate limited", { status: 429 });
+      return new Response(
+        [
+          `data: ${JSON.stringify({ type: "start" })}\n\n`,
+          `data: ${JSON.stringify({ type: "start-step" })}\n\n`,
+          `data: ${JSON.stringify({ type: "text-start", id: "t1" })}\n\n`,
+          `data: ${JSON.stringify({ type: "text-delta", id: "t1", delta: "fresh reply" })}\n\n`,
+          `data: ${JSON.stringify({ type: "text-end", id: "t1" })}\n\n`,
+          `data: ${JSON.stringify({ type: "finish-step" })}\n\n`,
+          `data: ${JSON.stringify({ type: "finish" })}\n\n`,
+          "data: [DONE]\n\n",
+        ].join(""),
+        { status: 200, headers: { "content-type": "text/event-stream", "x-conversation-id": "conv-1" } },
+      );
+    });
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "will fail{Enter}");
+    expect(await screen.findByRole("alert")).toBeTruthy();
+
+    // Type and send a NEW message (not clicking Retry) while chatStatus is
+    // still "error" -- this must be accepted, call the model again, and
+    // clear the stale error row once the new turn succeeds.
+    await user.type(composer, "a different message{Enter}");
+    await screen.findByText("fresh reply");
+
+    expect(chatCallCount).toBe(2);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
 
@@ -966,7 +1017,10 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
 
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(await screen.findByText("tutor stream failed")).toBeTruthy();
-    expect(composer.disabled).toBe(true);
+    // PR-1 whole-branch review (Important): same "error" != "disabled" fix
+    // as the section chat above, applied to the tutor chat's independent
+    // useChat instance too.
+    expect(composer.disabled).toBe(false);
 
     await user.click(screen.getByRole("button", { name: "Retry" }));
 

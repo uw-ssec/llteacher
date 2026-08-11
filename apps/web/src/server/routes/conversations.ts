@@ -50,21 +50,34 @@ const updateConversationSchema = z.object({
   title: z.string().trim().min(1).max(100),
 });
 
-// Shared "not found or not owned" check for PATCH/DELETE below: fetches via
-// the unscoped getConversationById and compares ownerUserId against the
-// caller, same pattern chatHandler (#3) established for conversationId
-// ownership. Returns null for BOTH "doesn't exist" and "exists but isn't
-// yours" -- callers must turn a null into a 404 (never 403), so a
-// guessed/leaked conversation id can't be used to confirm one exists that
-// isn't the caller's. Factored out (rather than duplicated in each handler,
-// as it was until this was flagged in review). This is the route-level
-// ownership check, not the repository-level tenancy check #141's
-// TenancyMismatchError covers (see the file-level comment above) -- both
-// converge on the same "404, never 403" rule, but through two different
-// mechanisms.
+// Shared "not found or not owned" check for PATCH/DELETE/GET-messages below:
+// fetches via the unscoped getConversationById and compares ownerUserId
+// against the caller, same pattern chatHandler (#3) established for
+// conversationId ownership. Returns null for "doesn't exist", "exists but
+// isn't yours", AND "exists, is yours, but is soft-deleted" -- callers must
+// turn a null into a 404 (never 403), so a guessed/leaked conversation id
+// can't be used to confirm one exists that isn't the caller's. Factored out
+// (rather than duplicated in each handler, as it was until this was flagged
+// in review). This is the route-level ownership check, not the
+// repository-level tenancy check #141's TenancyMismatchError covers (see
+// the file-level comment above) -- both converge on the same "404, never
+// 403" rule, but through two different mechanisms.
+//
+// PR-1 whole-branch review (Important): the isDeleted check was missing
+// here until this fix -- updateConversationTitle/softDeleteConversation's
+// own queries independently filter isDeleted, so PATCH and DELETE already
+// 404'd correctly on a soft-deleted conversation, but GET
+// /:id/messages (listConversationMessagesHandler) only ever called this
+// helper and getMessagesForConversation (which also filters isDeleted, but
+// only affects which MESSAGES come back, not the existence check itself) --
+// so a soft-deleted conversation's id returned 200 [] instead of 404,
+// inconsistent with PATCH/DELETE on the identical row. Adding the check
+// here (once, for every caller of this helper) also makes DELETE correctly
+// idempotent-404 on an already-deleted conversation instead of silently
+// returning 204 again.
 async function getOwnedConversationOrNull(db: Db, conversationId: string, userId: string) {
   const existing = await getConversationById(db, conversationId);
-  if (!existing || existing.ownerUserId !== userId) {
+  if (!existing || existing.ownerUserId !== userId || existing.isDeleted) {
     return null;
   }
   return existing;

@@ -509,14 +509,25 @@ export default function App() {
 
   const handleSendMessage = (text: string) => {
     /* #144: AI SDK v5's Chat#sendMessage has no internal guard against
-       being called while a previous turn is still in flight or has
-       errored -- it just pushes another message and starts another
-       request. Composer's own `disabled` (wired via ConversationView's
-       `isSending` below) already prevents this from typing + Enter, but
-       this handler is guarded independently too -- cheap insurance against
-       any other caller (future keyboard shortcut, programmatic resend,
-       etc.) that doesn't go through the composer. */
-    if (chatStatus !== "ready") return;
+       being called while a previous turn is still in flight -- it just
+       pushes another message and starts another request. Composer's own
+       `disabled` (wired via ConversationView's `isSending` below) already
+       prevents this from typing + Enter, but this handler is guarded
+       independently too -- cheap insurance against any other caller
+       (future keyboard shortcut, programmatic resend, etc.) that doesn't
+       go through the composer.
+
+       PR-1 whole-branch review (Important): "error" is deliberately NOT
+       blocked here (unlike "submitted"/"streaming") -- useChat's own
+       makeRequest() unconditionally resets status to "submitted" and
+       clears `error` the moment a new message is sent (verified in
+       @ai-sdk/react's Chat class), so sending a fresh message is a safe
+       and correct way to move past a failed turn. Blocking it too would
+       leave the section chat (this useChat instance has no `id`, unlike
+       the tutor chat, so nothing else ever resets it) permanently stuck
+       once errored, with Retry as the only way out -- and Retry replays
+       the exact same request that just failed. */
+    if (chatStatus === "submitted" || chatStatus === "streaming") return;
     /* conversationId flows per-call (not via the transport's own `body`,
        see the useChat comment above) so each turn after the first actually
        carries whatever the previous turn's x-conversation-id response
@@ -532,11 +543,12 @@ export default function App() {
      Guarded (rather than trusted) even though the composer that calls this
      is only reachable once tutorConversationId is set -- cheap insurance
      against a future caller wiring the tutor composer up before selection.
-     #144: also guarded on tutorChatStatus === "ready" for the same reason
+     #144 / PR-1 whole-branch review: guarded on tutorChatStatus for the
+     same reason, and with the same "error" is not "in flight" carve-out,
      as handleSendMessage above. */
   const handleSendTutorMessage = (text: string) => {
     if (!tutorConversationId) return;
-    if (tutorChatStatus !== "ready") return;
+    if (tutorChatStatus === "submitted" || tutorChatStatus === "streaming") return;
     sendTutorMessage({ text }, { body: { conversationId: tutorConversationId } });
   };
 
@@ -684,7 +696,11 @@ export default function App() {
               onRenameTitle={handleRenameTutorConversation}
               messages={tutorMessages}
               onSendMessage={handleSendTutorMessage}
-              isSending={tutorChatStatus !== "ready"}
+              /* PR-1 whole-branch review: "error" no longer disables the
+                 composer (only genuinely "in flight" does) -- see
+                 handleSendTutorMessage's doc comment above for why sending
+                 a fresh message is the intended way out of an error. */
+              isSending={tutorChatStatus === "submitted" || tutorChatStatus === "streaming"}
               error={tutorChatErrorRow}
             />
           </ErrorBoundary>
@@ -694,7 +710,15 @@ export default function App() {
               breadcrumb="STATS 311 · HW 3 · Section 3 P-VALUES"
               messages={messages}
               onSendMessage={handleSendMessage}
-              isSending={chatStatus !== "ready"}
+              /* PR-1 whole-branch review: "error" no longer disables the
+                 composer -- see handleSendMessage's doc comment above.
+                 This matters most for the section chat specifically: its
+                 useChat instance has no `id` (unlike the tutor chat), so
+                 nothing else ever resets it out of an error state -- if
+                 the composer stayed disabled here too, Retry (which
+                 replays the exact request that just failed) would be the
+                 *only* way out. */
+              isSending={chatStatus === "submitted" || chatStatus === "streaming"}
               error={sectionChatErrorRow}
             />
           </ErrorBoundary>
