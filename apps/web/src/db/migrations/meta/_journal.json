@@ -169,6 +169,13 @@
       "when": 1786485366844,
       "tag": "0023_chunky_scarecrow",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1786573363470,
+      "tag": "0024_aromatic_mordo",
+      "breakpoints": true
     }
   ]
 }

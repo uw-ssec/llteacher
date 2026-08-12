@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { conversations, messages, sections, homeworks, courseMemberships, submissions } from "../../db/schema";
 import type { CourseScope } from "./scope";
@@ -398,27 +398,6 @@ export async function getOwnedConversationOrNull(
     return null;
   }
   return existing;
-}
-
-// #219: per-user request budget for /api/chat. Counts this user's own user-
-// authored messages across every conversation they own (not scoped to one
-// conversation -- the limit is per-user, matching the issue title) created
-// within the trailing window. Reuses the messages/conversations tables
-// already written on every turn rather than a new counter table or an
-// external rate-limit binding.
-export async function countRecentUserMessagesForUser(db: Db, userId: string, since: Date) {
-  const [row] = await db
-    .select({ count: sql<number>`count(*)::int` })
-    .from(messages)
-    .innerJoin(conversations, eq(messages.conversationId, conversations.id))
-    .where(
-      and(
-        eq(conversations.ownerUserId, userId),
-        eq(messages.role, "user"),
-        gt(messages.createdAt, since),
-      ),
-    );
-  return row?.count ?? 0;
 }
 
 // Used by chatHandler's retry/idempotency check (#3, reworked #213): the

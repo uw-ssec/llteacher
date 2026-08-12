@@ -124,9 +124,15 @@ vi.mock("../repositories/conversations", () => ({
       .filter((m) => m.conversationId === conversationId)
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, limit),
-  // #219: unmetered in this integration test -- rate limiting itself is
-  // covered directly in chat.test.ts.
-  countRecentUserMessagesForUser: async () => 0,
+}));
+
+// #219/#265: unmetered in this integration test -- rate limiting itself is
+// covered directly in chat.test.ts (unit) and rateLimits.test.ts (real-DB
+// concurrency). reserveRateLimitSlot now lives in its own module, so it
+// needs its own mock here -- without one, chatHandler would call the real
+// implementation against the mocked (`{}`) db above and throw.
+vi.mock("../repositories/rateLimits", () => ({
+  reserveRateLimitSlot: async () => 1,
 }));
 
 function fakeAuthContext(): AuthContext {

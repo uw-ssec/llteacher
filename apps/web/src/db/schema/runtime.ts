@@ -168,6 +168,32 @@ export const messages = pgTable(
   ],
 );
 
+// #265: fixed-window per-user rate limit counter for /api/chat. A FIXED
+// window (bucketed by windowStart), not a sliding one, is what lets the
+// whole check-and-increment happen as one atomic upsert -- a sliding
+// window (count rows created in the last N ms) needs a read before the
+// write can be sized, which is exactly the check-then-act race this table
+// replaces (countRecentUserMessagesForUser counted persisted message rows,
+// with the actual increment three round-trips later and nothing
+// serializing the window in between). windowStart is computed by the
+// caller as floor(now / windowMs) * windowMs.
+export const chatRateLimitWindows = pgTable(
+  "chat_rate_limit_windows",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    count: integer("count").notNull().default(0),
+  },
+  (t) => [
+    uniqueIndex("chat_rate_limit_windows_user_window_idx").on(
+      t.userId,
+      t.windowStart,
+    ),
+  ],
+);
+
 // ---------- Relations ----------
 
 export const conversationsRelations = relations(

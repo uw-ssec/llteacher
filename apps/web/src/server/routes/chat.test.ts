@@ -23,13 +23,20 @@ const getOwnedConversationOrNullMock = vi.fn();
 const createConversationMock = vi.fn();
 const appendMessageMock = vi.fn();
 const getLastMessagesMock = vi.fn();
-const countRecentUserMessagesForUserMock = vi.fn();
 vi.mock("../repositories/conversations", () => ({
   getOwnedConversationOrNull: (...args: unknown[]) => getOwnedConversationOrNullMock(...args),
   createConversation: (...args: unknown[]) => createConversationMock(...args),
   appendMessage: (...args: unknown[]) => appendMessageMock(...args),
   getLastMessages: (...args: unknown[]) => getLastMessagesMock(...args),
-  countRecentUserMessagesForUser: (...args: unknown[]) => countRecentUserMessagesForUserMock(...args),
+}));
+
+// #265: reserveRateLimitSlot returns the POST-increment count (unlike the
+// old countRecentUserMessagesForUser, which returned the PRE-increment
+// count) -- mockResolvedValue(1) below means "this is the first request in
+// the window," not "zero prior requests."
+const reserveRateLimitSlotMock = vi.fn();
+vi.mock("../repositories/rateLimits", () => ({
+  reserveRateLimitSlot: (...args: unknown[]) => reserveRateLimitSlotMock(...args),
 }));
 
 // #259: kind:"section" now goes through #27's own lifecycle, not
@@ -112,9 +119,10 @@ describe("POST /api/chat", () => {
     getActiveSectionConversationMock.mockReset();
     streamTextMock.mockClear();
     capturedOnFinish = undefined;
-    // #219: under the rate limit by default -- individual rate-limit tests
-    // override this.
-    countRecentUserMessagesForUserMock.mockReset().mockResolvedValue(0);
+    // #219/#265: under the rate limit by default -- individual rate-limit
+    // tests override this. 1 is the post-increment count for "the first
+    // request in the window," not a pre-increment 0.
+    reserveRateLimitSlotMock.mockReset().mockResolvedValue(1);
   });
 
   it("returns 401 when there is no authContext", async () => {
@@ -219,9 +227,11 @@ describe("POST /api/chat", () => {
     });
   });
 
-  describe("#219 rate limiting", () => {
-    it("429s with Retry-After when the caller is over the per-minute budget, without touching the model", async () => {
-      countRecentUserMessagesForUserMock.mockResolvedValue(20);
+  describe("#219/#265 rate limiting", () => {
+    it("429s with Retry-After when this request's reservation pushes the count over budget, without touching the model", async () => {
+      // reserveRateLimitSlot's own increment already happened by the time
+      // it returns this -- 21st request in the window, one over the limit.
+      reserveRateLimitSlotMock.mockResolvedValue(21);
 
       const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
 
@@ -231,14 +241,33 @@ describe("POST /api/chat", () => {
       expect(streamTextMock).not.toHaveBeenCalled();
     });
 
-    it("proceeds normally when under budget", async () => {
-      countRecentUserMessagesForUserMock.mockResolvedValue(19);
+    it("proceeds normally at exactly the budget boundary (the 20th request in the window)", async () => {
+      reserveRateLimitSlotMock.mockResolvedValue(20);
       createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
       getLastMessagesMock.mockResolvedValue([]);
 
       const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
 
       expect(res.status).toBe(200);
+    });
+
+    // #265: unconditional means unconditional -- the reservation must be
+    // consumed even on a request that goes on to fail for an unrelated
+    // reason (here, a conversationId that doesn't resolve), not only on
+    // requests that reach the model. This is the fix for the old check's
+    // "skipped on a path that still calls the model" gap, verified from
+    // the other direction: it must NOT be skippable on any path either.
+    it("still reserves a slot even when the request later 404s for an unrelated reason", async () => {
+      reserveRateLimitSlotMock.mockResolvedValue(1);
+      getOwnedConversationOrNullMock.mockResolvedValue(null);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "does-not-exist",
+      });
+
+      expect(res.status).toBe(404);
+      expect(reserveRateLimitSlotMock).toHaveBeenCalledTimes(1);
     });
   });
 

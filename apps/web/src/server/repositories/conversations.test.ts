@@ -15,7 +15,6 @@ import {
   getLastMessages,
   getMessagesForConversation,
   updateConversationTitle,
-  countRecentUserMessagesForUser,
 } from "./conversations";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -800,51 +799,6 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       });
       const found = await getOwnedConversationOrNull(db, created.id, userId, () => false);
       expect(found).toBeNull();
-    });
-  });
-
-  // #219
-  describe("countRecentUserMessagesForUser", () => {
-    it("counts only this user's own user-role messages created after `since`, across conversations", async () => {
-      const convA = await createConversation(db, unsafeCourseScope(courseAId), {
-        ownerUserId: userId,
-        sectionId: null,
-        kind: "tutor",
-        title: "Rate limit count target A",
-      });
-      const convB = await createConversation(db, unsafeCourseScope(courseAId), {
-        ownerUserId: userId,
-        sectionId: null,
-        kind: "tutor",
-        title: "Rate limit count target B",
-      });
-      const since = new Date(Date.now() - 1000);
-
-      await appendMessage(db, unsafeCourseScope(courseAId), convA.id, { role: "user", parts: [{ type: "text", text: "1" }] });
-      await appendMessage(db, unsafeCourseScope(courseAId), convA.id, { role: "assistant", parts: [{ type: "text", text: "reply" }] });
-      await appendMessage(db, unsafeCourseScope(courseAId), convB.id, { role: "user", parts: [{ type: "text", text: "2" }] });
-
-      const count = await countRecentUserMessagesForUser(db, userId, since);
-      // Exactly the 2 user-role rows above -- the assistant row and any
-      // rows from other tests' users don't count.
-      expect(count).toBeGreaterThanOrEqual(2);
-
-      const countForOtherUser = await countRecentUserMessagesForUser(db, otherUserId, since);
-      expect(countForOtherUser).toBe(0);
-    });
-
-    it("excludes messages created before `since`", async () => {
-      const created = await createConversation(db, unsafeCourseScope(courseAId), {
-        ownerUserId: userId,
-        sectionId: null,
-        kind: "tutor",
-        title: "Rate limit window target",
-      });
-      await appendMessage(db, unsafeCourseScope(courseAId), created.id, { role: "user", parts: [{ type: "text", text: "old" }] });
-
-      const future = new Date(Date.now() + 60_000);
-      const count = await countRecentUserMessagesForUser(db, userId, future);
-      expect(count).toBe(0);
     });
   });
 

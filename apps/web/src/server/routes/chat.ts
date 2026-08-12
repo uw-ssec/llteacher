@@ -52,8 +52,8 @@ import {
   appendMessage,
   getLastMessages,
   getOwnedConversationOrNull,
-  countRecentUserMessagesForUser,
 } from "../repositories/conversations";
+import { reserveRateLimitSlot } from "../repositories/rateLimits";
 import {
   startSectionConversation,
   getActiveSectionConversation,
@@ -317,10 +317,17 @@ function deriveTutorConversationTitle(parts: unknown): string | null {
 
 // #219: per-user request budget. A Socratic tutoring turn is human-paced,
 // so this is generous, not a real throttle -- it exists to bound the cost
-// of a runaway client/script, not to shape normal usage. Checked against
-// the same messages table every turn already writes to (see
-// countRecentUserMessagesForUser's doc comment) rather than a new counter
-// table or an external rate-limit binding.
+// of a runaway client/script, not to shape normal usage.
+//
+// #265: reserveRateLimitSlot (repositories/rateLimits.ts) is a single
+// atomic upsert, called unconditionally as the FIRST thing this handler
+// does after basic request validation -- before conversation resolution,
+// before any persistence, before the model is ever reachable. The prior
+// version read a count, then relied on a LATER, conditional appendMessage
+// call as the actual counted side effect; that gap is exactly where the
+// race (concurrent requests all reading the same pre-increment count) and
+// the fail-open (a path that skips appendMessage but still calls the
+// model) both lived.
 const RATE_LIMIT_MAX_PER_MINUTE = 20;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 
@@ -396,16 +403,22 @@ export async function chatHandler(c: Context<AppEnv>) {
 
   const db = makeDb(c.env.DATABASE_URL);
 
-  // #219: per-user rate limit, checked before any persistence or model
-  // call. 429 + Retry-After, surfaced through useChat's existing #144
-  // error row (its onError sees the response status; the retryable row
-  // already wires `regenerate`).
-  const recentCount = await countRecentUserMessagesForUser(
+  // #219/#265: per-user rate limit, checked (and incremented, atomically,
+  // in the same statement) before any persistence or model call. 429 +
+  // Retry-After, surfaced through useChat's existing #144 error row (its
+  // onError sees the response status; the retryable row already wires
+  // `regenerate`). Unconditional -- every request that reaches this line
+  // consumes a slot, whether or not it goes on to call the model, which is
+  // deliberately more conservative than "only count requests that actually
+  // reach streamText": it closes every gap that shape could reopen, at the
+  // cost of also counting a request that will 400/404/409 moments later.
+  const requestCount = await reserveRateLimitSlot(
     db,
     authContext.session.userId,
-    new Date(Date.now() - RATE_LIMIT_WINDOW_MS),
+    new Date(),
+    RATE_LIMIT_WINDOW_MS,
   );
-  if (recentCount >= RATE_LIMIT_MAX_PER_MINUTE) {
+  if (requestCount > RATE_LIMIT_MAX_PER_MINUTE) {
     return c.json(
       { error: "You're sending messages too quickly. Please wait a moment and try again." },
       429,
