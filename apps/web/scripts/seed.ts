@@ -322,7 +322,15 @@ async function seed() {
       // reproducible run to run instead of drifting between 4-vs-5
       // submissions across runs.
       if ((conversationCount - 1) % 5 < 3) {
-        await db.insert(schema.submissions).values({ conversationId: conv.id, organizationId: org.id });
+        // #128: user_id/section_id are NOT NULL and composite-FK-checked
+        // against the conversation, so they must be the same owner and
+        // section the conversation above was created with.
+        await db.insert(schema.submissions).values({
+          conversationId: conv.id,
+          organizationId: org.id,
+          userId: userIds[studentHandle],
+          sectionId: section.id,
+        });
         submissionCount++;
       }
     }

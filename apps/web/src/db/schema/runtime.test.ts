@@ -210,6 +210,34 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
   let courseAId: string;
   let userAId: string;
   let conversationAId: string;
+  let membershipAId: string;
+  let sectionAId: string;
+
+  /** A fresh homework + section + section-conversation under course A.
+   *
+   *  #128: submissions are capped at one per (user, section) and a composite
+   *  FK ties a submission's (conversation_id, user_id, section_id) to the
+   *  conversation's own owner and section. So a test needing a second
+   *  submission for the same user needs a distinct *section*, not merely a
+   *  distinct conversation -- and it can no longer hang a submission off a
+   *  `tutor` conversation, whose section_id is NULL and therefore matches
+   *  nothing. Several tests below previously did exactly that; the schema
+   *  permitted it even though createSubmission has always refused it. */
+  async function makeSectionConversation(ownerUserId: string, label: string) {
+    const [hw] = await db
+      .insert(homeworks)
+      .values({ courseId: courseAId, createdById: membershipAId, title: label, description: "d", dueDate: new Date() })
+      .returning({ id: homeworks.id });
+    const [section] = await db
+      .insert(sections)
+      .values({ homeworkId: hw.id, order: 1, title: "s", content: "c" })
+      .returning({ id: sections.id });
+    const [conv] = await db
+      .insert(conversations)
+      .values({ ownerUserId, courseId: courseAId, sectionId: section.id, kind: "section", title: label })
+      .returning({ id: conversations.id });
+    return { conversationId: conv.id, sectionId: section.id };
+  }
 
   beforeAll(async () => {
     db = makeNodeDb(DATABASE_URL!);
@@ -248,7 +276,7 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
         .insert(conversations)
         .values({ ownerUserId: user.id, courseId: course.id, sectionId: section.id, kind: "section", title: "t" })
         .returning({ id: conversations.id });
-      return { orgId: org.id, courseId: course.id, userId: user.id, sectionId: section.id, conversationId: conv.id };
+      return { orgId: org.id, courseId: course.id, userId: user.id, membershipId: membership.id, sectionId: section.id, conversationId: conv.id };
     }
 
     const a = await makeOrgWithConversation("a");
@@ -256,6 +284,8 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
     courseAId = a.courseId;
     userAId = a.userId;
     conversationAId = a.conversationId;
+    membershipAId = a.membershipId;
+    sectionAId = a.sectionId;
 
     const b = await makeOrgWithConversation("b");
     orgBId = b.orgId;
@@ -273,9 +303,9 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
   });
 
   it("rejects a second submission for the same conversation", async () => {
-    await db.insert(submissions).values({ conversationId: conversationAId, organizationId: orgAId });
+    await db.insert(submissions).values({ conversationId: conversationAId, organizationId: orgAId, userId: userAId, sectionId: sectionAId });
     await expect(
-      db.insert(submissions).values({ conversationId: conversationAId, organizationId: orgAId }),
+      db.insert(submissions).values({ conversationId: conversationAId, organizationId: orgAId, userId: userAId, sectionId: sectionAId }),
     ).rejects.toThrow();
   });
 
@@ -425,13 +455,10 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
     // Own conversation, distinct from the shared `conversationAId` fixture --
     // submissions.conversation_id is unique, and an earlier test already
     // submitted against that one.
-    const [conv] = await db
-      .insert(conversations)
-      .values({ ownerUserId: userAId, courseId: courseAId, sectionId: null, kind: "tutor", title: "grader-restrict-test" })
-      .returning({ id: conversations.id });
+    const conv = await makeSectionConversation(userAId, "grader-restrict-test");
     const [sub] = await db
       .insert(submissions)
-      .values({ conversationId: conv.id, organizationId: orgAId })
+      .values({ conversationId: conv.conversationId, organizationId: orgAId, userId: userAId, sectionId: conv.sectionId })
       .returning({ id: submissions.id });
     const [membership] = await db
       .select({ id: courseMemberships.id })
@@ -450,16 +477,13 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
   });
 
   it("cascade-deletes an ungraded submission when its conversation is deleted", async () => {
-    const [conv] = await db
-      .insert(conversations)
-      .values({ ownerUserId: userAId, courseId: courseAId, sectionId: null, kind: "tutor", title: "cascade-test" })
-      .returning({ id: conversations.id });
+    const conv = await makeSectionConversation(userAId, "cascade-test");
     const [sub] = await db
       .insert(submissions)
-      .values({ conversationId: conv.id, organizationId: orgAId })
+      .values({ conversationId: conv.conversationId, organizationId: orgAId, userId: userAId, sectionId: conv.sectionId })
       .returning({ id: submissions.id });
 
-    await db.delete(conversations).where(eq(conversations.id, conv.id));
+    await db.delete(conversations).where(eq(conversations.id, conv.conversationId));
 
     const remainingSubs = await db.select().from(submissions).where(eq(submissions.id, sub.id));
     expect(remainingSubs).toHaveLength(0);
@@ -471,17 +495,14 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
     // comment on `grades` and issue #133. AI-graded or human-graded, either
     // one blocks: a recorded grade is the FERPA education record the gate
     // protects, not specifically the human-grader provenance.
-    const [conv] = await db
-      .insert(conversations)
-      .values({ ownerUserId: userAId, courseId: courseAId, sectionId: null, kind: "tutor", title: "cascade-block-test" })
-      .returning({ id: conversations.id });
+    const conv = await makeSectionConversation(userAId, "cascade-block-test");
     const [sub] = await db
       .insert(submissions)
-      .values({ conversationId: conv.id, organizationId: orgAId })
+      .values({ conversationId: conv.conversationId, organizationId: orgAId, userId: userAId, sectionId: conv.sectionId })
       .returning({ id: submissions.id });
     await db.insert(grades).values({ submissionId: sub.id, organizationId: orgAId, gradedByAi: true });
 
-    await expect(db.delete(conversations).where(eq(conversations.id, conv.id))).rejects.toThrow();
+    await expect(db.delete(conversations).where(eq(conversations.id, conv.conversationId))).rejects.toThrow();
   });
 
   it("blocks deleting a user while their submission has a grade (user-deletion cascade gate)", async () => {
@@ -491,13 +512,10 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
       .values({ email: emailBytes as never, emailBlindIndex: emailBytes as never })
       .returning({ id: users.id });
     await db.insert(courseMemberships).values({ userId: freshUser.id, courseId: courseAId, role: "student" });
-    const [conv] = await db
-      .insert(conversations)
-      .values({ ownerUserId: freshUser.id, courseId: courseAId, sectionId: null, kind: "tutor", title: "user-delete-gate-test" })
-      .returning({ id: conversations.id });
+    const conv = await makeSectionConversation(freshUser.id, "user-delete-gate-test");
     const [sub] = await db
       .insert(submissions)
-      .values({ conversationId: conv.id, organizationId: orgAId })
+      .values({ conversationId: conv.conversationId, organizationId: orgAId, userId: freshUser.id, sectionId: conv.sectionId })
       .returning({ id: submissions.id });
     await db.insert(grades).values({ submissionId: sub.id, organizationId: orgAId, gradedByAi: true });
 

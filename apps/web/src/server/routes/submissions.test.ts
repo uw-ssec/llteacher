@@ -20,15 +20,27 @@ const TEST_ENV = {
 const submitSectionMock = vi.fn();
 const getOrgScopesForUserMock = vi.fn();
 const getHomeworkSubmissionsMatrixMock = vi.fn();
-vi.mock("../repositories/submissions", () => ({
-  submitSection: (...a: unknown[]) => submitSectionMock(...a),
-  getHomeworkSubmissionsMatrix: (...a: unknown[]) => getHomeworkSubmissionsMatrixMock(...a),
-}));
+vi.mock("../repositories/submissions", async (importOriginal) => {
+  // importOriginal, not a bare factory: the handler now narrows on
+  // TeacherTestNotSubmittableError (#242), and a factory that omits the class
+  // makes `err instanceof undefined` throw inside the catch block.
+  const actual = await importOriginal<typeof import("../repositories/submissions")>();
+  return {
+    ...actual,
+    submitSection: (...a: unknown[]) => submitSectionMock(...a),
+    getHomeworkSubmissionsMatrix: (...a: unknown[]) => getHomeworkSubmissionsMatrixMock(...a),
+  };
+});
 vi.mock("../repositories/users", () => ({ getOrgScopesForUser: (...a: unknown[]) => getOrgScopesForUserMock(...a) }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
+/** Mirrors server/index.ts's app.onError so a rethrown error is observed the
+ *  way production observes it -- logged, and answered with the generic 503.
+ *  Without it the test app reports Hono's default 500 and the distinction
+ *  #251 is about would not actually be under test. */
 function buildApp(authContext: AuthContext | undefined) {
   const app = new Hono<AppEnv>();
+  app.onError((_err, c) => c.json({ error: "SERVICE_UNAVAILABLE" }, 503));
   app.use("*", async (c, next) => { if (authContext) c.set("authContext", authContext); await next(); });
   app.post("/api/conversations/:id/submit", (c) => submitSectionHandler(c));
   return app;
@@ -62,13 +74,46 @@ describe("POST /api/conversations/:id/submit", () => {
     expect(res.status).toBe(200);
   });
 
-  it("maps a wrong-owner repository error to 403", async () => {
+  it.each(["ConversationNotSubmittableError", "NotSubmissionOwnerError"] as const)(
+    "collapses %s into the same opaque 403",
+    async (errorName) => {
+      const mod = await import("../repositories/submissions");
+      getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
+      submitSectionMock.mockReset().mockRejectedValue(new mod[errorName]());
+      const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
+        "/api/conversations/conv-1/submit", { method: "POST" }, TEST_ENV,
+      );
+      expect(res.status).toBe(403);
+      // Identical body either way -- a non-owner must not be able to tell
+      // "doesn't exist" from "not yours" and learn a conversation exists.
+      expect(((await res.json()) as { error: string }).error).toBe(
+        "Conversation not found or not accessible",
+      );
+    },
+  );
+
+  it("returns 409 when the homework is hidden or expired (#251)", async () => {
+    const { HomeworkClosedError } = await import("../repositories/submissions");
     getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
-    submitSectionMock.mockReset().mockRejectedValue(new Error("Conversation not found or not owned by requester"));
+    submitSectionMock.mockReset().mockRejectedValue(new HomeworkClosedError());
     const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
       "/api/conversations/conv-1/submit", { method: "POST" }, TEST_ENV,
     );
-    expect(res.status).toBe(403);
+    // The student had legitimate access -- "not found" would send them
+    // hunting a bug that isn't there.
+    expect(res.status).toBe(409);
+  });
+
+  it("lets an unexpected repository failure propagate instead of reporting 403 (#251)", async () => {
+    // The gap @KshitijDani found: this catch was edited for #242 without
+    // taking #236's standard with it, so a dropped connection was reported
+    // to the student as "not found or not accessible" and never logged.
+    getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
+    submitSectionMock.mockReset().mockRejectedValue(new Error("connection terminated unexpectedly"));
+    const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
+      "/api/conversations/conv-1/submit", { method: "POST" }, TEST_ENV,
+    );
+    expect(res.status).toBe(503);
   });
 });
 
@@ -213,5 +258,23 @@ describe("GET .../submissions — unreleased-content gate (#172 audit)", () => {
       fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "ta" })] }),
     );
     expect(res.status).toBe(200);
+  });
+});
+
+describe("POST /api/conversations/:id/submit — teacher test (#242)", () => {
+  it("returns 409 naming the real reason, not the uniform 403", async () => {
+    const { TeacherTestNotSubmittableError } = await import("../repositories/submissions");
+    submitSectionMock.mockReset().mockRejectedValue(new TeacherTestNotSubmittableError());
+    getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
+
+    const res = await buildApp(
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "student" })] }),
+    ).request("/api/conversations/11111111-2222-4333-8444-555555555555/submit", { method: "POST" }, TEST_ENV);
+
+    // The caller owns this conversation -- it is their own test run -- so
+    // "not found or not accessible" would simply be false, and naming the
+    // real reason leaks nothing.
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toMatch(/Teacher test/);
   });
 });

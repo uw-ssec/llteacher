@@ -1,6 +1,6 @@
 {
-  "id": "4f0375ab-2f44-4d2d-85aa-233be17fe50c",
-  "prevId": "c086f416-a8ad-4ad5-8a8a-1082c495f6fe",
+  "id": "83ff3b19-8311-406d-8595-f2a178552ef0",
+  "prevId": "eb07bbbb-e1f2-45a6-b4ab-f53d6e132aa2",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2663,6 +2663,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "is_teacher_test": {
+          "name": "is_teacher_test",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "is_deleted": {
           "name": "is_deleted",
           "type": "boolean",
@@ -3393,6 +3400,18 @@
           "primaryKey": false,
           "notNull": true
         },
+        "client_message_id": {
+          "name": "client_message_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "seq": {
+          "name": "seq",
+          "type": "bigserial",
+          "primaryKey": false,
+          "notNull": true
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -3419,6 +3438,48 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "messages_conversation_seq_idx": {
+          "name": "messages_conversation_seq_idx",
+          "columns": [
+            {
+              "expression": "conversation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "messages_conversation_client_message_id_idx": {
+          "name": "messages_conversation_client_message_id_idx",
+          "columns": [
+            {
+              "expression": "conversation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "client_message_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}

@@ -1,6 +1,6 @@
 import { and, desc, eq, gt, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { conversations, messages, sections, homeworks, courseMemberships } from "../../db/schema";
+import { conversations, messages, sections, homeworks, courseMemberships, submissions } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import { TenancyMismatchError } from "./errors";
 
@@ -121,7 +121,27 @@ export async function createConversation(
 // Not yet exploitable (no route calls this), but see ARCHITECTURE.md's "Row
 // Ownership (Within a Scope)" section and issue #134: when M3 wires a route
 // to this, it should grow a requesterId parameter for that check.
+//
+// #128: refuses a conversation that already has a submission. Soft-deleting
+// one here would leave the submission row alive, pointing at a conversation
+// the student can no longer see -- and the moment they start a replacement
+// and submit it, a second submissions row for the same section. Callers that
+// mean "start over" want restartSectionConversation (repositories/
+// submissions.ts), which voids the submission in the same atomic group.
+// Tutor conversations can never have a submission (the composite FK added in
+// #128 makes that structural), so they are unaffected by this check.
 export async function softDeleteConversation(db: Db, scope: CourseScope, conversationId: string) {
+  const [blocking] = await db
+    .select({ id: submissions.id })
+    .from(submissions)
+    .innerJoin(conversations, eq(submissions.conversationId, conversations.id))
+    .where(and(eq(conversations.id, conversationId), eq(conversations.courseId, scope)));
+  if (blocking) {
+    throw new Error(
+      "Conversation has a submission; use restartSectionConversation to void it (#128)",
+    );
+  }
+
   return db
     .update(conversations)
     .set({ isDeleted: true, deletedAt: new Date() })

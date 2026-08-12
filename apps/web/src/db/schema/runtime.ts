@@ -4,6 +4,7 @@ import {
   boolean,
   check,
   doublePrecision,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -11,6 +12,7 @@ import {
   pgTable,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -56,6 +58,22 @@ export const conversations = pgTable(
     }),
     kind: conversationKindEnum("kind").notNull(),
     title: text("title").notNull(),
+    // #27: an instructor working a section to try out their own prompt, as
+    // opposed to a student doing the assignment. Django derived this at read
+    // time (`hasattr(user, 'teacher_profile')`); stored here instead because
+    // a derived check is retroactive -- promote a student to TA and every
+    // conversation they ever had silently becomes a "teacher test". What was
+    // true when the conversation started is the thing being recorded.
+    //
+    // Deliberately NOT the `conversation_type` enum #27's text points at.
+    // docs/architecture/multi-tenant-data-model.md's `conversation_type` is
+    // `recall | discovery | critical_thinking | tutor | evaluator` -- a
+    // pedagogical mode, an unrelated concept that isn't being built here, and
+    // taking that name now would collide when it is. That same doc says
+    // is_teacher_test should "collapse into a CourseMembership.role check",
+    // which is what this column deliberately does not do, for the reason
+    // above. Also avoids a second "type"-shaped column beside `kind`.
+    isTeacherTest: boolean("is_teacher_test").notNull().default(false),
     isDeleted: boolean("is_deleted").notNull().default(false),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
@@ -93,6 +111,12 @@ export const conversations = pgTable(
       sql`(${t.kind} = 'tutor' AND ${t.sectionId} IS NULL)
           OR (${t.kind} = 'section' AND ${t.sectionId} IS NOT NULL)`,
     ),
+    // #128: referenceable target for submissions' composite FK. `id` is
+    // already the primary key, so this adds no new integrity rule to
+    // conversations -- it exists solely because Postgres will only accept a
+    // foreign key whose referenced columns carry a unique constraint of
+    // exactly that shape.
+    unique("conversations_id_owner_section_uq").on(t.id, t.ownerUserId, t.sectionId),
   ],
 );
 
@@ -187,6 +211,24 @@ export const submissions = pgTable(
       .notNull()
       .unique()
       .references(() => conversations.id, { onDelete: "cascade" }),
+    // #128: denormalized from the owning conversation so that "one submission
+    // per (student, section)" becomes expressible at all. submissions
+    // previously carried neither column, which is why the
+    // soft-delete-and-recreate cycle could accumulate rows with nothing to
+    // detect it: UNIQUE(conversation_id) only ever caught a second submit of
+    // the *same* conversation.
+    //
+    // Kept honest by submissions_conversation_owner_section_fk below, not by
+    // convention. Without that FK these would be correct only as long as
+    // every writer remembered to copy them from the conversation, and the
+    // unique index would be enforcing a pair free to drift from the
+    // conversation it names.
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    sectionId: uuid("section_id")
+      .notNull()
+      .references(() => sections.id, { onDelete: "cascade" }),
     organizationId: uuid("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
@@ -194,7 +236,32 @@ export const submissions = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (t) => [index("submissions_org_idx").on(t.organizationId)],
+  (t) => [
+    index("submissions_org_idx").on(t.organizationId),
+    // #128. Two consequences beyond keeping the denormalized pair honest:
+    // (1) section_id is NOT NULL here while a tutor conversation's is NULL,
+    // and a NOT NULL value never matches NULL, so a submission against a
+    // tutor conversation becomes structurally impossible rather than merely
+    // rejected by createSubmission's kind check; (2) it is what makes the
+    // unique index below trustworthy.
+    foreignKey({
+      name: "submissions_conversation_owner_section_fk",
+      columns: [t.conversationId, t.userId, t.sectionId],
+      foreignColumns: [conversations.id, conversations.ownerUserId, conversations.sectionId],
+    }).onDelete("cascade"),
+    // #128, the actual fix.
+    //
+    // This cap is an accepted simplification, not a settled product rule. It
+    // keeps ONE submission per (student, section) and restart voids the
+    // previous one, so the platform retains no attempt history.
+    //
+    // The reasoning -- and the argument that `submissions` should instead be
+    // an append-only attempt table, which was deferred rather than refuted --
+    // is discussion #249. #250 is the work item. If attempts become
+    // first-class this becomes a partial unique index over live rows; read
+    // #249 before widening or removing it.
+    uniqueIndex("submissions_user_section_uq").on(t.userId, t.sectionId),
+  ],
 );
 
 // ---------- SectionAnswer ----------

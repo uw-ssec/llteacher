@@ -1,6 +1,6 @@
 {
-  "id": "4f0375ab-2f44-4d2d-85aa-233be17fe50c",
-  "prevId": "c086f416-a8ad-4ad5-8a8a-1082c495f6fe",
+  "id": "eb07bbbb-e1f2-45a6-b4ab-f53d6e132aa2",
+  "prevId": "4f0375ab-2f44-4d2d-85aa-233be17fe50c",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2662,6 +2662,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "is_teacher_test": {
+          "name": "is_teacher_test",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "is_deleted": {
           "name": "is_deleted",

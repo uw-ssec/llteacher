@@ -3,7 +3,7 @@ import { execSync } from "node:child_process";
 import { eq } from "drizzle-orm";
 import { makeNodeDb } from "../src/db/nodeClient";
 import type { Db } from "../src/db/client";
-import { organizations, courses, users, conversations, submissions, messages, grades, llmCallLogs } from "../src/db/schema";
+import { organizations, courses, users, conversations, submissions, messages, grades, llmCallLogs, courseMemberships, homeworks, sections } from "../src/db/schema";
 import { IdentityCipher } from "../src/lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../src/lib/secrets-loader";
 
@@ -48,9 +48,21 @@ describe.skipIf(!CAN_SEED)("db:seed script", () => {
   it("decrypts a seeded user's email via the same key-loading path the app uses", async () => {
     const keys = await loadIdentityCipherKeys(process.env as unknown as Env);
     const cipher = new IdentityCipher(keys);
-    const [row] = await db.select().from(users).where(eq(users.isPending, true)).limit(1);
+    // #245: selected by the blind index of a *known* seed email, not
+    // `limit(1)` over every pending user. reset() deletes seeded users by
+    // blind index computed with the current BLIND_INDEX_KEY, so users seeded
+    // under a previous run's key survive; an arbitrary pending row could
+    // therefore be one encrypted with a key that no longer exists, and the
+    // decrypt below would fail for reasons that have nothing to do with the
+    // key-loading path this test exists to cover. CI never sees it (fresh
+    // container per run); locally it fails on the second run onward.
+    const blindIndex = await cipher.computeBlindIndex(
+      IdentityCipher.normalizeEmail("student1@test.com"),
+    );
+    const [row] = await db.select().from(users).where(eq(users.emailBlindIndex, blindIndex));
+    expect(row).toBeDefined();
     const email = await cipher.decryptString(row.email);
-    expect(email).toMatch(/@test\.com$/);
+    expect(email).toBe("student1@test.com");
   });
 
   it("running without --reset a second time fails with a friendly 'already seeded' message, not a raw pg dump", () => {
@@ -113,9 +125,38 @@ describe.skipIf(!CAN_SEED)("db:seed script", () => {
       .insert(users)
       .values({ email: emailBytes as never, emailBlindIndex: emailBytes as never })
       .returning({ id: users.id });
+    // #128: a submission's composite FK ties it to its conversation's owner
+    // and section, and section_id is NOT NULL -- so this can no longer hang a
+    // submission off a `tutor` conversation the way it used to. The cascade
+    // being tested is unchanged; only the carrier had to become a real
+    // section conversation.
+    const [membership] = await db
+      .insert(courseMemberships)
+      .values({ userId: user.id, courseId: course.id, role: "instructor" })
+      .returning({ id: courseMemberships.id });
+    const [hw] = await db
+      .insert(homeworks)
+      .values({
+        courseId: course.id,
+        createdById: membership.id,
+        title: "h",
+        description: "d",
+        dueDate: new Date(),
+      })
+      .returning({ id: homeworks.id });
+    const [section] = await db
+      .insert(sections)
+      .values({ homeworkId: hw.id, order: 1, title: "s", content: "c" })
+      .returning({ id: sections.id });
     const [conv] = await db
       .insert(conversations)
-      .values({ ownerUserId: user.id, courseId: course.id, kind: "tutor", title: "cascade-check" })
+      .values({
+        ownerUserId: user.id,
+        courseId: course.id,
+        sectionId: section.id,
+        kind: "section",
+        title: "cascade-check",
+      })
       .returning({ id: conversations.id });
     const [msg] = await db
       .insert(messages)
@@ -123,7 +164,7 @@ describe.skipIf(!CAN_SEED)("db:seed script", () => {
       .returning({ id: messages.id });
     const [sub] = await db
       .insert(submissions)
-      .values({ conversationId: conv.id, organizationId: org.id })
+      .values({ conversationId: conv.id, organizationId: org.id, userId: user.id, sectionId: section.id })
       .returning({ id: submissions.id });
     const [grade] = await db
       .insert(grades)
