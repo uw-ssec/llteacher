@@ -31,6 +31,11 @@ export const llmProviderEnum = pgEnum("llm_provider", [
   "claude_for_education",
   "openrouter",
   "local",
+  // #178: UW SSEC's LiteLLM gateway. Appended, not inserted, so existing
+  // rows' enum ordinals never shift (Postgres ALTER TYPE ... ADD VALUE is
+  // append-only within a migration anyway; this keeps the source and the
+  // generated migration in agreement).
+  "llmoxie",
 ]);
 
 export const materialSourceEnum = pgEnum("material_source_type", [

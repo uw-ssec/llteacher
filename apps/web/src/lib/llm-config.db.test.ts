@@ -55,12 +55,15 @@ describe.skipIf(!RAW_DATABASE_URL)("resolveLLMConfig (real DB, #26)", () => {
     return { orgScope: unsafeOrgScope(org!.id), orgId: org!.id, homeworkId: hw!.id };
   }
 
-  async function insertConfig(orgId: string, opts: Partial<{ isDefault: boolean; isActive: boolean; modelName: string }> = {}) {
+  async function insertConfig(
+    orgId: string,
+    opts: Partial<{ isDefault: boolean; isActive: boolean; modelName: string; provider: "openrouter" | "llmoxie" }> = {},
+  ) {
     const [row] = await db
       .insert(llmConfigs)
       .values({
         organizationId: orgId,
-        provider: "openrouter",
+        provider: opts.provider ?? "openrouter",
         modelName: opts.modelName ?? "some/model",
         temperature: 0.7,
         maxCompletionTokens: 1000,
@@ -89,6 +92,19 @@ describe.skipIf(!RAW_DATABASE_URL)("resolveLLMConfig (real DB, #26)", () => {
     const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.homeworkId);
     expect(resolved.id).toBe(defaultId);
     expect(resolved.modelName).toBe("org-default-model");
+  });
+
+  it("resolves a config whose provider is 'llmoxie' (#178 enum extension actually took)", async () => {
+    const ctx = await seedCourse();
+    const configId = await insertConfig(ctx.orgId, {
+      isDefault: true,
+      modelName: "gpt-4o-via-llmoxie",
+      provider: "llmoxie",
+    });
+
+    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.homeworkId);
+    expect(resolved.id).toBe(configId);
+    expect(resolved.provider).toBe("llmoxie");
   });
 
   it("prefers the homework's own llm_config_id over the org default", async () => {

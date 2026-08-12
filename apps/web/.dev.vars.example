@@ -2,6 +2,9 @@ DATABASE_URL="postgresql://user:password@host.neon.tech/llteacher?sslmode=requir
 WORKOS_API_KEY="sk_test_placeholder"
 WORKOS_CLIENT_ID="client_placeholder"
 OPENROUTER_API_KEY="sk-or-v1-placeholder"
+# UW SSEC's LiteLLM gateway (#178). Base URL is hardcoded in lib/ai.ts
+# (getLLMoxie) -- only the key is a secret.
+LLMOXIE_API_KEY="llmoxie-key-placeholder"
 
 # Auth (M1): 32-byte keys, base64-encoded. Generate with:
 #   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"

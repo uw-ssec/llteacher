@@ -2,7 +2,7 @@ import { and, eq } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { homeworks, llmConfigs, organizationCredentials } from "../db/schema";
 import type { OrgScope } from "../server/repositories/scope";
-import { getOpenRouter } from "./ai";
+import { getOpenRouter, getLLMoxie } from "./ai";
 
 /* --------------------------------------------------------------------------
    Per-homework LLM config resolution (#26) -- replaces chat.ts's hardcoded
@@ -10,8 +10,8 @@ import { getOpenRouter } from "./ai";
    `llm_configs` row specifies.
 
    Three steps, kept separate (mirrors lib/prompts.ts's split for the same
-   reason -- each is independently testable and #178 only needs to extend
-   the last one):
+   reason -- each is independently testable, and #178 only had to extend
+   the last one to add LLMoxie):
 
      resolveLLMConfig      -- WHICH config row applies (homework override ->
                                org default -> LLMConfigNotFoundError, Django
@@ -20,11 +20,11 @@ import { getOpenRouter } from "./ai";
      resolveApiKey          -- the actual key for that row's provider,
                                resolved from an env binding, never a
                                plaintext DB column
-     buildProviderClient    -- the AI SDK provider factory for that
-                               row's provider (the switch #178 extends)
+     buildProviderClient    -- the AI SDK provider factory for that row's
+                               provider ("openrouter" and "llmoxie" today)
    -------------------------------------------------------------------------- */
 
-export type LlmProvider = "openai" | "anthropic" | "claude_for_education" | "openrouter" | "local";
+export type LlmProvider = "openai" | "anthropic" | "claude_for_education" | "openrouter" | "local" | "llmoxie";
 
 /** Django parity (LLMService.get_response's `if not llm_config: ...
  *  logger.error(...); return "...reference ID: {error_id}"`): a random,
@@ -52,11 +52,11 @@ export class LLMCredentialMissingError extends Error {
 }
 
 /** A config resolved to a real row with a real key, but this deployment has
- *  no client factory for its provider yet. Only "openrouter" does today;
- *  #178 adds the LiteLLM/LLMoxie case beside it. Matches the issue's own
- *  "if provider=local, handle gracefully (stub/error for now)" guidance --
- *  every non-openrouter provider is currently a graceful stub, not a
- *  silent misroute to openrouter regardless of what the config says. */
+ *  no client factory for its provider yet. "openrouter" and "llmoxie" (#178,
+ *  UW SSEC's LiteLLM gateway) both do; openai/anthropic/claude_for_education/
+ *  local remain graceful stubs, matching the issue's own "if provider=local,
+ *  handle gracefully (stub/error for now)" guidance -- never a silent
+ *  misroute to a different provider than what the config says. */
 export class UnsupportedLLMProviderError extends Error {
   constructor(readonly provider: string) {
     super(`LLM provider "${provider}" is not yet supported by this deployment`);
@@ -136,6 +136,7 @@ export async function resolveLLMConfig(
  *  is what keeps an org-default config created without one still usable. */
 const PROVIDER_FALLBACK_ENV_VAR: Partial<Record<LlmProvider, string>> = {
   openrouter: "OPENROUTER_API_KEY",
+  llmoxie: "LLMOXIE_API_KEY",
 };
 
 /** Resolves the actual API key for a config -- from its linked
@@ -182,9 +183,11 @@ export async function resolveApiKey(
   return key;
 }
 
-/** The per-request provider client factory -- the switch #178 adds its
- *  LiteLLM/LLMoxie case to, right beside this one. */
+/** The per-request provider client factory -- #178 added the "llmoxie"
+ *  case beside "openrouter" rather than in place of it, so existing
+ *  openrouter-provider configs keep working unchanged. */
 export function buildProviderClient(provider: LlmProvider, apiKey: string) {
   if (provider === "openrouter") return getOpenRouter(apiKey);
+  if (provider === "llmoxie") return getLLMoxie(apiKey);
   throw new UnsupportedLLMProviderError(provider);
 }

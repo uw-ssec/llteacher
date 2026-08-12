@@ -10,6 +10,7 @@ import {
 
 vi.mock("./ai", () => ({
   getOpenRouter: (apiKey: string) => ({ __fake: "openrouter-client", apiKey }),
+  getLLMoxie: (apiKey: string) => ({ __fake: "llmoxie-client", apiKey }),
 }));
 
 const baseConfig: ResolvedLLMConfig = {
@@ -45,6 +46,15 @@ describe("buildProviderClient", () => {
     expect(client.apiKey).toBe("sk-test");
   });
 
+  it("returns the LLMoxie client for provider 'llmoxie' (#178)", () => {
+    const client = buildProviderClient("llmoxie", "sk-llmoxie-test") as unknown as {
+      __fake: string;
+      apiKey: string;
+    };
+    expect(client.__fake).toBe("llmoxie-client");
+    expect(client.apiKey).toBe("sk-llmoxie-test");
+  });
+
   it.each(["openai", "anthropic", "claude_for_education", "local"] as const)(
     "throws UnsupportedLLMProviderError for provider '%s' (no client factory exists yet)",
     (provider) => {
@@ -70,6 +80,13 @@ describe("resolveApiKey", () => {
     const db = {} as never; // never queried -- credentialId is null
     const key = await resolveApiKey({ OPENROUTER_API_KEY: "sk-env-fallback" }, db, orgScope, baseConfig);
     expect(key).toBe("sk-env-fallback");
+  });
+
+  it("falls back to LLMOXIE_API_KEY for provider 'llmoxie' (#178)", async () => {
+    const db = {} as never;
+    const llmoxieConfig: ResolvedLLMConfig = { ...baseConfig, provider: "llmoxie" };
+    const key = await resolveApiKey({ LLMOXIE_API_KEY: "sk-llmoxie-env" }, db, orgScope, llmoxieConfig);
+    expect(key).toBe("sk-llmoxie-env");
   });
 
   it("throws LLMCredentialMissingError when no credential AND no fallback env var is set", async () => {

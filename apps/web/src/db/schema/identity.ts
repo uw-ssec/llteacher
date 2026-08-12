@@ -52,6 +52,10 @@ export const credentialProviderEnum = pgEnum("credential_provider", [
   "local",
   "canvas",
   "workos",
+  // #178: UW SSEC's LiteLLM gateway -- matches llmProviderEnum's own
+  // addition (content.ts) so a credential row can actually be tagged for
+  // an llm_configs row that uses it.
+  "llmoxie",
 ]);
 
 // Why a membership was dropped (issue #142). Distinguishing "this
