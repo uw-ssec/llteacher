@@ -199,7 +199,7 @@ export async function updateConversationHandler(c: Context<AppEnv>) {
 
   const db = makeDb(c.env.DATABASE_URL);
 
-  const existing = await getOwnedConversationOrNull(db, id!, authContext.session.userId);
+  const existing = await getOwnedConversationOrNull(db, id!, authContext.session.userId, authContext.isMemberOf);
   if (!existing) {
     return c.json({ error: "Conversation not found" }, 404);
   }
@@ -228,7 +228,7 @@ export async function deleteConversationHandler(c: Context<AppEnv>) {
   const id = c.req.param("id");
   const db = makeDb(c.env.DATABASE_URL);
 
-  const existing = await getOwnedConversationOrNull(db, id!, authContext.session.userId);
+  const existing = await getOwnedConversationOrNull(db, id!, authContext.session.userId, authContext.isMemberOf);
   if (!existing) {
     return c.json({ error: "Conversation not found" }, 404);
   }
@@ -270,7 +270,7 @@ export async function listConversationMessagesHandler(c: Context<AppEnv>) {
   const id = c.req.param("id");
   const db = makeDb(c.env.DATABASE_URL);
 
-  const existing = await getOwnedConversationOrNull(db, id!, authContext.session.userId);
+  const existing = await getOwnedConversationOrNull(db, id!, authContext.session.userId, authContext.isMemberOf);
   if (!existing) {
     return c.json({ error: "Conversation not found" }, 404);
   }

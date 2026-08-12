@@ -673,6 +673,8 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
   });
 
   describe("getOwnedConversationOrNull", () => {
+    const alwaysMember = () => true;
+
     it("returns the row when it exists, is owned, and is not soft-deleted", async () => {
       const created = await createConversation(db, unsafeCourseScope(courseAId), {
         ownerUserId: userId,
@@ -680,7 +682,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
         kind: "tutor",
         title: "Owned and findable",
       });
-      const found = await getOwnedConversationOrNull(db, created.id, userId);
+      const found = await getOwnedConversationOrNull(db, created.id, userId, alwaysMember);
       expect(found?.id).toBe(created.id);
     });
 
@@ -691,12 +693,17 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
         kind: "tutor",
         title: "Not owned by otherUserId",
       });
-      const found = await getOwnedConversationOrNull(db, created.id, otherUserId);
+      const found = await getOwnedConversationOrNull(db, created.id, otherUserId, alwaysMember);
       expect(found).toBeNull();
     });
 
     it("returns null for a nonexistent id", async () => {
-      const found = await getOwnedConversationOrNull(db, "00000000-0000-0000-0000-000000000000", userId);
+      const found = await getOwnedConversationOrNull(
+        db,
+        "00000000-0000-0000-0000-000000000000",
+        userId,
+        alwaysMember,
+      );
       expect(found).toBeNull();
     });
 
@@ -708,7 +715,21 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
         title: "Owned but soft-deleted",
       });
       await softDeleteConversation(db, unsafeCourseScope(courseAId), created.id);
-      const found = await getOwnedConversationOrNull(db, created.id, userId);
+      const found = await getOwnedConversationOrNull(db, created.id, userId, alwaysMember);
+      expect(found).toBeNull();
+    });
+
+    // #263: a dropped/removed course member kept full access because every
+    // *existing*-conversation path minted its scope straight from the row,
+    // never consulting membership -- only the *creation* path checked it.
+    it("returns null when the caller owns the row but is no longer a member of its course", async () => {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Owned, but the course was dropped",
+      });
+      const found = await getOwnedConversationOrNull(db, created.id, userId, () => false);
       expect(found).toBeNull();
     });
   });

@@ -366,7 +366,12 @@ export async function chatHandler(c: Context<AppEnv>) {
     // 404 and 401 respectively; a caller could tell "doesn't exist" apart
     // from "exists, not yours" by response code, which the uniform-401
     // comment on the old code claimed not to be possible.
-    const existing = await getOwnedConversationOrNull(db, conversationId, authContext.session.userId);
+    const existing = await getOwnedConversationOrNull(
+      db,
+      conversationId,
+      authContext.session.userId,
+      authContext.isMemberOf,
+    );
     if (!existing) {
       return c.json({ error: "Conversation not found" }, 404);
     }

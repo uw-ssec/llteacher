@@ -320,7 +320,12 @@ describe("PATCH /api/conversations/:id", () => {
   it("passes the caller's userId to getOwnedConversationOrNull", async () => {
     getOwnedConversationOrNullMock.mockResolvedValue(null);
     await patchConv(buildApp(fakeAuthContext()), "conv-1", { title: "New title" });
-    expect(getOwnedConversationOrNullMock).toHaveBeenCalledWith(expect.anything(), "conv-1", "u1");
+    expect(getOwnedConversationOrNullMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "conv-1",
+      "u1",
+      expect.any(Function),
+    );
   });
 
   it("400s when title is empty after trimming whitespace", async () => {

@@ -298,19 +298,43 @@ export async function getConversationById(db: Db, conversationId: string) {
   return row ?? null;
 }
 
-// #217/#222: shared "not found, not owned, or soft-deleted" check --
-// originally routes/conversations.ts-local (PATCH/DELETE/GET-messages);
-// moved here so routes/chat.ts's conversationId ownership check can reuse
-// the exact same rule instead of hand-rolling its own (#217) and inherit
-// the isDeleted check for free (#222) rather than depending on a downstream
-// TenancyMismatchError to accidentally produce the same 404. Returns null
-// for "doesn't exist", "exists but isn't yours", AND "exists, is yours, but
-// is soft-deleted" -- callers must turn a null into a 404 (never 401/403),
-// so a guessed/leaked conversation id can't be used to confirm one exists
-// that isn't the caller's.
-export async function getOwnedConversationOrNull(db: Db, conversationId: string, userId: string) {
+// #217/#222/#263: shared "not found, not owned, soft-deleted, or the caller
+// dropped the course" check -- originally routes/conversations.ts-local
+// (PATCH/DELETE/GET-messages); moved here so routes/chat.ts's conversationId
+// ownership check can reuse the exact same rule instead of hand-rolling its
+// own (#217) and inherit the isDeleted check for free (#222) rather than
+// depending on a downstream TenancyMismatchError to accidentally produce the
+// same 404. Returns null for "doesn't exist", "exists but isn't yours",
+// "exists, is yours, but is soft-deleted", AND "exists, is yours, but you no
+// longer have a live membership in its course" -- callers must turn a null
+// into a 404 (never 401/403), so a guessed/leaked conversation id can't be
+// used to confirm one exists that isn't the caller's.
+//
+// #263: createConversation already refuses to *originate* a conversation
+// without a live membership; this closes the matching gap on every path
+// that resolves an *existing* one, which is where every read/write/chat
+// call on an already-created conversation goes through this function
+// (chat.ts's conversationId branch; PATCH/DELETE/GET-messages below) and
+// then mints its CourseScope straight from the row via unsafeCourseScope --
+// with no membership check here, that scope mint was tautological: a
+// dropped student's still-valid session cookie kept full read/write/chat
+// access to conversations in a course they no longer belong to. isMemberOf
+// comes from AuthContext (already filters droppedAt, #139) so a repository
+// function stays free of route-layer auth types while still enforcing the
+// rule at its one real chokepoint instead of at each of the four call sites.
+export async function getOwnedConversationOrNull(
+  db: Db,
+  conversationId: string,
+  userId: string,
+  isMemberOfCourse: (courseId: string) => boolean,
+) {
   const existing = await getConversationById(db, conversationId);
-  if (!existing || existing.ownerUserId !== userId || existing.isDeleted) {
+  if (
+    !existing ||
+    existing.ownerUserId !== userId ||
+    existing.isDeleted ||
+    !isMemberOfCourse(existing.courseId)
+  ) {
     return null;
   }
   return existing;

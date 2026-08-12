@@ -405,7 +405,28 @@ describe("POST /api/chat", () => {
         conversationId: "conv-1",
       });
 
-      expect(getOwnedConversationOrNullMock).toHaveBeenCalledWith(expect.anything(), "conv-1", "u1");
+      expect(getOwnedConversationOrNullMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "conv-1",
+        "u1",
+        expect.any(Function),
+      );
+    });
+
+    // #263: the membership predicate passed through must actually be the
+    // caller's own -- not a stand-in that always returns true, which would
+    // make the dropped-membership fix a no-op wired to nothing.
+    it("passes the caller's own isMemberOf predicate to getOwnedConversationOrNull", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(null);
+      const authContext = fakeAuthContext();
+
+      await postChat(buildApp(authContext), {
+        messages: [userUiMessage],
+        conversationId: "conv-1",
+      });
+
+      const [, , , isMemberOfCourse] = getOwnedConversationOrNullMock.mock.calls[0]!;
+      expect(isMemberOfCourse).toBe(authContext.isMemberOf);
     });
   });
 
