@@ -161,6 +161,27 @@ vi.mock("../../lib/prompts", async (importOriginal) => {
   };
 });
 
+// #26: same rationale -- resolveLLMConfig/resolveApiKey are faked so
+// chat.ts's new per-turn config resolution doesn't reach the real Drizzle
+// queries. buildProviderClient stays real (it just builds a client object,
+// no network call), so the fake model factory below (../../lib/ai) is what
+// actually intercepts the call.
+vi.mock("../../lib/llm-config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/llm-config")>();
+  return {
+    ...actual,
+    resolveLLMConfig: async () => ({
+      id: "llm-config-1",
+      provider: "openrouter" as const,
+      modelName: "test-model",
+      temperature: 0.7,
+      maxCompletionTokens: 1000,
+      credentialId: null,
+    }),
+    resolveApiKey: async () => "sk-test-key",
+  };
+});
+
 function fakeAuthContext(): AuthContext {
   return buildFakeAuthContext({
     memberships: [fakeMembership({ courseId: "55555555-5555-5555-5555-555555555555", role: "student" })],

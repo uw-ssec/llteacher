@@ -46,7 +46,6 @@ import {
   type ToolSet,
 } from "ai";
 import { z } from "zod";
-import { getOpenRouter } from "../../lib/ai";
 import { makeDb } from "../../db/client";
 import type { ConversationKind } from "../../db/schema";
 import {
@@ -75,6 +74,14 @@ import {
   getSectionPromptContext,
   resolvePromptTemplate,
 } from "../../lib/prompts";
+import {
+  resolveLLMConfig,
+  resolveApiKey,
+  buildProviderClient,
+  LLMConfigNotFoundError,
+  LLMCredentialMissingError,
+  UnsupportedLLMProviderError,
+} from "../../lib/llm-config";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 
@@ -441,16 +448,12 @@ function deriveTutorConversationTitle(parts: unknown): string | null {
 const MAX_HISTORY_MESSAGES = 40;
 
 export async function chatHandler(c: Context<AppEnv>) {
-  const apiKey = c.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    return c.json(
-      {
-        error:
-          "OPENROUTER_API_KEY is not set. Add it to apps/web/.dev.vars for local dev or via `wrangler secret put OPENROUTER_API_KEY` for prod.",
-      },
-      500,
-    );
-  }
+  // #26: the OPENROUTER_API_KEY-specific early check this replaced is gone
+  // -- which key (if any) is needed depends on the resolved config's
+  // provider, known only once conv/scope/homeworkId are, well below. A
+  // missing/unusable key now surfaces as the Django-parity graceful 500
+  // right before the model call, not as a blanket "OpenRouter isn't
+  // configured" regardless of what the resolved config actually needs.
 
   // authMiddleware/rolesMiddleware already gate every /api/* route (chat.ts
   // is wired in unguarded via app.post("/api/chat", chatHandler) in
@@ -707,6 +710,10 @@ export async function chatHandler(c: Context<AppEnv>) {
   // verified scope -- the sanctioned case for this cast per scope.ts's
   // unsafeCourseScope docstring.
   const scope = unsafeCourseScope(conv.courseId);
+  // #25/#26: both prompt-template and LLM-config resolution need the org
+  // scope for their own fallback queries -- resolved once and shared,
+  // rather than each doing its own getOrgScopeForCourse round-trip.
+  const orgScope = await getOrgScopeForCourse(db, scope);
 
   // #25: system prompt, resolved from the conversation's PINNED template
   // (set once at creation/restart -- see lib/prompts.ts's module doc
@@ -720,15 +727,54 @@ export async function chatHandler(c: Context<AppEnv>) {
     : null;
   const resolvedSystemPromptContent =
     systemPromptTemplateContent ??
-    (await (async () => {
-      const orgScope = await getOrgScopeForCourse(db, scope);
-      if (!orgScope) return DEFAULT_SYSTEM_PROMPT;
-      return (await resolvePromptTemplate(db, orgScope, scope, conv.sectionId)).content;
-    })());
+    (orgScope ? (await resolvePromptTemplate(db, orgScope, scope, conv.sectionId)).content : DEFAULT_SYSTEM_PROMPT);
   const sectionPromptContext = conv.sectionId
     ? await getSectionPromptContext(db, scope, conv.sectionId)
     : null;
   const systemPrompt = assembleSystemPrompt(resolvedSystemPromptContent, sectionPromptContext ?? undefined);
+
+  // #26: model/provider, resolved per-request from the homework's
+  // llm_config_id override (if this is a section conversation) or the org's
+  // default config -- replaces the hardcoded model. Not pinned/cached on
+  // the conversation row the way #25's prompt template is (that's the
+  // cross-cutting invariant's stated ideal; out of scope for this pass,
+  // same "known gap, tracked separately" posture as #258 -- see #26's own
+  // closing comment). No org scope at all (a course whose org lookup
+  // failed) can't resolve any config; treated the same as "no config
+  // found" rather than a separate error path.
+  if (!orgScope) {
+    logServerError("chatHandler.llmConfig", new Error(`No org scope for course ${scope}`));
+    return c.json({ error: "Something went wrong. Please try again later." }, 503);
+  }
+  let resolvedLLMConfig: Awaited<ReturnType<typeof resolveLLMConfig>>;
+  try {
+    resolvedLLMConfig = await resolveLLMConfig(db, orgScope, sectionPromptContext?.homeworkId ?? null);
+  } catch (err) {
+    if (err instanceof LLMConfigNotFoundError) {
+      logServerError("chatHandler.llmConfig", err);
+      return c.json(
+        { error: `I'm sorry, but there's no valid LLM configuration available right now. Reference ID: ${err.referenceId}` },
+        500,
+      );
+    }
+    throw err;
+  }
+  let resolvedApiKey: string;
+  let providerClient: ReturnType<typeof buildProviderClient>;
+  try {
+    resolvedApiKey = await resolveApiKey(c.env as unknown as Record<string, string | undefined>, db, orgScope, resolvedLLMConfig);
+    providerClient = buildProviderClient(resolvedLLMConfig.provider, resolvedApiKey);
+  } catch (err) {
+    if (err instanceof LLMCredentialMissingError || err instanceof UnsupportedLLMProviderError) {
+      const referenceId = crypto.randomUUID();
+      logServerError("chatHandler.llmConfig", new Error(`${err.message} (ref: ${referenceId})`));
+      return c.json(
+        { error: `I'm sorry, but there's no valid LLM configuration available right now. Reference ID: ${referenceId}` },
+        500,
+      );
+    }
+    throw err;
+  }
 
   // Idempotency (#3, reworked #213) -- two distinct retry shapes, both
   // covered so neither the user row nor the assistant row can be
@@ -814,8 +860,6 @@ export async function chatHandler(c: Context<AppEnv>) {
     }
   }
 
-  const openrouter = getOpenRouter(apiKey);
-
   // #215: trailing window -- see MAX_HISTORY_MESSAGES' doc comment above
   // for the drop-silently decision.
   const windowedMessages =
@@ -835,12 +879,9 @@ export async function chatHandler(c: Context<AppEnv>) {
     : windowedMessages;
 
   const result = streamText({
-    // Gemma 4 31B (instruction-tuned) on OpenRouter's free tier. Released
-    // 2026-04-02, 262K context, native function calling (custom XML format
-    // OpenRouter normalizes to the OpenAI-compatible tool call shape the AI
-    // SDK expects). Free, with rate limits. #230: hardcoded pending #26
-    // (LLM config resolution).
-    model: openrouter("google/gemma-4-31b-it:free"),
+    // #26: model/provider/params all come from resolvedLLMConfig now --
+    // homework override or org default, never hardcoded.
+    model: providerClient(resolvedLLMConfig.modelName),
     system: systemPrompt,
     messages: convertToModelMessages(modelContextMessages),
     // #264: belt-and-suspenders alongside historyMessageSchema's role
@@ -850,6 +891,8 @@ export async function chatHandler(c: Context<AppEnv>) {
     // refusal even if some future change to that schema let one through.
     allowSystemInMessages: false,
     tools: TOOLS,
+    temperature: resolvedLLMConfig.temperature,
+    maxOutputTokens: resolvedLLMConfig.maxCompletionTokens,
     /* Allow up to 5 steps so the model can call a display tool and then
        continue with the follow-up Socratic question in the same turn.
        Without this, streamText stops the moment a tool call is emitted. */

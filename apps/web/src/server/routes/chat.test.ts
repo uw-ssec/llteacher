@@ -104,6 +104,21 @@ vi.mock("../../lib/prompts", async (importOriginal) => {
   };
 });
 
+// #26: LLM config resolution -- mocked for the same reason as #25's prompt
+// mocks above (these tests mock db to `{}`); buildProviderClient stays real
+// (importOriginal) so `model:` passed to streamTextMock reflects the actual
+// getOpenRouter(apiKey) call, not a second mock of it.
+const resolveLLMConfigMock = vi.fn();
+const resolveApiKeyMock = vi.fn();
+vi.mock("../../lib/llm-config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/llm-config")>();
+  return {
+    ...actual,
+    resolveLLMConfig: (...args: unknown[]) => resolveLLMConfigMock(...args),
+    resolveApiKey: (...args: unknown[]) => resolveApiKeyMock(...args),
+  };
+});
+
 function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
   return buildFakeAuthContext({
     memberships: [fakeMembership({ courseId: "55555555-5555-5555-5555-555555555555", role: "student" })],
@@ -163,6 +178,18 @@ describe("POST /api/chat", () => {
     getPinnedPromptTemplateContentMock.mockReset().mockResolvedValue(null);
     resolvePromptTemplateMock.mockReset().mockResolvedValue({ id: null, content: "test system prompt", version: null });
     getSectionPromptContextMock.mockReset().mockResolvedValue(null);
+    // #26: none of these tests assert on model/provider specifics -- a
+    // resolvable openrouter config + a fake key by default, same "no test
+    // needs to care" posture as the #25 defaults above.
+    resolveLLMConfigMock.mockReset().mockResolvedValue({
+      id: "llm-config-1",
+      provider: "openrouter",
+      modelName: "test/model",
+      temperature: 0.7,
+      maxCompletionTokens: 1000,
+      credentialId: null,
+    });
+    resolveApiKeyMock.mockReset().mockResolvedValue("sk-test-key");
   });
 
   it("returns 401 when there is no authContext", async () => {
@@ -171,19 +198,74 @@ describe("POST /api/chat", () => {
     expect(createConversationMock).not.toHaveBeenCalled();
   });
 
-  it("returns 500 when OPENROUTER_API_KEY is not set", async () => {
-    const app = new Hono<AppEnv>();
-    app.use("*", async (c, next) => {
-      c.set("authContext", fakeAuthContext());
-      await next();
-    });
-    app.post("/api/chat", (c) => chatHandler(c));
-    const res = await app.request(
-      "/api/chat",
-      { method: "POST", body: JSON.stringify({ messages: [userUiMessage] }), headers: { "content-type": "application/json" } },
-      { DATABASE_URL: "ignored" } as Env,
-    );
+  // #26: replaces the old hardcoded-OPENROUTER_API_KEY-missing test -- that
+  // check is gone; a missing/unusable key now surfaces through
+  // resolveApiKey's own LLMCredentialMissingError instead.
+  it("returns 500 with a Reference ID when no LLM config exists at any scope (Django parity)", async () => {
+    createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    const { LLMConfigNotFoundError } = await import("../../lib/llm-config");
+    const err = new LLMConfigNotFoundError();
+    resolveLLMConfigMock.mockRejectedValueOnce(err);
+
+    const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
     expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain(err.referenceId);
+    expect(streamTextMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 with a Reference ID when the resolved config's API key can't be resolved", async () => {
+    createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    const { LLMCredentialMissingError } = await import("../../lib/llm-config");
+    resolveApiKeyMock.mockRejectedValueOnce(new LLMCredentialMissingError("no key configured"));
+
+    const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("Reference ID");
+    expect(streamTextMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 with a Reference ID when the resolved config's provider has no client factory yet", async () => {
+    createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    resolveApiKeyMock.mockResolvedValueOnce("sk-test-key");
+    // buildProviderClient is real (importOriginal) -- give it a genuinely
+    // unsupported provider so it throws for real, not via a mock.
+    resolveLLMConfigMock.mockResolvedValueOnce({
+      id: "llm-config-1",
+      provider: "anthropic",
+      modelName: "claude-x",
+      temperature: 0.7,
+      maxCompletionTokens: 1000,
+      credentialId: null,
+    });
+
+    const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("Reference ID");
+    expect(streamTextMock).not.toHaveBeenCalled();
+  });
+
+  it("resolves the model/provider/params from the resolved config and passes them to streamText", async () => {
+    createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    getLastMessagesMock.mockResolvedValue([]);
+    resolveLLMConfigMock.mockResolvedValueOnce({
+      id: "llm-config-2",
+      provider: "openrouter",
+      modelName: "some/specific-model",
+      temperature: 0.42,
+      maxCompletionTokens: 777,
+      credentialId: null,
+    });
+    resolveApiKeyMock.mockResolvedValueOnce("sk-specific-key");
+
+    await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+
+    expect(streamTextMock).toHaveBeenCalledTimes(1);
+    const callArgs = streamTextMock.mock.calls[0]![0] as { temperature: number; maxOutputTokens: number };
+    expect(callArgs.temperature).toBe(0.42);
+    expect(callArgs.maxOutputTokens).toBe(777);
   });
 
   it("400s when the last message isn't a well-formed user message", async () => {

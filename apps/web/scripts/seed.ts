@@ -222,12 +222,18 @@ async function seed() {
     membershipIds[spec.handle] = membership.id;
   }
 
+  // #26: "openrouter" -- the only provider with a real client factory today
+  // (lib/llm-config.ts's buildProviderClient); no credentialId, so this
+  // resolves its key from the OPENROUTER_API_KEY env var, the same one
+  // chat.ts read directly before #26. A seeded "anthropic" config would
+  // resolve fine but fail at buildProviderClient with
+  // UnsupportedLLMProviderError the moment anyone actually chats.
   const [llmConfig] = await db
     .insert(schema.llmConfigs)
     .values({
       organizationId: org.id,
-      provider: "anthropic",
-      modelName: "claude-sonnet-4-5",
+      provider: "openrouter",
+      modelName: "google/gemma-4-31b-it:free",
       temperature: 0.7,
       maxCompletionTokens: 1000,
       isDefault: true,

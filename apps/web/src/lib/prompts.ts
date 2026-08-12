@@ -153,6 +153,12 @@ export interface PromptSectionContext {
    *  parameter for it, by design, so a solution can only leak into the
    *  student prompt via a caller that goes out of its way to mislabel it. */
   sectionContent: string;
+  /** Not used by assembleSystemPrompt itself (optional so pure
+   *  assembleSystemPrompt test fixtures don't need to supply it) -- carried
+   *  through so callers that already fetched this row (chat.ts) don't need
+   *  a second query just to get the homeworkId lib/llm-config.ts's
+   *  resolveLLMConfig needs. getSectionPromptContext always sets it. */
+  homeworkId?: string;
 }
 
 /** homework title + section title/content for assembleSystemPrompt's
@@ -174,6 +180,7 @@ export async function getSectionPromptContext(
       sectionTitle: sections.title,
       sectionContent: sections.content,
       homeworkTitle: homeworks.title,
+      homeworkId: homeworks.id,
     })
     .from(sections)
     .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
