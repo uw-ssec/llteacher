@@ -11,8 +11,11 @@ import {
   grades,
 } from "../../db/schema";
 import type { CourseScope, OrgScope } from "./scope";
+import { unsafeCourseScope } from "./scope";
 import { runAtomically } from "./atomic";
 import { SubmissionGradedError } from "./submissions";
+import { getOrgScopeForCourse } from "./organizations";
+import { resolvePromptTemplate } from "../../lib/prompts";
 
 /* --------------------------------------------------------------------------
    Section-conversation lifecycle (#27), kept in its own module rather than
@@ -139,7 +142,13 @@ export async function startSectionConversation(
   db: Db,
   scope: CourseScope,
   input: StartInput,
-): Promise<{ id: string; title: string; greetingMessageId: string; greetingParts: unknown }> {
+): Promise<{
+  id: string;
+  title: string;
+  greetingMessageId: string;
+  greetingParts: unknown;
+  promptTemplateId: string | null;
+}> {
   // Membership and section-in-course are both caller-supplied and must be
   // verified before writing -- same rationale as createConversation's checks
   // in conversations.ts. droppedAt IS NULL matches listMembershipsForUser:
@@ -201,6 +210,16 @@ export async function startSectionConversation(
   const title = `Section ${section.order}: ${section.title}`;
   const greeting = greetingParts(sectionGreeting(section));
 
+  // #25: resolved and pinned once, here, at creation -- see lib/prompts.ts's
+  // module doc comment for why this must never be re-resolved per-message.
+  // Best-effort: a missing org scope (shouldn't happen for a course that
+  // just passed every check above) degrades to no pin rather than failing
+  // section start entirely over a prompt-template lookup.
+  const orgScope = await getOrgScopeForCourse(db, scope);
+  const promptTemplateId = orgScope
+    ? (await resolvePromptTemplate(db, orgScope, scope, input.sectionId)).id
+    : null;
+
   // #238: the pre-check above is a courtesy, not the guarantee -- it and the
   // insert are separate round-trips, so a double-clicked "Start" can put two
   // requests past it. conversations_owner_section_active_uq is what actually
@@ -216,6 +235,7 @@ export async function startSectionConversation(
         kind: "section",
         title,
         isTeacherTest: input.isTeacherTest,
+        promptTemplateId,
       }),
       t.insert(messages).values({
         id: greetingMessageId,
@@ -237,7 +257,7 @@ export async function startSectionConversation(
   // section having never seen the greeting (and therefore the section's
   // actual question text, section.content, which the greeting is the sole
   // delivery mechanism for).
-  return { id: conversationId, title, greetingMessageId, greetingParts: greeting };
+  return { id: conversationId, title, greetingMessageId, greetingParts: greeting, promptTemplateId };
 }
 
 /** Delete-and-restart, in one action (#27) with #128's voiding semantics.
@@ -319,6 +339,15 @@ export async function restartSectionConversation(
   const greetingMessageId = crypto.randomUUID();
   const title = `Section ${owned.sectionOrder}: ${owned.sectionTitle}`;
 
+  // #25: a restart is a fresh conversation lifecycle start (same reasoning
+  // as startSectionConversation's own pin) -- re-resolved now rather than
+  // carried over from the conversation being replaced, so a template edit
+  // made between the original start and this restart is picked up, exactly
+  // once, for the replacement's own lifetime.
+  const promptTemplateId = (
+    await resolvePromptTemplate(db, scope, unsafeCourseScope(owned.courseId), owned.sectionId)
+  ).id;
+
   await runAtomically(db, (t) => [
     // Soft-delete first: conversations_owner_section_active_uq permits only
     // one active conversation per (owner, section), so the insert below is
@@ -341,6 +370,7 @@ export async function restartSectionConversation(
       // another test conversation, and a since-promoted student's restart
       // does not silently convert their work into a teacher test.
       isTeacherTest: owned.isTeacherTest,
+      promptTemplateId,
     }),
     t.insert(messages).values({
       id: greetingMessageId,
@@ -373,6 +403,7 @@ export type SectionConversationRow = {
   isTeacherTest: boolean;
   isDeleted: boolean;
   createdAt: Date;
+  promptTemplateId: string | null;
 };
 
 /** One section conversation by id, course-scoped. Returns soft-deleted rows
@@ -394,6 +425,7 @@ export async function getSectionConversationById(
       isTeacherTest: conversations.isTeacherTest,
       isDeleted: conversations.isDeleted,
       createdAt: conversations.createdAt,
+      promptTemplateId: conversations.promptTemplateId,
     })
     .from(conversations)
     .where(
@@ -423,6 +455,7 @@ export async function getActiveSectionConversation(
       isTeacherTest: conversations.isTeacherTest,
       isDeleted: conversations.isDeleted,
       createdAt: conversations.createdAt,
+      promptTemplateId: conversations.promptTemplateId,
     })
     .from(conversations)
     .where(

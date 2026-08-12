@@ -4,6 +4,8 @@ import { conversations, messages, sections, homeworks, courseMemberships, submis
 import type { ConversationKind } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import { TenancyMismatchError, IdempotencyKeyConflictError } from "./errors";
+import { getOrgScopeForCourse } from "./organizations";
+import { resolvePromptTemplate } from "../../lib/prompts";
 
 export const DEFAULT_CONVERSATIONS_PAGE_SIZE = 50;
 const DEFAULT_MESSAGES_PAGE_SIZE = 200;
@@ -134,9 +136,18 @@ export async function createConversation(
     }
   }
 
+  // #25: pinned once here, at creation -- never re-resolved per-message (see
+  // lib/prompts.ts's module doc comment for why). orgScope isn't something
+  // this function's callers carry (only CourseScope), so it's derived here
+  // rather than widening every caller's signature for one internal lookup.
+  const orgScope = await getOrgScopeForCourse(db, scope);
+  const promptTemplateId = orgScope
+    ? (await resolvePromptTemplate(db, orgScope, scope, input.sectionId)).id
+    : null;
+
   const [created] = await db
     .insert(conversations)
-    .values({ courseId: scope, ...input })
+    .values({ courseId: scope, promptTemplateId, ...input })
     .returning();
   return created;
 }

@@ -18,7 +18,14 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { courseMemberships, courses, organizations, users } from "./identity";
-import { llmConfigs, llmProviderEnum, materialChunks, sections, homeworkProgressWidgets } from "./content";
+import {
+  llmConfigs,
+  llmProviderEnum,
+  materialChunks,
+  sections,
+  homeworkProgressWidgets,
+  promptTemplates,
+} from "./content";
 
 // ---------- Enums ----------
 
@@ -81,6 +88,18 @@ export const conversations = pgTable(
     // which is what this column deliberately does not do, for the reason
     // above. Also avoids a second "type"-shaped column beside `kind`.
     isTeacherTest: boolean("is_teacher_test").notNull().default(false),
+    // #25: pinned once at conversation creation (resolvePromptTemplate,
+    // lib/prompts.ts) and never re-resolved per-message -- a mid-conversation
+    // template edit must not flip which version this conversation's system
+    // prompt uses (the cross-cutting invariant #30 lists for this epic).
+    // Nullable: a template row pins an exact version already (each edit is a
+    // new row via previousVersionId), so no separate version column is
+    // needed; null means resolution fell through to the built-in fallback
+    // constant (DEFAULT_SYSTEM_PROMPT) rather than a real template row, or
+    // the conversation predates this column.
+    promptTemplateId: uuid("prompt_template_id").references(() => promptTemplates.id, {
+      onDelete: "set null",
+    }),
     isDeleted: boolean("is_deleted").notNull().default(false),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })

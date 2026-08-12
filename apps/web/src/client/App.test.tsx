@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { renderHook, render, screen, waitFor, cleanup } from "@testing-library/react";
+import { renderHook, render, screen, waitFor, cleanup, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import App, { useStudentHomework } from "./App";
@@ -1654,8 +1654,8 @@ describe("App section restart affordance (#248)", () => {
         if (url === "/api/student/homeworks") {
           return new Response(JSON.stringify(RESTART_HOMEWORK_FIXTURE), { status: 200 });
         }
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
-        if (url === "/api/conversations/sec-conv-1/messages") {
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           return new Response(
             JSON.stringify([{ id: "m1", role: "user", parts: [{ type: "text", text: "sec 1 question" }] }]),
             { status: 200 },
@@ -1692,7 +1692,7 @@ describe("App section restart affordance (#248)", () => {
             { status: 200 },
           );
         }
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
         throw new Error(`unexpected fetch to ${url}`);
       }),
     );
@@ -1765,8 +1765,8 @@ describe("App section restart affordance (#248)", () => {
             { status: 200 },
           );
         }
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
-        if (url === "/api/conversations/sec-conv-1/messages") {
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           return new Response(
             JSON.stringify([{ id: "m1", role: "user", parts: [{ type: "text", text: "sec 1 question" }] }]),
             { status: 200 },
@@ -1805,7 +1805,7 @@ describe("App section restart affordance (#248)", () => {
           { status: 201 },
         );
       }
-      if (url === "/api/conversations/sec-conv-2/messages") {
+      if (url.startsWith("/api/conversations/sec-conv-2/messages")) {
         return new Response(
           JSON.stringify([{ id: "g1", role: "assistant", parts: [{ type: "text", text: "fresh greeting" }] }]),
           { status: 200 },

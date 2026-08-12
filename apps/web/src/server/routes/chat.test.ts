@@ -81,6 +81,29 @@ vi.mock("ai", async (importOriginal) => {
   return { ...actual, streamText: (args: Record<string, unknown>) => streamTextMock(args) };
 });
 
+// #25: system-prompt resolution -- mocked so these tests (which mock db to
+// `{}`) don't hit real Drizzle calls chat.ts now makes on every turn.
+// assembleSystemPrompt/DEFAULT_SYSTEM_PROMPT stay real (pure, no db) via
+// importOriginal, so `system:` passed to streamTextMock reflects the actual
+// composition logic, not a second mock of it.
+const getOrgScopeForCourseMock = vi.fn();
+vi.mock("../repositories/organizations", () => ({
+  getOrgScopeForCourse: (...args: unknown[]) => getOrgScopeForCourseMock(...args),
+}));
+
+const getPinnedPromptTemplateContentMock = vi.fn();
+const resolvePromptTemplateMock = vi.fn();
+const getSectionPromptContextMock = vi.fn();
+vi.mock("../../lib/prompts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/prompts")>();
+  return {
+    ...actual,
+    getPinnedPromptTemplateContent: (...args: unknown[]) => getPinnedPromptTemplateContentMock(...args),
+    resolvePromptTemplate: (...args: unknown[]) => resolvePromptTemplateMock(...args),
+    getSectionPromptContext: (...args: unknown[]) => getSectionPromptContextMock(...args),
+  };
+});
+
 function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
   return buildFakeAuthContext({
     memberships: [fakeMembership({ courseId: "55555555-5555-5555-5555-555555555555", role: "student" })],
@@ -133,6 +156,13 @@ describe("POST /api/chat", () => {
     // tests override this. 1 is the post-increment count for "the first
     // request in the window," not a pre-increment 0.
     reserveRateLimitSlotMock.mockReset().mockResolvedValue(1);
+    // #25: none of these tests assert on system-prompt *content* -- default
+    // to "resolved, no pin, no section context" for every test so chatHandler's
+    // new prompt-assembly branch runs without touching the mocked-empty db.
+    getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-a");
+    getPinnedPromptTemplateContentMock.mockReset().mockResolvedValue(null);
+    resolvePromptTemplateMock.mockReset().mockResolvedValue({ id: null, content: "test system prompt", version: null });
+    getSectionPromptContextMock.mockReset().mockResolvedValue(null);
   });
 
   it("returns 401 when there is no authContext", async () => {

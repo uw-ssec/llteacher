@@ -4,6 +4,25 @@ import { SubmissionGradedError } from "./submissions";
 import { unsafeOrgScope } from "./scope";
 import type { Db } from "../../db/client";
 
+// #25: both restartSectionConversation and startSectionConversation now
+// resolve+pin a prompt template internally. Mocked here (not just given a
+// canned queue result) because resolvePromptTemplate's real implementation
+// issues its own .select() chains against `db`, which would silently
+// consume from this file's hand-rolled `queue`/`selects` fakes below and
+// desync every carefully-ordered assertion that follows. getOrgScopeForCourse
+// uses db.query.courses.findFirst -- an API these fakes don't implement at
+// all -- so it must be mocked regardless.
+vi.mock("./organizations", () => ({
+  getOrgScopeForCourse: async () => "org-1",
+}));
+vi.mock("../../lib/prompts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/prompts")>();
+  return {
+    ...actual,
+    resolvePromptTemplate: async () => ({ id: null, content: "test system prompt", version: null }),
+  };
+});
+
 const SCOPE = unsafeOrgScope("org-1");
 const CONV = "11111111-2222-4333-8444-555555555555";
 const OWNER = "owner-1";

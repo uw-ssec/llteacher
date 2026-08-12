@@ -27,9 +27,10 @@
      4. return the conversationId to the client via the x-conversation-id
         response header, so it can send it back on the next turn
 
-   System prompt + model stay hardcoded, per #230: this is FLX-001's own
-   filed scope, a duplicate of #25 (prompt assembly) and #26 (LLM config
-   resolution), later tasks in this epic -- not in scope here.
+   System prompt: resolved per-conversation (#25, lib/prompts.ts) from the
+   conversation's pinned prompt_templates row + section context, never
+   hardcoded. Model stays hardcoded pending #26 (LLM config resolution),
+   a later task in this epic -- not in scope here.
    -------------------------------------------------------------------------- */
 
 import type { Context } from "hono";
@@ -65,15 +66,17 @@ import {
 } from "../repositories/sectionConversations";
 import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
 import { IdempotencyKeyConflictError } from "../repositories/errors";
+import { getOrgScopeForCourse } from "../repositories/organizations";
 import { logServerError } from "../utils/errors";
+import {
+  assembleSystemPrompt,
+  DEFAULT_SYSTEM_PROMPT,
+  getPinnedPromptTemplateContent,
+  getSectionPromptContext,
+  resolvePromptTemplate,
+} from "../../lib/prompts";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
-
-const SYSTEM_PROMPT = `You are an AI tutor for an introductory statistics course at the University of Washington. Your job is to guide students through homework problems using the Socratic method: ask leading questions, build intuition step by step, never just dump the answer.
-
-You have one structured rendering tool available: showDefinition. Call it whenever you are formally introducing a named statistical concept ("p-value", "null hypothesis", "standard error", "confidence interval", "type I error", etc.) — give the student a polished definition card with the term and a 1–2 sentence plain-language body. For everything else (guiding questions, follow-ups, gentle nudges, walking through computations), reply in plain markdown — no tool call.
-
-Be warm, curious, and patient. Prefer questions over assertions.`;
 
 /* Tool catalog typed as ToolSet. We use the AI SDK's jsonSchema() helper
    instead of Zod here — Zod's deeply parameterized types collide with the
@@ -564,7 +567,13 @@ export async function chatHandler(c: Context<AppEnv>) {
   // persisted history a normal turn would see.
   let sectionGreetingParts: unknown[] | undefined;
 
-  let conv: { id: string; ownerUserId: string; courseId: string };
+  let conv: {
+    id: string;
+    ownerUserId: string;
+    courseId: string;
+    sectionId: string | null;
+    promptTemplateId: string | null;
+  };
   if (conversationId) {
     // #217/#222: getOwnedConversationOrNull collapses "doesn't exist",
     // "exists but isn't yours", and "exists, is yours, but soft-deleted"
@@ -645,7 +654,13 @@ export async function chatHandler(c: Context<AppEnv>) {
           // but is also not who isInstructorOf's AUTHOR_ROLES tier means.
           isTeacherTest: !isStudentInCourse(authContext.memberships, courseId),
         });
-        conv = { id: created.id, ownerUserId: authContext.session.userId, courseId };
+        conv = {
+          id: created.id,
+          ownerUserId: authContext.session.userId,
+          courseId,
+          sectionId: requestedSectionId,
+          promptTemplateId: created.promptTemplateId,
+        };
         sectionGreetingParts = Array.isArray(created.greetingParts) ? created.greetingParts : undefined;
       } catch (err) {
         if (err instanceof SectionConversationExistsError) {
@@ -661,7 +676,13 @@ export async function chatHandler(c: Context<AppEnv>) {
             authContext.session.userId,
           );
           if (!active) throw err; // existence was just proven; a missing row here is a genuine bug, not a race
-          conv = { id: active.id, ownerUserId: active.ownerUserId, courseId: active.courseId };
+          conv = {
+            id: active.id,
+            ownerUserId: active.ownerUserId,
+            courseId: active.courseId,
+            sectionId: active.sectionId,
+            promptTemplateId: active.promptTemplateId,
+          };
         } else if (err instanceof SectionNotFoundError) {
           return c.json({ error: "Section not found" }, 404);
         } else if (err instanceof SectionNotInteractiveError) {
@@ -686,6 +707,28 @@ export async function chatHandler(c: Context<AppEnv>) {
   // verified scope -- the sanctioned case for this cast per scope.ts's
   // unsafeCourseScope docstring.
   const scope = unsafeCourseScope(conv.courseId);
+
+  // #25: system prompt, resolved from the conversation's PINNED template
+  // (set once at creation/restart -- see lib/prompts.ts's module doc
+  // comment) rather than re-resolved here. A null promptTemplateId means
+  // either a genuinely-unset scope (DEFAULT_SYSTEM_PROMPT was already the
+  // right answer at creation) or a conversation that predates this column
+  // -- both degrade the same way: resolve fresh now rather than fail the
+  // turn over a missing pin.
+  const systemPromptTemplateContent = conv.promptTemplateId
+    ? await getPinnedPromptTemplateContent(db, conv.promptTemplateId)
+    : null;
+  const resolvedSystemPromptContent =
+    systemPromptTemplateContent ??
+    (await (async () => {
+      const orgScope = await getOrgScopeForCourse(db, scope);
+      if (!orgScope) return DEFAULT_SYSTEM_PROMPT;
+      return (await resolvePromptTemplate(db, orgScope, scope, conv.sectionId)).content;
+    })());
+  const sectionPromptContext = conv.sectionId
+    ? await getSectionPromptContext(db, scope, conv.sectionId)
+    : null;
+  const systemPrompt = assembleSystemPrompt(resolvedSystemPromptContent, sectionPromptContext ?? undefined);
 
   // Idempotency (#3, reworked #213) -- two distinct retry shapes, both
   // covered so neither the user row nor the assistant row can be
@@ -798,7 +841,7 @@ export async function chatHandler(c: Context<AppEnv>) {
     // SDK expects). Free, with rate limits. #230: hardcoded pending #26
     // (LLM config resolution).
     model: openrouter("google/gemma-4-31b-it:free"),
-    system: SYSTEM_PROMPT,
+    system: systemPrompt,
     messages: convertToModelMessages(modelContextMessages),
     // #264: belt-and-suspenders alongside historyMessageSchema's role
     // allowlist above -- the SDK warns and proceeds by default (its own

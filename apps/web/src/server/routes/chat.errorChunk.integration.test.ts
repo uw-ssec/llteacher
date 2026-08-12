@@ -143,6 +143,24 @@ vi.mock("../repositories/rateLimits", () => ({
   RATE_LIMIT_WINDOW_MS: 60_000,
 }));
 
+// #25: system-prompt resolution isn't what this suite exercises (it's about
+// the error-chunk/idempotency seam) -- faked the same minimal way `lib/ai`
+// is above, so chat.ts's new per-turn prompt-assembly calls don't reach the
+// real Drizzle queries against the `{}` fake db. assembleSystemPrompt stays
+// real (pure, no db) via importOriginal.
+vi.mock("../repositories/organizations", () => ({
+  getOrgScopeForCourse: async () => "org-a",
+}));
+vi.mock("../../lib/prompts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/prompts")>();
+  return {
+    ...actual,
+    getPinnedPromptTemplateContent: async () => null,
+    resolvePromptTemplate: async () => ({ id: null, content: "test system prompt", version: null }),
+    getSectionPromptContext: async () => null,
+  };
+});
+
 function fakeAuthContext(): AuthContext {
   return buildFakeAuthContext({
     memberships: [fakeMembership({ courseId: "55555555-5555-5555-5555-555555555555", role: "student" })],
