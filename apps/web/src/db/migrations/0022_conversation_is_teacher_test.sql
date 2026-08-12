@@ -1,0 +1,1 @@
+ALTER TABLE "conversations" ADD COLUMN "is_teacher_test" boolean DEFAULT false NOT NULL;

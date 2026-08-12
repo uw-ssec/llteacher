@@ -15,6 +15,12 @@ import {
 import { workosWebhookHandler } from "./routes/webhooksWorkos";
 import { studentHomeworksHandler } from "./routes/studentHomeworks";
 import { submitSectionHandler, getHomeworkSubmissionsHandler } from "./routes/submissions";
+import {
+  startSectionConversationHandler,
+  getActiveSectionConversationHandler,
+  getSectionConversationHandler,
+  restartSectionConversationHandler,
+} from "./routes/sectionConversations";
 import { submitSectionAnswerHandler, getSectionAnswerHandler } from "./routes/sectionAnswers";
 import { submitWidgetResponseHandler } from "./routes/progressWidgets";
 import { listCourseTasHandler, updateTaCapabilitiesHandler } from "./routes/courseMemberships";
@@ -81,6 +87,29 @@ app.post("/api/conversations/:id/submit", requireRole(["student"])(submitSection
 app.get(
   "/api/courses/:courseId/homeworks/:homeworkId/submissions",
   requireGraderOf()(getHomeworkSubmissionsHandler),
+);
+// #27: section-conversation lifecycle. requireCourseMember, not
+// requireRole(["student"]) -- an instructor starting one is the teacher-test
+// case the isTeacherTest column exists for, and the handlers derive that from
+// the caller's own course role. Per-conversation ownership and the
+// instructor-can't-read-another-instructor's-test rule are enforced inside
+// the handlers (canReadSectionConversation), not by these guards, which only
+// answer "is this caller in this course."
+app.post(
+  "/api/courses/:courseId/sections/:sectionId/conversations",
+  requireCourseMember()(startSectionConversationHandler),
+);
+app.get(
+  "/api/courses/:courseId/sections/:sectionId/conversation",
+  requireCourseMember()(getActiveSectionConversationHandler),
+);
+app.get(
+  "/api/courses/:courseId/conversations/:conversationId",
+  requireCourseMember()(getSectionConversationHandler),
+);
+app.post(
+  "/api/courses/:courseId/conversations/:conversationId/restart",
+  requireCourseMember()(restartSectionConversationHandler),
 );
 app.patch("/api/sections/:sectionId/answer", requireRole(["student"])(submitSectionAnswerHandler));
 app.get(

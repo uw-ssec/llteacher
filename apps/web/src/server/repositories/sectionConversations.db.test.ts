@@ -1,0 +1,350 @@
+/* --------------------------------------------------------------------------
+   Section-conversation lifecycle against a real Postgres (#27), plus the
+   end-to-end verification #22 and #23 have been waiting on.
+
+   #22 (submit) and #23 (submissions matrix) shipped in PR #154 but had never
+   run against a real section conversation, because nothing created one --
+   #27's start route is the first thing that does. Their final acceptance
+   criterion is exactly this: drive submit and the matrix against real
+   conversation data. That is the last three tests in this file.
+   -------------------------------------------------------------------------- */
+
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { eq } from "drizzle-orm";
+import { makeNodeDb } from "../../db/nodeClient";
+import type { Db } from "../../db/client";
+import { unsafeCourseScope, unsafeOrgScope } from "./scope";
+import {
+  startSectionConversation,
+  restartSectionConversation,
+  getActiveSectionConversation,
+  getSectionConversationMessages,
+  SectionConversationExistsError,
+  SectionNotFoundError,
+  SectionNotInteractiveError,
+} from "./sectionConversations";
+import { submitSection, getHomeworkSubmissionsMatrix } from "./submissions";
+import { softDeleteConversation } from "./conversations";
+import { IdentityCipher } from "../../lib/crypto/identity-cipher";
+import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
+import {
+  organizations,
+  courses,
+  users,
+  courseMemberships,
+  homeworks,
+  sections,
+  conversations,
+} from "../../db/schema";
+
+const RAW_DATABASE_URL = process.env.DATABASE_URL;
+
+function randomBytes(): never {
+  return crypto.getRandomValues(new Uint8Array(16)) as never;
+}
+
+describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27)", () => {
+  let db: Db;
+  let cipher: IdentityCipher;
+  let orgId: string;
+  let courseId: string;
+  let homeworkId: string;
+  let sectionId: string;
+  let nonInteractiveSectionId: string;
+  let studentId: string;
+  let instructorId: string;
+
+  beforeAll(async () => {
+    db = makeNodeDb(RAW_DATABASE_URL!);
+    cipher = new IdentityCipher(
+      await loadIdentityCipherKeys({
+        ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+        BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+      } as Env),
+    );
+
+    const [org] = await db
+      .insert(organizations)
+      .values({
+        name: "27-org",
+        slug: `s27-${crypto.randomUUID().slice(0, 8)}`,
+        workosOrganizationId: `org_${crypto.randomUUID().slice(0, 8)}`,
+      })
+      .returning({ id: organizations.id });
+    orgId = org!.id;
+
+    const [course] = await db
+      .insert(courses)
+      .values({ organizationId: orgId, code: `C-${crypto.randomUUID().slice(0, 8)}`, term: "T", title: "t" })
+      .returning({ id: courses.id });
+    courseId = course!.id;
+
+    // Encrypted for real: getHomeworkSubmissionsMatrix decrypts every roster
+    // row, so random bytes would fail the cipher rather than the assertion.
+    const [student] = await db
+      .insert(users)
+      .values({
+        email: await cipher.encryptString("student@test.com"),
+        emailBlindIndex: await cipher.computeBlindIndex("student@test.com"),
+      })
+      .returning({ id: users.id });
+    studentId = student!.id;
+    await db.insert(courseMemberships).values({ userId: studentId, courseId, role: "student" });
+
+    const [instructor] = await db
+      .insert(users)
+      .values({ email: randomBytes(), emailBlindIndex: randomBytes() })
+      .returning({ id: users.id });
+    instructorId = instructor!.id;
+    const [instructorMembership] = await db
+      .insert(courseMemberships)
+      .values({ userId: instructorId, courseId, role: "instructor" })
+      .returning({ id: courseMemberships.id });
+
+    const [hw] = await db
+      .insert(homeworks)
+      .values({
+        courseId,
+        createdById: instructorMembership!.id,
+        title: "hw",
+        description: "d",
+        dueDate: new Date(Date.now() + 86_400_000),
+        publishedAt: new Date(Date.now() - 86_400_000),
+      })
+      .returning({ id: homeworks.id });
+    homeworkId = hw!.id;
+
+    const [section] = await db
+      .insert(sections)
+      .values({ homeworkId, title: "Confidence intervals", content: "Estimate the mean.", order: 2 })
+      .returning({ id: sections.id });
+    sectionId = section!.id;
+
+    const [nonInteractive] = await db
+      .insert(sections)
+      .values({ homeworkId, title: "Read this", content: "c", order: 3, type: "non_interactive" })
+      .returning({ id: sections.id });
+    nonInteractiveSectionId = nonInteractive!.id;
+  });
+
+  afterAll(async () => {
+    if (orgId) await db.delete(organizations).where(eq(organizations.id, orgId));
+  });
+
+  async function reset() {
+    await db.delete(conversations).where(eq(conversations.ownerUserId, studentId));
+    await db.delete(conversations).where(eq(conversations.ownerUserId, instructorId));
+  }
+
+  it("starts a conversation with the Django-parity greeting as its first message", async () => {
+    await reset();
+    const scope = unsafeCourseScope(courseId);
+
+    const created = await startSectionConversation(db, scope, {
+      sectionId,
+      ownerUserId: studentId,
+      isTeacherTest: false,
+    });
+
+    expect(created.title).toBe("Section 2: Confidence intervals");
+
+    const messages = await getSectionConversationMessages(db, created.id);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!.role).toBe("assistant");
+    expect(messages[0]!.parts).toEqual([
+      {
+        type: "text",
+        text: "Hello! I'm here to help you with Section 2: Confidence intervals.\n\nEstimate the mean.\n\nHow can I assist you with this question?",
+      },
+    ]);
+  });
+
+  it("refuses a second active conversation on the same section", async () => {
+    await reset();
+    const scope = unsafeCourseScope(courseId);
+    await startSectionConversation(db, scope, { sectionId, ownerUserId: studentId, isTeacherTest: false });
+
+    await expect(
+      startSectionConversation(db, scope, { sectionId, ownerUserId: studentId, isTeacherTest: false }),
+    ).rejects.toBeInstanceOf(SectionConversationExistsError);
+  });
+
+  it("refuses a conversation on a non_interactive section", async () => {
+    await reset();
+    // #164: that section type collects a single answer and never has a chat.
+    await expect(
+      startSectionConversation(db, unsafeCourseScope(courseId), {
+        sectionId: nonInteractiveSectionId,
+        ownerUserId: studentId,
+        isTeacherTest: false,
+      }),
+    ).rejects.toBeInstanceOf(SectionNotInteractiveError);
+  });
+
+  it("refuses a conversation for a non-member", async () => {
+    await reset();
+    const [outsider] = await db
+      .insert(users)
+      .values({ email: randomBytes(), emailBlindIndex: randomBytes() })
+      .returning({ id: users.id });
+
+    await expect(
+      startSectionConversation(db, unsafeCourseScope(courseId), {
+        sectionId,
+        ownerUserId: outsider!.id,
+        isTeacherTest: false,
+      }),
+      // #236/#241: a non-member gets the same SectionNotFoundError a genuinely
+      // missing section produces -- deliberately indistinguishable, so the
+      // error cannot be used to probe which sections exist.
+    ).rejects.toBeInstanceOf(SectionNotFoundError);
+
+    await db.delete(users).where(eq(users.id, outsider!.id));
+  });
+
+  it("records an instructor's conversation as a teacher test", async () => {
+    await reset();
+    const created = await startSectionConversation(db, unsafeCourseScope(courseId), {
+      sectionId,
+      ownerUserId: instructorId,
+      isTeacherTest: true,
+    });
+
+    const [row] = await db.select().from(conversations).where(eq(conversations.id, created.id));
+    expect(row!.isTeacherTest).toBe(true);
+  });
+
+  it("restart replaces the conversation and leaves exactly one active", async () => {
+    await reset();
+    const scope = unsafeCourseScope(courseId);
+    const first = await startSectionConversation(db, scope, {
+      sectionId,
+      ownerUserId: studentId,
+      isTeacherTest: false,
+    });
+
+    const { conversation } = await restartSectionConversation(
+      db,
+      unsafeOrgScope(orgId),
+      first.id,
+      studentId,
+    );
+
+    expect(conversation.id).not.toBe(first.id);
+
+    const active = await getActiveSectionConversation(db, scope, sectionId, studentId);
+    expect(active!.id).toBe(conversation.id);
+
+    // The replacement opens with its own greeting, not an empty transcript.
+    const messages = await getSectionConversationMessages(db, conversation.id);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!.role).toBe("assistant");
+  });
+
+  /* ------- the fail-closed guard on the bare soft-delete (#128) ------- */
+
+  it("softDeleteConversation refuses a submitted section conversation", async () => {
+    await reset();
+    const started = await startSectionConversation(db, unsafeCourseScope(courseId), {
+      sectionId,
+      ownerUserId: studentId,
+      isTeacherTest: false,
+    });
+    await submitSection(db, unsafeOrgScope(orgId), started.id, studentId);
+
+    // The door #128 would otherwise stay open through: a plain soft-delete
+    // leaves the submission row alive against a conversation the student can
+    // no longer see, and the replacement's submit then makes two.
+    await expect(
+      softDeleteConversation(db, unsafeCourseScope(courseId), started.id),
+    ).rejects.toThrow(/restartSectionConversation/);
+
+    const [still] = await db.select().from(conversations).where(eq(conversations.id, started.id));
+    expect(still!.isDeleted).toBe(false);
+  });
+
+  it("softDeleteConversation still works on an unsubmitted section conversation", async () => {
+    await reset();
+    const started = await startSectionConversation(db, unsafeCourseScope(courseId), {
+      sectionId,
+      ownerUserId: studentId,
+      isTeacherTest: false,
+    });
+
+    await expect(
+      softDeleteConversation(db, unsafeCourseScope(courseId), started.id),
+    ).resolves.toBeDefined();
+
+    const [row] = await db.select().from(conversations).where(eq(conversations.id, started.id));
+    expect(row!.isDeleted).toBe(true);
+  });
+
+  it("softDeleteConversation still works on a tutor conversation", async () => {
+    await reset();
+    const [tutor] = await db
+      .insert(conversations)
+      .values({ ownerUserId: studentId, courseId, sectionId: null, kind: "tutor", title: "t" })
+      .returning({ id: conversations.id });
+
+    await expect(
+      softDeleteConversation(db, unsafeCourseScope(courseId), tutor!.id),
+    ).resolves.toBeDefined();
+  });
+
+  /* ---------------- #22 / #23 end-to-end verification ---------------- */
+
+  it("#22: submits a real section conversation, then resubmits in place", async () => {
+    await reset();
+    const started = await startSectionConversation(db, unsafeCourseScope(courseId), {
+      sectionId,
+      ownerUserId: studentId,
+      isTeacherTest: false,
+    });
+    const orgScope = unsafeOrgScope(orgId);
+
+    const first = await submitSection(db, orgScope, started.id, studentId);
+    expect(first.isResubmission).toBe(false);
+
+    const second = await submitSection(db, orgScope, started.id, studentId);
+    expect(second.isResubmission).toBe(true);
+    // Resubmit replaces in place -- same row, not a second one.
+    expect(second.id).toBe(first.id);
+  });
+
+  it("#22: refuses to submit a teacher test conversation (Django can_submit parity)", async () => {
+    await reset();
+    const started = await startSectionConversation(db, unsafeCourseScope(courseId), {
+      sectionId,
+      ownerUserId: instructorId,
+      isTeacherTest: true,
+    });
+
+    await expect(
+      submitSection(db, unsafeOrgScope(orgId), started.id, instructorId),
+    ).rejects.toThrow(/Teacher test/);
+  });
+
+  it("#23: the submissions matrix reports the real conversation and submission", async () => {
+    await reset();
+    const started = await startSectionConversation(db, unsafeCourseScope(courseId), {
+      sectionId,
+      ownerUserId: studentId,
+      isTeacherTest: false,
+    });
+    await submitSection(db, unsafeOrgScope(orgId), started.id, studentId);
+
+    const matrix = await getHomeworkSubmissionsMatrix(
+      db,
+      unsafeCourseScope(courseId),
+      cipher,
+      homeworkId,
+    );
+
+    expect(matrix).not.toBeNull();
+    const row = matrix!.students.find((s) => s.email === "student@test.com");
+    expect(row).toBeDefined();
+    const cell = row!.sections.find((cl) => cl.sectionId === sectionId);
+    expect(cell!.status).toBe("submitted");
+    expect(cell!.conversationCount).toBe(1);
+  });
+});

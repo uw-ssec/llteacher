@@ -267,7 +267,14 @@ describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)
     const [convo] = await db.insert(conversations).values({
       ownerUserId: student!.id, courseId: course!.id, sectionId: firstSectionId!, kind: "section", title: "t",
     }).returning();
-    await db.insert(submissions).values({ conversationId: convo!.id, organizationId: org!.id });
+    // #128: user_id/section_id are NOT NULL and composite-FK-checked against
+    // the conversation, so they have to match convo's owner and section.
+    await db.insert(submissions).values({
+      conversationId: convo!.id,
+      organizationId: org!.id,
+      userId: student!.id,
+      sectionId: firstSectionId!,
+    });
 
     // Same wrap-and-count technique as submissions.test.ts's "no N+1" test:
     // db.query.*.findMany are Drizzle's relational query builder, db.select

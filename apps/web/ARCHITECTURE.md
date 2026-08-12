@@ -75,3 +75,62 @@ ownership check runs in the same query that already fetches the row --
 avoiding a separate read-then-check race -- but the *policy* (self-only, or
 self-or-instructor-override) is the calling route's decision to pass in, not
 something the repository infers on its own.
+
+## Section Submissions Are One Per (Student, Section)
+
+`submissions` carries denormalized `user_id`/`section_id` alongside
+`conversation_id`. They are not maintained by convention: a composite foreign
+key ties `(conversation_id, user_id, section_id)` to
+`conversations (id, owner_user_id, section_id)`, so Postgres rejects any
+submission whose pair disagrees with the conversation it names. `UNIQUE
+(user_id, section_id)` sits on top of that and is only trustworthy because of
+it.
+
+Write those two columns from the conversation row you already read to
+authorize the write -- not from a second lookup. The FK will catch a mismatch
+either way, but a single read leaves no window in which the values could
+disagree in the first place. `createSubmission` is the reference shape.
+
+Two rules follow from the same constraint:
+
+- **A submission can only ever attach to a `section` conversation.**
+  `submissions.section_id` is `NOT NULL`; a tutor conversation's is `NULL`;
+  the FK can never match. The `kind = 'section'` check in `createSubmission`
+  now produces a friendly error rather than being the only thing preventing
+  the row.
+- **Restarting a section voids its submission.** Use
+  `restartSectionConversation` (`repositories/submissions.ts`), which
+  soft-deletes the conversation and deletes the submission in one atomic
+  group. A bare `softDeleteConversation` *refuses* a conversation that has a
+  submission, because soft-deleting it alone would leave the submission row
+  alive against a conversation the student can no longer see -- and the
+  replacement's submit would then be the second row for that section.
+
+A graded submission cannot be restarted. `restartSectionConversation` checks
+and throws `SubmissionGradedError` (route layer maps it to 409), but the rule
+does not depend on that check: `grades.submission_id` is `ON DELETE RESTRICT`,
+so Postgres refuses the delete regardless.
+
+**This cap is an accepted simplification, not a settled product rule.**
+Restart deletes the submission row outright, so the platform keeps no attempt
+history — no record that an earlier submission existed, when it happened, or
+how many tries a student took. Discussion
+[#249](https://github.com/uw-ssec/llteacher/discussions/249) argues
+`submissions` should instead be an append-only attempt table; that was
+deferred to ship #27, not refuted. Work item:
+[#250](https://github.com/uw-ssec/llteacher/issues/250). Read #249 before
+changing the shape of this table.
+
+Two consequences worth knowing before you touch either path:
+
+- **A graded section can still be resubmitted**, which silently leaves the
+  grade describing replaced work, even though it cannot be *restarted*
+  ([#258](https://github.com/uw-ssec/llteacher/issues/258)). That asymmetry
+  falls out of `grades`' RESTRICT FK, not from a decision.
+- **The student must be told what restart discards** before they commit to
+  it. That disclosure contract is
+  [#248](https://github.com/uw-ssec/llteacher/issues/248), not this document.
+
+Rationale, and the superseded/locked alternatives that were rejected:
+[docs/superpowers/specs/2026-08-11-submission-uniqueness-design.md](../../docs/superpowers/specs/2026-08-11-submission-uniqueness-design.md)
+([#128](https://github.com/uw-ssec/llteacher/issues/128)).
