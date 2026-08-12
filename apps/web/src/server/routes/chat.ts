@@ -155,6 +155,27 @@ const inboundUserMessageSchema = z.object({
   parts: z.array(chatPartSchema).min(1),
 });
 
+// #264: only the last element of `messages` was ever validated -- the AI SDK's
+// convertToModelMessages has a real `case "system":` branch, so a client could
+// splice a forged element ANYWHERE earlier in the array (role:"system", or a
+// role:"assistant" turn that never happened) and it reached the model
+// untouched, with no trace in the persisted transcript (only the last element
+// is ever written). This validates every element the same way: role must be
+// "user" or "assistant" (never "system", "tool", or anything else
+// convertToModelMessages branches on), and every part's `type` must be one
+// this app actually produces and renders -- text, the step-start marker, or a
+// tool-<name> part -- matching exactly what hasRenderableContent/the
+// tool-dispatch loop above understand. A "file" part in particular is
+// rejected here rather than reaching convertToModelMessages, which would map
+// it to an outbound fetch URL (downloadAssets) the model can request.
+const ALLOWED_HISTORY_PART_TYPE_RE = /^(text|step-start|tool-[A-Za-z0-9_]+)$/;
+const historyPartSchema = z.object({ type: z.string().regex(ALLOWED_HISTORY_PART_TYPE_RE) }).passthrough();
+const historyMessageSchema = z.object({
+  id: z.string().min(1),
+  role: z.enum(["user", "assistant"]),
+  parts: z.array(historyPartSchema).min(1),
+});
+
 // In ai@5.0.195, a provider failure (e.g. a 429) arrives as an `error`
 // chunk mid-stream, not a stream rejection -- the stream still closes
 // normally, so `onFinish` below still fires. The AI SDK's own step
@@ -320,6 +341,17 @@ export async function chatHandler(c: Context<AppEnv>) {
   const { messages: uiMessages, conversationId, courseId: requestedCourseId, sectionId: requestedSectionId } = body;
   if (!Array.isArray(uiMessages) || uiMessages.length === 0) {
     return c.json({ error: "messages is required" }, 400);
+  }
+  // #264: every element, not just the tail -- see historyMessageSchema's
+  // doc comment. Runs before the tail-specific check below so a forged
+  // element anywhere in the array 400s the same way a forged tail would.
+  for (const m of uiMessages) {
+    if (!historyMessageSchema.safeParse(m).success) {
+      return c.json(
+        { error: "Every message must have role \"user\" or \"assistant\" and a well-formed parts array" },
+        400,
+      );
+    }
   }
 
   // Full history vs. incremental (#3 pitfall 3): the client still sends the
@@ -510,6 +542,12 @@ export async function chatHandler(c: Context<AppEnv>) {
     model: openrouter("google/gemma-4-31b-it:free"),
     system: SYSTEM_PROMPT,
     messages: convertToModelMessages(windowedMessages),
+    // #264: belt-and-suspenders alongside historyMessageSchema's role
+    // allowlist above -- the SDK warns and proceeds by default (its own
+    // words: "a security risk because they may enable prompt injection
+    // attacks"). This makes a role:"system" element a hard model-input
+    // refusal even if some future change to that schema let one through.
+    allowSystemInMessages: false,
     tools: TOOLS,
     /* Allow up to 5 steps so the model can call a display tool and then
        continue with the follow-up Socratic question in the same turn.
