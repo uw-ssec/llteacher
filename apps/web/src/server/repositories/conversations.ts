@@ -193,6 +193,38 @@ export async function updateConversationTitle(db: Db, scope: CourseScope, conver
 // as though it did not.
 type BatchStatement = Parameters<Db["batch"]>[0][number];
 
+// #254: the (conversation_id, client_message_id) unique index (#213) is a
+// check-then-insert race away from a Postgres 23505 -- two in-flight
+// requests carrying the same clientMessageId (a double-fired Retry, a
+// fetch-layer retry, a duplicated tab) can both pass chatHandler's
+// idempotency read and both reach here. `.onConflictDoNothing` makes the
+// insert itself race-safe (Postgres's unique index resolves the conflict
+// atomically; no serialization needed) -- the loser gets an empty
+// `.returning()` instead of a thrown constraint violation. A NULL
+// clientMessageId (every assistant/system row) can never trigger this: a
+// unique index treats every NULL as distinct from every other NULL, so
+// `created` is only ever missing here when `input.clientMessageId` was a
+// real, colliding string -- fetchExistingMessage's `clientMessageId ===
+// null` early-return is defense against that invariant being violated by a
+// future caller, not a path this function's own callers can reach today.
+async function fetchExistingMessage(
+  // Pick<Db, "select">, not Db: the transaction-path caller below passes
+  // its `tx` handle, whose type (PgTransaction<...>) is not assignable to
+  // the full `Db` (it's missing driver-capability members like `batch`
+  // that a transaction handle genuinely doesn't have) -- this function only
+  // ever calls `.select()`, so that's all it should require.
+  db: Pick<Db, "select">,
+  conversationId: string,
+  clientMessageId: string | null,
+) {
+  if (clientMessageId === null) return undefined;
+  const [existing] = await db
+    .select()
+    .from(messages)
+    .where(and(eq(messages.conversationId, conversationId), eq(messages.clientMessageId, clientMessageId)));
+  return existing;
+}
+
 export async function appendMessage(
   db: Db,
   scope: CourseScope,
@@ -213,33 +245,44 @@ export async function appendMessage(
     throw new TenancyMismatchError("Conversation not found in this course scope");
   }
 
+  const clientMessageId = input.clientMessageId ?? null;
   const messageValues = {
     conversationId,
     role: input.role,
     parts: input.parts,
-    clientMessageId: input.clientMessageId ?? null,
+    clientMessageId,
   };
+  const conflictTarget = { target: [messages.conversationId, messages.clientMessageId] };
 
   if (typeof db.batch === "function") {
     // Production path: neon-http, one atomic HTTP round-trip.
     const [[created]] = await db.batch([
-      db.insert(messages).values(messageValues).returning(),
+      db.insert(messages).values(messageValues).onConflictDoNothing(conflictTarget).returning(),
       // #140/#220: keep the parent conversation's "last activity" timestamp
       // (and therefore its position in listConversationsForOwner's
       // updatedAt-desc ordering) current with actual chat activity, not
       // just renames -- atomic with the insert above.
       db.update(conversations).set({ updatedAt: new Date() }).where(eq(conversations.id, conversationId)),
     ] as [BatchStatement, BatchStatement]);
-    return created;
+    // #254: a duplicate send must end in the same successful response as a
+    // retry, not a 503 -- ON CONFLICT DO NOTHING means `created` is
+    // undefined exactly when this clientMessageId already has a row; look
+    // it up and hand back the existing row instead of treating an empty
+    // `.returning()` as a failure.
+    return created ?? (await fetchExistingMessage(db, conversationId, clientMessageId));
   }
 
   // Test/dev path: node-postgres (makeNodeDb) has no runtime db.batch().
   // A real db.transaction() gives the same all-or-nothing guarantee
   // through a different Drizzle primitive.
   return db.transaction(async (tx) => {
-    const [created] = await tx.insert(messages).values(messageValues).returning();
+    const [created] = await tx
+      .insert(messages)
+      .values(messageValues)
+      .onConflictDoNothing(conflictTarget)
+      .returning();
     await tx.update(conversations).set({ updatedAt: new Date() }).where(eq(conversations.id, conversationId));
-    return created;
+    return created ?? (await fetchExistingMessage(tx, conversationId, clientMessageId));
   });
 }
 

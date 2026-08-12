@@ -1089,3 +1089,150 @@ describe("App tutor sidebar collapse persistence (#4)", () => {
     expect(await screen.findByRole("button", { name: "Expand tutor conversations" })).toBeTruthy();
   });
 });
+
+// #252: the section chat's own version of the #4 fix-round regression --
+// resuming a section with an existing conversationId set `conversationId`
+// but never hydrated `useChat`'s messages, so the LLM received zero prior
+// context on every reload while the server kept appending to the same,
+// real conversation row. Covers both the requirement's own "assert what
+// the section chat sends after a reload" ask and the visible-transcript
+// side of the same bug.
+describe("App section chat resumes with hydrated history (#252)", () => {
+  const HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [
+          { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+        ],
+      },
+    ],
+  };
+
+  it("hydrates the section chat's transcript on mount AND includes the prior turns in the next /api/chat request", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const chatCalls: Array<{ conversationId?: string; messages: Array<{ role: string }> }> = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url === "/api/conversations/sec-conv-1/messages") {
+          return new Response(
+            JSON.stringify([
+              { id: "m1", role: "user", parts: [{ type: "text", text: "prior section question" }] },
+              { id: "m2", role: "assistant", parts: [{ type: "text", text: "prior section answer" }] },
+            ]),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/chat") {
+          const body = JSON.parse(String(init?.body)) as {
+            conversationId?: string;
+            messages: Array<{ role: string }>;
+          };
+          chatCalls.push(body);
+          return chatStreamResponse(body.conversationId ?? "unexpected", "follow-up section reply");
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // The visible transcript reflects the persisted history on mount, not
+    // an empty thread -- the other half of #252 (the model's context is
+    // the part the test below actually proves).
+    expect(await screen.findByText("prior section question")).toBeTruthy();
+    expect(await screen.findByText("prior section answer")).toBeTruthy();
+
+    const composer = await screen.findByLabelText("Message input");
+    const user = userEvent.setup();
+    await user.type(composer, "follow-up section question{Enter}");
+    await screen.findByText("follow-up section reply");
+
+    expect(chatCalls).toHaveLength(1);
+    expect(chatCalls[0]!.conversationId).toBe("sec-conv-1");
+    // The actual bug: the outgoing model-context array must include the
+    // hydrated prior turns, not just the message just typed -- identical
+    // shape to the tutor rail's own #4 fix-round regression test above.
+    expect(chatCalls[0]!.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+  });
+
+  it("switching from a hydrated section back to it after visiting another surface re-hydrates rather than staying empty", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const twoSectionFixture = {
+      homeworks: [
+        {
+          ...HOMEWORK_FIXTURE.homeworks[0],
+          sections: [
+            { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+            { id: "s2", title: "Sec 2", order: 2, status: "not_started", conversationId: null },
+          ],
+        },
+      ],
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(twoSectionFixture), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url === "/api/conversations/sec-conv-1/messages") {
+          return new Response(
+            JSON.stringify([{ id: "m1", role: "user", parts: [{ type: "text", text: "sec 1 question" }] }]),
+            { status: 200 },
+          );
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // Sec 1 auto-selected on mount, hydrated.
+    expect(await screen.findByText("sec 1 question")).toBeTruthy();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Sec 2/ }));
+    // Sec 2 has no conversation yet -- empty thread, not sec 1's leftover text.
+    expect(screen.queryByText("sec 1 question")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /Sec 1/ }));
+    // Back on sec 1 -- re-hydrated, not left empty from sec 2's clear.
+    expect(await screen.findByText("sec 1 question")).toBeTruthy();
+  });
+});

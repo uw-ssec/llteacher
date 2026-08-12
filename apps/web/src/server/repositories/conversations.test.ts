@@ -516,25 +516,74 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       ).resolves.toBeDefined();
     });
 
-    it("rejects a second row with the same clientMessageId in the same conversation (unique index)", async () => {
+    // #254: a second appendMessage call with a clientMessageId that's
+    // already taken in this conversation used to reject with a raw
+    // Postgres unique-violation (chat.ts's caller had nothing to catch it,
+    // so it fell through to app.onError's generic 503) -- .onConflictDoNothing
+    // makes this resolve with the EXISTING row instead, same as a
+    // successful retry. "second" (the losing insert's own text) never
+    // lands; the first row's content is what's actually persisted.
+    it("resolves with the existing row (not a throw) on a sequential duplicate clientMessageId", async () => {
       const created = await createConversation(db, unsafeCourseScope(courseAId), {
         ownerUserId: userId,
         sectionId: null,
         kind: "tutor",
         title: "Duplicate clientMessageId",
       });
-      await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      const first = await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
         role: "user",
         parts: [{ type: "text", text: "first" }],
         clientMessageId: "dupe-id",
       });
-      await expect(
+
+      const second = await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+        role: "user",
+        parts: [{ type: "text", text: "second" }],
+        clientMessageId: "dupe-id",
+      });
+
+      expect(second?.id).toBe(first!.id);
+      expect(second?.parts).toEqual([{ type: "text", text: "first" }]);
+
+      const all = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id);
+      expect(all.filter((m) => m.clientMessageId === "dupe-id")).toHaveLength(1);
+    });
+
+    // #254's actual scenario: two requests genuinely racing (a double-fired
+    // Retry, a fetch-layer retry, a duplicated tab), not just two
+    // sequential calls -- Promise.all fires both appendMessage calls before
+    // either's insert has committed, exercising the real concurrent path
+    // .onConflictDoNothing exists for (Postgres's unique index resolves
+    // the conflict atomically; there is no serialization step to get
+    // wrong). Both promises must resolve (neither may reject/500), and
+    // exactly one row survives.
+    it("two concurrent appendMessage calls with the same clientMessageId both resolve, exactly one row persists", async () => {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Concurrent duplicate clientMessageId",
+      });
+
+      const [a, b] = await Promise.all([
         appendMessage(db, unsafeCourseScope(courseAId), created.id, {
           role: "user",
-          parts: [{ type: "text", text: "second" }],
-          clientMessageId: "dupe-id",
+          parts: [{ type: "text", text: "concurrent send" }],
+          clientMessageId: "concurrent-id",
         }),
-      ).rejects.toThrow();
+        appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+          role: "user",
+          parts: [{ type: "text", text: "concurrent send" }],
+          clientMessageId: "concurrent-id",
+        }),
+      ]);
+
+      expect(a).toBeDefined();
+      expect(b).toBeDefined();
+      expect(a!.id).toBe(b!.id); // the "loser" got the winner's row back, not a second one
+
+      const all = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id);
+      expect(all.filter((m) => m.clientMessageId === "concurrent-id")).toHaveLength(1);
     });
   });
 

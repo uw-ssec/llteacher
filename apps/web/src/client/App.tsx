@@ -425,25 +425,32 @@ export default function App() {
      resolves: a mismatch means a newer selection superseded this one while
      it was in flight, so this (now-stale) response is discarded instead of
      applied. */
+  // #252: shared by both hydration paths below (the tutor selection path
+  // here, and the section-chat mount/switch path further down) -- fetches a
+  // conversation's persisted history and parses it against the wire
+  // contract. What happens with the result (which useChat instance it
+  // seeds, which staleness ref guards it) differs per caller, so only the
+  // fetch+parse step itself is shared.
+  //
+  // #226: parsed against the actual wire contract (ConversationMessageResponse),
+  // not asserted straight to UIMessage[] -- the server's `parts` column is
+  // jsonb (genuinely `unknown` at this boundary, same as chat.ts's own
+  // replayPersistedPart treats it), so that one field still needs an inner
+  // cast; every other field is now the checked DTO shape rather than a
+  // blind assertion across the whole array.
+  const fetchConversationHistory = async (id: string): Promise<UIMessage[]> => {
+    const res = await fetch(`/api/conversations/${id}/messages`);
+    if (!res.ok) throw new Error(`failed to load conversation history: ${res.status}`);
+    const rows = (await res.json()) as ConversationMessageResponse[];
+    return rows.map((r) => ({ id: r.id, role: r.role, parts: r.parts as UIMessage["parts"] }));
+  };
+
   const handleSelectExistingTutorConversation = async (id: string) => {
     if (id === tutorConversationId) return;
     latestTutorSelectionRef.current = id;
     setJustCreatedTutorConversationId(undefined);
     try {
-      const res = await fetch(`/api/conversations/${id}/messages`);
-      if (!res.ok) throw new Error(`failed to load conversation history: ${res.status}`);
-      // #226: parsed against the actual wire contract (ConversationMessageResponse),
-      // not asserted straight to UIMessage[] -- the server's `parts` column is
-      // jsonb (genuinely `unknown` at this boundary, same as chat.ts's own
-      // replayPersistedPart treats it), so that one field still needs an
-      // inner cast; every other field is now the checked DTO shape rather
-      // than a blind assertion across the whole array.
-      const rows = (await res.json()) as ConversationMessageResponse[];
-      const history: UIMessage[] = rows.map((r) => ({
-        id: r.id,
-        role: r.role,
-        parts: r.parts as UIMessage["parts"],
-      }));
+      const history = await fetchConversationHistory(id);
       if (latestTutorSelectionRef.current !== id) return; // superseded while in flight -- discard
       selectTutorConversation(id, history);
     } catch (err) {
@@ -473,16 +480,60 @@ export default function App() {
   // already navigated to a different section.
   const [currentSection, setCurrentSection] = useState(1);
   const hasAutoSelectedSection = useRef(false);
+
+  /* #252: tracks whichever section-conversation load was requested most
+     recently -- the same staleness-guard shape latestTutorSelectionRef
+     gives the tutor rail (see that ref's own doc comment above), applied to
+     the section chat's mount/switch path: a section switch mid-fetch has
+     the identical overlapping-request race. Keyed by conversationId (not
+     section number) since that's what identifies which fetch is "this
+     one" -- undefined is a valid target (a section with no conversation
+     yet), distinct from "no load in flight." */
+  const latestSectionConversationRef = useRef<string | undefined>(undefined);
+
+  /* #252: the section chat's own version of handleSelectExistingTutorConversation
+     -- previously `setConversationId` was called directly (mount effect
+     below) or via handleSectionSelect with no hydration at all, so a
+     returning student's `useChat` stayed empty while the server kept
+     appending to their real, existing conversation: the model received
+     zero prior context on every reload, and the persisted transcript grew
+     silent gaps the model was never shown. `setSectionMessages` (the
+     section useChat instance's own setter -- it has no `id` to key a
+     remount off, unlike the tutor instance) is how the fetched history
+     actually gets applied. Fails open to an empty thread on a failed
+     fetch, matching fetchConversationHistory's other caller. */
+  const loadSectionConversation = async (sectionNumber: number, targetConversationId: string | undefined) => {
+    setCurrentSection(sectionNumber);
+    setConversationId(targetConversationId);
+    latestSectionConversationRef.current = targetConversationId;
+    if (!targetConversationId) {
+      setSectionMessages([]);
+      return;
+    }
+    try {
+      const history = await fetchConversationHistory(targetConversationId);
+      if (latestSectionConversationRef.current !== targetConversationId) return; // superseded -- discard
+      setSectionMessages(history);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[App] section conversation history fetch failed", err);
+      if (latestSectionConversationRef.current !== targetConversationId) return; // superseded -- discard
+      setSectionMessages([]);
+    }
+  };
+
   useEffect(() => {
     if (!hasAutoSelectedSection.current && sections.length > 0) {
       const first = sections[0]!.number;
-      setCurrentSection(first);
-      // #214: resume the section's own conversation if it already has one
-      // (a returning student), rather than always starting `conversationId`
-      // at undefined regardless of prior progress -- sectionMetaByOrder
-      // carries the same conversationId StudentSectionProgress already
-      // returns, just not dropped the way SidebarSection's mapping drops it.
-      setConversationId(sectionMetaByOrder.get(first)?.conversationId ?? undefined);
+      // #214/#252: resume the section's own conversation if it already has
+      // one (a returning student), rather than always starting
+      // `conversationId` at undefined regardless of prior progress --
+      // sectionMetaByOrder carries the same conversationId
+      // StudentSectionProgress already returns, just not dropped the way
+      // SidebarSection's mapping drops it -- and hydrate its history so the
+      // model (and the visible transcript) actually sees it, not just the
+      // id.
+      void loadSectionConversation(first, sectionMetaByOrder.get(first)?.conversationId ?? undefined);
       hasAutoSelectedSection.current = true;
     }
   }, [sections, sectionMetaByOrder]);
@@ -656,21 +707,14 @@ export default function App() {
      its own id on resolve and incorrectly flip the surface back to a
      tutor conversation the student explicitly navigated away from. */
   const handleSectionSelect = (sectionNumber: number) => {
-    setCurrentSection(sectionNumber);
-    // #214: switch to (or clear, if this section has none yet) that
-    // section's own conversationId -- see the auto-select effect above for
-    // why this must come from sectionMetaByOrder rather than staying
-    // whatever the previously-viewed section's conversationId was. Also
-    // clears the visible section-chat messages: without this, switching to
-    // a section with a *different* (or no) conversationId would keep
-    // showing the just-left section's history attached to the new
-    // conversationId. Doesn't re-hydrate the target section's own prior
-    // history from the server the way the tutor rail does (#4) -- this
-    // demo homework has exactly one section today, so that gap has no
-    // reachable user-facing effect yet; full section history hydration on
-    // switch is conversation-lifecycle scope (#27), not this fix.
-    setConversationId(sectionMetaByOrder.get(sectionNumber)?.conversationId ?? undefined);
-    setSectionMessages([]);
+    // #214/#252: switch to (or clear, if this section has none yet) that
+    // section's own conversationId and hydrate its history -- see
+    // loadSectionConversation's doc comment above for why this must come
+    // from sectionMetaByOrder rather than staying whatever the
+    // previously-viewed section's conversationId was, and why the fetch
+    // needs the same staleness guard the tutor rail's own selection path
+    // has (a section switch has the identical overlapping-request race).
+    void loadSectionConversation(sectionNumber, sectionMetaByOrder.get(sectionNumber)?.conversationId ?? undefined);
     latestTutorSelectionRef.current = undefined;
     setTutorConversationId(undefined);
     setTutorInitialMessages([]);
