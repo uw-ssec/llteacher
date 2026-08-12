@@ -8,6 +8,7 @@ import {
   getActiveSectionConversation,
   getSectionConversationMessages,
   canReadSectionConversation,
+  isStudentInCourse,
   SectionConversationExistsError,
   SectionNotFoundError,
   SectionNotInteractiveError,
@@ -27,20 +28,6 @@ import type { AppEnv } from "../context";
    different resource, different access rules, and keeping them apart avoids
    two branches rewriting one file.
    -------------------------------------------------------------------------- */
-
-/** True only when the caller's membership in this course is `student`.
- *
- *  #237: deliberately not `!authContext.isInstructorOf(courseId)`. That
- *  predicate is backed by AUTHOR_ROLES (instructor, admin), so a `ta` or
- *  `observer` fails it and would be classified as a student. Roles other
- *  than student are never doing the assignment, so the safe default for an
- *  unrecognized or missing membership is "not a student" -- a conversation
- *  wrongly marked as a teacher test is merely unsubmittable, whereas one
- *  wrongly marked as a student's pollutes real coursework. */
-function isStudentOf(authContext: AuthContext, courseId: string): boolean {
-  const membership = authContext.memberships.find((m) => m.courseId === courseId);
-  return membership?.role === "student";
-}
 
 /** Shared shape for "the id in the path isn't even a UUID". Returns the same
  *  body a genuine miss returns, so shape is never an existence oracle --
@@ -74,7 +61,7 @@ export async function startSectionConversationHandler(c: Context<AppEnv>) {
       // recorded as a student and their conversation would be submittable.
       // Recorded now rather than derived later; see the isTeacherTest
       // column comment for why storing beats deriving.
-      isTeacherTest: !isStudentOf(authContext, courseId!),
+      isTeacherTest: !isStudentInCourse(authContext.memberships, courseId!),
     });
     return c.json(created, 201);
   } catch (err) {

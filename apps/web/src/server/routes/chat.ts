@@ -54,6 +54,14 @@ import {
   getOwnedConversationOrNull,
   countRecentUserMessagesForUser,
 } from "../repositories/conversations";
+import {
+  startSectionConversation,
+  getActiveSectionConversation,
+  isStudentInCourse,
+  SectionConversationExistsError,
+  SectionNotFoundError,
+  SectionNotInteractiveError,
+} from "../repositories/sectionConversations";
 import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
 import { logServerError } from "../utils/errors";
 import type { AuthContext } from "../middleware/roles";
@@ -371,24 +379,65 @@ export async function chatHandler(c: Context<AppEnv>) {
     }
     // #214: kind defaults to "tutor" (every existing caller's behavior) --
     // only a caller that explicitly asks for "section" (App.tsx's
-    // homework-section chat instance) needs a sectionId, which
-    // createConversation validates against scope itself (throws
-    // TenancyMismatchError -> 404 on a mismatch, same as every other
-    // tenancy check in this app).
+    // homework-section chat instance) needs a sectionId.
     const kind = body.kind === "section" ? "section" : "tutor";
-    if (kind === "section" && !requestedSectionId) {
-      return c.json({ error: "sectionId is required when kind is 'section'" }, 400);
+    if (kind === "section") {
+      if (!requestedSectionId) {
+        return c.json({ error: "sectionId is required when kind is 'section'" }, 400);
+      }
+      // #259: routed through the same startSectionConversation every other
+      // section-conversation caller uses (#27's own routes), not
+      // createConversation -- which enforced none of isTeacherTest
+      // derivation, non_interactive refusal, the duplicate-active-conversation
+      // check, or the Django-parity greeting as the first message. This is
+      // what makes #27's routes live (previously reachable from no client
+      // code) instead of leaving two implementations of "start a section
+      // conversation" to drift, which is what produced this bug in the
+      // first place.
+      try {
+        const created = await startSectionConversation(db, scope, {
+          sectionId: requestedSectionId,
+          ownerUserId: authContext.session.userId,
+          // #237: derived from the caller's actual course role, same rule
+          // startSectionConversationHandler uses -- a TA or observer
+          // sending into a section is not a student doing the assignment,
+          // but is also not who isInstructorOf's AUTHOR_ROLES tier means.
+          isTeacherTest: !isStudentInCourse(authContext.memberships, fallbackCourseId!),
+        });
+        conv = { id: created.id, ownerUserId: authContext.session.userId, courseId: fallbackCourseId! };
+      } catch (err) {
+        if (err instanceof SectionConversationExistsError) {
+          // #238-style race: two requests for the same section's first
+          // turn (a double-fired send, two tabs) both arrived with no
+          // conversationId yet. The loser doesn't get an error -- it uses
+          // the conversation the winner just created, same as any other
+          // retry lands on the same conversation.
+          const active = await getActiveSectionConversation(
+            db,
+            scope,
+            requestedSectionId,
+            authContext.session.userId,
+          );
+          if (!active) throw err; // existence was just proven; a missing row here is a genuine bug, not a race
+          conv = { id: active.id, ownerUserId: active.ownerUserId, courseId: active.courseId };
+        } else if (err instanceof SectionNotFoundError) {
+          return c.json({ error: "Section not found" }, 404);
+        } else if (err instanceof SectionNotInteractiveError) {
+          return c.json({ error: err.message }, 409);
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      // #231: auto-title tutor conversations from their first message.
+      const title = deriveTutorConversationTitle(inboundMessage.parts) || "New Conversation";
+      conv = await createConversation(db, scope, {
+        ownerUserId: authContext.session.userId,
+        sectionId: null,
+        kind: "tutor",
+        title,
+      });
     }
-    // #231: auto-title tutor conversations from their first message; a
-    // section conversation isn't shown in a titled rail today, so it keeps
-    // the plain default.
-    const title = (kind === "tutor" && deriveTutorConversationTitle(inboundMessage.parts)) || "New Conversation";
-    conv = await createConversation(db, scope, {
-      ownerUserId: authContext.session.userId,
-      sectionId: kind === "section" ? requestedSectionId! : null,
-      kind,
-      title,
-    });
   }
 
   // Row just read back (and ownership-checked) or just created under a

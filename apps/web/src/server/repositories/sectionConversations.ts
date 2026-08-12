@@ -475,3 +475,26 @@ export function canWriteSectionConversation(
 ): boolean {
   return conversation.ownerUserId === viewer.userId;
 }
+
+/** True only when the caller's membership in this course is `student`.
+ *
+ *  #237: deliberately not "not an instructor" -- a `ta` or `observer` role
+ *  is neither `student` nor `instructor`/`admin` (the tiers isInstructorOf
+ *  checks), and would be misclassified as a student by that shortcut. Roles
+ *  other than student are never doing the assignment, so the safe default
+ *  for an unrecognized or missing membership is "not a student" -- a
+ *  conversation wrongly marked as a teacher test is merely unsubmittable,
+ *  whereas one wrongly marked as a student's pollutes real coursework.
+ *
+ *  #259: shared by both callers that create a section conversation
+ *  (routes/sectionConversations.ts's startSectionConversationHandler and
+ *  chat.ts's kind:"section" branch) -- previously duplicated once already
+ *  and drifted (chat.ts's copy didn't exist at all, defaulting every
+ *  section conversation to isTeacherTest: false), which is exactly the
+ *  failure mode a single shared implementation forecloses. Takes plain
+ *  membership data, not AuthContext, so this repository module doesn't need
+ *  to import the auth layer's types. */
+export function isStudentInCourse(memberships: { courseId: string; role: string }[], courseId: string): boolean {
+  const membership = memberships.find((m) => m.courseId === courseId);
+  return membership?.role === "student";
+}

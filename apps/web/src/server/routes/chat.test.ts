@@ -3,6 +3,11 @@ import { Hono } from "hono";
 import { chatHandler } from "./chat";
 import type { AuthContext } from "../middleware/roles";
 import { fakeAuthContext as buildFakeAuthContext, fakeMembership } from "../testing/authContext";
+import {
+  SectionConversationExistsError,
+  SectionNotFoundError,
+  SectionNotInteractiveError,
+} from "../repositories/sectionConversations";
 import type { AppEnv } from "../context";
 
 // Route test (mock db, mock the repository layer, mock streamText) -- per
@@ -25,6 +30,20 @@ vi.mock("../repositories/conversations", () => ({
   getLastMessages: (...args: unknown[]) => getLastMessagesMock(...args),
   countRecentUserMessagesForUser: (...args: unknown[]) => countRecentUserMessagesForUserMock(...args),
 }));
+
+// #259: kind:"section" now goes through #27's own lifecycle, not
+// createConversation -- mock that module too, and keep the error classes
+// real (imported from actual) so chat.ts's `instanceof` checks still work.
+const startSectionConversationMock = vi.fn();
+const getActiveSectionConversationMock = vi.fn();
+vi.mock("../repositories/sectionConversations", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../repositories/sectionConversations")>();
+  return {
+    ...actual,
+    startSectionConversation: (...args: unknown[]) => startSectionConversationMock(...args),
+    getActiveSectionConversation: (...args: unknown[]) => getActiveSectionConversationMock(...args),
+  };
+});
 
 // streamText is mocked so no real model call happens and the test controls
 // exactly when/what onFinish receives -- importOriginal keeps
@@ -88,6 +107,8 @@ describe("POST /api/chat", () => {
     createConversationMock.mockReset();
     appendMessageMock.mockReset();
     getLastMessagesMock.mockReset();
+    startSectionConversationMock.mockReset();
+    getActiveSectionConversationMock.mockReset();
     streamTextMock.mockClear();
     capturedOnFinish = undefined;
     // #219: under the rate limit by default -- individual rate-limit tests
@@ -216,26 +237,93 @@ describe("POST /api/chat", () => {
       expect(createConversationMock).not.toHaveBeenCalled();
     });
 
-    it("creates a kind:'section' conversation with the given sectionId when kind is 'section'", async () => {
-      createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    it("#259: routes kind:'section' through startSectionConversation (#27's lifecycle), not createConversation", async () => {
+      startSectionConversationMock.mockResolvedValue({ id: "conv-1" });
       getLastMessagesMock.mockResolvedValue([]);
 
-      await postChat(buildApp(fakeAuthContext()), {
+      const res = await postChat(buildApp(fakeAuthContext()), {
         messages: [userUiMessage],
         kind: "section",
         sectionId: "11111111-1111-1111-1111-111111111111",
       });
 
-      const [, , input] = createConversationMock.mock.calls[0]!;
+      expect(res.status).toBe(200);
+      expect(createConversationMock).not.toHaveBeenCalled();
+      expect(startSectionConversationMock).toHaveBeenCalledTimes(1);
+      const [, , input] = startSectionConversationMock.mock.calls[0]!;
       expect(input).toEqual({
-        ownerUserId: "u1",
         sectionId: "11111111-1111-1111-1111-111111111111",
-        kind: "section",
-        // #231: auto-titling is tutor-only -- a section conversation isn't
-        // shown in a titled rail, so it keeps the plain default even though
-        // this turn's text is derivable.
-        title: "New Conversation",
+        ownerUserId: "u1",
+        // #237/#259: derived from the caller's actual course role via the
+        // shared isStudentInCourse, not duplicated route-local logic.
+        // fakeAuthContext's default membership is a "student" of course-a.
+        isTeacherTest: false,
       });
+    });
+
+    it("#259: derives isTeacherTest=true for a non-student course role", async () => {
+      startSectionConversationMock.mockResolvedValue({ id: "conv-1" });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(
+        buildApp(fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] })),
+        {
+          messages: [userUiMessage],
+          kind: "section",
+          sectionId: "11111111-1111-1111-1111-111111111111",
+        },
+      );
+
+      const [, , input] = startSectionConversationMock.mock.calls[0]!;
+      expect(input.isTeacherTest).toBe(true);
+    });
+
+    it("#259: falls back to the winning conversation on a SectionConversationExistsError race", async () => {
+      startSectionConversationMock.mockRejectedValue(new SectionConversationExistsError());
+      getActiveSectionConversationMock.mockResolvedValue({
+        id: "conv-existing",
+        ownerUserId: "u1",
+        courseId: "course-a",
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        kind: "section",
+        sectionId: "11111111-1111-1111-1111-111111111111",
+      });
+
+      expect(res.status).toBe(200);
+      expect(appendMessageMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        "conv-existing",
+        expect.anything(),
+      );
+    });
+
+    it("#259: 404s when the section doesn't exist or isn't in the caller's course", async () => {
+      startSectionConversationMock.mockRejectedValue(new SectionNotFoundError("not found"));
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        kind: "section",
+        sectionId: "11111111-1111-1111-1111-111111111111",
+      });
+
+      expect(res.status).toBe(404);
+    });
+
+    it("#259: 409s when the section is non_interactive", async () => {
+      startSectionConversationMock.mockRejectedValue(new SectionNotInteractiveError());
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        kind: "section",
+        sectionId: "11111111-1111-1111-1111-111111111111",
+      });
+
+      expect(res.status).toBe(409);
     });
 
     it("400s when kind is 'section' but sectionId is missing", async () => {
@@ -245,6 +333,7 @@ describe("POST /api/chat", () => {
       });
       expect(res.status).toBe(400);
       expect(createConversationMock).not.toHaveBeenCalled();
+      expect(startSectionConversationMock).not.toHaveBeenCalled();
     });
   });
 
