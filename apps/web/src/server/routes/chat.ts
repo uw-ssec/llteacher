@@ -217,7 +217,20 @@ function hasRenderableContent(parts: unknown): boolean {
     if (type === "step-start") return false;
     if (type === "text") {
       const text = (part as { text?: unknown }).text;
-      return typeof text === "string" && text.length > 0;
+      if (typeof text !== "string" || text.length === 0) return false;
+      // #268: a text part mid-generation carries state:"streaming" until
+      // the SDK closes it out as state:"done" -- a part that never got
+      // there (a provider error or a client disconnect mid-delta) is
+      // exactly the truncated-answer case this whole function exists to
+      // catch, and length>0 alone doesn't see it (verified empirically:
+      // the persisted row from a text-then-error turn was
+      // {text:"...", state:"streaming"}, which the old check accepted).
+      // `state` is optional in the SDK's own type (older/synthetic parts
+      // omit it) -- only an EXPLICIT "streaming" is rejected here, not its
+      // absence, so replayPersistedPart's own always-complete text writes
+      // (which never set state) keep working.
+      const state = (part as { state?: unknown }).state;
+      return state !== "streaming";
     }
     // Any other known part shape (tool-*, file, source-url/document, etc.)
     // is real content the moment it exists.
@@ -590,16 +603,32 @@ export async function chatHandler(c: Context<AppEnv>) {
     // responseMessage is the full final UIMessage (text parts + any
     // tool-call/tool-result parts), exactly the shape `messages.parts`
     // (jsonb) is meant to store; no manual text+toolCalls reconstruction
-    // needed. Persisted even when isAborted (a cancelled/dropped stream
-    // still gets whatever partial content it produced saved, rather than
-    // losing the turn outright) -- best-effort, not double-write-proof: if
-    // the *worker process* dies before onFinish runs (vs. the client just
-    // disconnecting), the assistant message is lost and the client's retry
-    // will only re-send the user message (already deduped above), so no
-    // response ever gets generated for that turn. That gap is a documented
-    // limitation (#3 pitfall 2), not fixed here -- tracked as #96
-    // (streaming resilience).
-    onFinish: async ({ responseMessage }) => {
+    // needed.
+    //
+    // #268: NOT persisted when isAborted or finishReason === "error" (a
+    // client disconnect mid-delta, or a provider error after some content
+    // already streamed) -- previously this refused only a fully-empty
+    // response (hasRenderableContent's step-start-only case), which missed
+    // the partial case entirely: a text-then-error turn persisted a
+    // half-sentence as a normal-looking complete answer, and the
+    // idempotency replay path above then served that same half-sentence on
+    // every future retry, with no error chunk at all the second time. Two
+    // signals said "incomplete" at this exact decision point and neither
+    // was read: `finishReason`/`isAborted` on this callback's own event,
+    // and the persisted text part's own `state: "streaming"` (now also
+    // caught structurally by hasRenderableContent's strengthened text
+    // branch, in case a future SDK stops surfacing finishReason). "length"
+    // is deliberately NOT refused here -- that's a real, complete-as-far-
+    // as-the-model-went answer (hit its token budget), not a truncation.
+    //
+    // best-effort, not double-write-proof: if the *worker process* dies
+    // before onFinish runs (vs. the client just disconnecting), the
+    // assistant message is lost and the client's retry will only re-send
+    // the user message (already deduped above), so no response ever gets
+    // generated for that turn. That gap is a documented limitation (#3
+    // pitfall 2), not fixed here -- tracked as #96 (streaming resilience).
+    onFinish: async ({ responseMessage, isAborted, finishReason }) => {
+      if (isAborted || finishReason === "error") return;
       // A provider failure mid-stream (ai@5.0.195 delivers this as an
       // `error` chunk, not a rejection -- see hasRenderableContent's doc
       // comment) still lands here with a `responseMessage` that has no

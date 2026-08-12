@@ -168,6 +168,22 @@ function erroringModel(): LanguageModelV2 {
   ]);
 }
 
+// #268: a provider failure AFTER some content already streamed -- the
+// realistic shape of a mid-generation disconnect/upstream error, distinct
+// from erroringModel's zero-content case above. Per ai@5.0.195, this still
+// ends the stream normally (an `error` chunk, not a rejection), so onFinish
+// still fires -- with a responseMessage whose text part carries
+// state:"streaming" (never closed out by a text-end) and a finishReason of
+// "error" on the callback's own event.
+function partialThenErrorModel(): LanguageModelV2 {
+  return fakeLanguageModel([
+    { type: "stream-start", warnings: [] },
+    { type: "text-start", id: "t1" },
+    { type: "text-delta", id: "t1", delta: "A p-value is the probability of" },
+    { type: "error", error: new Error("upstream connection reset") },
+  ]);
+}
+
 function succeedingModel(replyText: string): LanguageModelV2 {
   return fakeLanguageModel([
     { type: "stream-start", warnings: [] },
@@ -269,5 +285,40 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
     // Still exactly one assistant row -- the replay didn't write a new one.
     const assistantRows = messagesStore.filter((m) => m.conversationId === "conv-1" && m.role === "assistant");
     expect(assistantRows).toHaveLength(1);
+  });
+
+  describe("#268: partial content then a provider error mid-generation", () => {
+    it("does not persist the partial text -- the half-sentence must not become a permanent 'answer'", async () => {
+      fakeModel = partialThenErrorModel();
+
+      const res = await postChat(buildApp(), { messages: [userUiMessage] });
+      expect(res.status).toBe(200);
+      await res.text();
+
+      const rows = messagesStore.filter((m) => m.conversationId === "conv-1");
+      // Pre-fix, this persisted {text:"A p-value is the probability of",
+      // state:"streaming"} as a normal-looking assistant row.
+      expect(rows.map((r) => r.role)).toEqual(["user"]);
+    });
+
+    it("calls the model again (not a replay of the half-sentence) on an identical retry, and this time persists the real reply", async () => {
+      fakeModel = partialThenErrorModel();
+      const app = buildApp();
+      await (await postChat(app, { messages: [userUiMessage] })).text();
+      expect(messagesStore.map((m) => m.role)).toEqual(["user"]);
+
+      fakeModel = succeedingModel("a p-value is the probability of seeing a result this extreme");
+      const secondRes = await postChat(app, { messages: [userUiMessage], conversationId: "conv-1" });
+      const body = await secondRes.text();
+
+      // The real, complete reply -- not the truncated fragment replayed
+      // back with no error chunk, which is what the bug produced.
+      expect(body).toContain("a p-value is the probability of seeing a result this extreme");
+      expect(body).not.toMatch(/"state":"streaming"/);
+
+      const rows = messagesStore.filter((m) => m.conversationId === "conv-1");
+      expect(rows.filter((r) => r.role === "user")).toHaveLength(1);
+      expect(rows.filter((r) => r.role === "assistant")).toHaveLength(1);
+    });
   });
 });
