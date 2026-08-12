@@ -2,6 +2,35 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to execute this plan issue-by-issue (one fresh subagent per GitHub issue, task review after each, whole-branch review per PR). Scope: GitHub milestone 4 (21 issues as of the 2026-08-11 sync — see below) + the M3 issues that are blocked on M4 work. Broken into 4 sequential, independently-mergeable PRs. Ends with a full epic acceptance pass against issue #30's own checklist.
 
+## 2026-08-12 sync check (pre-PR-2 kickoff)
+
+**Start here if you're picking up PR 2.** Re-verified the plan against live GitHub + repo state before handing off:
+
+- **PR 1 (#212) is still open**, not yet merged to `staging` — `mergeable: MERGEABLE`, CI green on its latest commit. Do not wait for the merge: keep committing PR 2 work to the same `worktree-m4-conv-chat` branch/worktree (`/Users/kshitijdani/Desktop/SSEC/llteacher/.claude/worktrees/m4-conv-chat`) — it already contains everything #212 has, plus everything `staging` has picked up in the meantime (see next point). The GitHub merge is a formality that can happen whenever Cordero re-approves; it does not gate starting PR 2's code.
+  - #212's last commit as of this sync: `3c291f4 fix(chat): route kind:section through startSectionConversation (#259)` — fixed Cordero's one blocking review finding. Review re-requested from `cdcore09`.
+- **Cordero landed a real PR against this milestone since the 08-11 sync**: [#247](https://github.com/uw-ssec/llteacher/pull/247) `feat(db): submission uniqueness + section conversation lifecycle (#128, #27)`, merged into `staging` 2026-08-12, and pulled into this worktree via a `staging` merge. This is a bigger plan delta than it looks:
+  - **#128 (M3, submission-uniqueness design decision) is now CLOSED.** The restart-then-resubmit semantics PR 2's table assumed still-open are resolved and implemented (`restartSectionConversation` returns a `voidedSubmission`; see `apps/web/src/server/repositories/sectionConversations.ts`).
+  - **#27's implementation already exists** — `startSectionConversation`, `restartSectionConversation`, `getActiveSectionConversation`, etc. in `repositories/sectionConversations.ts` + their routes — but **issue #27 itself is still OPEN**. Read it live before assuming what's left; at minimum its "verify #22/#23 against real data" closing requirement was blocked until today, because `/api/chat`'s `kind:"section"` path never actually called into this code (that was #259, just fixed in `3c291f4`). #27's lifecycle is now reachable from real chat traffic for the first time — #22 and #23 (both still OPEN) can likely be verified and closed as PR 2's first concrete step, ahead of #25/#26/#178.
+  - **PR 2's issue table below is stale on #27 and #128 as a result** — treat #25, #26, #178, #143 as the real remaining net-new build work; treat #27/#22/#23 as a verify-and-close pass on code that already landed.
+- **New issue not in the original plan or the 08-11 sync: [#248](https://github.com/uw-ssec/llteacher/issues/248)**, milestone M4, unassigned, created after 08-11. Title: "design: what the student is told (and can recover) when restarting a section." It's the disclosure/UX half of what #128 (data semantics, closed) and #27 (the bare "restart affordance with confirm" checkbox) leave unanswered — namely that a restarted conversation is currently unreachable by *anyone* (soft-deleted, filtered out of every read path) and there's no submission history to point a "your prior attempt is still there" claim at. Read #248's full body before building #27's restart UI — it may change what that confirm dialog is allowed to say.
+- **#178 (LLMoxie API key + LiteLLM wiring) is reserved for Kshitij** — he wants to work on it personally rather than have it folded into an automated/subagent pass. Sequence PR 2's other work around it (still directly after #26 per the dependency note below, same `ai.ts` provider-dispatch switch), but don't auto-implement it.
+- All other PR 2 issues (#25, #26, #143) unchanged in state — still OPEN, unassigned, original dependency reasoning holds.
+
+**Suggested PR 2 order given the above:** #22 → #23 (verify #27's already-landed lifecycle against real data, now unblocked by #259) → re-read live #27 and check off/close what's actually satisfied → #248 (resolve the restart-disclosure design question, since #27's remaining "restart affordance" checkbox needs it) → #25 → #26 → #178 (Kshitij, not automated) → #143.
+
+**Verification commands that worked this session** (apps/web has real-DB-gated tests that need a live Neon URL and a longer timeout than the 5000ms default — remote-DB latency, not flakiness):
+```bash
+# typecheck (whole monorepo, from repo root)
+npm run typecheck
+
+# fast suite, no real DB (from apps/web/)
+npx vitest run
+
+# real-DB-gated suite (from apps/web/, DATABASE_URL sourced from .dev.vars)
+export DATABASE_URL=$(grep '^DATABASE_URL=' .dev.vars | sed 's/^DATABASE_URL=//; s/^"//; s/"$//')
+npx vitest run --testTimeout=30000
+```
+
 ## 2026-08-11 sync check (post PR-1-merge-into-staging)
 
 PR 1 landed all 7 of its issues (#3/#5/#4/#6/#1/#141/#144 — [PR #212](https://github.com/uw-ssec/llteacher/pull/212), pending merge to `staging`). Before starting PR 2, re-verified the plan against live GitHub state:
