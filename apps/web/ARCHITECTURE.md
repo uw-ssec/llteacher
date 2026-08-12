@@ -140,6 +140,31 @@ to batch multiple message writes into one transaction. Keep `createdAt` for
 display (it's the value `formatUpdatedAt`-style UI code wants); use `seq`
 for ordering only.
 
+### Migrations Touching `messages`
+
+`messages` is the fastest-growing table in the schema and, unlike most
+tables this project has migrated so far, is never empty in a real
+deployment by the time a new migration runs against it. A plain
+`drizzle-kit generate` diff for a `NOT NULL` column with no explicit
+default (a `bigserial`, in particular) assigns values in whatever order
+Postgres's `ALTER TABLE` rewrite happens to scan the heap -- which has no
+relationship to `created_at`, and can vary between a fresh table and one
+that has seen deletes or a `VACUUM` ([#269](https://github.com/uw-ssec/llteacher/issues/269)
+demonstrated both silently reordering a populated `messages` table in
+Postgres 16, one via free-space reuse, one via `synchronize_seqscans` alone
+with zero deletes). The rule this repo has now hand-applied three times
+(migrations 0018, 0021, 0023): add the column nullable, backfill it with an
+explicit `UPDATE ... ORDER BY` (or `row_number() OVER (...)` into a real
+sequence for a strictly-ordered column like `seq`), then `SET NOT NULL`.
+Never trust `drizzle-kit generate`'s raw output for a `NOT NULL` column on
+this table without checking whether it included a backfill.
+
+Separately: 0023's column-add and its three index builds run as ordinary
+(non-`CONCURRENTLY`) DDL, which takes `ACCESS EXCLUSIVE` for the duration.
+Fine at current volume; revisit the online (`CONCURRENTLY`, multi-step)
+pattern before this table is large enough for that lock to be felt in
+production.
+
 ## Pinned AI SDK Versions
 
 `apps/web/package.json` pins `ai`, `@ai-sdk/react`, and `@ai-sdk/openai` to
