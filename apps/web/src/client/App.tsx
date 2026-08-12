@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { useNavigate } from "react-router";
-import { Sidebar, TopNav, ConversationView, renderToolPart, isToolPart, ErrorBoundary } from "@llteacher/ui";
+import { Sidebar, TopNav, ConversationView, AlertDialog, Button, renderToolPart, isToolPart, ErrorBoundary } from "@llteacher/ui";
 import type { SidebarSection, MessageData } from "@llteacher/ui";
 import { useAuth } from "./components/AuthProvider";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
@@ -718,6 +718,17 @@ export default function App() {
   }, [sections, sectionMetaByOrder]);
   const [hintCount, setHintCount] = useState(3);
   const [justSubmittedSection, setJustSubmittedSection] = useState<number | null>(null);
+  /* #248: restart-affordance dialog state for the section chat. `restarting`
+     keeps the dialog open through the request (rather than closing
+     optimistically) so a 409 (graded submission -- see
+     SubmissionGradedError, sectionConversations.ts) can be shown inline
+     instead of silently failing after the dialog already closed; per the
+     design decision on #248, the client does not try to predict this
+     state ahead of time (no separate "is this section graded" fetch) --
+     the restart endpoint is the single source of truth for it. */
+  const [restartDialogOpen, setRestartDialogOpen] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [restartError, setRestartError] = useState<string | null>(null);
   /* Sidebar collapse persists across reloads via localStorage. Lazy initializer
      reads on first render; the effect below writes whenever the state changes. */
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
@@ -943,6 +954,91 @@ export default function App() {
     }
   };
 
+  /* #248: opens the restart-confirm dialog for the section currently
+     showing. Only ever called from a button that's itself only rendered
+     when `conversationId` is set (see the section ConversationView render
+     below) -- there is nothing to restart otherwise. */
+  const openRestartDialog = () => {
+    setRestartError(null);
+    setRestartDialogOpen(true);
+  };
+
+  const cancelRestart = () => {
+    if (restarting) return; // AlertDialog disables Cancel while confirming; belt-and-suspenders
+    setRestartDialogOpen(false);
+    setRestartError(null);
+  };
+
+  /* POST /api/courses/:courseId/conversations/:conversationId/restart
+     (restartSectionConversationHandler, #27/#248). On success, reuses
+     loadSectionConversation -- the same hydration path the initial mount
+     and section-switch already go through -- rather than re-deriving the
+     new conversation's greeting client-side; the server is the source of
+     truth for that copy (sectionGreeting in sectionConversations.ts).
+     Per the #248 design decision, a graded-submission refusal (409) is not
+     predicted client-side -- it's surfaced here, inline, from the
+     response the server actually gave. */
+  const confirmRestart = async () => {
+    if (!courseId || !conversationId) return;
+    setRestarting(true);
+    setRestartError(null);
+    try {
+      const res = await fetch(`/api/courses/${courseId}/conversations/${conversationId}/restart`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        setRestartError(
+          body?.error ?? "Something went wrong restarting this section. Please try again.",
+        );
+        return;
+      }
+      const result = (await res.json()) as {
+        conversation: { id: string; title: string };
+        voidedSubmission: { id: string; submittedAt: string } | null;
+      };
+      const sectionNumber = currentSection;
+      setSectionMetaByOrder((prev) => {
+        const next = new Map(prev);
+        const meta = next.get(sectionNumber);
+        if (meta) next.set(sectionNumber, { ...meta, conversationId: result.conversation.id });
+        return next;
+      });
+      setSections((prev) =>
+        prev.map((s) => (s.number === sectionNumber ? { ...s, status: "current" as const } : s)),
+      );
+      await loadSectionConversation(sectionNumber, result.conversation.id);
+      setRestartDialogOpen(false);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[App] section restart failed", err);
+      setRestartError("Something went wrong restarting this section. Please try again.");
+    } finally {
+      setRestarting(false);
+    }
+  };
+
+  /* #248: the confirm dialog's copy. Conditioned only on whether the
+     current conversation has an (ungraded -- see decision 1 in the #248
+     comment) submission, not on an attempt count: the schema doesn't track
+     attempt history (see #250's deferral of the append-only model), so the
+     copy says "your previous attempt," singular, rather than approximating
+     a number it can't get right. */
+  const currentSectionStatus = sections.find((s) => s.number === currentSection)?.status;
+  const restartDescription = (
+    <>
+      <p>You&apos;ll lose your conversation so far, and you won&apos;t be able to see it again.</p>
+      {currentSectionStatus === "submitted" && (
+        <p>Your submission for this section will be undone — you&apos;ll need to resubmit when you&apos;re ready.</p>
+      )}
+      {restartError && (
+        <p role="alert" style={{ color: "var(--color-error)" }}>
+          {restartError}
+        </p>
+      )}
+    </>
+  );
+
   /* Anonymous visitors get a minimal placeholder, not the fixture course
      demo below -- see UnauthenticatedHome for why this isn't the full
      branded landing page. While the session check is in flight, render
@@ -1088,11 +1184,35 @@ export default function App() {
               isSending={chatStatus === "submitted" || chatStatus === "streaming" || !!sectionHydrationError}
               error={sectionChatErrorRow}
               hasMoreHistory={sectionHistoryHasMore}
+              /* #248: only once there's an active conversation to restart --
+                 a section the student hasn't started yet has nothing for
+                 the affordance to act on. */
+              headerActions={
+                conversationId ? (
+                  <Button variant="danger" size="sm" outlined onClick={openRestartDialog}>
+                    Restart section
+                  </Button>
+                ) : undefined
+              }
             />
           </ErrorBoundary>
         )}
         </main>
       </div>
+
+      {/* #248: restart-confirm dialog for the section chat -- see
+          confirmRestart's doc comment for the request/hydration flow and
+          restartDescription for the copy decision. */}
+      <AlertDialog
+        open={restartDialogOpen}
+        title="Restart this section?"
+        description={restartDescription}
+        confirmLabel="Restart section"
+        cancelLabel="Keep this conversation"
+        onConfirm={confirmRestart}
+        onCancel={cancelRestart}
+        confirming={restarting}
+      />
     </div>
   );
 }

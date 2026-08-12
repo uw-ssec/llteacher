@@ -155,3 +155,26 @@ describe("ConversationView live region (#300)", () => {
     expect(messagesWrap.getAttribute("aria-live")).toBeNull();
   });
 });
+
+/* #248: the optional header-actions slot next to the breadcrumb -- e.g. the
+   homework-section chat's "Restart section" button. Tutor chat passes
+   nothing and must be unaffected. */
+describe("ConversationView headerActions (#248)", () => {
+  it("renders nothing extra when headerActions is omitted", () => {
+    render(<ConversationView breadcrumb="STATS 311 · HW 3 · Section 3" messages={[]} onSendMessage={() => {}} />);
+    expect(screen.queryByRole("button", { name: "Restart section" })).toBeNull();
+  });
+
+  it("renders the passed headerActions node alongside the breadcrumb", () => {
+    render(
+      <ConversationView
+        breadcrumb="STATS 311 · HW 3 · Section 3"
+        messages={[]}
+        onSendMessage={() => {}}
+        headerActions={<button>Restart section</button>}
+      />,
+    );
+    expect(screen.getByText("STATS 311 · HW 3 · Section 3")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Restart section" })).toBeTruthy();
+  });
+});

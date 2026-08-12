@@ -1609,3 +1609,259 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
     expect(isComposerDisabled(composer)).toBe(true);
   });
 });
+
+// #248: the section chat's restart affordance -- confirm dialog copy,
+// wiring to POST .../conversations/:id/restart, and hydrating the
+// replacement conversation on success. Reuses HOMEWORK_FIXTURE's shape.
+describe("App section restart affordance (#248)", () => {
+  const RESTART_HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [
+          { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+        ],
+      },
+    ],
+  };
+
+  function stubBaseFetch(
+    extra: (url: string, init?: RequestInit) => Response | null,
+  ) {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+    };
+    HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
+      this.removeAttribute("open");
+      this.dispatchEvent(new Event("close"));
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(JSON.stringify(RESTART_HOMEWORK_FIXTURE), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url === "/api/conversations/sec-conv-1/messages") {
+          return new Response(
+            JSON.stringify([{ id: "m1", role: "user", parts: [{ type: "text", text: "sec 1 question" }] }]),
+            { status: 200 },
+          );
+        }
+        const res = extra(url, init);
+        if (res) return res;
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+  }
+
+  it("does not render the restart button for a section with no active conversation", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(
+            JSON.stringify({
+              homeworks: [
+                {
+                  ...RESTART_HOMEWORK_FIXTURE.homeworks[0],
+                  sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByLabelText("Message input");
+    expect(screen.queryByRole("button", { name: "Restart section" })).toBeNull();
+  });
+
+  it("opens a confirm dialog stating the conversation won't be recoverable, and cancel leaves it untouched", async () => {
+    stubBaseFetch(() => null);
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const restartButton = await screen.findByRole("button", { name: "Restart section" });
+    const user = userEvent.setup();
+    await user.click(restartButton);
+
+    const dialog = await screen.findByRole("alertdialog", { name: "Restart this section?" });
+    expect(dialog.textContent).toContain("you won't be able to see it again");
+    // Not submitted -- no "submission will be undone" line.
+    expect(dialog.textContent).not.toContain("submission for this section will be undone");
+
+    await user.click(screen.getByRole("button", { name: "Keep this conversation" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    // Original conversation untouched.
+    expect(await screen.findByText("sec 1 question")).toBeTruthy();
+  });
+
+  it("shows the submission-will-be-undone line when the section is already submitted", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+    };
+    HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
+      this.removeAttribute("open");
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(
+            JSON.stringify({
+              homeworks: [
+                {
+                  ...RESTART_HOMEWORK_FIXTURE.homeworks[0],
+                  sections: [{ id: "s1", title: "Sec 1", order: 1, status: "submitted", conversationId: "sec-conv-1" }],
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url === "/api/conversations/sec-conv-1/messages") {
+          return new Response(
+            JSON.stringify([{ id: "m1", role: "user", parts: [{ type: "text", text: "sec 1 question" }] }]),
+            { status: 200 },
+          );
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const restartButton = await screen.findByRole("button", { name: "Restart section" });
+    const user = userEvent.setup();
+    await user.click(restartButton);
+
+    const dialog = await screen.findByRole("alertdialog", { name: "Restart this section?" });
+    expect(dialog.textContent).toContain("submission for this section will be undone");
+  });
+
+  it("confirming restart POSTs to the restart endpoint and hydrates the replacement conversation", async () => {
+    let restartCalled = false;
+    stubBaseFetch((url) => {
+      if (url === "/api/courses/course-a/conversations/sec-conv-1/restart") {
+        restartCalled = true;
+        return new Response(
+          JSON.stringify({
+            conversation: { id: "sec-conv-2", title: "Section 1: Sec 1", greetingMessageId: "g1" },
+            voidedSubmission: null,
+          }),
+          { status: 201 },
+        );
+      }
+      if (url === "/api/conversations/sec-conv-2/messages") {
+        return new Response(
+          JSON.stringify([{ id: "g1", role: "assistant", parts: [{ type: "text", text: "fresh greeting" }] }]),
+          { status: 200 },
+        );
+      }
+      return null;
+    });
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const restartButton = await screen.findByRole("button", { name: "Restart section" });
+    const user = userEvent.setup();
+    await user.click(restartButton);
+    const dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Restart section" }));
+
+    expect(await screen.findByText("fresh greeting")).toBeTruthy();
+    expect(restartCalled).toBe(true);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.queryByText("sec 1 question")).toBeNull();
+  });
+
+  it("a 409 (graded submission) keeps the dialog open and shows the server's message inline", async () => {
+    stubBaseFetch((url) => {
+      if (url === "/api/courses/course-a/conversations/sec-conv-1/restart") {
+        return new Response(
+          JSON.stringify({ error: "Submission has already been graded and cannot be restarted" }),
+          { status: 409 },
+        );
+      }
+      return null;
+    });
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const restartButton = await screen.findByRole("button", { name: "Restart section" });
+    const user = userEvent.setup();
+    await user.click(restartButton);
+    const dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Restart section" }));
+
+    const errorText = await screen.findByText("Submission has already been graded and cannot be restarted");
+    expect(errorText).toBeTruthy();
+    // Dialog stayed open -- the original conversation is untouched.
+    expect(screen.getByRole("alertdialog")).toBeTruthy();
+  });
+});

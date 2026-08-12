@@ -96,6 +96,11 @@ export interface ConversationViewProps {
    *  than silent (a conversation with exactly 200 messages is otherwise
    *  indistinguishable from one truncated at 200). */
   hasMoreHistory?: boolean;
+  /** #248: optional slot rendered alongside the breadcrumb for
+   *  surface-specific header actions -- e.g. the homework-section chat's
+   *  "Restart section" button. `undefined` renders nothing, so surfaces
+   *  with no header action (the tutor chat) are unaffected. */
+  headerActions?: React.ReactNode;
 }
 
 /* -- Component ------------------------------------------------------------- */
@@ -111,6 +116,7 @@ export function ConversationView({
   error = null,
   autoFocusComposer = false,
   hasMoreHistory = false,
+  headerActions,
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -149,8 +155,12 @@ export function ConversationView({
             against a live region wide enough to re-announce every
             streamed token. */}
         <div className="conversation-inner" role="log" aria-live="polite" aria-relevant="additions">
-          {/* Breadcrumb */}
-          <p className="breadcrumb" aria-label="Location">{breadcrumb}</p>
+          {/* Breadcrumb, with an optional surface-specific action alongside it
+              (e.g. #248's "Restart section" button) */}
+          <div className="conversation-header-row">
+            <p className="breadcrumb" aria-label="Location">{breadcrumb}</p>
+            {headerActions}
+          </div>
 
           {/* #6: conversation header title -- only for surfaces that pass
               one (the homework-section chat has no per-conversation title

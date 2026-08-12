@@ -46,6 +46,9 @@ export type { EditableTitleProps } from "./components/EditableTitle";
 export { ErrorBoundary } from "./components/ErrorBoundary";
 export type { ErrorBoundaryProps } from "./components/ErrorBoundary";
 
+export { AlertDialog } from "./components/AlertDialog";
+export type { AlertDialogProps } from "./components/AlertDialog";
+
 /* -- Generative-UI surfaces (rendered inline inside AI messages) ----------- */
 
 export { DefinitionCard, renderToolPart, parseShowDefinitionInput, isToolPart } from "./generative";
