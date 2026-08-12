@@ -434,18 +434,33 @@ function deriveTutorConversationTitle(parts: unknown): string | null {
 // in rateLimits.ts itself (#308) -- routes/conversations.ts's
 // createConversationHandler shares the same budget/counter.
 
-// #215: bounds what the model sees on every turn. The client still sends
-// its full local history (useChat's own state), but only the trailing
-// window is forwarded to convertToModelMessages -- per-turn token cost is
-// therefore bounded regardless of how long the conversation has run.
-// Decision (documented per the issue's own request): a plain trailing
-// window, dropped silently -- no rolling summary. A summarization strategy
-// is real, separate work (tracked as #88, context-window management);
-// until it lands, the oldest turns beyond this window are simply not seen
-// by the model on a given turn, which is a graceful degradation (the
-// student can still reference them in the visible UI transcript) rather
-// than a hard failure.
+// #215: bounds what the model sees on every turn -- the trailing window
+// pulled from the server's own persisted history (#143 redesign below), so
+// per-turn token cost is bounded regardless of how long the conversation
+// has run. Decision (documented per the issue's own request): a plain
+// trailing window, dropped silently -- no rolling summary. A summarization
+// strategy is real, separate work (tracked as #88, context-window
+// management); until it lands, the oldest turns beyond this window are
+// simply not seen by the model on a given turn, which is a graceful
+// degradation (the student can still reference them in the visible UI
+// transcript) rather than a hard failure.
 const MAX_HISTORY_MESSAGES = 40;
+
+// #143: bound on the inbound request body itself, checked before any
+// parsing/db work -- distinct from MAX_HISTORY_MESSAGES above (which trims
+// what the model sees once a request is already accepted) and
+// MAX_MESSAGES_PER_REQUEST below (#308's array-length cap). A genuine
+// multi-turn Socratic exchange is plaintext and comfortably under it; it
+// exists to bound a runaway/malicious client, not to constrain normal usage.
+const MAX_REQUEST_BODY_BYTES = 256 * 1024;
+
+// #143: upstream model call timeout -- bounds how long a single turn can
+// hang the connection (and the Worker's wall-clock budget) if the provider
+// stalls instead of erroring. Generous for a Socratic turn (which can
+// include a tool call + follow-up text, i.e. multiple provider round-trips
+// within one streamText call, see stopWhen below), short enough that a
+// genuinely stuck upstream doesn't tie up the request indefinitely.
+const STREAM_TIMEOUT_MS = 60_000;
 
 export async function chatHandler(c: Context<AppEnv>) {
   // #26: the OPENROUTER_API_KEY-specific early check this replaced is gone
@@ -466,9 +481,22 @@ export async function chatHandler(c: Context<AppEnv>) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
+  // #143: read the raw body ourselves (not c.req.json()) so the size cap is
+  // enforced against the actual byte count before JSON.parse ever runs --
+  // c.req.json() would parse an oversize body first and only let a caller
+  // discover the problem after paying that cost.
+  let rawText: string;
+  try {
+    rawText = await c.req.text();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+  if (new TextEncoder().encode(rawText).length > MAX_REQUEST_BODY_BYTES) {
+    return c.json({ error: `Request body exceeds the ${MAX_REQUEST_BODY_BYTES} byte limit` }, 400);
+  }
   let rawBody: unknown;
   try {
-    rawBody = await c.req.json();
+    rawBody = JSON.parse(rawText);
   } catch {
     return c.json({ error: "Request body must be valid JSON" }, 400);
   }
@@ -524,11 +552,13 @@ export async function chatHandler(c: Context<AppEnv>) {
   }
 
   // Full history vs. incremental (#3 pitfall 3): the client still sends the
-  // whole UIMessage[] history (it's what streamText needs for model
-  // context, subject to the #215 trailing-window truncation below), but
-  // only the LAST message -- the one just typed -- gets persisted per turn.
-  // Everything before it either came from the DB on a "load conversation"
-  // path (#4) or was already persisted on a prior turn.
+  // whole UIMessage[] history (useChat's own local state), but only the
+  // LAST message -- the one just typed -- is trusted for anything. It gets
+  // validated below and is the only part of `uiMessages` that gets
+  // persisted or reaches the model; #143 stopped building the model's
+  // context from the rest of this client-supplied array (see the
+  // persistedHistory fetch further down) specifically because nothing
+  // before the last entry is checked here.
   const inboundMessage = uiMessages[uiMessages.length - 1];
   const parsedInbound = inboundUserMessageSchema.safeParse(inboundMessage);
   if (!parsedInbound.success) {
@@ -860,29 +890,52 @@ export async function chatHandler(c: Context<AppEnv>) {
     }
   }
 
-  // #215: trailing window -- see MAX_HISTORY_MESSAGES' doc comment above
-  // for the drop-silently decision.
-  const windowedMessages =
-    uiMessages.length > MAX_HISTORY_MESSAGES ? uiMessages.slice(-MAX_HISTORY_MESSAGES) : uiMessages;
+  // #143: server-authoritative context, not the client's own copy. The old
+  // behavior forwarded the client-supplied `uiMessages` array (trailing-
+  // windowed) straight to convertToModelMessages -- only its LAST entry was
+  // ever validated (parsedInbound above), so a crafted array could inject
+  // fabricated assistant replies or a smuggled system-role message ahead of
+  // it, overriding the Socratic guardrail (the exact academic-integrity
+  // bypass this issue's "Trust boundary on history" requirement calls out).
+  // Re-fetching from the row(s) this handler itself just confirmed or wrote
+  // above closes that: everything the model sees is either a prior
+  // assistant reply the server generated, or a prior user message this same
+  // idempotency check already accepted. getLastMessages orders newest-first
+  // (matches its use above); reversed here into the chronological order the
+  // model needs. Same MAX_HISTORY_MESSAGES cap as before (#215), just
+  // sourced server-side now instead of trusting the client's own window.
+  const persistedHistory = await getLastMessages(db, scope, conv.id, MAX_HISTORY_MESSAGES);
+  const modelMessages: UIMessage[] = [...persistedHistory].reverse().map((m) => ({
+    id: m.id,
+    role: m.role as UIMessage["role"],
+    parts: m.parts as UIMessage["parts"],
+  }));
 
-  // #272: the client's own array (windowedMessages, built above) has no way
-  // to know about a greeting the SERVER just wrote in startSectionConversation
-  // above -- it only knows the message it just sent. Prepending it here is
+  // #272: getLastMessages above only knows what's already persisted -- a
+  // freshly-created section conversation's greeting was just written inside
+  // startSectionConversation's own atomic group, but that write can't be
+  // relied on to be visible to this same request's read in every test/mock
+  // configuration, so it's still passed through explicitly rather than
+  // assumed to already be part of persistedHistory. Prepending it here is
   // what makes the model's very first answer in a section actually see the
   // question (section.content, embedded in the greeting), instead of
   // answering blind until a reload re-hydrates history that includes it.
   const modelContextMessages: UIMessage[] = sectionGreetingParts
     ? [
         { id: crypto.randomUUID(), role: "assistant", parts: sectionGreetingParts } as UIMessage,
-        ...windowedMessages,
+        ...modelMessages,
       ]
-    : windowedMessages;
+    : modelMessages;
 
   const result = streamText({
     // #26: model/provider/params all come from resolvedLLMConfig now --
     // homework override or org default, never hardcoded.
     model: providerClient(resolvedLLMConfig.modelName),
     system: systemPrompt,
+    // #143: server-authoritative history (modelMessages, from
+    // persistedHistory above), not a client-supplied array -- see
+    // persistedHistory's own doc comment for the trust-boundary rationale
+    // this closes.
     messages: convertToModelMessages(modelContextMessages),
     // #264: belt-and-suspenders alongside historyMessageSchema's role
     // allowlist above -- the SDK warns and proceeds by default (its own
@@ -897,6 +950,13 @@ export async function chatHandler(c: Context<AppEnv>) {
        continue with the follow-up Socratic question in the same turn.
        Without this, streamText stops the moment a tool call is emitted. */
     stopWhen: stepCountIs(5),
+    // #143: bounds how long a stuck/hanging upstream can hold this request
+    // open. A genuine provider error (including a 429) already arrives as
+    // an in-stream `error` chunk well before this fires (ai@5.0.195 -- see
+    // hasRenderableContent's doc comment); this specifically covers the
+    // "upstream never responds at all" case that chunk-based handling
+    // can't, by construction, ever see.
+    abortSignal: AbortSignal.timeout(STREAM_TIMEOUT_MS),
   });
 
   return result.toUIMessageStreamResponse({
