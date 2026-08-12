@@ -63,6 +63,7 @@ import {
   SectionNotInteractiveError,
 } from "../repositories/sectionConversations";
 import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
+import { IdempotencyKeyConflictError } from "../repositories/errors";
 import { logServerError } from "../utils/errors";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
@@ -148,9 +149,23 @@ interface ChatRequestBody {
 // which would happily store whatever it's given (#3 pitfall 4). `id` is
 // required as of #213: it's the AI SDK's own per-send UIMessage id, used as
 // the idempotency key below instead of comparing message content.
+//
+// #266 asked for `z.string().uuid()` here, on the claim that it "matches
+// what the AI SDK actually generates." Checked against the pinned
+// ai@5.0.195 rather than assumed: @ai-sdk/provider-utils's actual default
+// `generateId` (`createIdGenerator()`, no options) produces a 16-character
+// string from an alphanumeric alphabet with NO separator by default --
+// there is no `-`, so it is not UUID-shaped, and this app's own
+// `useChat()` calls (App.tsx) don't override that default. `.uuid()` would
+// 400 every real client request. CLIENT_MESSAGE_ID_RE is the actual
+// boundary tightening this issue was after -- a bounded, non-arbitrary
+// charset instead of "any non-empty string" -- sized generously around the
+// SDK's real 16-char output (and a `prefix-` variant, if this app ever
+// configures one) without requiring an exact format the SDK doesn't use.
+const CLIENT_MESSAGE_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const chatPartSchema = z.object({ type: z.string() }).passthrough();
 const inboundUserMessageSchema = z.object({
-  id: z.string().min(1),
+  id: z.string().regex(CLIENT_MESSAGE_ID_RE),
   role: z.literal("user"),
   parts: z.array(chatPartSchema).min(1),
 });
@@ -171,7 +186,7 @@ const inboundUserMessageSchema = z.object({
 const ALLOWED_HISTORY_PART_TYPE_RE = /^(text|step-start|tool-[A-Za-z0-9_]+)$/;
 const historyPartSchema = z.object({ type: z.string().regex(ALLOWED_HISTORY_PART_TYPE_RE) }).passthrough();
 const historyMessageSchema = z.object({
-  id: z.string().min(1),
+  id: z.string().regex(CLIENT_MESSAGE_ID_RE),
   role: z.enum(["user", "assistant"]),
   parts: z.array(historyPartSchema).min(1),
 });
@@ -519,11 +534,25 @@ export async function chatHandler(c: Context<AppEnv>) {
     return replayResponse(conv.id, lastMessage.parts);
   }
   if (!matchesInboundUser(lastMessage)) {
-    await appendMessage(db, scope, conv.id, {
-      role: "user",
-      parts: inboundMessage.parts,
-      clientMessageId: parsedInbound.data.id,
-    });
+    // #266: appendMessage's return value used to be discarded entirely, so
+    // a reused clientMessageId with different content silently dropped the
+    // new message while the call below still ran the model against it --
+    // caught locally (not left to server/index.ts's global onError, though
+    // that mapping stays as a safety net) so a well-formed conflict 409s
+    // with the same request/response shape every other refusal on this
+    // route already uses.
+    try {
+      await appendMessage(db, scope, conv.id, {
+        role: "user",
+        parts: inboundMessage.parts,
+        clientMessageId: parsedInbound.data.id,
+      });
+    } catch (err) {
+      if (err instanceof IdempotencyKeyConflictError) {
+        return c.json({ error: err.message }, 409);
+      }
+      throw err;
+    }
   }
 
   const openrouter = getOpenRouter(apiKey);

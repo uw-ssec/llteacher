@@ -8,6 +8,7 @@ import {
   SectionNotFoundError,
   SectionNotInteractiveError,
 } from "../repositories/sectionConversations";
+import { IdempotencyKeyConflictError } from "../repositories/errors";
 import type { AppEnv } from "../context";
 
 // Route test (mock db, mock the repository layer, mock streamText) -- per
@@ -545,6 +546,24 @@ describe("POST /api/chat", () => {
         { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
       );
       expect(streamTextMock).toHaveBeenCalledTimes(1);
+    });
+
+    // #266: a reused clientMessageId for DIFFERENT content must not
+    // silently drop the new message while still calling the model with it.
+    it("409s and never calls the model when appendMessage reports an IdempotencyKeyConflictError", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      getLastMessagesMock.mockResolvedValue([]);
+      appendMessageMock.mockRejectedValueOnce(
+        new IdempotencyKeyConflictError("A message with this clientMessageId already exists with different content"),
+      );
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "conv-1",
+      });
+
+      expect(res.status).toBe(409);
+      expect(streamTextMock).not.toHaveBeenCalled();
     });
 
     it("still persists a genuinely new user message even when the conversation has prior messages", async () => {

@@ -4,7 +4,7 @@ import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import { organizations, courses, users, courseMemberships, homeworks, sections } from "../../db/schema";
 import { unsafeCourseScope } from "./scope";
-import { TenancyMismatchError } from "./errors";
+import { TenancyMismatchError, IdempotencyKeyConflictError } from "./errors";
 import {
   listConversationsForOwner,
   createConversation,
@@ -521,32 +521,101 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     // Postgres unique-violation (chat.ts's caller had nothing to catch it,
     // so it fell through to app.onError's generic 503) -- .onConflictDoNothing
     // makes this resolve with the EXISTING row instead, same as a
-    // successful retry. "second" (the losing insert's own text) never
-    // lands; the first row's content is what's actually persisted.
-    it("resolves with the existing row (not a throw) on a sequential duplicate clientMessageId", async () => {
+    // successful retry, PROVIDED the content actually matches (#266 below
+    // covers the case where it doesn't).
+    it("resolves with the existing row (not a throw) on a sequential duplicate clientMessageId with identical content", async () => {
       const created = await createConversation(db, unsafeCourseScope(courseAId), {
         ownerUserId: userId,
         sectionId: null,
         kind: "tutor",
-        title: "Duplicate clientMessageId",
+        title: "Duplicate clientMessageId, same content",
       });
       const first = await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
         role: "user",
-        parts: [{ type: "text", text: "first" }],
+        parts: [{ type: "text", text: "same text both times" }],
         clientMessageId: "dupe-id",
       });
 
       const second = await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
         role: "user",
-        parts: [{ type: "text", text: "second" }],
+        parts: [{ type: "text", text: "same text both times" }],
         clientMessageId: "dupe-id",
       });
 
       expect(second?.id).toBe(first!.id);
-      expect(second?.parts).toEqual([{ type: "text", text: "first" }]);
 
       const all = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id);
       expect(all.filter((m) => m.clientMessageId === "dupe-id")).toHaveLength(1);
+    });
+
+    // #266: this used to silently resolve with "first"'s row and drop
+    // "second" entirely -- while chatHandler still called the model against
+    // "second"'s text, persisting an answer with no matching question in
+    // the transcript. clientMessageId is client-controlled and never bound
+    // to the content it claims to identify, so a reused id with genuinely
+    // different content is now a hard refusal instead of a silent drop.
+    it("throws IdempotencyKeyConflictError (not a silent drop) on a sequential duplicate clientMessageId with DIFFERENT content", async () => {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Duplicate clientMessageId, different content",
+      });
+      await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+        role: "user",
+        parts: [{ type: "text", text: "first" }],
+        clientMessageId: "dupe-id-mismatch",
+      });
+
+      await expect(
+        appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+          role: "user",
+          parts: [{ type: "text", text: "second, genuinely different" }],
+          clientMessageId: "dupe-id-mismatch",
+        }),
+      ).rejects.toBeInstanceOf(IdempotencyKeyConflictError);
+
+      // Not an orphan: exactly the first row survives, "second" never lands.
+      const all = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id);
+      const matching = all.filter((m) => m.clientMessageId === "dupe-id-mismatch");
+      expect(matching).toHaveLength(1);
+      expect(matching[0]?.parts).toEqual([{ type: "text", text: "first" }]);
+    });
+
+    // #266's own concurrent scenario: two in-flight requests race with the
+    // SAME clientMessageId but DIFFERENT content (not the #254 case of
+    // identical retries). The loser must reject with the typed error, not
+    // silently resolve with the winner's row -- and exactly one row (the
+    // winner's) must survive either way.
+    it("under a concurrent race with DIFFERENT content for the same clientMessageId, the loser rejects and exactly one row persists", async () => {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Concurrent duplicate clientMessageId, different content",
+      });
+
+      const results = await Promise.allSettled([
+        appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+          role: "user",
+          parts: [{ type: "text", text: "version A" }],
+          clientMessageId: "concurrent-mismatch-id",
+        }),
+        appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+          role: "user",
+          parts: [{ type: "text", text: "version B" }],
+          clientMessageId: "concurrent-mismatch-id",
+        }),
+      ]);
+
+      const fulfilled = results.filter((r) => r.status === "fulfilled");
+      const rejected = results.filter((r) => r.status === "rejected");
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(IdempotencyKeyConflictError);
+
+      const all = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id);
+      expect(all.filter((m) => m.clientMessageId === "concurrent-mismatch-id")).toHaveLength(1);
     });
 
     // #254's actual scenario: two requests genuinely racing (a double-fired

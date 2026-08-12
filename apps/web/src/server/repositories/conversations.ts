@@ -2,7 +2,7 @@ import { and, desc, eq, gt, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { conversations, messages, sections, homeworks, courseMemberships, submissions } from "../../db/schema";
 import type { CourseScope } from "./scope";
-import { TenancyMismatchError } from "./errors";
+import { TenancyMismatchError, IdempotencyKeyConflictError } from "./errors";
 
 const DEFAULT_CONVERSATIONS_PAGE_SIZE = 50;
 const DEFAULT_MESSAGES_PAGE_SIZE = 200;
@@ -225,6 +225,66 @@ async function fetchExistingMessage(
   return existing;
 }
 
+// #266: a `.returning()` miss from onConflictDoNothing only ever meant "this
+// clientMessageId already has a row" -- it said nothing about whether that
+// row holds the SAME content this call was trying to insert. Reusing an id
+// for genuinely different text (a client bug, or an id derived from
+// something other than a fresh per-send token) used to silently discard the
+// new message while the caller still ran the model against it, leaving a
+// persisted answer with no question. A same-id-same-content conflict (the
+// real retry case -- #254) still resolves to the existing row unchanged;
+// only a genuine mismatch is now a hard refusal instead of a quiet drop.
+// A plain JSON.stringify comparison is NOT safe here: `parts` round-trips
+// through a `jsonb` column, and jsonb does not preserve object key order
+// (confirmed empirically -- inserting `{type, text}` and reading it back
+// can come back key-reordered). Two structurally identical objects would
+// then compare unequal purely from the round-trip, turning a legitimate
+// same-content retry into a false-positive conflict. Recurse structurally
+// instead, comparing object keys by set membership + per-key value, not by
+// serialized string.
+function partsEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (a === null || b === null) return a === b;
+  if (typeof a !== "object") return false; // primitives already covered by a === b above
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    return a.every((item, i) => partsEqual(item, b[i]));
+  }
+  const aObj = a as Record<string, unknown>;
+  const bObj = b as Record<string, unknown>;
+  const aKeys = Object.keys(aObj);
+  const bKeys = Object.keys(bObj);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((key) => Object.hasOwn(bObj, key) && partsEqual(aObj[key], bObj[key]));
+}
+
+async function resolveConflict(
+  db: Pick<Db, "select">,
+  conversationId: string,
+  clientMessageId: string | null,
+  input: { parts: unknown },
+) {
+  const existing = await fetchExistingMessage(db, conversationId, clientMessageId);
+  if (!existing) {
+    // Per the invariant documented on appendMessage's onConflictDoNothing
+    // call: a real, colliding clientMessageId string is the only way
+    // `.returning()` comes back empty, so `existing` also missing here means
+    // the unique index was violated by something this function's own
+    // callers can't produce -- not a condition to paper over.
+    throw new Error(
+      `appendMessage: onConflictDoNothing fired but no existing row was found for clientMessageId ${clientMessageId}`,
+    );
+  }
+  if (!partsEqual(existing.parts, input.parts)) {
+    throw new IdempotencyKeyConflictError(
+      "A message with this clientMessageId already exists with different content",
+    );
+  }
+  return existing;
+}
+
 export async function appendMessage(
   db: Db,
   scope: CourseScope,
@@ -269,7 +329,7 @@ export async function appendMessage(
     // undefined exactly when this clientMessageId already has a row; look
     // it up and hand back the existing row instead of treating an empty
     // `.returning()` as a failure.
-    return created ?? (await fetchExistingMessage(db, conversationId, clientMessageId));
+    return created ?? (await resolveConflict(db, conversationId, clientMessageId, messageValues));
   }
 
   // Test/dev path: node-postgres (makeNodeDb) has no runtime db.batch().
@@ -282,7 +342,7 @@ export async function appendMessage(
       .onConflictDoNothing(conflictTarget)
       .returning();
     await tx.update(conversations).set({ updatedAt: new Date() }).where(eq(conversations.id, conversationId));
-    return created ?? (await fetchExistingMessage(tx, conversationId, clientMessageId));
+    return created ?? (await resolveConflict(tx, conversationId, clientMessageId, messageValues));
   });
 }
 

@@ -27,3 +27,21 @@ export class TenancyMismatchError extends Error {
     this.name = "TenancyMismatchError";
   }
 }
+
+// #266: appendMessage throws this when a caller reuses a clientMessageId
+// for DIFFERENT content than the row already stored under that id.
+// clientMessageId is fully client-controlled and never bound to what it
+// claims to identify -- reusing it used to silently drop the new message
+// (onConflictDoNothing + "just return whatever's already there") while
+// chatHandler still called the model with the new text, leaving a
+// persisted answer with no question in the transcript. A genuine retry
+// (same id, same content -- #254) is unaffected and still resolves to the
+// existing row; only a real mismatch is a refusal. Mapped to 409 in
+// server/index.ts's app.onError, same single-chokepoint pattern as
+// TenancyMismatchError above.
+export class IdempotencyKeyConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IdempotencyKeyConflictError";
+  }
+}
