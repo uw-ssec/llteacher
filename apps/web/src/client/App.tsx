@@ -122,7 +122,6 @@ export function useStudentHomework() {
                 : s.status === "in_progress"
                   ? ("current" as const)
                   : ("pending" as const),
-            conversationId: s.conversationId ?? undefined,
           })),
         );
         setSectionMetaByOrder(
@@ -136,7 +135,14 @@ export function useStudentHomework() {
       });
   }, []);
 
-  return { sections, setSections, sectionMetaByOrder, hwTitle, courseId, loading, loadError };
+  // #271: setSectionMetaByOrder returned so the caller can update a
+  // section's conversationId the moment the server mints one (chatFetch
+  // below) -- sectionMetaByOrder is the single source of truth for a
+  // section's conversationId now that the redundant copy on SidebarSection
+  // above is gone; previously this setter existed only inside this hook,
+  // which made it structurally impossible for anything outside the hook to
+  // keep the map current after the initial fetch.
+  return { sections, setSections, sectionMetaByOrder, setSectionMetaByOrder, hwTitle, courseId, loading, loadError };
 }
 
 /* Translates the AI SDK's UIMessage[] + status into the design system's
@@ -241,11 +247,45 @@ export default function App() {
   /* Wraps fetch to read the x-conversation-id response header before handing
      the (untouched) Response back to useChat's own stream parsing --
      DefaultChatTransport otherwise has no way to surface response headers
-     to the caller. */
+     to the caller.
+
+     #271: this function is captured ONCE by DefaultChatTransport at first
+     render (see the useChat comment below) -- reading `currentSection` or
+     `sectionMetaByOrder` directly here would freeze both at whatever they
+     were on that first render forever. currentSectionRef/sectionMetaByOrderRef
+     (declared below, kept current via their own effects) are how this
+     stays correct across every later render without recreating the
+     transport. */
   const chatFetch: typeof fetch = async (input, init) => {
     const res = await fetch(input, init);
     const newConversationId = res.headers.get("x-conversation-id");
-    if (newConversationId) setConversationId(newConversationId);
+    if (newConversationId) {
+      setConversationId(newConversationId);
+      const section = currentSectionRef.current;
+      const prevMeta = sectionMetaByOrderRef.current.get(section);
+      // #271: sectionMetaByOrder (not the removed SidebarSection.conversationId
+      // copy) is the single source of truth a section's conversationId is
+      // read from everywhere else in this file (loadSectionConversation,
+      // handleSubmit) -- writing the server-minted id back into it here is
+      // what makes those reads see it, instead of only ever seeing whatever
+      // the initial /api/student/homeworks fetch returned.
+      if (prevMeta) {
+        setSectionMetaByOrder((prev) => {
+          const next = new Map(prev);
+          next.set(section, { ...prevMeta, conversationId: newConversationId });
+          return next;
+        });
+      }
+      // #272: no prior conversationId for this section means THIS request
+      // is the one that just made the server write the section's greeting
+      // (the actual question text) as the conversation's first message --
+      // the client has no way to know that yet. Queued rather than fetched
+      // immediately: see the effect below for why it waits for this turn's
+      // stream to finish first.
+      if (prevMeta && !prevMeta.conversationId) {
+        pendingGreetingConversationIdRef.current = newConversationId;
+      }
+    }
     return res;
   };
 
@@ -279,8 +319,23 @@ export default function App() {
     }),
   });
 
-  const { sections, setSections, sectionMetaByOrder, hwTitle, courseId, loading: homeworkLoading, loadError } =
-    useStudentHomework();
+  const {
+    sections,
+    setSections,
+    sectionMetaByOrder,
+    setSectionMetaByOrder,
+    hwTitle,
+    courseId,
+    loading: homeworkLoading,
+    loadError,
+  } = useStudentHomework();
+
+  // #271: mirrors sectionMetaByOrder for chatFetch's closure above, which is
+  // captured once at mount and would otherwise never see updates.
+  const sectionMetaByOrderRef = useRef(sectionMetaByOrder);
+  useEffect(() => {
+    sectionMetaByOrderRef.current = sectionMetaByOrder;
+  }, [sectionMetaByOrder]);
 
   /* #4: the tutor-conversations rail. Undefined = the homework section chat
      is showing (default); set = the selected/created tutor conversation is
@@ -351,6 +406,21 @@ export default function App() {
      later doesn't re-steal focus. */
   const [justCreatedTutorConversationId, setJustCreatedTutorConversationId] = useState<string | undefined>(
     undefined,
+  );
+
+  // #276: set when a tutor conversation's history fetch fails -- rendered
+  // through ConversationView's existing error row (see tutorChatErrorRow
+  // below) with a Retry that re-runs the fetch, and disables the composer
+  // while set (see isSending below) so a message can't be sent assuming a
+  // switch succeeded when it didn't.
+  const [tutorHydrationError, setTutorHydrationError] = useState<{ message: string; onRetry: () => void } | null>(
+    null,
+  );
+
+  // #276: same shape as tutorHydrationError above, for the section chat's
+  // own hydration path (loadSectionConversation below).
+  const [sectionHydrationError, setSectionHydrationError] = useState<{ message: string; onRetry: () => void } | null>(
+    null,
   );
 
   /* #4/#6, lifted here per #223: one useTutorConversations instance shared
@@ -445,6 +515,16 @@ export default function App() {
     return rows.map((r) => ({ id: r.id, role: r.role, parts: r.parts as UIMessage["parts"] }));
   };
 
+  // #276: a failed fetch used to switch the surface AND clear the message
+  // list (selectTutorConversation(id, [])) with no error and nothing
+  // disabled -- an empty thread beside a rail row that still shows a
+  // non-zero message count, with the composer fully live to send a
+  // context-free turn into the real conversation. The surface still
+  // switches (the error needs somewhere to render, and ConversationView
+  // only mounts for the currently-selected id) but now carries
+  // tutorHydrationError alongside the empty seed: rendered as a retryable
+  // error row (tutorChatErrorRow below) and disables the composer (see
+  // isSending below) until Retry succeeds.
   const handleSelectExistingTutorConversation = async (id: string) => {
     if (id === tutorConversationId) return;
     latestTutorSelectionRef.current = id;
@@ -452,11 +532,16 @@ export default function App() {
     try {
       const history = await fetchConversationHistory(id);
       if (latestTutorSelectionRef.current !== id) return; // superseded while in flight -- discard
+      setTutorHydrationError(null);
       selectTutorConversation(id, history);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("[App] tutor conversation history fetch failed", err);
       if (latestTutorSelectionRef.current !== id) return; // superseded while in flight -- discard
+      setTutorHydrationError({
+        message: "Couldn't load that conversation. Please try again.",
+        onRetry: () => void handleSelectExistingTutorConversation(id),
+      });
       selectTutorConversation(id, []);
     }
   };
@@ -481,6 +566,13 @@ export default function App() {
   const [currentSection, setCurrentSection] = useState(1);
   const hasAutoSelectedSection = useRef(false);
 
+  // #271: mirrors currentSection for chatFetch's closure above (see that
+  // function's own doc comment for why a ref, not the state itself).
+  const currentSectionRef = useRef(currentSection);
+  useEffect(() => {
+    currentSectionRef.current = currentSection;
+  }, [currentSection]);
+
   /* #252: tracks whichever section-conversation load was requested most
      recently -- the same staleness-guard shape latestTutorSelectionRef
      gives the tutor rail (see that ref's own doc comment above), applied to
@@ -491,6 +583,12 @@ export default function App() {
      yet), distinct from "no load in flight." */
   const latestSectionConversationRef = useRef<string | undefined>(undefined);
 
+  // #272: set by chatFetch above when a turn just created a section's FIRST
+  // conversation -- the conversationId to re-hydrate from once this turn's
+  // stream finishes (see the effect right after loadSectionConversation
+  // below for why it waits rather than firing immediately).
+  const pendingGreetingConversationIdRef = useRef<string | undefined>(undefined);
+
   /* #252: the section chat's own version of handleSelectExistingTutorConversation
      -- previously `setConversationId` was called directly (mount effect
      below) or via handleSectionSelect with no hydration at all, so a
@@ -500,12 +598,23 @@ export default function App() {
      silent gaps the model was never shown. `setSectionMessages` (the
      section useChat instance's own setter -- it has no `id` to key a
      remount off, unlike the tutor instance) is how the fetched history
-     actually gets applied. Fails open to an empty thread on a failed
-     fetch, matching fetchConversationHistory's other caller. */
+     actually gets applied.
+
+     #276: a failed fetch used to fail OPEN -- clear the message list to
+     `[]` and otherwise say nothing, so the next thing the student typed
+     went to the model with zero context and got persisted into their real
+     conversation, reinstating exactly what the paragraph above says #252
+     already fixed. Now fails closed: the message list is left as whatever
+     it already was (not cleared), a retryable error is surfaced via
+     sectionHydrationError (rendered through ConversationView's existing
+     error row, same as a chat-stream error), and the composer is disabled
+     while it's set (see isSending below) so a context-free turn can't be
+     sent into the real conversation while hydration is broken. */
   const loadSectionConversation = async (sectionNumber: number, targetConversationId: string | undefined) => {
     setCurrentSection(sectionNumber);
     setConversationId(targetConversationId);
     latestSectionConversationRef.current = targetConversationId;
+    setSectionHydrationError(null);
     if (!targetConversationId) {
       setSectionMessages([]);
       return;
@@ -518,9 +627,34 @@ export default function App() {
       // eslint-disable-next-line no-console
       console.error("[App] section conversation history fetch failed", err);
       if (latestSectionConversationRef.current !== targetConversationId) return; // superseded -- discard
-      setSectionMessages([]);
+      setSectionHydrationError({
+        message: "Couldn't load this section's conversation. Please try again.",
+        onRetry: () => void loadSectionConversation(sectionNumber, targetConversationId),
+      });
     }
   };
+
+  // #272: fires the greeting re-hydration chatFetch queued above, but only
+  // once this turn's stream has fully finished (chatStatus back to
+  // "ready") -- setSectionMessages replaces the whole array, and calling it
+  // while useChat is still appending streamed tokens to the in-progress
+  // assistant reply would race with (and could visibly clobber) that
+  // render. Once fired, the re-fetched history is the authoritative
+  // [greeting, student's message, reply] triple a reload would also show.
+  useEffect(() => {
+    const pendingId = pendingGreetingConversationIdRef.current;
+    if (!pendingId || pendingId !== conversationId || chatStatus !== "ready") return;
+    pendingGreetingConversationIdRef.current = undefined;
+    void (async () => {
+      try {
+        const history = await fetchConversationHistory(pendingId);
+        if (latestSectionConversationRef.current === pendingId) setSectionMessages(history);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("[App] failed to hydrate section greeting after creation", err);
+      }
+    })();
+  }, [chatStatus, conversationId]);
 
   useEffect(() => {
     if (!hasAutoSelectedSection.current && sections.length > 0) {
@@ -596,8 +730,13 @@ export default function App() {
      AI SDK v5 clears status but may leave a stale error reference on some
      paths, so status is the source of truth here, matching how chatStatus
      already gates the composer's disabled state below). */
+  // #276: a hydration failure takes priority over a chat-stream error --
+  // it's the more fundamental problem (the composer is disabled either way
+  // while it's set, see isSending below), and regenerateChat's retry
+  // wouldn't even be reachable in a useful state without history loaded.
   const sectionChatErrorRow =
-    chatStatus === "error"
+    sectionHydrationError ??
+    (chatStatus === "error"
       ? {
           message: chatError?.message || "Something went wrong. Please try again.",
           onRetry: () =>
@@ -607,15 +746,16 @@ export default function App() {
                 : { courseId, kind: "section" as const, sectionId: sectionMetaByOrder.get(currentSection)?.id },
             }),
         }
-      : null;
+      : null);
   const tutorChatErrorRow =
-    tutorChatStatus === "error"
+    tutorHydrationError ??
+    (tutorChatStatus === "error"
       ? {
           message: tutorChatError?.message || "Something went wrong. Please try again.",
           onRetry: () =>
             regenerateTutorChat({ body: tutorConversationId ? { conversationId: tutorConversationId } : {} }),
         }
-      : null;
+      : null);
 
   /* #216: bumps the rail row's messageCount/updatedAt (and re-sorts it to
      the top) the moment a tutor turn finishes -- /api/chat writes bypass
@@ -730,10 +870,16 @@ export default function App() {
      (a real error affordance is a separate, cross-cutting concern beyond
      this task). */
   const handleSubmit = async (sectionNumber: number) => {
-    const section = sections.find((s) => s.number === sectionNumber);
-    if (!section?.conversationId) return; // no active conversation yet -- nothing to submit
+    // #271: reads sectionMetaByOrder, not sections[].conversationId (that
+    // copy is gone -- see SectionMeta's own doc comment) -- this is the
+    // fix for Submit going permanently inert the moment a section's first
+    // turn created a conversation mid-session: previously this map was
+    // never updated after the initial fetch, so a section that started
+    // life with conversationId: null stayed that way here forever.
+    const meta = sectionMetaByOrder.get(sectionNumber);
+    if (!meta?.conversationId) return; // no active conversation yet -- nothing to submit
     try {
-      const res = await fetch(`/api/conversations/${section.conversationId}/submit`, { method: "POST" });
+      const res = await fetch(`/api/conversations/${meta.conversationId}/submit`, { method: "POST" });
       if (!res.ok) throw new Error("submit failed");
       /* Transition the section to submitted and trigger the gold-halo
          success animation on its ✓ indicator. The flag clears after the
@@ -853,8 +999,11 @@ export default function App() {
               messages={tutorMessages}
               onSendMessage={handleSendTutorMessage}
               /* #144: "error" deliberately excluded -- see isSending's own
-                 doc comment (ConversationView.tsx) for why. */
-              isSending={tutorChatStatus === "submitted" || tutorChatStatus === "streaming"}
+                 doc comment (ConversationView.tsx) for why. #276: a
+                 hydration failure DOES disable sending -- unlike a chat
+                 error, there's no persisted conversation state to safely
+                 send a fresh turn into while it's broken. */
+              isSending={tutorChatStatus === "submitted" || tutorChatStatus === "streaming" || !!tutorHydrationError}
               error={tutorChatErrorRow}
               autoFocusComposer={tutorConversationId === justCreatedTutorConversationId}
             />
@@ -868,8 +1017,10 @@ export default function App() {
               /* #144: "error" excluded here matters most for the section
                  chat specifically -- its useChat instance has no `id`
                  (unlike the tutor chat), so nothing else ever resets it
-                 out of an error state; see isSending's own doc comment. */
-              isSending={chatStatus === "submitted" || chatStatus === "streaming"}
+                 out of an error state; see isSending's own doc comment.
+                 #276: a hydration failure DOES disable sending -- see the
+                 tutor instance's own isSending comment above. */
+              isSending={chatStatus === "submitted" || chatStatus === "streaming" || !!sectionHydrationError}
               error={sectionChatErrorRow}
             />
           </ErrorBoundary>

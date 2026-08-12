@@ -378,6 +378,46 @@ describe("POST /api/chat", () => {
       expect(input.isTeacherTest).toBe(true);
     });
 
+    // #272: the greeting startSectionConversation just wrote server-side is
+    // otherwise invisible to this turn's own model call -- the client's
+    // outgoing array only ever contains the message it just typed, so
+    // without this the tutor answered the student's very first message in
+    // a section having never seen the actual question text.
+    it("#272: prepends the freshly-created section's greeting to this turn's model context", async () => {
+      startSectionConversationMock.mockResolvedValue({
+        id: "conv-1",
+        greetingParts: [{ type: "text", text: "Hello! Here is the actual homework question." }],
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        kind: "section",
+        sectionId: "11111111-1111-1111-1111-111111111111",
+      });
+
+      expect(streamTextMock).toHaveBeenCalledTimes(1);
+      const callArgs = streamTextMock.mock.calls[0]![0] as { messages: Array<{ role: string }> };
+      // Greeting prepended ahead of the student's own turn -- 2 model
+      // messages total, not just the 1 the client actually sent.
+      expect(callArgs.messages).toHaveLength(2);
+      expect(callArgs.messages[0]!.role).toBe("assistant");
+      expect(JSON.stringify(callArgs.messages[0])).toContain("Hello! Here is the actual homework question.");
+    });
+
+    it("#272: does not prepend a greeting on an existing (not freshly-created) conversation", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "conv-1",
+      });
+
+      const callArgs = streamTextMock.mock.calls[0]![0] as { messages: unknown[] };
+      expect(callArgs.messages).toHaveLength(1); // just the student's turn -- no synthetic prepend
+    });
+
     it("#259: falls back to the winning conversation on a SectionConversationExistsError race", async () => {
       startSectionConversationMock.mockRejectedValue(new SectionConversationExistsError());
       getActiveSectionConversationMock.mockResolvedValue({

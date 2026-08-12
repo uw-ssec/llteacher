@@ -1236,3 +1236,231 @@ describe("App section chat resumes with hydrated history (#252)", () => {
     expect(await screen.findByText("sec 1 question")).toBeTruthy();
   });
 });
+
+describe("App section conversationId stays live after mid-session creation (#271, #272)", () => {
+  const TWO_SECTION_NO_CONVO_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [
+          { id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null },
+          { id: "s2", title: "Sec 2", order: 2, status: "not_started", conversationId: null },
+        ],
+      },
+    ],
+  };
+
+  // #271: previously, a section's conversationId learned mid-session (via
+  // the x-conversation-id response header on its first turn) was written
+  // ONLY into React state local to that turn -- sectionMetaByOrder itself
+  // was never updated. Switching away and back re-read the stale (null)
+  // map entry, wiped the transcript, and left Submit permanently inert.
+  // This drives the real failure path end to end: a section that starts
+  // with conversationId: null, gets one, survives a switch-away-and-back,
+  // and Submit actually fires against the right id.
+  it("keeps a section's transcript and Submit working after its first-ever turn mints a conversationId", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const submitCalls: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(JSON.stringify(TWO_SECTION_NO_CONVO_FIXTURE), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url === "/api/chat") {
+          const body = JSON.parse(String(init?.body)) as { conversationId?: string; kind?: string };
+          // Only Sec 1's very first turn should ever reach here without a
+          // conversationId -- every later call (including the eventual
+          // Sec 1 revisit) must already carry "new-conv-1".
+          if (!body.conversationId) {
+            return chatStreamResponse("new-conv-1", "reply to sec 1");
+          }
+          throw new Error(`unexpected /api/chat call with body ${JSON.stringify(body)}`);
+        }
+        if (url === "/api/conversations/new-conv-1/messages") {
+          return new Response(
+            JSON.stringify([
+              { id: "m1", role: "user", parts: [{ type: "text", text: "hello sec1" }] },
+              { id: "m2", role: "assistant", parts: [{ type: "text", text: "reply to sec 1" }] },
+            ]),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/conversations/new-conv-1/submit" && init?.method === "POST") {
+          submitCalls.push(url);
+          return new Response(JSON.stringify({}), { status: 200 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = await screen.findByLabelText("Message input");
+    const user = userEvent.setup();
+    await user.type(composer, "hello sec1{Enter}");
+    await screen.findByText("reply to sec 1");
+
+    // Switch away, then back -- this is the exact path that was broken:
+    // sectionMetaByOrder must now report "new-conv-1" for Sec 1, not the
+    // null it started with.
+    await user.click(screen.getByRole("button", { name: /Sec 2/ }));
+    expect(screen.queryByText("reply to sec 1")).toBeNull();
+    await user.click(screen.getByRole("button", { name: /Sec 1/ }));
+    // Re-hydrated via /api/conversations/new-conv-1/messages -- proves the
+    // switch-back resolved the UPDATED id, not the original null (which
+    // would have cleared to an empty thread instead of re-fetching).
+    expect(await screen.findByText("reply to sec 1")).toBeTruthy();
+
+    // Submit must fire against "new-conv-1" -- previously silently
+    // no-op'd because handleSubmit read sections[].conversationId, a copy
+    // that was never updated past its initial (null) fetch.
+    await user.click(screen.getByRole("button", { name: /Submit section 1/i }));
+    await waitFor(() => expect(submitCalls).toEqual(["/api/conversations/new-conv-1/submit"]));
+  });
+});
+
+// #276: a hydration failure used to fail OPEN -- clear the message list to
+// [] with no error and nothing disabled, so the very next thing typed went
+// to the model with zero context and got persisted into the real
+// conversation. Both the tutor and section paths must now fail CLOSED:
+// leave the message list alone, surface a retryable error, and disable the
+// composer while it's broken.
+describe("App history hydration fails closed on fetch failure (#276)", () => {
+  const HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [
+          { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+        ],
+      },
+    ],
+  };
+
+  it("section chat: a failed history fetch does not clear the transcript, surfaces a retryable error, and disables the composer", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    let messagesCallCount = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url === "/api/conversations/sec-conv-1/messages") {
+          messagesCallCount += 1;
+          return new Response(JSON.stringify({ error: "server unavailable" }), { status: 503 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // Retryable error surfaced, not a silent empty thread.
+    expect(await screen.findByText(/Couldn't load this section's conversation/i)).toBeTruthy();
+    // Composer disabled while hydration is broken -- a context-free turn
+    // must not be sendable into the real conversation.
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    expect(composer.disabled).toBe(true);
+    expect(messagesCallCount).toBe(1);
+
+    // Retry re-attempts the same fetch (still fails here -- proving Retry
+    // is wired to the real fetch, not a no-op).
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /retry/i }));
+    await waitFor(() => expect(messagesCallCount).toBe(2));
+  });
+
+  it("tutor chat: a failed history fetch surfaces a retryable error and disables the composer instead of a silent empty thread", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const tutorFixture = {
+      homeworks: [{ ...HOMEWORK_FIXTURE.homeworks[0], sections: [] }],
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(tutorFixture), { status: 200 });
+        if (url.startsWith("/api/conversations?courseId=")) {
+          return new Response(
+            JSON.stringify([
+              { id: "t1", title: "Existing tutor chat", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 2 },
+            ]),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/conversations/t1/messages") {
+          return new Response(JSON.stringify({ error: "server unavailable" }), { status: 503 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("Existing tutor chat"));
+
+    // Switches to the tutor surface (ConversationView only mounts for the
+    // currently-selected id, so that's where the error row has to render)
+    // but with the retryable error attached, not a silent empty thread.
+    expect(await screen.findByText("STATS 311 · TUTOR CHAT")).toBeTruthy();
+    expect(await screen.findByText(/Couldn't load that conversation/i)).toBeTruthy();
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    expect(composer.disabled).toBe(true);
+  });
+});

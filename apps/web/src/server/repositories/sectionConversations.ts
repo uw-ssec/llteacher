@@ -139,7 +139,7 @@ export async function startSectionConversation(
   db: Db,
   scope: CourseScope,
   input: StartInput,
-): Promise<{ id: string; title: string; greetingMessageId: string }> {
+): Promise<{ id: string; title: string; greetingMessageId: string; greetingParts: unknown }> {
   // Membership and section-in-course are both caller-supplied and must be
   // verified before writing -- same rationale as createConversation's checks
   // in conversations.ts. droppedAt IS NULL matches listMembershipsForUser:
@@ -199,6 +199,7 @@ export async function startSectionConversation(
   const conversationId = crypto.randomUUID();
   const greetingMessageId = crypto.randomUUID();
   const title = `Section ${section.order}: ${section.title}`;
+  const greeting = greetingParts(sectionGreeting(section));
 
   // #238: the pre-check above is a courtesy, not the guarantee -- it and the
   // insert are separate round-trips, so a double-clicked "Start" can put two
@@ -220,7 +221,7 @@ export async function startSectionConversation(
         id: greetingMessageId,
         conversationId,
         role: "assistant",
-        parts: greetingParts(sectionGreeting(section)),
+        parts: greeting,
       }),
     ]);
   } catch (err) {
@@ -230,7 +231,13 @@ export async function startSectionConversation(
     throw err;
   }
 
-  return { id: conversationId, title, greetingMessageId };
+  // #272: chatHandler needs the greeting's actual content (not just its id)
+  // to prepend it to the model's context on the turn that creates it --
+  // without this, the tutor answers the student's first message in a
+  // section having never seen the greeting (and therefore the section's
+  // actual question text, section.content, which the greeting is the sole
+  // delivery mechanism for).
+  return { id: conversationId, title, greetingMessageId, greetingParts: greeting };
 }
 
 /** Delete-and-restart, in one action (#27) with #128's voiding semantics.

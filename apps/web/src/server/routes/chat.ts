@@ -426,6 +426,16 @@ export async function chatHandler(c: Context<AppEnv>) {
     );
   }
 
+  // #272: set only when THIS request just created a fresh section
+  // conversation (the try branch below, not the race-fallback catch) --
+  // prepended to the model's context further down so the turn that creates
+  // a section conversation doesn't answer with zero knowledge of the
+  // section's actual question text, which the greeting is the sole
+  // delivery mechanism for. Left undefined on every other path (existing
+  // conversationId, tutor kind, race fallback), which already has real
+  // persisted history a normal turn would see.
+  let sectionGreetingParts: unknown[] | undefined;
+
   let conv: { id: string; ownerUserId: string; courseId: string };
   if (conversationId) {
     // #217/#222: getOwnedConversationOrNull collapses "doesn't exist",
@@ -483,6 +493,7 @@ export async function chatHandler(c: Context<AppEnv>) {
           isTeacherTest: !isStudentInCourse(authContext.memberships, fallbackCourseId!),
         });
         conv = { id: created.id, ownerUserId: authContext.session.userId, courseId: fallbackCourseId! };
+        sectionGreetingParts = Array.isArray(created.greetingParts) ? created.greetingParts : undefined;
       } catch (err) {
         if (err instanceof SectionConversationExistsError) {
           // #238-style race: two requests for the same section's first
@@ -588,6 +599,19 @@ export async function chatHandler(c: Context<AppEnv>) {
   const windowedMessages =
     uiMessages.length > MAX_HISTORY_MESSAGES ? uiMessages.slice(-MAX_HISTORY_MESSAGES) : uiMessages;
 
+  // #272: the client's own array (windowedMessages, built above) has no way
+  // to know about a greeting the SERVER just wrote in startSectionConversation
+  // above -- it only knows the message it just sent. Prepending it here is
+  // what makes the model's very first answer in a section actually see the
+  // question (section.content, embedded in the greeting), instead of
+  // answering blind until a reload re-hydrates history that includes it.
+  const modelContextMessages: UIMessage[] = sectionGreetingParts
+    ? [
+        { id: crypto.randomUUID(), role: "assistant", parts: sectionGreetingParts } as UIMessage,
+        ...windowedMessages,
+      ]
+    : windowedMessages;
+
   const result = streamText({
     // Gemma 4 31B (instruction-tuned) on OpenRouter's free tier. Released
     // 2026-04-02, 262K context, native function calling (custom XML format
@@ -596,7 +620,7 @@ export async function chatHandler(c: Context<AppEnv>) {
     // (LLM config resolution).
     model: openrouter("google/gemma-4-31b-it:free"),
     system: SYSTEM_PROMPT,
-    messages: convertToModelMessages(windowedMessages),
+    messages: convertToModelMessages(modelContextMessages),
     // #264: belt-and-suspenders alongside historyMessageSchema's role
     // allowlist above -- the SDK warns and proceeds by default (its own
     // words: "a security risk because they may enable prompt injection
