@@ -94,5 +94,22 @@ describe.skipIf(!DATABASE_URL)("migration 0023 seq backfill (#269, real DB)", ()
 
     const { rows: notNull } = await client.query<{ seq: string }>(`SELECT "seq" FROM "messages" WHERE "seq" IS NULL`);
     expect(notNull).toHaveLength(0);
+
+    // Round-4 review finding: every assertion above passes whether the
+    // migration's `setval(..., max + 1, false)` is correct or off by one
+    // (e.g. `true` instead of `false`, or a missing `+ 1`) -- none of them
+    // exercise the sequence's own next-value state, only the backfilled
+    // column. `is_called = false` means the NEXT nextval() call returns
+    // the given value itself; get that wrong and a genuinely new row after
+    // the migration collides with (or skips past) an already-backfilled
+    // seq instead of continuing cleanly from the max. A real post-migration
+    // INSERT is the only way to catch that -- it must both come out ahead
+    // of every backfilled seq and use the exact next integer, not just any
+    // integer greater than the max.
+    const maxBackfilledSeq = Math.max(...bySeq.map((_, i) => i + 1)); // 1..N, N == bySeq.length
+    const { rows: freshRow } = await client.query<{ seq: string }>(
+      `INSERT INTO "messages" ("created_at") VALUES (now()) RETURNING "seq"`,
+    );
+    expect(Number(freshRow[0]!.seq)).toBe(maxBackfilledSeq + 1);
   });
 });

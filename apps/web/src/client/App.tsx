@@ -282,8 +282,24 @@ export default function App() {
       // the client has no way to know that yet. Queued rather than fetched
       // immediately: see the effect below for why it waits for this turn's
       // stream to finish first.
+      //
+      // Round-4 review fix: the re-hydration effect below only applies its
+      // fetched history when `latestSectionConversationRef.current ===
+      // pendingId` -- and until now, nothing on this path ever wrote
+      // `newConversationId` into that ref. It's only ever set by
+      // loadSectionConversation, which for a section starting life at
+      // conversationId: null was last called with `undefined`. So the
+      // guard compared `undefined === newConversationId`, always false,
+      // and the re-fetched [greeting, question, reply] history was
+      // silently discarded -- the fetch fired (a wasted round-trip) but
+      // setSectionMessages was never reached. The server-side half of #272
+      // (the model seeing the greeting on the creation turn) was never
+      // affected; only the in-session transcript stayed missing it until a
+      // section switch or reload re-ran loadSectionConversation from
+      // scratch.
       if (prevMeta && !prevMeta.conversationId) {
         pendingGreetingConversationIdRef.current = newConversationId;
+        latestSectionConversationRef.current = newConversationId;
       }
     }
     return res;

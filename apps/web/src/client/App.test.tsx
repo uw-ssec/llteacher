@@ -1414,6 +1414,73 @@ describe("App section conversationId stays live after mid-session creation (#271
     await user.click(screen.getByRole("button", { name: /Submit section 1/i }));
     await waitFor(() => expect(submitCalls).toEqual(["/api/conversations/new-conv-1/submit"]));
   });
+
+  // Round-4 review finding: the test above only drives the #271 half (a
+  // section switch away-and-back). It asserts nothing about #272's own
+  // claim -- that the greeting re-hydration effect replaces the in-session
+  // transcript with [greeting, question, reply] once the creation turn's
+  // stream finishes, WITHOUT requiring a section switch or reload. That
+  // effect gates on `latestSectionConversationRef.current === pendingId`,
+  // and nothing on the "section starts at conversationId: null" path ever
+  // wrote the newly-minted id into that ref (it's only set by
+  // loadSectionConversation, last called with `undefined` for a fresh
+  // section) -- so the guard always failed, the re-fetch fired and was
+  // discarded, and the greeting never appeared until a switch or reload
+  // re-ran loadSectionConversation from scratch. This drives exactly that
+  // path: one turn, no section switch, and asserts the greeting is visible
+  // afterward.
+  it("shows the section's greeting in the transcript right after its first-ever turn, with no section switch (#272)", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(JSON.stringify(TWO_SECTION_NO_CONVO_FIXTURE), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        if (url === "/api/chat") {
+          const body = JSON.parse(String(init?.body)) as { conversationId?: string };
+          if (!body.conversationId) return chatStreamResponse("new-conv-1", "reply to sec 1");
+          throw new Error(`unexpected /api/chat call with body ${JSON.stringify(body)}`);
+        }
+        if (url.startsWith("/api/conversations/new-conv-1/messages")) {
+          return new Response(
+            JSON.stringify([
+              { id: "g1", role: "assistant", parts: [{ type: "text", text: "section greeting text" }] },
+              { id: "m1", role: "user", parts: [{ type: "text", text: "hello sec1" }] },
+              { id: "m2", role: "assistant", parts: [{ type: "text", text: "reply to sec 1" }] },
+            ]),
+            { status: 200 },
+          );
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = await screen.findByLabelText("Message input");
+    const user = userEvent.setup();
+    await user.type(composer, "hello sec1{Enter}");
+    await screen.findByText("reply to sec 1");
+
+    // No section switch, no reload -- the re-hydration effect alone must
+    // surface the greeting once the creation turn's stream settles.
+    expect(await screen.findByText("section greeting text")).toBeTruthy();
+  });
 });
 
 // #276: a hydration failure used to fail OPEN -- clear the message list to
