@@ -38,13 +38,41 @@ import {
   softDeleteConversation,
   getOwnedConversationOrNull,
   getMessagesForConversation,
+  DEFAULT_CONVERSATIONS_PAGE_SIZE,
 } from "../repositories/conversations";
 import type { ConversationKind } from "../../db/schema";
 import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
 import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from "../repositories/rateLimits";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
-import type { ConversationSummary, ConversationListItemResponse, ConversationMessageResponse } from "../../shared/types";
+import type {
+  ConversationSummary,
+  ConversationListItemResponse,
+  ConversationListResponse,
+  ConversationMessageResponse,
+} from "../../shared/types";
+
+// #281: an opaque cursor -- the client only ever echoes this back as
+// `before`, never parses or reconstructs it. Encoding (updatedAt, id)
+// together server-side is what fixes the precision-loss half of #281: the
+// wire value carries the exact Date the server compared against, not a
+// client-truncated re-derivation of one, and pairing it with `id` is what
+// makes the comparison in listConversationsForOwner a real tiebreaker
+// instead of a plain (lossy) timestamp comparison.
+function encodeConversationsCursor(cursor: { updatedAt: Date; id: string }): string {
+  return btoa(JSON.stringify({ updatedAt: cursor.updatedAt.toISOString(), id: cursor.id }));
+}
+function decodeConversationsCursor(raw: string): { updatedAt: Date; id: string } | null {
+  try {
+    const parsed = JSON.parse(atob(raw)) as { updatedAt?: unknown; id?: unknown };
+    if (typeof parsed.updatedAt !== "string" || typeof parsed.id !== "string") return null;
+    const updatedAt = new Date(parsed.updatedAt);
+    if (Number.isNaN(updatedAt.getTime())) return null;
+    return { updatedAt, id: parsed.id };
+  } catch {
+    return null;
+  }
+}
 
 // #308: no cap existed on how many tutor conversations one authenticated
 // student could mint -- unbounded row creation. 300 is generous relative to
@@ -110,10 +138,12 @@ export async function listConversationsHandler(c: Context<AppEnv>) {
 
   // #224: optional pagination. `limit` clamped to a sane range rather than
   // trusted verbatim -- a client-supplied 1000000 would defeat the point of
-  // bounding the page. `before` is an updatedAt cursor (ISO timestamp): the
-  // caller passes back the last row's updatedAt to fetch the next page.
+  // bounding the page. Always resolved to a real number (never left
+  // undefined) so this handler knows exactly what page size was requested
+  // when it decides below whether a full page came back -- the signal
+  // #281's nextCursor is based on.
   const limitParam = c.req.query("limit");
-  let limit: number | undefined;
+  let limit = DEFAULT_CONVERSATIONS_PAGE_SIZE;
   if (limitParam !== undefined) {
     const parsed = Number(limitParam);
     if (!Number.isInteger(parsed) || parsed < 1 || parsed > 200) {
@@ -121,14 +151,18 @@ export async function listConversationsHandler(c: Context<AppEnv>) {
     }
     limit = parsed;
   }
+  // #281: `before` is the opaque cursor this same handler emitted as
+  // `nextCursor` on a prior page (encodeConversationsCursor/
+  // decodeConversationsCursor above) -- the client only ever echoes it
+  // back, never constructs or parses one itself.
   const beforeParam = c.req.query("before");
-  let before: Date | undefined;
+  let before: { updatedAt: Date; id: string } | undefined;
   if (beforeParam !== undefined) {
-    const parsed = new Date(beforeParam);
-    if (Number.isNaN(parsed.getTime())) {
-      return c.json({ error: "before must be a valid ISO timestamp" }, 400);
+    const decoded = decodeConversationsCursor(beforeParam);
+    if (!decoded) {
+      return c.json({ error: "before must be a valid cursor from a prior response's nextCursor" }, 400);
     }
-    before = parsed;
+    before = decoded;
   }
 
   // The only sanctioned way to mint a CourseScope from request input (see
@@ -141,10 +175,20 @@ export async function listConversationsHandler(c: Context<AppEnv>) {
 
   const db = makeDb(c.env.DATABASE_URL);
   const rows = await listConversationsForOwner(db, scope, authContext.session.userId, { kind, limit, before });
-  const body: ConversationListItemResponse[] = rows.map((r) => ({
+  const items: ConversationListItemResponse[] = rows.map((r) => ({
     ...toConversationSummary(r),
     messageCount: r.messageCount,
   }));
+  // #281: an explicit nextCursor in the response, not something the client
+  // reconstructs from the last row (which is exactly how the precision-loss
+  // half of this bug happened -- toISOString() truncating a microsecond
+  // timestamptz to milliseconds). A full page (rows.length === limit) is
+  // the only signal available that more rows might exist; a short page
+  // means this was the last one.
+  const lastRow = rows[rows.length - 1];
+  const nextCursor =
+    rows.length === limit && lastRow ? encodeConversationsCursor({ updatedAt: lastRow.updatedAt, id: lastRow.id }) : null;
+  const body: ConversationListResponse = { items, nextCursor };
   return c.json(body);
 }
 

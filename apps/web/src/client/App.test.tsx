@@ -216,7 +216,7 @@ describe("App tutor-conversations rail (#4)", () => {
         if (url.startsWith("/api/conversations?")) {
           return extra.onConversationsGet
             ? extra.onConversationsGet()
-            : new Response(JSON.stringify([]), { status: 200 });
+            : new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
         }
         if (url === "/api/conversations" && init?.method === "POST") {
           return extra.onConversationsPost
@@ -253,7 +253,7 @@ describe("App tutor-conversations rail (#4)", () => {
         if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
         if (url.startsWith("/api/conversations?")) {
           conversationsGetUrls.push(url);
-          return new Response(JSON.stringify([]), { status: 200 });
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
         }
         throw new Error(`unexpected fetch to ${url}`);
       }),
@@ -364,21 +364,24 @@ describe("App tutor-conversations rail (#4)", () => {
     stubBaseFetch({
       onConversationsGet: () =>
         new Response(
-          JSON.stringify([
-            {
-              id: "tutor-conv-1",
-              ownerUserId: "u1",
-              courseId: "course-a",
-              sectionId: null,
-              kind: "tutor",
-              title: "Existing tutor chat",
-              isDeleted: false,
-              deletedAt: null,
-              createdAt: "2026-08-01T00:00:00.000Z",
-              updatedAt: "2026-08-01T00:00:00.000Z",
-              messageCount: 2,
-            },
-          ]),
+          JSON.stringify({
+            items: [
+              {
+                id: "tutor-conv-1",
+                ownerUserId: "u1",
+                courseId: "course-a",
+                sectionId: null,
+                kind: "tutor",
+                title: "Existing tutor chat",
+                isDeleted: false,
+                deletedAt: null,
+                createdAt: "2026-08-01T00:00:00.000Z",
+                updatedAt: "2026-08-01T00:00:00.000Z",
+                messageCount: 2,
+              },
+            ],
+            nextCursor: null,
+          }),
           { status: 200 },
         ),
       onConversationMessagesGet: (conversationId) => {
@@ -485,7 +488,10 @@ describe("App tutor-conversations rail (#4)", () => {
         if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
         if (url.startsWith("/api/conversations?")) {
           return new Response(
-            JSON.stringify([conversationFixture("conv-a", "Conversation A"), conversationFixture("conv-b", "Conversation B")]),
+            JSON.stringify({
+              items: [conversationFixture("conv-a", "Conversation A"), conversationFixture("conv-b", "Conversation B")],
+              nextCursor: null,
+            }),
             { status: 200 },
           );
         }
@@ -539,21 +545,24 @@ describe("App tutor-conversations rail (#4)", () => {
     stubBaseFetch({
       onConversationsGet: () =>
         new Response(
-          JSON.stringify([
-            {
-              id: "tutor-conv-1",
-              ownerUserId: "u1",
-              courseId: "course-a",
-              sectionId: null,
-              kind: "tutor",
-              title: "Existing tutor chat",
-              isDeleted: false,
-              deletedAt: null,
-              createdAt: "2026-08-01T00:00:00.000Z",
-              updatedAt: "2026-08-01T00:00:00.000Z",
-              messageCount: 2,
-            },
-          ]),
+          JSON.stringify({
+            items: [
+              {
+                id: "tutor-conv-1",
+                ownerUserId: "u1",
+                courseId: "course-a",
+                sectionId: null,
+                kind: "tutor",
+                title: "Existing tutor chat",
+                isDeleted: false,
+                deletedAt: null,
+                createdAt: "2026-08-01T00:00:00.000Z",
+                updatedAt: "2026-08-01T00:00:00.000Z",
+                messageCount: 2,
+              },
+            ],
+            nextCursor: null,
+          }),
           { status: 200 },
         ),
     });
@@ -614,21 +623,24 @@ describe("App tutor conversation header rename (#6)", () => {
         if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
         if (url.startsWith("/api/conversations?")) {
           return new Response(
-            JSON.stringify([
-              {
-                id: "tutor-conv-1",
-                ownerUserId: "u1",
-                courseId: "course-a",
-                sectionId: null,
-                kind: "tutor",
-                title: "Existing tutor chat",
-                isDeleted: false,
-                deletedAt: null,
-                createdAt: "2026-08-01T00:00:00.000Z",
-                updatedAt: "2026-08-01T00:00:00.000Z",
-                messageCount: 2,
-              },
-            ]),
+            JSON.stringify({
+              items: [
+                {
+                  id: "tutor-conv-1",
+                  ownerUserId: "u1",
+                  courseId: "course-a",
+                  sectionId: null,
+                  kind: "tutor",
+                  title: "Existing tutor chat",
+                  isDeleted: false,
+                  deletedAt: null,
+                  createdAt: "2026-08-01T00:00:00.000Z",
+                  updatedAt: "2026-08-01T00:00:00.000Z",
+                  messageCount: 2,
+                },
+              ],
+              nextCursor: null,
+            }),
             { status: 200 },
           );
         }
@@ -759,7 +771,7 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
           return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
         }
         if (url === "/api/student/homeworks") return new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
         if (url === "/api/chat") return chatFetch(input, init);
         throw new Error(`unexpected fetch to ${url}`);
       }),
@@ -973,7 +985,7 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
           return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
         }
         if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
         if (url === "/api/conversations" && init?.method === "POST") {
           return new Response(
             JSON.stringify({
@@ -1070,7 +1082,7 @@ describe("App tutor sidebar collapse persistence (#4)", () => {
           return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
         }
         if (url === "/api/student/homeworks") return new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
         throw new Error(`unexpected fetch to ${url}`);
       }),
     );
@@ -1147,7 +1159,7 @@ describe("App section chat resumes with hydrated history (#252)", () => {
           return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
         }
         if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
         if (url === "/api/conversations/sec-conv-1/messages") {
           return new Response(
             JSON.stringify([
@@ -1221,7 +1233,7 @@ describe("App section chat resumes with hydrated history (#252)", () => {
           return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
         }
         if (url === "/api/student/homeworks") return new Response(JSON.stringify(twoSectionFixture), { status: 200 });
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
         if (url === "/api/conversations/sec-conv-1/messages") {
           return new Response(
             JSON.stringify([{ id: "m1", role: "user", parts: [{ type: "text", text: "sec 1 question" }] }]),
@@ -1298,7 +1310,7 @@ describe("App section conversationId stays live after mid-session creation (#271
         if (url === "/api/student/homeworks") {
           return new Response(JSON.stringify(TWO_SECTION_NO_CONVO_FIXTURE), { status: 200 });
         }
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
         if (url === "/api/chat") {
           const body = JSON.parse(String(init?.body)) as { conversationId?: string; kind?: string };
           // Only Sec 1's very first turn should ever reach here without a
@@ -1397,7 +1409,7 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
           return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
         }
         if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
         if (url === "/api/conversations/sec-conv-1/messages") {
           messagesCallCount += 1;
           return new Response(JSON.stringify({ error: "server unavailable" }), { status: 503 });
@@ -1448,9 +1460,12 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
         if (url === "/api/student/homeworks") return new Response(JSON.stringify(tutorFixture), { status: 200 });
         if (url.startsWith("/api/conversations?courseId=")) {
           return new Response(
-            JSON.stringify([
-              { id: "t1", title: "Existing tutor chat", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 2 },
-            ]),
+            JSON.stringify({
+              items: [
+                { id: "t1", title: "Existing tutor chat", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 2 },
+              ],
+              nextCursor: null,
+            }),
             { status: 200 },
           );
         }

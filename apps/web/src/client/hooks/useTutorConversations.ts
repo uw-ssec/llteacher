@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ConversationListItemResponse, ConversationSummary } from "../../shared/types";
+import type { ConversationListItemResponse, ConversationListResponse, ConversationSummary } from "../../shared/types";
 
 /* --------------------------------------------------------------------------
    useTutorConversations — fetches and manages a student's course-scoped
@@ -85,10 +85,15 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     fetch(`/api/conversations?courseId=${encodeURIComponent(courseId)}&kind=tutor`)
       .then((r) => {
         if (!r.ok) throw new Error(`failed to load tutor conversations: ${r.status}`);
-        return r.json() as Promise<ConversationListItemResponse[]>;
+        return r.json() as Promise<ConversationListResponse>;
       })
       .then((data) => {
-        setConversations(data);
+        // #281: the route now returns { items, nextCursor } instead of a
+        // bare array. Only `items` is consumed here -- this hook doesn't
+        // paginate yet (wiring `nextCursor` into an actual load-more is
+        // #280's job); a single initial fetch is still exactly what every
+        // caller of `refetch` wants today.
+        setConversations(data.items);
         setLoadError(false);
       })
       .catch(() => {

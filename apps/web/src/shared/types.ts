@@ -104,6 +104,16 @@ export interface ConversationListItemResponse extends ConversationSummary {
   messageCount: number;
 }
 
+/** Wire shape of GET /api/conversations (#281). `nextCursor` is opaque --
+ *  the client only ever echoes it back as the next request's `before` query
+ *  param, never parses or reconstructs it itself (that reconstruction, off
+ *  a millisecond-truncated `updatedAt.toISOString()`, was the precision-loss
+ *  half of #281's bug). `null` means this was the last page. */
+export interface ConversationListResponse {
+  items: ConversationListItemResponse[];
+  nextCursor: string | null;
+}
+
 /** Wire shape of a row from GET /api/conversations/:id/messages (#4
  *  fix-round -- added so the tutor-conversations rail's chat column can
  *  seed useChat's `messages` on resume, not just so the UI shows history:

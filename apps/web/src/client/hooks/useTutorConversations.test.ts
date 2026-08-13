@@ -26,7 +26,7 @@ describe("useTutorConversations", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
       expect(url).toBe("/api/conversations?courseId=course-a&kind=tutor");
-      return new Response(JSON.stringify([CONV_A]), { status: 200 });
+      return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -85,7 +85,7 @@ describe("useTutorConversations", () => {
           postCalls.push({ url, body: JSON.parse(String(init.body)) });
           return new Response(JSON.stringify(created), { status: 201 });
         }
-        return new Response(JSON.stringify([]), { status: 200 });
+        return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
       }),
     );
 
@@ -109,7 +109,7 @@ describe("useTutorConversations", () => {
         if (init?.method === "POST") {
           return new Response(JSON.stringify({ error: "course access denied" }), { status: 403 });
         }
-        return new Response(JSON.stringify([CONV_A]), { status: 200 });
+        return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
       }),
     );
 
@@ -154,7 +154,7 @@ describe("useTutorConversations", () => {
           const url = typeof input === "string" ? input : input.toString();
           if (init?.method === "PATCH") return pending;
           expect(url).toBe("/api/conversations?courseId=course-a&kind=tutor");
-          return new Response(JSON.stringify([CONV_A]), { status: 200 });
+          return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
         }),
       );
 
@@ -188,7 +188,7 @@ describe("useTutorConversations", () => {
             patchCalls.push({ url, body: JSON.parse(String(init.body)) });
             return new Response(JSON.stringify({ ...CONV_A, title: "Renamed" }), { status: 200 });
           }
-          return new Response(JSON.stringify([CONV_A]), { status: 200 });
+          return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
         }),
       );
 
@@ -224,7 +224,7 @@ describe("useTutorConversations", () => {
               { status: 400 },
             );
           }
-          return new Response(JSON.stringify([CONV_A]), { status: 200 });
+          return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
         }),
       );
 
@@ -252,7 +252,7 @@ describe("useTutorConversations", () => {
         "fetch",
         vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
           if (init?.method === "PATCH") throw new TypeError("network error");
-          return new Response(JSON.stringify([CONV_A]), { status: 200 });
+          return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
         }),
       );
 
@@ -279,7 +279,7 @@ describe("useTutorConversations", () => {
     // row) produced a new renameConversation function, which was the actual
     // cause of TutorConversationsList's effects re-running every render.
     it("keeps the same function identity across a bumpConversation-driven list update", async () => {
-      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([CONV_A]), { status: 200 })));
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 })));
       const { result } = renderHook(() => useTutorConversations("course-a"));
       await waitFor(() => expect(result.current.loading).toBe(false));
 
@@ -295,7 +295,7 @@ describe("useTutorConversations", () => {
   // #216
   describe("bumpConversation", () => {
     it("increments messageCount and updates updatedAt for the given conversation", async () => {
-      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([CONV_A]), { status: 200 })));
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 })));
       const { result } = renderHook(() => useTutorConversations("course-a"));
       await waitFor(() => expect(result.current.loading).toBe(false));
 
@@ -311,7 +311,10 @@ describe("useTutorConversations", () => {
       const CONV_B = { ...CONV_A, id: "conv-b", title: "Chat B", updatedAt: "2026-08-05T00:00:00.000Z" };
       // CONV_B is more recently updated than CONV_A, so it's returned first
       // (matches listConversationsForOwner's desc(updatedAt) ordering).
-      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([CONV_B, CONV_A]), { status: 200 })));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify({ items: [CONV_B, CONV_A], nextCursor: null }), { status: 200 })),
+      );
       const { result } = renderHook(() => useTutorConversations("course-a"));
       await waitFor(() => expect(result.current.loading).toBe(false));
       expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-b", "conv-a"]);
@@ -324,7 +327,7 @@ describe("useTutorConversations", () => {
     });
 
     it("is a no-op for an id not currently in the list", async () => {
-      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([CONV_A]), { status: 200 })));
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 })));
       const { result } = renderHook(() => useTutorConversations("course-a"));
       await waitFor(() => expect(result.current.loading).toBe(false));
 

@@ -100,6 +100,20 @@ export const conversations = pgTable(
       t.courseId,
     ),
     index("conversations_course_kind_idx").on(t.courseId, t.kind),
+    // #281: listConversationsForOwner's ORDER BY updated_at DESC (the
+    // tutor-rail list, #5/#224) had no index serving that sort --
+    // conversations_owner_kind_course_idx above satisfies the equality
+    // predicates (owner_user_id, kind, course_id) but Postgres still had to
+    // sort every matching row before applying LIMIT. This index makes the
+    // sort itself index-served; id isn't part of the index (the compound
+    // cursor's tiebreaker is resolved by an equality condition on
+    // updated_at within the already-narrow index range, not by a second
+    // sort column here).
+    index("conversations_owner_kind_updated_idx").on(
+      t.ownerUserId,
+      t.kind,
+      t.updatedAt,
+    ),
     // conversations_owner_section_active_uq (below) leads with owner_user_id,
     // so it can't serve "all conversations on this section" (instructor
     // roster views) or the section-delete cascade -- both need section_id

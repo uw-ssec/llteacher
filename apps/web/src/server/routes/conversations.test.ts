@@ -28,6 +28,9 @@ vi.mock("../repositories/conversations", () => ({
   softDeleteConversation: (...args: unknown[]) => softDeleteConversationMock(...args),
   getOwnedConversationOrNull: (...args: unknown[]) => getOwnedConversationOrNullMock(...args),
   getMessagesForConversation: (...args: unknown[]) => getMessagesForConversationMock(...args),
+  // #281: the route imports this real value (not just a mocked function) to
+  // resolve the default page size when `limit` is omitted.
+  DEFAULT_CONVERSATIONS_PAGE_SIZE: 50,
 }));
 
 // #308: createConversationHandler now also rate-limits (reusing chat.ts's
@@ -134,22 +137,27 @@ describe("GET /api/conversations", () => {
 
     expect(res.status).toBe(200);
     // #218: only the wire fields -- ownerUserId/courseId/sectionId/isDeleted/
-    // deletedAt are dropped.
-    expect(await res.json()).toEqual([
-      {
-        id: "22222222-2222-2222-2222-222222222222",
-        kind: "tutor",
-        title: "Chat 1",
-        createdAt: "2026-08-01T00:00:00.000Z",
-        updatedAt: "2026-08-01T00:05:00.000Z",
-        messageCount: 3,
-      },
-    ]);
+    // deletedAt are dropped. #281: the response is now { items, nextCursor },
+    // not a bare array -- one row is fewer than the default page size
+    // (50), so nextCursor is null (no reason to believe there's a next page).
+    expect(await res.json()).toEqual({
+      items: [
+        {
+          id: "22222222-2222-2222-2222-222222222222",
+          kind: "tutor",
+          title: "Chat 1",
+          createdAt: "2026-08-01T00:00:00.000Z",
+          updatedAt: "2026-08-01T00:05:00.000Z",
+          messageCount: 3,
+        },
+      ],
+      nextCursor: null,
+    });
     expect(listConversationsForOwnerMock).toHaveBeenCalledWith(
       expect.anything(),
       "course-a",
       "u1",
-      { kind: "tutor", limit: undefined, before: undefined },
+      { kind: "tutor", limit: 50, before: undefined },
     );
   });
 
@@ -160,21 +168,51 @@ describe("GET /api/conversations", () => {
       expect.anything(),
       "course-a",
       "u1",
-      { kind: "tutor", limit: undefined, before: undefined },
+      { kind: "tutor", limit: 50, before: undefined },
     );
   });
 
-  // #224
+  // #224/#281
   describe("pagination", () => {
     it("passes a valid limit/before through to the repository", async () => {
       listConversationsForOwnerMock.mockResolvedValue([]);
+      const cursor = btoa(JSON.stringify({ updatedAt: "2026-08-01T00:00:00.000Z", id: "33333333-3333-3333-3333-333333333333" }));
       await request(
         buildApp(fakeAuthContext()),
-        "/api/conversations?courseId=course-a&limit=10&before=2026-08-01T00:00:00.000Z",
+        `/api/conversations?courseId=course-a&limit=10&before=${encodeURIComponent(cursor)}`,
       );
       const [, , , opts] = listConversationsForOwnerMock.mock.calls[0]!;
       expect(opts.limit).toBe(10);
-      expect(opts.before).toEqual(new Date("2026-08-01T00:00:00.000Z"));
+      expect(opts.before).toEqual({
+        updatedAt: new Date("2026-08-01T00:00:00.000Z"),
+        id: "33333333-3333-3333-3333-333333333333",
+      });
+    });
+
+    // #281: an explicit nextCursor in the response, encoding the last row's
+    // (updatedAt, id) -- only emitted when a full page came back (the only
+    // available signal that more rows might exist).
+    it("emits nextCursor encoding the last row's (updatedAt, id) when a full page comes back", async () => {
+      const rows = Array.from({ length: 2 }, (_, i) => ({
+        ...fakeConversationRow({ id: `44444444-4444-4444-4444-44444444444${i}`, title: `Chat ${i}` }),
+        messageCount: 0,
+      }));
+      listConversationsForOwnerMock.mockResolvedValue(rows);
+
+      const res = await request(buildApp(fakeAuthContext()), "/api/conversations?courseId=course-a&limit=2");
+      const body = (await res.json()) as { nextCursor: string | null };
+
+      expect(body.nextCursor).not.toBeNull();
+      const decoded = JSON.parse(atob(body.nextCursor!)) as { updatedAt: string; id: string };
+      expect(decoded.id).toBe(rows[1]!.id);
+      expect(decoded.updatedAt).toBe(rows[1]!.updatedAt.toISOString());
+    });
+
+    it("does not emit nextCursor when fewer rows than limit come back (last page)", async () => {
+      listConversationsForOwnerMock.mockResolvedValue([{ ...fakeConversationRow(), messageCount: 0 }]);
+      const res = await request(buildApp(fakeAuthContext()), "/api/conversations?courseId=course-a&limit=50");
+      const body = (await res.json()) as { nextCursor: string | null };
+      expect(body.nextCursor).toBeNull();
     });
 
     it("400s on a limit outside 1-200", async () => {
@@ -188,12 +226,13 @@ describe("GET /api/conversations", () => {
       expect(res.status).toBe(400);
     });
 
-    it("400s on an invalid before timestamp", async () => {
+    it("400s on a malformed before cursor", async () => {
       const res = await request(
         buildApp(fakeAuthContext()),
-        "/api/conversations?courseId=course-a&before=not-a-date",
+        "/api/conversations?courseId=course-a&before=not-a-valid-cursor",
       );
       expect(res.status).toBe(400);
+      expect(listConversationsForOwnerMock).not.toHaveBeenCalled();
     });
   });
 });

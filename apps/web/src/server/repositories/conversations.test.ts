@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
-import { organizations, courses, users, courseMemberships, homeworks, sections } from "../../db/schema";
+import { organizations, courses, users, courseMemberships, homeworks, sections, conversations } from "../../db/schema";
 import { unsafeCourseScope } from "./scope";
 import { TenancyMismatchError, IdempotencyKeyConflictError } from "./errors";
 import {
@@ -778,10 +778,63 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       const secondPage = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId, {
         limit: 5,
         kind: "tutor",
-        before: firstPage[0]!.updatedAt,
+        before: { updatedAt: firstPage[0]!.updatedAt, id: firstPage[0]!.id },
       });
       expect(secondPage.map((r) => r.id)).toContain(c1.id);
       expect(secondPage.map((r) => r.id)).not.toContain(c2.id);
+    });
+
+    // #281: the test above forces distinct timestamps via a real 5ms sleep
+    // -- exactly the workaround the issue named as evidence the tiebreaker
+    // was missing. This test instead forces a genuine TIE (two rows with
+    // the identical updated_at) and proves the compound (updatedAt, id)
+    // cursor still partitions them correctly across pages: the tied row
+    // must land on exactly one page, never both (duplicated) and never
+    // neither (silently dropped -- the actual bug this issue is about).
+    // Real wall-clock timing can't reliably reproduce a tie on demand, so
+    // the tie is set directly rather than raced for.
+    it("distinguishes tied updatedAt values via the id tiebreaker, with no duplicate or dropped row", async () => {
+      const c1 = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Tie: first",
+      });
+      const c2 = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Tie: second",
+      });
+      // Far-future, not just "earlier than now" -- this DB is shared across
+      // this file's other tests, which create their own tutor conversations
+      // with real (roughly "now") updatedAt values. A tied timestamp that
+      // merely predates those would sort BEHIND them, breaking the
+      // "firstPage[0] is one of the two tied rows" assumption below for
+      // reasons that have nothing to do with the tiebreaker being tested.
+      const tiedTimestamp = new Date("2099-01-01T00:00:00.000Z");
+      await db
+        .update(conversations)
+        .set({ updatedAt: tiedTimestamp })
+        .where(inArray(conversations.id, [c1.id, c2.id]));
+
+      const firstPage = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId, {
+        limit: 1,
+        kind: "tutor",
+      });
+      expect(firstPage).toHaveLength(1);
+      expect([c1.id, c2.id]).toContain(firstPage[0]!.id);
+
+      const secondPage = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId, {
+        limit: 5,
+        kind: "tutor",
+        before: { updatedAt: firstPage[0]!.updatedAt, id: firstPage[0]!.id },
+      });
+
+      const allIds = [...firstPage, ...secondPage].map((r) => r.id);
+      expect(allIds).toContain(c1.id);
+      expect(allIds).toContain(c2.id);
+      expect(new Set(allIds).size).toBe(allIds.length);
     });
   });
 

@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS "conversations_owner_kind_updated_idx" ON "conversations" USING btree ("owner_user_id","kind","updated_at");

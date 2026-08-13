@@ -183,6 +183,13 @@
       "when": 1786595348308,
       "tag": "0025_blue_speed",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1786597215085,
+      "tag": "0026_fluffy_redwing",
+      "breakpoints": true
     }
   ]
 }

@@ -1,18 +1,18 @@
-import { and, count, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, count, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { conversations, messages, sections, homeworks, courseMemberships, submissions } from "../../db/schema";
 import type { ConversationKind } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import { TenancyMismatchError, IdempotencyKeyConflictError } from "./errors";
 
-const DEFAULT_CONVERSATIONS_PAGE_SIZE = 50;
+export const DEFAULT_CONVERSATIONS_PAGE_SIZE = 50;
 const DEFAULT_MESSAGES_PAGE_SIZE = 200;
 
 export async function listConversationsForOwner(
   db: Db,
   scope: CourseScope,
   ownerUserId: string,
-  opts?: { includeDeleted?: boolean; kind?: ConversationKind; limit?: number; before?: Date },
+  opts?: { includeDeleted?: boolean; kind?: ConversationKind; limit?: number; before?: { updatedAt: Date; id: string } },
 ) {
   const conditions = [
     eq(conversations.courseId, scope),
@@ -30,18 +30,34 @@ export async function listConversationsForOwner(
   if (opts?.kind) {
     conditions.push(eq(conversations.kind, opts.kind));
   }
-  // #224: cursor pagination on updatedAt, the same column the ordering
-  // already sorts by -- a page boundary is just "strictly older than the
-  // last row of the previous page."
+  // #281: a compound (updated_at, id) cursor, not updated_at alone.
+  // updated_at is JS-Date (millisecond) precision and mutates on every chat
+  // turn/rename ($onUpdate, runtime.ts) -- two rows touched in the same
+  // millisecond are indistinguishable to a plain `lt`, so a row exactly at
+  // the boundary could be silently excluded from BOTH the page that should
+  // have included it and the next one. `id` (a UUID) breaks every tie
+  // deterministically; its own ordering is arbitrary (a UUID has no
+  // intrinsic meaning) but that's fine -- it only needs to be a stable
+  // total order, not a meaningful one. This is the row-constructor
+  // comparison `(updated_at, id) < ($before, $beforeId)` expanded into its
+  // OR/AND form, since drizzle has no native tuple-comparison helper:
+  // strictly older, OR exactly tied on updated_at and strictly "before" on
+  // id.
   if (opts?.before) {
-    conditions.push(lt(conversations.updatedAt, opts.before));
+    const { updatedAt, id } = opts.before;
+    conditions.push(
+      or(
+        lt(conversations.updatedAt, updatedAt),
+        and(eq(conversations.updatedAt, updatedAt), lt(conversations.id, id)),
+      )!,
+    );
   }
   const limit = opts?.limit ?? DEFAULT_CONVERSATIONS_PAGE_SIZE;
   const rows = await db
     .select()
     .from(conversations)
     .where(and(...conditions))
-    .orderBy(desc(conversations.updatedAt))
+    .orderBy(desc(conversations.updatedAt), desc(conversations.id))
     .limit(limit);
 
   if (rows.length === 0) return [];
