@@ -2785,3 +2785,292 @@ body {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
+
+/* ==========================================================================
+   .access-gate — the console's page-scale refusal (the 403).
+
+   Distinct from .admin-notice above, deliberately. AdminNotice is an in-flow
+   block: a filed record sitting in the records column, where its border and
+   background are what separate it from the rows around it. This state has no
+   rows around it, so a bordered block would be a container with nothing to
+   contain against -- a card floating in a void.
+
+   Here the same editorial-ledger language is composed at page scale:
+
+     · the leading rule, promoted from a 3px card border to a full-height
+       page rule -- architecture rather than trim
+     · the refusal set vertically along that rule, like the spine label on a
+       filed folder (the one device that only works once you stop using a box)
+     · Heritage Gold throughout: this is the console's permission colour, and
+       a 403 is a fact about the reader's roles, never a failure to dress in
+       the same red as a dropped fetch
+     · the ledger rows carrying what the prose paragraph used to describe
+
+   No border, no background fill, no watermark. The type and the rule do the
+   work; the paper ground is the surface, not something to sit a panel on.
+   ========================================================================== */
+
+.access-gate {
+  --gate-rail: clamp(30px, 6vw, 88px);
+
+  flex: 1;
+  display: grid;
+  grid-template-columns: var(--gate-rail) minmax(0, 1fr);
+  gap: clamp(20px, 3vw, 48px);
+  align-content: start;
+  padding-block: clamp(48px, 11vh, 132px) var(--space-8);
+  padding-inline: clamp(20px, 5vw, 76px) var(--space-6);
+  background-color: var(--color-bg);
+  overflow-y: auto;
+}
+
+/* -- Rail: the full-height rule + spine label ------------------------------ */
+
+.access-gate__rail {
+  position: relative;
+  align-self: stretch;
+  min-height: 280px;
+}
+
+/* The rule itself. Fades out downward so it reads as a margin mark that runs
+   off the page, not a box edge that stops. */
+.access-gate__rail::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-end: 0;
+  width: 2px;
+  background-image: linear-gradient(
+    to bottom,
+    var(--color-accent-warm) 0%,
+    var(--color-accent-warm) 62%,
+    transparent 100%
+  );
+  transform-origin: top;
+  animation: gate-rule 460ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.access-gate__spine {
+  position: absolute;
+  inset-block-start: 2px;
+  inset-inline-end: 18px;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--color-accent-warm);
+  opacity: 0.5;
+  user-select: none;
+  animation: gate-rise 620ms cubic-bezier(0.16, 1, 0.3, 1) 120ms both;
+}
+
+/* -- Content column -------------------------------------------------------- */
+
+.access-gate__body {
+  max-width: 60ch;
+  font-family: var(--font-sans);
+}
+
+.access-gate__eyebrow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-accent-warm);
+  animation: gate-rise 520ms cubic-bezier(0.16, 1, 0.3, 1) 60ms both;
+}
+
+.access-gate__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background-color: var(--color-accent-warm);
+  flex: none;
+}
+
+/* Set tight and large enough to break to two lines on its own -- the break
+   is the composition, so it isn't left to chance at any one width. */
+.access-gate__title {
+  max-width: 15ch;
+  margin: var(--space-4) 0 0;
+  font-size: clamp(30px, 4.6vw, 54px);
+  font-weight: 600;
+  line-height: 1.06;
+  letter-spacing: -0.025em;
+  color: var(--color-text);
+  text-wrap: balance;
+  animation: gate-rise 560ms cubic-bezier(0.16, 1, 0.3, 1) 110ms both;
+}
+
+.access-gate__ledger {
+  margin: clamp(28px, 4vh, 44px) 0 0;
+  border-block-start: 1px solid var(--color-border);
+  animation: gate-rise 600ms cubic-bezier(0.16, 1, 0.3, 1) 170ms both;
+}
+
+.access-gate__row {
+  display: grid;
+  grid-template-columns: minmax(0, 12rem) minmax(0, 1fr);
+  gap: var(--space-2) var(--space-5);
+  padding-block: var(--space-4);
+  border-block-end: 1px solid var(--color-border);
+}
+
+.access-gate__row dt {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  padding-block-start: 2px;
+}
+
+.access-gate__row dd {
+  margin: 0;
+  font-size: var(--font-size-base);
+  line-height: 1.5;
+  color: var(--color-text);
+}
+
+/* Roles stack one per line, flush to the value column -- no bullets, no
+   separators. An earlier pass set these inline with middots between them,
+   which only holds while all three fit on one line; the value column is
+   ~260px, so they wrapped, and a separator that lives on `li + li` then
+   leaves the first item unmarked and the rest indented past it. A stacked
+   list needs no separator to be read as three things, and stays aligned at
+   every width. */
+.access-gate__roles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Gold tick per role — the mark the reader checks themselves against, and the
+   same Heritage Gold that carries the permission fact everywhere else on this
+   page. `align-items: baseline` + a fixed gap is what keeps the ticks in one
+   column and the labels flush with each other; the earlier inline-with-middots
+   version drifted because the marker lived on `li + li`, so the first item had
+   none and the rest were indented past it. */
+.access-gate__roles li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6em;
+}
+
+.access-gate__roles li::before {
+  content: "·";
+  color: var(--color-accent-warm);
+  font-weight: 600;
+}
+
+.access-gate__next {
+  max-width: 46ch;
+  margin: clamp(24px, 3.5vh, 36px) 0 0;
+  font-size: var(--font-size-base);
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  animation: gate-rise 640ms cubic-bezier(0.16, 1, 0.3, 1) 220ms both;
+}
+
+.access-gate__action {
+  display: inline-flex;
+  align-items: center;
+  margin-block-start: clamp(24px, 3.5vh, 36px);
+  padding: 10px 18px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 4px;
+  background-color: transparent;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text);
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease;
+  animation: gate-rise 680ms cubic-bezier(0.16, 1, 0.3, 1) 270ms both;
+}
+
+.access-gate__action:hover {
+  border-color: var(--color-accent-warm);
+  background-color: var(--color-surface);
+}
+
+.access-gate__action:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* -- Motion ---------------------------------------------------------------- */
+
+@keyframes gate-rule {
+  from { transform: scaleY(0); }
+  to   { transform: scaleY(1); }
+}
+
+@keyframes gate-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* The spine's rotation is part of its layout, not its entrance -- animating
+   plain `transform` here would unwind the rotate(180deg) and leave the label
+   upside down. Opacity only. */
+@keyframes gate-rise-spine {
+  from { opacity: 0; }
+  to   { opacity: 0.5; }
+}
+
+.access-gate__spine {
+  animation-name: gate-rise-spine;
+}
+
+/* -- Narrow viewports ------------------------------------------------------ */
+
+@media (max-width: 640px) {
+  .access-gate {
+    --gate-rail: 14px;
+    padding-block-start: var(--space-8);
+    padding-inline: var(--space-5) var(--space-5);
+    gap: var(--space-5);
+  }
+
+  /* The spine needs a tall column to read along; below this width there isn't
+     one, so it goes rather than shrinking into an illegible smear. */
+  .access-gate__spine {
+    display: none;
+  }
+
+  .access-gate__row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .access-gate__rail::before,
+  .access-gate__spine,
+  .access-gate__eyebrow,
+  .access-gate__title,
+  .access-gate__ledger,
+  .access-gate__next,
+  .access-gate__action {
+    animation: none;
+  }
+  .access-gate__spine {
+    opacity: 0.5;
+  }
+}
