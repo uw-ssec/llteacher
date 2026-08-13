@@ -579,11 +579,37 @@ export async function chatHandler(c: Context<AppEnv>) {
     // with the same request/response shape every other refusal on this
     // route already uses.
     try {
-      await appendMessage(db, scope, conv.id, {
+      const { created } = await appendMessage(db, scope, conv.id, {
         role: "user",
         parts: inboundMessage.parts,
         clientMessageId: parsedInbound.data.id,
       });
+      // #273: `created: false` means this request LOST a race against
+      // another one carrying the same clientMessageId (double-fired send,
+      // a duplicated tab, a fetch-layer retry -- the exact scenarios #254's
+      // own doc comment names) -- appendMessage resolved to the WINNER's
+      // already-persisted row instead of making a new one. Both requests
+      // used to sail past this point regardless and both call streamText
+      // below: two paid model calls, two assistant rows, for one student
+      // turn. The loser re-runs the SAME idempotency read the top of this
+      // block already does -- the winner may have finished (and persisted
+      // a reply) by the time this read happens -- and either replays that
+      // reply or, if the winner is still mid-flight, tells the client to
+      // wait rather than also calling the model.
+      if (!created) {
+        const [raceLast, raceSecondLast] = await getLastMessages(db, scope, conv.id, 2);
+        if (
+          raceLast?.role === "assistant" &&
+          hasRenderableContent(raceLast.parts) &&
+          matchesInboundUser(raceSecondLast)
+        ) {
+          return replayResponse(conv.id, raceLast.parts);
+        }
+        return c.json(
+          { error: "This message is already being processed. Please wait a moment." },
+          409,
+        );
+      }
     } catch (err) {
       if (err instanceof IdempotencyKeyConflictError) {
         return c.json({ error: err.message }, 409);

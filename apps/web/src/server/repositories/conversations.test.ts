@@ -148,11 +148,12 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       kind: "tutor",
       title: "Chat with messages",
     });
-    const msg = await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+    const { row: msg, created: wasCreated } = await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
       role: "user",
       parts: [{ type: "text", text: "hello" }],
     });
     expect(msg.conversationId).toBe(created.id);
+    expect(wasCreated).toBe(true);
   });
 
   it("appendMessage rejects a conversation scoped to a different course", async () => {
@@ -534,6 +535,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
         parts: [{ type: "text", text: "same text both times" }],
         clientMessageId: "dupe-id",
       });
+      expect(first.created).toBe(true);
 
       const second = await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
         role: "user",
@@ -541,7 +543,10 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
         clientMessageId: "dupe-id",
       });
 
-      expect(second?.id).toBe(first!.id);
+      // #273: the second call must know it lost the race, not just get a
+      // row back indistinguishable from a fresh insert.
+      expect(second.created).toBe(false);
+      expect(second.row.id).toBe(first.row.id);
 
       const all = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id);
       expect(all.filter((m) => m.clientMessageId === "dupe-id")).toHaveLength(1);
@@ -648,7 +653,11 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
 
       expect(a).toBeDefined();
       expect(b).toBeDefined();
-      expect(a!.id).toBe(b!.id); // the "loser" got the winner's row back, not a second one
+      expect(a.row.id).toBe(b.row.id); // the "loser" got the winner's row back, not a second one
+      // #273: exactly one of the two calls actually created the row -- this
+      // is what lets chatHandler tell winner from loser under real
+      // concurrency, not just in the sequential case above.
+      expect([a.created, b.created].sort()).toEqual([false, true]);
 
       const all = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id);
       expect(all.filter((m) => m.clientMessageId === "concurrent-id")).toHaveLength(1);
@@ -703,7 +712,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
 
       const olderPage = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id, {
         limit: 2,
-        before: inserted[3]!.seq,
+        before: inserted[3]!.row.seq,
       });
       expect(olderPage.map((m) => (m.parts as { text: string }[])[0]?.text)).toEqual(["2", "3"]);
     });

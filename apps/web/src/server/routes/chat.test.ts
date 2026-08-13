@@ -113,7 +113,11 @@ describe("POST /api/chat", () => {
   beforeEach(() => {
     getOwnedConversationOrNullMock.mockReset();
     createConversationMock.mockReset();
-    appendMessageMock.mockReset();
+    // #273: appendMessage now returns { row, created } instead of just the
+    // row -- default to "this call created the row" (the common case) so
+    // tests that don't care about the race path don't have to configure
+    // this explicitly; the race-specific tests below override it.
+    appendMessageMock.mockReset().mockResolvedValue({ row: { id: "msg-1" }, created: true });
     getLastMessagesMock.mockReset();
     startSectionConversationMock.mockReset();
     getActiveSectionConversationMock.mockReset();
@@ -570,6 +574,71 @@ describe("POST /api/chat", () => {
     });
   });
 
+  describe("#273 concurrent duplicate sends", () => {
+    it("only calls the model once when two concurrent requests race on the same clientMessageId", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      getLastMessagesMock.mockResolvedValue([]); // neither request sees a prior row -- the real race window
+      // First appendMessage call to actually run "wins" (created: true);
+      // every call after that "lost" the race and resolved to the winner's
+      // row instead (created: false) -- deterministic regardless of which
+      // of the two Promise.all requests happens to reach this call first.
+      let callCount = 0;
+      appendMessageMock.mockImplementation(async () => {
+        callCount += 1;
+        return { row: { id: "msg-1" }, created: callCount === 1 };
+      });
+
+      const [res1, res2] = await Promise.all([
+        postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], conversationId: "conv-1" }),
+        postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], conversationId: "conv-1" }),
+      ]);
+
+      // The loser must not 500 -- either a replay or a 409, never an
+      // unhandled throw reaching app.onError's generic path.
+      expect([res1.status, res2.status].sort()).not.toContain(500);
+      // The actual bug: previously both requests called the model
+      // regardless of who won the DB-level race.
+      expect(streamTextMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("the loser 409s (not a silent no-op) when no assistant reply exists yet to replay", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      getLastMessagesMock.mockResolvedValue([]);
+      appendMessageMock.mockResolvedValueOnce({ row: { id: "msg-1" }, created: false });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "conv-1",
+      });
+
+      expect(res.status).toBe(409);
+      expect(streamTextMock).not.toHaveBeenCalled();
+    });
+
+    it("the loser replays the winner's reply when it has already been persisted by the time it re-checks", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      appendMessageMock.mockResolvedValueOnce({ row: { id: "msg-1" }, created: false });
+      getLastMessagesMock
+        .mockResolvedValueOnce([]) // the top-of-handler idempotency read: no prior rows yet
+        .mockResolvedValueOnce([
+          // the loser's re-check after losing the race: the winner already
+          // finished and its reply is now visible.
+          { role: "assistant", parts: [{ type: "text", text: "winner's reply" }], clientMessageId: null },
+          { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+        ]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "conv-1",
+      });
+
+      expect(res.status).toBe(200);
+      expect(streamTextMock).not.toHaveBeenCalled();
+      const body = await res.text();
+      expect(body).toContain("winner's reply");
+    });
+  });
+
   describe("#213 idempotency keyed on clientMessageId, not content", () => {
     it("does not double-write the user message on a retry before it was answered (same clientMessageId)", async () => {
       getOwnedConversationOrNullMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
@@ -742,7 +811,7 @@ describe("POST /api/chat", () => {
     getLastMessagesMock.mockResolvedValue([]);
     appendMessageMock.mockImplementation(async (_db, _scope, _id, input) => {
       if (input.role === "assistant") throw new Error("db unavailable");
-      return { id: "msg-1" };
+      return { row: { id: "msg-1" }, created: true };
     });
 
     await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });

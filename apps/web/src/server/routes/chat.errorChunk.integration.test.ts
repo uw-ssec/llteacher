@@ -117,7 +117,11 @@ vi.mock("../repositories/conversations", () => ({
       createdAt: nextCreatedAt++,
     };
     messagesStore.push(row);
-    return row;
+    // #273: real appendMessage now returns { row, created } -- this fake
+    // doesn't model onConflictDoNothing (nothing in this file's own tests
+    // exercises the concurrent-duplicate path, that's chat.test.ts's and
+    // conversations.test.ts's job), so it's always "created" here.
+    return { row, created: true };
   },
   getLastMessages: async (_db: unknown, _scope: string, conversationId: string, limit = 2) =>
     messagesStore

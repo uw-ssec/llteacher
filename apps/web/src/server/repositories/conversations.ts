@@ -329,7 +329,16 @@ export async function appendMessage(
     // undefined exactly when this clientMessageId already has a row; look
     // it up and hand back the existing row instead of treating an empty
     // `.returning()` as a failure.
-    return created ?? (await resolveConflict(db, conversationId, clientMessageId, messageValues));
+    //
+    // #273: the caller needs to know WHICH of those two happened, not just
+    // get a row back either way -- two concurrent requests carrying the
+    // same clientMessageId both used to sail past this call (one truly
+    // created the row, one silently resolved to it) and both went on to
+    // call the model, producing two paid calls and two assistant rows for
+    // one student turn. `created` lets chatHandler tell "I won this race"
+    // from "someone else already has this" and stop before the model call.
+    if (created) return { row: created, created: true };
+    return { row: await resolveConflict(db, conversationId, clientMessageId, messageValues), created: false };
   }
 
   // Test/dev path: node-postgres (makeNodeDb) has no runtime db.batch().
@@ -342,7 +351,8 @@ export async function appendMessage(
       .onConflictDoNothing(conflictTarget)
       .returning();
     await tx.update(conversations).set({ updatedAt: new Date() }).where(eq(conversations.id, conversationId));
-    return created ?? (await resolveConflict(tx, conversationId, clientMessageId, messageValues));
+    if (created) return { row: created, created: true };
+    return { row: await resolveConflict(tx, conversationId, clientMessageId, messageValues), created: false };
   });
 }
 
