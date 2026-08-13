@@ -7,11 +7,17 @@ import type { ConversationListItemResponse } from "../../shared/types";
    TutorConversationsList — the tutor-conversations rail (#4).
 
    A second, visually distinct collapsible sidebar zone sitting between the
-   homework Sidebar and the chat column -- not a new top-level route (see
-   task-4-report.md for the full IA writeup). It reuses the homework
-   Sidebar's collapse mechanic (chevron toggle, width transition, state
-   persisted by the caller under its own localStorage key) but is otherwise
-   a distinct surface.
+   homework Sidebar and the chat column -- not a new top-level route. #301:
+   inlined here (a prior version of this comment pointed at a task-4-report.md
+   that was never actually committed on any branch). Kept as a sidebar zone
+   rather than its own route so it can sit alongside the homework Sidebar and
+   the active chat column at once -- a student switching between "my tutor
+   conversations" and "the homework I'm working on" is a common back-and-forth
+   this surface exists to make cheap, which a route change (full navigation,
+   losing chat scroll position) would make more expensive than the tutor rail
+   is worth. It reuses the homework Sidebar's collapse mechanic (chevron
+   toggle, width transition, state persisted by the caller under its own
+   localStorage key) but is otherwise a distinct surface.
 
    Presentational (#223): owns no data-fetching of its own. `conversations`/
    `loading`/`loadError` and the create/rename actions all come from a

@@ -55,26 +55,47 @@ for the full reasoning, including which tables use which scope and why.
 `OrgScope`/`CourseScope` answer "does this row belong to the caller's
 org/course" -- they do not answer "may *this specific caller* touch *this
 specific row*." `repositories/conversations.ts`'s `softDeleteConversation`
-and `appendMessage` currently enforce `CourseScope` only: any member of the
-course (student or instructor) can soft-delete or append to any other
-student's conversation by UUID, since neither function checks the row's
-`ownerUserId` against the caller. Not yet exploitable -- no M3 route calls
-either function today -- but the gap needs an owner before the first
-conversation route ships with it silently unenforced (found + tracked as
-[#134](https://github.com/uw-ssec/llteacher/issues/134)).
+and `appendMessage` enforce `CourseScope` only: neither function checks the
+row's `ownerUserId` against the caller itself, so calling either directly
+with just a `CourseScope` would let any member of the course touch any other
+student's conversation by UUID.
 
-**Decision:** row ownership is the M3 route layer's responsibility, not the
-repository layer's -- extending the same split this doc already draws
-("guards decide *who*"; repositories decide *which org's rows*) with a third
-tier routes own: *which row within the org*. Routes already have
-`AuthContext.session.userId` and `AuthContext.isInstructorOf(courseId)`
-(`server/middleware/roles.ts`); when M3 adds conversation routes,
-`softDeleteConversation`/`appendMessage` (and any new conversation-mutating
-repository function) grow an explicit `requesterId` parameter so the
-ownership check runs in the same query that already fetches the row --
-avoiding a separate read-then-check race -- but the *policy* (self-only, or
-self-or-instructor-override) is the calling route's decision to pass in, not
-something the repository infers on its own.
+**#301 update:** this is no longer a latent gap -- both functions are now
+route-reachable (`DELETE /api/conversations/:id` -> `deleteConversationHandler`
+-> `softDeleteConversation`; every `/api/chat` turn -> `chatHandler` ->
+`appendMessage`), and the doc below previously said "no M3 route calls
+either function today," which stopped being true the moment those routes
+shipped. **Current reality:** ownership is enforced *at the route layer*,
+one tier up from where this section originally proposed adding it.
+`deleteConversationHandler` calls `getOwnedConversationOrNull`
+(`repositories/conversations.ts` -- see "Tenancy Mismatch Errors" below for
+why it moved out of `routes/conversations.ts`) first, and only calls
+`softDeleteConversation` with a `CourseScope` minted from that
+already-ownership-checked row; `chatHandler` does the identical
+existing-conversation check before its own `appendMessage` calls. Neither
+repository function grew the `requesterId` parameter this section originally
+proposed -- the route-layer check made it unnecessary for the callers that
+exist today.
+
+**Rule for the next conversation-mutating route:** call
+`getOwnedConversationOrNull` (or, for a route inside an already-scoped
+create/list flow, an equivalent ownership check) *before* calling
+`softDeleteConversation`, `appendMessage`, `updateConversationTitle`, or any
+future conversation-mutating repository function. These functions will
+silently accept a call from a caller who isn't the row's owner if you skip
+this -- they were never given their own ownership check, and #134 (below)
+is why that was a deliberate choice, not an oversight to route around.
+
+**#134 still open:** the belt-and-braces alternative this section
+originally proposed -- growing an explicit `requesterId` parameter on the
+repository functions themselves, so the ownership check runs in the same
+query that already fetches the row instead of as a separate read-then-check
+-- remains unimplemented. Every current caller happens to check ownership
+first, so there is no live exploit, but a future route that forgets the
+rule above has nothing at the repository layer to catch it. Revisit if a
+second conversation-mutating surface (an admin/instructor override path, for
+instance) makes "the route always checks first" harder to guarantee by
+inspection alone.
 
 ## Tenancy Mismatch Errors
 
@@ -87,9 +108,12 @@ every repository function threw a plain `Error` for both cases, which meant
 neither the route layer nor `app.onError` (`server/index.ts`) could tell
 them apart -- a tenancy mismatch fell through to the same generic 503 a
 real DB outage gets, when the honest response is a 404 (mirroring the
-404-not-403 convention `getOwnedConversationOrNull`,
-`routes/conversations.ts`, already established for the route-level
-ownership check: never leak whether a row exists via the status code).
+404-not-403 convention `getOwnedConversationOrNull`
+(`repositories/conversations.ts` -- moved there from `routes/conversations.ts`
+so `chatHandler`'s conversationId ownership check, #217, could reuse the
+identical rule instead of hand-rolling its own) already established for the
+route-level ownership check: never leak whether a row exists via the status
+code).
 
 **Convention:** a repository function that detects this specific condition
 throws `TenancyMismatchError` (`repositories/errors.ts`) instead of a plain
@@ -131,7 +155,9 @@ can). Revisit if this ever becomes reachable at meaningful concurrency.
 
 `messages.seq` (a global `bigserial`, [#221](https://github.com/uw-ssec/llteacher/issues/221))
 is the sort key for every "give me messages in order" query
-(`getLastMessages`, `getMessagesForConversation`) -- not `createdAt`.
+(`getLastMessages`, `getMessagesForConversation`,
+`getSectionConversationMessages` -- [#283](https://github.com/uw-ssec/llteacher/issues/283)
+brought the last of the three off `createdAt`) -- not `createdAt`.
 `createdAt` is `timestamptz` (microsecond resolution) and was safe as the
 sole ordering key only because each `appendMessage` call is its own
 separate transaction, so two rows could never share a timestamp; `seq`

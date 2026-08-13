@@ -47,9 +47,17 @@ export async function listConversationsForOwner(
   if (rows.length === 0) return [];
 
   // #4: the tutor-conversations list surface needs a per-conversation
-  // message count (its "message-count or preview snippet" requirement --
-  // count was chosen over a last-message snippet, see task-4-report.md).
-  // A second grouped query rather than a LEFT JOIN + GROUP BY on the
+  // message count (its "message-count or preview snippet" requirement).
+  // #301: count was chosen over a last-message snippet -- a snippet would
+  // mean fetching and truncating message *content* into a list response
+  // that otherwise carries no message bodies at all (widening what this
+  // endpoint exposes for a cosmetic win), and jsonb `parts` has no cheap
+  // "just the preview text" projection the way a plain text column would --
+  // extracting one means unpacking a part array's first text part per row.
+  // A count is a single aggregate, needs no content-shape assumptions, and
+  // is what #216's rail-refresh behavior (bumping this same count on each
+  // new message) already treats as the row's live-activity signal. A
+  // second grouped query rather than a LEFT JOIN + GROUP BY on the
   // primary select above -- same fan-out-avoidance pattern
   // listHomeworksForCourse (homeworks.ts) already uses for sectionCount,
   // merged back in application code via a Map instead of reasoning about
@@ -146,11 +154,19 @@ export async function countActiveConversationsForOwner(
   return row?.count ?? 0;
 }
 
-// Enforces CourseScope only -- any member of the course can soft-delete any
-// other student's conversation by UUID, since ownerUserId isn't checked.
-// Not yet exploitable (no route calls this), but see ARCHITECTURE.md's "Row
-// Ownership (Within a Scope)" section and issue #134: when M3 wires a route
-// to this, it should grow a requesterId parameter for that check.
+// Enforces CourseScope only -- any member of the course could soft-delete
+// any other student's conversation by UUID if called with just a
+// CourseScope, since ownerUserId isn't checked here. #301: this function IS
+// now route-reachable (DELETE /api/conversations/:id ->
+// deleteConversationHandler), which is exactly the condition an earlier
+// version of this comment said hadn't happened yet -- the ownership check
+// that closes the gap lives at the route layer instead:
+// deleteConversationHandler calls getOwnedConversationOrNull first and only
+// reaches this function with a CourseScope minted from an
+// already-ownership-verified row. See ARCHITECTURE.md's "Row Ownership
+// (Within a Scope)" section and issue #134 (still open: a requesterId
+// parameter here would let this function enforce its own invariant instead
+// of relying on every caller to check first).
 //
 // #128: refuses a conversation that already has a submission. Soft-deleting
 // one here would leave the submission row alive, pointing at a conversation

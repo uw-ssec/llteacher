@@ -10,7 +10,7 @@
 // route layer, which maps it to an honest 404 (see server/index.ts's
 // app.onError) -- never a 403, so a guessed/leaked id can't be used to
 // confirm a row exists that isn't the caller's, matching the 404-not-403
-// convention `getOwnedConversationOrNull` (routes/conversations.ts)
+// convention `getOwnedConversationOrNull` (repositories/conversations.ts)
 // already established for the route-level ownership check. See
 // ARCHITECTURE.md's "Tenancy Mismatch Errors" section.
 //

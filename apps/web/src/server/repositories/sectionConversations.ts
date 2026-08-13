@@ -438,7 +438,24 @@ export async function getActiveSectionConversation(
 }
 
 /** Messages for a conversation, oldest first -- the order a transcript reads
- *  in, and the order messages_conversation_created_idx already serves. */
+ *  in.
+ *
+ *  #283: ordered by `seq` (a monotonic bigserial), not `createdAt` -- the
+ *  same tiebreaker repositories/conversations.ts's getLastMessages/
+ *  getMessagesForConversation use (#221), and ARCHITECTURE.md's "Message
+ *  Ordering" section claims for "every" messages-in-order query. This
+ *  function was the one left behind: `createdAt` is `timestamptz`
+ *  (microsecond resolution) and was only safe as a sole ordering key
+ *  because each `appendMessage` call was its own separate transaction, so
+ *  two rows could never share a timestamp -- a guarantee `seq` makes
+ *  independent of that fact. That assumption is no longer even true for
+ *  this conversation's own first two rows: startSectionConversation writes
+ *  the conversation and its greeting message in one atomic `db.batch`
+ *  group, exactly the "batched writes" condition this file's own doc
+ *  comment on `seq` names as when `createdAt` stops being safe. `seq` is
+ *  included in the projection (not just used for ordering) so a future
+ *  caller can page consistently the way getMessagesForConversation's
+ *  `before` cursor does. */
 export async function getSectionConversationMessages(db: Db, conversationId: string) {
   return db
     .select({
@@ -446,10 +463,11 @@ export async function getSectionConversationMessages(db: Db, conversationId: str
       role: messages.role,
       parts: messages.parts,
       createdAt: messages.createdAt,
+      seq: messages.seq,
     })
     .from(messages)
     .where(eq(messages.conversationId, conversationId))
-    .orderBy(messages.createdAt);
+    .orderBy(messages.seq);
 }
 
 /** Who may read a given section conversation (#27 access rules).
