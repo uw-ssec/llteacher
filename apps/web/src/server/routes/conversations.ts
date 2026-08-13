@@ -29,6 +29,7 @@
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { makeDb } from "../../db/client";
+import { UUID_RE } from "../utils/uuid";
 import {
   listConversationsForOwner,
   createConversation,
@@ -225,6 +226,16 @@ export async function updateConversationHandler(c: Context<AppEnv>) {
   }
 
   const id = c.req.param("id");
+  // #267: a malformed id would otherwise reach getOwnedConversationOrNull's
+  // eq(conversations.id, id) unvalidated, raising Postgres's own "invalid
+  // input syntax for type uuid" -- a permanent client error the generic
+  // error handler turns into a 503 "try again later" plus a logged server
+  // error. 404 instead, matching the existing "not found or not owned"
+  // response so a malformed id and an unknown-but-valid one stay
+  // indistinguishable (same reasoning as the 404-not-403 convention below).
+  if (!id || !UUID_RE.test(id)) {
+    return c.json({ error: "Conversation not found" }, 404);
+  }
   let json: unknown;
   try {
     json = await c.req.json();
@@ -238,7 +249,7 @@ export async function updateConversationHandler(c: Context<AppEnv>) {
 
   const db = makeDb(c.env.DATABASE_URL);
 
-  const existing = await getOwnedConversationOrNull(db, id!, authContext.session.userId, authContext.isMemberOf);
+  const existing = await getOwnedConversationOrNull(db, id, authContext.session.userId, authContext.isMemberOf);
   if (!existing) {
     return c.json({ error: "Conversation not found" }, 404);
   }
@@ -246,7 +257,7 @@ export async function updateConversationHandler(c: Context<AppEnv>) {
   // Row just read back and ownership-checked -- the sanctioned case for
   // this cast per scope.ts's unsafeCourseScope docstring.
   const scope = unsafeCourseScope(existing.courseId);
-  const updated = await updateConversationTitle(db, scope, id!, parsed.data.title);
+  const updated = await updateConversationTitle(db, scope, id, parsed.data.title);
   // updateConversationTitle also excludes soft-deleted rows -- a
   // conversation deleted between the check above and this write (or one
   // that was already soft-deleted) 404s here too, same bucket as "not
@@ -265,9 +276,13 @@ export async function deleteConversationHandler(c: Context<AppEnv>) {
   }
 
   const id = c.req.param("id");
+  // #267: same reasoning as updateConversationHandler's guard above.
+  if (!id || !UUID_RE.test(id)) {
+    return c.json({ error: "Conversation not found" }, 404);
+  }
   const db = makeDb(c.env.DATABASE_URL);
 
-  const existing = await getOwnedConversationOrNull(db, id!, authContext.session.userId, authContext.isMemberOf);
+  const existing = await getOwnedConversationOrNull(db, id, authContext.session.userId, authContext.isMemberOf);
   if (!existing) {
     return c.json({ error: "Conversation not found" }, 404);
   }
@@ -286,7 +301,7 @@ export async function deleteConversationHandler(c: Context<AppEnv>) {
   // soft-deleted conversation once its parent conversation is filtered out,
   // and the FK is ON DELETE CASCADE from conversations.id for the day a
   // real hard-delete/purge path is added.
-  await softDeleteConversation(db, scope, id!);
+  await softDeleteConversation(db, scope, id);
 
   return c.body(null, 204);
 }
@@ -307,9 +322,13 @@ export async function listConversationMessagesHandler(c: Context<AppEnv>) {
   }
 
   const id = c.req.param("id");
+  // #267: same reasoning as updateConversationHandler's guard above.
+  if (!id || !UUID_RE.test(id)) {
+    return c.json({ error: "Conversation not found" }, 404);
+  }
   const db = makeDb(c.env.DATABASE_URL);
 
-  const existing = await getOwnedConversationOrNull(db, id!, authContext.session.userId, authContext.isMemberOf);
+  const existing = await getOwnedConversationOrNull(db, id, authContext.session.userId, authContext.isMemberOf);
   if (!existing) {
     return c.json({ error: "Conversation not found" }, 404);
   }
@@ -336,7 +355,7 @@ export async function listConversationMessagesHandler(c: Context<AppEnv>) {
   }
 
   const scope = unsafeCourseScope(existing.courseId);
-  const rows = await getMessagesForConversation(db, scope, id!, { limit, before });
+  const rows = await getMessagesForConversation(db, scope, id, { limit, before });
   // #226: the shape is checked against ConversationMessageResponse now
   // (previously an untyped literal the client asserted a different type
   // over -- neither side of the wire boundary actually enforced it). `parts`

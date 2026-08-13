@@ -98,7 +98,7 @@ vi.mock("../repositories/conversations", () => ({
     scope: string,
     input: { ownerUserId: string },
   ) => {
-    const row: FakeConversation = { id: "conv-1", ownerUserId: input.ownerUserId, courseId: scope };
+    const row: FakeConversation = { id: "22222222-2222-2222-2222-222222222222", ownerUserId: input.ownerUserId, courseId: scope };
     conversationsStore.set(row.id, row);
     return row;
   },
@@ -145,7 +145,7 @@ vi.mock("../repositories/rateLimits", () => ({
 
 function fakeAuthContext(): AuthContext {
   return buildFakeAuthContext({
-    memberships: [fakeMembership({ courseId: "course-a", role: "student" })],
+    memberships: [fakeMembership({ courseId: "55555555-5555-5555-5555-555555555555", role: "student" })],
   });
 }
 
@@ -223,14 +223,14 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
   it("does not persist an assistant row when the model stream errors before producing any content", async () => {
     fakeModel = erroringModel();
 
-    const res = await postChat(buildApp(), { messages: [userUiMessage], courseId: "course-a" });
+    const res = await postChat(buildApp(), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
     // Per the AI SDK's own behavior, a stream-level `error` chunk does not
     // fail the HTTP response -- it's forwarded as an `error` UI chunk to the
     // client while the response itself still completes normally.
     expect(res.status).toBe(200);
     await res.text(); // drain the stream so onFinish has actually run
 
-    const rows = messagesStore.filter((m) => m.conversationId === "conv-1");
+    const rows = messagesStore.filter((m) => m.conversationId === "22222222-2222-2222-2222-222222222222");
     expect(rows.map((r) => r.role)).toEqual(["user"]); // no assistant row -- the turn stays retryable
   });
 
@@ -238,7 +238,7 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
     // First attempt: the model errors out with nothing produced.
     fakeModel = erroringModel();
     const app = buildApp();
-    const firstRes = await postChat(app, { messages: [userUiMessage], courseId: "course-a" });
+    const firstRes = await postChat(app, { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
     await firstRes.text();
 
     expect(messagesStore.map((m) => m.role)).toEqual(["user"]); // still just the user row
@@ -250,7 +250,7 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
     fakeModel = succeedingModel("recovered reply after retry");
     const secondRes = await postChat(app, {
       messages: [userUiMessage],
-      conversationId: "conv-1",
+      conversationId: "22222222-2222-2222-2222-222222222222",
     });
     expect(secondRes.status).toBe(200);
     const body = await secondRes.text();
@@ -259,7 +259,7 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
     // parts) -- the streamed body actually contains the new model's reply.
     expect(body).toContain("recovered reply after retry");
 
-    const rows = messagesStore.filter((m) => m.conversationId === "conv-1");
+    const rows = messagesStore.filter((m) => m.conversationId === "22222222-2222-2222-2222-222222222222");
     // Exactly one user row (never duplicated) and now one real assistant
     // row with actual content -- the turn is answered for good, not stuck
     // replaying emptiness on every future retry.
@@ -272,10 +272,10 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
   it("a THIRD identical request now replays the persisted (real) assistant reply instead of calling the model a third time", async () => {
     fakeModel = erroringModel();
     const app = buildApp();
-    await (await postChat(app, { messages: [userUiMessage], courseId: "course-a" })).text();
+    await (await postChat(app, { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" })).text();
 
     fakeModel = succeedingModel("recovered reply");
-    await (await postChat(app, { messages: [userUiMessage], conversationId: "conv-1" })).text();
+    await (await postChat(app, { messages: [userUiMessage], conversationId: "22222222-2222-2222-2222-222222222222" })).text();
 
     // Swap in a model that would throw if actually called -- proves this
     // third, identical request takes the replay branch, not a fresh call.
@@ -291,13 +291,13 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
         throw new Error("model must not be called on a genuine replay");
       },
     };
-    const thirdRes = await postChat(app, { messages: [userUiMessage], conversationId: "conv-1" });
+    const thirdRes = await postChat(app, { messages: [userUiMessage], conversationId: "22222222-2222-2222-2222-222222222222" });
     expect(thirdRes.status).toBe(200);
     const body = await thirdRes.text();
     expect(body).toContain("recovered reply");
 
     // Still exactly one assistant row -- the replay didn't write a new one.
-    const assistantRows = messagesStore.filter((m) => m.conversationId === "conv-1" && m.role === "assistant");
+    const assistantRows = messagesStore.filter((m) => m.conversationId === "22222222-2222-2222-2222-222222222222" && m.role === "assistant");
     expect(assistantRows).toHaveLength(1);
   });
 
@@ -305,11 +305,11 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
     it("does not persist the partial text -- the half-sentence must not become a permanent 'answer'", async () => {
       fakeModel = partialThenErrorModel();
 
-      const res = await postChat(buildApp(), { messages: [userUiMessage], courseId: "course-a" });
+      const res = await postChat(buildApp(), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
       expect(res.status).toBe(200);
       await res.text();
 
-      const rows = messagesStore.filter((m) => m.conversationId === "conv-1");
+      const rows = messagesStore.filter((m) => m.conversationId === "22222222-2222-2222-2222-222222222222");
       // Pre-fix, this persisted {text:"A p-value is the probability of",
       // state:"streaming"} as a normal-looking assistant row.
       expect(rows.map((r) => r.role)).toEqual(["user"]);
@@ -318,11 +318,11 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
     it("calls the model again (not a replay of the half-sentence) on an identical retry, and this time persists the real reply", async () => {
       fakeModel = partialThenErrorModel();
       const app = buildApp();
-      await (await postChat(app, { messages: [userUiMessage], courseId: "course-a" })).text();
+      await (await postChat(app, { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" })).text();
       expect(messagesStore.map((m) => m.role)).toEqual(["user"]);
 
       fakeModel = succeedingModel("a p-value is the probability of seeing a result this extreme");
-      const secondRes = await postChat(app, { messages: [userUiMessage], conversationId: "conv-1" });
+      const secondRes = await postChat(app, { messages: [userUiMessage], conversationId: "22222222-2222-2222-2222-222222222222" });
       const body = await secondRes.text();
 
       // The real, complete reply -- not the truncated fragment replayed
@@ -330,7 +330,7 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
       expect(body).toContain("a p-value is the probability of seeing a result this extreme");
       expect(body).not.toMatch(/"state":"streaming"/);
 
-      const rows = messagesStore.filter((m) => m.conversationId === "conv-1");
+      const rows = messagesStore.filter((m) => m.conversationId === "22222222-2222-2222-2222-222222222222");
       expect(rows.filter((r) => r.role === "user")).toHaveLength(1);
       expect(rows.filter((r) => r.role === "assistant")).toHaveLength(1);
     });

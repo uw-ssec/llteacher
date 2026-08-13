@@ -237,6 +237,22 @@ const historyMessageSchema = z.object({
   parts: z.array(historyPartSchema).min(1).max(MAX_PARTS_PER_MESSAGE),
 });
 
+// #267: conversationId/courseId/sectionId genuinely are UUIDs (they
+// reference conversations.id/courses.id/sections.id, real primary keys) --
+// unlike CLIENT_MESSAGE_ID_RE above, `.uuid()` is the right check here, not
+// a rejected one. `.passthrough()` isn't needed (unlike chatPartSchema/
+// historyPartSchema): this schema only validates the four fields
+// chatHandler itself reads off the body; `messages` is handled separately
+// (see the unchecked-cast comment at its call site) since its own
+// per-element validation already happens via historyMessageSchema/
+// inboundUserMessageSchema below, not this envelope.
+const chatEnvelopeSchema = z.object({
+  conversationId: z.string().uuid().optional(),
+  courseId: z.string().uuid().optional(),
+  kind: z.enum(["section", "tutor"]).optional(),
+  sectionId: z.string().uuid().optional(),
+});
+
 // In ai@5.0.195, a provider failure (e.g. a 429) arrives as an `error`
 // chunk mid-stream, not a stream rejection -- the stream still closes
 // normally, so `onFinish` below still fires. The AI SDK's own step
@@ -444,13 +460,41 @@ export async function chatHandler(c: Context<AppEnv>) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  let body: ChatRequestBody;
+  let rawBody: unknown;
   try {
-    body = await c.req.json<ChatRequestBody>();
+    rawBody = await c.req.json();
   } catch {
     return c.json({ error: "Request body must be valid JSON" }, 400);
   }
-  const { messages: uiMessages, conversationId, courseId: requestedCourseId, sectionId: requestedSectionId } = body;
+  // #267: conversationId/courseId/sectionId used to reach
+  // getOwnedConversationOrNull/courseScopeFromAuthContext/
+  // startSectionConversation's own eq() calls completely unvalidated -- a
+  // malformed value (not JSON-invalid, just not UUID-shaped) raised
+  // Postgres's own "invalid input syntax for type uuid", which the generic
+  // error handler (server/index.ts) turns into a 503 "try again later" for
+  // what is a permanent client error -- utils/uuid.ts's UUID_RE doc comment
+  // names this exact failure mode, already fixed at every OTHER UUID path
+  // param in the codebase. `kind`'s own validation (#308, just below) is
+  // folded into this same envelope instead of staying a separate manual
+  // check now that there's a natural place for it.
+  const envelopeParsed = chatEnvelopeSchema.safeParse(rawBody);
+  if (!envelopeParsed.success) {
+    return c.json(
+      { error: "conversationId/courseId/sectionId must be valid UUIDs when present; kind must be 'tutor' or 'section'" },
+      400,
+    );
+  }
+  const {
+    conversationId,
+    courseId: requestedCourseId,
+    sectionId: requestedSectionId,
+    kind: requestedKind,
+  } = envelopeParsed.data;
+  // `messages` stays an unchecked cast here, same as the ChatRequestBody
+  // cast this replaced -- every element gets real validation via
+  // historyMessageSchema/inboundUserMessageSchema below; this is only the
+  // top-level "is it an array at all" shape.
+  const uiMessages = (rawBody as ChatRequestBody).messages;
   if (!Array.isArray(uiMessages) || uiMessages.length === 0) {
     return c.json({ error: "messages is required" }, 400);
   }
@@ -570,17 +614,14 @@ export async function chatHandler(c: Context<AppEnv>) {
     // only a caller that explicitly asks for "section" (App.tsx's
     // homework-section chat instance) needs a sectionId.
     //
-    // #308: an unrecognized kind used to silently coerce to "tutor" instead
-    // of 400ing -- `body.kind === "section" ? "section" : "tutor"` maps
-    // literally everything that isn't exactly "section" (a typo, a future
-    // client's not-yet-supported kind:"reflection", `null`) onto "tutor"
-    // with no error at all, precisely the failure mode #214 itself was
-    // filed for. Reject explicitly instead, matching routes/
-    // conversations.ts's GET handler's own kind validation.
-    if (body.kind !== undefined && body.kind !== "tutor" && body.kind !== "section") {
-      return c.json({ error: "kind must be 'tutor' or 'section'" }, 400);
-    }
-    const kind: ConversationKind = body.kind === "section" ? "section" : "tutor";
+    // #308/#267: an unrecognized kind used to silently coerce to "tutor"
+    // instead of 400ing -- precisely the failure mode #214 itself was filed
+    // for. chatEnvelopeSchema's z.enum(["section","tutor"]).optional()
+    // above already rejects anything else (a typo, a future client's
+    // not-yet-supported kind:"reflection") before this line is ever
+    // reached, so requestedKind is only ever "section", "tutor", or
+    // undefined here.
+    const kind: ConversationKind = requestedKind === "section" ? "section" : "tutor";
     if (kind === "section") {
       if (!requestedSectionId) {
         return c.json({ error: "sectionId is required when kind is 'section'" }, 400);
