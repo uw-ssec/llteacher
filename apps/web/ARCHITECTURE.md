@@ -254,3 +254,27 @@ Two consequences worth knowing before you touch either path:
 Rationale, and the superseded/locked alternatives that were rejected:
 [docs/superpowers/specs/2026-08-11-submission-uniqueness-design.md](../../docs/superpowers/specs/2026-08-11-submission-uniqueness-design.md)
 ([#128](https://github.com/uw-ssec/llteacher/issues/128)).
+
+## Deploy Order
+
+**Migrate before deploy, always** ([#284](https://github.com/uw-ssec/llteacher/issues/284)).
+`npm run deploy` runs `db:migrate` first for exactly this reason -- do not
+call `wrangler deploy` directly, and do not reorder the two in CI when that
+pipeline exists.
+
+The hazard is one-directional and comes from Drizzle's schema being shared
+between the query builder and the migrator: any migration that adds a
+column read via `db.select().from(...)` -- `messages.seq`/`client_message_id`
+(0023) are the current example -- means the *new* Worker bundle's queries
+reference a column the *old*, not-yet-migrated database doesn't have.
+Deploying the Worker first turns every `POST /api/chat` into `42703 column
+messages.seq does not exist` -> a 500. Client-side, that 500 surfaces as a
+history-fetch failure, and prior to #276 that failed open into a silently
+empty transcript rather than a visible error -- so a wrong-order deploy
+presented to a student as their conversation history having vanished, not
+as an outage.
+
+Rolling the Worker **back** after migrating forward is safe: `seq` has a
+`nextval` default and `client_message_id` is nullable, so pre-migration
+code inserts and selects cleanly against the post-migration schema. Only
+forward-Worker-before-forward-migration is the ordering that breaks.
