@@ -961,6 +961,16 @@ export default function App() {
 
   return (
     <div className="page-frame">
+      {/* #299: two <nav> landmarks (Sidebar, TutorConversationsList) sit
+          between here and the chat column, with no content landmark for
+          landmark-navigation (NVDA `D`, etc.) to reach -- this skip link is
+          the standard 2.4.1 Bypass Blocks technique, jumping straight past
+          both to the <main> below. Visually hidden until focused (reuses
+          the existing .sr-only pattern, see styles.css's own :focus
+          override next to it). */}
+      <a href="#conversation-main" className="skip-link sr-only">
+        Skip to conversation
+      </a>
       {/* Top nav — UW Husky Purple full-bleed bar */}
       <TopNav
         course="STATS 311"
@@ -1019,6 +1029,14 @@ export default function App() {
             of white-screening the whole app -- the sidebar/nav stay usable,
             and switching surfaces/conversations remounts a fresh boundary
             rather than being stuck on a stale caught error. */}
+        {/* #299: the one content landmark in the page -- see the skip
+            link above for why. tabIndex={-1} makes it a valid target for
+            that link's focus jump (an <a href="#..."> only scrolls to a
+            non-focusable element, it doesn't focus it) without adding the
+            <main> itself to the normal Tab order. display: contents so
+            wrapping doesn't change either branch's flex-item layout inside
+            .app-shell. */}
+        <main id="conversation-main" tabIndex={-1} className="conversation-main">
         {tutorConversationId ? (
           <ErrorBoundary key={`tutor-${tutorConversationId}`}>
             <ConversationView
@@ -1057,6 +1075,7 @@ export default function App() {
             />
           </ErrorBoundary>
         )}
+        </main>
       </div>
     </div>
   );

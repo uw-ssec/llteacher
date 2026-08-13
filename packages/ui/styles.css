@@ -58,7 +58,11 @@
   /* Text scale — warm, not clinical black */
   --raw-text:            #1A1A1A;   /* primary deep warm black */
   --raw-text-secondary:  #6B6760;   /* warm gray for muted UI */
-  --raw-text-muted:      #94908A;   /* very muted — placeholders, metadata */
+  /* #296: was #94908A (2.4-3.0:1 against this file's three light-theme
+     backgrounds -- rest/selected/hover -- all failing WCAG 1.4.3's 4.5:1).
+     #64605A clears 4.5:1 against all three (4.79:1 worst case, hover bg
+     --color-border). */
+  --raw-text-muted:      #64605A;   /* muted — placeholders, metadata (WCAG AA @ 4.5:1) */
 
   /* UW Husky Purple — primary brand / dominant chrome surface */
   --raw-accent:          #32006e;   /* UW Husky Purple — top nav + sidebar bg */
@@ -248,7 +252,19 @@
 
   --color-text:          #FAFAF7;
   --color-text-secondary: #B5B0AA;
-  --color-text-muted:    #7A7570;
+  /* #296: was #7A7570 -- 3.82:1 / 3.31:1 / 3.06:1 against this file's
+     --color-bg / --color-accent-faint / --color-border (all fail WCAG
+     1.4.3's 4.5:1). The issue's own suggested replacement, #8F8A84,
+     turned out to still fail two of those three (4.41:1 / 4.07:1)
+     when independently recomputed with the WCAG relative-luminance
+     formula while re-verifying the OTHER 19 call sites this issue also
+     asks for (#296's second requirement) -- #border and #accent-faint
+     are exactly the rail's hover/selected states this token exists to
+     cover. #95958D actually clears 4.5:1 against all seven dark-theme
+     surfaces --color-text-muted renders against anywhere in this file
+     (bg 5.77:1, accent-faint 5.01:1, border 4.62:1, surface 5.28:1,
+     surface-raised 4.97:1, code-bg 5.58:1, code-output-bg 5.27:1). */
+  --color-text-muted:    #95958D;
 
   /* UW Accent Lavender on dark — UW's own purple designed for dark contexts */
   --color-accent:        #C5B4E3;   /* UW Accent Lavender */
@@ -567,6 +583,15 @@ body {
     background-color: var(--color-bg);
   }
 
+  /* #299: <main id="conversation-main"> wraps the conversation column so
+     it's a reachable landmark (see the skip link above it in App.tsx) --
+     display: contents makes the wrapper invisible to .app-shell's flex
+     layout, so .conversation-column inside it still participates as a
+     direct flex item (flex: 1) exactly as before the wrapper existed. */
+  .conversation-main {
+    display: contents;
+  }
+
   /* -------------------------------------------------------------------------
      .sidebar — the section progress rail on UW Husky Purple.
      Not a thread list. Not navigation. A homework syllabus.
@@ -777,7 +802,12 @@ body {
     padding: var(--space-2) var(--space-3);
     margin-block-end: var(--space-4);
     background: none;
-    border: 1px dashed var(--color-border-strong);
+    /* #296: was --color-border-strong (1.48:1 against --color-bg, well
+       under WCAG 1.4.11's 3:1 for a component boundary) -- --color-accent
+       is already this button's text color (14.76:1) and clears 3:1 as a
+       border too, so the dashed rest-state boundary is now actually
+       identifiable as a button. */
+    border: 1px dashed var(--color-accent);
     border-radius: var(--radius-sm);
     color: var(--color-accent);
     font-size: var(--font-size-sm);
@@ -845,20 +875,19 @@ body {
     list-style: none;
   }
 
-  /* #6 (redesigned post-review): back to #4's original contract -- this
-     row is a single clickable "select this conversation" control again
-     (click/keyboard-activate ANYWHERE on the row, including the title,
-     selects it), with a small pencil-icon button (EditableTitle's own
-     rename trigger, see that component) nested inside it for renaming.
-     It's a <div role="button" tabIndex="0">, not a literal <button>,
-     specifically BECAUSE it needs to contain that nested real <button> --
-     two literal <button> elements can't nest (invalid HTML; the browser
-     would silently close the outer one early), and a clickable row
-     containing a smaller action button is a standard, well-supported
-     pattern (the same shape as a Gmail/Linear/GitHub list row with an
-     inline action icon) even though it's technically outside strict ARIA
-     nesting guidance. See ConversationListItem.tsx's doc comment for the
-     click/keydown propagation handling this requires. */
+  /* #295: this row is a plain, non-interactive <div> -- NOT role="button",
+     which the previous version of this comment defended as necessary to
+     contain EditableTitle's real nested pencil <button>. ARIA 1.2 defines
+     role="button" as Children Presentational: True and normatively
+     prohibits interactive descendants; a real nested <button> inside it is
+     exactly the case that rule exists to prevent, and user agents prune
+     that subtree -- the pencil's role/name were not reliably exposed to
+     AT (#295). The row's own "select this conversation" affordance now
+     lives on the title text itself, rendered as a real sibling <button>
+     by EditableTitle (its onActivateValue prop, passed from
+     ConversationListItem) -- two adjacent buttons (title, pencil), no
+     nesting, no ARIA violation. This div is now purely a layout/hover
+     grouping for the row, not a target itself. */
   .tutor-conversation-item {
     display: flex;
     flex-direction: column;
@@ -867,18 +896,12 @@ body {
     width: 100%;
     padding: var(--space-2);
     border-radius: var(--radius-sm);
-    cursor: pointer;
     color: var(--color-text);
     transition: background-color 120ms ease-out;
   }
 
   .tutor-conversation-item:hover {
     background-color: var(--color-border);
-  }
-
-  .tutor-conversation-item:focus-visible {
-    outline: 2px solid var(--color-accent);
-    outline-offset: -2px;
   }
 
   .tutor-conversation-item--selected {
@@ -895,24 +918,25 @@ body {
     font-weight: var(--weight-medium);
   }
 
-  /* #234: hovering/focusing anywhere on the row reveals its pencil, not
-     just hovering the tiny icon itself -- matches the row-wide
+  /* #234/#297: hovering/focusing anywhere on the row reveals its pencil,
+     not just hovering the tiny icon itself -- matches the row-wide
      discoverability the old single-button row gave for free. Gated behind
      (hover: hover) -- a touch device has no hover, so this rule would
      otherwise never fire and the pencil would stay invisible-but-hit-
-     testable there (see .editable-title__pencil's own opacity/visibility
-     default below for the touch fallback). Keyboard focus is unaffected --
-     :focus-within is not a hover-capability question. */
+     testable there (see .editable-title__pencil-btn's own default below
+     for the touch fallback). Keyboard focus is unaffected -- :focus-within
+     is not a hover-capability question. #297: reveals the BUTTON now, not
+     just the icon inside it -- see that rule's own doc comment for why. */
   @media (hover: hover) {
-    .tutor-conversation-item:hover .editable-title__pencil {
+    .tutor-conversation-item:hover .editable-title__pencil-btn {
       opacity: 1;
-      visibility: visible;
+      pointer-events: auto;
     }
   }
 
-  .tutor-conversation-item:focus-within .editable-title__pencil {
+  .tutor-conversation-item:focus-within .editable-title__pencil-btn {
     opacity: 1;
-    visibility: visible;
+    pointer-events: auto;
   }
 
   .tutor-conversation-item__meta {
@@ -953,11 +977,38 @@ body {
     min-width: 0;
   }
 
+  /* #295: when EditableTitle is given `onActivateValue`, .editable-title__value
+     renders as a real <button> instead of a <span> -- reset the browser's
+     default button chrome (border/background/padding/margin/font) back to
+     plain inline text so it's visually identical to the non-interactive
+     span it replaces; only the cursor and focus ring should read as
+     "interactive." text-align: inherit matters because buttons default to
+     `center`, which would break the ellipsis truncation above. */
+  button.editable-title__value {
+    display: inline;
+    border: none;
+    background: none;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    color: inherit;
+    text-align: inherit;
+    cursor: pointer;
+  }
+
+  /* #297: min 24x24 target (was a bare 12px glyph box, half the WCAG 2.5.8
+     minimum -- no exception applies, since the pencil sits entirely inside
+     .tutor-conversation-item, itself a target, so the Spacing exception's
+     24px-circle-doesn't-intersect-another-target test always fails here).
+     padding stays 0 -- inline-flex centring already places the 12px glyph
+     in the middle of the larger box, so nothing shifts visually. */
   .editable-title__pencil-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    min-width: 24px;
+    min-height: 24px;
     padding: 0;
     background: none;
     border: none;
@@ -965,27 +1016,38 @@ body {
     color: var(--color-text-muted);
   }
 
-  /* #234: visibility:hidden alongside opacity:0 -- opacity alone hides the
-     icon but leaves the underlying <button> laid out, focusable, and
-     CLICKABLE, so a touch tap landing on its box entered rename mode
-     instead of selecting the conversation, with no visual cue why (there
-     is no hover on touch, so the reveal rules below never fired for that
-     device class in the first place). visibility:hidden removes it from
-     hit-testing whenever it isn't actually shown, regardless of input
-     type; the reveal rules below flip both properties back together. A
-     touch device (hover: none) gets the pencil shown persistently instead
-     of hidden-by-default -- it has no hover and nothing is focused until
-     something is already tapped, so there is no other discovery path. */
-  .editable-title__pencil {
+  /* #234/#297: hides the BUTTON, not just the icon inside it -- #234's own
+     original fix targeted .editable-title__pencil (the SVG), which left
+     the actual <button> laid out, FOCUSABLE, and hit-testable at its full
+     (now 24x24, #297) box even while "hidden": a stray tap or click on
+     that transparent area still fired handleEdit(). opacity:0 alone would
+     have the same problem opacity always has (a transparent element is
+     still hit-tested); pointer-events:none is what actually removes it
+     from hit-testing. Deliberately NOT visibility:hidden, unlike #297's
+     own suggested fix -- see the reveal rules' comments below for why:
+     visibility:hidden would also remove the button from the TAB ORDER,
+     and the tutor chat header's own EditableTitle instance (no row to
+     hover, no sibling title-button to focus first, see #295's redesign of
+     ConversationListItem specifically) has nothing else inside
+     .editable-title a keyboard user could focus first to trigger
+     :focus-within and reveal it again -- the pencil would become
+     permanently keyboard-unreachable there. pointer-events:none achieves
+     the same "don't accidentally click this" goal without that
+     regression: it blocks POINTER interaction only, Tab/:focus-visible on
+     the button itself are unaffected. A touch device (hover: none) gets
+     the pencil shown persistently instead of hidden-by-default -- it has
+     no hover and nothing is focused until something is already tapped, so
+     there is no other discovery path. */
+  .editable-title__pencil-btn {
     opacity: 0;
-    visibility: hidden;
-    transition: opacity 120ms ease-out, visibility 120ms ease-out;
+    pointer-events: none;
+    transition: opacity 120ms ease-out;
   }
 
   @media (hover: none) {
-    .editable-title__pencil {
+    .editable-title__pencil-btn {
       opacity: 1;
-      visibility: visible;
+      pointer-events: auto;
     }
   }
 
@@ -993,9 +1055,9 @@ body {
      there's no larger row to hover) -- gated behind (hover: hover), same
      reasoning as .tutor-conversation-item's own hover rule above. */
   @media (hover: hover) {
-    .editable-title:hover .editable-title__pencil {
+    .editable-title:hover .editable-title__pencil-btn {
       opacity: 1;
-      visibility: visible;
+      pointer-events: auto;
     }
   }
 
@@ -1004,11 +1066,17 @@ body {
      (previously only :focus-visible on the button, with no fallback for
      focus landing elsewhere in the title first -- .tutor-conversation-item
      above already had its own :focus-within; this brings the header
-     instance to parity). */
-  .editable-title:focus-within .editable-title__pencil,
-  .editable-title__pencil-btn:focus-visible .editable-title__pencil {
+     instance to parity). #297: both rules now target the BUTTON, not the
+     icon inside it -- consistent with moving the hidden state there (see
+     that rule's doc comment). :focus-visible on the button itself still
+     works because pointer-events:none (unlike visibility:hidden) never
+     removes an element from the tab order -- Tab can still land here and
+     trigger this rule directly, .editable-title:focus-within is the
+     belt-and-braces case for focus landing elsewhere in the title first. */
+  .editable-title:focus-within .editable-title__pencil-btn,
+  .editable-title__pencil-btn:focus-visible {
     opacity: 1;
-    visibility: visible;
+    pointer-events: auto;
   }
 
   .editable-title__text {
@@ -2004,6 +2072,28 @@ body {
   clip: rect(0,0,0,0);
   white-space: nowrap;
   border-width: 0;
+}
+
+/* #299: skip link -- .sr-only until focused, then the :focus override
+   below pulls it back into the visible/hit-testable flow at the top of
+   the page so a sighted keyboard user can see and click it too, not just
+   have it announced. */
+.skip-link:focus {
+  position: fixed;
+  top: var(--space-2);
+  left: var(--space-2);
+  width: auto;
+  height: auto;
+  padding: var(--space-2) var(--space-3);
+  margin: 0;
+  overflow: visible;
+  clip: auto;
+  white-space: normal;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  border: 2px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  z-index: 1000;
 }
 
 /* ==========================================================================

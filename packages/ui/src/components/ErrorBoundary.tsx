@@ -21,7 +21,7 @@
    the student would otherwise use to navigate away from it.
    -------------------------------------------------------------------------- */
 
-import { Component, type ErrorInfo, type ReactNode } from "react";
+import { Component, createRef, type ErrorInfo, type ReactNode } from "react";
 
 export interface ErrorBoundaryProps {
   children: ReactNode;
@@ -38,6 +38,12 @@ interface ErrorBoundaryState {
 
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   state: ErrorBoundaryState = { error: null };
+  // #298: the default fallback's own container -- focused the instant it
+  // mounts (see componentDidUpdate below) so a render throw doesn't drop
+  // focus to <body> the same way EditableTitle's exit paths used to. Only
+  // meaningful for the default fallback below; a caller-supplied
+  // `fallback` render prop owns its own markup and focus.
+  private fallbackRef = createRef<HTMLDivElement>();
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
     return { error };
@@ -46,6 +52,26 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   componentDidCatch(error: Error, info: ErrorInfo) {
     // eslint-disable-next-line no-console
     console.error("[ErrorBoundary] caught a render error", error, info.componentStack);
+  }
+
+  componentDidMount() {
+    // #298: covers a throw during the very FIRST render -- React applies
+    // getDerivedStateFromError before that initial commit, so the fallback
+    // is already showing by the time this fires and there is no "previous"
+    // render for componentDidUpdate below to compare against.
+    if (this.state.error && !this.props.fallback) {
+      this.fallbackRef.current?.focus();
+    }
+  }
+
+  componentDidUpdate(_prevProps: ErrorBoundaryProps, prevState: ErrorBoundaryState) {
+    // #298: focus the fallback exactly once, right as it appears on a
+    // LATER render (a throw after the boundary already mounted clean) --
+    // not on every re-render while it's already showing (which would steal
+    // focus back from wherever the student moved to since).
+    if (!prevState.error && this.state.error && !this.props.fallback) {
+      this.fallbackRef.current?.focus();
+    }
   }
 
   /** Clears the caught error and lets `children` render fresh. Note this
@@ -64,7 +90,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     if (error) {
       if (this.props.fallback) return this.props.fallback(error, this.reset);
       return (
-        <div className="error-boundary-fallback" role="alert">
+        <div className="error-boundary-fallback" role="alert" tabIndex={-1} ref={this.fallbackRef}>
           <p>Something went wrong while rendering this conversation.</p>
           <button type="button" className="error-boundary-fallback__retry" onClick={this.reset}>
             Try again

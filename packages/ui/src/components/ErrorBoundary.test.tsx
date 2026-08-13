@@ -44,6 +44,20 @@ describe("ErrorBoundary", () => {
     consoleError.mockRestore();
   });
 
+  // #298: the caught error drops the throwing subtree (and whatever had
+  // focus in it) -- without this, focus falls to <body> and a keyboard
+  // user has no located way back to the retry affordance.
+  it("moves focus to the default fallback the instant it appears", () => {
+    const consoleError = suppressConsoleError();
+    render(
+      <ErrorBoundary>
+        <Bomb shouldThrow={true} />
+      </ErrorBoundary>,
+    );
+    expect(document.activeElement).toBe(screen.getByRole("alert"));
+    consoleError.mockRestore();
+  });
+
   it("logs the caught error via componentDidCatch instead of silently swallowing it", () => {
     const consoleError = suppressConsoleError();
     render(

@@ -8,24 +8,20 @@ import type { ConversationListItemResponse } from "../../shared/types";
    lives in apps/web, not packages/ui, since packages/ui has no apps/web
    import anywhere.
 
-   The whole row (including the title text) is clickable/keyboard-
-   activatable to select the conversation; renaming lives behind a small
-   pencil-icon button (EditableTitle's own rename trigger) nested inside it.
-   That makes the row a <div role="button" tabIndex="0">, not a literal
-   <button>: a literal <button> cannot contain another literal <button>
-   (invalid HTML), and EditableTitle's pencil trigger IS a real nested one --
-   the same shape as a Gmail/Linear/GitHub Issues list row with an inline
-   icon action.
-
-   Two propagation guards this requires (EditableTitle's own pencil button
-   already stopPropagation()s its OWN click, unrelated to these):
-     - onKeyDown checks `e.target === e.currentTarget` before treating
-       Enter/Space as "select the row" -- keydown bubbles from a focused
-       pencil button up through this row, so without the check,
-       keyboard-activating the pencil would ALSO fire onSelect.
-     - No such check is needed for onClick: the pencil button's own
-       stopPropagation already covers both the mouse-click and the
-       keyboard-activation-fires-a-real-click-event cases.
+   #295 redesign (post-review): the outer row is now a plain, non-
+   interactive <div> -- NOT role="button". The previous version defended
+   role="button" as necessary to contain EditableTitle's real nested pencil
+   <button>, reasoning "a literal <button> can't contain a literal
+   <button>." True, but ARIA 1.2 defines role="button" as Children
+   Presentational: True and normatively prohibits interactive descendants
+   too -- a real nested <button> inside a role="button" div is exactly the
+   case that rule exists to prevent, and user agents prune that subtree
+   (the pencil's role/name were not reliably exposed to assistive tech).
+   The row's "select this conversation" affordance now lives on the title
+   text itself, rendered as a real sibling <button> by EditableTitle (its
+   `onActivateValue` prop, passed below) -- two adjacent buttons (title,
+   pencil), no nesting, no ARIA violation. This div is now purely a
+   layout/hover grouping for the row, not a target itself.
    -------------------------------------------------------------------------- */
 
 export interface ConversationListItemProps {
@@ -91,35 +87,25 @@ export function ConversationListItem({
             ? "tutor-conversation-item tutor-conversation-item--selected"
             : "tutor-conversation-item"
         }
-        role="button"
-        tabIndex={0}
-        aria-current={isSelected ? "true" : undefined}
-        aria-label={`Select conversation: ${title}`}
-        aria-describedby={metaId}
-        onClick={onSelect}
-        onKeyDown={(e) => {
-          // See this file's doc comment -- without this check, keyboard-
-          // activating the nested pencil button would also select the row.
-          if (e.target !== e.currentTarget) return;
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            onSelect();
-          }
-        }}
       >
         <EditableTitle
           value={title}
           onSave={onRename}
           isEditable={isEditable}
           className="tutor-conversation-item__title"
+          onActivateValue={onSelect}
+          activateLabel={`Select conversation: ${title}`}
+          activateDescribedBy={metaId}
+          isActive={isSelected}
         />
         <span className="tutor-conversation-item__meta" id={metaId}>
           <span className="tutor-conversation-item__time">{formatUpdatedAt(updatedAt)}</span>
           {/* #233: visible text plus a visually-hidden expansion, not
               aria-label on a plain <span> -- aria-label support on a
               non-interactive element without a naming role isn't
-              guaranteed the way it is on this component's own role="button"
-              row above. */}
+              guaranteed the way it is on the title button above (#295:
+              the accessible-name-bearing control here since the redesign
+              that removed this row's own role="button"). */}
           <span className="tutor-conversation-item__count">
             {messageCount}
             <span className="sr-only"> {messageCount === 1 ? "message" : "messages"}</span>

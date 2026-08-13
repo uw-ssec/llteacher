@@ -1,4 +1,4 @@
-import { StrictMode } from "react";
+import { StrictMode, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { createBrowserRouter, RouterProvider, useRouteError } from "react-router";
 import App from "./App";
@@ -19,10 +19,19 @@ function RouteErrorBoundary() {
   const error = useRouteError();
   // eslint-disable-next-line no-console
   console.error("[RouteErrorBoundary] caught a route render error", error);
+  // #298: this component only ever mounts as a route's errorElement -- so
+  // mounting itself IS "the error just appeared," unlike ErrorBoundary
+  // (which stays mounted and toggles between children/fallback). Focusing
+  // on mount is the equivalent restore-focus treatment for a component
+  // that has no prior state to compare against.
+  const fallbackRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    fallbackRef.current?.focus();
+  }, []);
   return (
     <div className="page-frame">
       <div className="app-shell">
-        <div className="error-boundary-fallback" role="alert">
+        <div className="error-boundary-fallback" role="alert" tabIndex={-1} ref={fallbackRef}>
           <p>Something went wrong. Please refresh the page.</p>
           <a href="/">Go home</a>
         </div>

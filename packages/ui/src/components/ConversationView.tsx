@@ -136,7 +136,19 @@ export function ConversationView({
     <div className="conversation-column">
       {/* Scrollable message area */}
       <div className="conversation-messages">
-        <div className="conversation-inner">
+        {/* #300: role="log" is the ARIA role specified for exactly this
+            case -- a sequence of items where new ones append at the end
+            (vs. role="status"/"alert" for a single replaceable message).
+            aria-relevant="additions" (not the "additions text" default)
+            means only a newly APPENDED node is announced, not every text
+            mutation inside an existing one -- combined with aria-busy on
+            the in-progress AI message (Message.tsx), a streaming reply is
+            silent while it fills in and announced once, whole, on
+            completion. Deliberately NOT on the whole message list's
+            grandparent or higher -- see this issue's own explicit warning
+            against a live region wide enough to re-announce every
+            streamed token. */}
+        <div className="conversation-inner" role="log" aria-live="polite" aria-relevant="additions">
           {/* Breadcrumb */}
           <p className="breadcrumb" aria-label="Location">{breadcrumb}</p>
 

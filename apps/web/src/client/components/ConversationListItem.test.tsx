@@ -60,22 +60,27 @@ describe("ConversationListItem", () => {
     expect(description?.textContent).toContain("6 messages");
   });
 
-  // #6 (redesigned post-review): #4's original contract is restored --
-  // the whole row, including the title, is the select control again. Only
-  // a small pencil icon (see the "rename (#6)" describe block below) is
-  // carved out for renaming.
-  describe("select (restored #4 contract)", () => {
-    it("calls onSelect when the row is clicked, including a click on the title text", async () => {
+  // #295 redesign: the row itself is now a plain, non-interactive <div> --
+  // NOT role="button" (see this file's own #295 doc comment for why: a
+  // nested real <button> inside role="button" is an ARIA violation user
+  // agents prune). The title TEXT is the select control, rendered as a
+  // real sibling <button> by EditableTitle (its `onActivateValue` prop).
+  describe("select (#295 redesign)", () => {
+    it("calls onSelect when the title text/button is clicked", async () => {
       const { onSelect } = renderItem();
       await userEvent.click(screen.getByText("Understanding p-values"));
       expect(onSelect).toHaveBeenCalledTimes(1);
     });
 
-    it("calls onSelect when clicking the row background away from the title/pencil", async () => {
+    // #295: the outer row is deliberately non-interactive now -- clicking
+    // its background (away from the title button) does nothing. This
+    // replaces the old row-is-role="button" test that asserted the
+    // opposite; that behavior is exactly what #295 removed.
+    it("does not call onSelect when clicking the row background away from the title/pencil", async () => {
       const { onSelect, container } = renderItem();
       const row = container.querySelector(".tutor-conversation-item")!;
       await userEvent.click(row);
-      expect(onSelect).toHaveBeenCalledTimes(1);
+      expect(onSelect).not.toHaveBeenCalled();
     });
 
     it("is keyboard-reachable and activatable via Enter/Space, carrying an aria-label", async () => {

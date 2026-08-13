@@ -167,8 +167,12 @@ export function TutorConversationsList({
         </div>
       )}
 
+      {/* #295: list-style: none strips list semantics in Safari/VoiceOver
+          without an explicit role="list" -- restoring it here since this
+          surface took the "title becomes a real button" alternative, not
+          the role="listbox" route (which would supersede this). */}
       {conversations.length > 0 && (
-        <ul className="tutor-sidebar__list" aria-label="Tutor conversation list">
+        <ul className="tutor-sidebar__list" role="list" aria-label="Tutor conversation list">
           {conversations.map((conv) => (
             <ConversationListItem
               key={conv.id}

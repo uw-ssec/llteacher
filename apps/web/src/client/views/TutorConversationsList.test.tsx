@@ -138,6 +138,15 @@ describe("TutorConversationsList", () => {
     });
   });
 
+  // #295: list-style: none strips list semantics in Safari/VoiceOver
+  // without an explicit role="list" -- this rail took the "title becomes a
+  // real button" alternative (not role="listbox"), so role="list" is the
+  // one still required.
+  it("marks the conversation rail as a list (#295)", () => {
+    renderList({ conversations: [CONV_A] });
+    expect(screen.getByRole("list", { name: "Tutor conversation list" })).toBeTruthy();
+  });
+
   it("clicking an existing conversation's row calls onSelectConversation with its id", async () => {
     const { onSelectConversation } = renderList({ conversations: [CONV_A] });
     await userEvent.click(screen.getByRole("button", { name: "Select conversation: Chat A" }));

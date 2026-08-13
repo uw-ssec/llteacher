@@ -125,3 +125,33 @@ describe("ConversationView hasMoreHistory notice (#280)", () => {
     expect(screen.getByText(/older messages aren't shown yet/i)).toBeTruthy();
   });
 });
+
+// #300: the transcript itself carries the live region -- role="log" is the
+// role specified for a sequential-append list (vs. status/alert for a
+// single replaceable message), and aria-relevant="additions" means only a
+// newly-appended node is announced, not every text mutation inside an
+// existing one (which is what the in-progress aria-busy message on
+// Message.tsx suppresses -- see that component's own #300 test).
+describe("ConversationView live region (#300)", () => {
+  it("marks the transcript as a polite, additions-only log region", () => {
+    const { container } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} />,
+    );
+    const log = container.querySelector(".conversation-inner")!;
+    expect(log.getAttribute("role")).toBe("log");
+    expect(log.getAttribute("aria-live")).toBe("polite");
+    expect(log.getAttribute("aria-relevant")).toBe("additions");
+  });
+
+  it("does NOT put aria-live on anything wider than .conversation-inner (no torrent re-announce of every streamed token)", () => {
+    const { container } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} />,
+    );
+    // .conversation-messages is .conversation-inner's own parent -- the
+    // issue explicitly warns against a live region wide enough to
+    // re-announce every streamed token, so nothing above .conversation-inner
+    // itself may carry aria-live.
+    const messagesWrap = container.querySelector(".conversation-messages")!;
+    expect(messagesWrap.getAttribute("aria-live")).toBeNull();
+  });
+});

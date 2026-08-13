@@ -43,6 +43,27 @@ import { PencilSimple } from "@phosphor-icons/react";
    pencil button at all (not a disabled one) -- a non-owner should not even
    discover a rename affordance exists, matching the issue's "Only the
    conversation owner sees the edit affordance."
+
+   #295: `onActivateValue` turns the value span into a real, sibling
+   `<button>` -- for a caller like ConversationListItem that used to make
+   its OWN wrapper a `role="button"` div containing this component's pencil
+   button. ARIA 1.2 defines role="button" as Children Presentational: True
+   and normatively prohibits interactive descendants; a real nested
+   <button> is exactly the case that rule exists to prevent, and user
+   agents prune that subtree -- the pencil's role/name were not reliably
+   exposed to AT. With `onActivateValue` supplied, the row's own "select
+   this conversation" affordance moves onto the title text itself (a real
+   button), leaving two adjacent buttons (title, pencil) with no nesting
+   and no ARIA violation. Omitting `onActivateValue` keeps the plain,
+   non-interactive `<span>` behavior every existing caller (e.g. the chat
+   column header) still wants.
+
+   #298: exiting edit mode (save success, save failure, Escape) restores
+   focus to whichever trigger opened it -- the pencil button, or (when
+   present) the activate button for the `isEditable === false` case is
+   moot since there's no trigger at all there. Without this, all three
+   exit paths unmount the focused input and drop focus to <body>,
+   forcing a full keyboard re-traversal of the page.
    -------------------------------------------------------------------------- */
 
 export interface EditableTitleProps {
@@ -60,6 +81,21 @@ export interface EditableTitleProps {
   className?: string;
   /** aria-label prefix for the pencil rename trigger, e.g. "Rename". */
   renameLabel?: string;
+  /** #295: when provided, the value renders as a real `<button>` (a
+   *  sibling of the pencil button, never its ancestor) that calls this on
+   *  click/keyboard-activation instead of doing nothing. Omit to keep the
+   *  value as plain, non-interactive text. */
+  onActivateValue?: () => void;
+  /** aria-label for the value button. Required in practice whenever
+   *  `onActivateValue` is passed (falls back to the bare `value` text
+   *  otherwise, which is rarely a good accessible name on its own). */
+  activateLabel?: string;
+  /** Optional aria-describedby target for the value button (e.g. a
+   *  sibling block carrying timestamp/count metadata). */
+  activateDescribedBy?: string;
+  /** Sets aria-current="true" on the value button -- e.g. "this is the
+   *  currently-selected/open conversation." */
+  isActive?: boolean;
 }
 
 export function EditableTitle({
@@ -70,12 +106,19 @@ export function EditableTitle({
   error,
   className = "",
   renameLabel = "Rename",
+  onActivateValue,
+  activateLabel,
+  activateDescribedBy,
+  isActive,
 }: EditableTitleProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [pendingValue, setPendingValue] = useState(value);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  // #298: the trigger that opened edit mode -- restored on exit.
+  const pencilRef = useRef<HTMLButtonElement>(null);
+  const wasEditingRef = useRef(false);
   // Set right before we know the input is about to leave the DOM (a
   // successful or failed commitSave, or Escape) -- removing a focused
   // element from the DOM fires a real "blur" event in browsers, which
@@ -91,11 +134,33 @@ export function EditableTitle({
     if (!isEditing) setPendingValue(value);
   }, [value, isEditing]);
 
+  // #298: focus the input on entry; on exit (save/fail/Escape), restore
+  // focus to the pencil that opened it rather than letting it fall to
+  // <body> when React unmounts the (still-focused) input.
   useEffect(() => {
-    if (isEditing) inputRef.current?.focus();
+    if (isEditing) {
+      inputRef.current?.focus();
+    } else if (wasEditingRef.current) {
+      pencilRef.current?.focus();
+    }
+    wasEditingRef.current = isEditing;
   }, [isEditing]);
 
   if (!isEditable) {
+    if (onActivateValue) {
+      return (
+        <button
+          type="button"
+          className={`editable-title__value ${className}`.trim()}
+          onClick={onActivateValue}
+          aria-label={activateLabel}
+          aria-describedby={activateDescribedBy}
+          aria-current={isActive ? "true" : undefined}
+        >
+          {value}
+        </button>
+      );
+    }
     return <span className={`editable-title__text ${className}`.trim()}>{value}</span>;
   }
 
@@ -162,19 +227,34 @@ export function EditableTitle({
   if (!isEditing) {
     return (
       <span className={`editable-title ${className}`.trim()}>
-        {/* Plain, non-interactive display text -- NOT a click target for
-            entering edit mode (see this file's doc comment for why the
-            first version of this component had that, and why it changed:
-            a list row needs its title click-able for "select this row"
-            instead, restoring #4's original contract). */}
-        <span className="editable-title__value">{value}</span>
+        {/* #295: a real, sibling <button> when the caller wants the value
+            itself to be an activation control (e.g. "select this
+            conversation") -- never an ancestor of the pencil button below,
+            which would reproduce the role="button"-with-nested-button ARIA
+            violation this redesign exists to remove. Plain, non-interactive
+            text otherwise. */}
+        {onActivateValue ? (
+          <button
+            type="button"
+            className="editable-title__value"
+            onClick={onActivateValue}
+            aria-label={activateLabel}
+            aria-describedby={activateDescribedBy}
+            aria-current={isActive ? "true" : undefined}
+          >
+            {value}
+          </button>
+        ) : (
+          <span className="editable-title__value">{value}</span>
+        )}
         <button
+          ref={pencilRef}
           type="button"
           className="editable-title__pencil-btn"
           onClick={(e) => {
-            // Renaming and "select this row" (a likely ancestor click
-            // handler in list contexts) are separate interactions --
-            // never let this bubble into one.
+            // Renaming and "select this row" (a likely sibling activate
+            // button in list contexts) are separate interactions -- never
+            // let this bubble into one.
             e.stopPropagation();
             handleEdit();
           }}

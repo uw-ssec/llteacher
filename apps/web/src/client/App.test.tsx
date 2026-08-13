@@ -1121,6 +1121,50 @@ describe("App tutor sidebar collapse persistence (#4)", () => {
   });
 });
 
+// #299: two <nav> landmarks (Sidebar, TutorConversationsList) sit between
+// the top nav and the chat column with no content landmark for landmark
+// navigation to reach -- a skip link plus a <main> around the chat column
+// is the standard 2.4.1 Bypass Blocks fix.
+describe("App main landmark + skip link (#299)", () => {
+  it("wraps the conversation column in a focusable <main id=\"conversation-main\">, reachable from a first-child skip link", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    const { container } = render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("button", { name: "New conversation" });
+
+    const pageFrame = container.querySelector(".page-frame")!;
+    const skipLink = pageFrame.firstElementChild as HTMLAnchorElement;
+    expect(skipLink.tagName).toBe("A");
+    expect(skipLink.getAttribute("href")).toBe("#conversation-main");
+    expect(skipLink.textContent).toMatch(/skip to conversation/i);
+
+    const main = document.getElementById("conversation-main")!;
+    expect(main.tagName).toBe("MAIN");
+    expect(main.getAttribute("tabindex")).toBe("-1");
+  });
+});
+
 // #252: the section chat's own version of the #4 fix-round regression --
 // resuming a section with an existing conversationId set `conversationId`
 // but never hydrated `useChat`'s messages, so the LLM received zero prior
