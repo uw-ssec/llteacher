@@ -173,7 +173,22 @@ export function Composer({
       <div className="composer-inner">
         <div className="composer-wrap">
           <div className="composer-body">
-            {/* The textarea — single input mode. Code goes in markdown fences. */}
+            {/* The textarea — single input mode. Code goes in markdown fences.
+                #270: native `disabled` removes the element from the focus
+                order the instant it's set -- mid-turn, that's while this
+                element already HAS focus, so the browser blurs it to
+                `document.body` with nothing to restore it, forcing a
+                keyboard-only student to re-traverse the whole page (nav,
+                homework sidebar, tutor rail, every conversation row) to
+                send their next message. aria-disabled never removes the
+                element from that order (focus survives the send/receive
+                cycle by construction, nothing to restore), and is announced
+                to AT where native `disabled` silently vanishes from the
+                accessibility tree -- the WCAG 2.5.8 target-size/AT-visibility
+                complaint the original review also raised, fixed as a side
+                effect of the same change. readOnly is the actual input
+                suppression during streaming; the `!disabled` guard in
+                handleKeyDown above still blocks Enter-to-submit too. */}
             <textarea
               ref={textareaRef}
               className="composer-textarea"
@@ -181,7 +196,8 @@ export function Composer({
               onChange={(e) => onChange(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={placeholder}
-              disabled={disabled}
+              aria-disabled={disabled}
+              readOnly={disabled}
               rows={1}
               aria-label="Message input"
               aria-multiline="true"

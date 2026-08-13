@@ -61,6 +61,13 @@ describe("useStudentHomework", () => {
   });
 });
 
+// #270: Composer's textarea uses aria-disabled + readOnly, not native
+// `disabled` -- see Composer.tsx's own comment for why (native disabled
+// blurs a focused element with nothing to restore it).
+function isComposerDisabled(el: HTMLTextAreaElement): boolean {
+  return el.getAttribute("aria-disabled") === "true" && el.readOnly;
+}
+
 /* Builds a minimal, schema-valid AI SDK v5 UI message stream response body
    ("start" -> a single text part -> "finish", then the SSE "[DONE]"
    sentinel) -- the exact shape @ai-sdk/react's DefaultChatTransport parses
@@ -785,10 +792,16 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
     // Status flips to "submitted" synchronously inside sendMessage, before
     // the (still-pending) fetch resolves -- the composer must reflect that
     // immediately, not just once a response eventually arrives.
-    await waitFor(() => expect(composer.disabled).toBe(true));
+    await waitFor(() => expect(isComposerDisabled(composer)).toBe(true));
     expect(chatCallCount).toBe(1);
+    // #270: aria-disabled + readOnly never remove the element from the
+    // focus order -- the actual regression this issue covers is that the
+    // OLD native-`disabled` composer blurred itself to document.body the
+    // instant this state was set, right after the student pressed Enter
+    // (the composer still has focus from typing/submitting at this point).
+    expect(document.activeElement).toBe(composer);
 
-    // Disabled textareas reject keystrokes/Enter entirely in jsdom -- this
+    // readOnly textareas reject keystrokes/Enter entirely in jsdom -- this
     // proves the guard is load-bearing (AI SDK v5's Chat#sendMessage has no
     // internal guard of its own against being called while already in
     // flight), not merely a visual flag nobody enforces.
@@ -817,7 +830,11 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
       ),
     );
     await screen.findByText("reply");
-    await waitFor(() => expect(composer.disabled).toBe(false));
+    await waitFor(() => expect(isComposerDisabled(composer)).toBe(false));
+    // #270: focus survived the ENTIRE send/receive cycle -- never lost, so
+    // nothing needed to restore it. A keyboard-only student can type their
+    // next message immediately with no re-traversal of the page.
+    expect(document.activeElement).toBe(composer);
   });
 
   it("surfaces a failed turn as an inline retryable error instead of silently disappearing, and regenerate() recovers it", async () => {
@@ -870,14 +887,14 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
     // here too, Retry (which replays the exact request that just failed)
     // would be the only way out, with no way to instead send a corrected
     // or different message.
-    expect(composer.disabled).toBe(false);
+    expect(isComposerDisabled(composer)).toBe(false);
 
     await user.click(screen.getByRole("button", { name: "Retry" }));
 
     await screen.findByText("recovered reply");
     expect(chatCallCount).toBe(2);
     expect(screen.queryByRole("alert")).toBeNull();
-    expect((screen.getByLabelText("Message input") as HTMLTextAreaElement).disabled).toBe(false);
+    expect(isComposerDisabled(screen.getByLabelText("Message input") as HTMLTextAreaElement)).toBe(false);
   });
 
   it("recovers from an error by sending a fresh message directly, without using Retry", async () => {
@@ -1020,7 +1037,7 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
     // PR-1 whole-branch review (Important): same "error" != "disabled" fix
     // as the section chat above, applied to the tutor chat's independent
     // useChat instance too.
-    expect(composer.disabled).toBe(false);
+    expect(isComposerDisabled(composer)).toBe(false);
 
     await user.click(screen.getByRole("button", { name: "Retry" }));
 
@@ -1402,7 +1419,7 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
     // Composer disabled while hydration is broken -- a context-free turn
     // must not be sendable into the real conversation.
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
-    expect(composer.disabled).toBe(true);
+    expect(isComposerDisabled(composer)).toBe(true);
     expect(messagesCallCount).toBe(1);
 
     // Retry re-attempts the same fetch (still fails here -- proving Retry
@@ -1461,6 +1478,6 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
     expect(await screen.findByText("STATS 311 · TUTOR CHAT")).toBeTruthy();
     expect(await screen.findByText(/Couldn't load that conversation/i)).toBeTruthy();
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
-    expect(composer.disabled).toBe(true);
+    expect(isComposerDisabled(composer)).toBe(true);
   });
 });
