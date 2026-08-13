@@ -111,6 +111,35 @@ Copied from #30's own "Integration & Verification Strategy" — every PR's tests
 
 **Why #144 here, not later:** it fixes the *existing* single-chat surface, and #4 is about to add a second UI surface reading the same message data — better to land the crash/error-boundary fix before there are two surfaces to keep in sync.
 
+### PR 1 addendum (2026-08-12): non-blocking findings pulled forward from the round-3 audit
+
+Cordero's round-3 re-audit of #212 filed 50 issues (#263–#312): 4 Critical,
+39 Major, 7 Minor/Enhancement. 11 were blocking and are already fixed (see
+the sync note above this table). Of the remaining 39, the 16 below are
+worth finishing in *this* PR rather than deferring — either because
+Cordero's own review text explicitly said "I'd pull forward," or because
+they're direct continuations of code the 11 blocking fixes already
+touched this session (same file/function; cheaper to close now than to
+re-open the area for a second pass later). The rest are distributed into
+PR 2/PR 4 below — nothing in this batch maps to PR 3's WebR/transcript
+scope.
+
+| Issue | Title | Why now |
+|---|---|---|
+| [#285](https://github.com/uw-ssec/llteacher/issues/285) | document the five new conversation routes for consumers | **Critical**, and Cordero's own "I'd pull forward" list. Three other CDI teams integrate against these routes with zero consumer docs today — path/method/auth/request-response shape/error codes for each. |
+| [#280](https://github.com/uw-ssec/llteacher/issues/280) | wire conversation and message pagination in the client | Cordero's "pull forward" list. Server already paginates (#224); the client never sends `limit`/`before` or offers load-more, so the 51st conversation is unreachable. Fix with #281. |
+| [#281](https://github.com/uw-ssec/llteacher/issues/281) | conversation list cursor drops rows; no tiebreaker or index | Cordero's "pull forward" list. The `updatedAt` cursor #280 would page on isn't safe yet — no tiebreaker, no supporting index. |
+| [#295](https://github.com/uw-ssec/llteacher/issues/295)–[#300](https://github.com/uw-ssec/llteacher/issues/300) | the accessibility set: rename pencil not exposed to AT (nested interactive inside `role=button`), rail contrast fails WCAG, rename-pencil target is half the WCAG 2.5.8 minimum, rename-exit/error-boundary destroys keyboard focus, no main landmark/skip link past two nav rails, streamed output never announced to screen readers | Cordero's "pull forward" list, and directly continues #270 (composer focus) — same audit dimension, same PR, same review pass. |
+| [#273](https://github.com/uw-ssec/llteacher/issues/273) | concurrent duplicate sends still make two model calls | Self-tagged **Blocking** in the issue's own body but not in Cordero's synthesized 11-item list (verified — the only one of the 39 with that discrepancy). `chatHandler` still discards `appendMessage`'s return value, so two concurrent identical sends both reach `streamText` even though the DB write itself is race-safe as of #266. Fix alongside #266's `resolveConflict`. |
+| [#283](https://github.com/uw-ssec/llteacher/issues/283) | section messages still order by `createdAt`, not `seq` | Direct continuation of #269: `getSectionConversationMessages` (`sectionConversations.ts`) was untouched by that fix and still sorts the old way. ARCHITECTURE.md's "Message Ordering" section (written for #269) currently overclaims `seq` is authoritative on every read path — fix with #301. |
+| [#304](https://github.com/uw-ssec/llteacher/issues/304) | `memberships[0]` is non-deterministic and assumes one course | Direct continuation: `chat.ts:375`'s `fallbackCourseId`, written this session for the #259/kind:"section" fix, has no `ORDER BY` — a multi-course user can silently land in the wrong course's scope. |
+| [#307](https://github.com/uw-ssec/llteacher/issues/307) | align content gate with what replay and renderer can show | Minor; tightens `hasRenderableContent` further, the exact function #268 modified this session. |
+| [#308](https://github.com/uw-ssec/llteacher/issues/308) | add size bounds and reject unknown `kind` instead of coercing | Minor; extends `historyMessageSchema`/the `kind` derivation, both touched this session for #264/#259. |
+| [#301](https://github.com/uw-ssec/llteacher/issues/301) | ARCHITECTURE.md claims no route calls now-wired functions | Trivial doc fix — do together with #283, since fixing #283 changes what this section should say anyway. |
+| [#306](https://github.com/uw-ssec/llteacher/issues/306) | lockfile, react peer range, locale, and lint hygiene | Trivial, zero-risk, four 1–6 line fixes bundled by the reviewer. |
+
+**Not pulled forward, flagged for reconsideration:** [#286](https://github.com/uw-ssec/llteacher/issues/286) (chat errors render the raw HTTP response body to students — a real usability/security issue in the shipped #144 error row), [#287](https://github.com/uw-ssec/llteacher/issues/287) (#231's auto-titling landed on a path no client can reach — the feature is non-functional in production today), [#291](https://github.com/uw-ssec/llteacher/issues/291) (rename errors persist forever, shipped #6), [#292](https://github.com/uw-ssec/llteacher/issues/292) (rail message count off by half, shipped #216), and [#294](https://github.com/uw-ssec/llteacher/issues/294) (breadcrumb/nav hardcoded — the issue's own text says this PR is what made them wrong). All five are real bugs in features *this* PR shipped, not pre-existing debt — they're parked in PR 4's table below by default, but there's a real argument for pulling them into PR 1 instead. Worth a second look before merging.
+
 ---
 
 ## PR 2 — Section-Aware Prompting, LLM Config Resolution, Conversation Lifecycle
@@ -127,6 +156,13 @@ Copied from #30's own "Integration & Verification Strategy" — every PR's tests
 | [#128](https://github.com/uw-ssec/llteacher/issues/128) *(M3)* | resolve submission uniqueness/resubmission semantics | **design decision, resolve before/alongside #27's delete-and-restart implementation.** Answer: does delete-and-restart on an already-submitted section (a) supersede the existing submission (re-point at new conversation) or (b) implicitly un-submit? Then add the DB-level constraint that actually enforces the chosen answer (current schema doesn't survive soft-delete-and-recreate). Feed the answer directly into #27's delete-and-restart requirement above. |
 | [#22](https://github.com/uw-ssec/llteacher/issues/22) *(M3)* | section submission flow | already merged (PR #154) — **re-run its Vitest suite + manual walk now that #27 produces real conversations**; confirm resubmit-in-place still behaves per #128's resolved semantics; close the issue |
 | [#23](https://github.com/uw-ssec/llteacher/issues/23) *(M3)* | submissions dashboard | already merged except one box — **verify the real-data aggregation now that #27 exists**; leave the "drill-in navigation to transcript viewer" checkbox open (blocked on #29, PR 3) |
+| [#267](https://github.com/uw-ssec/llteacher/issues/267) | validate UUID params on new conversation routes | pairs with #143's tenancy-binding hardening -- same "harden the request boundary" pass, same files |
+| [#274](https://github.com/uw-ssec/llteacher/issues/274) | model-call timeout + client stop control | #143 already requires `AbortSignal.timeout` -- this is that requirement's own filed issue; implement together |
+| [#275](https://github.com/uw-ssec/llteacher/issues/275) | observability on the chat failure path | pairs with #143's hardening; log locally per the "Known soft dependencies" #45 pattern below, rewire when M8 ships |
+| [#279](https://github.com/uw-ssec/llteacher/issues/279) | collapse 8 sequential DB round-trips per turn | `chatHandler` gets rewritten for #25/#26/#143 anyway -- do the round-trip consolidation in the same pass, not a second one |
+| [#282](https://github.com/uw-ssec/llteacher/issues/282) | per-course/global LLM budget, not just per-user | directly extends #26's LLM config resolution -- the scarce resource is one deployment-wide credential, so per-user-only limiting is the wrong axis once #26 makes config resolution real |
+| [#305](https://github.com/uw-ssec/llteacher/issues/305) | move the section greeting out of the repository layer | the greeting is prompt-construction content (persona/wording), not persistence logic -- #25's prompt builder is its correct home once it exists |
+| [#312](https://github.com/uw-ssec/llteacher/issues/312) | dedupe scope check, split `chatHandler`, fix stale comments | `chatHandler` is already getting heavily rewritten for #25/#26/#143/#274/#279 -- do the structural cleanup in that same pass |
 
 **Primary files:** `apps/web/src/lib/prompts.ts` (new), `apps/web/src/lib/llm-config.ts` (new), `apps/web/src/lib/ai.ts` (extend with the LiteLLM/LLMoxie client factory, #178), `apps/web/src/db/schema/content.ts` (extend `llm_provider` enum + migration, #178), `apps/web/src/db/schema/conversations.ts` (new — split out of `content.ts`/`runtime.ts` per #27), `apps/web/src/lib/conversations.ts` (new service layer), `apps/web/src/server/routes/conversations.ts` (extend from PR 1), `apps/web/src/server/routes/chat.ts`, `apps/web/src/db/schema/runtime.ts` (submission/conversation constraint per #128's decision).
 
@@ -162,6 +198,22 @@ Copied from #30's own "Integration & Verification Strategy" — every PR's tests
 | [#89](https://github.com/uw-ssec/llteacher/issues/89) | answer-leakage eval harness | checked-in eval set (adversarial + normal prompts); `npm run tutor:eval` runs real prompt builder + judge pass; baseline scores + regression-fail threshold; solution-leakage cases double as #25's structural unit fixtures; deterministic/recorded mode for CI |
 | [#90](https://github.com/uw-ssec/llteacher/issues/90) | student feedback flag | per-message flag affordance (reason + optional comment), one per message per student; instructor review surface; flagged examples exportable into #89's eval set |
 | [#167](https://github.com/uw-ssec/llteacher/issues/167) *(M3)* | auto-submit overdue sections | scheduled job submits past-due sections with an active-but-unsubmitted conversation; distinguishable `source` column (`student`\|`auto`); idempotent re-runs; observable run counts; **built on #128's resolved uniqueness semantics from PR 2 — do not build ahead of it (this was explicitly called out in the issue)** |
+| [#277](https://github.com/uw-ssec/llteacher/issues/277) | memoize message lists, throttle streamed re-renders | perf/reliability, pairs with #96's streaming resilience work |
+| [#278](https://github.com/uw-ssec/llteacher/issues/278) | scroll effect fires per token, ignores reduced-motion | same UI-perf/a11y bucket as #277 -- do together |
+| [#288](https://github.com/uw-ssec/llteacher/issues/288) | disclose the 40-message context window to the student | directly #88's territory (context-window management) -- the student-facing half of that issue |
+| [#289](https://github.com/uw-ssec/llteacher/issues/289) | delete affordance for tutor conversations | feature completion for #5 (DELETE route already exists server-side, no client affordance) |
+| [#290](https://github.com/uw-ssec/llteacher/issues/290) | selecting a conversation gives no feedback until it loads | UI polish, pairs with #293 |
+| [#293](https://github.com/uw-ssec/llteacher/issues/293) | empty-state flashes on load; disabled reason is invisible | UI polish, pairs with #290 |
+| [#302](https://github.com/uw-ssec/llteacher/issues/302) | extract a shared hook for the two chat surfaces in App.tsx | refactor/cleanup once App.tsx's shape has settled post-PR2/PR3 |
+| [#303](https://github.com/uw-ssec/llteacher/issues/303) | consolidate ten copies of the mount-fetch router in App.test.tsx | test hygiene |
+| [#309](https://github.com/uw-ssec/llteacher/issues/309) | cover the production atomicity path and count-shaped properties | test hygiene, pairs with PR 4's own regression-suite pass |
+| [#310](https://github.com/uw-ssec/llteacher/issues/310) | tutor rail interaction and rendering polish | polish |
+| [#311](https://github.com/uw-ssec/llteacher/issues/311) | drop unused option surface; document capacity assumptions | chore |
+| [#286](https://github.com/uw-ssec/llteacher/issues/286) | chat errors render the raw HTTP response body to students | **flagged for PR 1 reconsideration** (see PR 1 addendum) -- parked here only by default |
+| [#287](https://github.com/uw-ssec/llteacher/issues/287) | #231's auto-titling landed on a path no client can reach | **flagged for PR 1 reconsideration** -- the feature is non-functional in production today |
+| [#291](https://github.com/uw-ssec/llteacher/issues/291) | rename errors persist forever and crush the input | **flagged for PR 1 reconsideration** -- bug in shipped #6 |
+| [#292](https://github.com/uw-ssec/llteacher/issues/292) | rail message count is off by half, credited to wrong row | **flagged for PR 1 reconsideration** -- bug in shipped #216 |
+| [#294](https://github.com/uw-ssec/llteacher/issues/294) | breadcrumb and nav hardcode section, homework, and user | **flagged for PR 1 reconsideration** -- the issue's own text says this PR is what made them wrong |
 
 **Primary files:** `apps/web/src/lib/tokenCounter.ts` (new), `apps/web/src/db/schema/content.ts` (stream-session tracking, `responseFeedback`, `conversation_summary`), `apps/web/src/server/routes/chat/resume.ts` (new), `apps/web/src/server/jobs/cleanup-stale-streams.ts` (new), `apps/web/src/server/jobs/auto-submit-overdue.ts` (new), `evals/tutor-behavior.ts` + `evals/datasets/` + `evals/scoring/` (new), `apps/web/src/server/routes/feedback.ts` (new), `apps/admin/src/client/views/FeedbackDashboard.tsx` (new).
 
