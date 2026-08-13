@@ -207,6 +207,7 @@ describe("POST /api/chat", () => {
       getLastMessagesMock.mockResolvedValue([]);
 
       const res = await postChat(buildApp(fakeAuthContext()), {
+        courseId: "course-a",
         messages: [
           { id: "m1", role: "user", parts: [{ type: "text", text: "what's a p-value?" }] },
           {
@@ -250,7 +251,10 @@ describe("POST /api/chat", () => {
       createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
       getLastMessagesMock.mockResolvedValue([]);
 
-      const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        courseId: "course-a",
+      });
 
       expect(res.status).toBe(200);
     });
@@ -280,7 +284,10 @@ describe("POST /api/chat", () => {
       createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
       getLastMessagesMock.mockResolvedValue([]);
 
-      const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        courseId: "course-a",
+      });
 
       expect(res.status).toBe(200);
       expect(createConversationMock).toHaveBeenCalledTimes(1);
@@ -299,6 +306,7 @@ describe("POST /api/chat", () => {
       const longText = "a".repeat(80);
 
       await postChat(buildApp(fakeAuthContext()), {
+        courseId: "course-a",
         messages: [{ id: "client-1", role: "user", parts: [{ type: "text", text: longText }] }],
       });
 
@@ -315,6 +323,7 @@ describe("POST /api/chat", () => {
       // (see hasRenderableContent), just not a text part, which is what
       // this test is actually exercising.
       await postChat(buildApp(fakeAuthContext()), {
+        courseId: "course-a",
         messages: [{ id: "client-1", role: "user", parts: [{ type: "step-start" }] }],
       });
 
@@ -322,21 +331,37 @@ describe("POST /api/chat", () => {
       expect(input.title).toBe("New Conversation");
     });
 
-    it("falls back to the caller's own course membership when courseId is omitted", async () => {
+    // #304: previously fell back to authContext.memberships[0]?.courseId --
+    // listMembershipsForUser has no ORDER BY, so that pick was arbitrary
+    // and could differ between two requests from the same multi-course
+    // user (the norm for instructors/TAs). courseId is now required
+    // explicitly on every no-conversationId request; the section path
+    // already sent it unconditionally (see #272's test above), so this
+    // only tightens the tutor path.
+    it("400s when conversationId is omitted and courseId is also omitted (no silent membership guess)", async () => {
+      const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+      expect(res.status).toBe(400);
+      expect(createConversationMock).not.toHaveBeenCalled();
+    });
+
+    it("creates the conversation under the explicitly-provided courseId", async () => {
       createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
       getLastMessagesMock.mockResolvedValue([]);
 
-      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        courseId: "course-a",
+      });
 
-      // scope.ts's courseScopeFromAuthContext mints a CourseScope only from a
-      // courseId the authContext actually reports membership in -- asserting
-      // createConversation was called at all (rather than 403ing) is itself
-      // proof the fallback resolved to "course-a", the one membership fakeAuthContext sets up.
+      expect(res.status).toBe(200);
       expect(createConversationMock).toHaveBeenCalledTimes(1);
     });
 
-    it("403s when the caller has no course membership to fall back to", async () => {
-      const res = await postChat(buildApp(fakeAuthContext({ memberships: [] })), { messages: [userUiMessage] });
+    it("403s when the caller provides a courseId they are not a member of", async () => {
+      const res = await postChat(buildApp(fakeAuthContext({ memberships: [] })), {
+        messages: [userUiMessage],
+        courseId: "course-a",
+      });
       expect(res.status).toBe(403);
       expect(createConversationMock).not.toHaveBeenCalled();
     });
@@ -346,6 +371,7 @@ describe("POST /api/chat", () => {
       getLastMessagesMock.mockResolvedValue([]);
 
       const res = await postChat(buildApp(fakeAuthContext()), {
+        courseId: "course-a",
         messages: [userUiMessage],
         kind: "section",
         sectionId: "11111111-1111-1111-1111-111111111111",
@@ -372,6 +398,7 @@ describe("POST /api/chat", () => {
       await postChat(
         buildApp(fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] })),
         {
+          courseId: "course-a",
           messages: [userUiMessage],
           kind: "section",
           sectionId: "11111111-1111-1111-1111-111111111111",
@@ -395,6 +422,7 @@ describe("POST /api/chat", () => {
       getLastMessagesMock.mockResolvedValue([]);
 
       await postChat(buildApp(fakeAuthContext()), {
+        courseId: "course-a",
         messages: [userUiMessage],
         kind: "section",
         sectionId: "11111111-1111-1111-1111-111111111111",
@@ -432,6 +460,7 @@ describe("POST /api/chat", () => {
       getLastMessagesMock.mockResolvedValue([]);
 
       const res = await postChat(buildApp(fakeAuthContext()), {
+        courseId: "course-a",
         messages: [userUiMessage],
         kind: "section",
         sectionId: "11111111-1111-1111-1111-111111111111",
@@ -450,6 +479,7 @@ describe("POST /api/chat", () => {
       startSectionConversationMock.mockRejectedValue(new SectionNotFoundError("not found"));
 
       const res = await postChat(buildApp(fakeAuthContext()), {
+        courseId: "course-a",
         messages: [userUiMessage],
         kind: "section",
         sectionId: "11111111-1111-1111-1111-111111111111",
@@ -462,6 +492,7 @@ describe("POST /api/chat", () => {
       startSectionConversationMock.mockRejectedValue(new SectionNotInteractiveError());
 
       const res = await postChat(buildApp(fakeAuthContext()), {
+        courseId: "course-a",
         messages: [userUiMessage],
         kind: "section",
         sectionId: "11111111-1111-1111-1111-111111111111",
@@ -472,6 +503,7 @@ describe("POST /api/chat", () => {
 
     it("400s when kind is 'section' but sectionId is missing", async () => {
       const res = await postChat(buildApp(fakeAuthContext()), {
+        courseId: "course-a",
         messages: [userUiMessage],
         kind: "section",
       });
@@ -485,7 +517,7 @@ describe("POST /api/chat", () => {
     createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
     getLastMessagesMock.mockResolvedValue([]);
 
-    await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+    await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "course-a" });
 
     expect(appendMessageMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -504,7 +536,7 @@ describe("POST /api/chat", () => {
     createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
     getLastMessagesMock.mockResolvedValue([]);
 
-    const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+    const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "course-a" });
 
     expect(res.headers.get("x-conversation-id")).toBe("conv-1");
   });
@@ -785,7 +817,7 @@ describe("POST /api/chat", () => {
     createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
     getLastMessagesMock.mockResolvedValue([]);
 
-    await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+    await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "course-a" });
 
     expect(capturedOnFinish).toBeDefined();
     const responseMessage = {
@@ -814,7 +846,7 @@ describe("POST /api/chat", () => {
       return { row: { id: "msg-1" }, created: true };
     });
 
-    await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
+    await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "course-a" });
     expect(capturedOnFinish).toBeDefined();
 
     await expect(
@@ -834,7 +866,10 @@ describe("POST /api/chat", () => {
     }));
     // The schema requires the LAST message to be a well-formed user turn --
     // append the real inbound message on top of the long history.
-    await postChat(buildApp(fakeAuthContext()), { messages: [...longHistory, userUiMessage] });
+    await postChat(buildApp(fakeAuthContext()), {
+      messages: [...longHistory, userUiMessage],
+      courseId: "course-a",
+    });
 
     expect(streamTextMock).toHaveBeenCalledTimes(1);
     const callArgs = streamTextMock.mock.calls[0]![0] as { messages: unknown[] };

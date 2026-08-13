@@ -155,7 +155,7 @@ function buildApp() {
   return app;
 }
 
-function postChat(app: Hono<AppEnv>, payload: { messages: unknown[]; conversationId?: string }) {
+function postChat(app: Hono<AppEnv>, payload: { messages: unknown[]; conversationId?: string; courseId?: string }) {
   return app.request(
     "/api/chat",
     { method: "POST", body: JSON.stringify(payload), headers: { "content-type": "application/json" } },
@@ -219,7 +219,7 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
   it("does not persist an assistant row when the model stream errors before producing any content", async () => {
     fakeModel = erroringModel();
 
-    const res = await postChat(buildApp(), { messages: [userUiMessage] });
+    const res = await postChat(buildApp(), { messages: [userUiMessage], courseId: "course-a" });
     // Per the AI SDK's own behavior, a stream-level `error` chunk does not
     // fail the HTTP response -- it's forwarded as an `error` UI chunk to the
     // client while the response itself still completes normally.
@@ -234,7 +234,7 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
     // First attempt: the model errors out with nothing produced.
     fakeModel = erroringModel();
     const app = buildApp();
-    const firstRes = await postChat(app, { messages: [userUiMessage] });
+    const firstRes = await postChat(app, { messages: [userUiMessage], courseId: "course-a" });
     await firstRes.text();
 
     expect(messagesStore.map((m) => m.role)).toEqual(["user"]); // still just the user row
@@ -268,7 +268,7 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
   it("a THIRD identical request now replays the persisted (real) assistant reply instead of calling the model a third time", async () => {
     fakeModel = erroringModel();
     const app = buildApp();
-    await (await postChat(app, { messages: [userUiMessage] })).text();
+    await (await postChat(app, { messages: [userUiMessage], courseId: "course-a" })).text();
 
     fakeModel = succeedingModel("recovered reply");
     await (await postChat(app, { messages: [userUiMessage], conversationId: "conv-1" })).text();
@@ -301,7 +301,7 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
     it("does not persist the partial text -- the half-sentence must not become a permanent 'answer'", async () => {
       fakeModel = partialThenErrorModel();
 
-      const res = await postChat(buildApp(), { messages: [userUiMessage] });
+      const res = await postChat(buildApp(), { messages: [userUiMessage], courseId: "course-a" });
       expect(res.status).toBe(200);
       await res.text();
 
@@ -314,7 +314,7 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
     it("calls the model again (not a replay of the half-sentence) on an identical retry, and this time persists the real reply", async () => {
       fakeModel = partialThenErrorModel();
       const app = buildApp();
-      await (await postChat(app, { messages: [userUiMessage] })).text();
+      await (await postChat(app, { messages: [userUiMessage], courseId: "course-a" })).text();
       expect(messagesStore.map((m) => m.role)).toEqual(["user"]);
 
       fakeModel = succeedingModel("a p-value is the probability of seeing a result this extreme");

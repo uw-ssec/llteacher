@@ -460,8 +460,25 @@ export async function chatHandler(c: Context<AppEnv>) {
     }
     conv = existing;
   } else {
-    const fallbackCourseId = requestedCourseId ?? authContext.memberships[0]?.courseId;
-    const scope = fallbackCourseId ? courseScopeFromAuthContext(authContext, fallbackCourseId) : null;
+    // #304: previously fell back to authContext.memberships[0]?.courseId
+    // when the client omitted courseId -- listMembershipsForUser has no
+    // ORDER BY, so Postgres gives no ordering guarantee and [0] was
+    // arbitrary, possibly differing between two requests from the same
+    // user. ProfileService.ts already documents this exact pattern as a
+    // hazard ("memberships[0] would make the primary role flicker across
+    // requests") and deliberately avoids it; this PR reintroduced it on a
+    // write path. A user with two memberships -- the norm for instructors
+    // and TAs -- could get a tutor conversation silently minted into the
+    // wrong course. Requiring courseId explicitly loses no real caller:
+    // the section path already sends it on every no-conversationId
+    // request (see handleSendMessage in App.tsx), and courseScopeFromAuthContext
+    // below already rejects a course the caller isn't a member of, so
+    // this doesn't relax that check either.
+    if (!requestedCourseId) {
+      return c.json({ error: "courseId is required when conversationId is omitted" }, 400);
+    }
+    const courseId = requestedCourseId;
+    const scope = courseScopeFromAuthContext(authContext, courseId);
     if (!scope) {
       return c.json({ error: "Course access denied" }, 403);
     }
@@ -490,9 +507,9 @@ export async function chatHandler(c: Context<AppEnv>) {
           // startSectionConversationHandler uses -- a TA or observer
           // sending into a section is not a student doing the assignment,
           // but is also not who isInstructorOf's AUTHOR_ROLES tier means.
-          isTeacherTest: !isStudentInCourse(authContext.memberships, fallbackCourseId!),
+          isTeacherTest: !isStudentInCourse(authContext.memberships, courseId),
         });
-        conv = { id: created.id, ownerUserId: authContext.session.userId, courseId: fallbackCourseId! };
+        conv = { id: created.id, ownerUserId: authContext.session.userId, courseId };
         sectionGreetingParts = Array.isArray(created.greetingParts) ? created.greetingParts : undefined;
       } catch (err) {
         if (err instanceof SectionConversationExistsError) {
