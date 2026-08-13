@@ -606,6 +606,112 @@ describe("POST /api/chat", () => {
     });
   });
 
+  // #307: hasRenderableContent (the persistence/replay gate) must accept
+  // exactly the part shapes replayPersistedPart can actually turn into
+  // real streamed content -- nothing more, nothing less. Each case below
+  // drives the real "already answered" replay branch (a persisted
+  // assistant row as lastMessage, matching user row as secondLastMessage)
+  // and asserts one of two outcomes: a genuine replay (200, model never
+  // called, streamed body contains the expected content) for an "accepted"
+  // shape, or a fresh model call (the gate says "not really answered", so
+  // it falls through exactly like an unanswered turn would) for a
+  // "rejected" shape. Before this fix, several "rejected" shapes below
+  // (reasoning/file parts, a still-in-flight tool call) were WRONGLY
+  // accepted by the old gate -- persisted, then silently dropped by
+  // replayPersistedPart on the next retry, producing a permanently blank
+  // assistant bubble.
+  describe("#307 content gate matches replay emit-set", () => {
+    const acceptedCases: Array<{ name: string; parts: unknown[]; expectInBody: string }> = [
+      {
+        name: "non-empty text",
+        parts: [{ type: "text", text: "already answered this one" }],
+        expectInBody: "already answered this one",
+      },
+      {
+        name: "a resolved tool call (output-available)",
+        parts: [
+          {
+            type: "tool-showDefinition",
+            toolCallId: "call-1",
+            state: "output-available",
+            input: { term: "p-value" },
+            output: { status: "displayed", term: "p-value" },
+          },
+        ],
+        expectInBody: "tool-output-available",
+      },
+      {
+        name: "a resolved tool call (output-error)",
+        parts: [
+          {
+            type: "tool-showDefinition",
+            toolCallId: "call-1",
+            state: "output-error",
+            input: { term: "p-value" },
+            errorText: "definition lookup failed",
+          },
+        ],
+        expectInBody: "definition lookup failed",
+      },
+    ];
+
+    for (const { name, parts, expectInBody } of acceptedCases) {
+      it(`replays without a model call for: ${name}`, async () => {
+        getOwnedConversationOrNullMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+        getLastMessagesMock.mockResolvedValue([
+          { role: "assistant", parts, clientMessageId: null },
+          { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+        ]);
+
+        const res = await postChat(buildApp(fakeAuthContext()), {
+          messages: [userUiMessage],
+          conversationId: "conv-1",
+        });
+
+        expect(res.status).toBe(200);
+        expect(streamTextMock).not.toHaveBeenCalled();
+        expect(appendMessageMock).not.toHaveBeenCalled();
+        const body = await res.text();
+        expect(body).toContain(expectInBody);
+      });
+    }
+
+    const rejectedCases: Array<{ name: string; parts: unknown[] }> = [
+      { name: "step-start marker only", parts: [{ type: "step-start" }] },
+      { name: "empty text", parts: [{ type: "text", text: "" }] },
+      { name: "a reasoning part", parts: [{ type: "reasoning", text: "thinking it through" }] },
+      { name: "a file part", parts: [{ type: "file", url: "https://example.com/x" }] },
+      {
+        name: "a tool call still awaiting input (input-streaming)",
+        parts: [{ type: "tool-showDefinition", toolCallId: "call-1", state: "input-streaming" }],
+      },
+      {
+        name: "a tool call whose input landed but never resolved (input-available)",
+        parts: [
+          { type: "tool-showDefinition", toolCallId: "call-1", state: "input-available", input: { term: "p-value" } },
+        ],
+      },
+    ];
+
+    for (const { name, parts } of rejectedCases) {
+      it(`falls through to a real model call (not a blank replay) for: ${name}`, async () => {
+        getOwnedConversationOrNullMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+        getLastMessagesMock.mockResolvedValue([
+          { role: "assistant", parts, clientMessageId: null },
+          { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+        ]);
+
+        const res = await postChat(buildApp(fakeAuthContext()), {
+          messages: [userUiMessage],
+          conversationId: "conv-1",
+        });
+
+        expect(res.status).toBe(200);
+        expect(streamTextMock).toHaveBeenCalledTimes(1);
+      });
+    }
+  });
+
   describe("#273 concurrent duplicate sends", () => {
     it("only calls the model once when two concurrent requests race on the same clientMessageId", async () => {
       getOwnedConversationOrNullMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });

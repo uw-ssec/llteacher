@@ -209,12 +209,25 @@ const historyMessageSchema = z.object({
 // onFinish should persist an assistant row at all, and to decide whether an
 // already-persisted row is complete enough to replay -- so neither path can
 // treat "the model said nothing" as "the model answered."
+//
+// #307: an allowlist, not a denylist -- it accepts exactly the part shapes
+// replayPersistedPart below can actually emit something for (non-empty
+// text, or a tool-* call that resolved to output-available/output-error)
+// and nothing else. The previous version accepted ANY unrecognized part
+// shape (reasoning, file, source-url, or a tool-* part still mid-flight --
+// input-available/input-streaming, no output yet), so a turn whose only
+// "content" was one of those passed the gate, got persisted, and then
+// replayPersistedPart silently dropped it on replay (its own doc comment:
+// "anything else is dropped rather than guessed at") -- a permanently blank
+// assistant bubble with no error and no recovery. Keeping this allowlist in
+// lockstep with replayPersistedPart's emit-set is exactly what
+// chat.test.ts's "#307 gate/replay parity" test asserts, so the two can't
+// silently drift apart again.
 function hasRenderableContent(parts: unknown): boolean {
   if (!Array.isArray(parts)) return false;
   return parts.some((part) => {
     if (!part || typeof part !== "object" || !("type" in part)) return false;
     const type = (part as { type: unknown }).type;
-    if (type === "step-start") return false;
     if (type === "text") {
       const text = (part as { text?: unknown }).text;
       if (typeof text !== "string" || text.length === 0) return false;
@@ -232,9 +245,23 @@ function hasRenderableContent(parts: unknown): boolean {
       const state = (part as { state?: unknown }).state;
       return state !== "streaming";
     }
-    // Any other known part shape (tool-*, file, source-url/document, etc.)
-    // is real content the moment it exists.
-    return true;
+    if (typeof type === "string" && type.startsWith("tool-")) {
+      // #307: only a tool call that actually resolved -- output-available
+      // (a real result) or output-error (a real, renderable failure) --
+      // counts as content. input-available/input-streaming means the tool
+      // was invoked but the turn ended (aborted, provider error) before it
+      // resolved: replayPersistedPart has nothing to emit for that state
+      // beyond a dangling tool-input-available, which is exactly the
+      // "poisoned history" scenario (an unanswered tool call the model then
+      // can't recover from on the next turn) this fix exists to stop from
+      // ever being persisted as "answered" in the first place.
+      const toolCallId = (part as { toolCallId?: unknown }).toolCallId;
+      const state = (part as { state?: unknown }).state;
+      return typeof toolCallId === "string" && (state === "output-available" || state === "output-error");
+    }
+    // step-start, reasoning, file, source-url/document, and anything else
+    // this app's own TOOLS/renderer don't produce/display -- never counts.
+    return false;
   });
 }
 
@@ -253,7 +280,15 @@ function replayPersistedPart(part: { type: string } & Record<string, unknown>, w
     writer.write({ type: "text-end", id });
     return;
   }
-  if (part.type.startsWith("tool-") && typeof part.toolCallId === "string") {
+  if (
+    part.type.startsWith("tool-") &&
+    typeof part.toolCallId === "string" &&
+    (part.state === "output-available" || part.state === "output-error")
+  ) {
+    // #307: only ever reached for a tool call that actually resolved --
+    // hasRenderableContent's matching allowlist guarantees any part that
+    // gets here is output-available or output-error, never a dangling
+    // input-available/input-streaming call with no result to show.
     const toolName = part.type.slice("tool-".length);
     writer.write({ type: "tool-input-available", toolCallId: part.toolCallId, toolName, input: part.input });
     if (part.state === "output-error") {
