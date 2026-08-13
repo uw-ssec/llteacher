@@ -26,6 +26,7 @@ import { HomeworkReadOnlyView } from "./views/HomeworkReadOnlyView";
 import { SubmissionsView } from "./views/SubmissionsView";
 import { TaCapabilitiesView } from "./views/TaCapabilitiesView";
 import { LLMConfigsView } from "./views/LLMConfigsView";
+import type { LLMConfigOption } from "./components/HomeworkForm";
 import {
   LLM_CONFIGS,
   CURRENT_TEACHER,
@@ -88,6 +89,35 @@ export default function App() {
   const canAuthor = CURRENT_COURSE ? AUTHOR_ROLE_SET.has(CURRENT_COURSE.role) : false;
 
   const [view, setView] = useState<View>({ kind: "homeworks" });
+
+  // The homework create/edit form's "LLM config" picker needs the course's
+  // *real* llm_configs UUIDs -- it used to render the LLM_CONFIGS fixture's
+  // placeholder ids ("llm-001" etc.), which updateHomeworkHandler correctly
+  // rejects as not-a-UUID (400) on save. That PATCH failure landed after the
+  // homework's bare POST had already succeeded, so a save that picked
+  // anything but "(course/org default)" looked like a total failure while
+  // actually leaving an incomplete homework behind. Fetched once per course,
+  // same "no cache layer to hook into" reasoning as HomeworksDataLoader.
+  const [llmConfigOptions, setLlmConfigOptions] = useState<LLMConfigOption[]>([]);
+  useEffect(() => {
+    if (!CURRENT_COURSE_ID) return;
+    fetch(`/api/courses/${CURRENT_COURSE_ID}/llm-configs`)
+      .then((r) => { if (!r.ok) throw new Error("failed"); return r.json(); })
+      .then((data: { llmConfigs: { id: string; provider: string; modelName: string; isDefault: boolean }[] }) => {
+        setLlmConfigOptions(
+          data.llmConfigs.map((cfg) => ({
+            id: cfg.id,
+            name: `${cfg.provider} · ${cfg.modelName}${cfg.isDefault ? " (org default)" : ""}`,
+          })),
+        );
+      })
+      .catch(() => {
+        /* Leave empty -- the picker still offers "(course/org default)",
+           which is always valid, so a failed fetch degrades to "instructors
+           can't pick a specific config right now" rather than blocking
+           homework creation entirely. */
+      });
+  }, [CURRENT_COURSE_ID]);
 
   /* Sidebar collapse persists across reloads via localStorage. Lazy
      initializer reads on first render; the effect below writes on change.
@@ -213,7 +243,7 @@ export default function App() {
                 ) : CURRENT_COURSE_ID ? (
                   <HomeworkCreateView
                     courseId={CURRENT_COURSE_ID}
-                    llmConfigs={LLM_CONFIGS}
+                    llmConfigs={llmConfigOptions}
                     onCreated={() => setView({ kind: "homeworks" })}
                     onCancel={() => setView({ kind: "homeworks" })}
                   />
@@ -245,7 +275,7 @@ export default function App() {
                   <HomeworkEditView
                     courseId={CURRENT_COURSE_ID}
                     homeworkId={view.homeworkId}
-                    llmConfigs={LLM_CONFIGS}
+                    llmConfigs={llmConfigOptions}
                     onSaved={() => setView({ kind: "homeworks" })}
                     onCancel={() => setView({ kind: "homeworks" })}
                   />

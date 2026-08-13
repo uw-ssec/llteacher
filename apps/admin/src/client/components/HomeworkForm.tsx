@@ -3,8 +3,18 @@ import { useForm, useFieldArray } from "react-hook-form";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Button, Input } from "@llteacher/ui";
-import type { LLMConfig, SectionDetail } from "../lib/fixtures";
+import type { SectionDetail } from "../lib/fixtures";
 import { computeSectionDiff, type FormSection } from "../lib/computeSectionDiff";
+
+/** The picker only ever renders an id + a label -- decoupled from the full
+ *  fixtures.LLMConfig shape (which models the LLM-configs catalog page's
+ *  row, not what a dropdown needs) so a real, server-fetched config summary
+ *  (server/routes/llmConfigs.ts) can be mapped in without dragging along
+ *  fields (recordNumber, basePromptPreview, ...) it doesn't have. */
+export interface LLMConfigOption {
+  id: string;
+  name: string;
+}
 
 /** #165: an authored pre/post prompt pair, before the order-renumbering
  *  submit-time transform (mirrors FormSection's role for sections). */
@@ -61,7 +71,7 @@ export interface HomeworkFormProps {
     publish: boolean; releasedAt?: string;
     hidden: boolean; expiresAt?: string;
   }) => Promise<void>;
-  llmConfigs: LLMConfig[];
+  llmConfigs: LLMConfigOption[];
   isLoading?: boolean;
 }
 

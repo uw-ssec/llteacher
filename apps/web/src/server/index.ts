@@ -31,6 +31,7 @@ import {
 import { submitSectionAnswerHandler, getSectionAnswerHandler } from "./routes/sectionAnswers";
 import { submitWidgetResponseHandler } from "./routes/progressWidgets";
 import { listCourseTasHandler, updateTaCapabilitiesHandler } from "./routes/courseMemberships";
+import { listLlmConfigsHandler } from "./routes/llmConfigs";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireGraderOf, requireInstructorOf, requireRole } from "./utils/guards";
@@ -86,6 +87,7 @@ app.post("/api/webhooks/workos", workosWebhookHandler);
 app.get("/api/profile", getProfileHandler);
 app.patch("/api/profile", patchProfileHandler);
 app.get("/api/courses/:courseId/homeworks", requireCourseMember()(listHomeworksHandler));
+app.get("/api/courses/:courseId/llm-configs", requireInstructorOf()(listLlmConfigsHandler));
 app.post("/api/courses/:courseId/homeworks", requireInstructorOf()(createHomeworkHandler));
 app.get(
   "/api/courses/:courseId/homeworks/:homeworkId",

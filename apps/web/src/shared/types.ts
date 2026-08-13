@@ -215,6 +215,21 @@ export interface HomeworkUpdateBody {
   widgets?: ProgressWidgetDiffInput[];
 }
 
+/** A course's org-scoped `llm_configs` rows, read-only, for the homework
+ *  author's config picker (apps/admin). Deliberately thin -- no credential
+ *  or prompt-template internals -- since this is exposed to any instructor,
+ *  not just the org admin who manages the underlying config. */
+export interface LLMConfigSummary {
+  id: string;
+  provider: string;
+  modelName: string;
+  isDefault: boolean;
+}
+
+export interface LLMConfigListResponse {
+  llmConfigs: LLMConfigSummary[];
+}
+
 export interface HomeworkPublishBody {
   publish: boolean;
   /** ISO datetime. If omitted and publish=true, releases immediately. Must
