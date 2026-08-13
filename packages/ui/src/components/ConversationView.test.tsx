@@ -109,3 +109,19 @@ describe("ConversationView error row (#144)", () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 });
+
+// #280: the messages route pages at 200 with no "load older" wired -- this
+// makes that ceiling visible instead of silent.
+describe("ConversationView hasMoreHistory notice (#280)", () => {
+  it("renders nothing extra when hasMoreHistory is omitted/false", () => {
+    render(<ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} />);
+    expect(screen.queryByText(/older messages aren't shown yet/i)).toBeNull();
+  });
+
+  it("renders a notice above the transcript when hasMoreHistory is true", () => {
+    render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} hasMoreHistory={true} />,
+    );
+    expect(screen.getByText(/older messages aren't shown yet/i)).toBeTruthy();
+  });
+});

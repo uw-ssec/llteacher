@@ -38,6 +38,12 @@ export interface TutorConversationsListProps {
   conversations: ConversationListItemResponse[];
   loading: boolean;
   loadError: boolean;
+  /** #280: true when the server has more conversations than this list
+   *  fetched (the list route pages at 50, no load-more is wired yet) --
+   *  renders a visible note below the list so the page ceiling is visible
+   *  rather than silent (an empty-looking tail otherwise looks identical to
+   *  "I have exactly N conversations"). */
+  hasMore: boolean;
   selectedConversationId: string | undefined;
   /** Fired when an existing row is clicked. */
   onSelectConversation: (conversationId: string) => void;
@@ -59,6 +65,7 @@ export function TutorConversationsList({
   conversations,
   loading,
   loadError,
+  hasMore,
   selectedConversationId,
   onSelectConversation,
   onCreateConversation,
@@ -175,6 +182,18 @@ export function TutorConversationsList({
             />
           ))}
         </ul>
+      )}
+
+      {/* #280: the list route pages at 50 with no load-more wired yet --
+          without this, the 51st-oldest conversation is silently
+          unreachable (an empty-looking tail is indistinguishable from "I
+          have exactly 50 conversations"). Static text, not a live region:
+          it's present at initial render, not something that appears mid-
+          interaction and needs to interrupt anything. */}
+      {!loadError && hasMore && (
+        <p className="tutor-sidebar__more-notice">
+          Showing your most recent {conversations.length} conversations. Older ones aren't shown yet.
+        </p>
       )}
     </nav>
   );

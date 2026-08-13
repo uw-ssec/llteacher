@@ -24,6 +24,13 @@ export interface UseTutorConversationsResult {
   /** True only when a fetch to a *known* courseId failed (network error or
    *  non-2xx) -- never true just because courseId hasn't loaded yet. */
   loadError: boolean;
+  /** #280: true when the server's response carried a non-null `nextCursor`
+   *  -- there are more conversations than fit in one page (the list route's
+   *  default page size, 50) that this hook doesn't fetch. Load-more itself
+   *  isn't wired yet (the fix here is making the ceiling visible instead of
+   *  silent, the issue's own explicitly-sanctioned interim); a caller can
+   *  use this to render a "showing the most recent N" notice. */
+  hasMore: boolean;
   /** Refetches the list from the server. Not called automatically after
    *  createConversation (that appends optimistically instead). */
   refetch: () => void;
@@ -58,6 +65,7 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
   const [conversations, setConversations] = useState<ConversationListItemResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
 
   // #223: renameConversation needs to read the row being renamed BEFORE its
   // own optimistic update, to roll back to the right value on failure --
@@ -78,6 +86,7 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
       // to yet (homework list still loading, or the student has none).
       setConversations([]);
       setLoadError(false);
+      setHasMore(false);
       setLoading(false);
       return;
     }
@@ -88,16 +97,18 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
         return r.json() as Promise<ConversationListResponse>;
       })
       .then((data) => {
-        // #281: the route now returns { items, nextCursor } instead of a
-        // bare array. Only `items` is consumed here -- this hook doesn't
-        // paginate yet (wiring `nextCursor` into an actual load-more is
-        // #280's job); a single initial fetch is still exactly what every
-        // caller of `refetch` wants today.
+        // #281: the route returns { items, nextCursor } instead of a bare
+        // array. #280: `nextCursor` is now surfaced as `hasMore` -- this
+        // hook still only ever fetches one page (an actual load-more
+        // request isn't wired), but a non-null cursor means the ceiling is
+        // real and worth showing rather than leaving the ceiling silent.
         setConversations(data.items);
+        setHasMore(data.nextCursor !== null);
         setLoadError(false);
       })
       .catch(() => {
         setConversations([]);
+        setHasMore(false);
         setLoadError(true);
       })
       .finally(() => setLoading(false));
@@ -191,5 +202,5 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     });
   }, []);
 
-  return { conversations, loading, loadError, refetch, createConversation, renameConversation, bumpConversation };
+  return { conversations, loading, loadError, hasMore, refetch, createConversation, renameConversation, bumpConversation };
 }

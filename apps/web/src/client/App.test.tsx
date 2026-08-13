@@ -227,7 +227,9 @@ describe("App tutor-conversations rail (#4)", () => {
         // existing tests that don't care about hydration itself (e.g.
         // "selecting a homework section switches back") don't need to know
         // about this endpoint's existence.
-        const messagesMatch = url.match(/^\/api\/conversations\/([^/]+)\/messages$/);
+        // #280: matches with or without a query string -- fetchConversationHistory
+        // now requests an explicit `?limit=` param.
+        const messagesMatch = url.match(/^\/api\/conversations\/([^/]+)\/messages(?:\?.*)?$/);
         if (messagesMatch) {
           return extra.onConversationMessagesGet
             ? extra.onConversationMessagesGet(messagesMatch[1]!)
@@ -495,8 +497,8 @@ describe("App tutor-conversations rail (#4)", () => {
             { status: 200 },
           );
         }
-        if (url === "/api/conversations/conv-a/messages") return pendingA;
-        if (url === "/api/conversations/conv-b/messages") return pendingB;
+        if (url.startsWith("/api/conversations/conv-a/messages")) return pendingA;
+        if (url.startsWith("/api/conversations/conv-b/messages")) return pendingB;
         throw new Error(`unexpected fetch to ${url}`);
       }),
     );
@@ -644,7 +646,7 @@ describe("App tutor conversation header rename (#6)", () => {
             { status: 200 },
           );
         }
-        if (url === "/api/conversations/tutor-conv-1/messages") return new Response(JSON.stringify([]), { status: 200 });
+        if (url.startsWith("/api/conversations/tutor-conv-1/messages")) return new Response(JSON.stringify([]), { status: 200 });
         const patchMatch = url.match(/^\/api\/conversations\/([^/]+)$/);
         if (patchMatch && init?.method === "PATCH") {
           const body = JSON.parse(String(init.body));
@@ -1160,7 +1162,7 @@ describe("App section chat resumes with hydrated history (#252)", () => {
         }
         if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
         if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        if (url === "/api/conversations/sec-conv-1/messages") {
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           return new Response(
             JSON.stringify([
               { id: "m1", role: "user", parts: [{ type: "text", text: "prior section question" }] },
@@ -1234,7 +1236,7 @@ describe("App section chat resumes with hydrated history (#252)", () => {
         }
         if (url === "/api/student/homeworks") return new Response(JSON.stringify(twoSectionFixture), { status: 200 });
         if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        if (url === "/api/conversations/sec-conv-1/messages") {
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           return new Response(
             JSON.stringify([{ id: "m1", role: "user", parts: [{ type: "text", text: "sec 1 question" }] }]),
             { status: 200 },
@@ -1321,7 +1323,7 @@ describe("App section conversationId stays live after mid-session creation (#271
           }
           throw new Error(`unexpected /api/chat call with body ${JSON.stringify(body)}`);
         }
-        if (url === "/api/conversations/new-conv-1/messages") {
+        if (url.startsWith("/api/conversations/new-conv-1/messages")) {
           return new Response(
             JSON.stringify([
               { id: "m1", role: "user", parts: [{ type: "text", text: "hello sec1" }] },
@@ -1410,7 +1412,7 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
         }
         if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
         if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        if (url === "/api/conversations/sec-conv-1/messages") {
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           messagesCallCount += 1;
           return new Response(JSON.stringify({ error: "server unavailable" }), { status: 503 });
         }
@@ -1469,7 +1471,7 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
             { status: 200 },
           );
         }
-        if (url === "/api/conversations/t1/messages") {
+        if (url.startsWith("/api/conversations/t1/messages")) {
           return new Response(JSON.stringify({ error: "server unavailable" }), { status: 503 });
         }
         throw new Error(`unexpected fetch to ${url}`);

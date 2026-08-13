@@ -90,6 +90,12 @@ export interface ConversationViewProps {
    *  render right after a brand-new conversation was created and switched
    *  to, so a keyboard user lands in the composer without an extra Tab. */
   autoFocusComposer?: boolean;
+  /** #280: true when the fetched history came back a full page (the
+   *  messages route pages at 200, no "load older" is wired yet) -- renders
+   *  a static notice above the transcript so the ceiling is visible rather
+   *  than silent (a conversation with exactly 200 messages is otherwise
+   *  indistinguishable from one truncated at 200). */
+  hasMoreHistory?: boolean;
 }
 
 /* -- Component ------------------------------------------------------------- */
@@ -104,6 +110,7 @@ export function ConversationView({
   isSending = false,
   error = null,
   autoFocusComposer = false,
+  hasMoreHistory = false,
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -145,6 +152,17 @@ export function ConversationView({
                 renameLabel="Rename conversation"
               />
             </h1>
+          )}
+
+          {/* #280: the ceiling made visible instead of silent -- see
+              hasMoreHistory's own doc comment above. No message count in
+              the copy: `messages` here keeps growing as the conversation
+              continues after hydration, so a count captured from the
+              fetched page would go stale the moment a new turn is sent. */}
+          {hasMoreHistory && (
+            <p className="conversation-history-notice">
+              Showing the most recent messages. Older messages aren't shown yet.
+            </p>
           )}
 
           {/* Messages */}

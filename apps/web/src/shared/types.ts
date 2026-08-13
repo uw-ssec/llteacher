@@ -129,6 +129,12 @@ export interface ConversationMessageResponse {
   id: string;
   role: "user" | "assistant" | "system";
   parts: unknown;
+  /** #280: the messages cursor (getMessagesForConversation's own `before`
+   *  param) is a seq value, but the response previously carried no seq at
+   *  all -- a client couldn't construct "give me the page before this one"
+   *  from its own response even if it wanted to. Included so a future
+   *  caller can page without a second round-trip to look it up. */
+  seq: number;
 }
 
 export interface SectionResponse {

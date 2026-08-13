@@ -577,9 +577,10 @@ describe("GET /api/conversations/:id/messages", () => {
       "22222222-2222-2222-2222-222222222222",
       { limit: undefined, before: undefined },
     );
+    // #280: seq is now included in the wire response.
     expect(await res.json()).toEqual([
-      { id: "m1", role: "user", parts: [{ type: "text", text: "hi" }] },
-      { id: "m2", role: "assistant", parts: [{ type: "text", text: "hello" }] },
+      { id: "m1", role: "user", parts: [{ type: "text", text: "hi" }], seq: 1 },
+      { id: "m2", role: "assistant", parts: [{ type: "text", text: "hello" }], seq: 2 },
     ]);
   });
 

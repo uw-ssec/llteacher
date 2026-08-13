@@ -35,7 +35,23 @@ describe("useTutorConversations", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.conversations).toEqual([CONV_A]);
     expect(result.current.loadError).toBe(false);
+    expect(result.current.hasMore).toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // #280: nextCursor !== null surfaced as hasMore -- lets a caller show that
+  // the page ceiling is real instead of leaving it silent (load-more itself
+  // isn't wired here yet).
+  it("sets hasMore when the response carries a non-null nextCursor", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: "opaque-cursor" }), { status: 200 })),
+    );
+
+    const { result } = renderHook(() => useTutorConversations("course-a"));
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.hasMore).toBe(true);
   });
 
   it("does not fetch and returns an empty, non-error list while courseId is undefined", async () => {

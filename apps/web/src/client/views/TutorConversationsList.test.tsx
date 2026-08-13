@@ -33,6 +33,7 @@ function renderList(overrides: Partial<React.ComponentProps<typeof TutorConversa
       conversations={[]}
       loading={false}
       loadError={false}
+      hasMore={false}
       selectedConversationId={undefined}
       onSelectConversation={onSelectConversation}
       onCreateConversation={onCreateConversation}
@@ -67,6 +68,25 @@ describe("TutorConversationsList", () => {
   it("does not show the empty state while still loading", () => {
     renderList({ loading: true, conversations: [] });
     expect(screen.queryByText("No conversations yet")).toBeNull();
+  });
+
+  // #280: the list route pages at 50 with no load-more wired -- this makes
+  // that ceiling visible instead of silent.
+  describe("hasMore notice (#280)", () => {
+    it("shows a notice when hasMore is true", () => {
+      renderList({ conversations: [CONV_A], hasMore: true });
+      expect(screen.getByText(/older ones aren't shown yet/i)).toBeTruthy();
+    });
+
+    it("does not show the notice when hasMore is false", () => {
+      renderList({ conversations: [CONV_A], hasMore: false });
+      expect(screen.queryByText(/older ones aren't shown yet/i)).toBeNull();
+    });
+
+    it("does not show the notice alongside loadError", () => {
+      renderList({ loadError: true, hasMore: true });
+      expect(screen.queryByText(/older ones aren't shown yet/i)).toBeNull();
+    });
   });
 
   describe("create (#232/#235)", () => {
@@ -145,6 +165,7 @@ describe("TutorConversationsList", () => {
         conversations={[]}
         loading={false}
         loadError={false}
+        hasMore={false}
         selectedConversationId={undefined}
         onSelectConversation={() => {}}
         onCreateConversation={async () => true}

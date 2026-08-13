@@ -406,7 +406,9 @@ export async function listConversationMessagesHandler(c: Context<AppEnv>) {
   // stays `unknown`, matching how it's stored (jsonb) and how chat.ts's own
   // replayPersistedPart already treats a persisted row's parts at this same
   // boundary.
-  const body: ConversationMessageResponse[] = rows.map((r) => ({ id: r.id, role: r.role, parts: r.parts }));
+  // #280: seq included so a caller can construct the next `before` (this
+  // same query's own cursor param) without a second round-trip.
+  const body: ConversationMessageResponse[] = rows.map((r) => ({ id: r.id, role: r.role, parts: r.parts, seq: r.seq }));
   return c.json(body);
 }
 

@@ -423,6 +423,15 @@ export default function App() {
     null,
   );
 
+  // #280: true when fetchConversationHistory's page came back full (the
+  // messages route pages at 200, no load-more wired yet -- see that
+  // function's own doc comment) -- the ceiling made visible instead of
+  // silent, mirroring tutorConversationsHasMore's role for the rail list.
+  // One flag per surface since tutor/section hydrate independently and
+  // (rarely, but possibly) their most recent fetches could disagree.
+  const [tutorHistoryHasMore, setTutorHistoryHasMore] = useState(false);
+  const [sectionHistoryHasMore, setSectionHistoryHasMore] = useState(false);
+
   /* #4/#6, lifted here per #223: one useTutorConversations instance shared
      by the rail (TutorConversationsList, now presentational -- it takes
      `conversations`/etc. as props) and this chat column's header, instead
@@ -439,6 +448,7 @@ export default function App() {
     conversations: tutorConversations,
     loading: tutorConversationsLoading,
     loadError: tutorConversationsLoadError,
+    hasMore: tutorConversationsHasMore,
     createConversation: createTutorConversationRow,
     renameConversation: renameTutorConversationRow,
     bumpConversation: bumpTutorConversation,
@@ -508,11 +518,23 @@ export default function App() {
   // replayPersistedPart treats it), so that one field still needs an inner
   // cast; every other field is now the checked DTO shape rather than a
   // blind assertion across the whole array.
-  const fetchConversationHistory = async (id: string): Promise<UIMessage[]> => {
-    const res = await fetch(`/api/conversations/${id}/messages`);
+  //
+  // #280: `limit` is requested explicitly (matching, not relying on, the
+  // route's own DEFAULT_MESSAGES_PAGE_SIZE) so this function knows for
+  // certain whether a full page means "there might be more" -- a length
+  // that happens to equal an unstated server default would be a coincidence
+  // to key off of, not a real signal. Older messages beyond this page
+  // aren't fetched (a real prepend-on-scroll isn't wired yet); `hasMore`
+  // lets the caller show that ceiling instead of leaving it silent.
+  const MESSAGES_HISTORY_LIMIT = 200;
+  const fetchConversationHistory = async (id: string): Promise<{ messages: UIMessage[]; hasMore: boolean }> => {
+    const res = await fetch(`/api/conversations/${id}/messages?limit=${MESSAGES_HISTORY_LIMIT}`);
     if (!res.ok) throw new Error(`failed to load conversation history: ${res.status}`);
     const rows = (await res.json()) as ConversationMessageResponse[];
-    return rows.map((r) => ({ id: r.id, role: r.role, parts: r.parts as UIMessage["parts"] }));
+    return {
+      messages: rows.map((r) => ({ id: r.id, role: r.role, parts: r.parts as UIMessage["parts"] })),
+      hasMore: rows.length === MESSAGES_HISTORY_LIMIT,
+    };
   };
 
   // #276: a failed fetch used to switch the surface AND clear the message
@@ -533,7 +555,8 @@ export default function App() {
       const history = await fetchConversationHistory(id);
       if (latestTutorSelectionRef.current !== id) return; // superseded while in flight -- discard
       setTutorHydrationError(null);
-      selectTutorConversation(id, history);
+      setTutorHistoryHasMore(history.hasMore);
+      selectTutorConversation(id, history.messages);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("[App] tutor conversation history fetch failed", err);
@@ -542,6 +565,7 @@ export default function App() {
         message: "Couldn't load that conversation. Please try again.",
         onRetry: () => void handleSelectExistingTutorConversation(id),
       });
+      setTutorHistoryHasMore(false);
       selectTutorConversation(id, []);
     }
   };
@@ -617,12 +641,14 @@ export default function App() {
     setSectionHydrationError(null);
     if (!targetConversationId) {
       setSectionMessages([]);
+      setSectionHistoryHasMore(false);
       return;
     }
     try {
       const history = await fetchConversationHistory(targetConversationId);
       if (latestSectionConversationRef.current !== targetConversationId) return; // superseded -- discard
-      setSectionMessages(history);
+      setSectionMessages(history.messages);
+      setSectionHistoryHasMore(history.hasMore);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("[App] section conversation history fetch failed", err);
@@ -648,7 +674,10 @@ export default function App() {
     void (async () => {
       try {
         const history = await fetchConversationHistory(pendingId);
-        if (latestSectionConversationRef.current === pendingId) setSectionMessages(history);
+        if (latestSectionConversationRef.current === pendingId) {
+          setSectionMessages(history.messages);
+          setSectionHistoryHasMore(history.hasMore);
+        }
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error("[App] failed to hydrate section greeting after creation", err);
@@ -973,6 +1002,7 @@ export default function App() {
           conversations={tutorConversations}
           loading={tutorConversationsLoading}
           loadError={tutorConversationsLoadError}
+          hasMore={tutorConversationsHasMore}
           selectedConversationId={tutorConversationId}
           onSelectConversation={handleSelectExistingTutorConversation}
           onCreateConversation={handleCreateTutorConversation}
@@ -1006,6 +1036,7 @@ export default function App() {
               isSending={tutorChatStatus === "submitted" || tutorChatStatus === "streaming" || !!tutorHydrationError}
               error={tutorChatErrorRow}
               autoFocusComposer={tutorConversationId === justCreatedTutorConversationId}
+              hasMoreHistory={tutorHistoryHasMore}
             />
           </ErrorBoundary>
         ) : (
@@ -1022,6 +1053,7 @@ export default function App() {
                  tutor instance's own isSending comment above. */
               isSending={chatStatus === "submitted" || chatStatus === "streaming" || !!sectionHydrationError}
               error={sectionChatErrorRow}
+              hasMoreHistory={sectionHistoryHasMore}
             />
           </ErrorBoundary>
         )}
