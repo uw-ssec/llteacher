@@ -39,6 +39,12 @@
 
 import { useRef, useEffect, useState } from "react";
 
+/** #308: matches MAX_TEXT_PART_LENGTH in apps/web/src/server/routes/chat.ts
+ *  -- the server refuses a text part longer than this, so capping input
+ *  here keeps a normal user from ever composing a message the send would
+ *  just reject. */
+const DEFAULT_MAX_LENGTH = 8_000;
+
 export interface ComposerProps {
   value: string;
   onChange: (value: string) => void;
@@ -52,6 +58,9 @@ export interface ComposerProps {
    *  visual focus implicitly went (the chat column switched to it)
    *  instead of needing to click/tab into the composer manually. */
   autoFocus?: boolean;
+  /** #308: caps how many characters the textarea accepts, matching the
+   *  server's own per-text-part limit. */
+  maxLength?: number;
 }
 
 /* Cursor is on the first visual line iff there's no newline before it and no
@@ -74,6 +83,7 @@ export function Composer({
   placeholder = "Ask, explore, or push back…",
   history,
   autoFocus = false,
+  maxLength = DEFAULT_MAX_LENGTH,
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -201,6 +211,7 @@ export function Composer({
               rows={1}
               aria-label="Message input"
               aria-multiline="true"
+              maxLength={maxLength}
             />
 
             {/* Enter hint — fades in on focus via CSS */}

@@ -1,4 +1,5 @@
 import type { CourseRole } from "../server/middleware/roles";
+import type { ConversationKind } from "../db/schema";
 
 export type HelloResponse = {
   message: string;
@@ -93,7 +94,7 @@ export interface StudentHomeworkListResponse {
    rather than treating its absence as a fetch bug. */
 export interface ConversationSummary {
   id: string;
-  kind: "section" | "tutor";
+  kind: ConversationKind;
   title: string;
   createdAt: string;
   updatedAt: string;

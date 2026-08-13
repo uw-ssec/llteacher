@@ -8,6 +8,7 @@ import { TenancyMismatchError, IdempotencyKeyConflictError } from "./errors";
 import {
   listConversationsForOwner,
   createConversation,
+  countActiveConversationsForOwner,
   softDeleteConversation,
   appendMessage,
   getConversationById,
@@ -121,6 +122,41 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     });
     const rows = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId);
     expect(rows.map((r) => r.title)).not.toContain("Course B chat");
+  });
+
+  // #308: backs createConversationHandler's per-user conversation cap.
+  // Delta-based (not an absolute-count assertion) since this file's other
+  // tests share the same (userId, courseAId) pair and run in the same DB.
+  it("countActiveConversationsForOwner counts only live tutor conversations for (owner, scope, kind)", async () => {
+    const before = await countActiveConversationsForOwner(db, unsafeCourseScope(courseAId), userId, "tutor");
+
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "#308 cap counting fixture",
+    });
+    expect(await countActiveConversationsForOwner(db, unsafeCourseScope(courseAId), userId, "tutor")).toBe(
+      before + 1,
+    );
+
+    // Soft-deleting drops it back out of the live count -- the intended
+    // relief valve (a student who deletes old conversations gets room back).
+    await softDeleteConversation(db, unsafeCourseScope(courseAId), created.id);
+    expect(await countActiveConversationsForOwner(db, unsafeCourseScope(courseAId), userId, "tutor")).toBe(before);
+  });
+
+  it("countActiveConversationsForOwner does not count a different course's conversations", async () => {
+    const beforeA = await countActiveConversationsForOwner(db, unsafeCourseScope(courseAId), userId, "tutor");
+
+    await createConversation(db, unsafeCourseScope(courseBId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "#308 cross-course cap fixture",
+    });
+
+    expect(await countActiveConversationsForOwner(db, unsafeCourseScope(courseAId), userId, "tutor")).toBe(beforeA);
   });
 
   it("excludes soft-deleted conversations by default, includes them with includeDeleted", async () => {

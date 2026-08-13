@@ -2,6 +2,16 @@ import { sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { chatRateLimitWindows } from "../../db/schema";
 
+// #219: per-user request budget. A Socratic tutoring turn (or a "create a
+// tutor conversation" click, #308) is human-paced, so this is generous, not
+// a real throttle -- it exists to bound the cost of a runaway client/script,
+// not to shape normal usage. Shared by every caller of reserveRateLimitSlot
+// below (originally /api/chat only; #308 added POST /api/conversations)
+// rather than each route hand-rolling its own budget, since they're all
+// bounding the same failure mode against the same per-user counter table.
+export const RATE_LIMIT_MAX_PER_MINUTE = 20;
+export const RATE_LIMIT_WINDOW_MS = 60_000;
+
 /* --------------------------------------------------------------------------
    #265: replaces the #219 rate limiter's read-then-decide check (count
    persisted message rows, then rely on a LATER, separate appendMessage call

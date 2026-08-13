@@ -176,6 +176,13 @@
       "when": 1786573363470,
       "tag": "0024_aromatic_mordo",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1786595348308,
+      "tag": "0025_blue_speed",
+      "breakpoints": true
     }
   ]
 }

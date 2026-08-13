@@ -32,15 +32,26 @@ import { makeDb } from "../../db/client";
 import {
   listConversationsForOwner,
   createConversation,
+  countActiveConversationsForOwner,
   updateConversationTitle,
   softDeleteConversation,
   getOwnedConversationOrNull,
   getMessagesForConversation,
 } from "../repositories/conversations";
+import type { ConversationKind } from "../../db/schema";
 import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
+import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from "../repositories/rateLimits";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { ConversationSummary, ConversationListItemResponse, ConversationMessageResponse } from "../../shared/types";
+
+// #308: no cap existed on how many tutor conversations one authenticated
+// student could mint -- unbounded row creation. 300 is generous relative to
+// any real usage pattern (the tutor rail is a course-wide scratch space, not
+// a per-section resource with a natural cap) while still bounding abuse; a
+// student who wants more room can delete old conversations (the count below
+// only ever counts live rows).
+const MAX_TUTOR_CONVERSATIONS_PER_COURSE = 300;
 
 const createConversationSchema = z.object({
   courseId: z.string().uuid(),
@@ -56,7 +67,7 @@ const updateConversationSchema = z.object({
 // client reads (see ConversationSummary's doc comment, shared/types.ts).
 function toConversationSummary(row: {
   id: string;
-  kind: "section" | "tutor";
+  kind: ConversationKind;
   title: string;
   createdAt: Date;
   updatedAt: Date;
@@ -162,6 +173,34 @@ export async function createConversationHandler(c: Context<AppEnv>) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
+
+  // #308: this route had no rate limit at all -- only /api/chat did (#219).
+  // Reuses the exact same per-user counter/budget rather than standing up a
+  // second one: conversation creation is a rare, deliberate action (the
+  // "New conversation" button) next to chat's per-message volume, so
+  // sharing one generous per-minute budget between the two costs a normal
+  // user nothing while still bounding a scripted create-loop.
+  const requestCount = await reserveRateLimitSlot(db, authContext.session.userId, new Date(), RATE_LIMIT_WINDOW_MS);
+  if (requestCount > RATE_LIMIT_MAX_PER_MINUTE) {
+    return c.json(
+      { error: "You're sending requests too quickly. Please wait a moment and try again." },
+      429,
+      { "Retry-After": String(Math.ceil(RATE_LIMIT_WINDOW_MS / 1000)) },
+    );
+  }
+
+  // #308: unbounded row creation otherwise -- see MAX_TUTOR_CONVERSATIONS_PER_COURSE's
+  // doc comment above.
+  const activeCount = await countActiveConversationsForOwner(db, scope, authContext.session.userId, "tutor");
+  if (activeCount >= MAX_TUTOR_CONVERSATIONS_PER_COURSE) {
+    return c.json(
+      {
+        error: `You've reached the limit of ${MAX_TUTOR_CONVERSATIONS_PER_COURSE} tutor conversations for this course. Delete an old one to make room.`,
+      },
+      429,
+    );
+  }
+
   // createConversation (repositories/conversations.ts, #3) re-verifies
   // course membership itself (courseScopeFromAuthContext already did, but
   // the repository doesn't trust callers to have checked) and throws a

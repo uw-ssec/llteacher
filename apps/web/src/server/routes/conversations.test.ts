@@ -14,6 +14,7 @@ vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
 const listConversationsForOwnerMock = vi.fn();
 const createConversationMock = vi.fn();
+const countActiveConversationsForOwnerMock = vi.fn();
 const updateConversationTitleMock = vi.fn();
 const softDeleteConversationMock = vi.fn();
 const getOwnedConversationOrNullMock = vi.fn();
@@ -21,10 +22,23 @@ const getMessagesForConversationMock = vi.fn();
 vi.mock("../repositories/conversations", () => ({
   listConversationsForOwner: (...args: unknown[]) => listConversationsForOwnerMock(...args),
   createConversation: (...args: unknown[]) => createConversationMock(...args),
+  // #308: backs createConversationHandler's per-user conversation cap.
+  countActiveConversationsForOwner: (...args: unknown[]) => countActiveConversationsForOwnerMock(...args),
   updateConversationTitle: (...args: unknown[]) => updateConversationTitleMock(...args),
   softDeleteConversation: (...args: unknown[]) => softDeleteConversationMock(...args),
   getOwnedConversationOrNull: (...args: unknown[]) => getOwnedConversationOrNullMock(...args),
   getMessagesForConversation: (...args: unknown[]) => getMessagesForConversationMock(...args),
+}));
+
+// #308: createConversationHandler now also rate-limits (reusing chat.ts's
+// #219/#265 counter/budget) -- mock the same module chat.test.ts does, with
+// the same real constant values, so this route's own tests don't need to
+// know the numbers to stay under budget by default.
+const reserveRateLimitSlotMock = vi.fn();
+vi.mock("../repositories/rateLimits", () => ({
+  reserveRateLimitSlot: (...args: unknown[]) => reserveRateLimitSlotMock(...args),
+  RATE_LIMIT_MAX_PER_MINUTE: 20,
+  RATE_LIMIT_WINDOW_MS: 60_000,
 }));
 
 function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
@@ -78,10 +92,14 @@ function fakeConversationRow(overrides: Partial<Record<string, unknown>> = {}) {
 beforeEach(() => {
   listConversationsForOwnerMock.mockReset();
   createConversationMock.mockReset();
+  // #308: 0 active conversations and under-budget by default -- individual
+  // tests for the cap/rate-limit paths override these explicitly.
+  countActiveConversationsForOwnerMock.mockReset().mockResolvedValue(0);
   updateConversationTitleMock.mockReset();
   softDeleteConversationMock.mockReset();
   getOwnedConversationOrNullMock.mockReset();
   getMessagesForConversationMock.mockReset();
+  reserveRateLimitSlotMock.mockReset().mockResolvedValue(1);
 });
 
 describe("GET /api/conversations", () => {
@@ -295,6 +313,61 @@ describe("POST /api/conversations", () => {
     });
     expect(res.status).toBe(400);
     expect(createConversationMock).not.toHaveBeenCalled();
+  });
+
+  // #308: previously no rate limit at all on this route (only /api/chat had
+  // one, #219) and no cap on how many live tutor conversations one student
+  // could accumulate.
+  it("429s (with Retry-After) when this request's reservation pushes the count over budget, without creating a conversation", async () => {
+    reserveRateLimitSlotMock.mockResolvedValue(21);
+    const authContext = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "11111111-1111-1111-1111-111111111111", role: "student" })],
+    });
+
+    const res = await request(buildApp(authContext), "/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ courseId: "11111111-1111-1111-1111-111111111111" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBeTruthy();
+    expect(createConversationMock).not.toHaveBeenCalled();
+  });
+
+  it("429s when the caller already has the max number of active tutor conversations for this course", async () => {
+    countActiveConversationsForOwnerMock.mockResolvedValue(300);
+    const authContext = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "11111111-1111-1111-1111-111111111111", role: "student" })],
+    });
+
+    const res = await request(buildApp(authContext), "/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ courseId: "11111111-1111-1111-1111-111111111111" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(429);
+    expect(createConversationMock).not.toHaveBeenCalled();
+  });
+
+  it("creates a conversation normally when just under the active-conversation cap", async () => {
+    countActiveConversationsForOwnerMock.mockResolvedValue(299);
+    const authContext = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "11111111-1111-1111-1111-111111111111", role: "student" })],
+    });
+    createConversationMock.mockResolvedValue(
+      fakeConversationRow({ id: "conv-1", courseId: "11111111-1111-1111-1111-111111111111" }),
+    );
+
+    const res = await request(buildApp(authContext), "/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ courseId: "11111111-1111-1111-1111-111111111111" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(201);
+    expect(createConversationMock).toHaveBeenCalledTimes(1);
   });
 });
 

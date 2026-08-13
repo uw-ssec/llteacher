@@ -1,6 +1,7 @@
-import { and, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, count, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { conversations, messages, sections, homeworks, courseMemberships, submissions } from "../../db/schema";
+import type { ConversationKind } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import { TenancyMismatchError, IdempotencyKeyConflictError } from "./errors";
 
@@ -11,7 +12,7 @@ export async function listConversationsForOwner(
   db: Db,
   scope: CourseScope,
   ownerUserId: string,
-  opts?: { includeDeleted?: boolean; kind?: "section" | "tutor"; limit?: number; before?: Date },
+  opts?: { includeDeleted?: boolean; kind?: ConversationKind; limit?: number; before?: Date },
 ) {
   const conditions = [
     eq(conversations.courseId, scope),
@@ -69,7 +70,7 @@ export async function listConversationsForOwner(
 export async function createConversation(
   db: Db,
   scope: CourseScope,
-  input: { ownerUserId: string; sectionId: string | null; kind: "section" | "tutor"; title: string },
+  input: { ownerUserId: string; sectionId: string | null; kind: ConversationKind; title: string },
 ) {
   // Neither ownerUserId nor sectionId is guaranteed to belong to `scope`'s
   // course just because the caller says so -- both are caller-supplied
@@ -114,6 +115,35 @@ export async function createConversation(
     .values({ courseId: scope, ...input })
     .returning();
   return created;
+}
+
+// #308: backs createConversationHandler's per-user conversation cap --
+// POST /api/conversations had no bound at all on how many rows one student
+// could mint (the free-standing tutor rail has no natural "one per X" limit
+// the way section conversations do via conversations_owner_section_active_uq
+// above). Counts only LIVE rows: a student who deletes old conversations to
+// make room is exactly the intended relief valve, not a bypass. Scoped to
+// (ownerUserId, scope, kind) so a student's section-conversation count
+// (bounded structurally anyway, one per section) never eats into their
+// tutor-conversation budget or vice versa.
+export async function countActiveConversationsForOwner(
+  db: Db,
+  scope: CourseScope,
+  ownerUserId: string,
+  kind: ConversationKind,
+) {
+  const [row] = await db
+    .select({ count: count() })
+    .from(conversations)
+    .where(
+      and(
+        eq(conversations.ownerUserId, ownerUserId),
+        eq(conversations.courseId, scope),
+        eq(conversations.kind, kind),
+        eq(conversations.isDeleted, false),
+      ),
+    );
+  return row?.count ?? 0;
 }
 
 // Enforces CourseScope only -- any member of the course can soft-delete any

@@ -47,13 +47,14 @@ import {
 import { z } from "zod";
 import { getOpenRouter } from "../../lib/ai";
 import { makeDb } from "../../db/client";
+import type { ConversationKind } from "../../db/schema";
 import {
   createConversation,
   appendMessage,
   getLastMessages,
   getOwnedConversationOrNull,
 } from "../repositories/conversations";
-import { reserveRateLimitSlot } from "../repositories/rateLimits";
+import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from "../repositories/rateLimits";
 import {
   startSectionConversation,
   getActiveSectionConversation,
@@ -134,7 +135,7 @@ interface ChatRequestBody {
   // chat instance (App.tsx) sends "section" + its real sectionId, so its
   // auto-created conversation is properly scoped and never shows up in the
   // tutor rail's kind=tutor listing.
-  kind?: "section" | "tutor";
+  kind?: ConversationKind;
   // Required when kind is "section"; ignored otherwise. Validated against
   // scope by createConversation's own tenancy check (repositories/
   // conversations.ts), which throws TenancyMismatchError -> 404 on a
@@ -163,11 +164,54 @@ interface ChatRequestBody {
 // SDK's real 16-char output (and a `prefix-` variant, if this app ever
 // configures one) without requiring an exact format the SDK doesn't use.
 const CLIENT_MESSAGE_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
-const chatPartSchema = z.object({ type: z.string() }).passthrough();
+
+// #308: no size bound previously existed on a part's own `text` field --
+// `chatPartSchema`/`historyPartSchema` were `.passthrough()`, so a text part
+// could carry an arbitrarily long string all the way to appendMessage's
+// jsonb insert. The sharpest failure mode wasn't even this field: a client's
+// `id` (client_message_id) participates in a btree unique index, which caps
+// a tuple at ~2704 bytes, so an oversized value there failed the INSERT with
+// SQLSTATE 54000 -> a generic 503, no model call, no counted message --
+// reserveRateLimitSlot's budget never even saw that request, since it 500s
+// after persistence, not before. `id` itself is already bounded
+// (CLIENT_MESSAGE_ID_RE above, 128 chars), so this addresses the same class
+// of gap for the field that actually has no cap at all: message text.
+const MAX_TEXT_PART_LENGTH = 8_000;
+// #308: also no bound on how many parts a single message could carry (a
+// message legitimately produced by this app's own composer/tool loop has a
+// handful at most) or how many messages the whole request could carry (the
+// client sends its full local history every turn, #3 pitfall 3) -- both
+// were `.min(1)` with no `.max()`, and `messages` itself was checked only
+// for `length > 0`.
+const MAX_PARTS_PER_MESSAGE = 32;
+// Generous relative to MAX_HISTORY_MESSAGES (40, the trailing window
+// actually forwarded to the model below) -- this bounds the REQUEST, not
+// the model context, so a genuinely long-running conversation's full
+// history can still round-trip through hydration/replay without hitting
+// this cap while a scripted/malicious oversized payload still 400s.
+const MAX_MESSAGES_PER_REQUEST = 500;
+
+// Shared by chatPartSchema and historyPartSchema below: `.passthrough()`
+// admits any extra keys unchecked (needed for the tool-* part shapes
+// neither schema tries to fully model), so the text-length cap can't be
+// expressed as a plain `z.object({ text: z.string().max(...) })` field --
+// only a text-typed part has (or needs) that field at all. A `.refine` is
+// the right tool for a cross-field, conditional constraint like this.
+function withTextLengthCap<T extends z.ZodTypeAny>(schema: T) {
+  return schema.refine(
+    (part) => {
+      const p = part as { type?: unknown; text?: unknown };
+      return p.type !== "text" || (typeof p.text === "string" && p.text.length <= MAX_TEXT_PART_LENGTH);
+    },
+    { message: `a text part's text must be a string of at most ${MAX_TEXT_PART_LENGTH} characters` },
+  );
+}
+
+const chatPartSchema = withTextLengthCap(z.object({ type: z.string() }).passthrough());
 const inboundUserMessageSchema = z.object({
   id: z.string().regex(CLIENT_MESSAGE_ID_RE),
   role: z.literal("user"),
-  parts: z.array(chatPartSchema).min(1),
+  parts: z.array(chatPartSchema).min(1).max(MAX_PARTS_PER_MESSAGE),
 });
 
 // #264: only the last element of `messages` was ever validated -- the AI SDK's
@@ -184,11 +228,13 @@ const inboundUserMessageSchema = z.object({
 // rejected here rather than reaching convertToModelMessages, which would map
 // it to an outbound fetch URL (downloadAssets) the model can request.
 const ALLOWED_HISTORY_PART_TYPE_RE = /^(text|step-start|tool-[A-Za-z0-9_]+)$/;
-const historyPartSchema = z.object({ type: z.string().regex(ALLOWED_HISTORY_PART_TYPE_RE) }).passthrough();
+const historyPartSchema = withTextLengthCap(
+  z.object({ type: z.string().regex(ALLOWED_HISTORY_PART_TYPE_RE) }).passthrough(),
+);
 const historyMessageSchema = z.object({
   id: z.string().regex(CLIENT_MESSAGE_ID_RE),
   role: z.enum(["user", "assistant"]),
-  parts: z.array(historyPartSchema).min(1),
+  parts: z.array(historyPartSchema).min(1).max(MAX_PARTS_PER_MESSAGE),
 });
 
 // In ai@5.0.195, a provider failure (e.g. a 429) arrives as an `error`
@@ -350,10 +396,6 @@ function deriveTutorConversationTitle(parts: unknown): string | null {
   return text.length > AUTO_TITLE_MAX_LENGTH ? `${text.slice(0, AUTO_TITLE_MAX_LENGTH).trimEnd()}…` : text;
 }
 
-// #219: per-user request budget. A Socratic tutoring turn is human-paced,
-// so this is generous, not a real throttle -- it exists to bound the cost
-// of a runaway client/script, not to shape normal usage.
-//
 // #265: reserveRateLimitSlot (repositories/rateLimits.ts) is a single
 // atomic upsert, called unconditionally as the FIRST thing this handler
 // does after basic request validation -- before conversation resolution,
@@ -362,9 +404,9 @@ function deriveTutorConversationTitle(parts: unknown): string | null {
 // call as the actual counted side effect; that gap is exactly where the
 // race (concurrent requests all reading the same pre-increment count) and
 // the fail-open (a path that skips appendMessage but still calls the
-// model) both lived.
-const RATE_LIMIT_MAX_PER_MINUTE = 20;
-const RATE_LIMIT_WINDOW_MS = 60_000;
+// model) both lived. RATE_LIMIT_MAX_PER_MINUTE/RATE_LIMIT_WINDOW_MS now live
+// in rateLimits.ts itself (#308) -- routes/conversations.ts's
+// createConversationHandler shares the same budget/counter.
 
 // #215: bounds what the model sees on every turn. The client still sends
 // its full local history (useChat's own state), but only the trailing
@@ -411,6 +453,13 @@ export async function chatHandler(c: Context<AppEnv>) {
   const { messages: uiMessages, conversationId, courseId: requestedCourseId, sectionId: requestedSectionId } = body;
   if (!Array.isArray(uiMessages) || uiMessages.length === 0) {
     return c.json({ error: "messages is required" }, 400);
+  }
+  // #308: no bound previously existed on the array's own length (only on
+  // parts-per-message and text-part length, above). See
+  // MAX_MESSAGES_PER_REQUEST's doc comment for why this is generous relative
+  // to MAX_HISTORY_MESSAGES.
+  if (uiMessages.length > MAX_MESSAGES_PER_REQUEST) {
+    return c.json({ error: `messages must contain at most ${MAX_MESSAGES_PER_REQUEST} entries` }, 400);
   }
   // #264: every element, not just the tail -- see historyMessageSchema's
   // doc comment. Runs before the tail-specific check below so a forged
@@ -520,7 +569,18 @@ export async function chatHandler(c: Context<AppEnv>) {
     // #214: kind defaults to "tutor" (every existing caller's behavior) --
     // only a caller that explicitly asks for "section" (App.tsx's
     // homework-section chat instance) needs a sectionId.
-    const kind = body.kind === "section" ? "section" : "tutor";
+    //
+    // #308: an unrecognized kind used to silently coerce to "tutor" instead
+    // of 400ing -- `body.kind === "section" ? "section" : "tutor"` maps
+    // literally everything that isn't exactly "section" (a typo, a future
+    // client's not-yet-supported kind:"reflection", `null`) onto "tutor"
+    // with no error at all, precisely the failure mode #214 itself was
+    // filed for. Reject explicitly instead, matching routes/
+    // conversations.ts's GET handler's own kind validation.
+    if (body.kind !== undefined && body.kind !== "tutor" && body.kind !== "section") {
+      return c.json({ error: "kind must be 'tutor' or 'section'" }, 400);
+    }
+    const kind: ConversationKind = body.kind === "section" ? "section" : "tutor";
     if (kind === "section") {
       if (!requestedSectionId) {
         return c.json({ error: "sectionId is required when kind is 'section'" }, 400);

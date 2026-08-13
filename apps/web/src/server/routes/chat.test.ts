@@ -37,6 +37,12 @@ vi.mock("../repositories/conversations", () => ({
 const reserveRateLimitSlotMock = vi.fn();
 vi.mock("../repositories/rateLimits", () => ({
   reserveRateLimitSlot: (...args: unknown[]) => reserveRateLimitSlotMock(...args),
+  // #308: RATE_LIMIT_MAX_PER_MINUTE/RATE_LIMIT_WINDOW_MS moved into this
+  // module so routes/conversations.ts's createConversationHandler can share
+  // them -- chat.ts imports both as real values (not just the mocked
+  // function), so the mock must actually provide them too.
+  RATE_LIMIT_MAX_PER_MINUTE: 20,
+  RATE_LIMIT_WINDOW_MS: 60_000,
 }));
 
 // #259: kind:"section" now goes through #27's own lifecycle, not
@@ -510,6 +516,80 @@ describe("POST /api/chat", () => {
       expect(res.status).toBe(400);
       expect(createConversationMock).not.toHaveBeenCalled();
       expect(startSectionConversationMock).not.toHaveBeenCalled();
+    });
+
+    // #308: an unrecognized kind used to silently coerce to "tutor" instead
+    // of 400ing.
+    it("400s on an unrecognized kind instead of silently coercing to tutor", async () => {
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        courseId: "course-a",
+        messages: [userUiMessage],
+        kind: "reflection",
+      });
+      expect(res.status).toBe(400);
+      expect(createConversationMock).not.toHaveBeenCalled();
+      expect(startSectionConversationMock).not.toHaveBeenCalled();
+    });
+  });
+
+  // #308: no size bound previously existed on a message's parts count, a
+  // text part's own length, or the messages array itself.
+  describe("#308 request size bounds", () => {
+    it("400s when a message's parts array exceeds the per-message cap", async () => {
+      const tooManyParts = {
+        id: "client-1",
+        role: "user",
+        parts: Array.from({ length: 33 }, (_, i) => ({ type: "text", text: `part ${i}` })),
+      };
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        courseId: "course-a",
+        messages: [tooManyParts],
+      });
+      expect(res.status).toBe(400);
+      expect(createConversationMock).not.toHaveBeenCalled();
+    });
+
+    it("400s when a text part exceeds the character cap", async () => {
+      const oversizedMessage = {
+        id: "client-1",
+        role: "user",
+        parts: [{ type: "text", text: "a".repeat(8_001) }],
+      };
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        courseId: "course-a",
+        messages: [oversizedMessage],
+      });
+      expect(res.status).toBe(400);
+      expect(createConversationMock).not.toHaveBeenCalled();
+    });
+
+    it("accepts a text part right at the character cap", async () => {
+      createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+      getLastMessagesMock.mockResolvedValue([]);
+      const atCapMessage = {
+        id: "client-1",
+        role: "user",
+        parts: [{ type: "text", text: "a".repeat(8_000) }],
+      };
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        courseId: "course-a",
+        messages: [atCapMessage],
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it("400s when the messages array itself exceeds the per-request cap", async () => {
+      const tooManyMessages = Array.from({ length: 501 }, (_, i) => ({
+        id: `hist-${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `turn ${i}` }],
+      }));
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        courseId: "course-a",
+        messages: [...tooManyMessages, userUiMessage],
+      });
+      expect(res.status).toBe(400);
+      expect(createConversationMock).not.toHaveBeenCalled();
     });
   });
 

@@ -37,10 +37,24 @@ const createConversationMock = vi.fn();
 vi.mock("./repositories/conversations", () => ({
   listConversationsForOwner: vi.fn(),
   createConversation: (...args: unknown[]) => createConversationMock(...args),
+  // #308: createConversationHandler's per-user conversation cap -- stubbed
+  // to "no active conversations" so the #141 test below (the only test in
+  // this file that reaches POST /api/conversations) doesn't need to know
+  // about the cap to exercise the TenancyMismatchError mapping it's after.
+  countActiveConversationsForOwner: vi.fn().mockResolvedValue(0),
   updateConversationTitle: vi.fn(),
   softDeleteConversation: vi.fn(),
   getConversationById: vi.fn(),
   getMessagesForConversation: vi.fn(),
+}));
+
+// #308: createConversationHandler also rate-limits now (shares chat.ts's
+// #219/#265 counter) -- stubbed the same way chat.test.ts stubs it, real db
+// calls would throw against this file's fake `db` (no `.insert`/`.batch`).
+vi.mock("./repositories/rateLimits", () => ({
+  reserveRateLimitSlot: vi.fn().mockResolvedValue(1),
+  RATE_LIMIT_MAX_PER_MINUTE: 20,
+  RATE_LIMIT_WINDOW_MS: 60_000,
 }));
 
 beforeEach(() => {

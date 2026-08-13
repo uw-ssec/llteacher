@@ -27,6 +27,13 @@ export const conversationKindEnum = pgEnum("conversation_kind", [
   "tutor",
 ]);
 
+// #308: the single source of truth for the app-code union -- every route/
+// repository/shared-types file that used to hand-write `"section" | "tutor"`
+// derives it from here instead, so adding a third enum value can't silently
+// leave one of those literal unions stale (TypeScript would flag every
+// switch/conditional that assumed exhaustiveness the moment the enum grows).
+export type ConversationKind = (typeof conversationKindEnum.enumValues)[number];
+
 export const messageRoleEnum = pgEnum("message_role", [
   "user",
   "assistant",
@@ -106,10 +113,24 @@ export const conversations = pgTable(
     uniqueIndex("conversations_owner_section_active_uq")
       .on(t.ownerUserId, t.sectionId)
       .where(sql`${t.kind} = 'section' AND ${t.isDeleted} = false`),
+    // #308: restated as two independent implications instead of an
+    // exhaustive OR of every (kind, section_id) pair -- the OR form only
+    // has two disjuncts because there are only two kinds today, so it
+    // silently double-duties as an allowlist of kind itself: a future third
+    // kind value (e.g. one #27's own doc comment above gestures at) would
+    // satisfy neither disjunct and be rejected by this CHECK no matter what
+    // section_id it carried, forcing a rewrite of this constraint (not just
+    // an addition) the moment conversationKindEnum grows. Each implication
+    // below only constrains the kind it names -- "if this row claims to be
+    // a tutor conversation, section_id must be null" / "...a section
+    // conversation, section_id must be set" -- and says nothing at all
+    // about a third kind, so adding one only means adding its own
+    // implication (or leaving it unconstrained here) instead of restating
+    // the whole thing.
     check(
       "conversations_kind_section_chk",
-      sql`(${t.kind} = 'tutor' AND ${t.sectionId} IS NULL)
-          OR (${t.kind} = 'section' AND ${t.sectionId} IS NOT NULL)`,
+      sql`(${t.kind} <> 'tutor' OR ${t.sectionId} IS NULL)
+          AND (${t.kind} <> 'section' OR ${t.sectionId} IS NOT NULL)`,
     ),
     // #128: referenceable target for submissions' composite FK. `id` is
     // already the primary key, so this adds no new integrity rule to

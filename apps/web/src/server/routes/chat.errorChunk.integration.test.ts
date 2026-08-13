@@ -137,6 +137,10 @@ vi.mock("../repositories/conversations", () => ({
 // implementation against the mocked (`{}`) db above and throw.
 vi.mock("../repositories/rateLimits", () => ({
   reserveRateLimitSlot: async () => 1,
+  // #308: chat.ts now imports these as real values (not just the mocked
+  // function) -- see chat.test.ts's identical mock for why.
+  RATE_LIMIT_MAX_PER_MINUTE: 20,
+  RATE_LIMIT_WINDOW_MS: 60_000,
 }));
 
 function fakeAuthContext(): AuthContext {
