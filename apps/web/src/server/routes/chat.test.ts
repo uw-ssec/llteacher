@@ -160,8 +160,8 @@ function postChat(
 describe("classifyTurn", () => {
   const ANSWERED = { role: "assistant", parts: [{ type: "text", text: "a real reply" }], clientMessageId: null };
   const UNANSWERED_ASSISTANT = { role: "assistant", parts: [{ type: "step-start" }], clientMessageId: null };
-  const USER_TURN = { role: "user", clientMessageId: "client-1" };
-  const OTHER_USER_TURN = { role: "user", clientMessageId: "some-other-send" };
+  const USER_TURN = { role: "user", parts: [{ type: "text", text: "hi" }], clientMessageId: "client-1" };
+  const OTHER_USER_TURN = { role: "user", parts: [{ type: "text", text: "hi" }], clientMessageId: "some-other-send" };
 
   it("replays when the last row is a renderable assistant reply to this exact turn", () => {
     expect(classifyTurn(ANSWERED, USER_TURN, "client-1")).toBe("replay");
