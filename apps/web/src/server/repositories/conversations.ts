@@ -358,12 +358,17 @@ async function resolveConflict(
   return existing;
 }
 
-export async function appendMessage(
-  db: Db,
+// #312: the id/courseId/isDeleted predicate below was written verbatim in
+// three places (this function, getLastMessages, getMessagesForConversation)
+// -- a tenancy guard duplicated three times has to change in lockstep or one
+// copy silently becomes more permissive than the others. `Pick<Db, "select">`
+// (not `Db`) so the transaction-path caller in appendMessage below can pass
+// its `tx` handle, which lacks driver-capability members like `batch`.
+export async function assertConversationInScope(
+  db: Pick<Db, "select">,
   scope: CourseScope,
   conversationId: string,
-  input: { role: "user" | "assistant" | "system"; parts: unknown; clientMessageId?: string | null },
-) {
+): Promise<boolean> {
   const [owned] = await db
     .select({ id: conversations.id })
     .from(conversations)
@@ -374,8 +379,28 @@ export async function appendMessage(
         eq(conversations.isDeleted, false),
       ),
     );
-  if (!owned) {
-    throw new TenancyMismatchError("Conversation not found in this course scope");
+  return !!owned;
+}
+
+export async function appendMessage(
+  db: Db,
+  scope: CourseScope,
+  conversationId: string,
+  input: { role: "user" | "assistant" | "system"; parts: unknown; clientMessageId?: string | null },
+  // #279: chatHandler calls this after it has already resolved/verified
+  // `conv` for the current request (via getOwnedConversationOrNull,
+  // startSectionConversation, or createConversation, all of which prove
+  // scope membership) -- re-running the same select here is a fourth
+  // redundant round-trip per turn. Every OTHER caller (none exist outside
+  // chat.ts today, but the type stays safe by default) has not already
+  // proven this, so the check stays on unless a caller explicitly opts out.
+  opts?: { skipOwnershipCheck?: boolean },
+) {
+  if (!opts?.skipOwnershipCheck) {
+    const owned = await assertConversationInScope(db, scope, conversationId);
+    if (!owned) {
+      throw new TenancyMismatchError("Conversation not found in this course scope");
+    }
   }
 
   const clientMessageId = input.clientMessageId ?? null;
@@ -387,6 +412,17 @@ export async function appendMessage(
   };
   const conflictTarget = { target: [messages.conversationId, messages.clientMessageId] };
 
+  // #312: this duplicates the same db.batch()/db.transaction() capability
+  // branch as atomic.ts's runAtomically and repositories/homeworks.ts's
+  // updateHomework, rather than reusing runAtomically -- deliberately, same
+  // reasoning runAtomically's own doc comment already gives for
+  // updateHomework: runAtomically returns Promise<void>, but this call site
+  // needs the INSERT's own `.returning()` row (and the created/existing
+  // distinction below, #273) back from whichever branch ran. Consolidating
+  // would mean widening runAtomically's signature to carry a result back out
+  // through both the batch and per-statement-await transaction paths -- a
+  // real change to a helper already shared by sectionConversations.ts, not
+  // a drop-in swap here.
   if (typeof db.batch === "function") {
     // Production path: neon-http, one atomic HTTP round-trip.
     const [[created]] = await db.batch([
@@ -498,18 +534,20 @@ export async function getOwnedConversationOrNull(
 // createdAt is timestamptz (microsecond resolution) and safe today only
 // because each append is its own transaction, so two rows can never share a
 // timestamp; `seq` makes that guarantee independent of that fact.
-export async function getLastMessages(db: Db, scope: CourseScope, conversationId: string, limit = 2) {
-  const [owned] = await db
-    .select({ id: conversations.id })
-    .from(conversations)
-    .where(
-      and(
-        eq(conversations.id, conversationId),
-        eq(conversations.courseId, scope),
-        eq(conversations.isDeleted, false),
-      ),
-    );
-  if (!owned) return [];
+export async function getLastMessages(
+  db: Db,
+  scope: CourseScope,
+  conversationId: string,
+  limit = 2,
+  // #279: same opt-out as appendMessage's own opts -- chatHandler's two call
+  // sites both run after `conv` is already resolved/verified for this
+  // request.
+  opts?: { skipOwnershipCheck?: boolean },
+) {
+  if (!opts?.skipOwnershipCheck) {
+    const owned = await assertConversationInScope(db, scope, conversationId);
+    if (!owned) return [];
+  }
   return db
     .select()
     .from(messages)
@@ -539,16 +577,7 @@ export async function getMessagesForConversation(
   conversationId: string,
   opts?: { limit?: number; before?: number },
 ) {
-  const [owned] = await db
-    .select({ id: conversations.id })
-    .from(conversations)
-    .where(
-      and(
-        eq(conversations.id, conversationId),
-        eq(conversations.courseId, scope),
-        eq(conversations.isDeleted, false),
-      ),
-    );
+  const owned = await assertConversationInScope(db, scope, conversationId);
   if (!owned) return [];
 
   const limit = opts?.limit ?? DEFAULT_MESSAGES_PAGE_SIZE;

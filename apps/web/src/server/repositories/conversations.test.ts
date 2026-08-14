@@ -331,6 +331,79 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     expect(last).toEqual([]);
   });
 
+  // #279: skipOwnershipCheck exists so chatHandler can skip a redundant
+  // round-trip once it has already proven scope membership elsewhere in the
+  // same request -- it must never become an accidental way to bypass the
+  // check for a caller that hasn't. These two tests pin both halves: the
+  // flag genuinely skips (misuse is possible, by design, for a caller that
+  // opts in) and the DEFAULT (omitted, matching every non-chat.ts caller)
+  // still enforces it.
+  it("getLastMessages still returns [] for a wrong-scope conversation when skipOwnershipCheck is omitted (default-safe)", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Default-safe target",
+    });
+    await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      role: "user",
+      parts: [{ type: "text", text: "hello" }],
+    });
+    const last = await getLastMessages(db, unsafeCourseScope(courseBId), created.id, 2, {});
+    expect(last).toEqual([]);
+  });
+
+  it("getLastMessages returns rows for a wrong-scope conversation when skipOwnershipCheck is true (opt-in bypass, not a default)", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Opt-in-bypass target",
+    });
+    await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      role: "user",
+      parts: [{ type: "text", text: "hello" }],
+    });
+    // Wrong scope (courseB), but the caller asserts it already verified --
+    // the row comes back anyway, proving the check genuinely didn't run.
+    const last = await getLastMessages(db, unsafeCourseScope(courseBId), created.id, 2, {
+      skipOwnershipCheck: true,
+    });
+    expect(last).toHaveLength(1);
+  });
+
+  it("appendMessage still throws TenancyMismatchError for a wrong-scope conversation when skipOwnershipCheck is omitted (default-safe)", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Default-safe append target",
+    });
+    await expect(
+      appendMessage(db, unsafeCourseScope(courseBId), created.id, {
+        role: "user",
+        parts: [{ type: "text", text: "hello" }],
+      }),
+    ).rejects.toThrow(TenancyMismatchError);
+  });
+
+  it("appendMessage writes into a wrong-scope conversation when skipOwnershipCheck is true (opt-in bypass, not a default)", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Opt-in-bypass append target",
+    });
+    const { row } = await appendMessage(
+      db,
+      unsafeCourseScope(courseBId),
+      created.id,
+      { role: "user", parts: [{ type: "text", text: "hello" }] },
+      { skipOwnershipCheck: true },
+    );
+    expect(row.conversationId).toBe(created.id);
+  });
+
   it("getMessagesForConversation (#4 fix-round) returns full history oldest-first", async () => {
     const created = await createConversation(db, unsafeCourseScope(courseAId), {
       ownerUserId: userId,

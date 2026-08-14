@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import { chatHandler } from "./chat";
+import { chatHandler, classifyTurn } from "./chat";
 import type { AuthContext } from "../middleware/roles";
 import { fakeAuthContext as buildFakeAuthContext, fakeMembership } from "../testing/authContext";
 import {
@@ -152,6 +152,41 @@ function postChat(
     TEST_ENV,
   );
 }
+
+// #312: classifyTurn is a pure function (no db, no I/O) -- zero mocks
+// needed, unlike every other case in this file. Covers the decision table
+// directly instead of only ever exercising it indirectly through the full
+// HTTP handler.
+describe("classifyTurn", () => {
+  const ANSWERED = { role: "assistant", parts: [{ type: "text", text: "a real reply" }], clientMessageId: null };
+  const UNANSWERED_ASSISTANT = { role: "assistant", parts: [{ type: "step-start" }], clientMessageId: null };
+  const USER_TURN = { role: "user", clientMessageId: "client-1" };
+  const OTHER_USER_TURN = { role: "user", clientMessageId: "some-other-send" };
+
+  it("replays when the last row is a renderable assistant reply to this exact turn", () => {
+    expect(classifyTurn(ANSWERED, USER_TURN, "client-1")).toBe("replay");
+  });
+
+  it("does not replay when the assistant row has no renderable content (step-start only)", () => {
+    expect(classifyTurn(UNANSWERED_ASSISTANT, USER_TURN, "client-1")).toBe("insert");
+  });
+
+  it("does not replay when the assistant row answers a DIFFERENT turn", () => {
+    expect(classifyTurn(ANSWERED, OTHER_USER_TURN, "client-1")).toBe("insert");
+  });
+
+  it("skips the insert when the last row is already this exact user turn (not yet answered)", () => {
+    expect(classifyTurn(USER_TURN, undefined, "client-1")).toBe("skip-insert");
+  });
+
+  it("inserts when the last row is a DIFFERENT user turn (a genuine new message)", () => {
+    expect(classifyTurn(OTHER_USER_TURN, undefined, "client-1")).toBe("insert");
+  });
+
+  it("inserts on a brand-new conversation with no prior messages at all", () => {
+    expect(classifyTurn(undefined, undefined, "client-1")).toBe("insert");
+  });
+});
 
 describe("POST /api/chat", () => {
   beforeEach(() => {
@@ -611,6 +646,7 @@ describe("POST /api/chat", () => {
         expect.anything(),
         "conv-existing",
         expect.anything(),
+        expect.anything(),
       );
     });
 
@@ -774,6 +810,7 @@ describe("POST /api/chat", () => {
       expect.anything(),
       "22222222-2222-2222-2222-222222222222",
       { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+      expect.anything(),
     );
     // Persisted before streamText is invoked -- the model call must not be
     // able to race ahead of the DB write it depends on being durable.
@@ -1094,6 +1131,7 @@ describe("POST /api/chat", () => {
         expect.anything(),
         "22222222-2222-2222-2222-222222222222",
         { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+        expect.anything(),
       );
       expect(streamTextMock).toHaveBeenCalledTimes(1);
     });
@@ -1133,6 +1171,7 @@ describe("POST /api/chat", () => {
         expect.anything(),
         "22222222-2222-2222-2222-222222222222",
         { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+        expect.anything(),
       );
     });
 
@@ -1189,6 +1228,7 @@ describe("POST /api/chat", () => {
         expect.anything(),
         "22222222-2222-2222-2222-222222222222",
         { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+        expect.anything(),
       );
     });
   });
@@ -1215,6 +1255,7 @@ describe("POST /api/chat", () => {
       expect.anything(),
       "22222222-2222-2222-2222-222222222222",
       { role: "assistant", parts: responseMessage.parts },
+      expect.anything(),
     );
   });
 

@@ -47,6 +47,7 @@ import {
 } from "ai";
 import { z } from "zod";
 import { makeDb } from "../../db/client";
+import type { Db } from "../../db/client";
 import type { ConversationKind } from "../../db/schema";
 import {
   createConversation,
@@ -462,6 +463,191 @@ const MAX_REQUEST_BODY_BYTES = 256 * 1024;
 // genuinely stuck upstream doesn't tie up the request indefinitely.
 const STREAM_TIMEOUT_MS = 60_000;
 
+// #312: the idempotency decision below used to live inline, TWICE -- once
+// for the initial check, once for the race-fallback re-check after a lost
+// appendMessage race (#273) -- with no way to unit-test either copy without
+// going through the full HTTP handler and its seven module mocks. Extracted
+// as a pure function (no db, no I/O) so both call sites share exactly one
+// copy and chat.test.ts can assert the decision table directly, with zero
+// mocks.
+export type TurnClassification = "replay" | "skip-insert" | "insert";
+
+export function classifyTurn(
+  lastMessage: { role: string; parts: unknown; clientMessageId: string | null } | undefined,
+  secondLastMessage: { role: string; clientMessageId: string | null } | undefined,
+  inboundClientMessageId: string,
+): TurnClassification {
+  const matchesInboundUser = (msg: { role: string; clientMessageId: string | null } | undefined) =>
+    msg?.role === "user" && msg.clientMessageId === inboundClientMessageId;
+  // "Already answered": the model already ran and its response is already
+  // persisted for this exact user turn -- replay it, no model call.
+  if (
+    lastMessage?.role === "assistant" &&
+    hasRenderableContent(lastMessage.parts) &&
+    matchesInboundUser(secondLastMessage)
+  ) {
+    return "replay";
+  }
+  // "Not answered yet": the user message already landed but the assistant
+  // hasn't responded (or its response hasn't been persisted) yet -- don't
+  // insert it again, fall through to a normal model call.
+  if (matchesInboundUser(lastMessage)) {
+    return "skip-insert";
+  }
+  return "insert";
+}
+
+/** #312: conversation resolution, extracted from chatHandler -- this step
+ *  has no coupling to streaming or the model call at all; it was folded into
+ *  the same function only because it happened to run first. Returns a
+ *  Response directly for every early-exit case (404/403/400/409) so
+ *  chatHandler's own body stays a thin "resolve, then stream" dispatcher --
+ *  callers must check `instanceof Response` before touching `.conv`. */
+async function resolveConversation(
+  c: Context<AppEnv>,
+  db: Db,
+  authContext: AuthContext,
+  envelope: { conversationId?: string; courseId?: string; sectionId?: string; kind?: ConversationKind },
+  inboundMessage: UIMessage,
+): Promise<
+  | {
+      conv: {
+        id: string;
+        ownerUserId: string;
+        courseId: string;
+        sectionId: string | null;
+        promptTemplateId: string | null;
+      };
+      // #272: set only when THIS call just created a fresh section
+      // conversation (the try branch below, not the race-fallback catch) --
+      // prepended to the model's context further down so the turn that
+      // creates a section conversation doesn't answer with zero knowledge of
+      // the section's actual question text, which the greeting is the sole
+      // delivery mechanism for. Undefined on every other path (existing
+      // conversationId, tutor kind, race fallback), which already has real
+      // persisted history a normal turn would see.
+      sectionGreetingParts: unknown[] | undefined;
+    }
+  | Response
+> {
+  if (envelope.conversationId) {
+    // #217/#222: getOwnedConversationOrNull collapses "doesn't exist",
+    // "exists but isn't yours", and "exists, is yours, but soft-deleted"
+    // into the same null -> 404, matching routes/conversations.ts's
+    // PATCH/DELETE/GET-messages handlers exactly (moved to the repository
+    // layer, repositories/conversations.ts, precisely so this route could
+    // reuse it instead of hand-rolling its own 404-vs-401 split, which was
+    // the existence oracle this rule exists to avoid).
+    const existing = await getOwnedConversationOrNull(
+      db,
+      envelope.conversationId,
+      authContext.session.userId,
+      authContext.isMemberOf,
+    );
+    if (!existing) {
+      return c.json({ error: "Conversation not found" }, 404);
+    }
+    return { conv: existing, sectionGreetingParts: undefined };
+  }
+
+  // #304: previously fell back to authContext.memberships[0]?.courseId when
+  // the client omitted courseId -- listMembershipsForUser has no ORDER BY,
+  // so Postgres gives no ordering guarantee and [0] was arbitrary, possibly
+  // differing between two requests from the same user. A user with two
+  // memberships (the norm for instructors and TAs) could get a tutor
+  // conversation silently minted into the wrong course. Requiring courseId
+  // explicitly loses no real caller: the section path already sends it on
+  // every no-conversationId request (see handleSendMessage in App.tsx), and
+  // courseScopeFromAuthContext below already rejects a course the caller
+  // isn't a member of, so this doesn't relax that check either.
+  if (!envelope.courseId) {
+    return c.json({ error: "courseId is required when conversationId is omitted" }, 400);
+  }
+  const courseId = envelope.courseId;
+  const scope = courseScopeFromAuthContext(authContext, courseId);
+  if (!scope) {
+    return c.json({ error: "Course access denied" }, 403);
+  }
+  // #214: kind defaults to "tutor" (every existing caller's behavior) --
+  // only a caller that explicitly asks for "section" (App.tsx's
+  // homework-section chat instance) needs a sectionId.
+  //
+  // #308/#267: an unrecognized kind used to silently coerce to "tutor"
+  // instead of 400ing -- chatEnvelopeSchema's z.enum(["section","tutor"])
+  // already rejects anything else before this is ever reached, so
+  // envelope.kind is only ever "section", "tutor", or undefined here.
+  const kind: ConversationKind = envelope.kind === "section" ? "section" : "tutor";
+  if (kind === "section") {
+    const requestedSectionId = envelope.sectionId;
+    if (!requestedSectionId) {
+      return c.json({ error: "sectionId is required when kind is 'section'" }, 400);
+    }
+    // #259: routed through the same startSectionConversation every other
+    // section-conversation caller uses (#27's own routes), not
+    // createConversation -- which enforced none of isTeacherTest derivation,
+    // non_interactive refusal, the duplicate-active-conversation check, or
+    // the Django-parity greeting as the first message.
+    try {
+      const created = await startSectionConversation(db, scope, {
+        sectionId: requestedSectionId,
+        ownerUserId: authContext.session.userId,
+        // #237: derived from the caller's actual course role, same rule
+        // startSectionConversationHandler uses -- a TA or observer sending
+        // into a section is not a student doing the assignment, but is also
+        // not who isInstructorOf's AUTHOR_ROLES tier means.
+        isTeacherTest: !isStudentInCourse(authContext.memberships, courseId),
+      });
+      return {
+        conv: {
+          id: created.id,
+          ownerUserId: authContext.session.userId,
+          courseId,
+          sectionId: requestedSectionId,
+          promptTemplateId: created.promptTemplateId,
+        },
+        sectionGreetingParts: Array.isArray(created.greetingParts) ? created.greetingParts : undefined,
+      };
+    } catch (err) {
+      if (err instanceof SectionConversationExistsError) {
+        // #238-style race: two requests for the same section's first turn
+        // (a double-fired send, two tabs) both arrived with no
+        // conversationId yet. The loser doesn't get an error -- it uses the
+        // conversation the winner just created, same as any other retry
+        // lands on the same conversation.
+        const active = await getActiveSectionConversation(db, scope, requestedSectionId, authContext.session.userId);
+        if (!active) throw err; // existence was just proven; a missing row here is a genuine bug, not a race
+        return {
+          conv: {
+            id: active.id,
+            ownerUserId: active.ownerUserId,
+            courseId: active.courseId,
+            sectionId: active.sectionId,
+            promptTemplateId: active.promptTemplateId,
+          },
+          sectionGreetingParts: undefined,
+        };
+      }
+      if (err instanceof SectionNotFoundError) {
+        return c.json({ error: "Section not found" }, 404);
+      }
+      if (err instanceof SectionNotInteractiveError) {
+        return c.json({ error: err.message }, 409);
+      }
+      throw err;
+    }
+  }
+
+  // #231: auto-title tutor conversations from their first message.
+  const title = deriveTutorConversationTitle(inboundMessage.parts) || "New Conversation";
+  const conv = await createConversation(db, scope, {
+    ownerUserId: authContext.session.userId,
+    sectionId: null,
+    kind: "tutor",
+    title,
+  });
+  return { conv, sectionGreetingParts: undefined };
+}
+
 export async function chatHandler(c: Context<AppEnv>) {
   // #26: the OPENROUTER_API_KEY-specific early check this replaced is gone
   // -- which key (if any) is needed depends on the resolved config's
@@ -518,12 +704,6 @@ export async function chatHandler(c: Context<AppEnv>) {
       400,
     );
   }
-  const {
-    conversationId,
-    courseId: requestedCourseId,
-    sectionId: requestedSectionId,
-    kind: requestedKind,
-  } = envelopeParsed.data;
   // `messages` stays an unchecked cast here, same as the ChatRequestBody
   // cast this replaced -- every element gets real validation via
   // historyMessageSchema/inboundUserMessageSchema below; this is only the
@@ -590,151 +770,12 @@ export async function chatHandler(c: Context<AppEnv>) {
     );
   }
 
-  // #272: set only when THIS request just created a fresh section
-  // conversation (the try branch below, not the race-fallback catch) --
-  // prepended to the model's context further down so the turn that creates
-  // a section conversation doesn't answer with zero knowledge of the
-  // section's actual question text, which the greeting is the sole
-  // delivery mechanism for. Left undefined on every other path (existing
-  // conversationId, tutor kind, race fallback), which already has real
-  // persisted history a normal turn would see.
-  let sectionGreetingParts: unknown[] | undefined;
-
-  let conv: {
-    id: string;
-    ownerUserId: string;
-    courseId: string;
-    sectionId: string | null;
-    promptTemplateId: string | null;
-  };
-  if (conversationId) {
-    // #217/#222: getOwnedConversationOrNull collapses "doesn't exist",
-    // "exists but isn't yours", and "exists, is yours, but soft-deleted"
-    // into the same null -> 404, matching routes/conversations.ts's
-    // PATCH/DELETE/GET-messages handlers exactly (moved to the repository
-    // layer, repositories/conversations.ts, precisely so this route could
-    // reuse it instead of hand-rolling its own 404-vs-401 split, which was
-    // the existence oracle this rule exists to avoid). Previously this
-    // checked existence and ownership as two separate branches returning
-    // 404 and 401 respectively; a caller could tell "doesn't exist" apart
-    // from "exists, not yours" by response code, which the uniform-401
-    // comment on the old code claimed not to be possible.
-    const existing = await getOwnedConversationOrNull(
-      db,
-      conversationId,
-      authContext.session.userId,
-      authContext.isMemberOf,
-    );
-    if (!existing) {
-      return c.json({ error: "Conversation not found" }, 404);
-    }
-    conv = existing;
-  } else {
-    // #304: previously fell back to authContext.memberships[0]?.courseId
-    // when the client omitted courseId -- listMembershipsForUser has no
-    // ORDER BY, so Postgres gives no ordering guarantee and [0] was
-    // arbitrary, possibly differing between two requests from the same
-    // user. ProfileService.ts already documents this exact pattern as a
-    // hazard ("memberships[0] would make the primary role flicker across
-    // requests") and deliberately avoids it; this PR reintroduced it on a
-    // write path. A user with two memberships -- the norm for instructors
-    // and TAs -- could get a tutor conversation silently minted into the
-    // wrong course. Requiring courseId explicitly loses no real caller:
-    // the section path already sends it on every no-conversationId
-    // request (see handleSendMessage in App.tsx), and courseScopeFromAuthContext
-    // below already rejects a course the caller isn't a member of, so
-    // this doesn't relax that check either.
-    if (!requestedCourseId) {
-      return c.json({ error: "courseId is required when conversationId is omitted" }, 400);
-    }
-    const courseId = requestedCourseId;
-    const scope = courseScopeFromAuthContext(authContext, courseId);
-    if (!scope) {
-      return c.json({ error: "Course access denied" }, 403);
-    }
-    // #214: kind defaults to "tutor" (every existing caller's behavior) --
-    // only a caller that explicitly asks for "section" (App.tsx's
-    // homework-section chat instance) needs a sectionId.
-    //
-    // #308/#267: an unrecognized kind used to silently coerce to "tutor"
-    // instead of 400ing -- precisely the failure mode #214 itself was filed
-    // for. chatEnvelopeSchema's z.enum(["section","tutor"]).optional()
-    // above already rejects anything else (a typo, a future client's
-    // not-yet-supported kind:"reflection") before this line is ever
-    // reached, so requestedKind is only ever "section", "tutor", or
-    // undefined here.
-    const kind: ConversationKind = requestedKind === "section" ? "section" : "tutor";
-    if (kind === "section") {
-      if (!requestedSectionId) {
-        return c.json({ error: "sectionId is required when kind is 'section'" }, 400);
-      }
-      // #259: routed through the same startSectionConversation every other
-      // section-conversation caller uses (#27's own routes), not
-      // createConversation -- which enforced none of isTeacherTest
-      // derivation, non_interactive refusal, the duplicate-active-conversation
-      // check, or the Django-parity greeting as the first message. This is
-      // what makes #27's routes live (previously reachable from no client
-      // code) instead of leaving two implementations of "start a section
-      // conversation" to drift, which is what produced this bug in the
-      // first place.
-      try {
-        const created = await startSectionConversation(db, scope, {
-          sectionId: requestedSectionId,
-          ownerUserId: authContext.session.userId,
-          // #237: derived from the caller's actual course role, same rule
-          // startSectionConversationHandler uses -- a TA or observer
-          // sending into a section is not a student doing the assignment,
-          // but is also not who isInstructorOf's AUTHOR_ROLES tier means.
-          isTeacherTest: !isStudentInCourse(authContext.memberships, courseId),
-        });
-        conv = {
-          id: created.id,
-          ownerUserId: authContext.session.userId,
-          courseId,
-          sectionId: requestedSectionId,
-          promptTemplateId: created.promptTemplateId,
-        };
-        sectionGreetingParts = Array.isArray(created.greetingParts) ? created.greetingParts : undefined;
-      } catch (err) {
-        if (err instanceof SectionConversationExistsError) {
-          // #238-style race: two requests for the same section's first
-          // turn (a double-fired send, two tabs) both arrived with no
-          // conversationId yet. The loser doesn't get an error -- it uses
-          // the conversation the winner just created, same as any other
-          // retry lands on the same conversation.
-          const active = await getActiveSectionConversation(
-            db,
-            scope,
-            requestedSectionId,
-            authContext.session.userId,
-          );
-          if (!active) throw err; // existence was just proven; a missing row here is a genuine bug, not a race
-          conv = {
-            id: active.id,
-            ownerUserId: active.ownerUserId,
-            courseId: active.courseId,
-            sectionId: active.sectionId,
-            promptTemplateId: active.promptTemplateId,
-          };
-        } else if (err instanceof SectionNotFoundError) {
-          return c.json({ error: "Section not found" }, 404);
-        } else if (err instanceof SectionNotInteractiveError) {
-          return c.json({ error: err.message }, 409);
-        } else {
-          throw err;
-        }
-      }
-    } else {
-      // #231: auto-title tutor conversations from their first message.
-      const title = deriveTutorConversationTitle(inboundMessage.parts) || "New Conversation";
-      conv = await createConversation(db, scope, {
-        ownerUserId: authContext.session.userId,
-        sectionId: null,
-        kind: "tutor",
-        title,
-      });
-    }
-  }
+  // #312: conversation resolution extracted to its own function -- see
+  // resolveConversation's own doc comment. Early-exit cases (404/403/400/409)
+  // come back as a Response to return directly.
+  const resolved = await resolveConversation(c, db, authContext, envelopeParsed.data, inboundMessage);
+  if (resolved instanceof Response) return resolved;
+  const { conv, sectionGreetingParts } = resolved;
 
   // Row just read back (and ownership-checked) or just created under a
   // verified scope -- the sanctioned case for this cast per scope.ts's
@@ -831,18 +872,20 @@ export async function chatHandler(c: Context<AppEnv>) {
   // -- the highest-frequency replies in a Socratic tutor) gets a NEW id
   // each send, so it is correctly treated as a new message, not a retry of
   // the old one.
-  const [lastMessage, secondLastMessage] = await getLastMessages(db, scope, conv.id, 2);
-  const matchesInboundUser = (msg: { role: string; clientMessageId: string | null } | undefined) =>
-    msg?.role === "user" && msg.clientMessageId === parsedInbound.data.id;
+  // #279: skipOwnershipCheck -- `conv` above already proved this
+  // conversation is in scope (getOwnedConversationOrNull, or a row this
+  // same request just created/raced onto inside resolveConversation), so
+  // re-running the same id/courseId/isDeleted select here would be a
+  // redundant round-trip.
+  const [lastMessage, secondLastMessage] = await getLastMessages(db, scope, conv.id, 2, {
+    skipOwnershipCheck: true,
+  });
+  const initialClassification = classifyTurn(lastMessage, secondLastMessage, parsedInbound.data.id);
 
-  if (
-    lastMessage?.role === "assistant" &&
-    hasRenderableContent(lastMessage.parts) &&
-    matchesInboundUser(secondLastMessage)
-  ) {
-    return replayResponse(conv.id, lastMessage.parts);
+  if (initialClassification === "replay") {
+    return replayResponse(conv.id, lastMessage!.parts);
   }
-  if (!matchesInboundUser(lastMessage)) {
+  if (initialClassification === "insert") {
     // #266: appendMessage's return value used to be discarded entirely, so
     // a reused clientMessageId with different content silently dropped the
     // new message while the call below still ran the model against it --
@@ -851,11 +894,13 @@ export async function chatHandler(c: Context<AppEnv>) {
     // with the same request/response shape every other refusal on this
     // route already uses.
     try {
-      const { created } = await appendMessage(db, scope, conv.id, {
-        role: "user",
-        parts: inboundMessage.parts,
-        clientMessageId: parsedInbound.data.id,
-      });
+      const { created } = await appendMessage(
+        db,
+        scope,
+        conv.id,
+        { role: "user", parts: inboundMessage.parts, clientMessageId: parsedInbound.data.id },
+        { skipOwnershipCheck: true },
+      );
       // #273: `created: false` means this request LOST a race against
       // another one carrying the same clientMessageId (double-fired send,
       // a duplicated tab, a fetch-layer retry -- the exact scenarios #254's
@@ -869,13 +914,11 @@ export async function chatHandler(c: Context<AppEnv>) {
       // reply or, if the winner is still mid-flight, tells the client to
       // wait rather than also calling the model.
       if (!created) {
-        const [raceLast, raceSecondLast] = await getLastMessages(db, scope, conv.id, 2);
-        if (
-          raceLast?.role === "assistant" &&
-          hasRenderableContent(raceLast.parts) &&
-          matchesInboundUser(raceSecondLast)
-        ) {
-          return replayResponse(conv.id, raceLast.parts);
+        const [raceLast, raceSecondLast] = await getLastMessages(db, scope, conv.id, 2, {
+          skipOwnershipCheck: true,
+        });
+        if (classifyTurn(raceLast, raceSecondLast, parsedInbound.data.id) === "replay") {
+          return replayResponse(conv.id, raceLast!.parts);
         }
         return c.json(
           { error: "This message is already being processed. Please wait a moment." },
@@ -904,7 +947,9 @@ export async function chatHandler(c: Context<AppEnv>) {
   // (matches its use above); reversed here into the chronological order the
   // model needs. Same MAX_HISTORY_MESSAGES cap as before (#215), just
   // sourced server-side now instead of trusting the client's own window.
-  const persistedHistory = await getLastMessages(db, scope, conv.id, MAX_HISTORY_MESSAGES);
+  const persistedHistory = await getLastMessages(db, scope, conv.id, MAX_HISTORY_MESSAGES, {
+    skipOwnershipCheck: true,
+  });
   const modelMessages: UIMessage[] = [...persistedHistory].reverse().map((m) => ({
     id: m.id,
     role: m.role as UIMessage["role"],
@@ -1002,7 +1047,13 @@ export async function chatHandler(c: Context<AppEnv>) {
       // check falls through to a genuine model call again.
       if (!hasRenderableContent(responseMessage.parts)) return;
       try {
-        await appendMessage(db, scope, conv.id, { role: "assistant", parts: responseMessage.parts });
+        await appendMessage(
+          db,
+          scope,
+          conv.id,
+          { role: "assistant", parts: responseMessage.parts },
+          { skipOwnershipCheck: true },
+        );
       } catch (err) {
         logServerError("chatHandler.onFinish", err);
       }
