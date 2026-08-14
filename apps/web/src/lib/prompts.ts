@@ -30,7 +30,16 @@ import type { CourseScope, OrgScope } from "../server/repositories/scope";
 /** Django parity default (`apps/llm/src/llm/services.py`'s Socratic-method
  *  system prompt) -- the safe fallback when no prompt_templates row exists
  *  at any scope. Never null/crash; see #25's own "missing prompt at any
- *  scope" testing requirement. */
+ *  scope" testing requirement.
+ *
+ *  #305 requirement 3 (generate the tool paragraph below from chat.ts's
+ *  TOOLS catalog instead of hand-duplicating it here) is deliberately NOT
+ *  done yet -- with exactly one tool (showDefinition), a generation
+ *  abstraction has no real drift to prevent; PR 3 adds the second and third
+ *  tools (executeRCode, markSectionComplete), which is when this paragraph
+ *  and TOOLS' own descriptions can actually diverge unnoticed. Do the
+ *  extraction then, against real second/third-tool text instead of a
+ *  speculative single-tool shape. */
 export const DEFAULT_SYSTEM_PROMPT = `You are an AI tutor for an introductory statistics course at the University of Washington. Your job is to guide students through homework problems using the Socratic method: ask leading questions, build intuition step by step, never just dump the answer.
 
 You have one structured rendering tool available: showDefinition. Call it whenever you are formally introducing a named statistical concept ("p-value", "null hypothesis", "standard error", "confidence interval", "type I error", etc.) — give the student a polished definition card with the term and a 1–2 sentence plain-language body. For everything else (guiding questions, follow-ups, gentle nudges, walking through computations), reply in plain markdown — no tool call.
@@ -186,6 +195,26 @@ export async function getSectionPromptContext(
     .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
     .where(and(eq(sections.id, sectionId), eq(homeworks.courseId, courseScope)));
   return row ?? null;
+}
+
+/** #305: section-conversation persona/wording -- moved here from
+ *  repositories/sectionConversations.ts, which had no business owning prompt
+ *  content (a repository module resolving org-facing copy is a layering
+ *  violation; the fix is this signature living in the prompt-assembly
+ *  module, not a lookup swap). Django parity greeting, verbatim from
+ *  ConversationService._create_initial_message
+ *  (apps/conversations/src/conversations/services.py). Stored as an
+ *  `assistant` message by the caller, matching Django's MESSAGE_TYPE_AI --
+ *  the tutor is speaking to the student, so it is not a `system` message. */
+export function sectionGreeting(section: { order: number; title: string; content: string }): string {
+  return `Hello! I'm here to help you with Section ${section.order}: ${section.title}.\n\n${section.content}\n\nHow can I assist you with this question?`;
+}
+
+/** #305: the `Section N: Title` conversation-title template, same
+ *  reasoning as sectionGreeting above -- was duplicated verbatim at both of
+ *  startSectionConversation's and restartSectionConversation's call sites. */
+export function sectionConversationTitle(section: { order: number; title: string }): string {
+  return `Section ${section.order}: ${section.title}`;
 }
 
 /** Pure composition: template content + (optional) section context + the

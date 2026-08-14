@@ -15,7 +15,7 @@ import { unsafeCourseScope } from "./scope";
 import { runAtomically } from "./atomic";
 import { SubmissionGradedError } from "./submissions";
 import { getOrgScopeForCourse } from "./organizations";
-import { resolvePromptTemplate } from "../../lib/prompts";
+import { resolvePromptTemplate, sectionGreeting, sectionConversationTitle } from "../../lib/prompts";
 
 /* --------------------------------------------------------------------------
    Section-conversation lifecycle (#27), kept in its own module rather than
@@ -27,15 +27,12 @@ import { resolvePromptTemplate } from "../../lib/prompts";
    submitted, and restarting one has to reason about that submission. Splitting
    them keeps each file about one thing, and it keeps this work off the file
    PR #212 is actively rewriting.
-   -------------------------------------------------------------------------- */
 
-/** Django parity greeting, verbatim from ConversationService.
- *  _create_initial_message (apps/conversations/src/conversations/services.py).
- *  Stored as an `assistant` message, matching Django's MESSAGE_TYPE_AI -- the
- *  tutor is speaking to the student, so it is not a `system` message. */
-export function sectionGreeting(section: { order: number; title: string; content: string }): string {
-  return `Hello! I'm here to help you with Section ${section.order}: ${section.title}.\n\n${section.content}\n\nHow can I assist you with this question?`;
-}
+   #305: sectionGreeting/sectionConversationTitle -- the persona/wording this
+   module used to own directly -- now live in lib/prompts.ts, imported above.
+   This repository stays about persistence; prompt-facing copy stays in the
+   prompt-assembly module.
+   -------------------------------------------------------------------------- */
 
 /** The message `parts` shape the AI SDK uses, and that messages.parts stores. */
 function greetingParts(text: string) {
@@ -207,7 +204,7 @@ export async function startSectionConversation(
 
   const conversationId = crypto.randomUUID();
   const greetingMessageId = crypto.randomUUID();
-  const title = `Section ${section.order}: ${section.title}`;
+  const title = sectionConversationTitle(section);
   const greeting = greetingParts(sectionGreeting(section));
 
   // #25: resolved and pinned once, here, at creation -- see lib/prompts.ts's
@@ -337,7 +334,7 @@ export async function restartSectionConversation(
 
   const newConversationId = crypto.randomUUID();
   const greetingMessageId = crypto.randomUUID();
-  const title = `Section ${owned.sectionOrder}: ${owned.sectionTitle}`;
+  const title = sectionConversationTitle({ order: owned.sectionOrder, title: owned.sectionTitle });
 
   // #25: a restart is a fresh conversation lifecycle start (same reasoning
   // as startSectionConversation's own pin) -- re-resolved now rather than

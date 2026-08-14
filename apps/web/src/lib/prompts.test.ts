@@ -1,5 +1,30 @@
 import { describe, it, expect } from "vitest";
-import { assembleSystemPrompt, DEFAULT_SYSTEM_PROMPT, TUTOR_GUARDRAIL } from "./prompts";
+import {
+  assembleSystemPrompt,
+  DEFAULT_SYSTEM_PROMPT,
+  TUTOR_GUARDRAIL,
+  sectionGreeting,
+  sectionConversationTitle,
+} from "./prompts";
+
+describe("sectionGreeting (#305)", () => {
+  it("matches the Django reference string exactly", () => {
+    // Verbatim parity with ConversationService._create_initial_message
+    // (apps/conversations/src/conversations/services.py). Pinned as a literal
+    // rather than rebuilt from the same template the implementation uses --
+    // a test that constructs the expected value the same way the code does
+    // cannot detect the template changing.
+    expect(sectionGreeting({ order: 1, title: "Warm-up", content: "What is a mean?" })).toBe(
+      "Hello! I'm here to help you with Section 1: Warm-up.\n\nWhat is a mean?\n\nHow can I assist you with this question?",
+    );
+  });
+});
+
+describe("sectionConversationTitle (#305)", () => {
+  it("formats as 'Section N: Title'", () => {
+    expect(sectionConversationTitle({ order: 3, title: "P-Values" })).toBe("Section 3: P-Values");
+  });
+});
 
 describe("assembleSystemPrompt", () => {
   it("returns just the template content + guardrail when no section is given (tutor-kind)", () => {
