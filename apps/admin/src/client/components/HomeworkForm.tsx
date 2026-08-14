@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import { Button, Input } from "@llteacher/ui";
 import type { LLMConfig, SectionDetail } from "../lib/fixtures";
 import { computeSectionDiff, type FormSection } from "../lib/computeSectionDiff";
+import { AdminNotice } from "./AdminNotice";
 
 /** #165: an authored pre/post prompt pair, before the order-renumbering
  *  submit-time transform (mirrors FormSection's role for sections). */
@@ -66,6 +67,13 @@ export interface HomeworkFormProps {
 }
 
 const MAX_SECTIONS = 20;
+
+/* `submitError` carries two unrelated kinds of message: this one (the network
+   save actually failed) and form-shape complaints like "No more than 20
+   sections". Only the former earns the reassurance copy about unsaved edits,
+   so the render branch compares against this constant rather than dressing
+   every submit error as a server failure. */
+const SAVE_FAILED = "Failed to save homework. Please try again.";
 
 export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: HomeworkFormProps) {
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -131,7 +139,7 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
         hidden: values.hidden, expiresAt: values.expiresAt,
       });
     } catch {
-      setSubmitError("Failed to save homework. Please try again.");
+      setSubmitError(SAVE_FAILED);
     }
   });
 
@@ -162,7 +170,7 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
       <div className="admin-form-field">
         <label htmlFor="hw-due-date">Due date</label>
         <input id="hw-due-date" type="datetime-local" {...register("dueDate", { required: "Due date required" })} />
-        {errors.dueDate && <p role="alert">{errors.dueDate.message}</p>}
+        {errors.dueDate && <p role="alert" className="admin-field-error">{errors.dueDate.message}</p>}
       </div>
 
       <div className="admin-form-field">
@@ -226,7 +234,7 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
         </fieldset>
       ))}
 
-      {errors.sections && <p role="alert">At least 1 section is required</p>}
+      {errors.sections && <p role="alert" className="admin-field-error">At least 1 section is required</p>}
 
       <Button type="button" onClick={() => append({ title: "", content: "", solutionContent: undefined, type: "conversation" })}>
         + Add section
@@ -254,7 +262,19 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
         + Add progress widget
       </Button>
 
-      {submitError && <p role="alert">{submitError}</p>}
+      {/* No retry action here — the Save button below IS the retry, and a
+          second "Try again" next to it would be two controls for one act. */}
+      {submitError && (
+        <AdminNotice
+          eyebrow={submitError === SAVE_FAILED ? "Not saved" : "Check this form"}
+          title={submitError}
+          body={
+            submitError === SAVE_FAILED
+              ? "Your edits are still on screen and nothing was written to the server. Nothing is lost until you leave this page."
+              : undefined
+          }
+        />
+      )}
 
       <Button type="submit" variant="accent" disabled={isLoading}>Save</Button>
     </form>
