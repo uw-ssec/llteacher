@@ -13,6 +13,13 @@ import {
   updateHomeworkHideHandler,
 } from "./routes/homeworks";
 import { workosWebhookHandler } from "./routes/webhooksWorkos";
+import {
+  listConversationsHandler,
+  createConversationHandler,
+  updateConversationHandler,
+  deleteConversationHandler,
+  listConversationMessagesHandler,
+} from "./routes/conversations";
 import { studentHomeworksHandler } from "./routes/studentHomeworks";
 import { submitSectionHandler, getHomeworkSubmissionsHandler } from "./routes/submissions";
 import {
@@ -28,6 +35,7 @@ import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireGraderOf, requireInstructorOf, requireRole } from "./utils/guards";
 import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "./utils/errors";
+import { TenancyMismatchError, IdempotencyKeyConflictError } from "./repositories/errors";
 import type { AppEnv } from "./context";
 
 const app = new Hono<AppEnv>();
@@ -36,7 +44,27 @@ const app = new Hono<AppEnv>();
 // locally -- e.g. a DB connection failure in rolesMiddleware or a profile
 // route. Logs the real error server-side; the client only ever sees the
 // generic message, never DB connection strings or driver internals.
+//
+// #141: a TenancyMismatchError (repositories/errors.ts) is the one
+// exception to that -- createConversation/appendMessage
+// (repositories/conversations.ts) throw it for an expected,
+// non-infra condition (a caller-supplied id that doesn't belong to the
+// scope it's used under), so it's mapped to an honest 404 here instead,
+// without logging it as a server-side failure. This is the single
+// route-layer mapping point for that error class -- see ARCHITECTURE.md's
+// "Tenancy Mismatch Errors" section. Checked before the generic case so it
+// takes precedence.
 app.onError((err, c) => {
+  if (err instanceof TenancyMismatchError) {
+    return c.json({ error: "Not found" }, 404);
+  }
+  // #266: appendMessage throws this when a client reuses a clientMessageId
+  // for different content than the row already stored under it -- the
+  // request is well-formed and the caller is who they say they are, the id
+  // just collides. 409, not a silent 200 that discards the new message.
+  if (err instanceof IdempotencyKeyConflictError) {
+    return c.json({ error: err.message }, 409);
+  }
   logServerError("server", err);
   return c.json({ error: SERVICE_UNAVAILABLE_MESSAGE }, 503);
 });
@@ -80,6 +108,13 @@ app.patch(
   requireInstructorOf()(updateHomeworkHideHandler),
 );
 app.get("/api/student/homeworks", requireRole(["student"])(studentHomeworksHandler));
+app.get("/api/conversations", listConversationsHandler);
+app.post("/api/conversations", createConversationHandler);
+// #4 fix-round: message-history hydration for the tutor-conversations rail
+// (see conversations.ts's doc comment above listConversationMessagesHandler).
+app.get("/api/conversations/:id/messages", listConversationMessagesHandler);
+app.patch("/api/conversations/:id", updateConversationHandler);
+app.delete("/api/conversations/:id", deleteConversationHandler);
 app.post("/api/conversations/:id/submit", requireRole(["student"])(submitSectionHandler));
 // #172: grading reads, not authoring -- requireGraderOf admits `ta`
 // alongside instructor/admin. Every content-mutating route above stays on

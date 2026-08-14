@@ -139,7 +139,7 @@ export async function startSectionConversation(
   db: Db,
   scope: CourseScope,
   input: StartInput,
-): Promise<{ id: string; title: string; greetingMessageId: string }> {
+): Promise<{ id: string; title: string; greetingMessageId: string; greetingParts: unknown }> {
   // Membership and section-in-course are both caller-supplied and must be
   // verified before writing -- same rationale as createConversation's checks
   // in conversations.ts. droppedAt IS NULL matches listMembershipsForUser:
@@ -199,6 +199,7 @@ export async function startSectionConversation(
   const conversationId = crypto.randomUUID();
   const greetingMessageId = crypto.randomUUID();
   const title = `Section ${section.order}: ${section.title}`;
+  const greeting = greetingParts(sectionGreeting(section));
 
   // #238: the pre-check above is a courtesy, not the guarantee -- it and the
   // insert are separate round-trips, so a double-clicked "Start" can put two
@@ -220,7 +221,7 @@ export async function startSectionConversation(
         id: greetingMessageId,
         conversationId,
         role: "assistant",
-        parts: greetingParts(sectionGreeting(section)),
+        parts: greeting,
       }),
     ]);
   } catch (err) {
@@ -230,7 +231,13 @@ export async function startSectionConversation(
     throw err;
   }
 
-  return { id: conversationId, title, greetingMessageId };
+  // #272: chatHandler needs the greeting's actual content (not just its id)
+  // to prepend it to the model's context on the turn that creates it --
+  // without this, the tutor answers the student's first message in a
+  // section having never seen the greeting (and therefore the section's
+  // actual question text, section.content, which the greeting is the sole
+  // delivery mechanism for).
+  return { id: conversationId, title, greetingMessageId, greetingParts: greeting };
 }
 
 /** Delete-and-restart, in one action (#27) with #128's voiding semantics.
@@ -431,7 +438,24 @@ export async function getActiveSectionConversation(
 }
 
 /** Messages for a conversation, oldest first -- the order a transcript reads
- *  in, and the order messages_conversation_created_idx already serves. */
+ *  in.
+ *
+ *  #283: ordered by `seq` (a monotonic bigserial), not `createdAt` -- the
+ *  same tiebreaker repositories/conversations.ts's getLastMessages/
+ *  getMessagesForConversation use (#221), and ARCHITECTURE.md's "Message
+ *  Ordering" section claims for "every" messages-in-order query. This
+ *  function was the one left behind: `createdAt` is `timestamptz`
+ *  (microsecond resolution) and was only safe as a sole ordering key
+ *  because each `appendMessage` call was its own separate transaction, so
+ *  two rows could never share a timestamp -- a guarantee `seq` makes
+ *  independent of that fact. That assumption is no longer even true for
+ *  this conversation's own first two rows: startSectionConversation writes
+ *  the conversation and its greeting message in one atomic `db.batch`
+ *  group, exactly the "batched writes" condition this file's own doc
+ *  comment on `seq` names as when `createdAt` stops being safe. `seq` is
+ *  included in the projection (not just used for ordering) so a future
+ *  caller can page consistently the way getMessagesForConversation's
+ *  `before` cursor does. */
 export async function getSectionConversationMessages(db: Db, conversationId: string) {
   return db
     .select({
@@ -439,10 +463,11 @@ export async function getSectionConversationMessages(db: Db, conversationId: str
       role: messages.role,
       parts: messages.parts,
       createdAt: messages.createdAt,
+      seq: messages.seq,
     })
     .from(messages)
     .where(eq(messages.conversationId, conversationId))
-    .orderBy(messages.createdAt);
+    .orderBy(messages.seq);
 }
 
 /** Who may read a given section conversation (#27 access rules).
@@ -474,4 +499,27 @@ export function canWriteSectionConversation(
   viewer: { userId: string },
 ): boolean {
   return conversation.ownerUserId === viewer.userId;
+}
+
+/** True only when the caller's membership in this course is `student`.
+ *
+ *  #237: deliberately not "not an instructor" -- a `ta` or `observer` role
+ *  is neither `student` nor `instructor`/`admin` (the tiers isInstructorOf
+ *  checks), and would be misclassified as a student by that shortcut. Roles
+ *  other than student are never doing the assignment, so the safe default
+ *  for an unrecognized or missing membership is "not a student" -- a
+ *  conversation wrongly marked as a teacher test is merely unsubmittable,
+ *  whereas one wrongly marked as a student's pollutes real coursework.
+ *
+ *  #259: shared by both callers that create a section conversation
+ *  (routes/sectionConversations.ts's startSectionConversationHandler and
+ *  chat.ts's kind:"section" branch) -- previously duplicated once already
+ *  and drifted (chat.ts's copy didn't exist at all, defaulting every
+ *  section conversation to isTeacherTest: false), which is exactly the
+ *  failure mode a single shared implementation forecloses. Takes plain
+ *  membership data, not AuthContext, so this repository module doesn't need
+ *  to import the auth layer's types. */
+export function isStudentInCourse(memberships: { courseId: string; role: string }[], courseId: string): boolean {
+  const membership = memberships.find((m) => m.courseId === courseId);
+  return membership?.role === "student";
 }

@@ -3,5 +3,5 @@
 
 export { DefinitionCard } from "./DefinitionCard";
 export type { DefinitionCardProps } from "./DefinitionCard";
-export { renderToolPart } from "./render";
+export { renderToolPart, parseShowDefinitionInput, isToolPart } from "./render";
 export type { ToolPart } from "./render";

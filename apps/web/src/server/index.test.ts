@@ -6,6 +6,7 @@ import {
   loadSessionKey,
   sealSession,
 } from "../lib/session";
+import { TenancyMismatchError } from "./repositories/errors";
 
 const SESSION_SECRET = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
 
@@ -28,10 +29,39 @@ vi.mock("../db/client", () => ({
   }),
 }));
 
+// Only createConversation is exercised below (the #141 onError-mapping
+// test) -- every other export is a no-op stub so importing the real
+// routes/conversations.ts module (which imports all of these) doesn't
+// throw for the tests in this file that never hit /api/conversations.
+const createConversationMock = vi.fn();
+vi.mock("./repositories/conversations", () => ({
+  listConversationsForOwner: vi.fn(),
+  createConversation: (...args: unknown[]) => createConversationMock(...args),
+  // #308: createConversationHandler's per-user conversation cap -- stubbed
+  // to "no active conversations" so the #141 test below (the only test in
+  // this file that reaches POST /api/conversations) doesn't need to know
+  // about the cap to exercise the TenancyMismatchError mapping it's after.
+  countActiveConversationsForOwner: vi.fn().mockResolvedValue(0),
+  updateConversationTitle: vi.fn(),
+  softDeleteConversation: vi.fn(),
+  getConversationById: vi.fn(),
+  getMessagesForConversation: vi.fn(),
+}));
+
+// #308: createConversationHandler also rate-limits now (shares chat.ts's
+// #219/#265 counter) -- stubbed the same way chat.test.ts stubs it, real db
+// calls would throw against this file's fake `db` (no `.insert`/`.batch`).
+vi.mock("./repositories/rateLimits", () => ({
+  reserveRateLimitSlot: vi.fn().mockResolvedValue(1),
+  RATE_LIMIT_MAX_PER_MINUTE: 20,
+  RATE_LIMIT_WINDOW_MS: 60_000,
+}));
+
 beforeEach(() => {
   findMany.mockReset();
   findFirst.mockReset();
   findFirst.mockResolvedValue({ isActive: true, sessionEpoch: 0 });
+  createConversationMock.mockReset();
 });
 
 describe("app composition", () => {
@@ -69,6 +99,33 @@ describe("app composition", () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).not.toMatch(/ECONNREFUSED/);
     expect(consoleSpy).toHaveBeenCalledWith(expect.anything(), dbError);
+
+    consoleSpy.mockRestore();
+  });
+
+  it("maps a TenancyMismatchError to 404 (not the generic 503) and does not log it as a server error (#141)", async () => {
+    const courseId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    findMany.mockResolvedValue([
+      { id: "m1", userId: "u1", courseId, role: "student", droppedAt: null },
+    ]);
+    createConversationMock.mockRejectedValue(new TenancyMismatchError("Owner is not a member of this course scope"));
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const key = await loadSessionKey(ENV);
+    const sealed = await sealSession(createSessionPayload("u1", "w1", 0), key);
+
+    const res = await app.request(
+      "/api/conversations",
+      {
+        method: "POST",
+        headers: { cookie: `${SESSION_COOKIE_NAME}=${sealed}`, "content-type": "application/json" },
+        body: JSON.stringify({ courseId }),
+      },
+      ENV,
+    );
+
+    expect(res.status).toBe(404);
+    expect(consoleSpy).not.toHaveBeenCalled();
 
     consoleSpy.mockRestore();
   });

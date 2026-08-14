@@ -162,6 +162,34 @@
       "when": 1786483428721,
       "tag": "0022_conversation_is_teacher_test",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1786485366844,
+      "tag": "0023_chunky_scarecrow",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1786573363470,
+      "tag": "0024_aromatic_mordo",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1786595348308,
+      "tag": "0025_blue_speed",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1786597215085,
+      "tag": "0026_fluffy_redwing",
+      "breakpoints": true
     }
   ]
 }

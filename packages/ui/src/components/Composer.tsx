@@ -39,6 +39,12 @@
 
 import { useRef, useEffect, useState } from "react";
 
+/** #308: matches MAX_TEXT_PART_LENGTH in apps/web/src/server/routes/chat.ts
+ *  -- the server refuses a text part longer than this, so capping input
+ *  here keeps a normal user from ever composing a message the send would
+ *  just reject. */
+const DEFAULT_MAX_LENGTH = 8_000;
+
 export interface ComposerProps {
   value: string;
   onChange: (value: string) => void;
@@ -47,6 +53,14 @@ export interface ComposerProps {
   placeholder?: string;
   /** Prior student messages, oldest→newest. Up/Down navigate this list. */
   history?: string[];
+  /** #235: focuses the textarea once on mount -- used when a brand-new
+   *  conversation was just created, so a keyboard user lands where the
+   *  visual focus implicitly went (the chat column switched to it)
+   *  instead of needing to click/tab into the composer manually. */
+  autoFocus?: boolean;
+  /** #308: caps how many characters the textarea accepts, matching the
+   *  server's own per-text-part limit. */
+  maxLength?: number;
 }
 
 /* Cursor is on the first visual line iff there's no newline before it and no
@@ -68,8 +82,18 @@ export function Composer({
   disabled = false,
   placeholder = "Ask, explore, or push back…",
   history,
+  autoFocus = false,
+  maxLength = DEFAULT_MAX_LENGTH,
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // #235: run once on mount only (empty deps) -- a later autoFocus prop
+  // change must not steal focus back from wherever the user has since
+  // moved it.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (autoFocus) textareaRef.current?.focus();
+  }, []);
 
   /* History navigation state. `historyIndex === null` means the user is on
      their in-progress draft (the bottom of the stack). `savedDraft` preserves
@@ -159,7 +183,22 @@ export function Composer({
       <div className="composer-inner">
         <div className="composer-wrap">
           <div className="composer-body">
-            {/* The textarea — single input mode. Code goes in markdown fences. */}
+            {/* The textarea — single input mode. Code goes in markdown fences.
+                #270: native `disabled` removes the element from the focus
+                order the instant it's set -- mid-turn, that's while this
+                element already HAS focus, so the browser blurs it to
+                `document.body` with nothing to restore it, forcing a
+                keyboard-only student to re-traverse the whole page (nav,
+                homework sidebar, tutor rail, every conversation row) to
+                send their next message. aria-disabled never removes the
+                element from that order (focus survives the send/receive
+                cycle by construction, nothing to restore), and is announced
+                to AT where native `disabled` silently vanishes from the
+                accessibility tree -- the WCAG 2.5.8 target-size/AT-visibility
+                complaint the original review also raised, fixed as a side
+                effect of the same change. readOnly is the actual input
+                suppression during streaming; the `!disabled` guard in
+                handleKeyDown above still blocks Enter-to-submit too. */}
             <textarea
               ref={textareaRef}
               className="composer-textarea"
@@ -167,10 +206,12 @@ export function Composer({
               onChange={(e) => onChange(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={placeholder}
-              disabled={disabled}
+              aria-disabled={disabled}
+              readOnly={disabled}
               rows={1}
               aria-label="Message input"
               aria-multiline="true"
+              maxLength={maxLength}
             />
 
             {/* Enter hint — fades in on focus via CSS */}

@@ -40,9 +40,15 @@ export type { BadgeProps, BadgeVariant, BadgeSize } from "./components/Badge";
 export { Spinner } from "./components/Spinner";
 export type { SpinnerProps, SpinnerSize } from "./components/Spinner";
 
+export { EditableTitle } from "./components/EditableTitle";
+export type { EditableTitleProps } from "./components/EditableTitle";
+
+export { ErrorBoundary } from "./components/ErrorBoundary";
+export type { ErrorBoundaryProps } from "./components/ErrorBoundary";
+
 /* -- Generative-UI surfaces (rendered inline inside AI messages) ----------- */
 
-export { DefinitionCard, renderToolPart } from "./generative";
+export { DefinitionCard, renderToolPart, parseShowDefinitionInput, isToolPart } from "./generative";
 export type { DefinitionCardProps, ToolPart } from "./generative";
 
 /* -- Auth session -----------------------------------------------------------

@@ -1,0 +1,624 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { Hono } from "hono";
+import { conversationsRoutes } from "./conversations";
+import type { AuthContext } from "../middleware/roles";
+import { fakeAuthContext as buildFakeAuthContext, fakeMembership } from "../testing/authContext";
+import type { AppEnv } from "../context";
+
+// Route test (mock db, mock the repository layer) -- per the issue's own
+// "Testing Strategy". None of these tests exercise real SQL; they only
+// verify the routes' own ownership, validation, and status-code behavior.
+const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
+
+vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
+
+const listConversationsForOwnerMock = vi.fn();
+const createConversationMock = vi.fn();
+const countActiveConversationsForOwnerMock = vi.fn();
+const updateConversationTitleMock = vi.fn();
+const softDeleteConversationMock = vi.fn();
+const getOwnedConversationOrNullMock = vi.fn();
+const getMessagesForConversationMock = vi.fn();
+vi.mock("../repositories/conversations", () => ({
+  listConversationsForOwner: (...args: unknown[]) => listConversationsForOwnerMock(...args),
+  createConversation: (...args: unknown[]) => createConversationMock(...args),
+  // #308: backs createConversationHandler's per-user conversation cap.
+  countActiveConversationsForOwner: (...args: unknown[]) => countActiveConversationsForOwnerMock(...args),
+  updateConversationTitle: (...args: unknown[]) => updateConversationTitleMock(...args),
+  softDeleteConversation: (...args: unknown[]) => softDeleteConversationMock(...args),
+  getOwnedConversationOrNull: (...args: unknown[]) => getOwnedConversationOrNullMock(...args),
+  getMessagesForConversation: (...args: unknown[]) => getMessagesForConversationMock(...args),
+  // #281: the route imports this real value (not just a mocked function) to
+  // resolve the default page size when `limit` is omitted.
+  DEFAULT_CONVERSATIONS_PAGE_SIZE: 50,
+}));
+
+// #308: createConversationHandler now also rate-limits (reusing chat.ts's
+// #219/#265 counter/budget) -- mock the same module chat.test.ts does, with
+// the same real constant values, so this route's own tests don't need to
+// know the numbers to stay under budget by default.
+const reserveRateLimitSlotMock = vi.fn();
+vi.mock("../repositories/rateLimits", () => ({
+  reserveRateLimitSlot: (...args: unknown[]) => reserveRateLimitSlotMock(...args),
+  RATE_LIMIT_MAX_PER_MINUTE: 20,
+  RATE_LIMIT_WINDOW_MS: 60_000,
+}));
+
+function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
+  return buildFakeAuthContext({
+    memberships: [fakeMembership({ courseId: "course-a", role: "student" })],
+    ...overrides,
+  });
+}
+
+function buildApp(authContext: AuthContext | undefined) {
+  const app = new Hono<AppEnv>();
+  app.use("*", async (c, next) => {
+    if (authContext) c.set("authContext", authContext);
+    await next();
+  });
+  app.route("/api/conversations", conversationsRoutes);
+  return app;
+}
+
+function request(app: Hono<AppEnv>, path: string, init?: RequestInit) {
+  return app.request(path, init, TEST_ENV);
+}
+
+function patchConv(app: Hono<AppEnv>, id: string, body: unknown) {
+  return request(app, `/api/conversations/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+    headers: { "content-type": "application/json" },
+  });
+}
+
+// Full raw-row shape every repository mock resolves with -- #218 projects
+// this down to ConversationSummary in the route layer, so the projector
+// needs real Date objects (not undefined) for createdAt/updatedAt.
+function fakeConversationRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "22222222-2222-2222-2222-222222222222",
+    ownerUserId: "u1",
+    courseId: "course-a",
+    sectionId: null,
+    kind: "tutor" as const,
+    title: "New Conversation",
+    isDeleted: false,
+    deletedAt: null,
+    createdAt: new Date("2026-08-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-08-01T00:05:00.000Z"),
+    ...overrides,
+  };
+}
+
+beforeEach(() => {
+  listConversationsForOwnerMock.mockReset();
+  createConversationMock.mockReset();
+  // #308: 0 active conversations and under-budget by default -- individual
+  // tests for the cap/rate-limit paths override these explicitly.
+  countActiveConversationsForOwnerMock.mockReset().mockResolvedValue(0);
+  updateConversationTitleMock.mockReset();
+  softDeleteConversationMock.mockReset();
+  getOwnedConversationOrNullMock.mockReset();
+  getMessagesForConversationMock.mockReset();
+  reserveRateLimitSlotMock.mockReset().mockResolvedValue(1);
+});
+
+describe("GET /api/conversations", () => {
+  it("returns 401 when there is no authContext", async () => {
+    const res = await request(buildApp(undefined), "/api/conversations?courseId=course-a");
+    expect(res.status).toBe(401);
+    expect(listConversationsForOwnerMock).not.toHaveBeenCalled();
+  });
+
+  it("400s when courseId is missing", async () => {
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations");
+    expect(res.status).toBe(400);
+    expect(listConversationsForOwnerMock).not.toHaveBeenCalled();
+  });
+
+  it("400s on an unrecognized kind", async () => {
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations?courseId=course-a&kind=bogus");
+    expect(res.status).toBe(400);
+    expect(listConversationsForOwnerMock).not.toHaveBeenCalled();
+  });
+
+  it("403s when the caller is not a member of the requested course", async () => {
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations?courseId=course-b");
+    expect(res.status).toBe(403);
+    expect(listConversationsForOwnerMock).not.toHaveBeenCalled();
+  });
+
+  it("defaults kind to 'tutor' and lists only the caller's conversations for the course, projected to the wire DTO", async () => {
+    listConversationsForOwnerMock.mockResolvedValue([{ ...fakeConversationRow({ title: "Chat 1" }), messageCount: 3 }]);
+
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations?courseId=course-a");
+
+    expect(res.status).toBe(200);
+    // #218: only the wire fields -- ownerUserId/courseId/sectionId/isDeleted/
+    // deletedAt are dropped. #281: the response is now { items, nextCursor },
+    // not a bare array -- one row is fewer than the default page size
+    // (50), so nextCursor is null (no reason to believe there's a next page).
+    expect(await res.json()).toEqual({
+      items: [
+        {
+          id: "22222222-2222-2222-2222-222222222222",
+          kind: "tutor",
+          title: "Chat 1",
+          createdAt: "2026-08-01T00:00:00.000Z",
+          updatedAt: "2026-08-01T00:05:00.000Z",
+          messageCount: 3,
+        },
+      ],
+      nextCursor: null,
+    });
+    expect(listConversationsForOwnerMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "course-a",
+      "u1",
+      { kind: "tutor", limit: 50, before: undefined },
+    );
+  });
+
+  it("passes an explicit kind=tutor through", async () => {
+    listConversationsForOwnerMock.mockResolvedValue([]);
+    await request(buildApp(fakeAuthContext()), "/api/conversations?courseId=course-a&kind=tutor");
+    expect(listConversationsForOwnerMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "course-a",
+      "u1",
+      { kind: "tutor", limit: 50, before: undefined },
+    );
+  });
+
+  // #224/#281
+  describe("pagination", () => {
+    it("passes a valid limit/before through to the repository", async () => {
+      listConversationsForOwnerMock.mockResolvedValue([]);
+      const cursor = btoa(JSON.stringify({ updatedAt: "2026-08-01T00:00:00.000Z", id: "33333333-3333-3333-3333-333333333333" }));
+      await request(
+        buildApp(fakeAuthContext()),
+        `/api/conversations?courseId=course-a&limit=10&before=${encodeURIComponent(cursor)}`,
+      );
+      const [, , , opts] = listConversationsForOwnerMock.mock.calls[0]!;
+      expect(opts.limit).toBe(10);
+      expect(opts.before).toEqual({
+        updatedAt: new Date("2026-08-01T00:00:00.000Z"),
+        id: "33333333-3333-3333-3333-333333333333",
+      });
+    });
+
+    // #281: an explicit nextCursor in the response, encoding the last row's
+    // (updatedAt, id) -- only emitted when a full page came back (the only
+    // available signal that more rows might exist).
+    it("emits nextCursor encoding the last row's (updatedAt, id) when a full page comes back", async () => {
+      const rows = Array.from({ length: 2 }, (_, i) => ({
+        ...fakeConversationRow({ id: `44444444-4444-4444-4444-44444444444${i}`, title: `Chat ${i}` }),
+        messageCount: 0,
+      }));
+      listConversationsForOwnerMock.mockResolvedValue(rows);
+
+      const res = await request(buildApp(fakeAuthContext()), "/api/conversations?courseId=course-a&limit=2");
+      const body = (await res.json()) as { nextCursor: string | null };
+
+      expect(body.nextCursor).not.toBeNull();
+      const decoded = JSON.parse(atob(body.nextCursor!)) as { updatedAt: string; id: string };
+      expect(decoded.id).toBe(rows[1]!.id);
+      expect(decoded.updatedAt).toBe(rows[1]!.updatedAt.toISOString());
+    });
+
+    it("does not emit nextCursor when fewer rows than limit come back (last page)", async () => {
+      listConversationsForOwnerMock.mockResolvedValue([{ ...fakeConversationRow(), messageCount: 0 }]);
+      const res = await request(buildApp(fakeAuthContext()), "/api/conversations?courseId=course-a&limit=50");
+      const body = (await res.json()) as { nextCursor: string | null };
+      expect(body.nextCursor).toBeNull();
+    });
+
+    it("400s on a limit outside 1-200", async () => {
+      const res = await request(buildApp(fakeAuthContext()), "/api/conversations?courseId=course-a&limit=0");
+      expect(res.status).toBe(400);
+      expect(listConversationsForOwnerMock).not.toHaveBeenCalled();
+    });
+
+    it("400s on a non-numeric limit", async () => {
+      const res = await request(buildApp(fakeAuthContext()), "/api/conversations?courseId=course-a&limit=abc");
+      expect(res.status).toBe(400);
+    });
+
+    it("400s on a malformed before cursor", async () => {
+      const res = await request(
+        buildApp(fakeAuthContext()),
+        "/api/conversations?courseId=course-a&before=not-a-valid-cursor",
+      );
+      expect(res.status).toBe(400);
+      expect(listConversationsForOwnerMock).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("POST /api/conversations", () => {
+  it("returns 401 when there is no authContext", async () => {
+    const res = await request(buildApp(undefined), "/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ courseId: "course-a" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(401);
+    expect(createConversationMock).not.toHaveBeenCalled();
+  });
+
+  it("400s when courseId is missing or not a uuid-shaped string", async () => {
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ courseId: "not-a-uuid" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(400);
+    expect(createConversationMock).not.toHaveBeenCalled();
+  });
+
+  it("400s on invalid JSON body", async () => {
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations", {
+      method: "POST",
+      body: "not json",
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("403s when the caller is not a member of courseId", async () => {
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ courseId: "11111111-1111-1111-1111-111111111111" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(403);
+    expect(createConversationMock).not.toHaveBeenCalled();
+  });
+
+  it("creates a tutor conversation with the default title when title is omitted, and returns 201 with the projected DTO", async () => {
+    const authContext = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "11111111-1111-1111-1111-111111111111", role: "student" })],
+    });
+    createConversationMock.mockResolvedValue(
+      fakeConversationRow({ id: "22222222-2222-2222-2222-222222222222", courseId: "11111111-1111-1111-1111-111111111111", title: "New Conversation" }),
+    );
+
+    const res = await request(buildApp(authContext), "/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ courseId: "11111111-1111-1111-1111-111111111111" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(201);
+    expect(createConversationMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "11111111-1111-1111-1111-111111111111",
+      { ownerUserId: "u1", sectionId: null, kind: "tutor", title: "New Conversation" },
+    );
+    // #218: no ownerUserId/courseId/etc. in the response.
+    expect(await res.json()).toEqual({
+      id: "22222222-2222-2222-2222-222222222222",
+      kind: "tutor",
+      title: "New Conversation",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:05:00.000Z",
+    });
+  });
+
+  it("creates a tutor conversation using the supplied title", async () => {
+    const authContext = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "11111111-1111-1111-1111-111111111111", role: "student" })],
+    });
+    createConversationMock.mockResolvedValue(
+      fakeConversationRow({ id: "22222222-2222-2222-2222-222222222222", courseId: "11111111-1111-1111-1111-111111111111", title: "My chat" }),
+    );
+
+    await request(buildApp(authContext), "/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ courseId: "11111111-1111-1111-1111-111111111111", title: "  My chat  " }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(createConversationMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "11111111-1111-1111-1111-111111111111",
+      { ownerUserId: "u1", sectionId: null, kind: "tutor", title: "My chat" },
+    );
+  });
+
+  it("400s when the supplied title is whitespace-only (empty after trim)", async () => {
+    const authContext = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "11111111-1111-1111-1111-111111111111", role: "student" })],
+    });
+    const res = await request(buildApp(authContext), "/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ courseId: "11111111-1111-1111-1111-111111111111", title: "   " }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(400);
+    expect(createConversationMock).not.toHaveBeenCalled();
+  });
+
+  it("400s when the supplied title is over 100 chars", async () => {
+    const authContext = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "11111111-1111-1111-1111-111111111111", role: "student" })],
+    });
+    const res = await request(buildApp(authContext), "/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ courseId: "11111111-1111-1111-1111-111111111111", title: "x".repeat(101) }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(400);
+    expect(createConversationMock).not.toHaveBeenCalled();
+  });
+
+  // #308: previously no rate limit at all on this route (only /api/chat had
+  // one, #219) and no cap on how many live tutor conversations one student
+  // could accumulate.
+  it("429s (with Retry-After) when this request's reservation pushes the count over budget, without creating a conversation", async () => {
+    reserveRateLimitSlotMock.mockResolvedValue(21);
+    const authContext = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "11111111-1111-1111-1111-111111111111", role: "student" })],
+    });
+
+    const res = await request(buildApp(authContext), "/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ courseId: "11111111-1111-1111-1111-111111111111" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBeTruthy();
+    expect(createConversationMock).not.toHaveBeenCalled();
+  });
+
+  it("429s when the caller already has the max number of active tutor conversations for this course", async () => {
+    countActiveConversationsForOwnerMock.mockResolvedValue(300);
+    const authContext = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "11111111-1111-1111-1111-111111111111", role: "student" })],
+    });
+
+    const res = await request(buildApp(authContext), "/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ courseId: "11111111-1111-1111-1111-111111111111" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(429);
+    expect(createConversationMock).not.toHaveBeenCalled();
+  });
+
+  it("creates a conversation normally when just under the active-conversation cap", async () => {
+    countActiveConversationsForOwnerMock.mockResolvedValue(299);
+    const authContext = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "11111111-1111-1111-1111-111111111111", role: "student" })],
+    });
+    createConversationMock.mockResolvedValue(
+      fakeConversationRow({ id: "22222222-2222-2222-2222-222222222222", courseId: "11111111-1111-1111-1111-111111111111" }),
+    );
+
+    const res = await request(buildApp(authContext), "/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ courseId: "11111111-1111-1111-1111-111111111111" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(201);
+    expect(createConversationMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("PATCH /api/conversations/:id", () => {
+  it("returns 401 when there is no authContext", async () => {
+    const res = await patchConv(buildApp(undefined), "22222222-2222-2222-2222-222222222222", { title: "New title" });
+    expect(res.status).toBe(401);
+    expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
+  });
+
+  // #267: a malformed id used to reach getOwnedConversationOrNull's
+  // eq(conversations.id, id) unvalidated, raising Postgres's "invalid input
+  // syntax for type uuid" -- a permanent client error the generic error
+  // handler turned into a 503 "try again later" plus a logged server error.
+  it("404s (not 503) on a malformed id, without reaching the repository layer", async () => {
+    const res = await patchConv(buildApp(fakeAuthContext()), "not-a-uuid", { title: "New title" });
+    expect(res.status).toBe(404);
+    expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
+  });
+
+  // #217: getOwnedConversationOrNull itself collapses "doesn't exist",
+  // "not owned", and "soft-deleted" into one null -- these three tests
+  // exercise the route's response to that null, not three different repo
+  // return shapes (that collapsing is getOwnedConversationOrNull's own
+  // responsibility, covered directly in conversations repository tests).
+  it("404s when getOwnedConversationOrNull returns null (not found, not owned, or soft-deleted)", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(null);
+    const res = await patchConv(buildApp(fakeAuthContext()), "22222222-2222-2222-2222-222222222222", { title: "New title" });
+    expect(res.status).toBe(404);
+    expect(updateConversationTitleMock).not.toHaveBeenCalled();
+  });
+
+  it("passes the caller's userId to getOwnedConversationOrNull", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(null);
+    await patchConv(buildApp(fakeAuthContext()), "22222222-2222-2222-2222-222222222222", { title: "New title" });
+    expect(getOwnedConversationOrNullMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "22222222-2222-2222-2222-222222222222",
+      "u1",
+      expect.any(Function),
+    );
+  });
+
+  it("400s when title is empty after trimming whitespace", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+    const res = await patchConv(buildApp(fakeAuthContext()), "22222222-2222-2222-2222-222222222222", { title: "   " });
+    expect(res.status).toBe(400);
+    expect(updateConversationTitleMock).not.toHaveBeenCalled();
+  });
+
+  it("400s when title exceeds 100 chars", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+    const res = await patchConv(buildApp(fakeAuthContext()), "22222222-2222-2222-2222-222222222222", { title: "x".repeat(101) });
+    expect(res.status).toBe(400);
+    expect(updateConversationTitleMock).not.toHaveBeenCalled();
+  });
+
+  it("400s when the request body is not valid JSON", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222", {
+      method: "PATCH",
+      body: "not json",
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("trims the title before persisting and returns the projected updated row", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+    updateConversationTitleMock.mockResolvedValue(fakeConversationRow({ title: "Trimmed" }));
+
+    const res = await patchConv(buildApp(fakeAuthContext()), "22222222-2222-2222-2222-222222222222", { title: "  Trimmed  " });
+
+    expect(res.status).toBe(200);
+    expect(updateConversationTitleMock).toHaveBeenCalledWith(expect.anything(), "course-a", "22222222-2222-2222-2222-222222222222", "Trimmed");
+    expect(await res.json()).toEqual({
+      id: "22222222-2222-2222-2222-222222222222",
+      kind: "tutor",
+      title: "Trimmed",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:05:00.000Z",
+    });
+  });
+
+  it("404s when updateConversationTitle finds nothing to update (e.g. concurrently soft-deleted)", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+    updateConversationTitleMock.mockResolvedValue(null);
+
+    const res = await patchConv(buildApp(fakeAuthContext()), "22222222-2222-2222-2222-222222222222", { title: "New title" });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("DELETE /api/conversations/:id", () => {
+  it("returns 401 when there is no authContext", async () => {
+    const res = await request(buildApp(undefined), "/api/conversations/22222222-2222-2222-2222-222222222222", { method: "DELETE" });
+    expect(res.status).toBe(401);
+    expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
+  });
+
+  // #267
+  it("404s (not 503) on a malformed id, without reaching the repository layer", async () => {
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/not-a-uuid", { method: "DELETE" });
+    expect(res.status).toBe(404);
+    expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
+  });
+
+  it("404s when getOwnedConversationOrNull returns null", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(null);
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222", { method: "DELETE" });
+    expect(res.status).toBe(404);
+    expect(softDeleteConversationMock).not.toHaveBeenCalled();
+  });
+
+  it("soft-deletes and returns 204 with no body when owned by the caller", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+    softDeleteConversationMock.mockResolvedValue(undefined);
+
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222", { method: "DELETE" });
+
+    expect(res.status).toBe(204);
+    const text = await res.text();
+    expect(text).toBe("");
+    expect(softDeleteConversationMock).toHaveBeenCalledWith(expect.anything(), "course-a", "22222222-2222-2222-2222-222222222222");
+  });
+});
+
+// #4 fix-round: added after code review found that selecting an existing
+// tutor conversation reset the client's chat to empty with no way to
+// reseed it -- not just a visual gap, since chatHandler builds the model's
+// context from exactly what the client sends (chat.ts). Ownership tests
+// below mirror PATCH/DELETE's 404-not-403 pattern exactly (same
+// getOwnedConversationOrNull helper), not a new one.
+describe("GET /api/conversations/:id/messages", () => {
+  it("returns 401 when there is no authContext", async () => {
+    const res = await request(buildApp(undefined), "/api/conversations/22222222-2222-2222-2222-222222222222/messages");
+    expect(res.status).toBe(401);
+    expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
+  });
+
+  // #267
+  it("404s (not 503) on a malformed id, without reaching the repository layer", async () => {
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/not-a-uuid/messages");
+    expect(res.status).toBe(404);
+    expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
+  });
+
+  it("404s when getOwnedConversationOrNull returns null (not found, not owned, or soft-deleted)", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(null);
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222/messages");
+    expect(res.status).toBe(404);
+    expect(getMessagesForConversationMock).not.toHaveBeenCalled();
+  });
+
+  it("returns the conversation's messages mapped to {id, role, parts}, scoped by the conversation's own courseId", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+    getMessagesForConversationMock.mockResolvedValue([
+      { id: "m1", conversationId: "22222222-2222-2222-2222-222222222222", role: "user", parts: [{ type: "text", text: "hi" }], createdAt: new Date(), seq: 1 },
+      { id: "m2", conversationId: "22222222-2222-2222-2222-222222222222", role: "assistant", parts: [{ type: "text", text: "hello" }], createdAt: new Date(), seq: 2 },
+    ]);
+
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222/messages");
+
+    expect(res.status).toBe(200);
+    expect(getMessagesForConversationMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "course-a",
+      "22222222-2222-2222-2222-222222222222",
+      { limit: undefined, before: undefined },
+    );
+    // #280: seq is now included in the wire response.
+    expect(await res.json()).toEqual([
+      { id: "m1", role: "user", parts: [{ type: "text", text: "hi" }], seq: 1 },
+      { id: "m2", role: "assistant", parts: [{ type: "text", text: "hello" }], seq: 2 },
+    ]);
+  });
+
+  it("returns an empty array (200), not 404, for a conversation with no messages yet", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+    getMessagesForConversationMock.mockResolvedValue([]);
+
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222/messages");
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
+  });
+
+  // #215
+  describe("pagination", () => {
+    it("passes a valid limit/before through to the repository", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+      getMessagesForConversationMock.mockResolvedValue([]);
+      await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222/messages?limit=50&before=12");
+      expect(getMessagesForConversationMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "course-a",
+        "22222222-2222-2222-2222-222222222222",
+        { limit: 50, before: 12 },
+      );
+    });
+
+    it("400s on a limit outside 1-500", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+      const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222/messages?limit=0");
+      expect(res.status).toBe(400);
+      expect(getMessagesForConversationMock).not.toHaveBeenCalled();
+    });
+
+    it("400s on a non-integer before", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+      const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222/messages?before=abc");
+      expect(res.status).toBe(400);
+    });
+  });
+});

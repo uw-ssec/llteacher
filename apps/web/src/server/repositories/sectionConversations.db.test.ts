@@ -24,7 +24,7 @@ import {
   SectionNotInteractiveError,
 } from "./sectionConversations";
 import { submitSection, getHomeworkSubmissionsMatrix } from "./submissions";
-import { softDeleteConversation } from "./conversations";
+import { softDeleteConversation, appendMessage } from "./conversations";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import {
@@ -157,6 +157,39 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
         text: "Hello! I'm here to help you with Section 2: Confidence intervals.\n\nEstimate the mean.\n\nHow can I assist you with this question?",
       },
     ]);
+  });
+
+  // #283: getSectionConversationMessages was still ordering by `createdAt`
+  // while repositories/conversations.ts's getLastMessages/
+  // getMessagesForConversation had already moved to `seq` (#221) -- this
+  // conversation's own first two rows (the greeting + a reply) are written
+  // in a single atomic db.batch group by startSectionConversation, which is
+  // exactly the "batched writes" condition ARCHITECTURE.md's Message
+  // Ordering section names as when createdAt stops being a safe sole
+  // ordering key. Asserting on `seq` order directly (not just createdAt,
+  // which two batched rows could plausibly still share or reverse under a
+  // real driver) is what actually exercises the fix.
+  it("orders messages by seq, including the batch-written greeting", async () => {
+    await reset();
+    const scope = unsafeCourseScope(courseId);
+    const created = await startSectionConversation(db, scope, {
+      sectionId,
+      ownerUserId: studentId,
+      isTeacherTest: false,
+    });
+    const [greeting] = await getSectionConversationMessages(db, created.id);
+    const { row: userMsg } = await appendMessage(db, scope, created.id, {
+      role: "user",
+      parts: [{ type: "text", text: "question" }],
+    });
+    const { row: assistantMsg } = await appendMessage(db, scope, created.id, {
+      role: "assistant",
+      parts: [{ type: "text", text: "answer" }],
+    });
+
+    const messages = await getSectionConversationMessages(db, created.id);
+    expect(messages.map((m) => m.id)).toEqual([greeting!.id, userMsg.id, assistantMsg.id]);
+    expect(messages.map((m) => m.seq)).toEqual([...messages.map((m) => m.seq)].sort((a, b) => a - b));
   });
 
   it("refuses a second active conversation on the same section", async () => {

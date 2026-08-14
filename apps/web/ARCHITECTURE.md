@@ -55,26 +55,172 @@ for the full reasoning, including which tables use which scope and why.
 `OrgScope`/`CourseScope` answer "does this row belong to the caller's
 org/course" -- they do not answer "may *this specific caller* touch *this
 specific row*." `repositories/conversations.ts`'s `softDeleteConversation`
-and `appendMessage` currently enforce `CourseScope` only: any member of the
-course (student or instructor) can soft-delete or append to any other
-student's conversation by UUID, since neither function checks the row's
-`ownerUserId` against the caller. Not yet exploitable -- no M3 route calls
-either function today -- but the gap needs an owner before the first
-conversation route ships with it silently unenforced (found + tracked as
-[#134](https://github.com/uw-ssec/llteacher/issues/134)).
+and `appendMessage` enforce `CourseScope` only: neither function checks the
+row's `ownerUserId` against the caller itself, so calling either directly
+with just a `CourseScope` would let any member of the course touch any other
+student's conversation by UUID.
 
-**Decision:** row ownership is the M3 route layer's responsibility, not the
-repository layer's -- extending the same split this doc already draws
-("guards decide *who*"; repositories decide *which org's rows*) with a third
-tier routes own: *which row within the org*. Routes already have
-`AuthContext.session.userId` and `AuthContext.isInstructorOf(courseId)`
-(`server/middleware/roles.ts`); when M3 adds conversation routes,
-`softDeleteConversation`/`appendMessage` (and any new conversation-mutating
-repository function) grow an explicit `requesterId` parameter so the
-ownership check runs in the same query that already fetches the row --
-avoiding a separate read-then-check race -- but the *policy* (self-only, or
-self-or-instructor-override) is the calling route's decision to pass in, not
-something the repository infers on its own.
+**#301 update:** this is no longer a latent gap -- both functions are now
+route-reachable (`DELETE /api/conversations/:id` -> `deleteConversationHandler`
+-> `softDeleteConversation`; every `/api/chat` turn -> `chatHandler` ->
+`appendMessage`), and the doc below previously said "no M3 route calls
+either function today," which stopped being true the moment those routes
+shipped. **Current reality:** ownership is enforced *at the route layer*,
+one tier up from where this section originally proposed adding it.
+`deleteConversationHandler` calls `getOwnedConversationOrNull`
+(`repositories/conversations.ts` -- see "Tenancy Mismatch Errors" below for
+why it moved out of `routes/conversations.ts`) first, and only calls
+`softDeleteConversation` with a `CourseScope` minted from that
+already-ownership-checked row; `chatHandler` does the identical
+existing-conversation check before its own `appendMessage` calls. Neither
+repository function grew the `requesterId` parameter this section originally
+proposed -- the route-layer check made it unnecessary for the callers that
+exist today.
+
+**Rule for the next conversation-mutating route:** call
+`getOwnedConversationOrNull` (or, for a route inside an already-scoped
+create/list flow, an equivalent ownership check) *before* calling
+`softDeleteConversation`, `appendMessage`, `updateConversationTitle`, or any
+future conversation-mutating repository function. These functions will
+silently accept a call from a caller who isn't the row's owner if you skip
+this -- they were never given their own ownership check, and #134 (below)
+is why that was a deliberate choice, not an oversight to route around.
+
+**#134 still open:** the belt-and-braces alternative this section
+originally proposed -- growing an explicit `requesterId` parameter on the
+repository functions themselves, so the ownership check runs in the same
+query that already fetches the row instead of as a separate read-then-check
+-- remains unimplemented. Every current caller happens to check ownership
+first, so there is no live exploit, but a future route that forgets the
+rule above has nothing at the repository layer to catch it. Revisit if a
+second conversation-mutating surface (an admin/instructor override path, for
+instance) makes "the route always checks first" harder to guarantee by
+inspection alone.
+
+## Tenancy Mismatch Errors
+
+A repository function's `CourseScope` check (see "Tenancy Enforcement"
+above) can fail two different ways: an unexpected infra failure (DB
+connection drop, etc.), or an expected condition -- the caller passed an id
+(an owner, a section, a conversation) that just doesn't belong to the scope
+it's being used under. Prior to [#141](https://github.com/uw-ssec/llteacher/issues/141)
+every repository function threw a plain `Error` for both cases, which meant
+neither the route layer nor `app.onError` (`server/index.ts`) could tell
+them apart -- a tenancy mismatch fell through to the same generic 503 a
+real DB outage gets, when the honest response is a 404 (mirroring the
+404-not-403 convention `getOwnedConversationOrNull`
+(`repositories/conversations.ts` -- moved there from `routes/conversations.ts`
+so `chatHandler`'s conversationId ownership check, #217, could reuse the
+identical rule instead of hand-rolling its own) already established for the
+route-level ownership check: never leak whether a row exists via the status
+code).
+
+**Convention:** a repository function that detects this specific condition
+throws `TenancyMismatchError` (`repositories/errors.ts`) instead of a plain
+`Error`. `server/index.ts`'s `app.onError` -- already the single place
+every uncaught error in the app funnels through -- checks
+`err instanceof TenancyMismatchError` first and maps it to a 404, before
+falling through to the generic 503 for everything else. This is a shared
+app-layer handler, not a per-route `try`/`catch`: any repository function
+that wants this behavior throws the same class, and every route gets the
+mapping for free without its own catch block.
+
+As of #141, `createConversation`/`appendMessage`
+(`repositories/conversations.ts`) throw it. `recordGrade`
+(`repositories/submissions.ts`) is expected to reuse it when
+[#75](https://github.com/uw-ssec/llteacher/issues/75) (M5) wires a route to
+it. `createSubmission` (`repositories/submissions.ts`) deliberately does
+**not** use this: [#22](https://github.com/uw-ssec/llteacher/issues/22)'s
+`submitSectionHandler` already has its own reasoned (403, not 404)
+convention for that call site (mapping both "doesn't exist" and "wrong
+owner" to a uniform 403, so a non-owner can't use a 404-vs-403 split to
+learn a conversation exists) -- a deliberate, documented exception to this
+convention, not an oversight to "fix."
+
+## Known Non-Atomic Sequences
+
+`appendMessage` (`repositories/conversations.ts`) checks the conversation is
+owned-and-not-deleted, then inserts the message and touches the parent
+conversation's `updatedAt` -- the insert and the touch are atomic with each
+other (`db.batch`, since `neon-http` has no `db.transaction` -- see that
+function's own doc comment), but the ownership check is a separate,
+earlier read. A conversation soft-deleted between the check and the insert
+is a narrow TOCTOU window ([#220](https://github.com/uw-ssec/llteacher/issues/220)):
+not closed here, left open deliberately rather than adding a second
+`db.batch` round or a `WHERE` clause on the insert itself, which would need
+its own design pass (an insert can't conditionally no-op the way an update
+can). Revisit if this ever becomes reachable at meaningful concurrency.
+
+## Message Ordering
+
+`messages.seq` (a global `bigserial`, [#221](https://github.com/uw-ssec/llteacher/issues/221))
+is the sort key for every "give me messages in order" query
+(`getLastMessages`, `getMessagesForConversation`,
+`getSectionConversationMessages` -- [#283](https://github.com/uw-ssec/llteacher/issues/283)
+brought the last of the three off `createdAt`) -- not `createdAt`.
+`createdAt` is `timestamptz` (microsecond resolution) and was safe as the
+sole ordering key only because each `appendMessage` call is its own
+separate transaction, so two rows could never share a timestamp; `seq`
+makes that guarantee independent of that fact, and survives a future change
+to batch multiple message writes into one transaction. Keep `createdAt` for
+display (it's the value `formatUpdatedAt`-style UI code wants); use `seq`
+for ordering only.
+
+### Migrations Touching `messages`
+
+`messages` is the fastest-growing table in the schema and, unlike most
+tables this project has migrated so far, is never empty in a real
+deployment by the time a new migration runs against it. A plain
+`drizzle-kit generate` diff for a `NOT NULL` column with no explicit
+default (a `bigserial`, in particular) assigns values in whatever order
+Postgres's `ALTER TABLE` rewrite happens to scan the heap -- which has no
+relationship to `created_at`, and can vary between a fresh table and one
+that has seen deletes or a `VACUUM` ([#269](https://github.com/uw-ssec/llteacher/issues/269)
+demonstrated both silently reordering a populated `messages` table in
+Postgres 16, one via free-space reuse, one via `synchronize_seqscans` alone
+with zero deletes). The rule this repo has now hand-applied three times
+(migrations 0018, 0021, 0023): add the column nullable, backfill it with an
+explicit `UPDATE ... ORDER BY` (or `row_number() OVER (...)` into a real
+sequence for a strictly-ordered column like `seq`), then `SET NOT NULL`.
+Never trust `drizzle-kit generate`'s raw output for a `NOT NULL` column on
+this table without checking whether it included a backfill.
+
+Separately: 0023's column-add and its three index builds run as ordinary
+(non-`CONCURRENTLY`) DDL, which takes `ACCESS EXCLUSIVE` for the duration.
+Fine at current volume; revisit the online (`CONCURRENTLY`, multi-step)
+pattern before this table is large enough for that lock to be felt in
+production.
+
+## Pinned AI SDK Versions
+
+`apps/web/package.json` pins `ai`, `@ai-sdk/react`, and `@ai-sdk/openai` to
+exact versions ([#229](https://github.com/uw-ssec/llteacher/issues/229)),
+not a `^` range. `routes/chat.ts` depends on two undocumented internals of
+`ai@5.0.195`: the AI SDK's step machinery unconditionally pushing a
+`{ type: "step-start" }` marker part onto `responseMessage.parts` (see
+`hasRenderableContent`'s doc comment in that file), and the exact
+`UIMessageChunk` shapes `replayPersistedPart` hand-constructs to impersonate
+a `streamText` response on the idempotency-replay path. A `^5.0.0` range
+would let `npm install` float either out from under the code with no
+review. `chat.errorChunk.integration.test.ts` drives a real `streamText()`
+against an erroring model and would catch a `step-start` regression in CI;
+the replay-chunk shapes have thinner coverage, so treat any bump of these
+three packages as a deliberate, reviewed change, not a routine update.
+
+## Client Architecture Notes
+
+Two decisions live in code comments in `apps/web/src/client/` rather than
+here, because they're small enough to stay next to the code they explain --
+noted here only as a pointer so they're easy to find:
+
+- **Two independent `useChat` instances in `App.tsx`** (one for the
+  homework-section chat, one for the tutor rail's active conversation) --
+  see the doc comment above the tutor `useChat` call in `App.tsx` for why
+  they're deliberately not unified into one, including why one is keyed by
+  `id` and the other isn't.
+- **The tutor rail's IA** (a second collapsible sidebar zone, not a new
+  route or a merge into the homework `Sidebar`) -- see
+  `TutorConversationsList.tsx`'s file-level doc comment.
 
 ## Section Submissions Are One Per (Student, Section)
 
@@ -134,3 +280,27 @@ Two consequences worth knowing before you touch either path:
 Rationale, and the superseded/locked alternatives that were rejected:
 [docs/superpowers/specs/2026-08-11-submission-uniqueness-design.md](../../docs/superpowers/specs/2026-08-11-submission-uniqueness-design.md)
 ([#128](https://github.com/uw-ssec/llteacher/issues/128)).
+
+## Deploy Order
+
+**Migrate before deploy, always** ([#284](https://github.com/uw-ssec/llteacher/issues/284)).
+`npm run deploy` runs `db:migrate` first for exactly this reason -- do not
+call `wrangler deploy` directly, and do not reorder the two in CI when that
+pipeline exists.
+
+The hazard is one-directional and comes from Drizzle's schema being shared
+between the query builder and the migrator: any migration that adds a
+column read via `db.select().from(...)` -- `messages.seq`/`client_message_id`
+(0023) are the current example -- means the *new* Worker bundle's queries
+reference a column the *old*, not-yet-migrated database doesn't have.
+Deploying the Worker first turns every `POST /api/chat` into `42703 column
+messages.seq does not exist` -> a 500. Client-side, that 500 surfaces as a
+history-fetch failure, and prior to #276 that failed open into a silently
+empty transcript rather than a visible error -- so a wrong-order deploy
+presented to a student as their conversation history having vanished, not
+as an outage.
+
+Rolling the Worker **back** after migrating forward is safe: `seq` has a
+`nextval` default and `client_message_id` is nullable, so pre-migration
+code inserts and selects cleanly against the post-migration schema. Only
+forward-Worker-before-forward-migration is the ordering that breaks.

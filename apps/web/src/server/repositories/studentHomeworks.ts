@@ -33,6 +33,13 @@ export interface StudentSectionProgress {
 
 export interface StudentHomeworkSummary {
   id: string;
+  /** #4: the tutor-conversations list surface (apps/web/src/client/hooks/
+   *  useTutorConversations.ts) needs a courseId to call GET/POST
+   *  /api/conversations?courseId=... -- this endpoint is the only place
+   *  the student client currently learns its course context (the client
+   *  has no course-switching UI yet), so it rides along on the homework
+   *  summary it's already fetching rather than a new endpoint. */
+  courseId: string;
   title: string;
   description: string;
   dueDate: string;
@@ -142,6 +149,7 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
     const total = hw.sections.length || 1;
     results.push({
       id: hw.id,
+      courseId: hw.courseId,
       title: hw.title,
       description: hw.description,
       dueDate: hw.dueDate.toISOString(),

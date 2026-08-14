@@ -44,7 +44,15 @@ export type MessageProps =
 export function Message(props: MessageProps) {
   if (props.role === "ai") {
     return (
-      <div className="message--ai">
+      // #300: aria-busy so the log region below (ConversationView's
+      // .conversation-inner, role="log" aria-live="polite") doesn't
+      // announce this message while it's still filling in -- an
+      // in-progress node inside a polite live region is otherwise
+      // announced repeatedly as it mutates, one of the worst-case
+      // "torrent" failure modes for a streamed response. Flips to false
+      // (and this element is then announced once, whole) the instant the
+      // owning useChat call marks the turn done.
+      <div className="message--ai" aria-busy={props.isStreaming ?? false}>
         {/* Message body — no speaker mark; layout difference vs. student
             messages is enough signal */}
         <div className="message__ai-body">

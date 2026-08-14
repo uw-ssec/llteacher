@@ -1,4 +1,5 @@
 import type { CourseRole } from "../server/middleware/roles";
+import type { ConversationKind } from "../db/schema";
 
 export type HelloResponse = {
   message: string;
@@ -78,6 +79,62 @@ export type { SectionStatusType, StudentHomeworkSummary };
 
 export interface StudentHomeworkListResponse {
   homeworks: StudentHomeworkSummary[];
+}
+
+/* -- Conversations (#4/#5) --------------------------------------------------
+   Wire shape of a row from GET /api/conversations -- a projection of the
+   `conversations` table, not the raw Drizzle row (#218: the raw row also
+   carries ownerUserId/courseId/sectionId/isDeleted/deletedAt, none of which
+   any client reads -- every row returned is already scoped to the caller's
+   own, so this was never a cross-tenant leak, but it needlessly widened the
+   public wire contract). GET/POST/PATCH /api/conversations all project to
+   this shape server-side (routes/conversations.ts's toConversationSummary).
+   POST's response has no messageCount key at all -- a brand-new conversation
+   never has messages yet -- callers (useTutorConversations) default it to 0
+   rather than treating its absence as a fetch bug. */
+export interface ConversationSummary {
+  id: string;
+  kind: ConversationKind;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ConversationListItemResponse extends ConversationSummary {
+  messageCount: number;
+}
+
+/** Wire shape of GET /api/conversations (#281). `nextCursor` is opaque --
+ *  the client only ever echoes it back as the next request's `before` query
+ *  param, never parses or reconstructs it itself (that reconstruction, off
+ *  a millisecond-truncated `updatedAt.toISOString()`, was the precision-loss
+ *  half of #281's bug). `null` means this was the last page. */
+export interface ConversationListResponse {
+  items: ConversationListItemResponse[];
+  nextCursor: string | null;
+}
+
+/** Wire shape of a row from GET /api/conversations/:id/messages (#4
+ *  fix-round -- added so the tutor-conversations rail's chat column can
+ *  seed useChat's `messages` on resume, not just so the UI shows history:
+ *  chatHandler builds the model's context from convertToModelMessages
+ *  (chat.ts) over exactly the client-sent messages array, so without this
+ *  the LLM itself loses all prior context on resume, not just the display).
+ *  `parts` is deliberately typed `unknown`, matching how the DB stores it
+ *  (jsonb) and how chat.ts's own replayPersistedPart already treats a
+ *  persisted row's parts at this boundary -- the client casts it to
+ *  @ai-sdk/react's UIMessage['parts'] when seeding useChat, the same
+ *  looseness this codebase already accepts elsewhere for this exact field. */
+export interface ConversationMessageResponse {
+  id: string;
+  role: "user" | "assistant" | "system";
+  parts: unknown;
+  /** #280: the messages cursor (getMessagesForConversation's own `before`
+   *  param) is a seq value, but the response previously carried no seq at
+   *  all -- a client couldn't construct "give me the page before this one"
+   *  from its own response even if it wanted to. Included so a future
+   *  caller can page without a second round-trip to look it up. */
+  seq: number;
 }
 
 export interface SectionResponse {

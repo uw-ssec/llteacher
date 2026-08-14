@@ -1,5 +1,6 @@
 import { relations, sql } from "drizzle-orm";
 import {
+  bigserial,
   boolean,
   check,
   doublePrecision,
@@ -25,6 +26,13 @@ export const conversationKindEnum = pgEnum("conversation_kind", [
   "section",
   "tutor",
 ]);
+
+// #308: the single source of truth for the app-code union -- every route/
+// repository/shared-types file that used to hand-write `"section" | "tutor"`
+// derives it from here instead, so adding a third enum value can't silently
+// leave one of those literal unions stale (TypeScript would flag every
+// switch/conditional that assumed exhaustiveness the moment the enum grows).
+export type ConversationKind = (typeof conversationKindEnum.enumValues)[number];
 
 export const messageRoleEnum = pgEnum("message_role", [
   "user",
@@ -92,6 +100,20 @@ export const conversations = pgTable(
       t.courseId,
     ),
     index("conversations_course_kind_idx").on(t.courseId, t.kind),
+    // #281: listConversationsForOwner's ORDER BY updated_at DESC (the
+    // tutor-rail list, #5/#224) had no index serving that sort --
+    // conversations_owner_kind_course_idx above satisfies the equality
+    // predicates (owner_user_id, kind, course_id) but Postgres still had to
+    // sort every matching row before applying LIMIT. This index makes the
+    // sort itself index-served; id isn't part of the index (the compound
+    // cursor's tiebreaker is resolved by an equality condition on
+    // updated_at within the already-narrow index range, not by a second
+    // sort column here).
+    index("conversations_owner_kind_updated_idx").on(
+      t.ownerUserId,
+      t.kind,
+      t.updatedAt,
+    ),
     // conversations_owner_section_active_uq (below) leads with owner_user_id,
     // so it can't serve "all conversations on this section" (instructor
     // roster views) or the section-delete cascade -- both need section_id
@@ -105,10 +127,24 @@ export const conversations = pgTable(
     uniqueIndex("conversations_owner_section_active_uq")
       .on(t.ownerUserId, t.sectionId)
       .where(sql`${t.kind} = 'section' AND ${t.isDeleted} = false`),
+    // #308: restated as two independent implications instead of an
+    // exhaustive OR of every (kind, section_id) pair -- the OR form only
+    // has two disjuncts because there are only two kinds today, so it
+    // silently double-duties as an allowlist of kind itself: a future third
+    // kind value (e.g. one #27's own doc comment above gestures at) would
+    // satisfy neither disjunct and be rejected by this CHECK no matter what
+    // section_id it carried, forcing a rewrite of this constraint (not just
+    // an addition) the moment conversationKindEnum grows. Each implication
+    // below only constrains the kind it names -- "if this row claims to be
+    // a tutor conversation, section_id must be null" / "...a section
+    // conversation, section_id must be set" -- and says nothing at all
+    // about a third kind, so adding one only means adding its own
+    // implication (or leaving it unconstrained here) instead of restating
+    // the whole thing.
     check(
       "conversations_kind_section_chk",
-      sql`(${t.kind} = 'tutor' AND ${t.sectionId} IS NULL)
-          OR (${t.kind} = 'section' AND ${t.sectionId} IS NOT NULL)`,
+      sql`(${t.kind} <> 'tutor' OR ${t.sectionId} IS NULL)
+          AND (${t.kind} <> 'section' OR ${t.sectionId} IS NOT NULL)`,
     ),
     // #128: referenceable target for submissions' composite FK. `id` is
     // already the primary key, so this adds no new integrity rule to
@@ -134,6 +170,22 @@ export const messages = pgTable(
       .references(() => conversations.id, { onDelete: "cascade" }),
     role: messageRoleEnum("role").notNull(),
     parts: jsonb("parts").notNull(),
+    // #213: the AI SDK's own per-send UIMessage.id, persisted for user rows
+    // so a retry (same id, resent) can be told apart from a genuinely new
+    // message with identical text (new id) -- chatHandler's idempotency
+    // check keys off this instead of JSON.stringify(parts) equality. Null
+    // for assistant/system rows (server-authored, no client id to record);
+    // Postgres unique indexes treat NULL as distinct from every other NULL,
+    // so those rows never collide against each other or against a real id.
+    clientMessageId: text("client_message_id"),
+    // #221: monotonic tiebreaker for ordering. createdAt alone is
+    // timestamptz (microsecond resolution) -- safe today only because each
+    // append is its own transaction, so two rows can never share a
+    // timestamp; stops being safe the moment appends are ever batched.
+    // Global (not per-conversation) bigserial, per the issue's own
+    // suggestion -- ordering only ever needs to be correct within one
+    // conversation's rows, and a global sequence guarantees that trivially.
+    seq: bigserial("seq", { mode: "number" }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -142,6 +194,37 @@ export const messages = pgTable(
     index("messages_conversation_created_idx").on(
       t.conversationId,
       t.createdAt,
+    ),
+    index("messages_conversation_seq_idx").on(t.conversationId, t.seq),
+    uniqueIndex("messages_conversation_client_message_id_idx").on(
+      t.conversationId,
+      t.clientMessageId,
+    ),
+  ],
+);
+
+// #265: fixed-window per-user rate limit counter for /api/chat. A FIXED
+// window (bucketed by windowStart), not a sliding one, is what lets the
+// whole check-and-increment happen as one atomic upsert -- a sliding
+// window (count rows created in the last N ms) needs a read before the
+// write can be sized, which is exactly the check-then-act race this table
+// replaces (countRecentUserMessagesForUser counted persisted message rows,
+// with the actual increment three round-trips later and nothing
+// serializing the window in between). windowStart is computed by the
+// caller as floor(now / windowMs) * windowMs.
+export const chatRateLimitWindows = pgTable(
+  "chat_rate_limit_windows",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    count: integer("count").notNull().default(0),
+  },
+  (t) => [
+    uniqueIndex("chat_rate_limit_windows_user_window_idx").on(
+      t.userId,
+      t.windowStart,
     ),
   ],
 );
