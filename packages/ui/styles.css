@@ -1480,6 +1480,18 @@ body {
   }
 
   /* -------------------------------------------------------------------------
+     .conversation-stop-row — #274: a Stop affordance above the composer
+     while a turn is genuinely outstanding, so a merely-slow (not yet timed
+     out) response has an escape hatch beyond a full page reload.
+     ------------------------------------------------------------------------- */
+  .conversation-stop-row {
+    display: flex;
+    justify-content: flex-end;
+    padding-inline: var(--space-4);
+    margin-block-start: var(--space-2);
+  }
+
+  /* -------------------------------------------------------------------------
      .error-boundary-fallback — #144: shown in place of a chat column that
      threw during render, instead of white-screening the whole app. See
      packages/ui/src/components/ErrorBoundary.tsx.

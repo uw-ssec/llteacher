@@ -101,6 +101,15 @@ export interface ConversationViewProps {
    *  "Restart section" button. `undefined` renders nothing, so surfaces
    *  with no header action (the tutor chat) are unaffected. */
   headerActions?: React.ReactNode;
+  /** #274: the owning `useChat` instance's own `stop()` -- rendered as a
+   *  "Stop" affordance next to the composer while `isSending` is true.
+   *  `undefined` renders nothing (matches every other optional-callback
+   *  prop here), so a caller that doesn't track a `useChat` instance (e.g.
+   *  a fixture in tests) is unaffected. The server-side half of #274 (a
+   *  timeout on the model call itself) already exists (chat.ts's
+   *  STREAM_TIMEOUT_MS); this is the client's own escape hatch for a
+   *  request that's merely slow, not yet timed out. */
+  onStop?: () => void;
 }
 
 /* -- Component ------------------------------------------------------------- */
@@ -117,6 +126,7 @@ export function ConversationView({
   autoFocusComposer = false,
   hasMoreHistory = false,
   headerActions,
+  onStop,
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -227,6 +237,18 @@ export function ConversationView({
           <div ref={bottomRef} aria-hidden="true" />
         </div>
       </div>
+
+      {/* #274: a Stop affordance for a turn that's merely slow, not yet
+          timed out (chat.ts's own STREAM_TIMEOUT_MS bounds the server side
+          of this) -- only rendered while a send is genuinely outstanding
+          and the caller actually tracks a useChat instance to stop. */}
+      {isSending && onStop && (
+        <div className="conversation-stop-row">
+          <Button variant="danger" size="sm" outlined onClick={onStop}>
+            Stop
+          </Button>
+        </div>
+      )}
 
       {/* Sticky composer -- #144: disabled while a send is genuinely in
           flight, so Enter mid-stream can't fire a second, overlapping

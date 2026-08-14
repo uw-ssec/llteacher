@@ -178,3 +178,31 @@ describe("ConversationView headerActions (#248)", () => {
     expect(screen.getByRole("button", { name: "Restart section" })).toBeTruthy();
   });
 });
+
+/* #274: a Stop affordance for a turn that's merely slow, not yet timed out
+   server-side -- only visible while a send is genuinely outstanding AND the
+   caller actually tracks a useChat instance to stop. */
+describe("ConversationView Stop control (#274)", () => {
+  it("renders nothing when onStop is omitted, even while isSending", () => {
+    render(<ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={true} />);
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  });
+
+  it("renders nothing when onStop is set but isSending is false", () => {
+    render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={false} onStop={() => {}} />,
+    );
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  });
+
+  it("renders Stop and calls onStop when clicked, while isSending is true", async () => {
+    const onStop = vi.fn();
+    render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={true} onStop={onStop} />,
+    );
+    const stopButton = screen.getByRole("button", { name: "Stop" });
+    const user = userEvent.setup();
+    await user.click(stopButton);
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+});

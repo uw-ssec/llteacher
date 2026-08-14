@@ -328,6 +328,11 @@ export default function App() {
     status: chatStatus,
     error: chatError,
     regenerate: regenerateChat,
+    // #274: a client-side escape hatch for a turn that's merely slow, not
+    // yet timed out (chat.ts's own STREAM_TIMEOUT_MS bounds the server
+    // side) -- aliased since both useChat instances below would otherwise
+    // collide on the name `stop`.
+    stop: stopChat,
   } = useChat({
     transport: new DefaultChatTransport({
       api: "/api/chat",
@@ -394,6 +399,9 @@ export default function App() {
     status: tutorChatStatus,
     error: tutorChatError,
     regenerate: regenerateTutorChat,
+    // #274: see stopChat's own doc comment above -- same escape hatch, this
+    // instance's own turn.
+    stop: stopTutorChat,
   } = useChat({
     id: tutorConversationId,
     messages: tutorInitialMessages,
@@ -974,7 +982,7 @@ export default function App() {
      loadSectionConversation -- the same hydration path the initial mount
      and section-switch already go through -- rather than re-deriving the
      new conversation's greeting client-side; the server is the source of
-     truth for that copy (sectionGreeting in sectionConversations.ts).
+     truth for that copy (sectionGreeting in lib/prompts.ts, #305).
      Per the #248 design decision, a graded-submission refusal (409) is not
      predicted client-side -- it's surfaced here, inline, from the
      response the server actually gave. */
@@ -1167,6 +1175,7 @@ export default function App() {
               error={tutorChatErrorRow}
               autoFocusComposer={tutorConversationId === justCreatedTutorConversationId}
               hasMoreHistory={tutorHistoryHasMore}
+              onStop={stopTutorChat}
             />
           </ErrorBoundary>
         ) : (
@@ -1184,6 +1193,7 @@ export default function App() {
               isSending={chatStatus === "submitted" || chatStatus === "streaming" || !!sectionHydrationError}
               error={sectionChatErrorRow}
               hasMoreHistory={sectionHistoryHasMore}
+              onStop={stopChat}
               /* #248: only once there's an active conversation to restart --
                  a section the student hasn't started yet has nothing for
                  the affordance to act on. */

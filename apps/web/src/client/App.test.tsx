@@ -1865,3 +1865,89 @@ describe("App section restart affordance (#248)", () => {
     expect(screen.getByRole("alertdialog")).toBeTruthy();
   });
 });
+
+// #274: a client-side Stop control for a turn that's merely slow, not yet
+// timed out server-side. Uses a manually-controlled SSE stream (never
+// closed on its own) so the request stays genuinely in flight long enough
+// to assert the button, then click it.
+describe("App Stop control (#274)", () => {
+  const STOP_HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
+      },
+    ],
+  };
+
+  it("section chat: shows Stop while a turn is in flight, and clicking it aborts the request", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    let capturedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(JSON.stringify(STOP_HOMEWORK_FIXTURE), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url === "/api/chat") {
+          capturedSignal = init?.signal ?? undefined;
+          // Never-closing stream -- chatStatus stays "streaming" until the
+          // test itself aborts it, same as a genuinely stalled upstream.
+          // Wired to the request's own AbortSignal the same way a real
+          // fetch's body stream would be: aborting cancels the in-progress
+          // read, which is what lets useChat notice Stop actually happened.
+          const stream = new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "start" })}\n\n`));
+              capturedSignal?.addEventListener("abort", () => {
+                controller.error(new DOMException("The operation was aborted.", "AbortError"));
+              });
+            },
+          });
+          return new Response(stream, {
+            status: 200,
+            headers: { "content-type": "text/event-stream", "x-conversation-id": "conv-1" },
+          });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = await screen.findByLabelText("Message input");
+    const user = userEvent.setup();
+    await user.type(composer, "hello{Enter}");
+
+    const stopButton = await screen.findByRole("button", { name: "Stop" });
+    expect(capturedSignal?.aborted).toBe(false);
+
+    await user.click(stopButton);
+    expect(capturedSignal?.aborted).toBe(true);
+    // Stop's whole point: the composer must come back, not stay wedged
+    // behind isSending forever.
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Stop" })).toBeNull());
+  });
+});
