@@ -658,7 +658,60 @@ export default function App() {
      error row, same as a chat-stream error), and the composer is disabled
      while it's set (see isSending below) so a context-free turn can't be
      sent into the real conversation while hydration is broken. */
-  const loadSectionConversation = async (sectionNumber: number, targetConversationId: string | undefined) => {
+  /* #318: a fresh section (no conversation yet) used to render an empty
+     composer until the student's own first message lazily created the
+     conversation server-side (chat.ts's resolveConversation) -- the
+     canonical greeting (#27's "Hello! I'm here to help you with Section
+     N...") never appeared until AFTER that first turn, bundled with the
+     model's reply to it. This calls the same start endpoint chatHandler
+     already uses internally, eagerly, so the greeting shows the moment the
+     student opens the section -- ordinary chat UX. Guarded by
+     currentSectionRef rather than latestSectionConversationRef: the latter
+     can't tell two different never-started sections apart (both target
+     `undefined`), so a fast section switch mid-request would otherwise let
+     a stale response land on whichever section is now showing. */
+  const startFreshSectionConversation = async (sectionNumber: number, sectionId: string) => {
+    if (!courseId) return;
+    try {
+      const res = await fetch(`/api/courses/${courseId}/sections/${sectionId}/conversations`, { method: "POST" });
+      if (currentSectionRef.current !== sectionNumber) return; // superseded -- discard
+      if (!res.ok) {
+        // 409 covers both "already exists" (a race with another request for
+        // the same section) and "section isn't interactive" (#164) -- either
+        // way there's nothing to eagerly show. The composer stays empty and
+        // the student's own first message still creates/finds the
+        // conversation via chat.ts's existing lazy path, same as before
+        // this fix.
+        return;
+      }
+      const created = (await res.json()) as { id: string; greetingMessageId: string; greetingParts: unknown };
+      setConversationId(created.id);
+      latestSectionConversationRef.current = created.id;
+      setSectionMessages([
+        { id: created.greetingMessageId, role: "assistant", parts: created.greetingParts as UIMessage["parts"] },
+      ]);
+      setSectionMetaByOrder((prev) => {
+        const prevMeta = prev.get(sectionNumber);
+        if (!prevMeta) return prev;
+        const next = new Map(prev);
+        next.set(sectionNumber, { ...prevMeta, conversationId: created.id });
+        return next;
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[App] failed to eagerly start section conversation", err);
+      // Left as the empty state loadSectionConversation already set -- not
+      // surfaced as sectionHydrationError (which disables the composer):
+      // the student can still type, and chat.ts creates the same
+      // conversation lazily on send, same as before this fix.
+    }
+  };
+
+  const loadSectionConversation = async (
+    sectionNumber: number,
+    targetConversationId: string | undefined,
+    sectionId?: string,
+  ) => {
     setCurrentSection(sectionNumber);
     setConversationId(targetConversationId);
     latestSectionConversationRef.current = targetConversationId;
@@ -666,6 +719,7 @@ export default function App() {
     if (!targetConversationId) {
       setSectionMessages([]);
       setSectionHistoryHasMore(false);
+      if (sectionId) void startFreshSectionConversation(sectionNumber, sectionId);
       return;
     }
     try {
@@ -679,7 +733,7 @@ export default function App() {
       if (latestSectionConversationRef.current !== targetConversationId) return; // superseded -- discard
       setSectionHydrationError({
         message: "Couldn't load this section's conversation. Please try again.",
-        onRetry: () => void loadSectionConversation(sectionNumber, targetConversationId),
+        onRetry: () => void loadSectionConversation(sectionNumber, targetConversationId, sectionId),
       });
     }
   };
@@ -720,7 +774,11 @@ export default function App() {
       // SidebarSection's mapping drops it -- and hydrate its history so the
       // model (and the visible transcript) actually sees it, not just the
       // id.
-      void loadSectionConversation(first, sectionMetaByOrder.get(first)?.conversationId ?? undefined);
+      void loadSectionConversation(
+        first,
+        sectionMetaByOrder.get(first)?.conversationId ?? undefined,
+        sectionMetaByOrder.get(first)?.id,
+      );
       hasAutoSelectedSection.current = true;
     }
   }, [sections, sectionMetaByOrder]);
@@ -918,7 +976,11 @@ export default function App() {
     // previously-viewed section's conversationId was, and why the fetch
     // needs the same staleness guard the tutor rail's own selection path
     // has (a section switch has the identical overlapping-request race).
-    void loadSectionConversation(sectionNumber, sectionMetaByOrder.get(sectionNumber)?.conversationId ?? undefined);
+    void loadSectionConversation(
+      sectionNumber,
+      sectionMetaByOrder.get(sectionNumber)?.conversationId ?? undefined,
+      sectionMetaByOrder.get(sectionNumber)?.id,
+    );
     latestTutorSelectionRef.current = undefined;
     setTutorConversationId(undefined);
     setTutorInitialMessages([]);

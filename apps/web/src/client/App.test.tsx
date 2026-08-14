@@ -1312,6 +1312,106 @@ describe("App section chat resumes with hydrated history (#252)", () => {
   });
 });
 
+describe("App eager section greeting (#318)", () => {
+  const HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
+      },
+    ],
+  };
+
+  it("shows the section's greeting on open, before the student sends anything", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    let startCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url === "/api/courses/course-a/sections/s1/conversations" && init?.method === "POST") {
+          startCalls += 1;
+          return new Response(
+            JSON.stringify({
+              id: "sec-conv-new",
+              title: "Section 1: Sec 1",
+              greetingMessageId: "g1",
+              greetingParts: [{ type: "text", text: "Hello! I'm here to help you with Section 1: Sec 1." }],
+              promptTemplateId: null,
+            }),
+            { status: 201 },
+          );
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // No message sent yet -- the greeting must already be visible.
+    expect(await screen.findByText("Hello! I'm here to help you with Section 1: Sec 1.")).toBeTruthy();
+    expect(startCalls).toBe(1);
+  });
+
+  it("leaves the composer empty (no crash) when the eager-start call 409s", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url === "/api/courses/course-a/sections/s1/conversations" && init?.method === "POST") {
+          return new Response(JSON.stringify({ error: "Section is not interactive" }), { status: 409 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = await screen.findByLabelText("Message input");
+    expect(composer).toBeTruthy();
+    expect(screen.queryByText(/Hello! I'm here to help you/)).toBeNull();
+  });
+});
+
 describe("App section conversationId stays live after mid-session creation (#271, #272)", () => {
   const TWO_SECTION_NO_CONVO_FIXTURE = {
     homeworks: [
