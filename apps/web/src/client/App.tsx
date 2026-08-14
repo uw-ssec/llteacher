@@ -1033,6 +1033,7 @@ export default function App() {
      copy says "your previous attempt," singular, rather than approximating
      a number it can't get right. */
   const currentSectionStatus = sections.find((s) => s.number === currentSection)?.status;
+  const currentSectionTitle = sections.find((s) => s.number === currentSection)?.title;
   const restartDescription = (
     <>
       <p>You&apos;ll lose your conversation so far, and you won&apos;t be able to see it again.</p>
@@ -1095,7 +1096,7 @@ export default function App() {
       <TopNav
         course="STATS 311"
         term="Autumn 2026"
-        homework="HW 3 · Probability and Distributions"
+        homework={hwTitle}
         userInitials="AC"
         isAuthenticated={isAuthenticated}
         onProfileClick={() => navigate("/profile")}
@@ -1181,7 +1182,9 @@ export default function App() {
         ) : (
           <ErrorBoundary key="section">
             <ConversationView
-              breadcrumb="STATS 311 · HW 3 · Section 3 P-VALUES"
+              breadcrumb={`STATS 311 · ${hwTitle} · Section ${currentSection}${
+                currentSectionTitle ? `: ${currentSectionTitle}` : ""
+              }`}
               messages={messages}
               onSendMessage={handleSendMessage}
               /* #144: "error" excluded here matters most for the section

@@ -582,7 +582,7 @@ describe("App tutor-conversations rail (#4)", () => {
     await screen.findByText("STATS 311 · TUTOR CHAT");
 
     await user.click(screen.getByRole("button", { name: /Sec 1/ }));
-    await screen.findByText("STATS 311 · HW 3 · Section 3 P-VALUES");
+    await screen.findByText("STATS 311 · HW 3 · Section 1: Sec 1");
     expect(screen.queryByText("STATS 311 · TUTOR CHAT")).toBeNull();
   });
 });
@@ -747,7 +747,7 @@ describe("App tutor conversation header rename (#6)", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByText("STATS 311 · HW 3 · Section 3 P-VALUES");
+    await screen.findByText("STATS 311 · HW 3 · Section 1: Sec 1");
     expect(screen.queryByRole("button", { name: /Rename conversation/ })).toBeNull();
   });
 });
