@@ -697,6 +697,13 @@ export default function App() {
         next.set(sectionNumber, { ...prevMeta, conversationId: created.id });
         return next;
       });
+      // Matches confirmRestart's own status update below -- a section with
+      // an active conversation is "current" (the sidebar's in-progress dot),
+      // not "pending" (not_started). Without this, the dot stays stale until
+      // a full reload re-derives status from the server.
+      setSections((prev) =>
+        prev.map((s) => (s.number === sectionNumber ? { ...s, status: "current" as const } : s)),
+      );
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("[App] failed to eagerly start section conversation", err);
@@ -1004,6 +1011,15 @@ export default function App() {
     // life with conversationId: null stayed that way here forever.
     const meta = sectionMetaByOrder.get(sectionNumber);
     if (!meta?.conversationId) return; // no active conversation yet -- nothing to submit
+    // #318: eagerly starting a section's conversation (above) means
+    // meta.conversationId is now populated the moment the greeting loads --
+    // before this check, that made a section submittable with zero student
+    // input, since the Sidebar's Submit button (packages/ui) has no content
+    // gate of its own. The Submit button always targets `currentSection`
+    // (Sidebar.tsx's own onClick), so `aiMessages` -- the live transcript
+    // for whichever section is currently shown -- is the right thing to
+    // check, not a second fetch.
+    if (!aiMessages.some((m) => m.role === "user")) return;
     try {
       const res = await fetch(`/api/conversations/${meta.conversationId}/submit`, { method: "POST" });
       if (!res.ok) throw new Error("submit failed");

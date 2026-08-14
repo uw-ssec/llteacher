@@ -168,7 +168,7 @@ export function ConversationView({
           {/* Breadcrumb, with an optional surface-specific action alongside it
               (e.g. #248's "Restart section" button) */}
           <div className="conversation-header-row">
-            <p className="breadcrumb" aria-label="Location">{breadcrumb}</p>
+            <p className="breadcrumb">{breadcrumb}</p>
             {headerActions}
           </div>
 

@@ -1373,6 +1373,10 @@ describe("App eager section greeting (#318)", () => {
     // No message sent yet -- the greeting must already be visible.
     expect(await screen.findByText("Hello! I'm here to help you with Section 1: Sec 1.")).toBeTruthy();
     expect(startCalls).toBe(1);
+    // The sidebar dot must reflect the new conversation too, not stay
+    // "not_started" until a reload -- SectionItem marks the current section
+    // aria-current="step" only once its status flips to "current".
+    expect(screen.getByRole("button", { name: /Sec 1/ }).getAttribute("aria-current")).toBe("step");
   });
 
   it("leaves the composer empty (no crash) when the eager-start call 409s", async () => {
@@ -1409,6 +1413,62 @@ describe("App eager section greeting (#318)", () => {
     const composer = await screen.findByLabelText("Message input");
     expect(composer).toBeTruthy();
     expect(screen.queryByText(/Hello! I'm here to help you/)).toBeNull();
+  });
+
+  it("Submit does nothing for a section whose only content is the eager greeting -- no student turn yet", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    let submitCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url === "/api/courses/course-a/sections/s1/conversations" && init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              id: "sec-conv-new",
+              title: "Section 1: Sec 1",
+              greetingMessageId: "g1",
+              greetingParts: [{ type: "text", text: "Hello! I'm here to help you with Section 1: Sec 1." }],
+              promptTemplateId: null,
+            }),
+            { status: 201 },
+          );
+        }
+        if (url === "/api/conversations/sec-conv-new/submit" && init?.method === "POST") {
+          submitCalls += 1;
+          return new Response(JSON.stringify({}), { status: 200 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Hello! I'm here to help you with Section 1: Sec 1.");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Submit section 1/i }));
+
+    // Give any (wrongly-fired) submit request a tick to land, then assert
+    // it never did -- the greeting alone must not be submittable work.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(submitCalls).toBe(0);
   });
 });
 
