@@ -2183,9 +2183,16 @@ body {
 
 .admin-record-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  /* [id] [body] [actions]. The status badge used to hold a fourth column
+     between body and actions, which put a record attribute inside the action
+     cluster; it now leads the body's meta line with the other attributes. */
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: var(--space-4);
   align-items: start;
+  /* One nudge, declared once. The id chip and the action buttons both need to
+     optically align to the first line of the title; they were carrying
+     separate literals that had already drifted apart from the status badge's. */
+  --record-row-first-line: 2px;
   padding: var(--space-5) var(--space-3);
   border-block-end: 1px solid var(--color-border);
   transition: background-color 140ms ease-out;
@@ -2196,7 +2203,7 @@ body {
 }
 
 .admin-record-row__id {
-  padding-block-start: 2px;  /* optical alignment with first line of body */
+  padding-block-start: var(--record-row-first-line);
 }
 
 .admin-record-row__body {
@@ -2234,6 +2241,10 @@ body {
 .admin-record-row__meta {
   display: inline-flex;
   flex-wrap: wrap;
+  /* Explicit: the status pill is taller than the bare icon chips it now sits
+     beside (padding + a 1.4 line box vs. plain text), so the default stretch
+     would leave the row's items sitting on different centre lines. */
+  align-items: center;
   gap: var(--space-3);
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
@@ -2278,17 +2289,14 @@ body {
   margin: 0 0.15em;
 }
 
-.admin-record-row__status {
-  display: flex;
-  align-items: flex-start;
-  padding-block-start: 4px;
-}
+/* .admin-record-row__status intentionally removed — the status badge now sits
+   in .admin-record-row__meta with the other record attributes. */
 
 .admin-record-row__actions {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  padding-block-start: 2px;
+  padding-block-start: var(--record-row-first-line);
 }
 
 /* Staggered entrance — gentle fade + 2px rise */
