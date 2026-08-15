@@ -98,6 +98,22 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
           hidden: false, expiresAt: undefined,
         },
   });
+  /* #317 review, "strongly recommend before merge": the <select> below is
+     uncontrolled (register()), so its DOM value on mount is whatever
+     <option> matches defaultValues.llmConfigId -- if the assigned config is
+     inactive (llmConfigs is pre-filtered to isActive) or the fetch failed
+     (llmConfigsError below, .catch(() => {})'d upstream), no matching
+     <option> exists and the browser silently falls back to the FIRST
+     option, "(course/org default)". Saving an unrelated field edit then
+     PATCHes llmConfigId: "" -> null, dropping the override with no warning.
+     Always including the currently-assigned id as its own option -- even
+     when it's missing from the active list -- means the DOM's initial
+     value always has somewhere real to land. */
+  const assignedConfigId = initialData?.llmConfigId ?? undefined;
+  const selectableConfigs =
+    assignedConfigId && !llmConfigs.some((cfg) => cfg.id === assignedConfigId)
+      ? [...llmConfigs, { id: assignedConfigId, name: "Currently assigned (inactive or unavailable)" }]
+      : llmConfigs;
   const { fields, append, remove } = useFieldArray({ control, name: "sections" });
   const { fields: widgetFields, append: appendWidget, remove: removeWidget } = useFieldArray({ control, name: "widgets" });
 
@@ -179,7 +195,7 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
         <label htmlFor="hw-llm-config">LLM config</label>
         <select id="hw-llm-config" {...register("llmConfigId")}>
           <option value="">(course/org default)</option>
-          {llmConfigs.map((cfg) => <option key={cfg.id} value={cfg.id}>{cfg.name}</option>)}
+          {selectableConfigs.map((cfg) => <option key={cfg.id} value={cfg.id}>{cfg.name}</option>)}
         </select>
       </div>
 

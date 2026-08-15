@@ -231,4 +231,56 @@ describe("HomeworkForm", () => {
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
     await waitFor(() => expect(screen.getByText(/failed to save/i)).toBeTruthy());
   });
+
+  // #317 review, "strongly recommend before merge": an inactive/unavailable
+  // assigned config used to have no matching <option>, so the uncontrolled
+  // select silently fell back to "(course/org default)" on mount -- saving
+  // an unrelated edit then PATCHed llmConfigId to undefined, dropping the
+  // override with no warning shown anywhere.
+  it("preserves an assigned llmConfigId that is missing from the active configs list on an unrelated save", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <HomeworkForm
+        onSubmit={onSubmit}
+        llmConfigs={LLM_CONFIGS}
+        initialData={{
+          title: "Existing HW",
+          description: "d",
+          dueDate: "2099-01-01T00:00",
+          llmConfigId: "cfg-inactive",
+          sections: [
+            {
+              id: "s1",
+              homeworkId: "hw1",
+              title: "Sec 1",
+              order: 1,
+              hasSolution: false,
+              submissionsCount: 0,
+              content: "c",
+              solutionContent: undefined,
+              type: "conversation",
+            },
+          ],
+          widgets: [],
+          status: "active",
+          releasedAt: null,
+          isHidden: false,
+          expiresAt: null,
+          publishedAt: "2026-01-01T00:00:00.000Z",
+        }}
+      />,
+    );
+
+    // The assigned (inactive) config must be selected, not silently reset.
+    const select = screen.getByLabelText(/llm config/i) as HTMLSelectElement;
+    expect(select.value).toBe("cfg-inactive");
+
+    // Edit something unrelated and save -- the override must survive.
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "Renamed HW" } });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.llmConfigId).toBe("cfg-inactive");
+  });
 });
