@@ -62,6 +62,7 @@ export async function startSectionConversationHandler(c: Context<AppEnv>) {
       // Recorded now rather than derived later; see the isTeacherTest
       // column comment for why storing beats deriving.
       isTeacherTest: !isStudentInCourse(authContext.memberships, courseId!),
+      canViewDrafts: authContext.canViewDraftsIn(courseId!),
     });
     return c.json(created, 201);
   } catch (err) {
@@ -205,6 +206,7 @@ export async function restartSectionConversationHandler(c: Context<AppEnv>) {
       orgScope,
       conversationId,
       authContext.session.userId,
+      authContext.canViewDraftsIn(courseId!),
     );
     return c.json(
       {

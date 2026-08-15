@@ -553,6 +553,9 @@ describe("POST /api/chat", () => {
         // shared isStudentInCourse, not duplicated route-local logic.
         // fakeAuthContext's default membership is a "student" of 55555555-5555-5555-5555-555555555555.
         isTeacherTest: false,
+        // #317 review, blocking finding #4: a plain student membership has
+        // no canViewDrafts grant.
+        canViewDrafts: false,
       });
     });
 
@@ -840,6 +843,95 @@ describe("POST /api/chat", () => {
     expect(res.status).toBe(200);
     expect(createConversationMock).not.toHaveBeenCalled();
     expect(res.headers.get("x-conversation-id")).toBe("22222222-2222-2222-2222-222222222222");
+  });
+
+  // #317 review, blocking finding #4: an unreleased section (draft,
+  // scheduled, hidden/expired) must not leak its content into the model's
+  // context, even for an existing conversation started while it was live --
+  // getSectionPromptContext's own doc comment. Collapses to the same
+  // "Section not found" 404 startSectionConversation's own gate uses.
+  describe("#317 blocking finding #4: unreleased-section release gate", () => {
+    it("404s a turn on an existing conversation when the section is unreleased and the caller cannot view drafts", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+        sectionId: "11111111-1111-1111-1111-111111111111",
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+      getSectionPromptContextMock.mockResolvedValue({
+        homeworkTitle: "HW",
+        sectionTitle: "Sec",
+        sectionContent: "The full problem statement.",
+        isUnreleased: true,
+      });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "Section not found" });
+      // The whole point: the model must never see the section content.
+      expect(streamTextMock).not.toHaveBeenCalled();
+      expect(appendMessageMock).not.toHaveBeenCalled();
+    });
+
+    it("does not gate an unreleased section for a caller who can view drafts (instructor)", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+        sectionId: "11111111-1111-1111-1111-111111111111",
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+      getSectionPromptContextMock.mockResolvedValue({
+        homeworkTitle: "HW",
+        sectionTitle: "Sec",
+        sectionContent: "The full problem statement.",
+        isUnreleased: true,
+      });
+
+      const res = await postChat(
+        buildApp(
+          fakeAuthContext({
+            memberships: [
+              fakeMembership({ courseId: "55555555-5555-5555-5555-555555555555", role: "instructor" }),
+            ],
+          }),
+        ),
+        {
+          messages: [userUiMessage],
+          conversationId: "22222222-2222-2222-2222-222222222222",
+        },
+      );
+
+      expect(res.status).toBe(200);
+    });
+
+    it("does not gate a released section", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+        sectionId: "11111111-1111-1111-1111-111111111111",
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+      getSectionPromptContextMock.mockResolvedValue({
+        homeworkTitle: "HW",
+        sectionTitle: "Sec",
+        sectionContent: "The full problem statement.",
+        isUnreleased: false,
+      });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(200);
+    });
   });
 
   // #217/#222: getOwnedConversationOrNull collapses "doesn't exist", "exists

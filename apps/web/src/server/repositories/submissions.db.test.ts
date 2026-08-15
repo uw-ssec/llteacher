@@ -210,6 +210,7 @@ describe.skipIf(!RAW_DATABASE_URL)("submissions uniqueness (real DB, #128)", () 
       scope,
       convA,
       userId,
+      true,
     );
     expect(voidedSubmission).not.toBeNull();
 

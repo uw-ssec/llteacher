@@ -15,6 +15,7 @@ import { unsafeCourseScope } from "./scope";
 import { runAtomically } from "./atomic";
 import { SubmissionGradedError } from "./submissions";
 import { getOrgScopeForCourse } from "./organizations";
+import { deriveHomeworkStatus, isUnreleased } from "./homeworks";
 import { resolvePromptTemplate, sectionGreeting, sectionConversationTitle } from "../../lib/prompts";
 
 /* --------------------------------------------------------------------------
@@ -121,6 +122,15 @@ type StartInput = {
    *  read time -- see the column comment on conversations.isTeacherTest. The
    *  route derives this from the caller's course role. */
   isTeacherTest: boolean;
+  /** #317 review, blocking finding #4: distinct from isTeacherTest above --
+   *  isTeacherTest is true for any non-student (TA, instructor, observer),
+   *  but #172's own capability model means a TA without the canViewDrafts
+   *  grant must NOT be able to start a conversation (test or otherwise) on
+   *  a section the instructor hasn't released, the same gate every sibling
+   *  read path already applies. Callers pass authContext.canViewDraftsIn
+   *  (courseId) here -- this function has no authContext of its own to
+   *  derive it from. */
+  canViewDrafts: boolean;
 };
 
 /** Creates a section conversation plus its opening tutor message.
@@ -173,11 +183,37 @@ export async function startSectionConversation(
       title: sections.title,
       content: sections.content,
       type: sections.type,
+      dueDate: homeworks.dueDate,
+      publishedAt: homeworks.publishedAt,
+      releasedAt: homeworks.releasedAt,
+      isHidden: homeworks.isHidden,
+      expiresAt: homeworks.expiresAt,
     })
     .from(sections)
     .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
     .where(and(eq(sections.id, input.sectionId), eq(homeworks.courseId, scope)));
   if (!section) {
+    throw new SectionNotFoundError();
+  }
+  // #317 review, blocking finding #4: the greeting written below is built
+  // from section.content -- an unreleased section's problem statement would
+  // leak into it the moment a conversation starts, before chat.ts's own
+  // per-turn gate (lib/prompts.ts's getSectionPromptContext) ever runs.
+  // Collapses to the same SectionNotFoundError the row-missing case above
+  // throws, so this stays indistinguishable from a genuinely missing
+  // section (#236/#241's own rationale).
+  if (
+    !input.canViewDrafts &&
+    isUnreleased(
+      deriveHomeworkStatus({
+        dueDate: section.dueDate,
+        publishedAt: section.publishedAt,
+        releasedAt: section.releasedAt,
+        isHidden: section.isHidden,
+        expiresAt: section.expiresAt,
+      }),
+    )
+  ) {
     throw new SectionNotFoundError();
   }
   // #164: a non_interactive section has no conversation by design -- it
@@ -278,6 +314,13 @@ export async function restartSectionConversation(
   scope: OrgScope,
   conversationId: string,
   requesterId: string,
+  // #317 review, blocking finding #4: same leak vector as
+  // startSectionConversation -- a restart writes a fresh greeting from
+  // section.content too, so this needs the same gate. Not part of
+  // Cordero's own flagged pair (getSectionPromptContext,
+  // startSectionConversation), but the identical vulnerability class:
+  // fixed alongside them rather than left for a separate pass.
+  canViewDrafts: boolean,
 ): Promise<{
   voidedSubmission: { id: string; submittedAt: Date } | null;
   conversation: { id: string; title: string; greetingMessageId: string };
@@ -296,10 +339,16 @@ export async function restartSectionConversation(
       sectionOrder: sections.order,
       sectionTitle: sections.title,
       sectionContent: sections.content,
+      dueDate: homeworks.dueDate,
+      publishedAt: homeworks.publishedAt,
+      releasedAt: homeworks.releasedAt,
+      isHidden: homeworks.isHidden,
+      expiresAt: homeworks.expiresAt,
     })
     .from(conversations)
     .innerJoin(courses, eq(conversations.courseId, courses.id))
     .innerJoin(sections, eq(conversations.sectionId, sections.id))
+    .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
     .where(
       and(
         eq(conversations.id, conversationId),
@@ -313,6 +362,24 @@ export async function restartSectionConversation(
   }
   if (owned.ownerUserId !== requesterId) {
     throw new NotConversationOwnerError();
+  }
+  if (
+    !canViewDrafts &&
+    isUnreleased(
+      deriveHomeworkStatus({
+        dueDate: owned.dueDate,
+        publishedAt: owned.publishedAt,
+        releasedAt: owned.releasedAt,
+        isHidden: owned.isHidden,
+        expiresAt: owned.expiresAt,
+      }),
+    )
+  ) {
+    // Same "absent" bucket ConversationNotFoundError already covers above --
+    // a withdrawn section's conversation must not be restartable (which
+    // would leak its content into a fresh greeting) any more than it's
+    // reachable for a first-ever start.
+    throw new ConversationNotFoundError();
   }
 
   const [submission] = await db

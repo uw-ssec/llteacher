@@ -144,6 +144,7 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
       sectionId,
       ownerUserId: studentId,
       isTeacherTest: false,
+      canViewDrafts: true,
     });
 
     expect(created.title).toBe("Section 2: Confidence intervals");
@@ -176,6 +177,7 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
       sectionId,
       ownerUserId: studentId,
       isTeacherTest: false,
+      canViewDrafts: true,
     });
     const [greeting] = await getSectionConversationMessages(db, created.id);
     const { row: userMsg } = await appendMessage(db, scope, created.id, {
@@ -195,10 +197,10 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
   it("refuses a second active conversation on the same section", async () => {
     await reset();
     const scope = unsafeCourseScope(courseId);
-    await startSectionConversation(db, scope, { sectionId, ownerUserId: studentId, isTeacherTest: false });
+    await startSectionConversation(db, scope, { sectionId, ownerUserId: studentId, isTeacherTest: false, canViewDrafts: true });
 
     await expect(
-      startSectionConversation(db, scope, { sectionId, ownerUserId: studentId, isTeacherTest: false }),
+      startSectionConversation(db, scope, { sectionId, ownerUserId: studentId, isTeacherTest: false, canViewDrafts: true }),
     ).rejects.toBeInstanceOf(SectionConversationExistsError);
   });
 
@@ -210,6 +212,7 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
         sectionId: nonInteractiveSectionId,
         ownerUserId: studentId,
         isTeacherTest: false,
+        canViewDrafts: true,
       }),
     ).rejects.toBeInstanceOf(SectionNotInteractiveError);
   });
@@ -226,6 +229,7 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
         sectionId,
         ownerUserId: outsider!.id,
         isTeacherTest: false,
+        canViewDrafts: true,
       }),
       // #236/#241: a non-member gets the same SectionNotFoundError a genuinely
       // missing section produces -- deliberately indistinguishable, so the
@@ -235,12 +239,62 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
     await db.delete(users).where(eq(users.id, outsider!.id));
   });
 
+  // #317 review, blocking finding #4: same "indistinguishable from missing"
+  // rule as the non-member case above, now for an unreleased homework's
+  // section -- the greeting startSectionConversation writes would otherwise
+  // leak the draft's problem statement to a student who merely holds the
+  // section's UUID from before it was withdrawn.
+  it("refuses a conversation on an unreleased (draft) section's homework for a caller without draft access", async () => {
+    await reset();
+    const [instructorMembershipRow] = await db
+      .select({ id: courseMemberships.id })
+      .from(courseMemberships)
+      .where(eq(courseMemberships.userId, instructorId));
+    const [draftHw] = await db
+      .insert(homeworks)
+      .values({
+        courseId,
+        createdById: instructorMembershipRow!.id,
+        title: "draft hw",
+        description: "d",
+        dueDate: new Date(Date.now() + 86_400_000),
+        publishedAt: null, // #317: unpublished -- deriveHomeworkStatus resolves this to "draft"
+      })
+      .returning({ id: homeworks.id });
+    const [draftSection] = await db
+      .insert(sections)
+      .values({ homeworkId: draftHw!.id, title: "Draft section", content: "secret content", order: 1 })
+      .returning({ id: sections.id });
+
+    await expect(
+      startSectionConversation(db, unsafeCourseScope(courseId), {
+        sectionId: draftSection!.id,
+        ownerUserId: studentId,
+        isTeacherTest: false,
+        canViewDrafts: false,
+      }),
+    ).rejects.toBeInstanceOf(SectionNotFoundError);
+
+    // canViewDrafts: true (an instructor previewing their own draft) is the
+    // documented bypass -- must still succeed.
+    const created = await startSectionConversation(db, unsafeCourseScope(courseId), {
+      sectionId: draftSection!.id,
+      ownerUserId: instructorId,
+      isTeacherTest: true,
+      canViewDrafts: true,
+    });
+    expect(created.title).toBe("Section 1: Draft section");
+
+    await db.delete(homeworks).where(eq(homeworks.id, draftHw!.id));
+  });
+
   it("records an instructor's conversation as a teacher test", async () => {
     await reset();
     const created = await startSectionConversation(db, unsafeCourseScope(courseId), {
       sectionId,
       ownerUserId: instructorId,
       isTeacherTest: true,
+      canViewDrafts: true,
     });
 
     const [row] = await db.select().from(conversations).where(eq(conversations.id, created.id));
@@ -254,6 +308,7 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
       sectionId,
       ownerUserId: studentId,
       isTeacherTest: false,
+      canViewDrafts: true,
     });
 
     const { conversation } = await restartSectionConversation(
@@ -261,6 +316,7 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
       unsafeOrgScope(orgId),
       first.id,
       studentId,
+      true,
     );
 
     expect(conversation.id).not.toBe(first.id);
@@ -282,6 +338,7 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
       sectionId,
       ownerUserId: studentId,
       isTeacherTest: false,
+      canViewDrafts: true,
     });
     await submitSection(db, unsafeOrgScope(orgId), started.id, studentId);
 
@@ -302,6 +359,7 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
       sectionId,
       ownerUserId: studentId,
       isTeacherTest: false,
+      canViewDrafts: true,
     });
 
     await expect(
@@ -332,6 +390,7 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
       sectionId,
       ownerUserId: studentId,
       isTeacherTest: false,
+      canViewDrafts: true,
     });
     const orgScope = unsafeOrgScope(orgId);
 
@@ -350,6 +409,7 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
       sectionId,
       ownerUserId: instructorId,
       isTeacherTest: true,
+      canViewDrafts: true,
     });
 
     await expect(
@@ -363,6 +423,7 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
       sectionId,
       ownerUserId: studentId,
       isTeacherTest: false,
+      canViewDrafts: true,
     });
     await submitSection(db, unsafeOrgScope(orgId), started.id, studentId);
 

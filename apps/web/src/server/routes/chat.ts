@@ -597,6 +597,7 @@ async function resolveConversation(
         // into a section is not a student doing the assignment, but is also
         // not who isInstructorOf's AUTHOR_ROLES tier means.
         isTeacherTest: !isStudentInCourse(authContext.memberships, courseId),
+        canViewDrafts: authContext.canViewDraftsIn(courseId),
       });
       return {
         conv: {
@@ -803,6 +804,17 @@ export async function chatHandler(c: Context<AppEnv>) {
   const sectionPromptContext = conv.sectionId
     ? await getSectionPromptContext(db, scope, conv.sectionId)
     : null;
+  // #317 review, blocking finding #4: an unreleased section (draft,
+  // scheduled, or hidden/expired) must not leak its content into the model's
+  // context, even for a conversation that started while it was live -- see
+  // PromptSectionContext.isUnreleased's own doc comment. Collapses to the
+  // same "Section not found" 404 startSectionConversation's own equivalent
+  // gate (repositories/sectionConversations.ts) returns, so this stays
+  // indistinguishable from a genuinely missing section, same rationale as
+  // every sibling release gate in this codebase (#172 audit).
+  if (sectionPromptContext?.isUnreleased && !authContext.canViewDraftsIn(conv.courseId)) {
+    return c.json({ error: "Section not found" }, 404);
+  }
   const systemPrompt = assembleSystemPrompt(resolvedSystemPromptContent, sectionPromptContext ?? undefined);
 
   // #26: model/provider, resolved per-request from the homework's

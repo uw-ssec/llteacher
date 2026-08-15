@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { homeworks, promptTemplates, sections } from "../db/schema";
 import type { CourseScope, OrgScope } from "../server/repositories/scope";
+import { deriveHomeworkStatus, isUnreleased } from "../server/repositories/homeworks";
 
 /* --------------------------------------------------------------------------
    Prompt assembly (#25) -- replaces chat.ts's hardcoded SYSTEM_PROMPT with
@@ -168,6 +169,19 @@ export interface PromptSectionContext {
    *  a second query just to get the homeworkId lib/llm-config.ts's
    *  resolveLLMConfig needs. getSectionPromptContext always sets it. */
   homeworkId?: string;
+  /** #317 review, blocking finding #4: true when the parent homework's
+   *  derived status (deriveHomeworkStatus, repositories/homeworks.ts) is
+   *  draft/scheduled/hidden -- i.e. the instructor has not released this
+   *  section to students. Every sibling read path (submissions dashboard,
+   *  homework detail route, section-answer read at
+   *  routes/sectionAnswers.ts:102) gates on this; this one didn't, so a
+   *  student holding a section's UUID from when it was live could still
+   *  POST /api/chat with kind:"section" after it was hidden or expired and
+   *  get the full problem statement back verbatim in the greeting,
+   *  re-injected every turn. Not used by assembleSystemPrompt itself --
+   *  the caller (chat.ts) is the one with authContext.canViewDraftsIn, so
+   *  the caller decides whether this should actually block the turn. */
+  isUnreleased?: boolean;
 }
 
 /** homework title + section title/content for assembleSystemPrompt's
@@ -178,7 +192,11 @@ export interface PromptSectionContext {
  *  returns null for a sectionId that doesn't resolve within that scope
  *  (deleted section, cross-course id) rather than throwing -- chat.ts
  *  treats that as "build the prompt without section context" rather than
- *  failing the whole turn over stale section metadata. */
+ *  failing the whole turn over stale section metadata.
+ *
+ *  A resolved row's `isUnreleased` still needs a caller-side gate (see that
+ *  field's own doc comment) -- this function stays a pure lookup, not an
+ *  authorization decision, since it has no access to the caller's role. */
 export async function getSectionPromptContext(
   db: Db,
   courseScope: CourseScope,
@@ -190,11 +208,21 @@ export async function getSectionPromptContext(
       sectionContent: sections.content,
       homeworkTitle: homeworks.title,
       homeworkId: homeworks.id,
+      dueDate: homeworks.dueDate,
+      publishedAt: homeworks.publishedAt,
+      releasedAt: homeworks.releasedAt,
+      isHidden: homeworks.isHidden,
+      expiresAt: homeworks.expiresAt,
     })
     .from(sections)
     .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
     .where(and(eq(sections.id, sectionId), eq(homeworks.courseId, courseScope)));
-  return row ?? null;
+  if (!row) return null;
+  const { dueDate, publishedAt, releasedAt, isHidden, expiresAt, ...context } = row;
+  return {
+    ...context,
+    isUnreleased: isUnreleased(deriveHomeworkStatus({ dueDate, publishedAt, releasedAt, isHidden, expiresAt })),
+  };
 }
 
 /** #305: section-conversation persona/wording -- moved here from
