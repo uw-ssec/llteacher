@@ -844,7 +844,7 @@ export async function chatHandler(c: Context<AppEnv>) {
   }
   let resolvedLLMConfig: Awaited<ReturnType<typeof resolveLLMConfig>>;
   try {
-    resolvedLLMConfig = await resolveLLMConfig(db, orgScope, sectionPromptContext?.homeworkId ?? null);
+    resolvedLLMConfig = await resolveLLMConfig(db, orgScope, scope, sectionPromptContext?.homeworkId ?? null);
   } catch (err) {
     if (err instanceof LLMConfigNotFoundError) {
       logServerError("chatHandler.llmConfig", err);

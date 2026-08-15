@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import type { Db } from "../db/client";
-import { homeworks, llmConfigs, organizationCredentials } from "../db/schema";
-import type { OrgScope } from "../server/repositories/scope";
+import { courses, homeworks, llmConfigs, organizationCredentials } from "../db/schema";
+import type { CourseScope, OrgScope } from "../server/repositories/scope";
 import { getOpenRouter, getLLMoxie } from "./ai";
 
 /* --------------------------------------------------------------------------
@@ -82,19 +82,22 @@ const LLM_CONFIG_COLUMNS = {
   credentialId: llmConfigs.credentialId,
 } as const;
 
-/** Homework's `llm_config_id` if set (and still active) -> the org's
- *  `is_default && is_active` config -> LLMConfigNotFoundError. Two levels
- *  only: `homeworks.llmConfigId` and `llmConfigs.isDefault` are the only
- *  override/default columns the schema actually has -- a course-level
- *  fallback is described in this issue's own Code Framework notes, but no
- *  `courses.llmConfigId` (or equivalent) column exists to resolve it from.
+/** Homework's `llm_config_id` if set (and still active) -> the course's
+ *  `llm_config_id` if set (and still active) -> the org's
+ *  `is_default && is_active` config -> LLMConfigNotFoundError. Three levels,
+ *  matching the three override/default columns the schema actually has
+ *  (#317 review, #325: `courses.llmConfigId` closes the course-level gap
+ *  this doc comment used to call out as missing -- lets one course under a
+ *  shared org, e.g. one of the four CDI projects, pin its own model without
+ *  setting `llm_config_id` on every homework in it).
  *
  *  `homeworkId` is null for tutor-kind conversations (no homework to check
- *  an override against) -- resolution goes straight to the org default,
+ *  an override against) -- resolution starts at the course level instead,
  *  same shape as resolvePromptTemplate's `sectionId: null` case. */
 export async function resolveLLMConfig(
   db: Db,
   orgScope: OrgScope,
+  courseScope: CourseScope,
   homeworkId: string | null,
 ): Promise<ResolvedLLMConfig> {
   if (homeworkId) {
@@ -115,6 +118,21 @@ export async function resolveLLMConfig(
         );
       if (override) return override;
     }
+  }
+
+  const [course] = await db.select({ llmConfigId: courses.llmConfigId }).from(courses).where(eq(courses.id, courseScope));
+  if (course?.llmConfigId) {
+    const [courseOverride] = await db
+      .select(LLM_CONFIG_COLUMNS)
+      .from(llmConfigs)
+      .where(
+        and(
+          eq(llmConfigs.id, course.llmConfigId),
+          eq(llmConfigs.organizationId, orgScope),
+          eq(llmConfigs.isActive, true),
+        ),
+      );
+    if (courseOverride) return courseOverride;
   }
 
   const [orgDefault] = await db
