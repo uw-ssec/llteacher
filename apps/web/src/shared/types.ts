@@ -230,6 +230,33 @@ export interface LLMConfigListResponse {
   llmConfigs: LLMConfigSummary[];
 }
 
+/** #317 review, #325: the instructor-facing view of a course's own scoped
+ *  prompt_templates row. `null` id/version fields would be a null instead
+ *  -- see CoursePromptTemplateResponse below -- there's nothing to summarize
+ *  when the course has no scoped template of its own (resolution just
+ *  falls through to org/default). */
+export interface CoursePromptTemplateSummary {
+  id: string;
+  content: string;
+  version: number;
+  composeWithParent: boolean;
+  updatedAt: string;
+}
+
+export interface CoursePromptTemplateResponse {
+  promptTemplate: CoursePromptTemplateSummary | null;
+}
+
+export interface CoursePromptTemplateUpsertBody {
+  content: string;
+  composeWithParent?: boolean;
+}
+
+export interface CoursePromptTemplateUpsertResponse {
+  id: string;
+  version: number;
+}
+
 export interface HomeworkPublishBody {
   publish: boolean;
   /** ISO datetime. If omitted and publish=true, releases immediately. Must

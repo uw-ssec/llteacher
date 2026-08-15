@@ -32,6 +32,11 @@ import { submitSectionAnswerHandler, getSectionAnswerHandler } from "./routes/se
 import { submitWidgetResponseHandler } from "./routes/progressWidgets";
 import { listCourseTasHandler, updateTaCapabilitiesHandler } from "./routes/courseMemberships";
 import { listLlmConfigsHandler } from "./routes/llmConfigs";
+import {
+  getCoursePromptTemplateHandler,
+  putCoursePromptTemplateHandler,
+  deleteCoursePromptTemplateHandler,
+} from "./routes/promptTemplates";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireGraderOf, requireInstructorOf, requireRole } from "./utils/guards";
@@ -88,6 +93,9 @@ app.get("/api/profile", getProfileHandler);
 app.patch("/api/profile", patchProfileHandler);
 app.get("/api/courses/:courseId/homeworks", requireCourseMember()(listHomeworksHandler));
 app.get("/api/courses/:courseId/llm-configs", requireInstructorOf()(listLlmConfigsHandler));
+app.get("/api/courses/:courseId/prompt-template", requireInstructorOf()(getCoursePromptTemplateHandler));
+app.put("/api/courses/:courseId/prompt-template", requireInstructorOf()(putCoursePromptTemplateHandler));
+app.delete("/api/courses/:courseId/prompt-template", requireInstructorOf()(deleteCoursePromptTemplateHandler));
 app.post("/api/courses/:courseId/homeworks", requireInstructorOf()(createHomeworkHandler));
 app.get(
   "/api/courses/:courseId/homeworks/:homeworkId",
