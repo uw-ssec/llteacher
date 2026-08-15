@@ -152,6 +152,24 @@ export const promptTemplates = pgTable(
     index("prompt_templates_scope_course_idx").on(t.scopeCourseId),
     index("prompt_templates_scope_homework_idx").on(t.scopeHomeworkId),
     index("prompt_templates_scope_section_idx").on(t.scopeSectionId),
+    // #317 review finding #324: mirrors llm_configs_org_default_uq -- at
+    // most one ACTIVE template per concrete scope target. Postgres unique
+    // indexes never treat two NULLs as a conflict, so each index only
+    // constrains rows that actually scope to that column; a row's other
+    // three scope columns (always NULL, per the CHECK above) never collide
+    // with anything here.
+    uniqueIndex("prompt_templates_scope_org_active_uq")
+      .on(t.scopeOrganizationId)
+      .where(sql`${t.isActive} = true`),
+    uniqueIndex("prompt_templates_scope_course_active_uq")
+      .on(t.scopeCourseId)
+      .where(sql`${t.isActive} = true`),
+    uniqueIndex("prompt_templates_scope_homework_active_uq")
+      .on(t.scopeHomeworkId)
+      .where(sql`${t.isActive} = true`),
+    uniqueIndex("prompt_templates_scope_section_active_uq")
+      .on(t.scopeSectionId)
+      .where(sql`${t.isActive} = true`),
   ],
 );
 

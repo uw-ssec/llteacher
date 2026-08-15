@@ -91,6 +91,8 @@ describe.skipIf(!RAW_DATABASE_URL)("resolvePromptTemplate (real DB, #25)", () =>
     scopeSectionId?: string;
     content: string;
     isActive?: boolean;
+    version?: number;
+    composeWithParent?: boolean;
   }) {
     const [row] = await db
       .insert(promptTemplates)
@@ -120,36 +122,32 @@ describe.skipIf(!RAW_DATABASE_URL)("resolvePromptTemplate (real DB, #25)", () =>
     expect(resolved).toEqual({ id: courseTemplateId, content: "course-level prompt", version: 1 });
   });
 
-  it("prefers the homework's direct override over a course-scoped template", async () => {
+  it("prefers the homework's direct scope-column template over a course-scoped one (#324: no FK set)", async () => {
     const ctx = await seedCourse();
     await insertTemplate({ scopeCourseId: ctx.courseId, content: "course-level prompt" });
     const hwTemplateId = await insertTemplate({ scopeHomeworkId: ctx.homeworkId, content: "homework-level prompt" });
-    await db.update(homeworks).set({ promptTemplateId: hwTemplateId }).where(eq(homeworks.id, ctx.homeworkId));
 
     const resolved = await resolvePromptTemplate(db, ctx.orgScope, ctx.courseScope, ctx.sectionId);
     expect(resolved).toEqual({ id: hwTemplateId, content: "homework-level prompt", version: 1 });
   });
 
-  it("prefers the section's direct override over the homework's", async () => {
+  it("prefers the section's direct scope-column template over the homework's (#324: no FK set)", async () => {
     const ctx = await seedCourse();
-    const hwTemplateId = await insertTemplate({ scopeHomeworkId: ctx.homeworkId, content: "homework-level prompt" });
-    await db.update(homeworks).set({ promptTemplateId: hwTemplateId }).where(eq(homeworks.id, ctx.homeworkId));
+    await insertTemplate({ scopeHomeworkId: ctx.homeworkId, content: "homework-level prompt" });
     const sectionTemplateId = await insertTemplate({ scopeSectionId: ctx.sectionId, content: "section-level prompt" });
-    await db.update(sections).set({ promptTemplateId: sectionTemplateId }).where(eq(sections.id, ctx.sectionId));
 
     const resolved = await resolvePromptTemplate(db, ctx.orgScope, ctx.courseScope, ctx.sectionId);
     expect(resolved).toEqual({ id: sectionTemplateId, content: "section-level prompt", version: 1 });
   });
 
-  it("falls through to the next scope level when an override row has been deactivated", async () => {
+  it("falls through to the next scope level when the more specific row has been deactivated", async () => {
     const ctx = await seedCourse();
     const courseTemplateId = await insertTemplate({ scopeCourseId: ctx.courseId, content: "course-level prompt" });
-    const sectionTemplateId = await insertTemplate({
+    await insertTemplate({
       scopeSectionId: ctx.sectionId,
       content: "stale section prompt",
       isActive: false,
     });
-    await db.update(sections).set({ promptTemplateId: sectionTemplateId }).where(eq(sections.id, ctx.sectionId));
 
     const resolved = await resolvePromptTemplate(db, ctx.orgScope, ctx.courseScope, ctx.sectionId);
     expect(resolved).toEqual({ id: courseTemplateId, content: "course-level prompt", version: 1 });
@@ -157,12 +155,42 @@ describe.skipIf(!RAW_DATABASE_URL)("resolvePromptTemplate (real DB, #25)", () =>
 
   it("resolves to course/org scope only (no homework/section walk) when sectionId is null -- tutor-kind conversations", async () => {
     const ctx = await seedCourse();
-    const hwTemplateId = await insertTemplate({ scopeHomeworkId: ctx.homeworkId, content: "homework-level prompt" });
-    await db.update(homeworks).set({ promptTemplateId: hwTemplateId }).where(eq(homeworks.id, ctx.homeworkId));
+    await insertTemplate({ scopeHomeworkId: ctx.homeworkId, content: "homework-level prompt" });
     const courseTemplateId = await insertTemplate({ scopeCourseId: ctx.courseId, content: "course-level prompt" });
 
     const resolved = await resolvePromptTemplate(db, ctx.orgScope, ctx.courseScope, null);
     expect(resolved).toEqual({ id: courseTemplateId, content: "course-level prompt", version: 1 });
+  });
+
+  it("rejects a second active template at the same scope (#324: partial unique index)", async () => {
+    const ctx = await seedCourse();
+    await insertTemplate({ scopeCourseId: ctx.courseId, content: "first active" });
+    await expect(insertTemplate({ scopeCourseId: ctx.courseId, content: "second active" })).rejects.toThrow();
+  });
+
+  it("honors compose_with_parent by concatenating the parent scope's content before the child's", async () => {
+    const ctx = await seedCourse();
+    await insertTemplate({ scopeOrganizationId: ctx.orgId, content: "org base" });
+    const courseTemplateId = await insertTemplate({
+      scopeCourseId: ctx.courseId,
+      content: "course addendum",
+      composeWithParent: true,
+    });
+
+    const resolved = await resolvePromptTemplate(db, ctx.orgScope, ctx.courseScope, null);
+    expect(resolved).toEqual({ id: courseTemplateId, content: "org base\n\ncourse addendum", version: 1 });
+  });
+
+  it("composes with DEFAULT_SYSTEM_PROMPT when compose_with_parent is true but no parent template exists at any level", async () => {
+    const ctx = await seedCourse();
+    const courseTemplateId = await insertTemplate({
+      scopeCourseId: ctx.courseId,
+      content: "course addendum",
+      composeWithParent: true,
+    });
+
+    const resolved = await resolvePromptTemplate(db, ctx.orgScope, ctx.courseScope, null);
+    expect(resolved).toEqual({ id: courseTemplateId, content: `${DEFAULT_SYSTEM_PROMPT}\n\ncourse addendum`, version: 1 });
   });
 
   it("does not leak another org's org-scoped template", async () => {
@@ -177,10 +205,12 @@ describe.skipIf(!RAW_DATABASE_URL)("resolvePromptTemplate (real DB, #25)", () =>
   it("getPinnedPromptTemplateContent returns the exact pinned row's content even after it's deactivated", async () => {
     const ctx = await seedCourse();
     const pinnedId = await insertTemplate({ scopeCourseId: ctx.courseId, content: "v1 content, pinned" });
-    // A newer version supersedes it -- deactivating v1 must NOT change what
-    // an already-pinned conversation resolves to.
-    await insertTemplate({ scopeCourseId: ctx.courseId, content: "v2 content" });
+    // A newer version supersedes it -- deactivate v1 before activating v2
+    // (the partial unique index allows only one active row per scope), then
+    // confirm deactivating v1 did NOT change what an already-pinned
+    // conversation resolves to.
     await db.update(promptTemplates).set({ isActive: false }).where(eq(promptTemplates.id, pinnedId));
+    await insertTemplate({ scopeCourseId: ctx.courseId, content: "v2 content", version: 2 });
 
     const content = await getPinnedPromptTemplateContent(db, pinnedId);
     expect(content).toBe("v1 content, pinned");

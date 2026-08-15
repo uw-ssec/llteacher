@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { homeworks, promptTemplates, sections } from "../db/schema";
 import type { CourseScope, OrgScope } from "../server/repositories/scope";
@@ -67,76 +67,98 @@ export interface ResolvedPromptTemplate {
   version: number | null;
 }
 
-function toResolved(row: { id: string; content: string; version: number }): ResolvedPromptTemplate {
-  return { id: row.id, content: row.content, version: row.version };
+interface ScopedTemplateRow {
+  id: string;
+  content: string;
+  version: number;
+  composeWithParent: boolean;
 }
 
-/** One prompt_templates row by id, but ONLY if still active -- an override
- *  FK (sections.promptTemplateId / homeworks.promptTemplateId) pointing at
- *  a row someone has since deactivated is treated as no override, not as a
- *  hard error; resolution falls through to the next scope level. */
-async function fetchActiveTemplateById(db: Db, id: string): Promise<ResolvedPromptTemplate | null> {
+/** The most recent active row matching a single scope predicate --
+ *  `.orderBy(desc(version)).limit(1)` is the fix for #317 review finding
+ *  #324 ("nondeterministic selection"): the old code destructured `[row]`
+ *  from an unordered select, so two active rows at one scope (a state the
+ *  new partial unique index below prevents going forward, but a pre-
+ *  migration DB or a raw-SQL insert could still produce) resolved to
+ *  whichever row Postgres happened to return first. */
+async function fetchActiveTemplateForScope(db: Db, scopePredicate: SQL): Promise<ScopedTemplateRow | null> {
   const [row] = await db
-    .select({ id: promptTemplates.id, content: promptTemplates.content, version: promptTemplates.version })
+    .select({
+      id: promptTemplates.id,
+      content: promptTemplates.content,
+      version: promptTemplates.version,
+      composeWithParent: promptTemplates.composeWithParent,
+    })
     .from(promptTemplates)
-    .where(and(eq(promptTemplates.id, id), eq(promptTemplates.isActive, true)));
-  return row ? toResolved(row) : null;
+    .where(scopePredicate)
+    .orderBy(desc(promptTemplates.version))
+    .limit(1);
+  return row ?? null;
+}
+
+/** Tries each scope level from `index` onward, returning the first active
+ *  match -- or DEFAULT_SYSTEM_PROMPT if none exists at any remaining level.
+ *  `levels[i]` is null for a level with nothing to scope to (no
+ *  homeworkId when `sectionId` was itself null), and is simply skipped.
+ *
+ *  #317 review finding #324 ("compose_with_parent is inert"): when the
+ *  matched row has `composeWithParent: true`, this recurses into the next
+ *  level (the row's own scope's "parent" in the section -> homework ->
+ *  course -> org walk) and concatenates that resolution's content ahead of
+ *  the matched row's own -- "parent then child", per the issue's own
+ *  wording. The returned id/version always identify the most specific
+ *  (child) row actually matched, since that is what a conversation should
+ *  pin to; only `content` reflects the composition. */
+async function resolveFromLevel(db: Db, levels: Array<SQL | null>, index: number): Promise<ResolvedPromptTemplate> {
+  for (let i = index; i < levels.length; i++) {
+    const predicate = levels[i];
+    if (!predicate) continue;
+    const row = await fetchActiveTemplateForScope(db, predicate);
+    if (!row) continue;
+    if (row.composeWithParent) {
+      const parent = await resolveFromLevel(db, levels, i + 1);
+      return { id: row.id, content: `${parent.content}\n\n${row.content}`, version: row.version };
+    }
+    return { id: row.id, content: row.content, version: row.version };
+  }
+  return { id: null, content: DEFAULT_SYSTEM_PROMPT, version: null };
 }
 
 /** Walks section -> homework -> course -> org -> built-in fallback, per the
  *  resolution order documented on promptTemplates itself
- *  (db/schema/content.ts). `sectionId` is null for tutor-kind conversations
- *  (no section to check overrides against; homework-level resolution is
- *  only ever reached via a section, matching the schema -- tutor
- *  conversations aren't linked to a specific homework).
+ *  (db/schema/content.ts) -- by each level's own `scope_*_id` column, not
+ *  the `sections.promptTemplateId` / `homeworks.promptTemplateId` override
+ *  FKs (#317 review finding #324: those FKs and this function's real
+ *  resolution had diverged -- nothing in the codebase ever writes them).
+ *  `sectionId` is null for tutor-kind conversations (no section to resolve
+ *  a homework from either; homework-level resolution is only ever reached
+ *  via a section, matching the schema).
  *
- *  Org scoping (#30 cross-cutting invariant): every level's query is scoped
- *  to `orgScope`/`courseScope`, both of which the caller must have already
- *  verified belong to the requester (mint via courseScopeFromAuthContext,
- *  never from unvalidated request input) -- this function does not
- *  itself re-check membership. */
+ *  Org scoping (#30 cross-cutting invariant): every level's predicate is
+ *  scoped to `orgScope`/`courseScope`/the caller-supplied `sectionId`,
+ *  which the caller must have already verified belongs to the requester
+ *  (mint via courseScopeFromAuthContext, never from unvalidated request
+ *  input) -- this function does not itself re-check membership. */
 export async function resolvePromptTemplate(
   db: Db,
   orgScope: OrgScope,
   courseScope: CourseScope,
   sectionId: string | null,
 ): Promise<ResolvedPromptTemplate> {
+  let homeworkId: string | null = null;
   if (sectionId) {
-    const [section] = await db
-      .select({ promptTemplateId: sections.promptTemplateId, homeworkId: sections.homeworkId })
-      .from(sections)
-      .where(eq(sections.id, sectionId));
-
-    if (section?.promptTemplateId) {
-      const fromSection = await fetchActiveTemplateById(db, section.promptTemplateId);
-      if (fromSection) return fromSection;
-    }
-
-    if (section?.homeworkId) {
-      const [homework] = await db
-        .select({ promptTemplateId: homeworks.promptTemplateId })
-        .from(homeworks)
-        .where(eq(homeworks.id, section.homeworkId));
-      if (homework?.promptTemplateId) {
-        const fromHomework = await fetchActiveTemplateById(db, homework.promptTemplateId);
-        if (fromHomework) return fromHomework;
-      }
-    }
+    const [section] = await db.select({ homeworkId: sections.homeworkId }).from(sections).where(eq(sections.id, sectionId));
+    homeworkId = section?.homeworkId ?? null;
   }
 
-  const [courseTemplate] = await db
-    .select({ id: promptTemplates.id, content: promptTemplates.content, version: promptTemplates.version })
-    .from(promptTemplates)
-    .where(and(eq(promptTemplates.scopeCourseId, courseScope), eq(promptTemplates.isActive, true)));
-  if (courseTemplate) return toResolved(courseTemplate);
+  const levels: Array<SQL | null> = [
+    sectionId ? and(eq(promptTemplates.scopeSectionId, sectionId), eq(promptTemplates.isActive, true))! : null,
+    homeworkId ? and(eq(promptTemplates.scopeHomeworkId, homeworkId), eq(promptTemplates.isActive, true))! : null,
+    and(eq(promptTemplates.scopeCourseId, courseScope), eq(promptTemplates.isActive, true))!,
+    and(eq(promptTemplates.scopeOrganizationId, orgScope), eq(promptTemplates.isActive, true))!,
+  ];
 
-  const [orgTemplate] = await db
-    .select({ id: promptTemplates.id, content: promptTemplates.content, version: promptTemplates.version })
-    .from(promptTemplates)
-    .where(and(eq(promptTemplates.scopeOrganizationId, orgScope), eq(promptTemplates.isActive, true)));
-  if (orgTemplate) return toResolved(orgTemplate);
-
-  return { id: null, content: DEFAULT_SYSTEM_PROMPT, version: null };
+  return resolveFromLevel(db, levels, 0);
 }
 
 /** The pinned lookup chat.ts uses on every turn once a conversation has a

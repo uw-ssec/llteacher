@@ -1,0 +1,4 @@
+CREATE UNIQUE INDEX IF NOT EXISTS "prompt_templates_scope_org_active_uq" ON "prompt_templates" USING btree ("scope_organization_id") WHERE "prompt_templates"."is_active" = true;--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "prompt_templates_scope_course_active_uq" ON "prompt_templates" USING btree ("scope_course_id") WHERE "prompt_templates"."is_active" = true;--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "prompt_templates_scope_homework_active_uq" ON "prompt_templates" USING btree ("scope_homework_id") WHERE "prompt_templates"."is_active" = true;--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "prompt_templates_scope_section_active_uq" ON "prompt_templates" USING btree ("scope_section_id") WHERE "prompt_templates"."is_active" = true;
