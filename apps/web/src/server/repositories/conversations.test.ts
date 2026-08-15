@@ -16,6 +16,8 @@ import {
   getLastMessages,
   getMessagesForConversation,
   updateConversationTitle,
+  acquireConversationTurnLock,
+  releaseConversationTurnLock,
 } from "./conversations";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -970,6 +972,75 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       });
       const found = await getOwnedConversationOrNull(db, created.id, userId, () => false);
       expect(found).toBeNull();
+    });
+  });
+
+  // #317 review, #322: the per-conversation turn lock chat.ts now acquires
+  // before its idempotency read, closing the race where two concurrent
+  // sends interleaved into Q_a, Q_b, A_a, A_b with no ordering guarantee.
+  describe("acquireConversationTurnLock / releaseConversationTurnLock (#322)", () => {
+    async function makeLockableConversation() {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Lock test conversation",
+      });
+      return created.id;
+    }
+
+    it("grants the lock when none is held", async () => {
+      const id = await makeLockableConversation();
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(true);
+    });
+
+    it("refuses a second acquisition while the first is still held", async () => {
+      const id = await makeLockableConversation();
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(true);
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(false);
+    });
+
+    it("grants the lock again after it's released", async () => {
+      const id = await makeLockableConversation();
+      await acquireConversationTurnLock(db, id, 90_000);
+      await releaseConversationTurnLock(db, id);
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(true);
+    });
+
+    // The abandoned-lock escape hatch: a Worker killed mid-request never
+    // calls releaseConversationTurnLock, so without this a conversation
+    // would stay permanently locked. staleMs=0 makes any already-held lock
+    // immediately eligible for reclaim, without needing to wait a real
+    // 90 seconds in a test.
+    it("treats a lock older than staleMs as abandoned and grants a new one", async () => {
+      const id = await makeLockableConversation();
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(true);
+      await expect(acquireConversationTurnLock(db, id, 0)).resolves.toBe(true);
+    });
+
+    it("does not treat a lock younger than staleMs as abandoned", async () => {
+      const id = await makeLockableConversation();
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(true);
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(false);
+    });
+
+    it("releasing a conversation with no held lock is a harmless no-op", async () => {
+      const id = await makeLockableConversation();
+      await expect(releaseConversationTurnLock(db, id)).resolves.toBeUndefined();
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(true);
+    });
+
+    // Real concurrency, same rationale as rateLimits.test.ts's own
+    // "under real concurrency" test: the conditional UPDATE is the thing
+    // that makes this race-safe, and that guarantee is only actually
+    // proven by real simultaneous requests hitting real Postgres, not by
+    // sequential awaits that never overlap.
+    it("under real concurrency, exactly one of N parallel acquisitions succeeds", async () => {
+      const id = await makeLockableConversation();
+      const results = await Promise.all(
+        Array.from({ length: 8 }, () => acquireConversationTurnLock(db, id, 90_000)),
+      );
+      expect(results.filter(Boolean)).toHaveLength(1);
     });
   });
 

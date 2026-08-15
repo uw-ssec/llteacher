@@ -102,6 +102,18 @@ export const conversations = pgTable(
     }),
     isDeleted: boolean("is_deleted").notNull().default(false),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    // #317 review, #322: a per-conversation turn lock -- set (via a
+    // conditional UPDATE, see acquireConversationTurnLock in
+    // repositories/conversations.ts) the moment a turn starts processing,
+    // cleared when it finishes. Two concurrent sends on one conversation
+    // (two tabs, a double-fired send) used to interleave into
+    // Q_a, Q_b, A_a, A_b with no ordering guarantee, and a lost-response
+    // retry could permanently 409 even though the real answer was already
+    // persisted (classifyTurn's replay path only ever inspects the last two
+    // rows). Nullable: null means no turn is in flight. A lock older than
+    // LOCK_STALE_MS (chat.ts) is treated as abandoned (a Worker killed
+    // mid-request never clears it) rather than a permanent deadlock.
+    processingStartedAt: timestamp("processing_started_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

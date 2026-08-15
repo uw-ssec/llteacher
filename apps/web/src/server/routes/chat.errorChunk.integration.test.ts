@@ -73,7 +73,17 @@ function fakeLanguageModel(chunks: LanguageModelV2StreamPart[]): LanguageModelV2
    exercise that REAL branching logic (routes/chat.ts is untouched by this
    mock) without a real Postgres. Rows carry an incrementing `createdAt` so
    getLastMessages' desc(seq) ordering is deterministic. */
-interface FakeConversation { id: string; ownerUserId: string; courseId: string }
+interface FakeConversation {
+  id: string;
+  ownerUserId: string;
+  courseId: string;
+  // #317 review, #322: mirrors conversations.processing_started_at so this
+  // fake can model the per-conversation turn lock the same way the real
+  // repository does -- this file's tests each drive one turn at a time
+  // sequentially, so acquire always succeeds and release always no-ops,
+  // but chat.ts calls both unconditionally and needs real functions here.
+  processingStartedAt: number | null;
+}
 interface FakeMessageRow {
   id: string;
   conversationId: string;
@@ -98,9 +108,28 @@ vi.mock("../repositories/conversations", () => ({
     scope: string,
     input: { ownerUserId: string },
   ) => {
-    const row: FakeConversation = { id: "22222222-2222-2222-2222-222222222222", ownerUserId: input.ownerUserId, courseId: scope };
+    const row: FakeConversation = {
+      id: "22222222-2222-2222-2222-222222222222",
+      ownerUserId: input.ownerUserId,
+      courseId: scope,
+      processingStartedAt: null,
+    };
     conversationsStore.set(row.id, row);
     return row;
+  },
+  // #317 review, #322: minimal fakes -- this file's own tests drive one
+  // turn at a time, so acquire always succeeds (mirroring the real
+  // conditional UPDATE's happy path) and release just clears the field.
+  // The lock's actual concurrency guarantee is proven for real in
+  // conversations.test.ts against a real Postgres, not re-proven here.
+  acquireConversationTurnLock: async (_db: unknown, conversationId: string) => {
+    const conv = conversationsStore.get(conversationId);
+    if (conv) conv.processingStartedAt = Date.now();
+    return true;
+  },
+  releaseConversationTurnLock: async (_db: unknown, conversationId: string) => {
+    const conv = conversationsStore.get(conversationId);
+    if (conv) conv.processingStartedAt = null;
   },
   appendMessage: async (
     _db: unknown,

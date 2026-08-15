@@ -23,11 +23,20 @@ const getOwnedConversationOrNullMock = vi.fn();
 const createConversationMock = vi.fn();
 const appendMessageMock = vi.fn();
 const getLastMessagesMock = vi.fn();
+// #317 review, #322: the per-conversation turn lock -- acquireConversationTurnLockMock
+// defaults to true (lock granted) in beforeEach below so every existing test
+// exercises the same "got the lock" path it always implicitly assumed;
+// the dedicated #322 describe block overrides it to false to test the new
+// blocked-turn 409.
+const acquireConversationTurnLockMock = vi.fn();
+const releaseConversationTurnLockMock = vi.fn();
 vi.mock("../repositories/conversations", () => ({
   getOwnedConversationOrNull: (...args: unknown[]) => getOwnedConversationOrNullMock(...args),
   createConversation: (...args: unknown[]) => createConversationMock(...args),
   appendMessage: (...args: unknown[]) => appendMessageMock(...args),
   getLastMessages: (...args: unknown[]) => getLastMessagesMock(...args),
+  acquireConversationTurnLock: (...args: unknown[]) => acquireConversationTurnLockMock(...args),
+  releaseConversationTurnLock: (...args: unknown[]) => releaseConversationTurnLockMock(...args),
 }));
 
 // #265: reserveRateLimitSlot returns the POST-increment count (unlike the
@@ -64,12 +73,17 @@ vi.mock("../repositories/sectionConversations", async (importOriginal) => {
 // convertToModelMessages/jsonSchema/stepCountIs (used by chat.ts, untouched
 // by #3) running for real.
 type FakeResponseMessage = { id?: string; role: string; parts: unknown[] };
-let capturedOnFinish: ((event: { responseMessage: FakeResponseMessage }) => void | Promise<void>) | undefined;
+type FakeOnFinishEvent = {
+  responseMessage: FakeResponseMessage;
+  isAborted?: boolean;
+  finishReason?: string;
+};
+let capturedOnFinish: ((event: FakeOnFinishEvent) => void | Promise<void>) | undefined;
 const streamTextMock = vi.fn((_args: Record<string, unknown>) => {
   return {
     toUIMessageStreamResponse: (opts?: {
       headers?: Record<string, string>;
-      onFinish?: (event: { responseMessage: FakeResponseMessage }) => void | Promise<void>;
+      onFinish?: (event: FakeOnFinishEvent) => void | Promise<void>;
     }) => {
       capturedOnFinish = opts?.onFinish;
       return new Response("stream-body", { status: 200, headers: opts?.headers });
@@ -198,6 +212,10 @@ describe("POST /api/chat", () => {
     // this explicitly; the race-specific tests below override it.
     appendMessageMock.mockReset().mockResolvedValue({ row: { id: "msg-1" }, created: true });
     getLastMessagesMock.mockReset();
+    // #317 review, #322: true (lock granted) by default -- every test not
+    // specifically about the lock itself expects the turn to proceed.
+    acquireConversationTurnLockMock.mockReset().mockResolvedValue(true);
+    releaseConversationTurnLockMock.mockReset().mockResolvedValue(undefined);
     startSectionConversationMock.mockReset();
     getActiveSectionConversationMock.mockReset();
     streamTextMock.mockClear();
@@ -1365,6 +1383,129 @@ describe("POST /api/chat", () => {
     await expect(
       capturedOnFinish!({ responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] } }),
     ).resolves.not.toThrow();
+  });
+
+  // #317 review, #322: the per-conversation turn lock. Two concurrent sends
+  // on one conversation used to interleave into Q_a, Q_b, A_a, A_b with no
+  // ordering guarantee; a lost-response retry could permanently 409 even
+  // though the real answer was already persisted. The lock closes the race
+  // at its source (before the idempotency read, not just around the model
+  // call) instead of only detecting it after the fact.
+  describe("#322 per-conversation turn lock", () => {
+    it("409s immediately when another turn already holds the lock for this conversation, without touching the model or persisting anything", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      acquireConversationTurnLockMock.mockResolvedValue(false);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: "Another message for this conversation is still being processed. Please wait a moment and try again.",
+      });
+      expect(getLastMessagesMock).not.toHaveBeenCalled();
+      expect(appendMessageMock).not.toHaveBeenCalled();
+      expect(streamTextMock).not.toHaveBeenCalled();
+    });
+
+    it("acquires the lock before the idempotency read", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(acquireConversationTurnLockMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+        expect.any(Number),
+      );
+      const acquireOrder = acquireConversationTurnLockMock.mock.invocationCallOrder[0]!;
+      const getLastMessagesOrder = getLastMessagesMock.mock.invocationCallOrder[0]!;
+      expect(acquireOrder).toBeLessThan(getLastMessagesOrder);
+    });
+
+    it("releases the lock without ever calling the model when the turn replays", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      const answered = { id: "a1", role: "assistant", parts: [{ type: "text", text: "the answer" }], clientMessageId: null };
+      getLastMessagesMock.mockResolvedValue([answered, { id: "u1", role: "user", parts: [], clientMessageId: "client-1" }]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(200);
+      expect(streamTextMock).not.toHaveBeenCalled();
+      expect(releaseConversationTurnLockMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+      );
+    });
+
+    it("releases the lock once the stream finishes successfully", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      expect(capturedOnFinish).toBeDefined();
+      expect(releaseConversationTurnLockMock).not.toHaveBeenCalled();
+
+      await capturedOnFinish!({ responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] } });
+
+      expect(releaseConversationTurnLockMock).toHaveBeenCalledWith(expect.anything(), "22222222-2222-2222-2222-222222222222");
+    });
+
+    it("releases the lock even when the turn is aborted (no renderable content persisted)", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      expect(capturedOnFinish).toBeDefined();
+
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "half-sen" }] },
+        isAborted: true,
+      });
+
+      expect(releaseConversationTurnLockMock).toHaveBeenCalledWith(expect.anything(), "22222222-2222-2222-2222-222222222222");
+      expect(appendMessageMock).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ role: "assistant" }),
+        expect.anything(),
+      );
+    });
+
+    it("a lock-release failure does not throw out of onFinish (best-effort)", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      releaseConversationTurnLockMock.mockRejectedValue(new Error("db unavailable"));
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      expect(capturedOnFinish).toBeDefined();
+
+      await expect(
+        capturedOnFinish!({ responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] } }),
+      ).resolves.not.toThrow();
+    });
   });
 
   // #143: the model's context now comes from the server's own persisted

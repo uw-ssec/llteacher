@@ -55,6 +55,8 @@ import {
   appendMessage,
   getLastMessages,
   getOwnedConversationOrNull,
+  acquireConversationTurnLock,
+  releaseConversationTurnLock,
 } from "../repositories/conversations";
 import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from "../repositories/rateLimits";
 import {
@@ -463,6 +465,14 @@ const MAX_REQUEST_BODY_BYTES = 256 * 1024;
 // within one streamText call, see stopWhen below), short enough that a
 // genuinely stuck upstream doesn't tie up the request indefinitely.
 const STREAM_TIMEOUT_MS = 60_000;
+
+// #317 review, #322: how old a held turn lock (conversations.processing
+// started_at) must be before a new request is allowed to treat it as
+// abandoned rather than genuinely in-flight. Comfortably above
+// STREAM_TIMEOUT_MS -- a legitimate turn's lock must never go stale while
+// that same turn could still be legitimately running -- to leave room for
+// the persistence work on either side of the streamText call itself.
+const LOCK_STALE_MS = 90_000;
 
 // #312: the idempotency decision below used to live inline, TWICE -- once
 // for the initial check, once for the race-fallback re-check after a lost
@@ -889,6 +899,26 @@ export async function chatHandler(c: Context<AppEnv>) {
   // -- the highest-frequency replies in a Socratic tutor) gets a NEW id
   // each send, so it is correctly treated as a new message, not a retry of
   // the old one.
+  // #317 review, #322: claims the per-conversation turn lock BEFORE the
+  // idempotency read below, not just around the model call -- the race
+  // Cordero found (two concurrent sends interleaving into Q_a, Q_b, A_a,
+  // A_b, and a lost-response retry permanently 409ing even though the real
+  // answer was already persisted) happens in the read-classify-write
+  // sequence itself, not only in streamText. A second concurrent request on
+  // this same conversation gets a distinct, retryable 409 immediately,
+  // rather than being allowed to race through this same sequence.
+  // acquireConversationTurnLock's own doc comment (repositories/
+  // conversations.ts) covers the staleness/abandoned-lock case.
+  const lockAcquired = await acquireConversationTurnLock(db, conv.id, LOCK_STALE_MS);
+  if (!lockAcquired) {
+    return c.json(
+      {
+        error: "Another message for this conversation is still being processed. Please wait a moment and try again.",
+      },
+      409,
+    );
+  }
+
   // #279: skipOwnershipCheck -- `conv` above already proved this
   // conversation is in scope (getOwnedConversationOrNull, or a row this
   // same request just created/raced onto inside resolveConversation), so
@@ -900,6 +930,9 @@ export async function chatHandler(c: Context<AppEnv>) {
   const initialClassification = classifyTurn(lastMessage, secondLastMessage, parsedInbound.data.id);
 
   if (initialClassification === "replay") {
+    // No model call is about to happen -- release immediately rather than
+    // holding the lock until LOCK_STALE_MS expires for no reason.
+    await releaseConversationTurnLock(db, conv.id);
     return replayResponse(conv.id, lastMessage!.parts);
   }
   if (initialClassification === "insert") {
@@ -931,18 +964,26 @@ export async function chatHandler(c: Context<AppEnv>) {
       // reply or, if the winner is still mid-flight, tells the client to
       // wait rather than also calling the model.
       if (!created) {
+        // #322: the lock above prevents this within one conversation under
+        // normal circumstances -- this remains reachable only via the
+        // staleness escape hatch (acquireConversationTurnLock's own doc
+        // comment), so it stays as a defensive backstop rather than dead
+        // code.
         const [raceLast, raceSecondLast] = await getLastMessages(db, scope, conv.id, 2, {
           skipOwnershipCheck: true,
         });
         if (classifyTurn(raceLast, raceSecondLast, parsedInbound.data.id) === "replay") {
+          await releaseConversationTurnLock(db, conv.id);
           return replayResponse(conv.id, raceLast!.parts);
         }
+        await releaseConversationTurnLock(db, conv.id);
         return c.json(
           { error: "This message is already being processed. Please wait a moment." },
           409,
         );
       }
     } catch (err) {
+      await releaseConversationTurnLock(db, conv.id);
       if (err instanceof IdempotencyKeyConflictError) {
         return c.json({ error: err.message }, 409);
       }
@@ -950,130 +991,152 @@ export async function chatHandler(c: Context<AppEnv>) {
     }
   }
 
-  // #143: server-authoritative context, not the client's own copy. The old
-  // behavior forwarded the client-supplied `uiMessages` array (trailing-
-  // windowed) straight to convertToModelMessages -- only its LAST entry was
-  // ever validated (parsedInbound above), so a crafted array could inject
-  // fabricated assistant replies or a smuggled system-role message ahead of
-  // it, overriding the Socratic guardrail (the exact academic-integrity
-  // bypass this issue's "Trust boundary on history" requirement calls out).
-  // Re-fetching from the row(s) this handler itself just confirmed or wrote
-  // above closes that: everything the model sees is either a prior
-  // assistant reply the server generated, or a prior user message this same
-  // idempotency check already accepted. getLastMessages orders newest-first
-  // (matches its use above); reversed here into the chronological order the
-  // model needs. Same MAX_HISTORY_MESSAGES cap as before (#215), just
-  // sourced server-side now instead of trusting the client's own window.
-  const persistedHistory = await getLastMessages(db, scope, conv.id, MAX_HISTORY_MESSAGES, {
-    skipOwnershipCheck: true,
-  });
-  const modelMessages: UIMessage[] = [...persistedHistory].reverse().map((m) => ({
-    id: m.id,
-    role: m.role as UIMessage["role"],
-    parts: m.parts as UIMessage["parts"],
-  }));
+  // #317 review, #322: everything from here through the streamText call
+  // below is synchronous setup on the way to a held-open stream -- if any
+  // of it throws, the lock must be released here (the success path's
+  // release lives in onFinish, which only fires once the stream actually
+  // starts). Not needed for correctness under the current code (nothing
+  // between here and streamText is expected to throw), but the alternative
+  // -- a stuck lock silently blackholing a conversation for LOCK_STALE_MS
+  // -- is a worse failure mode than the extra try/catch.
+  try {
+    // #143: server-authoritative context, not the client's own copy. The old
+    // behavior forwarded the client-supplied `uiMessages` array (trailing-
+    // windowed) straight to convertToModelMessages -- only its LAST entry was
+    // ever validated (parsedInbound above), so a crafted array could inject
+    // fabricated assistant replies or a smuggled system-role message ahead of
+    // it, overriding the Socratic guardrail (the exact academic-integrity
+    // bypass this issue's "Trust boundary on history" requirement calls out).
+    // Re-fetching from the row(s) this handler itself just confirmed or wrote
+    // above closes that: everything the model sees is either a prior
+    // assistant reply the server generated, or a prior user message this same
+    // idempotency check already accepted. getLastMessages orders newest-first
+    // (matches its use above); reversed here into the chronological order the
+    // model needs. Same MAX_HISTORY_MESSAGES cap as before (#215), just
+    // sourced server-side now instead of trusting the client's own window.
+    const persistedHistory = await getLastMessages(db, scope, conv.id, MAX_HISTORY_MESSAGES, {
+      skipOwnershipCheck: true,
+    });
+    const modelMessages: UIMessage[] = [...persistedHistory].reverse().map((m) => ({
+      id: m.id,
+      role: m.role as UIMessage["role"],
+      parts: m.parts as UIMessage["parts"],
+    }));
 
-  // #272: getLastMessages above only knows what's already persisted -- a
-  // freshly-created section conversation's greeting was just written inside
-  // startSectionConversation's own atomic group, but that write can't be
-  // relied on to be visible to this same request's read in every test/mock
-  // configuration, so it's still passed through explicitly rather than
-  // assumed to already be part of persistedHistory. Prepending it here is
-  // what makes the model's very first answer in a section actually see the
-  // question (section.content, embedded in the greeting), instead of
-  // answering blind until a reload re-hydrates history that includes it.
-  const modelContextMessages: UIMessage[] = sectionGreetingParts
-    ? [
-        { id: crypto.randomUUID(), role: "assistant", parts: sectionGreetingParts } as UIMessage,
-        ...modelMessages,
-      ]
-    : modelMessages;
+    // #272: getLastMessages above only knows what's already persisted -- a
+    // freshly-created section conversation's greeting was just written inside
+    // startSectionConversation's own atomic group, but that write can't be
+    // relied on to be visible to this same request's read in every test/mock
+    // configuration, so it's still passed through explicitly rather than
+    // assumed to already be part of persistedHistory. Prepending it here is
+    // what makes the model's very first answer in a section actually see the
+    // question (section.content, embedded in the greeting), instead of
+    // answering blind until a reload re-hydrates history that includes it.
+    const modelContextMessages: UIMessage[] = sectionGreetingParts
+      ? [
+          { id: crypto.randomUUID(), role: "assistant", parts: sectionGreetingParts } as UIMessage,
+          ...modelMessages,
+        ]
+      : modelMessages;
 
-  const result = streamText({
-    // #26: model/provider/params all come from resolvedLLMConfig now --
-    // homework override or org default, never hardcoded.
-    model: providerClient(resolvedLLMConfig.modelName),
-    system: systemPrompt,
-    // #143: server-authoritative history (modelMessages, from
-    // persistedHistory above), not a client-supplied array -- see
-    // persistedHistory's own doc comment for the trust-boundary rationale
-    // this closes.
-    messages: convertToModelMessages(modelContextMessages),
-    // #264: belt-and-suspenders alongside historyMessageSchema's role
-    // allowlist above -- the SDK warns and proceeds by default (its own
-    // words: "a security risk because they may enable prompt injection
-    // attacks"). This makes a role:"system" element a hard model-input
-    // refusal even if some future change to that schema let one through.
-    allowSystemInMessages: false,
-    tools: TOOLS,
-    temperature: resolvedLLMConfig.temperature,
-    maxOutputTokens: resolvedLLMConfig.maxCompletionTokens,
-    /* Allow up to 5 steps so the model can call a display tool and then
-       continue with the follow-up Socratic question in the same turn.
-       Without this, streamText stops the moment a tool call is emitted. */
-    stopWhen: stepCountIs(5),
-    // #143: bounds how long a stuck/hanging upstream can hold this request
-    // open. A genuine provider error (including a 429) already arrives as
-    // an in-stream `error` chunk well before this fires (ai@5.0.195 -- see
-    // hasRenderableContent's doc comment); this specifically covers the
-    // "upstream never responds at all" case that chunk-based handling
-    // can't, by construction, ever see.
-    abortSignal: AbortSignal.timeout(STREAM_TIMEOUT_MS),
-  });
+    const result = streamText({
+      // #26: model/provider/params all come from resolvedLLMConfig now --
+      // homework override or org default, never hardcoded.
+      model: providerClient(resolvedLLMConfig.modelName),
+      system: systemPrompt,
+      // #143: server-authoritative history (modelMessages, from
+      // persistedHistory above), not a client-supplied array -- see
+      // persistedHistory's own doc comment for the trust-boundary rationale
+      // this closes.
+      messages: convertToModelMessages(modelContextMessages),
+      // #264: belt-and-suspenders alongside historyMessageSchema's role
+      // allowlist above -- the SDK warns and proceeds by default (its own
+      // words: "a security risk because they may enable prompt injection
+      // attacks"). This makes a role:"system" element a hard model-input
+      // refusal even if some future change to that schema let one through.
+      allowSystemInMessages: false,
+      tools: TOOLS,
+      temperature: resolvedLLMConfig.temperature,
+      maxOutputTokens: resolvedLLMConfig.maxCompletionTokens,
+      /* Allow up to 5 steps so the model can call a display tool and then
+         continue with the follow-up Socratic question in the same turn.
+         Without this, streamText stops the moment a tool call is emitted. */
+      stopWhen: stepCountIs(5),
+      // #143: bounds how long a stuck/hanging upstream can hold this request
+      // open. A genuine provider error (including a 429) already arrives as
+      // an in-stream `error` chunk well before this fires (ai@5.0.195 -- see
+      // hasRenderableContent's doc comment); this specifically covers the
+      // "upstream never responds at all" case that chunk-based handling
+      // can't, by construction, ever see.
+      abortSignal: AbortSignal.timeout(STREAM_TIMEOUT_MS),
+    });
 
-  return result.toUIMessageStreamResponse({
-    headers: { "x-conversation-id": conv.id },
-    // The AI SDK's natural hook for persisting the assistant turn --
-    // responseMessage is the full final UIMessage (text parts + any
-    // tool-call/tool-result parts), exactly the shape `messages.parts`
-    // (jsonb) is meant to store; no manual text+toolCalls reconstruction
-    // needed.
-    //
-    // #268: NOT persisted when isAborted or finishReason === "error" (a
-    // client disconnect mid-delta, or a provider error after some content
-    // already streamed) -- previously this refused only a fully-empty
-    // response (hasRenderableContent's step-start-only case), which missed
-    // the partial case entirely: a text-then-error turn persisted a
-    // half-sentence as a normal-looking complete answer, and the
-    // idempotency replay path above then served that same half-sentence on
-    // every future retry, with no error chunk at all the second time. Two
-    // signals said "incomplete" at this exact decision point and neither
-    // was read: `finishReason`/`isAborted` on this callback's own event,
-    // and the persisted text part's own `state: "streaming"` (now also
-    // caught structurally by hasRenderableContent's strengthened text
-    // branch, in case a future SDK stops surfacing finishReason). "length"
-    // is deliberately NOT refused here -- that's a real, complete-as-far-
-    // as-the-model-went answer (hit its token budget), not a truncation.
-    //
-    // best-effort, not double-write-proof: if the *worker process* dies
-    // before onFinish runs (vs. the client just disconnecting), the
-    // assistant message is lost and the client's retry will only re-send
-    // the user message (already deduped above), so no response ever gets
-    // generated for that turn. That gap is a documented limitation (#3
-    // pitfall 2), not fixed here -- tracked as #96 (streaming resilience).
-    onFinish: async ({ responseMessage, isAborted, finishReason }) => {
-      if (isAborted || finishReason === "error") return;
-      // A provider failure mid-stream (ai@5.0.195 delivers this as an
-      // `error` chunk, not a rejection -- see hasRenderableContent's doc
-      // comment) still lands here with a `responseMessage` that has no
-      // real content. Persisting it anyway would write a permanently-empty
-      // assistant row that the idempotency check above would then treat as
-      // "already answered" on every future retry -- silently defeating the
-      // client's retry affordance (#144) forever. Returning early instead
-      // leaves nothing persisted for this turn, so a retry's idempotency
-      // check falls through to a genuine model call again.
-      if (!hasRenderableContent(responseMessage.parts)) return;
-      try {
-        await appendMessage(
-          db,
-          scope,
-          conv.id,
-          { role: "assistant", parts: responseMessage.parts },
-          { skipOwnershipCheck: true },
-        );
-      } catch (err) {
-        logServerError("chatHandler.onFinish", err);
-      }
-    },
-  });
+    return result.toUIMessageStreamResponse({
+      headers: { "x-conversation-id": conv.id },
+      // The AI SDK's natural hook for persisting the assistant turn --
+      // responseMessage is the full final UIMessage (text parts + any
+      // tool-call/tool-result parts), exactly the shape `messages.parts`
+      // (jsonb) is meant to store; no manual text+toolCalls reconstruction
+      // needed.
+      //
+      // #268: NOT persisted when isAborted or finishReason === "error" (a
+      // client disconnect mid-delta, or a provider error after some content
+      // already streamed) -- previously this refused only a fully-empty
+      // response (hasRenderableContent's step-start-only case), which missed
+      // the partial case entirely: a text-then-error turn persisted a
+      // half-sentence as a normal-looking complete answer, and the
+      // idempotency replay path above then served that same half-sentence on
+      // every future retry, with no error chunk at all the second time. Two
+      // signals said "incomplete" at this exact decision point and neither
+      // was read: `finishReason`/`isAborted` on this callback's own event,
+      // and the persisted text part's own `state: "streaming"` (now also
+      // caught structurally by hasRenderableContent's strengthened text
+      // branch, in case a future SDK stops surfacing finishReason). "length"
+      // is deliberately NOT refused here -- that's a real, complete-as-far-
+      // as-the-model-went answer (hit its token budget), not a truncation.
+      //
+      // best-effort, not double-write-proof: if the *worker process* dies
+      // before onFinish runs (vs. the client just disconnecting), the
+      // assistant message is lost and the client's retry will only re-send
+      // the user message (already deduped above), so no response ever gets
+      // generated for that turn. That gap is a documented limitation (#3
+      // pitfall 2), not fixed here -- tracked as #96 (streaming resilience).
+      onFinish: async ({ responseMessage, isAborted, finishReason }) => {
+        // #317 review, #322: unconditional, before the early returns below
+        // -- the turn is over (successfully, aborted, or errored) the
+        // moment onFinish fires at all, so the lock must release here
+        // regardless of which of those three this turn was. Best-effort
+        // (releaseConversationTurnLock's own doc comment): a failure here
+        // must never surface as a second error layered on the turn's own.
+        await releaseConversationTurnLock(db, conv.id).catch((err) => {
+          logServerError("chatHandler.onFinish.releaseLock", err);
+        });
+        if (isAborted || finishReason === "error") return;
+        // A provider failure mid-stream (ai@5.0.195 delivers this as an
+        // `error` chunk, not a rejection -- see hasRenderableContent's doc
+        // comment) still lands here with a `responseMessage` that has no
+        // real content. Persisting it anyway would write a permanently-empty
+        // assistant row that the idempotency check above would then treat as
+        // "already answered" on every future retry -- silently defeating the
+        // client's retry affordance (#144) forever. Returning early instead
+        // leaves nothing persisted for this turn, so a retry's idempotency
+        // check falls through to a genuine model call again.
+        if (!hasRenderableContent(responseMessage.parts)) return;
+        try {
+          await appendMessage(
+            db,
+            scope,
+            conv.id,
+            { role: "assistant", parts: responseMessage.parts },
+            { skipOwnershipCheck: true },
+          );
+        } catch (err) {
+          logServerError("chatHandler.onFinish", err);
+        }
+      },
+    });
+  } catch (err) {
+    await releaseConversationTurnLock(db, conv.id).catch(() => {});
+    throw err;
+  }
 }

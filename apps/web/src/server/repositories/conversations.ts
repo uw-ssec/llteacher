@@ -519,6 +519,53 @@ export async function getOwnedConversationOrNull(
   return existing;
 }
 
+/** #317 review, #322: claims the per-conversation turn lock via a single
+ *  conditional UPDATE -- the only thing that makes this race-safe under
+ *  concurrent requests is that the WHERE clause and the write happen
+ *  atomically in one statement; a read-then-write pair here would have the
+ *  exact same race window classifyTurn's retry logic was already losing to.
+ *
+ *  `RETURNING id` is how the caller tells "I got the lock" from "someone
+ *  else holds it" apart: a real conflict updates 0 rows, and this returns
+ *  false without touching anything. `staleMs` treats an old lock as
+ *  abandoned (a Worker killed mid-request -- an uncaught exception, a
+ *  platform-level timeout -- never reaches the release call below) rather
+ *  than a permanent deadlock; chat.ts's own STREAM_TIMEOUT_MS bounds how
+ *  long a legitimate turn can hold it, so staleMs is set comfortably above
+ *  that, not equal to it. */
+export async function acquireConversationTurnLock(
+  db: Db,
+  conversationId: string,
+  staleMs: number,
+): Promise<boolean> {
+  const staleBefore = new Date(Date.now() - staleMs);
+  const rows = await db
+    .update(conversations)
+    .set({ processingStartedAt: new Date() })
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        or(isNull(conversations.processingStartedAt), lt(conversations.processingStartedAt, staleBefore)),
+      ),
+    )
+    .returning({ id: conversations.id });
+  return rows.length > 0;
+}
+
+/** Releases the lock acquired above. Best-effort by design: called from
+ *  chat.ts's onFinish/onAbort/catch paths, all of which run after the
+ *  response has already started streaming to the client -- a failure here
+ *  must never surface as a second error layered on top of whatever the
+ *  turn itself already reported. A conversation stuck locked past staleMs
+ *  self-heals on the next send via the staleness check above, so silently
+ *  losing a release is degraded, not broken. */
+export async function releaseConversationTurnLock(db: Db, conversationId: string): Promise<void> {
+  await db
+    .update(conversations)
+    .set({ processingStartedAt: null })
+    .where(eq(conversations.id, conversationId));
+}
+
 // Used by chatHandler's retry/idempotency check (#3, reworked #213): the
 // most recently persisted messages in a conversation, newest first (index 0
 // = last message). limit=2 is what chatHandler needs to distinguish its two
