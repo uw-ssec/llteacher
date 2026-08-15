@@ -223,3 +223,33 @@ export function buildProviderClient(provider: LlmProvider, apiKey: string) {
   if (provider === "llmoxie") return getLLMoxie(apiKey);
   throw new UnsupportedLLMProviderError(provider);
 }
+
+/** #317 review, #321: per-model $/1M-token rates for llm_call_logs.cost_cents
+ *  (the CDI reporting story). Best-effort and explicitly approximate --
+ *  neither the AI SDK nor this app's schema tracks a canonical price list,
+ *  and OpenRouter alone fronts hundreds of models with independently-set
+ *  rates that change over time. Add a model's real published rate here as
+ *  it's confirmed; an unlisted model resolves to a null cost (an honest
+ *  "unknown," not a guessed number) rather than silently defaulting to $0
+ *  or some other model's rate. ":free" OpenRouter model slugs are the one
+ *  case genuinely known to always be $0 without needing per-model upkeep. */
+const MODEL_PRICING_PER_MILLION_TOKENS: Record<string, { input: number; output: number }> = {
+  "google/gemma-4-31b-it:free": { input: 0, output: 0 },
+};
+
+/** Returns null (not 0) for a model with no known rate -- see the pricing
+ *  table's own doc comment for why guessing would be worse than omitting.
+ *  Rounds to the nearest cent; a single turn's cost is expected to be a
+ *  small fraction of a cent for most models, so this is aggregated cost
+ *  reporting, not a per-turn billing primitive. */
+export function estimateCostCents(
+  modelName: string,
+  inputTokens: number | null,
+  outputTokens: number | null,
+): number | null {
+  if (modelName.endsWith(":free")) return 0;
+  const pricing = MODEL_PRICING_PER_MILLION_TOKENS[modelName];
+  if (!pricing || inputTokens === null || outputTokens === null) return null;
+  const dollars = (inputTokens / 1_000_000) * pricing.input + (outputTokens / 1_000_000) * pricing.output;
+  return Math.round(dollars * 100);
+}

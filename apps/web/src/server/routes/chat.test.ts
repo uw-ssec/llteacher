@@ -39,6 +39,13 @@ vi.mock("../repositories/conversations", () => ({
   releaseConversationTurnLock: (...args: unknown[]) => releaseConversationTurnLockMock(...args),
 }));
 
+// #317 review, #321: llm_call_logs -- one row per turn, written from
+// chatHandler's onFinish.
+const recordLlmCallLogMock = vi.fn();
+vi.mock("../repositories/llmCallLogs", () => ({
+  recordLlmCallLog: (...args: unknown[]) => recordLlmCallLogMock(...args),
+}));
+
 // #265: reserveRateLimitSlot returns the POST-increment count (unlike the
 // old countRecentUserMessagesForUser, which returned the PRE-increment
 // count) -- mockResolvedValue(1) below means "this is the first request in
@@ -79,13 +86,25 @@ type FakeOnFinishEvent = {
   finishReason?: string;
 };
 let capturedOnFinish: ((event: FakeOnFinishEvent) => void | Promise<void>) | undefined;
+let capturedStreamResponseOnError: ((error: unknown) => string) | undefined;
+// #317 review, #321: chat.ts's own onFinish awaits result.usage/result.response
+// to build the llm_call_logs row -- individual tests override these via
+// mockUsage/mockResponseMeta when they care about the exact values;
+// otherwise these sensible defaults keep every other test from having to
+// know about #321's fields at all.
+let mockUsage: { inputTokens?: number; outputTokens?: number } = { inputTokens: 10, outputTokens: 20 };
+let mockResponseMeta: { id?: string } = { id: "provider-resp-1" };
 const streamTextMock = vi.fn((_args: Record<string, unknown>) => {
   return {
+    usage: Promise.resolve(mockUsage),
+    response: Promise.resolve(mockResponseMeta),
     toUIMessageStreamResponse: (opts?: {
       headers?: Record<string, string>;
       onFinish?: (event: FakeOnFinishEvent) => void | Promise<void>;
+      onError?: (error: unknown) => string;
     }) => {
       capturedOnFinish = opts?.onFinish;
+      capturedStreamResponseOnError = opts?.onError;
       return new Response("stream-body", { status: 200, headers: opts?.headers });
     },
   };
@@ -216,10 +235,14 @@ describe("POST /api/chat", () => {
     // specifically about the lock itself expects the turn to proceed.
     acquireConversationTurnLockMock.mockReset().mockResolvedValue(true);
     releaseConversationTurnLockMock.mockReset().mockResolvedValue(undefined);
+    recordLlmCallLogMock.mockReset().mockResolvedValue(undefined);
+    mockUsage = { inputTokens: 10, outputTokens: 20 };
+    mockResponseMeta = { id: "provider-resp-1" };
     startSectionConversationMock.mockReset();
     getActiveSectionConversationMock.mockReset();
     streamTextMock.mockClear();
     capturedOnFinish = undefined;
+    capturedStreamResponseOnError = undefined;
     // #219/#265: under the rate limit by default -- individual rate-limit
     // tests override this. 1 is the post-increment count for "the first
     // request in the window," not a pre-increment 0.
@@ -1383,6 +1406,127 @@ describe("POST /api/chat", () => {
     await expect(
       capturedOnFinish!({ responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] } }),
     ).resolves.not.toThrow();
+  });
+
+  // #317 review, #321: LLM call observability -- a provider failure was
+  // previously invisible on the server (no error rate, no per-provider
+  // breakdown, no latency, no cost). Also folds in the "strongly recommend"
+  // finding that a raw provider error (e.g. a 429's JSON body) reached the
+  // student verbatim via App.tsx's chatError.message.
+  describe("#321 LLM call observability", () => {
+    it("passes onError and onAbort to streamText", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+
+      const streamTextArgs = streamTextMock.mock.calls[0]![0] as { onError?: unknown; onAbort?: unknown };
+      expect(typeof streamTextArgs.onError).toBe("function");
+      expect(typeof streamTextArgs.onAbort).toBe("function");
+    });
+
+    it("streamText's onError logs without throwing (best-effort)", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      const streamTextArgs = streamTextMock.mock.calls[0]![0] as { onError: (e: { error: unknown }) => void };
+      expect(() => streamTextArgs.onError({ error: new Error("upstream rejected the request") })).not.toThrow();
+      expect(errorSpy).toHaveBeenCalledWith(
+        "[chatHandler.streamText.onError]",
+        expect.objectContaining({ message: expect.stringContaining("upstream rejected the request") }),
+      );
+      errorSpy.mockRestore();
+    });
+
+    it("replaces the client-visible stream error with a safe message instead of the raw provider error", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      expect(capturedStreamResponseOnError).toBeDefined();
+
+      const clientVisibleMessage = capturedStreamResponseOnError!(
+        new Error('{"error":"You\'re sending messages too quickly. Please slow down."}'),
+      );
+      expect(clientVisibleMessage).not.toContain("sending messages too quickly");
+      expect(clientVisibleMessage).toBe("Something went wrong while generating a response. Please try again.");
+      errorSpy.mockRestore();
+    });
+
+    it("writes one llm_call_logs row with token/cost/latency data on a successful turn", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      appendMessageMock.mockResolvedValue({ row: { id: "assistant-msg-1" }, created: true });
+      mockUsage = { inputTokens: 100, outputTokens: 50 };
+      mockResponseMeta = { id: "req-abc" };
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      await capturedOnFinish!({ responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] } });
+
+      expect(recordLlmCallLogMock).toHaveBeenCalledTimes(1);
+      const logged = recordLlmCallLogMock.mock.calls[0]![1] as Record<string, unknown>;
+      expect(logged).toMatchObject({
+        messageId: "assistant-msg-1",
+        conversationId: "22222222-2222-2222-2222-222222222222",
+        providerRequestId: "req-abc",
+        inputTokens: 100,
+        outputTokens: 50,
+        errorFlag: false,
+      });
+      expect(typeof logged.latencyMs).toBe("number");
+    });
+
+    it("writes an llm_call_logs row with errorFlag true and no messageId when the turn is aborted", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "half-sen" }] },
+        isAborted: true,
+      });
+
+      expect(recordLlmCallLogMock).toHaveBeenCalledTimes(1);
+      const logged = recordLlmCallLogMock.mock.calls[0]![1] as Record<string, unknown>;
+      expect(logged).toMatchObject({ messageId: null, errorFlag: true });
+      expect(appendMessageMock).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ role: "assistant" }),
+        expect.anything(),
+      );
+    });
+
+    it("writes an llm_call_logs row with errorFlag true when finishReason is 'error'", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "" }] },
+        finishReason: "error",
+      });
+
+      expect(recordLlmCallLogMock).toHaveBeenCalledTimes(1);
+      const logged = recordLlmCallLogMock.mock.calls[0]![1] as Record<string, unknown>;
+      expect(logged).toMatchObject({ messageId: null, errorFlag: true });
+    });
+
+    it("a recordLlmCallLog failure does not throw out of onFinish (best-effort)", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      recordLlmCallLogMock.mockRejectedValue(new Error("db unavailable"));
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+
+      await expect(
+        capturedOnFinish!({ responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] } }),
+      ).resolves.not.toThrow();
+    });
   });
 
   // #317 review, #322: the per-conversation turn lock. Two concurrent sends

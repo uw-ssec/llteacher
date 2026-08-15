@@ -172,6 +172,15 @@ vi.mock("../repositories/rateLimits", () => ({
   RATE_LIMIT_WINDOW_MS: 60_000,
 }));
 
+// #317 review, #321: llm_call_logs -- same reasoning as rateLimits above,
+// a no-op fake so chatHandler's onFinish doesn't call the real
+// db.insert(...) against the mocked (`{}`) db. This file's own tests are
+// about error-chunk/idempotency behavior, not #321's own observability
+// data, which chat.test.ts covers directly.
+vi.mock("../repositories/llmCallLogs", () => ({
+  recordLlmCallLog: async () => {},
+}));
+
 // #25: system-prompt resolution isn't what this suite exercises (it's about
 // the error-chunk/idempotency seam) -- faked the same minimal way `lib/ai`
 // is above, so chat.ts's new per-turn prompt-assembly calls don't reach the

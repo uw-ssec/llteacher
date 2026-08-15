@@ -70,6 +70,7 @@ import {
 import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
 import { IdempotencyKeyConflictError } from "../repositories/errors";
 import { getOrgScopeForCourse } from "../repositories/organizations";
+import { recordLlmCallLog } from "../repositories/llmCallLogs";
 import { logServerError } from "../utils/errors";
 import {
   assembleSystemPrompt,
@@ -82,6 +83,7 @@ import {
   resolveLLMConfig,
   resolveApiKey,
   buildProviderClient,
+  estimateCostCents,
   LLMConfigNotFoundError,
   LLMCredentialMissingError,
   UnsupportedLLMProviderError,
@@ -1039,6 +1041,12 @@ export async function chatHandler(c: Context<AppEnv>) {
         ]
       : modelMessages;
 
+    // #317 review, #321: latency for the llm_call_logs row written in
+    // onFinish below -- captured right before the model call actually
+    // starts, not at the top of chatHandler, so it reflects the LLM call
+    // itself rather than this turn's own persistence/setup overhead.
+    const turnStartedAt = Date.now();
+
     const result = streamText({
       // #26: model/provider/params all come from resolvedLLMConfig now --
       // homework override or org default, never hardcoded.
@@ -1069,10 +1077,55 @@ export async function chatHandler(c: Context<AppEnv>) {
       // "upstream never responds at all" case that chunk-based handling
       // can't, by construction, ever see.
       abortSignal: AbortSignal.timeout(STREAM_TIMEOUT_MS),
+      // #317 review, #321: a genuine failure in stream construction/
+      // processing itself -- e.g. a malformed request the provider rejects
+      // before any token streams. Distinct from a provider error mid-
+      // generation, which ai@5.0.195 delivers as an in-stream `error` chunk
+      // instead (handled by onFinish's finishReason check below), not a
+      // rejection this callback would ever see. Previously silent: the
+      // SDK's own default is a bare console.error with no request context
+      // this app could act on -- "zero evidence" was #321's whole complaint.
+      onError: ({ error }) => {
+        logServerError(
+          "chatHandler.streamText.onError",
+          new Error(
+            `LLM call failed for conversation ${conv.id}, user ${authContext.session.userId}, provider ${resolvedLLMConfig.provider}, model ${resolvedLLMConfig.modelName}: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+      },
+      // Fires specifically when abortSignal (STREAM_TIMEOUT_MS above)
+      // actually trips -- a stuck/hanging upstream that never errored and
+      // never finished, not a provider-reported failure. Logged under its
+      // own label so an operator can tell "the model is slow" apart from
+      // "the model is erroring" without guessing from timing alone.
+      onAbort: () => {
+        logServerError(
+          "chatHandler.streamText.onAbort",
+          new Error(
+            `LLM call timed out after ${STREAM_TIMEOUT_MS}ms for conversation ${conv.id}, provider ${resolvedLLMConfig.provider}, model ${resolvedLLMConfig.modelName}`,
+          ),
+        );
+      },
     });
 
     return result.toUIMessageStreamResponse({
       headers: { "x-conversation-id": conv.id },
+      // #317 review, #321 + "strongly recommend" item: previously absent,
+      // so the SDK's default error-to-string conversion reached the client
+      // unfiltered -- combined with App.tsx rendering chatError.message
+      // verbatim, a provider error (e.g. a raw 429 JSON body, "You're
+      // sending messages too quickly...") reached the student exactly as
+      // the provider phrased it. Logged for the same reason as streamText's
+      // own onError above (this hook can fire for stream-processing errors
+      // that one doesn't see), and replaced with a message that's actually
+      // safe to show a student.
+      onError: (error) => {
+        logServerError(
+          "chatHandler.toUIMessageStreamResponse.onError",
+          error instanceof Error ? error : new Error(String(error)),
+        );
+        return "Something went wrong while generating a response. Please try again.";
+      },
       // The AI SDK's natural hook for persisting the assistant turn --
       // responseMessage is the full final UIMessage (text parts + any
       // tool-call/tool-result parts), exactly the shape `messages.parts`
@@ -1102,36 +1155,96 @@ export async function chatHandler(c: Context<AppEnv>) {
       // generated for that turn. That gap is a documented limitation (#3
       // pitfall 2), not fixed here -- tracked as #96 (streaming resilience).
       onFinish: async ({ responseMessage, isAborted, finishReason }) => {
-        // #317 review, #322: unconditional, before the early returns below
-        // -- the turn is over (successfully, aborted, or errored) the
-        // moment onFinish fires at all, so the lock must release here
-        // regardless of which of those three this turn was. Best-effort
+        // #317 review, #322: unconditional, before anything below -- the
+        // turn is over (successfully, aborted, or errored) the moment
+        // onFinish fires at all, so the lock must release here regardless
+        // of which of those three this turn was. Best-effort
         // (releaseConversationTurnLock's own doc comment): a failure here
         // must never surface as a second error layered on the turn's own.
         await releaseConversationTurnLock(db, conv.id).catch((err) => {
           logServerError("chatHandler.onFinish.releaseLock", err);
         });
-        if (isAborted || finishReason === "error") return;
+
+        // #268: NOT persisted when isAborted or finishReason === "error" (a
+        // client disconnect mid-delta, or a provider error after some
+        // content already streamed) -- previously this refused only a
+        // fully-empty response (hasRenderableContent's step-start-only
+        // case), which missed the partial case entirely: a text-then-error
+        // turn persisted a half-sentence as a normal-looking complete
+        // answer, and the idempotency replay path above then served that
+        // same half-sentence on every future retry, with no error chunk at
+        // all the second time. Two signals said "incomplete" at this exact
+        // decision point and neither was read: `finishReason`/`isAborted`
+        // on this callback's own event, and the persisted text part's own
+        // `state: "streaming"` (now also caught structurally by
+        // hasRenderableContent's strengthened text branch, in case a future
+        // SDK stops surfacing finishReason). "length" is deliberately NOT
+        // refused here -- that's a real, complete-as-far-as-the-model-went
+        // answer (hit its token budget), not a truncation.
+        //
         // A provider failure mid-stream (ai@5.0.195 delivers this as an
         // `error` chunk, not a rejection -- see hasRenderableContent's doc
         // comment) still lands here with a `responseMessage` that has no
         // real content. Persisting it anyway would write a permanently-empty
         // assistant row that the idempotency check above would then treat as
         // "already answered" on every future retry -- silently defeating the
-        // client's retry affordance (#144) forever. Returning early instead
-        // leaves nothing persisted for this turn, so a retry's idempotency
-        // check falls through to a genuine model call again.
-        if (!hasRenderableContent(responseMessage.parts)) return;
+        // client's retry affordance (#144) forever. Not persisting instead
+        // leaves nothing for this turn, so a retry's idempotency check falls
+        // through to a genuine model call again.
+        //
+        // best-effort, not double-write-proof: if the *worker process* dies
+        // before onFinish runs (vs. the client just disconnecting), the
+        // assistant message is lost and the client's retry will only re-send
+        // the user message (already deduped above), so no response ever gets
+        // generated for that turn. That gap is a documented limitation (#3
+        // pitfall 2), not fixed here -- tracked as #96 (streaming resilience).
+        const isErrorOutcome = isAborted || finishReason === "error";
+        let persistedMessageId: string | null = null;
+        if (!isErrorOutcome && hasRenderableContent(responseMessage.parts)) {
+          try {
+            const { row } = await appendMessage(
+              db,
+              scope,
+              conv.id,
+              { role: "assistant", parts: responseMessage.parts },
+              { skipOwnershipCheck: true },
+            );
+            persistedMessageId = row.id;
+          } catch (err) {
+            logServerError("chatHandler.onFinish", err);
+          }
+        }
+
+        // #317 review, #321: one llm_call_logs row per turn -- including the
+        // error/aborted/no-content cases above, which previously early-
+        // returned with nothing written anywhere. This was the operational
+        // gap #321 names: a provider outage or a rotated key produced
+        // "zero evidence" -- no error rate, no per-provider breakdown, no
+        // latency, no cost. Best-effort like the release/persist steps
+        // above: a logging failure must never surface as a second error
+        // layered on this turn's own outcome.
         try {
-          await appendMessage(
-            db,
-            scope,
-            conv.id,
-            { role: "assistant", parts: responseMessage.parts },
-            { skipOwnershipCheck: true },
-          );
+          const [usage, response] = await Promise.all([result.usage, result.response]);
+          await recordLlmCallLog(db, {
+            messageId: persistedMessageId,
+            conversationId: conv.id,
+            organizationId: orgScope,
+            llmConfigId: resolvedLLMConfig.id,
+            provider: resolvedLLMConfig.provider,
+            model: resolvedLLMConfig.modelName,
+            providerRequestId: response.id ?? null,
+            inputTokens: usage.inputTokens ?? null,
+            outputTokens: usage.outputTokens ?? null,
+            costCents: estimateCostCents(
+              resolvedLLMConfig.modelName,
+              usage.inputTokens ?? null,
+              usage.outputTokens ?? null,
+            ),
+            latencyMs: Date.now() - turnStartedAt,
+            errorFlag: isErrorOutcome || !persistedMessageId,
+          });
         } catch (err) {
-          logServerError("chatHandler.onFinish", err);
+          logServerError("chatHandler.onFinish.recordLlmCallLog", err);
         }
       },
     });
