@@ -29,8 +29,9 @@
 
    System prompt: resolved per-conversation (#25, lib/prompts.ts) from the
    conversation's pinned prompt_templates row + section context, never
-   hardcoded. Model stays hardcoded pending #26 (LLM config resolution),
-   a later task in this epic -- not in scope here.
+   hardcoded. Model/provider/params are resolved per-conversation too (#26,
+   lib/llm-config.ts) from the org/course/homework's llm_configs row, never
+   hardcoded -- see resolveLLMConfig's own call site below.
    -------------------------------------------------------------------------- */
 
 import type { Context } from "hono";

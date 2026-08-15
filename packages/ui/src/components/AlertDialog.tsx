@@ -56,6 +56,16 @@ export function AlertDialog({
   const titleId = useId();
   const descriptionId = useId();
 
+  /* Self-healing on every render, not just when `open` changes (PR #317
+     review finding): the native <dialog> can close itself independently of
+     React's `open` prop (the `cancel` event below, or any future path that
+     calls the browser's own close), and a `[open]`-keyed effect only
+     re-checks when `open` itself changes value -- if `open` stays `true`
+     across that desync (exactly what happened here: `cancelRestart`
+     early-returns while `confirming`, so `restartDialogOpen` never flips),
+     the mismatch stands forever. Both branches are idempotent -- showModal()
+     no-ops if already open, close() no-ops if already closed -- so running
+     this after every render is safe, not just after `open` transitions. */
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
@@ -64,18 +74,31 @@ export function AlertDialog({
     } else if (!open && dialog.open) {
       dialog.close();
     }
-  }, [open]);
+  });
 
-  // Escape fires `cancel` (then `close`) on a native <dialog> -- let the
-  // browser's default close proceed, but also tell the parent so its
-  // `open` state (the actual source of truth here) stays in sync.
+  // Escape fires `cancel` (then `close`) on a native <dialog>. Normally we
+  // let the browser's default close proceed and tell the parent so its
+  // `open` state stays in sync -- but while `confirming` (a request is
+  // in flight and the dialog must stay open to show a server-side refusal
+  // inline, see the `confirming` prop doc comment), the native `cancel`
+  // event is cancelable and closing the DOM dialog out from under React's
+  // `open === true` is exactly the desync the effect above now heals, but
+  // preventing it here means the healing effect never has to fire for this
+  // specific, most-common cause of it (#317 review: Escape during restart
+  // permanently bricked the Restart button before this fix).
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
-    const handleCancel = () => onCancel();
+    const handleCancel = (e: Event) => {
+      if (confirming) {
+        e.preventDefault();
+        return;
+      }
+      onCancel();
+    };
     dialog.addEventListener("cancel", handleCancel);
     return () => dialog.removeEventListener("cancel", handleCancel);
-  }, [onCancel]);
+  }, [onCancel, confirming]);
 
   return (
     <dialog
