@@ -1592,11 +1592,15 @@ body {
     color: var(--color-text-secondary);
   }
 
+  /* Underlined by default. Without it this was the same colour and family as
+     the paragraph directly above, distinguished only on :hover -- which touch
+     users never get, so nothing marked it as actionable at all. */
   .error-boundary-fallback__secondary {
     font-family: var(--font-sans);
     font-size: var(--font-size-sm);
     color: var(--color-text-secondary);
-    text-decoration: none;
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 
   .error-boundary-fallback__secondary:hover {
@@ -1716,7 +1720,9 @@ body {
     align-items: center;
     gap: 0.45em;
     margin-block-start: var(--space-1);
-    padding: 0;
+    /* 2.5.8: same 23.8px this class's twin was fixed for. Left behind in the
+       first pass, and this work grew it from two call sites to four. */
+    padding-block: var(--space-1);
     background: none;
     border: none;
     cursor: pointer;
