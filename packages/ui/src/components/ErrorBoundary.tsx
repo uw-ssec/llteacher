@@ -91,9 +91,14 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
       if (this.props.fallback) return this.props.fallback(error, this.reset);
       return (
         <div className="error-boundary-fallback" role="alert" tabIndex={-1} ref={this.fallbackRef}>
-          <p>Something went wrong while rendering this conversation.</p>
+          <span className="error-boundary-fallback__label">Conversation stopped</span>
+          <p className="error-boundary-fallback__body">
+            This conversation couldn&apos;t be displayed. Your messages are saved — reloading
+            it should bring them back.
+          </p>
           <button type="button" className="error-boundary-fallback__retry" onClick={this.reset}>
             Try again
+            <span aria-hidden="true">→</span>
           </button>
         </div>
       );

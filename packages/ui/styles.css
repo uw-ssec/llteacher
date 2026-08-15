@@ -1448,23 +1448,158 @@ body {
      the owning useChat's last turn failed (status "error") instead of the
      stream just silently disappearing.
      ------------------------------------------------------------------------- */
+  /* -------------------------------------------------------------------------
+     .conversation-error-row — the turn that did not arrive.
+
+     This was a pink-washed rounded rectangle with a red left bar and an
+     outlined button in the corner: the generic alert component every tool
+     produces, and a thing that belongs to no product in particular. It also
+     contradicted the rules this app already sets for itself -- `.btn` is
+     documented as "Text-link or minimal outlined. Never a vivid filled
+     pill", and `.message--ai` as "no fill, no border. Pure text."
+
+     Redesigned from the conversation outward instead. Every turn here
+     already has a voice: the tutor speaks as bare text on paper, the student
+     as a right-aligned bubble, the system as centred mono small-caps. A
+     failure is not an alert interrupting that thread -- it is the tutor's
+     turn *failing to arrive*. So it occupies the tutor's own position and
+     register, and is rendered severed rather than boxed.
+
+     The device is a rule that breaks off: a hairline runs from the text
+     margin and stops short, ending in an error-red tick. An utterance cut
+     mid-flow. It only reads as anything inside a conversation, which is the
+     point -- it cannot be lifted into some other product's alert slot.
+
+     Paper stays paper. Error red appears as a hairline mark, never a wash.
+     ------------------------------------------------------------------------- */
   .conversation-error-row {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-4);
-    margin-block: var(--space-4);
-    padding: var(--space-3) var(--space-4);
-    border-radius: 6px;
-    background-color: rgba(190, 60, 50, 0.06);
-    border-inline-start: 2px solid var(--color-error);
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
+    /* Sits where an AI turn would, and carries .message--ai's own bottom
+       rhythm so the thread's spacing does not stutter around a failure. */
+    margin-block: var(--space-4) var(--space-8);
   }
 
+  /* The severed rule. Solid from the margin, then fading -- the fade is the
+     "cut off" rather than a hard stop, which would read as a border. */
+  .conversation-error-row::before {
+    content: "";
+    display: block;
+    width: min(280px, 60%);
+    height: 1px;
+    background-image: linear-gradient(
+      to right,
+      var(--color-error) 0,
+      var(--color-error) 18px,
+      var(--color-border-strong) 18px,
+      transparent 100%
+    );
+    transform-origin: left;
+    animation: error-rule-sever 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  @keyframes error-rule-sever {
+    from { transform: scaleX(0); }
+    to   { transform: scaleX(1); }
+  }
+
+  @keyframes error-turn-rise {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Same construction as .message__system-text -- this is the system's
+     existing voice for "something happened here that is not a turn". */
+  .conversation-error-row__label {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-variant: small-caps;
+    color: var(--color-error);
+    animation: error-turn-rise 320ms ease-out both;
+    animation-delay: 80ms;
+  }
+
+  /* The tutor's body register, one step quieter -- it occupies the speaking
+     position but is not itself a thing the tutor said. */
   .conversation-error-row__message {
     margin: 0;
+    max-width: 58ch;
+    font-family: var(--font-sans);
+    font-size: var(--font-size-base);
+    line-height: var(--leading-body);
+    color: var(--color-text-secondary);
+    animation: error-turn-rise 320ms ease-out both;
+    animation-delay: 120ms;
+  }
+
+  /* The machine's words, demoted. Present for a bug report, not shouted at
+     a student who cannot act on "Provider returned error". */
+  .conversation-error-row__detail {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    line-height: var(--leading-normal);
+    color: var(--color-text-muted);
+    word-break: break-word;
+    animation: error-turn-rise 320ms ease-out both;
+    animation-delay: 160ms;
+  }
+
+  /* Retry borrows the sidebar's submit affordance -- a text link whose arrow
+     slides on hover -- rather than an outlined button in the corner. The
+     recovery is offered in the thread's own voice. */
+  .conversation-error-row__retry {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45em;
+    margin-block-start: var(--space-1);
+    padding: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
     font-family: var(--font-sans);
     font-size: var(--font-size-sm);
-    color: var(--color-text);
+    font-weight: var(--weight-medium);
+    color: var(--color-accent);
+    transition: color 140ms ease-out;
+    animation: error-turn-rise 320ms ease-out both;
+    animation-delay: 200ms;
+  }
+
+  .conversation-error-row__retry:hover {
+    color: var(--color-accent-hover);
+  }
+
+  .conversation-error-row__retry:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  .conversation-error-row__retry-arrow {
+    display: inline-block;
+    transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .conversation-error-row__retry:hover .conversation-error-row__retry-arrow {
+    transform: translateX(3px);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .conversation-error-row::before,
+    .conversation-error-row__label,
+    .conversation-error-row__message,
+    .conversation-error-row__detail,
+    .conversation-error-row__retry {
+      animation: none;
+    }
+    .conversation-error-row__retry-arrow {
+      transition: none;
+    }
   }
 
   /* -------------------------------------------------------------------------
@@ -1476,31 +1611,141 @@ body {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    gap: var(--space-3);
+    gap: var(--space-2);
+    /* Inline padding matters here because this also renders as a route's
+       whole content inside .app-shell (a flex row) -- without it the fallback
+       sat flush against the viewport's left edge. */
     margin: var(--space-6) 0;
-    padding: var(--space-4) var(--space-5);
-    border-radius: 6px;
-    background-color: rgba(190, 60, 50, 0.06);
-    border-inline-start: 2px solid var(--color-error);
+    padding-inline: var(--space-8);
+  }
+
+  /* Same severed rule as .conversation-error-row -- a render failure and a
+     failed turn are the same event to a student ("the tutor stopped"), so
+     they should not arrive in two different visual languages. */
+  .error-boundary-fallback::before {
+    content: "";
+    display: block;
+    width: min(280px, 60%);
+    height: 1px;
+    background-image: linear-gradient(
+      to right,
+      var(--color-error) 0,
+      var(--color-error) 18px,
+      var(--color-border-strong) 18px,
+      transparent 100%
+    );
+  }
+
+  .error-boundary-fallback__label {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-variant: small-caps;
+    color: var(--color-error);
+  }
+
+  .error-boundary-fallback__body {
+    margin: 0;
+    max-width: 58ch;
     font-family: var(--font-sans);
-    font-size: var(--font-size-sm);
-    color: var(--color-text);
+    font-size: var(--font-size-base);
+    line-height: var(--leading-body);
+    color: var(--color-text-secondary);
   }
 
   .error-boundary-fallback__retry {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45em;
+    margin-block-start: var(--space-1);
+    padding: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
     font-family: var(--font-sans);
     font-size: var(--font-size-sm);
     font-weight: var(--weight-medium);
-    color: var(--color-error);
-    background: none;
-    border: 1px solid var(--color-error);
-    border-radius: 6px;
-    padding: var(--space-1) var(--space-3);
-    cursor: pointer;
+    color: var(--color-accent);
+    transition: color 140ms ease-out;
   }
 
   .error-boundary-fallback__retry:hover {
-    background-color: rgba(190, 60, 50, 0.08);
+    color: var(--color-accent-hover);
+  }
+
+  .error-boundary-fallback__retry:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  /* -------------------------------------------------------------------------
+     .not-found — the 404. Had no rule anywhere in this stylesheet, so it
+     rendered as a raw browser <h1> and a blue underlined link. Same severed
+     rule as the other stopped states: a page that isn't there and a turn
+     that didn't arrive are the same promise broken, and should not arrive in
+     two different visual languages.
+     ------------------------------------------------------------------------- */
+  .not-found {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-3);
+    min-height: 100vh;
+    justify-content: center;
+    padding-inline: clamp(var(--space-6), 8vw, var(--space-12));
+    background-color: var(--color-bg);
+  }
+
+  .not-found::before {
+    content: "";
+    display: block;
+    width: min(280px, 60%);
+    height: 1px;
+    background-image: linear-gradient(
+      to right,
+      var(--color-accent-warm) 0,
+      var(--color-accent-warm) 18px,
+      var(--color-border-strong) 18px,
+      transparent 100%
+    );
+  }
+
+  .not-found h1 {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: var(--font-size-2xl);
+    font-weight: var(--weight-semibold);
+    letter-spacing: -0.02em;
+    line-height: var(--leading-tight);
+    color: var(--color-text);
+  }
+
+  .not-found p {
+    margin: 0;
+    max-width: 52ch;
+    font-family: var(--font-sans);
+    font-size: var(--font-size-sm);
+    line-height: var(--leading-body);
+    color: var(--color-text-secondary);
+  }
+
+  .not-found a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45em;
+    margin-block-start: var(--space-2);
+    font-family: var(--font-sans);
+    font-size: var(--font-size-sm);
+    font-weight: var(--weight-medium);
+    color: var(--color-accent);
+    text-decoration: none;
+    transition: color 140ms ease-out;
+  }
+
+  .not-found a:hover {
+    color: var(--color-accent-hover);
   }
 
   /* -------------------------------------------------------------------------

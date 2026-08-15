@@ -903,7 +903,7 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
     // or different message.
     expect(isComposerDisabled(composer)).toBe(false);
 
-    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await user.click(screen.getByRole("button", { name: /try again/i }));
 
     await screen.findByText("recovered reply");
     expect(chatCallCount).toBe(2);
@@ -1053,7 +1053,7 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
     // useChat instance too.
     expect(isComposerDisabled(composer)).toBe(false);
 
-    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await user.click(screen.getByRole("button", { name: /try again/i }));
 
     await screen.findByText("tutor recovered");
     expect(chatCallCount).toBe(2);
@@ -1550,7 +1550,7 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
     // Retry re-attempts the same fetch (still fails here -- proving Retry
     // is wired to the real fetch, not a no-op).
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: /retry/i }));
+    await user.click(screen.getByRole("button", { name: /try again/i }));
     await waitFor(() => expect(messagesCallCount).toBe(2));
   });
 

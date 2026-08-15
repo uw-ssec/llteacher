@@ -969,7 +969,25 @@ export default function App() {
           onLogout={logout}
         />
         <div className="app-shell">
-          <p role="alert">Failed to load your homework. Please refresh the page.</p>
+          {/* Was a bare <p role="alert"> flush against the shell's top-left
+              corner -- the same unstyled-alert shape the admin console had
+              before AdminNotice. Routed through the stopped-state language
+              the rest of this app now uses. */}
+          <div className="error-boundary-fallback" role="alert">
+            <span className="error-boundary-fallback__label">Homework didn&apos;t load</span>
+            <p className="error-boundary-fallback__body">
+              Your assignment couldn&apos;t be fetched. Nothing you&apos;ve submitted is
+              affected — reloading should bring it back.
+            </p>
+            <button
+              type="button"
+              className="error-boundary-fallback__retry"
+              onClick={() => window.location.reload()}
+            >
+              Reload
+              <span aria-hidden="true">→</span>
+            </button>
+          </div>
         </div>
       </div>
     );

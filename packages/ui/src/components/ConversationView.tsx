@@ -15,7 +15,52 @@ import { Message } from "./Message";
 import { Composer } from "./Composer";
 import { CodeBlock } from "./CodeBlock";
 import { EditableTitle } from "./EditableTitle";
-import { Button } from "./Button";
+
+/** Splits what the student is told from what the machine said.
+ *
+ *  The AI SDK's transport throws `new Error(await response.text())`, and this
+ *  server answers `c.json({ error })` -- so the string handed to this
+ *  component is the raw response body, and a student was being shown
+ *  `{"error":"You're sending messages too quickly..."}`, braces and all.
+ *
+ *  Unwrapping that JSON is the floor, not the ceiling: whatever survives is
+ *  still the server's or the provider's phrasing ("Provider returned error"),
+ *  which names a system a student has no relationship with and cannot act on.
+ *  So the readable half is what they get, and anything that still looks like
+ *  machine output is demoted to the detail line for a bug report. */
+export function readErrorMessage(raw: string): { message: string; detail?: string } {
+  const trimmed = raw.trim();
+
+  let unwrapped = trimmed;
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      const inner = (parsed as { error?: unknown })?.error;
+      if (typeof inner === "string" && inner.trim()) unwrapped = inner.trim();
+    } catch {
+      /* Not JSON after all -- fall through with the original string. */
+    }
+  }
+
+  if (!unwrapped) {
+    return { message: "The tutor didn't reply. Nothing you wrote was lost." };
+  }
+
+  /* Provider/transport strings name systems the student has no relationship
+     with. Give them a sentence they can act on and keep the original where
+     it is useful -- in a bug report, not in the middle of their homework. */
+  const looksInternal = /provider|upstream|fetch|status code|\b5\d{2}\b|api[_ -]?error/i.test(
+    unwrapped,
+  );
+  if (looksInternal) {
+    return {
+      message: "The tutor didn't reply. Nothing you wrote was lost — try again.",
+      detail: unwrapped,
+    };
+  }
+
+  return { message: unwrapped };
+}
 
 /* -- Message data shape ---------------------------------------------------- */
 
@@ -204,14 +249,26 @@ export function ConversationView({
               useChat's last turn failed (status "error"), so a failed or
               rate-limited stream surfaces something instead of the
               synthetic "thinking" placeholder just vanishing. */}
-          {error && (
-            <div className="conversation-error-row" role="alert">
-              <p className="conversation-error-row__message">{error.message}</p>
-              <Button variant="danger" size="sm" outlined onClick={error.onRetry}>
-                Retry
-              </Button>
-            </div>
-          )}
+          {error && (() => {
+            const { message, detail } = readErrorMessage(error.message);
+            return (
+              <div className="conversation-error-row" role="alert">
+                <span className="conversation-error-row__label">No response</span>
+                <p className="conversation-error-row__message">{message}</p>
+                {detail && <p className="conversation-error-row__detail">{detail}</p>}
+                <button
+                  type="button"
+                  className="conversation-error-row__retry"
+                  onClick={error.onRetry}
+                >
+                  Try again
+                  <span className="conversation-error-row__retry-arrow" aria-hidden="true">
+                    →
+                  </span>
+                </button>
+              </div>
+            );
+          })()}
 
           {/* Bottom sentinel for scroll-to-latest */}
           <div ref={bottomRef} aria-hidden="true" />

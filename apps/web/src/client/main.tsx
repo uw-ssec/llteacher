@@ -32,8 +32,15 @@ function RouteErrorBoundary() {
     <div className="page-frame">
       <div className="app-shell">
         <div className="error-boundary-fallback" role="alert" tabIndex={-1} ref={fallbackRef}>
-          <p>Something went wrong. Please refresh the page.</p>
-          <a href="/">Go home</a>
+          <span className="error-boundary-fallback__label">Page stopped</span>
+          <p className="error-boundary-fallback__body">
+            This page couldn&apos;t be displayed. Your work is saved — reloading should bring
+            it back.
+          </p>
+          <a className="error-boundary-fallback__retry" href="/">
+            Go home
+            <span aria-hidden="true">→</span>
+          </a>
         </div>
       </div>
     </div>
@@ -49,8 +56,15 @@ const router = createBrowserRouter([
 function NotFound() {
   return (
     <div className="not-found">
-      <h1>Page not found</h1>
-      <a href="/">Go home</a>
+      <h1>That page isn&apos;t here</h1>
+      <p>
+        The link may be out of date, or the homework may have been withdrawn by your
+        instructor. Nothing you&apos;ve submitted is affected.
+      </p>
+      <a href="/">
+        Back to your homework
+        <span aria-hidden="true">→</span>
+      </a>
     </div>
   );
 }
