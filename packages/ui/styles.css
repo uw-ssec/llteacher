@@ -1649,9 +1649,14 @@ body {
   padding-block-start: var(--space-2);
   padding-block-end: var(--space-5);
   padding-inline: var(--space-3);
-  /* Smooth width transition when collapsing — pairs with the base
-     .sidebar transition rule */
-  transition: width 200ms ease-out, padding 200ms ease-out;
+  /* No transition override here on purpose. This block sits OUTSIDE
+     @layer components, so it beats the base .sidebar rule regardless of
+     specificity -- an override that declared itself a pairing while
+     actually replacing it, collapsing this rail in 200ms against the
+     student rail's 240ms. Inheriting the base rule is what makes the two
+     sidebars animate identically, and it narrows the animated properties
+     to padding-inline (the only padding that changes on collapse) instead
+     of all four sides. */
 }
 
 .admin-sidebar__label {
