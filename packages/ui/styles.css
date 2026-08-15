@@ -3804,6 +3804,135 @@ body {
 .admin-markdown-preview > :first-child { margin-block-start: 0; }
 .admin-markdown-preview > :last-child  { margin-block-end: 0; }
 
+/* Tailwind's preflight resets headings to inherit size/weight, strips list
+   markers and indentation, and flattens blockquotes and tables. ReactMarkdown
+   was emitting correct semantic elements the whole time and they rendered
+   indistinguishably from plain text -- a preview that previews nothing.
+   Restored here rather than reaching for a prose plugin, because the scale
+   should be this console's type scale, not a generic one.
+
+   Deliberately modest: this is a preview inside a form, subordinate to the
+   textarea above it, so the heading steps are compressed relative to a real
+   document. It should read as formatted without competing with the field. */
+
+.admin-markdown-preview h1,
+.admin-markdown-preview h2,
+.admin-markdown-preview h3,
+.admin-markdown-preview h4 {
+  margin-block: var(--space-4) var(--space-2);
+  font-family: var(--font-sans);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+}
+
+.admin-markdown-preview h1 { font-size: var(--font-size-lg); }
+.admin-markdown-preview h2 { font-size: var(--font-size-base); }
+.admin-markdown-preview h3,
+.admin-markdown-preview h4 {
+  font-size: var(--font-size-sm);
+  /* Below h2 the size scale runs out, so weight and small-caps carry the
+     level instead of shrinking text past readability. */
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-secondary);
+}
+
+.admin-markdown-preview p {
+  margin-block: 0 var(--space-3);
+}
+
+.admin-markdown-preview ul,
+.admin-markdown-preview ol {
+  margin-block: 0 var(--space-3);
+  padding-inline-start: var(--space-5);
+}
+
+.admin-markdown-preview ul { list-style: disc; }
+.admin-markdown-preview ol { list-style: decimal; }
+
+.admin-markdown-preview li {
+  margin-block-end: var(--space-1);
+}
+
+.admin-markdown-preview li::marker {
+  color: var(--color-text-muted);
+}
+
+/* Nested lists step down, matching how an authored problem statement
+   usually nests sub-parts. */
+.admin-markdown-preview li > ul,
+.admin-markdown-preview li > ol {
+  margin-block: var(--space-1) 0;
+}
+
+.admin-markdown-preview li > ul { list-style: circle; }
+
+.admin-markdown-preview strong { font-weight: var(--weight-semibold); }
+.admin-markdown-preview em { font-style: italic; }
+
+/* The console's rule vocabulary: a quiet leading rule rather than a fill. */
+.admin-markdown-preview blockquote {
+  margin: 0 0 var(--space-3);
+  padding-inline-start: var(--space-4);
+  border-inline-start: 2px solid var(--color-border-strong);
+  color: var(--color-text-secondary);
+}
+
+.admin-markdown-preview a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.admin-markdown-preview hr {
+  margin-block: var(--space-4);
+  border: none;
+  border-block-start: 1px solid var(--color-border);
+}
+
+/* Ruled like the record rows, not boxed -- same reasoning as the rest of
+   this console's tabular surfaces. */
+.admin-markdown-preview table {
+  width: 100%;
+  margin-block: 0 var(--space-3);
+  border-collapse: collapse;
+  font-size: var(--font-size-xs);
+}
+
+.admin-markdown-preview th,
+.admin-markdown-preview td {
+  padding: var(--space-2) var(--space-3);
+  border-block-end: 1px solid var(--color-border);
+  text-align: start;
+  vertical-align: top;
+}
+
+.admin-markdown-preview th {
+  font-family: var(--font-mono);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+/* Fenced blocks: distinct from the inline `code` rule below. */
+.admin-markdown-preview pre {
+  margin-block: 0 var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-code-bg);
+  overflow-x: auto;
+}
+
+.admin-markdown-preview pre code {
+  padding: 0;
+  background: none;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-code);
+}
+
 .admin-markdown-preview code {
   font-family: var(--font-mono);
   font-size: 0.92em;
