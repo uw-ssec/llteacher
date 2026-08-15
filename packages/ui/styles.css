@@ -3187,7 +3187,8 @@ body {
 
 /* -- Filter chips (tabs above filtered lists) ------------------------------ */
 
-.admin-filter-row {
+.admin-filter-row,
+.list-controls__filters {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
@@ -3217,6 +3218,15 @@ body {
 .admin-filter:focus-visible {
   color: var(--color-text);
   outline: none;
+}
+
+/* The chip is a label wrapping a visually-hidden radio, so the element that
+   actually takes focus is invisible. Without this the whole filter rail is
+   keyboard-navigable with no visible indication of where you are. */
+.admin-filter:has(:focus-visible) {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+  color: var(--color-text);
 }
 
 .admin-filter--active {
@@ -3754,6 +3764,201 @@ body {
 .prompt-import__notice--error {
   color: var(--color-error);
   border-inline-start-color: var(--color-error);
+}
+
+/* == List controls: search / filter / sort ================================
+   Shared by Homeworks, Submissions, and LLM configs so the same task has the
+   same shape on every list. See ListControls.tsx for why each part is
+   optional and why the summary is a live region.
+   ======================================================================== */
+
+.list-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-block-end: var(--space-4);
+}
+
+.list-controls__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+/* -- Search -------------------------------------------------------------- */
+
+.list-controls__search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 18rem;
+  /* Capped so the field does not stretch to the full width of a wide console
+     and read as the page's primary action. It is a way to narrow the list,
+     not the reason the page exists. */
+  max-width: 26rem;
+}
+
+.list-controls__search-icon {
+  position: absolute;
+  inset-inline-start: var(--space-3);
+  display: inline-flex;
+  color: var(--color-text-muted);
+  pointer-events: none;
+}
+
+.list-controls__search-input {
+  width: 100%;
+  padding: 7px var(--space-3) 7px calc(var(--space-3) * 2 + 15px);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  transition: border-color 140ms ease-out, box-shadow 140ms ease-out;
+}
+
+.list-controls__search-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.list-controls__search-input:focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+
+/* Chrome and Safari draw their own clear button on type="search"; hiding it
+   avoids two clear affordances sitting side by side saying the same thing. */
+.list-controls__search-input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
+.list-controls__search-clear {
+  position: absolute;
+  inset-inline-end: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: color 140ms ease-out, background-color 140ms ease-out;
+}
+
+.list-controls__search-clear:hover {
+  color: var(--color-text);
+  background-color: var(--color-bg);
+}
+
+.list-controls__search-clear:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* -- Sort ---------------------------------------------------------------- */
+
+.list-controls__sort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-inline-start: auto;
+}
+
+/* Mono small-caps, matching every other field label in the console. */
+.list-controls__sort-label {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.list-controls__sort-select {
+  padding: 6px var(--space-2);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.list-controls__sort-select:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* -- Result summary ------------------------------------------------------ */
+
+.list-controls__summary {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.03em;
+  color: var(--color-text-muted);
+}
+
+/* -- Empty result state -------------------------------------------------- */
+
+/* Distinct from the list's own "nothing here yet" empty state. Those two get
+   confused constantly, and telling someone to create their first homework
+   when they have twelve and merely mistyped a search is worse than saying
+   nothing at all. */
+.list-empty {
+  padding: var(--space-6) var(--space-5);
+  text-align: center;
+  border: 1px dashed var(--color-border);
+  border-radius: 8px;
+}
+
+.list-empty__title {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+
+.list-empty__body {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.list-empty__action {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.list-empty__action:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 40rem) {
+  .list-controls__search {
+    max-width: none;
+  }
+  .list-controls__sort {
+    margin-inline-start: 0;
+  }
 }
 
 /* -- Group: a ruled fieldset, replacing the browser's default box --------- */

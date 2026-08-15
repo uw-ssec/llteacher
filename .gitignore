@@ -25,8 +25,15 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# Anchored to the repo root. Unanchored, these are Python-packaging
+# artifacts from the standard template that also match ANY nested
+# directory named lib -- which silently swallowed new TypeScript source
+# under packages/ui/src/lib and would have done the same to
+# apps/web/src/lib and apps/admin/src/client/lib had those not predated
+# the rule. Python's own lib/ only ever appears inside a virtualenv,
+# and .venv/venv/env/ENV are already ignored wholesale below.
+/lib/
+/lib64/
 parts/
 sdist/
 var/
