@@ -27,6 +27,7 @@ import { HomeworkReadOnlyView } from "./views/HomeworkReadOnlyView";
 import { SubmissionsView } from "./views/SubmissionsView";
 import { TaCapabilitiesView } from "./views/TaCapabilitiesView";
 import { LLMConfigsView } from "./views/LLMConfigsView";
+import { LLMConfigFormView } from "./views/LLMConfigFormView";
 import {
   LLM_CONFIGS,
   CURRENT_TEACHER,
@@ -56,6 +57,8 @@ type View =
   | { kind: "edit-homework"; homeworkId: string }
   | { kind: "submissions"; homeworkId: string }
   | { kind: "llm-configs" }
+  | { kind: "create-llm-config" }
+  | { kind: "edit-llm-config"; configId: string }
   | { kind: "students" };
 
 const NAV_BREADCRUMB: Record<View["kind"], string> = {
@@ -64,6 +67,8 @@ const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "edit-homework":    "Instructor Console · Edit Homework",
   "submissions":      "Instructor Console · Submissions",
   "llm-configs":      "Instructor Console · LLM Configs",
+  "create-llm-config": "Instructor Console · New LLM Config",
+  "edit-llm-config":  "Instructor Console · Edit LLM Config",
   "students":         "Instructor Console · TA permissions",
 };
 
@@ -116,6 +121,8 @@ export default function App() {
       ? "submissions"
       : view.kind === "create-homework" || view.kind === "edit-homework"
         ? "homeworks"
+        : view.kind === "create-llm-config" || view.kind === "edit-llm-config"
+          ? "llm-configs"
         : (view.kind as AdminNavKey);
 
   const navigate = (key: AdminNavKey) => {
@@ -180,10 +187,7 @@ export default function App() {
           onToggleCollapse={() => setIsSidebarCollapsed((c) => !c)}
           canAuthor={canAuthor}
           onNewHomework={() => setView({ kind: "create-homework" })}
-          onNewLLMConfig={() => {
-            // eslint-disable-next-line no-console
-            console.log("[admin] new LLM config — form view not yet implemented");
-          }}
+          onNewLLMConfig={() => setView({ kind: "create-llm-config" })}
         />
 
         <main className="conversation-column admin-main">
@@ -272,14 +276,28 @@ export default function App() {
               {view.kind === "llm-configs" && (
                 <LLMConfigsView
                   configs={LLM_CONFIGS}
-                  onOpenConfig={(id) => {
-                    // eslint-disable-next-line no-console
-                    console.log("[admin] open config", id);
-                  }}
-                  onNewConfig={() => {
-                    // eslint-disable-next-line no-console
-                    console.log("[admin] new LLM config");
-                  }}
+                  onOpenConfig={(id) => setView({ kind: "edit-llm-config", configId: id })}
+                  onNewConfig={() => setView({ kind: "create-llm-config" })}
+                />
+              )}
+
+              {/* Both form views are fixture-backed for now: there is no
+                  llm-configs API on this branch at all (the read route ships
+                  in #317, and no create/update endpoint exists anywhere yet).
+                  onSave is therefore a no-op that returns to the list rather
+                  than a fetch that would 404 -- #332 tracks the write path. */}
+              {view.kind === "create-llm-config" && (
+                <LLMConfigFormView
+                  onSave={async () => setView({ kind: "llm-configs" })}
+                  onCancel={() => setView({ kind: "llm-configs" })}
+                />
+              )}
+
+              {view.kind === "edit-llm-config" && (
+                <LLMConfigFormView
+                  initialConfig={LLM_CONFIGS.find((c) => c.id === view.configId)}
+                  onSave={async () => setView({ kind: "llm-configs" })}
+                  onCancel={() => setView({ kind: "llm-configs" })}
                 />
               )}
 

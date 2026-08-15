@@ -4228,6 +4228,69 @@ body {
 }
 
 /* ==========================================================================
+   .admin-scale — a pedagogical value, not a number input.
+
+   Temperature and the token ceiling are the two settings an instructor is
+   least equipped to reason about as raw numbers, and most able to reason
+   about as behaviour. So the track is the control and the figure is a
+   readout: mono, tabular, to the right, deliberately quiet. The anchors
+   below name what each end does to the student's experience rather than
+   describing the parameter ("Consistent"/"Varied", not "low"/"high").
+
+   Heritage Gold on the filled side, because this is the AI's own voice
+   being tuned -- the same reason gold marks the tutor everywhere else in
+   this product rather than the purple chrome.
+   ========================================================================== */
+
+.admin-scale {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.admin-scale__input {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--color-accent-warm);
+  cursor: pointer;
+}
+
+/* Tabular so the readout does not jitter as digits change under the thumb. */
+.admin-scale__value {
+  min-width: 4ch;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+  text-align: end;
+}
+
+.admin-scale__anchors {
+  display: flex;
+  justify-content: space-between;
+  margin-block-start: var(--space-1);
+  /* Same mono small-caps as every other label in this console. */
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+/* An option that exists but is not available yet. Shown rather than hidden
+   so the reader learns the model instead of wondering what is missing --
+   the explanation lives in the label's own second line. */
+.admin-form-check--disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.admin-form-check--disabled .admin-form-check__label {
+  color: var(--color-text-secondary);
+}
+
+/* ==========================================================================
    .access-gate — the console's page-scale refusal (the 403).
 
    Distinct from .admin-notice above, deliberately. AdminNotice is an in-flow

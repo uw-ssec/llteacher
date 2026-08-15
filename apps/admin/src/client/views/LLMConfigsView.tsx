@@ -87,7 +87,15 @@ export function LLMConfigsView({
                   </span>
                 )}
               </button>
+              {/* Status leads the meta line, matching the homework row. It is a
+                  record attribute, not an action, and parking it in the third
+                  grid column pushed the real actions onto an implicit second
+                  row -- which is why "Open" rendered below-left here while the
+                  homework row's actions sat right. */}
               <div className="admin-record-row__meta">
+                <StatusBadge kind={cfg.isActive ? "active" : "inactive"}>
+                  {cfg.isActive ? "active" : "inactive"}
+                </StatusBadge>
                 <span className="admin-record-row__meta-chip admin-record-row__meta-chip--mono">
                   <Sparkle size={12} weight="regular" aria-hidden="true" />
                   {cfg.modelName}
@@ -105,12 +113,6 @@ export function LLMConfigsView({
                 {cfg.basePromptPreview}
                 <span className="admin-prompt-quote" aria-hidden="true">"</span>
               </p>
-            </div>
-
-            <div className="admin-record-row__status">
-              <StatusBadge kind={cfg.isActive ? "active" : "inactive"}>
-                {cfg.isActive ? "active" : "inactive"}
-              </StatusBadge>
             </div>
 
             <div className="admin-record-row__actions">
