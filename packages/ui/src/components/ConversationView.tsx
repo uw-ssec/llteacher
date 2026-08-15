@@ -329,11 +329,27 @@ export function ConversationView({
             );
           })}
 
-          {/* #144: inline retryable error row -- shown when the owning
-              useChat's last turn failed (status "error"), so a failed or
-              rate-limited stream surfaces something instead of the
-              synthetic "thinking" placeholder just vanishing. */}
-          {error && errorCopy && (
+          {/* Bottom sentinel for scroll-to-latest */}
+          <div ref={bottomRef} aria-hidden="true" />
+        </div>
+
+        {/* Deliberately OUTSIDE the role="log" region above.
+
+            A role="alert" nested inside a live region is two overlapping
+            live regions governing one insertion, with conflicting settings:
+            the log is polite + aria-relevant="additions" + non-atomic, and
+            alert is implicitly assertive + atomic. ARIA defines no
+            resolution for that and screen readers diverge. Worse, because
+            "additions" excludes text changes, a second consecutive failure
+            producing an identical message mutates no DOM and announces
+            nothing at all -- the student hears silence after pressing
+            Try again.
+
+            Hoisted here, its alert semantics work unopposed. It keeps
+            .conversation-inner for the reading measure, and stays inside
+            .conversation-messages so it scrolls with the thread. */}
+        {error && errorCopy && (
+          <div className="conversation-inner">
             <div className="conversation-error-row">
               {/* role="alert" scoped to the two lines the student must hear.
                   It was on the whole block, which meant the machine detail
@@ -369,11 +385,8 @@ export function ConversationView({
                 </details>
               )}
             </div>
-          )}
-
-          {/* Bottom sentinel for scroll-to-latest */}
-          <div ref={bottomRef} aria-hidden="true" />
-        </div>
+          </div>
+        )}
       </div>
 
       {/* Sticky composer -- #144: disabled while a send is genuinely in
