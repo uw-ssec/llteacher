@@ -44,6 +44,9 @@ export type StoppedReason =
   | "not_found"
   | "denied"
   | "in_progress"
+  | "section_closed"
+  | "tutor_stopped"
+  | "unavailable"
   | "unknown";
 
 export interface StoppedCopy {
@@ -71,7 +74,11 @@ function clampDetail(raw: string): string | undefined {
 }
 
 export function readErrorMessage(raw: string): StoppedCopy {
-  const trimmed = raw.trim();
+  /* Defensive: the SDK stores whatever was thrown, typed `unknown`. A
+     non-Error throw yields `undefined` here, and `.trim()` on it would raise
+     inside the render body -- escalating a recoverable failed turn into a
+     boundary swap that destroys the student's unsent draft. */
+  const trimmed = typeof raw === "string" ? raw.trim() : "";
 
   let code: StoppedReason = "unknown";
   let serverError: string | undefined;
@@ -127,6 +134,29 @@ export function readErrorMessage(raw: string): StoppedCopy {
       return {
         label: "Already sending",
         message: "That message is already on its way. Give it a moment before sending again.",
+        retryable: true,
+      };
+    case "section_closed":
+      /* Distinct from in_progress on purpose: both are 409s, but this one is
+         permanent. Sharing a code meant a closed section rendered "already on
+         its way" with a retry that 409s identically forever. */
+      return {
+        label: "Section closed",
+        message:
+          "This section isn't open for conversation. Your instructor may have closed it, or you may have already submitted it.",
+        retryable: false,
+      };
+    case "tutor_stopped":
+      return {
+        label: "No response",
+        message: "The tutor stopped partway through. Nothing you wrote was lost.",
+        retryable: true,
+      };
+    case "unavailable":
+      return {
+        label: "Tutor unavailable",
+        message:
+          "The tutor isn't available right now. This is a problem on our side, not yours — your work is saved. Try again shortly, and tell your instructor if it persists.",
         retryable: true,
       };
     default:
@@ -240,10 +270,14 @@ export function ConversationView({
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  /* Scroll to bottom when new messages arrive */
+  /* Scroll to bottom when new messages arrive -- and when a turn fails.
+     `error` belongs in the deps: a failed turn does not change `messages`
+     (the assistant reply is deliberately not persisted), so without it the
+     error row mounts below the fold and nothing scrolls to it, leaving the
+     only recovery control off-screen. */
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, error]);
 
   const handleSubmit = (text: string) => {
     onSendMessage?.(text);
@@ -329,8 +363,6 @@ export function ConversationView({
             );
           })}
 
-          {/* Bottom sentinel for scroll-to-latest */}
-          <div ref={bottomRef} aria-hidden="true" />
         </div>
 
         {/* Deliberately OUTSIDE the role="log" region above.
@@ -387,6 +419,10 @@ export function ConversationView({
             </div>
           </div>
         )}
+
+        {/* Sentinel last, so "scroll to bottom" means the real bottom --
+            below the error row, not above it. */}
+        <div ref={bottomRef} aria-hidden="true" />
       </div>
 
       {/* Sticky composer -- #144: disabled while a send is genuinely in

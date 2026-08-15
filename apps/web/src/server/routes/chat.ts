@@ -440,13 +440,17 @@ const MAX_HISTORY_MESSAGES = 40;
 export async function chatHandler(c: Context<AppEnv>) {
   const apiKey = c.env.OPENROUTER_API_KEY;
   if (!apiKey) {
-    return c.json(
-      {
-        error:
-          "OPENROUTER_API_KEY is not set. Add it to apps/web/.dev.vars for local dev or via `wrangler secret put OPENROUTER_API_KEY` for prod.",
-      },
-      500,
+    /* The operator-facing detail goes to the log, not the HTTP body. Naming
+       the secret, the file, and the wrangler command in a response a student
+       can read is a reconnaissance description of our secret management --
+       and the client's detail line renders whatever arrives. */
+    logServerError(
+      "chatHandler.config",
+      new Error(
+        'Secret "OPENROUTER_API_KEY" is not set. Add it to apps/web/.dev.vars for local dev, or via `wrangler secret put OPENROUTER_API_KEY` for prod.',
+      ),
     );
+    return c.json({ error: "The tutor is not configured.", code: "unavailable" }, 500);
   }
 
   // authMiddleware/rolesMiddleware already gate every /api/* route (chat.ts
@@ -848,7 +852,14 @@ export async function chatHandler(c: Context<AppEnv>) {
         `chatHandler.stream conversation=${conv.id}`,
         error,
       );
-      return "The tutor stopped partway through. Nothing you wrote was lost.";
+      /* A JSON envelope, not a bare sentence: the client parses `{error, code}`
+         and would otherwise classify a bare string as `unknown` -- rendering
+         generic copy as the headline and burying this sentence in the
+         "details for support" disclosure, where it helps nobody. */
+      return JSON.stringify({
+        error: "The tutor stopped partway through. Nothing you wrote was lost.",
+        code: "tutor_stopped",
+      });
     },
     // The AI SDK's natural hook for persisting the assistant turn --
     // responseMessage is the full final UIMessage (text parts + any

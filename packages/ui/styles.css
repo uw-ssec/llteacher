@@ -1666,6 +1666,9 @@ body {
        whole content inside .app-shell (a flex row) -- without it the fallback
        sat flush against the viewport's left edge. */
     margin: var(--space-6) 0;
+    /* Shell-sized. `.error-boundary-fallback--inline` below drops it for the
+       in-page uses (ProfileView), where this class is reused inside a
+       non-flex parent and the shell padding reads as a stray indent. */
     padding-inline: var(--space-8);
     /* Owns the scroll its predecessor had. .page-frame is 100vh/overflow
        hidden and .app-shell clips too, so without this the content below the
@@ -1676,13 +1679,20 @@ body {
     overflow-y: auto;
   }
 
+  /* Same language, but not the page's whole content: no scroll ownership and
+     no shell padding. */
+  .error-boundary-fallback--inline {
+    flex: initial;
+    overflow-y: visible;
+    padding-inline: 0;
+  }
+
   /* Same severed rule as .conversation-error-row -- a render failure and a
      failed turn are the same event to a student ("the tutor stopped"), so
      they should not arrive in two different visual languages. */
 
   .error-boundary-fallback__label {
     margin: 0;
-    font-size: var(--font-size-xs);
     font-weight: var(--weight-medium);
     font-family: var(--font-mono);
     font-size: var(--font-size-xs);

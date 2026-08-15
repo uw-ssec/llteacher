@@ -188,11 +188,14 @@ describe("readErrorMessage", () => {
     ["Load failed", "Load failed"],
     ["ThrottlingException", "ThrottlingException"],
     ["<html><body>502 Bad Gateway</body></html>", "502"],
-  ])("never renders %s as the student-facing message", (raw, leaked) => {
+  ])("routes %s to the detail line, never the message", (raw, leaked) => {
     const r = readErrorMessage(raw);
     expect(r.message).not.toContain(leaked);
     expect(r.label).toBe("No response");
-    expect(r.retryable).toBe(true);
+    // The load-bearing half: the machine text must actually be in `detail`.
+    // Asserting only that `message` lacks it is vacuous, because `message`
+    // is a literal on this branch and cannot contain input-derived text.
+    expect(r.detail).toContain(leaked);
   });
 
   it("keeps the machine text available in the detail line", () => {
@@ -208,11 +211,18 @@ describe("readErrorMessage", () => {
   it("does not treat a quantity as a status code", () => {
     // The old regex matched `500` in "at most 500 entries" and told the
     // student to retry a deterministic 400.
-    const r = readErrorMessage(
+    // Coded: the switch returns before any text is examined.
+    const coded = readErrorMessage(
       JSON.stringify({ error: "messages must contain at most 500 entries", code: "history_too_long" }),
     );
-    expect(r.retryable).toBe(false);
-    expect(r.message).toMatch(/start a new one/i);
+    expect(coded.retryable).toBe(false);
+    expect(coded.message).toMatch(/start a new one/i);
+
+    // Uncoded: this is the path the old regex got wrong. No classification
+    // happens on the text at all now, so the quantity cannot mislead it.
+    const uncoded = readErrorMessage("Your essay must be at least 500 words");
+    expect(uncoded.label).toBe("No response");
+    expect(uncoded.detail).toBe("Your essay must be at least 500 words");
   });
 
   it("falls back to generic copy on empty or unparseable input", () => {
@@ -221,5 +231,46 @@ describe("readErrorMessage", () => {
       expect(r.label).toBe("No response");
       expect(r.message).toMatch(/didn't finish answering/i);
     }
+  });
+});
+
+describe("stopped-state rendering", () => {
+  const base = {
+    breadcrumb: "STATS 311",
+    messages: [],
+    onSendMessage: vi.fn(),
+  };
+
+  /* The behavioural half of the retryable contract had no component test:
+     withholding a button that provably cannot succeed is the point of the
+     field, and nothing asserted it actually renders that way. */
+  it("offers no retry when the failure cannot be retried", () => {
+    render(
+      <ConversationView
+        {...base}
+        error={{ message: JSON.stringify({ error: "Unauthorized", code: "unauthorized" }), onRetry: vi.fn() }}
+      />,
+    );
+    expect(screen.getByText(/signed out/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it("offers retry when it can succeed", () => {
+    render(
+      <ConversationView
+        {...base}
+        error={{ message: JSON.stringify({ error: "slow", code: "rate_limited" }), onRetry: vi.fn() }}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+  });
+
+  it("keeps the machine detail out of the alert region", () => {
+    render(
+      <ConversationView {...base} error={{ message: "ThrottlingException", onRetry: vi.fn() }} />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).not.toContain("ThrottlingException");
+    expect(screen.getByText("ThrottlingException")).toBeTruthy();
   });
 });

@@ -85,7 +85,7 @@ export function ProfileView() {
           rendered as raw browser defaults. Routed through the stopped-state
           language the rest of the student app now uses. */}
       {saveError && (
-        <div role="alert" className="error-boundary-fallback">
+        <div role="alert" className="error-boundary-fallback error-boundary-fallback--inline">
           <h2 className="error-boundary-fallback__label">Not saved</h2>
           <p className="error-boundary-fallback__body">
             Your changes couldn&apos;t be saved. Nothing was lost — the values are still on
