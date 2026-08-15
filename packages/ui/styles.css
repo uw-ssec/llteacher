@@ -3282,6 +3282,339 @@ body {
 }
 
 /* ==========================================================================
+   .admin-form — the homework authoring surface (#328).
+
+   Before this, .admin-form-field had no rule anywhere in the stylesheet, so
+   every control in HomeworkForm fell back to inline browser flow: labels
+   ran into their inputs, "Publish / Published / Release at" collided on one
+   line, and a section's title, type, and content sat side by side on a
+   single row. Only the Title looked right, because it is the one field that
+   uses the Input component.
+
+   The direction is the console's own, not a new one: a specification
+   document. Mono small-caps field labels matching Input's inline label and
+   the sidebar's CATALOG rule, ruled groups instead of browser fieldset
+   chrome, and each section rendered as a numbered record echoing the
+   HW-001 chip vocabulary from the list view. Authoring a homework and
+   reading the homework list should feel like the same product.
+   ========================================================================== */
+
+.admin-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  /* Narrower than the 1080px records column. This is prose authoring, and a
+     full-width datetime input next to a full-width textarea reads as two
+     unrelated things rather than one form. */
+  max-width: 820px;
+}
+
+/* -- Field: label over control, the unit the whole form is built from ----- */
+
+.admin-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* Matches Input.tsx's inline label exactly (mono, xs, small-caps, uppercase,
+   0.06em, secondary) so the Title field and every hand-rolled field below it
+   read as the same control. */
+.admin-form-field > label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-variant: small-caps;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.admin-form-field input[type="text"],
+.admin-form-field input[type="datetime-local"],
+.admin-form-field select,
+.admin-form-field textarea,
+.admin-form-record input[type="text"],
+.admin-form-record input:not([type]),
+.admin-form-record select,
+.admin-form-record textarea {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  transition:
+    border-color 140ms ease-out,
+    background-color 140ms ease-out;
+}
+
+.admin-form-field textarea,
+.admin-form-record textarea {
+  /* Prose, not a one-line box. Section content becomes the tutor's context
+     and the solution is a full worked answer -- both were rendering as a
+     bare resize handle. */
+  min-height: 7.5rem;
+  line-height: var(--leading-body);
+  resize: vertical;
+}
+
+.admin-form-record textarea[id$="-solution"] {
+  min-height: 5.5rem;
+}
+
+.admin-form-field input:focus,
+.admin-form-field select:focus,
+.admin-form-field textarea:focus,
+.admin-form-record input:focus,
+.admin-form-record select:focus,
+.admin-form-record textarea:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+  border-color: var(--color-accent);
+  background-color: var(--color-bg);
+}
+
+.admin-form-field input[aria-invalid="true"] {
+  border-color: var(--color-error);
+}
+
+/* Secondary line under a control -- the parenthetical explanations that were
+   previously jammed inline against a checkbox label. */
+.admin-form-hint {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-normal);
+  color: var(--color-text-muted);
+}
+
+/* -- Group: a ruled fieldset, replacing the browser's default box --------- */
+
+.admin-form-group {
+  margin: 0;
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background-color: var(--color-surface-raised);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* Same construction as the sidebar's ● CATALOG label, so a form group and a
+   nav group are recognisably the same kind of heading. */
+.admin-form-group > legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.admin-form-group > legend::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background-color: var(--color-accent-warm);
+}
+
+/* -- Checkbox row: box, label, and its explanation on separate axes ------- */
+
+.admin-form-check {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 0.6em;
+  cursor: pointer;
+}
+
+.admin-form-check input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  margin-block-start: 1px;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.admin-form-check__label {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  line-height: var(--leading-normal);
+}
+
+.admin-form-check__label span {
+  display: block;
+  margin-block-start: 2px;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+/* -- Record: a section or widget, styled as the list view's rows are ------ */
+
+.admin-form-record {
+  position: relative;
+  margin: 0;
+  padding: var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background-color: var(--color-surface-raised);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* The numbered chip, borrowing RecordId's vocabulary from the list view so a
+   section reads as a record rather than a browser fieldset. */
+.admin-form-record > legend {
+  padding: 3px 9px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 4px;
+  background-color: var(--color-bg);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+/* -- Markdown preview: the authored text as the student will meet it ------ */
+
+.admin-markdown-preview {
+  padding: var(--space-3) var(--space-4);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-bg);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  color: var(--color-text-secondary);
+}
+
+/* Empty is the common case while typing has not started -- label it instead
+   of rendering an unexplained empty dashed box. */
+.admin-markdown-preview:empty::before {
+  content: "Preview";
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.admin-markdown-preview > :first-child { margin-block-start: 0; }
+.admin-markdown-preview > :last-child  { margin-block-end: 0; }
+
+.admin-markdown-preview code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background-color: var(--color-surface);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+/* -- Actions -------------------------------------------------------------- */
+
+/* The add-actions belong with the list they extend, not with Save. */
+.admin-form-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* Save is the commitment; it gets its own ruled band so it cannot read as a
+   third add-button the way it did when all three ran together inline. */
+.admin-form-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding-block-start: var(--space-4);
+  border-block-start: 1px solid var(--color-border);
+}
+
+/* `.btn--danger` has no rule anywhere in this stylesheet (#327), so every
+   destructive control falls back to plain secondary text -- here that put
+   "Remove section" in the same visual register as a label. Scoped to the
+   authoring form on purpose: defining the shared variant is #327's job, and
+   #317 adds new danger controls that would collide with it. */
+.admin-form-record__remove {
+  align-self: flex-start;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-error);
+  transition:
+    border-color 140ms ease-out,
+    background-color 140ms ease-out;
+}
+
+.admin-form-record__remove:hover {
+  border-color: var(--color-error);
+  background-color: rgba(201, 42, 42, 0.05);
+}
+
+/* The shared Button's variants are text-link styles (`.btn--accent` sets a
+   colour and nothing else), which is right in a record row and wrong for a
+   form's primary action -- Save rendered as plain purple text with no more
+   weight than "+ Add section". These give the authoring controls real
+   affordance without changing Button for every other caller. */
+.admin-form-actions .btn {
+  padding: var(--space-2) var(--space-5);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-accent);
+  font-weight: var(--weight-medium);
+  color: var(--form-action-fg, #FFFFFF);
+  transition:
+    background-color 140ms ease-out,
+    border-color 140ms ease-out;
+}
+
+/* --color-accent is deep Husky Purple in light mode and light Accent
+   Lavender under [data-theme="dark"], so the label flips with the surface. */
+[data-theme="dark"] .admin-form-actions .btn {
+  --form-action-fg: var(--raw-text);
+}
+
+.admin-form-actions .btn:hover:not(:disabled) {
+  background-color: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.admin-form-actions .btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Dashed, echoing the sidebar's own QUICK ACTIONS buttons -- an add-control
+   reads as "there could be another one here", which is exactly what a dashed
+   edge says and a solid one does not. */
+.admin-form-add .btn {
+  padding: var(--space-2) var(--space-4);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  transition:
+    border-color 140ms ease-out,
+    color 140ms ease-out;
+}
+
+.admin-form-add .btn:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* ==========================================================================
    .admin-notice — the console's failure + denial state.
 
    One visual family for every "this did not work" moment: a 403 denial, a
