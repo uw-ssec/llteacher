@@ -438,9 +438,14 @@ describe("App tutor-conversations rail (#4)", () => {
 
     expect(chatCalls).toHaveLength(1);
     expect(chatCalls[0]!.conversationId).toBe("tutor-conv-1");
-    // The actual bug: the outgoing model-context array must include the
-    // hydrated prior turns, not just the message just typed.
-    expect(chatCalls[0]!.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    // #317 review, blocking finding #3: the wire body is now trimmed to just
+    // the message just typed -- chat.ts has never read anything but the
+    // last element (server-authoritative history comes from the DB), and
+    // sending the whole local array eventually 400s long conversations on
+    // the byte cap. The hydrated history is still what's DISPLAYED (the
+    // findByText assertions above) and still seeds useChat's own local
+    // state; only what's transmitted over the wire changed.
+    expect(chatCalls[0]!.messages.map((m) => m.role)).toEqual(["user"]);
   });
 
   // #4 fix-round 2: the hydration fix above introduced an async gap
@@ -1248,10 +1253,10 @@ describe("App section chat resumes with hydrated history (#252)", () => {
 
     expect(chatCalls).toHaveLength(1);
     expect(chatCalls[0]!.conversationId).toBe("sec-conv-1");
-    // The actual bug: the outgoing model-context array must include the
-    // hydrated prior turns, not just the message just typed -- identical
-    // shape to the tutor rail's own #4 fix-round regression test above.
-    expect(chatCalls[0]!.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    // #317 review, blocking finding #3: wire body trimmed to just the
+    // message just typed -- identical rationale to the tutor rail's own
+    // regression test above.
+    expect(chatCalls[0]!.messages.map((m) => m.role)).toEqual(["user"]);
   });
 
   it("switching from a hydrated section back to it after visiting another surface re-hydrates rather than staying empty", async () => {

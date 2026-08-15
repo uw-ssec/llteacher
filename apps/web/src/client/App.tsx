@@ -223,6 +223,29 @@ function buildMessageData(
   return messages;
 }
 
+/* #317 review, blocking finding #3: DefaultChatTransport's default request
+   body sends useChat's ENTIRE local message array on every turn -- for a
+   long-running section (hydration restores up to 200 messages), that array
+   alone measures ~189KB at 100 realistic messages and eventually exceeds
+   MAX_REQUEST_BODY_BYTES (chat.ts), 400ing every further send with no
+   recovery (reloading just re-hydrates the same history). chat.ts has never
+   actually needed more than the last message -- #143's server-authoritative
+   history redesign already reads persisted history from the DB, not from
+   this array (see chatEnvelopeSchema's own doc comment) -- so trimming here
+   costs nothing server-side. `body` already carries the envelope fields
+   (conversationId, or courseId/kind/sectionId) merged in by the transport
+   before this runs; only `messages` needs overriding. Shared by both
+   useChat instances below since both hit the same cap. */
+function prepareSendMessagesRequest({
+  messages,
+  body,
+}: {
+  messages: UIMessage[];
+  body: Record<string, unknown> | undefined;
+}) {
+  return { body: { ...body, messages: messages.slice(-1) } };
+}
+
 /* ==========================================================================
    App — the root component
 
@@ -337,6 +360,7 @@ export default function App() {
     transport: new DefaultChatTransport({
       api: "/api/chat",
       fetch: chatFetch,
+      prepareSendMessagesRequest,
     }),
   });
 
@@ -405,7 +429,7 @@ export default function App() {
   } = useChat({
     id: tutorConversationId,
     messages: tutorInitialMessages,
-    transport: new DefaultChatTransport({ api: "/api/chat" }),
+    transport: new DefaultChatTransport({ api: "/api/chat", prepareSendMessagesRequest }),
   });
 
   /* #4 fix-round 2: tracks whichever tutor-surface switch was requested
