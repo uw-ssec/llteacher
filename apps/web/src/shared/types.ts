@@ -322,6 +322,12 @@ declare global {
     WORKOS_API_KEY: string;
     WORKOS_CLIENT_ID: string;
     OPENROUTER_API_KEY: string;
+    // #178: LiteLLM gateway key, added alongside the openrouter provider --
+    // missed here until the #317 review's secretRef-allowlist fix
+    // (lib/llm-config.ts) started reading Env through a real type instead
+    // of an `as unknown as Record<string, string | undefined>` cast, which
+    // had been silently covering for the gap.
+    LLMOXIE_API_KEY: string;
     ASSETS: Fetcher;
     // Auth (M1): sealed session cookie key + IdentityCipher keys.
     SESSION_SECRET: string;

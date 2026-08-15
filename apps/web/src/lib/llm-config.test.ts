@@ -22,6 +22,26 @@ const baseConfig: ResolvedLLMConfig = {
   credentialId: null,
 };
 
+/** #317 review, security finding #323: resolveApiKey now takes the real
+ *  Env type (not an open Record) so the compiler catches a typo'd binding
+ *  name the same way any other Env access would -- these tests build a
+ *  minimal-but-real Env rather than casting a bag of arbitrary keys. */
+function fakeEnv(overrides: Partial<Env> = {}): Env {
+  return {
+    DATABASE_URL: "postgres://unused",
+    WORKOS_API_KEY: "unused",
+    WORKOS_CLIENT_ID: "unused",
+    OPENROUTER_API_KEY: "",
+    LLMOXIE_API_KEY: "",
+    ASSETS: {} as Env["ASSETS"],
+    SESSION_SECRET: "unused",
+    ENCRYPTION_KEY: "unused",
+    BLIND_INDEX_KEY: "unused",
+    WORKOS_WEBHOOK_SECRET: "unused",
+    ...overrides,
+  };
+}
+
 describe("LLMConfigNotFoundError", () => {
   it("carries a random referenceId, and the message includes it (Django parity: quotable to an admin)", () => {
     const err = new LLMConfigNotFoundError();
@@ -78,41 +98,63 @@ describe("resolveApiKey", () => {
 
   it("falls back to the provider's conventional env var when the config has no credentialId", async () => {
     const db = {} as never; // never queried -- credentialId is null
-    const key = await resolveApiKey({ OPENROUTER_API_KEY: "sk-env-fallback" }, db, orgScope, baseConfig);
+    const key = await resolveApiKey(fakeEnv({ OPENROUTER_API_KEY: "sk-env-fallback" }), db, orgScope, baseConfig);
     expect(key).toBe("sk-env-fallback");
   });
 
   it("falls back to LLMOXIE_API_KEY for provider 'llmoxie' (#178)", async () => {
     const db = {} as never;
     const llmoxieConfig: ResolvedLLMConfig = { ...baseConfig, provider: "llmoxie" };
-    const key = await resolveApiKey({ LLMOXIE_API_KEY: "sk-llmoxie-env" }, db, orgScope, llmoxieConfig);
+    const key = await resolveApiKey(fakeEnv({ LLMOXIE_API_KEY: "sk-llmoxie-env" }), db, orgScope, llmoxieConfig);
     expect(key).toBe("sk-llmoxie-env");
   });
 
   it("throws LLMCredentialMissingError when no credential AND no fallback env var is set", async () => {
     const db = {} as never;
-    await expect(resolveApiKey({}, db, orgScope, baseConfig)).rejects.toBeInstanceOf(LLMCredentialMissingError);
+    await expect(resolveApiKey(fakeEnv(), db, orgScope, baseConfig)).rejects.toBeInstanceOf(
+      LLMCredentialMissingError,
+    );
   });
 
   it("throws LLMCredentialMissingError when no credential and the provider has no fallback env var mapping at all", async () => {
     const db = {} as never;
     const localConfig: ResolvedLLMConfig = { ...baseConfig, provider: "local" };
     await expect(
-      resolveApiKey({ OPENROUTER_API_KEY: "sk-irrelevant" }, db, orgScope, localConfig),
+      resolveApiKey(fakeEnv({ OPENROUTER_API_KEY: "sk-irrelevant" }), db, orgScope, localConfig),
     ).rejects.toBeInstanceOf(LLMCredentialMissingError);
   });
 
-  it("resolves through a linked credential's secretRef when credentialId is set", async () => {
+  it("resolves through a linked credential's secretRef when it names an allowlisted binding", async () => {
     const selectMock = vi.fn().mockReturnValue({
       from: vi.fn().mockReturnValue({
-        where: vi.fn().mockResolvedValue([{ secretRef: "MY_ORG_OPENROUTER_KEY" }]),
+        where: vi.fn().mockResolvedValue([{ secretRef: "OPENROUTER_API_KEY" }]),
       }),
     });
     const db = { select: selectMock } as never;
     const config: ResolvedLLMConfig = { ...baseConfig, credentialId: "cred-1" };
 
-    const key = await resolveApiKey({ MY_ORG_OPENROUTER_KEY: "sk-from-credential" }, db, orgScope, config);
+    const key = await resolveApiKey(fakeEnv({ OPENROUTER_API_KEY: "sk-from-credential" }), db, orgScope, config);
     expect(key).toBe("sk-from-credential");
+  });
+
+  // #317 review, security finding #323: organization_credentials.secretRef
+  // is free-form DB text with no write-path validation today -- the
+  // allowlist is the only thing standing between a future credential UI and
+  // a row that points at ENCRYPTION_KEY/SESSION_SECRET/DATABASE_URL/etc.
+  // Simulates exactly that: a secretRef naming a real, set env binding that
+  // is simply not on the allowlist must still be refused.
+  it("refuses a linked credential's secretRef when it names a binding that isn't on the allowlist, even if that env var is set", async () => {
+    const selectMock = vi.fn().mockReturnValue({
+      from: vi.fn().mockReturnValue({
+        where: vi.fn().mockResolvedValue([{ secretRef: "ENCRYPTION_KEY" }]),
+      }),
+    });
+    const db = { select: selectMock } as never;
+    const config: ResolvedLLMConfig = { ...baseConfig, credentialId: "cred-1" };
+
+    await expect(
+      resolveApiKey(fakeEnv({ ENCRYPTION_KEY: "the-real-pii-key" }), db, orgScope, config),
+    ).rejects.toBeInstanceOf(LLMCredentialMissingError);
   });
 
   it("throws LLMCredentialMissingError when the linked credential row doesn't resolve (deleted or wrong org)", async () => {
@@ -122,18 +164,19 @@ describe("resolveApiKey", () => {
     const db = { select: selectMock } as never;
     const config: ResolvedLLMConfig = { ...baseConfig, credentialId: "cred-gone" };
 
-    await expect(resolveApiKey({}, db, orgScope, config)).rejects.toBeInstanceOf(LLMCredentialMissingError);
+    await expect(resolveApiKey(fakeEnv(), db, orgScope, config)).rejects.toBeInstanceOf(LLMCredentialMissingError);
   });
 
-  it("throws LLMCredentialMissingError when the credential's secretRef names an env var that isn't actually set", async () => {
+  it("throws LLMCredentialMissingError when the credential's secretRef names an allowlisted env var that isn't actually set", async () => {
     const selectMock = vi.fn().mockReturnValue({
       from: vi.fn().mockReturnValue({
-        where: vi.fn().mockResolvedValue([{ secretRef: "UNSET_SECRET" }]),
+        where: vi.fn().mockResolvedValue([{ secretRef: "OPENROUTER_API_KEY" }]),
       }),
     });
     const db = { select: selectMock } as never;
     const config: ResolvedLLMConfig = { ...baseConfig, credentialId: "cred-1" };
 
-    await expect(resolveApiKey({}, db, orgScope, config)).rejects.toBeInstanceOf(LLMCredentialMissingError);
+    // fakeEnv() leaves OPENROUTER_API_KEY as "" (allowlisted, but unset).
+    await expect(resolveApiKey(fakeEnv(), db, orgScope, config)).rejects.toBeInstanceOf(LLMCredentialMissingError);
   });
 });

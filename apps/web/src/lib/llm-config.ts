@@ -131,13 +131,40 @@ export async function resolveLLMConfig(
 /** Provider -> the conventional Worker-secret binding name used when a
  *  config has no linked credential row -- the same convention
  *  OPENROUTER_API_KEY already used before this issue, and #178's
- *  LLMOXIE_API_KEY will too. Most configs won't have a credential row until
+ *  LLMOXIE_API_KEY too. Most configs won't have a credential row until
  *  an admin credential-management UI exists (not built yet); this fallback
  *  is what keeps an org-default config created without one still usable. */
 const PROVIDER_FALLBACK_ENV_VAR: Partial<Record<LlmProvider, string>> = {
   openrouter: "OPENROUTER_API_KEY",
   llmoxie: "LLMOXIE_API_KEY",
 };
+
+/** #317 review, security finding #323: organization_credentials.secretRef
+ *  is free-form `text`, entirely DB-controlled -- with no allowlist, it was
+ *  used as an unrestricted index into the whole Worker secret environment
+ *  (ENCRYPTION_KEY, BLIND_INDEX_KEY, SESSION_SECRET, DATABASE_URL,
+ *  WORKOS_API_KEY all live in the same `env`). Not exploitable today (no
+ *  write path to organization_credentials exists yet), but becomes Critical
+ *  the day a credential-management UI ships: one write of
+ *  secret_ref = "ENCRYPTION_KEY" would transmit the PII encryption key to
+ *  openrouter.ai as a Bearer token on the next chat turn. Every legitimate
+ *  binding this app resolves a secret from is named here; anything else is
+ *  refused before it ever reaches env lookup. */
+const ALLOWED_SECRET_REF_BINDINGS: ReadonlySet<string> = new Set(
+  Object.values(PROVIDER_FALLBACK_ENV_VAR),
+);
+
+/** The one place this module reads an env binding by a name that isn't a
+ *  compile-time-known property access -- confined to this single line
+ *  (rather than the whole `env` object being cast at the call site, as it
+ *  was before this fix) so `Env` stays fully type-checked everywhere else a
+ *  caller touches it. Every call site either passes a name from
+ *  PROVIDER_FALLBACK_ENV_VAR (a hardcoded map this module owns, not
+ *  DB-controlled) or one ALLOWED_SECRET_REF_BINDINGS has already
+ *  validated. */
+function readEnvSecret(env: Env, bindingName: string): string | undefined {
+  return (env as unknown as Record<string, string | undefined>)[bindingName];
+}
 
 /** Resolves the actual API key for a config -- from its linked
  *  `organization_credentials.secretRef` (an env-binding name; `secretRef`
@@ -146,7 +173,7 @@ const PROVIDER_FALLBACK_ENV_VAR: Partial<Record<LlmProvider, string>> = {
  *  the key into a local variable only, at the moment of use -- callers must
  *  not log or persist it (see chat.ts's call site). */
 export async function resolveApiKey(
-  env: Record<string, string | undefined>,
+  env: Env,
   db: Db,
   orgScope: OrgScope,
   config: ResolvedLLMConfig,
@@ -166,7 +193,12 @@ export async function resolveApiKey(
         `llm_configs ${config.id} references a credential that no longer exists or belongs to a different org`,
       );
     }
-    const key = env[credential.secretRef];
+    if (!ALLOWED_SECRET_REF_BINDINGS.has(credential.secretRef)) {
+      throw new LLMCredentialMissingError(
+        `Secret binding "${credential.secretRef}" is not on the allowlist of env bindings this deployment may resolve a credential from`,
+      );
+    }
+    const key = readEnvSecret(env, credential.secretRef);
     if (!key) {
       throw new LLMCredentialMissingError(`Secret "${credential.secretRef}" is not set in this environment`);
     }
@@ -174,7 +206,7 @@ export async function resolveApiKey(
   }
 
   const fallbackVar = PROVIDER_FALLBACK_ENV_VAR[config.provider];
-  const key = fallbackVar ? env[fallbackVar] : undefined;
+  const key = fallbackVar ? readEnvSecret(env, fallbackVar) : undefined;
   if (!key) {
     throw new LLMCredentialMissingError(
       `No credential configured for llm_configs ${config.id} (provider "${config.provider}") and no fallback env var is set`,

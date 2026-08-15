@@ -846,7 +846,11 @@ export async function chatHandler(c: Context<AppEnv>) {
   let resolvedApiKey: string;
   let providerClient: ReturnType<typeof buildProviderClient>;
   try {
-    resolvedApiKey = await resolveApiKey(c.env as unknown as Record<string, string | undefined>, db, orgScope, resolvedLLMConfig);
+    // #317 review, security finding #323: c.env is passed through with its
+    // real Env type now -- resolveApiKey itself confines the one genuinely
+    // dynamic lookup (an allowlisted binding name) to a single scoped cast,
+    // instead of this call site erasing the whole Env contract.
+    resolvedApiKey = await resolveApiKey(c.env, db, orgScope, resolvedLLMConfig);
     providerClient = buildProviderClient(resolvedLLMConfig.provider, resolvedApiKey);
   } catch (err) {
     if (err instanceof LLMCredentialMissingError || err instanceof UnsupportedLLMProviderError) {
