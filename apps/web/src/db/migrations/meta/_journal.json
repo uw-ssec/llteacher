@@ -204,6 +204,13 @@
       "when": 1786659209225,
       "tag": "0028_pale_karnak",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1786762063718,
+      "tag": "0029_default_llm_configs_and_provider_backfill",
+      "breakpoints": true
     }
   ]
 }
