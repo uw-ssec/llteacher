@@ -39,7 +39,7 @@ describe("ErrorBoundary", () => {
       </ErrorBoundary>,
     );
     expect(screen.getByRole("alert")).toBeTruthy();
-    expect(screen.getByText(/something went wrong/i)).toBeTruthy();
+    expect(screen.getByText(/couldn't be displayed/i)).toBeTruthy();
     expect(screen.queryByText("fine")).toBeNull();
     consoleError.mockRestore();
   });

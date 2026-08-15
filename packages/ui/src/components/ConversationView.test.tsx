@@ -105,7 +105,7 @@ describe("ConversationView error row (#144)", () => {
     expect(screen.getByText("The response failed. Please try again.")).toBeTruthy();
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await user.click(screen.getByRole("button", { name: /try again/i }));
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 });
