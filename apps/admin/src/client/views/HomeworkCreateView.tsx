@@ -1,4 +1,5 @@
 import { HomeworkForm } from "../components/HomeworkForm";
+import { PageHeader } from "../components/PageHeader";
 import type { LLMConfig } from "../lib/fixtures";
 
 export function HomeworkCreateView({
@@ -17,6 +18,13 @@ export function HomeworkCreateView({
       <button type="button" className="admin-back" onClick={onCancel}>
         Cancel
       </button>
+      {/* #328: the view had no heading at all -- "Cancel" was standing in for
+          a page title, and "New homework" appeared only in the breadcrumb. */}
+      <PageHeader
+        eyebrow="HOMEWORK"
+        title="New homework"
+        subtitle="Sections, the AI tutor configuration, and when students can see it."
+      />
       <HomeworkForm
         llmConfigs={llmConfigs}
         onSubmit={async (payload) => {
