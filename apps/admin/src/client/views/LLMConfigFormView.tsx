@@ -31,7 +31,7 @@
    it is coming, and a reviewer should see the gate.
    -------------------------------------------------------------------------- */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { PageHeader } from "../components/PageHeader";
@@ -77,6 +77,15 @@ function temperatureBand(t: number): keyof typeof TEMPERATURE_HINT {
   return "high";
 }
 
+/* Import limits. `accept` is a picker hint the OS lets you bypass with
+   "All Files", so the extension is re-checked in code. The size cap is not
+   about upload cost -- nothing is uploaded -- but about what a system prompt
+   plausibly is: prose. A megabyte-scale file in this field is a mistake, and
+   pasting it into a textarea would hang the tab before it ever reached a
+   model. */
+const PROMPT_FILE_EXTENSIONS = [".md", ".markdown"];
+const MAX_PROMPT_BYTES = 128 * 1024;
+
 /** ~4 characters per token is the usual rough conversion; stated as a range
  *  because an instructor should not read it as exact. */
 function approxWords(tokens: number): string {
@@ -104,9 +113,63 @@ export function LLMConfigFormView({
   });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  /* Import feedback lives beside the field rather than in a toast: the
+     instructor needs to know which file landed, and a transient message
+     would be gone by the time they finish reading the prompt it produced. */
+  const [importNotice, setImportNotice] = useState<
+    { ok: true; text: string } | { ok: false; text: string } | null
+  >(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const set = <K extends keyof LLMConfigFormValues>(key: K, v: LLMConfigFormValues[K]) =>
     setValues((prev) => ({ ...prev, [key]: v }));
+
+  const importPromptFile = async (file: File) => {
+    setImportNotice(null);
+
+    const name = file.name.toLowerCase();
+    if (!PROMPT_FILE_EXTENSIONS.some((ext) => name.endsWith(ext))) {
+      setImportNotice({
+        ok: false,
+        text: `${file.name} isn't a Markdown file. Choose a .md or .markdown file.`,
+      });
+      return;
+    }
+    if (file.size > MAX_PROMPT_BYTES) {
+      setImportNotice({
+        ok: false,
+        text: `${file.name} is ${Math.round(file.size / 1024)} KB. A system prompt should be prose — the limit is ${MAX_PROMPT_BYTES / 1024} KB.`,
+      });
+      return;
+    }
+
+    /* Replacing is destructive and there is no undo, so ask first -- but only
+       when there is something to lose. Confirming an import into an empty
+       field would be friction for no safety. */
+    if (
+      values.basePrompt.trim() &&
+      !window.confirm(
+        `Replace the current base prompt with the contents of ${file.name}? What's in the field now will be lost.`,
+      )
+    ) {
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      if (!text.trim()) {
+        setImportNotice({ ok: false, text: `${file.name} is empty.` });
+        return;
+      }
+      set("basePrompt", text);
+      setImportNotice({
+        ok: true,
+        text: `Loaded ${file.name} (${Math.max(1, Math.round(file.size / 1024))} KB). Edit it here — the file itself isn't linked or stored.`,
+      });
+    } catch {
+      setImportNotice({ ok: false, text: `${file.name} couldn't be read.` });
+    }
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -277,7 +340,36 @@ export function LLMConfigFormView({
         </fieldset>
 
         <div className="admin-form-field">
-          <label htmlFor="cfg-prompt">Base prompt</label>
+          {/* The import control sits on the label row rather than under the
+              textarea: it is an alternative way to fill this one field, so it
+              belongs to the field's heading, not to the content below it. */}
+          <div className="admin-form-field__header">
+            <label htmlFor="cfg-prompt">Base prompt</label>
+            {/* A <label> wrapping a visually-hidden-but-focusable input is the
+                accessible file-picker pattern. `.sr-only` clips rather than
+                display:none, which would drop the input out of the tab order
+                entirely; the visible focus ring is painted via :focus-within
+                on the wrapper, since the element actually holding focus is the
+                one nobody can see. */}
+            <label className="prompt-import">
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="sr-only"
+                accept=".md,.markdown,text/markdown"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  /* Clear the input regardless of outcome. A file input does
+                     not fire change when the same path is picked twice, so
+                     without this, fixing a file and re-importing it would
+                     silently do nothing. */
+                  e.target.value = "";
+                  if (file) void importPromptFile(file);
+                }}
+              />
+              <span className="prompt-import__face">Import .md</span>
+            </label>
+          </div>
           <textarea
             id="cfg-prompt"
             value={values.basePrompt}
@@ -285,8 +377,20 @@ export function LLMConfigFormView({
           />
           <p className="admin-form-hint">
             Markdown. This is what the tutor is told it is, before it ever sees a student. It sets
-            the voice for every conversation this configuration backs.
+            the voice for every conversation this configuration backs. Write it here, or import a
+            file you keep elsewhere.
           </p>
+          {importNotice && (
+            /* Assertive rather than polite: this replaces the whole field, and
+               a screen-reader user who just triggered the picker needs to know
+               it landed before they arrow back into the textarea. */
+            <p
+              className={`prompt-import__notice${importNotice.ok ? "" : " prompt-import__notice--error"}`}
+              role="alert"
+            >
+              {importNotice.text}
+            </p>
+          )}
           <div className="admin-markdown-preview" aria-label="Base prompt preview">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{values.basePrompt}</ReactMarkdown>
           </div>
