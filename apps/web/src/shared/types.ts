@@ -322,6 +322,17 @@ declare global {
     WORKOS_API_KEY: string;
     WORKOS_CLIENT_ID: string;
     OPENROUTER_API_KEY: string;
+    /* #178's gateway. Optional because a deployment serving only
+       openrouter-provider configs never reads it -- but declared, so a
+       missing binding is a typecheck concern rather than an undefined at
+       runtime. resolveApiKey previously cast Env away entirely
+       (`c.env as unknown as Record<string, string | undefined>`), which
+       meant neither tsc nor `wrangler types` could flag any absent secret. */
+    LLMOXIE_API_KEY?: string;
+    /* Overrides the gateway host. Unset falls back to
+       LLMOXIE_DEFAULT_BASE_URL in lib/ai.ts -- see the reasoning there for
+       why a generated Azure hostname should not be a compile-time constant. */
+    LLMOXIE_BASE_URL?: string;
     ASSETS: Fetcher;
     // Auth (M1): sealed session cookie key + IdentityCipher keys.
     SESSION_SECRET: string;

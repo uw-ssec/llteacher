@@ -186,8 +186,14 @@ export async function resolveApiKey(
 /** The per-request provider client factory -- #178 added the "llmoxie"
  *  case beside "openrouter" rather than in place of it, so existing
  *  openrouter-provider configs keep working unchanged. */
-export function buildProviderClient(provider: LlmProvider, apiKey: string) {
+export function buildProviderClient(
+  provider: LlmProvider,
+  apiKey: string,
+  /** Deployment-varying endpoints. Optional so existing callers are
+   *  unchanged and an unset binding keeps the previous behaviour. */
+  endpoints?: { llmoxieBaseUrl?: string },
+) {
   if (provider === "openrouter") return getOpenRouter(apiKey);
-  if (provider === "llmoxie") return getLLMoxie(apiKey);
+  if (provider === "llmoxie") return getLLMoxie(apiKey, endpoints?.llmoxieBaseUrl);
   throw new UnsupportedLLMProviderError(provider);
 }

@@ -2,9 +2,14 @@ DATABASE_URL="postgresql://user:password@host.neon.tech/llteacher?sslmode=requir
 WORKOS_API_KEY="sk_test_placeholder"
 WORKOS_CLIENT_ID="client_placeholder"
 OPENROUTER_API_KEY="sk-or-v1-placeholder"
-# UW SSEC's LiteLLM gateway (#178). Base URL is hardcoded in lib/ai.ts
-# (getLLMoxie) -- only the key is a secret.
+# UW SSEC's LiteLLM gateway (#178).
 LLMOXIE_API_KEY="llmoxie-key-placeholder"
+# Optional. Overrides the gateway host; unset uses LLMOXIE_DEFAULT_BASE_URL
+# in lib/ai.ts. Set this for local/preview so student traffic does not go to
+# the -prod gateway, and to recover without a redeploy if the Azure
+# Container Apps environment is ever recreated (the hostname's
+# `lemonmoss-19296c81` segment is generated and does not survive that).
+# LLMOXIE_BASE_URL="https://your-gateway.example/v1"
 
 # Auth (M1): 32-byte keys, base64-encoded. Generate with:
 #   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"

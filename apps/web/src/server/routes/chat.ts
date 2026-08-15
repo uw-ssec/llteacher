@@ -834,7 +834,9 @@ export async function chatHandler(c: Context<AppEnv>) {
   let providerClient: ReturnType<typeof buildProviderClient>;
   try {
     resolvedApiKey = await resolveApiKey(c.env as unknown as Record<string, string | undefined>, db, orgScope, resolvedLLMConfig);
-    providerClient = buildProviderClient(resolvedLLMConfig.provider, resolvedApiKey);
+    providerClient = buildProviderClient(resolvedLLMConfig.provider, resolvedApiKey, {
+      llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL,
+    });
   } catch (err) {
     if (err instanceof LLMCredentialMissingError || err instanceof UnsupportedLLMProviderError) {
       const referenceId = crypto.randomUUID();
