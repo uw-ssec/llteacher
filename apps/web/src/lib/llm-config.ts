@@ -233,6 +233,15 @@ export async function resolveApiKey(
   return key;
 }
 
+/** #317 review, #325 ("selectable != working"): the subset of `llm_provider`
+ *  buildProviderClient below actually has a factory for. `llm_provider` has
+ *  five values; only these two work. routes/llmConfigs.ts's picker route
+ *  filters to this set so an instructor authoring a homework cannot select
+ *  a config that 500s on its first real turn -- this is the single source
+ *  of truth both that route and buildProviderClient's own branches read
+ *  from, so a new provider case can't add one without the other. */
+export const SUPPORTED_LLM_PROVIDERS: ReadonlySet<LlmProvider> = new Set(["openrouter", "llmoxie"]);
+
 /** The per-request provider client factory -- #178 added the "llmoxie"
  *  case beside "openrouter" rather than in place of it, so existing
  *  openrouter-provider configs keep working unchanged. */

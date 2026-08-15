@@ -28,22 +28,17 @@ import { deriveHomeworkStatus, isUnreleased } from "../server/repositories/homew
    for conversations that predate the promptTemplateId column.
    -------------------------------------------------------------------------- */
 
-/** Django parity default (`apps/llm/src/llm/services.py`'s Socratic-method
- *  system prompt) -- the safe fallback when no prompt_templates row exists
- *  at any scope. Never null/crash; see #25's own "missing prompt at any
- *  scope" testing requirement.
- *
- *  #305 requirement 3 (generate the tool paragraph below from chat.ts's
- *  TOOLS catalog instead of hand-duplicating it here) is deliberately NOT
- *  done yet -- with exactly one tool (showDefinition), a generation
- *  abstraction has no real drift to prevent; PR 3 adds the second and third
- *  tools (executeRCode, markSectionComplete), which is when this paragraph
- *  and TOOLS' own descriptions can actually diverge unnoticed. Do the
- *  extraction then, against real second/third-tool text instead of a
- *  speculative single-tool shape. */
-export const DEFAULT_SYSTEM_PROMPT = `You are an AI tutor for an introductory statistics course at the University of Washington. Your job is to guide students through homework problems using the Socratic method: ask leading questions, build intuition step by step, never just dump the answer.
-
-You have one structured rendering tool available: showDefinition. Call it whenever you are formally introducing a named statistical concept ("p-value", "null hypothesis", "standard error", "confidence interval", "type I error", etc.) — give the student a polished definition card with the term and a 1–2 sentence plain-language body. For everything else (guiding questions, follow-ups, gentle nudges, walking through computations), reply in plain markdown — no tool call.
+/** The safe, code-level fallback when NO prompt_templates row exists at
+ *  ANY scope -- not org/institution/subject-specific text (#317 review,
+ *  #325: "move the institution- and subject-specific fallback text into
+ *  the seeded org template; make the built-in fallback neutral"). LLTeacher
+ *  is the shared base for multiple CDI-funded projects, each seeding its
+ *  own org-scoped prompt_templates row (scripts/seed.ts's TUTOR_BASE_PROMPT
+ *  is the UW-statistics one) -- this string only fires for an org that has
+ *  seeded nothing at all, so it must not assume any particular subject.
+ *  Never null/crash; see #25's own "missing prompt at any scope" testing
+ *  requirement. */
+export const DEFAULT_SYSTEM_PROMPT = `You are an AI tutor. Guide students through problems using the Socratic method: ask leading questions, build intuition step by step, never just dump the answer.
 
 Be warm, curious, and patient. Prefer questions over assertions.`;
 
@@ -55,7 +50,16 @@ Be warm, curious, and patient. Prefer questions over assertions.`;
  *  the cross-cutting invariant on prompt-template pinning above) -- the
  *  pedagogical contract is what's preserved verbatim, not the delivery
  *  mechanism. Written scope-agnostic ("the student", not "this section")
- *  so the same sentence serves both section- and tutor-kind conversations. */
+ *  so the same sentence serves both section- and tutor-kind conversations.
+ *
+ *  #317 review, #325: only appended when resolution fell through to
+ *  DEFAULT_SYSTEM_PROMPT above (assembleSystemPrompt's `isDefaultPrompt`
+ *  param) -- a real prompt_templates row, at any scope, already states its
+ *  own pedagogy and gets to be the final word on it. Unconditionally
+ *  appending this sentence to every resolved template meant a project that
+ *  deliberately wants its tutor to sometimes give a direct answer (e.g. a
+ *  reference/lookup-style homework) could author a template saying so and
+ *  have it contradicted by a sentence it had no way to remove. */
 export const TUTOR_GUARDRAIL =
   "Respond as an AI tutor helping the student. Guide them without giving away the complete answer.";
 
@@ -267,16 +271,30 @@ export function sectionConversationTitle(section: { order: number; title: string
   return `Section ${section.order}: ${section.title}`;
 }
 
-/** Pure composition: template content + (optional) section context + the
- *  tutor guardrail -> one system-prompt string. No db access, no I/O --
- *  the whole point of extracting this from resolvePromptTemplate is that
- *  it's trivially snapshot-testable (#25's own ask).
+/** Pure composition: template content + (optional) section context +
+ *  (conditionally) the tutor guardrail -> one system-prompt string. No db
+ *  access, no I/O -- the whole point of extracting this from
+ *  resolvePromptTemplate is that it's trivially snapshot-testable (#25's
+ *  own ask).
  *
  *  Section content is wrapped in an XML-style delimiter per the issue's own
  *  pitfall guidance: section.content is instructor-authored but still
  *  untrusted-as-instructions input from the model's point of view, so it's
- *  fenced rather than interpolated bare into the surrounding prompt. */
-export function assembleSystemPrompt(templateContent: string, section?: PromptSectionContext): string {
+ *  fenced rather than interpolated bare into the surrounding prompt.
+ *
+ *  `isDefaultPrompt` (#317 review, #325): true only when `templateContent`
+ *  IS DEFAULT_SYSTEM_PROMPT (resolution found no real prompt_templates row
+ *  at any scope) -- see TUTOR_GUARDRAIL's own doc comment for why a real
+ *  template must not have this sentence forced onto it. Callers pass this
+ *  explicitly (chat.ts derives it from ResolvedPromptTemplate.id === null)
+ *  rather than this function re-deriving it via string comparison against
+ *  DEFAULT_SYSTEM_PROMPT, which would misfire for any org template whose
+ *  content happens to match it verbatim. */
+export function assembleSystemPrompt(
+  templateContent: string,
+  section?: PromptSectionContext,
+  isDefaultPrompt = false,
+): string {
   const parts = [templateContent.trim()];
   if (section) {
     parts.push(
@@ -288,6 +306,6 @@ export function assembleSystemPrompt(templateContent: string, section?: PromptSe
       ].join("\n"),
     );
   }
-  parts.push(TUTOR_GUARDRAIL);
+  if (isDefaultPrompt) parts.push(TUTOR_GUARDRAIL);
   return parts.join("\n\n");
 }

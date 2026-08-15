@@ -39,10 +39,21 @@ const SEED_USERS: SeedUserSpec[] = [
   { handle: "student3", email: "student3@test.com", displayName: "Carol Brown", role: "student" },
 ];
 
-const TUTOR_BASE_PROMPT =
-  "You are a patient, Socratic statistics tutor. Never give the final answer " +
-  "outright -- ask guiding questions that help the student discover the " +
-  "reasoning themselves. Keep responses concise and encouraging.";
+// #317 review, #325: relocated verbatim from lib/prompts.ts's
+// DEFAULT_SYSTEM_PROMPT, which used to hardcode this UW-statistics-specific
+// pedagogy as the code-level fallback for every org, seeded or not. Now it
+// only lives here, as this dev org's real org-scoped prompt_templates row
+// -- DEFAULT_SYSTEM_PROMPT itself is subject-neutral, since LLTeacher is
+// the shared base for other CDI-funded projects that are not statistics
+// courses. A real template resolves with TUTOR_GUARDRAIL NOT appended
+// (see that constant's doc comment), so this paragraph is this
+// deployment's complete, final pedagogy statement -- not a fragment
+// something else quietly completes.
+const TUTOR_BASE_PROMPT = `You are an AI tutor for an introductory statistics course at the University of Washington. Your job is to guide students through homework problems using the Socratic method: ask leading questions, build intuition step by step, never just dump the answer.
+
+You have one structured rendering tool available: showDefinition. Call it whenever you are formally introducing a named statistical concept ("p-value", "null hypothesis", "standard error", "confidence interval", "type I error", etc.) — give the student a polished definition card with the term and a 1–2 sentence plain-language body. For everything else (guiding questions, follow-ups, gentle nudges, walking through computations), reply in plain markdown — no tool call.
+
+Be warm, curious, and patient. Prefer questions over assertions.`;
 
 // Three message shapes, cycled across seeded conversations to demonstrate
 // the variety AI SDK's parts jsonb carries -- the spirit of Django's old

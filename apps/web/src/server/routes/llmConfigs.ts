@@ -2,6 +2,7 @@ import { type Context } from "hono";
 import { makeDb } from "../../db/client";
 import { listLlmConfigsForOrg } from "../repositories/llmConfigs";
 import { getOrgScopeForCourse } from "../repositories/organizations";
+import { SUPPORTED_LLM_PROVIDERS } from "../../lib/llm-config";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { LLMConfigListResponse } from "../../shared/types";
@@ -29,8 +30,12 @@ export async function listLlmConfigsHandler(c: Context<AppEnv>) {
 
   const rows = await listLlmConfigsForOrg(db, orgScope);
   const body: LLMConfigListResponse = {
+    // #317 review, #325 ("selectable != working"): a config whose provider
+    // has no buildProviderClient factory would 500 on its first real turn
+    // -- excluded here, not just left for the client to guess at, so an
+    // instructor literally cannot select one.
     llmConfigs: rows
-      .filter((r) => r.isActive)
+      .filter((r) => r.isActive && SUPPORTED_LLM_PROVIDERS.has(r.provider))
       .map((r) => ({ id: r.id, provider: r.provider, modelName: r.modelName, isDefault: r.isDefault })),
   };
   return c.json(body);

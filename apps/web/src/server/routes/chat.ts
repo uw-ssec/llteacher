@@ -807,12 +807,30 @@ export async function chatHandler(c: Context<AppEnv>) {
   // right answer at creation) or a conversation that predates this column
   // -- both degrade the same way: resolve fresh now rather than fail the
   // turn over a missing pin.
+  //
+  // #317 review, #325: `isDefaultPrompt` tracks whether that resolution
+  // ever actually hit a real prompt_templates row -- a PINNED id is by
+  // definition a real row (DEFAULT_SYSTEM_PROMPT is never pinned, see
+  // ResolvedPromptTemplate.id's own doc comment), so only the two
+  // no-pin branches can set it true. Passed to assembleSystemPrompt so
+  // TUTOR_GUARDRAIL is appended only for the code-level fallback, never a
+  // project's own template (see that constant's doc comment).
   const systemPromptTemplateContent = conv.promptTemplateId
     ? await getPinnedPromptTemplateContent(db, conv.promptTemplateId)
     : null;
-  const resolvedSystemPromptContent =
-    systemPromptTemplateContent ??
-    (orgScope ? (await resolvePromptTemplate(db, orgScope, scope, conv.sectionId)).content : DEFAULT_SYSTEM_PROMPT);
+  let resolvedSystemPromptContent: string;
+  let isDefaultPrompt: boolean;
+  if (systemPromptTemplateContent !== null) {
+    resolvedSystemPromptContent = systemPromptTemplateContent;
+    isDefaultPrompt = false;
+  } else if (orgScope) {
+    const resolved = await resolvePromptTemplate(db, orgScope, scope, conv.sectionId);
+    resolvedSystemPromptContent = resolved.content;
+    isDefaultPrompt = resolved.id === null;
+  } else {
+    resolvedSystemPromptContent = DEFAULT_SYSTEM_PROMPT;
+    isDefaultPrompt = true;
+  }
   const sectionPromptContext = conv.sectionId
     ? await getSectionPromptContext(db, scope, conv.sectionId)
     : null;
@@ -827,7 +845,7 @@ export async function chatHandler(c: Context<AppEnv>) {
   if (sectionPromptContext?.isUnreleased && !authContext.canViewDraftsIn(conv.courseId)) {
     return c.json({ error: "Section not found" }, 404);
   }
-  const systemPrompt = assembleSystemPrompt(resolvedSystemPromptContent, sectionPromptContext ?? undefined);
+  const systemPrompt = assembleSystemPrompt(resolvedSystemPromptContent, sectionPromptContext ?? undefined, isDefaultPrompt);
 
   // #26: model/provider, resolved per-request from the homework's
   // llm_config_id override (if this is a section conversation) or the org's
