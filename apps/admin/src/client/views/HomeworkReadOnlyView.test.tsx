@@ -77,10 +77,10 @@ describe("HomeworkReadOnlyView (#172 audit)", () => {
     );
     // Present immediately, before the fetch settles.
     expect(screen.getByRole("button", { name: /All homeworks/i })).toBeTruthy();
-    expect(screen.getByRole("heading")).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 1 })).toBeTruthy();
     await waitFor(() => screen.getByRole("alert"));
     expect(screen.getByRole("button", { name: /All homeworks/i })).toBeTruthy();
-    expect(screen.getByRole("heading")).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 1 })).toBeTruthy();
   });
 
   /** #172 re-audit (FLX-005): an unrecognized status must not be rendered as

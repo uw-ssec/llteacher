@@ -17,6 +17,7 @@
 import { useEffect, useState } from "react";
 import { TopNav, AUTHOR_ROLES, CONSOLE_ROLES } from "@llteacher/ui";
 import { AdminSidebar } from "./components/AdminSidebar";
+import { AdminNotice } from "./components/AdminNotice";
 import type { AdminNavKey } from "./components/AdminSidebar";
 import { HomeworksView } from "./views/HomeworksView";
 import type { HomeworkListItemResponse } from "./views/HomeworksView";
@@ -150,10 +151,14 @@ export default function App() {
 
   if (authLoading) return null;
   if (!isAuthenticated) return <UnauthenticatedAdmin onLogin={login} error={authError} />;
-  if (!role || !CONSOLE_ROLE_SET.has(role)) return <Forbidden />;
+  if (!role || !CONSOLE_ROLE_SET.has(role)) return <Forbidden userInitials={initials} onLogout={logout} />;
 
+  /* .page-frame (not a bespoke admin wrapper) — the 100vh/overflow-hidden
+     outer shell the student app uses. Without it the sidebar has no height
+     to fill, so the rail only stretches as far as the main column's content
+     and the whole page scrolls as one. */
   return (
-    <div className="app-shell-vertical">
+    <div className="page-frame">
       {/* Shared TopNav with admin mode. The Heritage Gold dot + "Admin"
           marker in the affiliation tag is the at-a-glance "instructor
           console" cue; the trailing breadcrumb segment names the view. */}
@@ -318,7 +323,10 @@ function HomeworksDataLoader({
 }) {
   const [homeworks, setHomeworks] = useState<HomeworkListItemResponse[] | null>(null);
   const [loadError, setLoadError] = useState(false);
+  /* Bumped by the notice's retry action to re-run the effect. */
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
+    setLoadError(false);
     fetch(`/api/courses/${courseId}/homeworks`)
       .then((r) => {
         if (!r.ok) throw new Error("failed");
@@ -326,8 +334,17 @@ function HomeworksDataLoader({
       })
       .then((data) => setHomeworks(data.homeworks))
       .catch(() => setLoadError(true));
-  }, [courseId]);
-  if (loadError) return <p role="alert">Failed to load homeworks.</p>;
+  }, [courseId, attempt]);
+  if (loadError)
+    return (
+      <AdminNotice
+        eyebrow="Could not load"
+        title="The homework list didn't load"
+        body="The console reached the server but the course's homeworks came back empty-handed. This is usually a dropped connection rather than missing data — retrying is safe."
+        detail={`GET /api/courses/${courseId}/homeworks`}
+        onRetry={() => setAttempt((n) => n + 1)}
+      />
+    );
   if (!homeworks) return null;
   return (
     <HomeworksView
@@ -352,6 +369,7 @@ function SubmissionsDataLoader({
 }) {
   const [data, setData] = useState<import("./views/SubmissionsView").HomeworkSubmissionsData | null>(null);
   const [loadError, setLoadError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     setData(null); // clear stale data from a previously-open homework before the new fetch resolves
     setLoadError(false);
@@ -362,8 +380,18 @@ function SubmissionsDataLoader({
       })
       .then(setData)
       .catch(() => setLoadError(true));
-  }, [courseId, homeworkId]);
-  if (loadError) return <p role="alert">Failed to load submissions.</p>;
+  }, [courseId, homeworkId, attempt]);
+  if (loadError)
+    return (
+      <AdminNotice
+        eyebrow="Could not load"
+        title="Submissions didn't load"
+        body="Student work for this homework couldn't be fetched. Nothing has been altered — the records are intact on the server."
+        detail={`GET /api/courses/${courseId}/homeworks/${homeworkId}/submissions`}
+        onRetry={() => setAttempt((n) => n + 1)}
+        secondaryAction={{ label: "Back to homeworks", onClick: onBack }}
+      />
+    );
   if (!data) return null;
   return <SubmissionsView data={data} onBack={onBack} />;
 }

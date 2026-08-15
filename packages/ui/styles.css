@@ -2155,9 +2155,14 @@ body {
   padding-block-start: var(--space-2);
   padding-block-end: var(--space-5);
   padding-inline: var(--space-3);
-  /* Smooth width transition when collapsing — pairs with the base
-     .sidebar transition rule */
-  transition: width 200ms ease-out, padding 200ms ease-out;
+  /* No transition override here on purpose. This block sits OUTSIDE
+     @layer components, so it beats the base .sidebar rule regardless of
+     specificity -- an override that declared itself a pairing while
+     actually replacing it, collapsing this rail in 200ms against the
+     student rail's 240ms. Inheriting the base rule is what makes the two
+     sidebars animate identically, and it narrows the animated properties
+     to padding-inline (the only padding that changes on collapse) instead
+     of all four sides. */
 }
 
 .admin-sidebar__label {
@@ -2358,7 +2363,10 @@ body {
   display: none;
 }
 
-.sidebar--collapsed .admin-sidebar {
+/* Compound, not descendant: both classes sit on the same <aside>, so
+   `.sidebar--collapsed .admin-sidebar` never matched and the rail kept its
+   expanded inline padding at 64px wide. */
+.admin-sidebar.sidebar--collapsed {
   padding-inline: 0;
 }
 
@@ -2686,9 +2694,16 @@ body {
 
 .admin-record-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  /* [id] [body] [actions]. The status badge used to hold a fourth column
+     between body and actions, which put a record attribute inside the action
+     cluster; it now leads the body's meta line with the other attributes. */
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: var(--space-4);
   align-items: start;
+  /* One nudge, declared once. The id chip and the action buttons both need to
+     optically align to the first line of the title; they were carrying
+     separate literals that had already drifted apart from the status badge's. */
+  --record-row-first-line: 2px;
   padding: var(--space-5) var(--space-3);
   border-block-end: 1px solid var(--color-border);
   transition: background-color 140ms ease-out;
@@ -2699,7 +2714,7 @@ body {
 }
 
 .admin-record-row__id {
-  padding-block-start: 2px;  /* optical alignment with first line of body */
+  padding-block-start: var(--record-row-first-line);
 }
 
 .admin-record-row__body {
@@ -2737,6 +2752,10 @@ body {
 .admin-record-row__meta {
   display: inline-flex;
   flex-wrap: wrap;
+  /* Explicit: the status pill is taller than the bare icon chips it now sits
+     beside (padding + a 1.4 line box vs. plain text), so the default stretch
+     would leave the row's items sitting on different centre lines. */
+  align-items: center;
   gap: var(--space-3);
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
@@ -2781,17 +2800,14 @@ body {
   margin: 0 0.15em;
 }
 
-.admin-record-row__status {
-  display: flex;
-  align-items: flex-start;
-  padding-block-start: 4px;
-}
+/* .admin-record-row__status intentionally removed — the status badge now sits
+   in .admin-record-row__meta with the other record attributes. */
 
 .admin-record-row__actions {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  padding-block-start: 2px;
+  padding-block-start: var(--record-row-first-line);
 }
 
 /* Staggered entrance — gentle fade + 2px rise */
@@ -3263,6 +3279,303 @@ body {
   background-color: rgba(75, 46, 131, 0.06);
   padding: 1px 5px;
   border-radius: 3px;
+}
+
+/* ==========================================================================
+   .admin-notice — the console's failure + denial state.
+
+   One visual family for every "this did not work" moment: a 403 denial, a
+   failed fetch, a failed save. Before this they were a bare <p role="alert">
+   (and, for the 403, a class with no stylesheet at all), which read as an
+   unstyled document rather than a considered state.
+
+   The register is deliberate. This is an instructor's records console, not a
+   consumer app -- a screaming red alert box is the wrong voice for "the
+   homework list did not load." The direction is the same editorial-ledger
+   language the rest of the console already speaks:
+
+     · a filed record on warm paper, hairline-ruled
+     · a mono small-caps status eyebrow with a state dot   (cf. ● CATALOG)
+     · a semantic rule down the leading edge               (cf. .admin-alert)
+     · the ¶ pilcrow promoted from a stray glyph to a letterpress watermark
+     · a diagonal hatch in the corner — a stamped, filed-away texture
+
+   Colour carries the state (red = failed, gold = denied); everything else is
+   shared, so a reader learns the shape once.
+   ========================================================================== */
+
+.admin-notice {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  max-width: 620px;
+  padding: var(--space-6) var(--space-6) var(--space-6) var(--space-8);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background-color: var(--color-surface);
+  font-family: var(--font-sans);
+  /* The state colour every child inherits. Modifiers below re-point it. */
+  --notice-tone: var(--color-error);
+  --notice-tone-wash: rgba(201, 42, 42, 0.05);
+  /* Red carries more visual weight than gold at equal alpha, so the two tones
+     tune the watermark separately to land at the same perceived quietness. */
+  --notice-mark-opacity: 0.07;
+}
+
+/* Leading rule — the console's active-state motif, reused as a status mark.
+   Draws downward on entrance. */
+.admin-notice::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  inset-block: 0;
+  width: 3px;
+  background-color: var(--notice-tone);
+  transform-origin: top;
+  animation: notice-rule 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Corner hatch — a stamped/filed texture, not decoration for its own sake.
+   Fades out toward the content so it never competes with the text. */
+.admin-notice::after {
+  content: "";
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-end: 0;
+  width: 180px;
+  /* Top-right only. The ¶ mark owns the bottom-right; giving the hatch full
+     height put two textures in one corner, where they read as noise rather
+     than as two deliberate marks. */
+  height: 58%;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--notice-tone) 0,
+    var(--notice-tone) 1px,
+    transparent 1px,
+    transparent 9px
+  );
+  opacity: 0.07;
+  -webkit-mask-image: linear-gradient(200deg, #000, transparent 70%);
+  mask-image: linear-gradient(200deg, #000, transparent 70%);
+}
+
+@keyframes notice-rule {
+  from { transform: scaleY(0); }
+  to   { transform: scaleY(1); }
+}
+
+@keyframes notice-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Denial, not failure — Heritage Gold. A 403 is an authorization fact, not a
+   fault, and it should not wear the same red as a broken request. */
+.admin-notice--denied {
+  --notice-tone: var(--color-accent-warm);
+  --notice-tone-wash: rgba(133, 117, 77, 0.06);
+  --notice-mark-opacity: 0.10;
+}
+
+/* The ¶ watermark. The pilcrow already appears in this console's empty and
+   403 states as a 25px glyph floating with no role; at this scale it becomes
+   the letterpress mark the aesthetic was reaching for. */
+/* Anchored to the bottom-right and bled off BOTH edges. Bleeding off a single
+   edge reads as a clipping bug; off the corner it reads as ink running past
+   the plate, which is the intent. It also fills the card's empty lower-right
+   quadrant instead of sitting behind the text. */
+.admin-notice__mark {
+  position: absolute;
+  inset-block-end: -0.30em;
+  inset-inline-end: -0.06em;
+  font-family: var(--font-sans);
+  font-size: 148px;
+  line-height: 1;
+  font-weight: var(--weight-semibold);
+  color: var(--notice-tone);
+  opacity: var(--notice-mark-opacity);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Status eyebrow — mono small-caps with a state dot, the same construction as
+   the sidebar's ● CATALOG label, so it reads as the same system. */
+.admin-notice__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55em;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--notice-tone);
+  animation: notice-rise 340ms ease-out both;
+  animation-delay: 60ms;
+}
+
+.admin-notice__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--notice-tone);
+  flex-shrink: 0;
+}
+
+.admin-notice__title {
+  margin: 0;
+  font-size: var(--font-size-xl);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.015em;
+  line-height: var(--leading-tight);
+  color: var(--color-text);
+  animation: notice-rise 340ms ease-out both;
+  animation-delay: 110ms;
+}
+
+.admin-notice__body {
+  margin: 0;
+  /* The comfortable measure, held regardless of the 1080px admin column the
+     block sits in — and short enough to keep a clear right gutter so the text
+     never runs into the corner marks. */
+  max-width: 46ch;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  color: var(--color-text-secondary);
+  animation: notice-rise 340ms ease-out both;
+  animation-delay: 160ms;
+}
+
+/* Technical line — the failing resource, in mono, for an admin who is about
+   to paste it into a bug report. Quiet by default; selectable. */
+.admin-notice__detail {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: 4px;
+  background-color: var(--notice-tone-wash);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-normal);
+  /* Secondary, not muted: --color-text-muted over the tinted wash lands near
+     2.8:1, and this line exists to be read and copied into a bug report. */
+  color: var(--color-text-secondary);
+  word-break: break-all;
+  animation: notice-rise 340ms ease-out both;
+  animation-delay: 200ms;
+}
+
+.admin-notice__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-block-start: var(--space-1);
+  animation: notice-rise 340ms ease-out both;
+  animation-delay: 240ms;
+}
+
+.admin-notice__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--color-accent);
+  border-radius: 4px;
+  background-color: var(--color-accent);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  /* --color-accent is deep Husky Purple in light mode but light Accent
+     Lavender under [data-theme="dark"], so a hardcoded white label would fail
+     contrast on the dark theme. The foreground flips with the surface. */
+  color: var(--notice-action-fg, #FFFFFF);
+  cursor: pointer;
+  transition:
+    background-color 140ms ease-out,
+    border-color 140ms ease-out,
+    transform 140ms ease-out;
+}
+
+[data-theme="dark"] .admin-notice__action {
+  --notice-action-fg: var(--raw-text);
+}
+
+.admin-notice__action:hover {
+  background-color: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.admin-notice__action:active {
+  transform: translateY(1px);
+}
+
+.admin-notice__action:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.admin-notice__action--ghost {
+  background-color: transparent;
+  border-color: var(--color-border-strong);
+  color: var(--color-text-secondary);
+}
+
+.admin-notice__action--ghost:hover {
+  background-color: transparent;
+  border-color: var(--color-text-secondary);
+  color: var(--color-text);
+}
+
+/* The retry glyph spins one turn on hover — the one micro-interaction in this
+   block, spent on the control that matters. */
+.admin-notice__action-glyph {
+  display: inline-flex;
+  transition: transform 420ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.admin-notice__action:hover .admin-notice__action-glyph {
+  transform: rotate(360deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .admin-notice::before,
+  .admin-notice__eyebrow,
+  .admin-notice__title,
+  .admin-notice__body,
+  .admin-notice__detail,
+  .admin-notice__actions {
+    animation: none;
+  }
+  .admin-notice__action-glyph {
+    transition: none;
+  }
+}
+
+/* Field-level validation errors in the admin forms. Not part of the notice
+   family -- these are inline corrections, not failures -- but they were the
+   same bare <p role="alert"> and would otherwise sit unstyled next to a
+   styled save failure in the very same form. */
+.admin-field-error {
+  display: flex;
+  align-items: center;
+  gap: 0.45em;
+  margin: var(--space-1) 0 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  color: var(--color-error);
+}
+
+.admin-field-error::before {
+  content: "";
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background-color: var(--color-error);
+  flex-shrink: 0;
 }
 
 /* #172 (FUN-002): read-only homework view for a non-authoring grader. */
