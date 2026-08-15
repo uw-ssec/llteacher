@@ -91,9 +91,25 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
       if (this.props.fallback) return this.props.fallback(error, this.reset);
       return (
         <div className="error-boundary-fallback" role="alert" tabIndex={-1} ref={this.fallbackRef}>
-          <p>Something went wrong while rendering this conversation.</p>
+          {/* Deliberately does NOT promise the draft survives: `draft` is
+              ConversationView-local state, and this fallback replaces that
+              component, so anything typed and unsent is already gone. It also
+              does not say "reload" -- the button below calls reset(), which
+              re-renders the same children and, per reset()'s own doc comment,
+              will simply re-throw on a deterministic error. */}
+          {/* h1, not h2: the only <h1> in this package lives inside
+              ConversationView -- the component this fallback replaces -- and
+              for the section chat it never renders at all. An h2 here would
+              be the document's only heading, with no parent. */}
+          <h1 className="error-boundary-fallback__label">Conversation stopped</h1>
+          <p className="error-boundary-fallback__body">
+            This conversation couldn&apos;t be displayed. Messages you already sent are saved;
+            anything typed but not sent is gone. If trying again doesn&apos;t help, reload the
+            page.
+          </p>
           <button type="button" className="error-boundary-fallback__retry" onClick={this.reset}>
             Try again
+            <span aria-hidden="true">→</span>
           </button>
         </div>
       );

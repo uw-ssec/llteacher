@@ -96,7 +96,7 @@ describe("ProfileView", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
     await waitFor(() => screen.getByRole("alert"));
-    expect(screen.getByRole("alert").textContent).toMatch(/failed to save/i);
+    expect(screen.getByRole("alert").textContent).toMatch(/couldn't be saved/i);
 
     await userEvent.click(screen.getByRole("button", { name: /dismiss/i }));
     expect(screen.queryByRole("alert")).toBeNull();
@@ -117,7 +117,7 @@ describe("ProfileView", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
     await waitFor(() => screen.getByRole("alert"));
-    expect(screen.getByRole("alert").textContent).toMatch(/failed to save/i);
+    expect(screen.getByRole("alert").textContent).toMatch(/couldn't be saved/i);
 
     // Give any unhandled rejection a turn to surface before asserting none did.
     await new Promise((resolve) => setTimeout(resolve, 0));
