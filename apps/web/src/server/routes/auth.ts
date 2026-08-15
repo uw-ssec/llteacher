@@ -67,6 +67,37 @@ export async function callbackHandler(c: Context<AppEnv>) {
   deleteCookie(c, OAUTH_STATE_COOKIE, { path: "/" });
   deleteCookie(c, OAUTH_VERIFIER_COOKIE, { path: "/" });
 
+  /* ---- TEMPORARY DEBUG INSTRUMENTATION -- REMOVE BEFORE COMMIT ----
+     Records which of the four inputs the callback actually received, so a
+     failed round trip says WHICH one was missing instead of collapsing all
+     of them into one 400. Values are truncated to 8 chars: `state` is a
+     CSRF nonce, not a credential, and the verifier is only reported as
+     present/absent. Writes to a file so it survives the dev server's
+     terminal scrollback. */
+  try {
+    const { appendFileSync } = await import("node:fs");
+    const cookieHeader = c.req.header("cookie") ?? "";
+    appendFileSync(
+      "/private/tmp/claude-501/-Users-corderocore-Documents-llteacher/e2295540-183d-4bcb-8db9-68b5aa8fd98d/scratchpad/auth-callback.log",
+      JSON.stringify({
+        at: new Date().toISOString(),
+        url: c.req.url.split("?")[0],
+        host: c.req.header("host"),
+        query: [...new URL(c.req.url).searchParams.keys()],
+        codePresent: !!code,
+        returnedState: returnedState ? `${returnedState.slice(0, 8)}… (len ${returnedState.length})` : null,
+        expectedState: expectedState ? `${expectedState.slice(0, 8)}… (len ${expectedState.length})` : null,
+        stateMatches: !!expectedState && returnedState === expectedState,
+        verifierPresent: !!verifier,
+        cookieNames: cookieHeader.split(";").map((s) => s.split("=")[0]!.trim()).filter(Boolean),
+        userAgent: (c.req.header("user-agent") ?? "").slice(0, 80),
+      }) + "\n",
+    );
+  } catch {
+    /* instrumentation must never break the flow */
+  }
+  /* ---- END TEMPORARY DEBUG INSTRUMENTATION ---- */
+
   if (!code) {
     return c.text("Missing authorization code", 400);
   }

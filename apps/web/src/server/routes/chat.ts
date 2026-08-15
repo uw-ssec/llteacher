@@ -457,7 +457,7 @@ export async function chatHandler(c: Context<AppEnv>) {
   // re-check convention used throughout homeworks.ts/submissions.ts.
   const authContext = c.get("authContext") as AuthContext | undefined;
   if (!authContext) {
-    return c.json({ error: "Unauthorized" }, 401);
+    return c.json({ error: "Unauthorized", code: "unauthorized" }, 401);
   }
 
   let rawBody: unknown;
@@ -503,7 +503,10 @@ export async function chatHandler(c: Context<AppEnv>) {
   // MAX_MESSAGES_PER_REQUEST's doc comment for why this is generous relative
   // to MAX_HISTORY_MESSAGES.
   if (uiMessages.length > MAX_MESSAGES_PER_REQUEST) {
-    return c.json({ error: `messages must contain at most ${MAX_MESSAGES_PER_REQUEST} entries` }, 400);
+    return c.json(
+      { error: `messages must contain at most ${MAX_MESSAGES_PER_REQUEST} entries`, code: "history_too_long" },
+      400,
+    );
   }
   // #264: every element, not just the tail -- see historyMessageSchema's
   // doc comment. Runs before the tail-specific check below so a forged
@@ -548,7 +551,10 @@ export async function chatHandler(c: Context<AppEnv>) {
   );
   if (requestCount > RATE_LIMIT_MAX_PER_MINUTE) {
     return c.json(
-      { error: "You're sending messages too quickly. Please wait a moment and try again." },
+      {
+        error: "You're sending messages too quickly. Please wait a moment and try again.",
+        code: "rate_limited",
+      },
       429,
       { "Retry-After": String(Math.ceil(RATE_LIMIT_WINDOW_MS / 1000)) },
     );
@@ -584,7 +590,7 @@ export async function chatHandler(c: Context<AppEnv>) {
       authContext.isMemberOf,
     );
     if (!existing) {
-      return c.json({ error: "Conversation not found" }, 404);
+      return c.json({ error: "Conversation not found", code: "not_found" }, 404);
     }
     conv = existing;
   } else {
@@ -608,7 +614,7 @@ export async function chatHandler(c: Context<AppEnv>) {
     const courseId = requestedCourseId;
     const scope = courseScopeFromAuthContext(authContext, courseId);
     if (!scope) {
-      return c.json({ error: "Course access denied" }, 403);
+      return c.json({ error: "Course access denied", code: "denied" }, 403);
     }
     // #214: kind defaults to "tutor" (every existing caller's behavior) --
     // only a caller that explicitly asks for "section" (App.tsx's
@@ -663,9 +669,9 @@ export async function chatHandler(c: Context<AppEnv>) {
           if (!active) throw err; // existence was just proven; a missing row here is a genuine bug, not a race
           conv = { id: active.id, ownerUserId: active.ownerUserId, courseId: active.courseId };
         } else if (err instanceof SectionNotFoundError) {
-          return c.json({ error: "Section not found" }, 404);
+          return c.json({ error: "Section not found", code: "not_found" }, 404);
         } else if (err instanceof SectionNotInteractiveError) {
-          return c.json({ error: err.message }, 409);
+          return c.json({ error: err.message, code: "in_progress" }, 409);
         } else {
           throw err;
         }
@@ -765,7 +771,7 @@ export async function chatHandler(c: Context<AppEnv>) {
       }
     } catch (err) {
       if (err instanceof IdempotencyKeyConflictError) {
-        return c.json({ error: err.message }, 409);
+        return c.json({ error: err.message, code: "in_progress" }, 409);
       }
       throw err;
     }
@@ -811,10 +817,39 @@ export async function chatHandler(c: Context<AppEnv>) {
        continue with the follow-up Socratic question in the same turn.
        Without this, streamText stops the moment a tool call is emitted. */
     stopWhen: stepCountIs(5),
+    /* The SDK default is a bare `console.error(error)` -- no conversation,
+       no user, no model, so a provider outage arrives in the logs as an
+       anonymous object. Everything else in this handler goes through
+       logServerError; this was the one path that did not. */
+    onError: ({ error }) => {
+      logServerError(`chatHandler.streamText conversation=${conv.id}`, error);
+    },
   });
 
   return result.toUIMessageStreamResponse({
     headers: { "x-conversation-id": conv.id },
+    /* The server decides what crosses the wire, because it is the only place
+       that knows what the string is.
+
+       Without this the SDK default is `getErrorMessage`, which returns
+       `error.message` verbatim -- and for an OpenAI-compatible provider that
+       is the provider's own prose, streamed straight into a student's
+       homework thread. The client cannot fix this after the fact: it receives
+       an opaque string with no status, no code, and no provenance, and any
+       attempt to classify it there is pattern-matching one provider's English
+       (which breaks on the next provider, on Bedrock's exception names, and
+       on WebKit's differently-worded fetch failures).
+
+       So: log the real error with context, return one sentence the student
+       can act on. Everything downstream then only ever renders strings this
+       codebase authored. */
+    onError: (error) => {
+      logServerError(
+        `chatHandler.stream conversation=${conv.id}`,
+        error,
+      );
+      return "The tutor stopped partway through. Nothing you wrote was lost.";
+    },
     // The AI SDK's natural hook for persisting the assistant turn --
     // responseMessage is the full final UIMessage (text parts + any
     // tool-call/tool-result parts), exactly the shape `messages.parts`

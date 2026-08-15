@@ -81,11 +81,23 @@ export function ProfileView() {
         </section>
       )}
 
+      {/* #334: `.profile-save-error` had no CSS rule anywhere, so this state
+          rendered as raw browser defaults. Routed through the stopped-state
+          language the rest of the student app now uses. */}
       {saveError && (
-        <div role="alert" className="profile-save-error">
-          <p>Failed to save your changes. Please try again.</p>
-          <button type="button" onClick={() => setSaveError(false)}>
+        <div role="alert" className="error-boundary-fallback">
+          <h2 className="error-boundary-fallback__label">Not saved</h2>
+          <p className="error-boundary-fallback__body">
+            Your changes couldn&apos;t be saved. Nothing was lost — the values are still on
+            screen, so you can try again.
+          </p>
+          <button
+            type="button"
+            className="error-boundary-fallback__retry"
+            onClick={() => setSaveError(false)}
+          >
             Dismiss
+            <span aria-hidden="true">→</span>
           </button>
         </div>
       )}

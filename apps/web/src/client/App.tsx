@@ -973,21 +973,7 @@ export default function App() {
               corner -- the same unstyled-alert shape the admin console had
               before AdminNotice. Routed through the stopped-state language
               the rest of this app now uses. */}
-          <div className="error-boundary-fallback" role="alert">
-            <span className="error-boundary-fallback__label">Homework didn&apos;t load</span>
-            <p className="error-boundary-fallback__body">
-              Your assignment couldn&apos;t be fetched. Nothing you&apos;ve submitted is
-              affected — reloading should bring it back.
-            </p>
-            <button
-              type="button"
-              className="error-boundary-fallback__retry"
-              onClick={() => window.location.reload()}
-            >
-              Reload
-              <span aria-hidden="true">→</span>
-            </button>
-          </div>
+          <HomeworkLoadError />
         </div>
       </div>
     );
@@ -1111,6 +1097,41 @@ export default function App() {
         )}
         </main>
       </div>
+    </div>
+  );
+}
+
+/** The homework-load failure state.
+ *
+ *  A function component rather than inline JSX so it can hold the
+ *  focus-on-mount effect the other two fallbacks carry (#298). Without it,
+ *  flipping `loadError` replaced the shell's contents and dropped keyboard
+ *  focus to <body> with nothing announced and nowhere to land.
+ *
+ *  The copy deliberately does not claim reloading will fix it. `loadError` is
+ *  one boolean set by a bare `.catch`, covering 401/403/503/network alike --
+ *  on an expired session, reloading will not bring it back, so promising that
+ *  would be the same false-reassurance defect as the boundary copy. */
+function HomeworkLoadError() {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    ref.current?.focus();
+  }, []);
+  return (
+    <div className="error-boundary-fallback" role="alert" tabIndex={-1} ref={ref}>
+      <h1 className="error-boundary-fallback__label">Homework didn&apos;t load</h1>
+      <p className="error-boundary-fallback__body">
+        Your assignment couldn&apos;t be fetched. Anything you&apos;ve already submitted is
+        saved. Reloading often fixes it; if it doesn&apos;t, you may need to sign in again.
+      </p>
+      <button
+        type="button"
+        className="error-boundary-fallback__retry"
+        onClick={() => window.location.reload()}
+      >
+        Reload
+        <span aria-hidden="true">→</span>
+      </button>
     </div>
   );
 }

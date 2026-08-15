@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConversationView } from "./ConversationView";
+import { readErrorMessage } from "./ConversationView";
 
 beforeEach(() => {
   // jsdom doesn't implement these two DOM APIs Composer/ConversationView
@@ -105,7 +106,7 @@ describe("ConversationView error row (#144)", () => {
     expect(screen.getByText("The response failed. Please try again.")).toBeTruthy();
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: /try again/i }));
+    await user.click(screen.getByRole("button", { name: "Try again" }));
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 });
@@ -153,5 +154,72 @@ describe("ConversationView live region (#300)", () => {
     // itself may carry aria-live.
     const messagesWrap = container.querySelector(".conversation-messages")!;
     expect(messagesWrap.getAttribute("aria-live")).toBeNull();
+  });
+});
+
+/* readErrorMessage is the only branching logic in the stopped-state work and
+   previously had no direct test. These pin the two properties that matter:
+   the client never renders an unrecognized string as the student's message,
+   and a non-retryable condition offers no retry. */
+describe("readErrorMessage", () => {
+  it("uses its own copy for a known code, never the server's prose", () => {
+    const r = readErrorMessage(
+      JSON.stringify({ error: "You're sending messages too quickly.", code: "rate_limited" }),
+    );
+    expect(r.label).toBe("Slow down");
+    expect(r.message).toMatch(/wait a few seconds/i);
+    expect(r.detail).toBeUndefined();
+    expect(r.retryable).toBe(true);
+  });
+
+  it("does not offer retry when retrying provably cannot succeed", () => {
+    for (const code of ["unauthorized", "history_too_long", "not_found", "denied"]) {
+      const r = readErrorMessage(JSON.stringify({ error: "x", code }));
+      expect(r.retryable).toBe(false);
+    }
+  });
+
+  /* The defect this rewrite exists to fix: the previous version failed OPEN,
+     promoting anything it did not recognize to the student's headline. */
+  it.each([
+    ['{"error":"OPENROUTER_API_KEY is not set. Run wrangler secret put"}', "OPENROUTER_API_KEY"],
+    ['{"error":{"code":429,"message":"nested"}}', "429"],
+    ['{"message":"wrong key"}', "wrong key"],
+    ["Load failed", "Load failed"],
+    ["ThrottlingException", "ThrottlingException"],
+    ["<html><body>502 Bad Gateway</body></html>", "502"],
+  ])("never renders %s as the student-facing message", (raw, leaked) => {
+    const r = readErrorMessage(raw);
+    expect(r.message).not.toContain(leaked);
+    expect(r.label).toBe("No response");
+    expect(r.retryable).toBe(true);
+  });
+
+  it("keeps the machine text available in the detail line", () => {
+    expect(readErrorMessage("ThrottlingException").detail).toBe("ThrottlingException");
+  });
+
+  it("clamps an unbounded body so it cannot push the retry control away", () => {
+    const r = readErrorMessage("x".repeat(5000));
+    expect(r.detail!.length).toBeLessThanOrEqual(301);
+    expect(r.detail!.endsWith("…")).toBe(true);
+  });
+
+  it("does not treat a quantity as a status code", () => {
+    // The old regex matched `500` in "at most 500 entries" and told the
+    // student to retry a deterministic 400.
+    const r = readErrorMessage(
+      JSON.stringify({ error: "messages must contain at most 500 entries", code: "history_too_long" }),
+    );
+    expect(r.retryable).toBe(false);
+    expect(r.message).toMatch(/start a new one/i);
+  });
+
+  it("falls back to generic copy on empty or unparseable input", () => {
+    for (const raw of ["", "   ", "{not json"]) {
+      const r = readErrorMessage(raw);
+      expect(r.label).toBe("No response");
+      expect(r.message).toMatch(/didn't finish answering/i);
+    }
   });
 });
