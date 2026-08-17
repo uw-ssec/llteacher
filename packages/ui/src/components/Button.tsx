@@ -99,11 +99,13 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       .filter(Boolean)
       .join(" ");
 
-    // #327: suppresses BOTH mouse and keyboard (Enter/Space) activation --
-    // pointer-events:none above already blocks mouse hit-testing on a
-    // native `disabled` button, but has no effect on a keyboard-triggered
-    // click on a focusable, aria-disabled one, so the guard has to live
-    // here, not just in CSS.
+    // #327: suppresses BOTH mouse and keyboard (Enter/Space) activation.
+    // styles.css's `.btn[aria-disabled="true"]` rule already sets
+    // pointer-events:none too (the same rule native `:disabled` gets), but
+    // that CSS property only affects pointer/mouse hit-testing -- it has no
+    // effect on a keyboard-triggered click on a focusable element, which is
+    // exactly what aria-disabled (unlike native disabled) keeps focusable.
+    // The guard has to live here in JS regardless of what CSS does.
     const handleClick: React.MouseEventHandler<HTMLButtonElement> = (e) => {
       if (isAriaDisabled) {
         e.preventDefault();

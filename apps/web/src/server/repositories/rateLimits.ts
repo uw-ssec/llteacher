@@ -73,15 +73,22 @@ export async function reserveRateLimitSlot(
     })
     .returning({ count: chatRateLimitWindows.count });
 
+  // #317 review, code-review follow-up: this call runs unconditionally on
+  // the hot path of every chat turn and every conversation creation --
+  // NOT awaited, so the ~1% of requests that trigger the purge don't wait
+  // on a DELETE behind the reservation they actually asked for. A dropped
+  // purge attempt (this function returning, and on Cloudflare Workers
+  // potentially the whole invocation ending, before the DELETE lands) is
+  // harmless: it costs nothing but one skipped opportunity, and the next
+  // ~100th call gets another. See RATE_LIMIT_WINDOW_IDX (schema/runtime.ts)
+  // for the other half of this fix -- the DELETE's own WHERE clause had no
+  // supporting index.
   if (Math.random() < PURGE_PROBABILITY) {
-    // Best-effort: a purge failure must never fail the actual rate-limit
-    // reservation this function exists for -- caught and logged, not
-    // awaited-and-thrown.
-    try {
-      await db.delete(chatRateLimitWindows).where(lt(chatRateLimitWindows.windowStart, new Date(now.getTime() - RATE_LIMIT_RETENTION_MS)));
-    } catch (err) {
-      logServerError("reserveRateLimitSlot.purge", err);
-    }
+    db.delete(chatRateLimitWindows)
+      .where(lt(chatRateLimitWindows.windowStart, new Date(now.getTime() - RATE_LIMIT_RETENTION_MS)))
+      .catch((err) => {
+        logServerError("reserveRateLimitSlot.purge", err);
+      });
   }
 
   return row!.count;

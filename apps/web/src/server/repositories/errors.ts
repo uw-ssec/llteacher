@@ -45,3 +45,45 @@ export class IdempotencyKeyConflictError extends Error {
     this.name = "IdempotencyKeyConflictError";
   }
 }
+
+// #317 review follow-up: two concurrent writers racing the same partial
+// unique index used to only be handled at one call site
+// (sectionConversations.ts's startSectionConversation ->
+// conversations_owner_section_active_uq). promptTemplates.ts's
+// upsertCourseScopedPromptTemplate has the identical shape (read current,
+// write under a partial unique index, no row lock in between) and needs
+// the same translation -- extracted here so a third caller doesn't have to
+// reinvent it a third time.
+
+/** Postgres unique-violation SQLSTATE. */
+export const PG_UNIQUE_VIOLATION = "23505";
+
+/** True when `err` is a Postgres unique-violation naming `constraint`.
+ *
+ *  Both drivers surface the SQLSTATE on a `code` property; neon-http also
+ *  carries `constraint`, and node-postgres does too. Checked structurally
+ *  rather than by message, which is locale- and version-dependent. */
+export function isUniqueViolation(err: unknown, constraint: string): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const e = err as { code?: unknown; constraint?: unknown };
+  return e.code === PG_UNIQUE_VIOLATION && e.constraint === constraint;
+}
+
+// #317 review, code-review follow-up: upsertCourseScopedPromptTemplate
+// (repositories/promptTemplates.ts) reads the course's current active
+// template, then writes "deactivate old, insert new" as one atomic group --
+// with no row lock between the read and the write, unlike
+// acquireConversationTurnLock's single conditional UPDATE. Two concurrent
+// PUTs to the same course's prompt template (a double-click, two tabs) can
+// both read the same `current` and both attempt to insert a new active row;
+// prompt_templates_scope_course_active_uq (#324) lets only one succeed, and
+// the loser used to surface as an unhandled exception -> the generic 503
+// every unrecognized error falls through to (server/index.ts's app.onError)
+// instead of a clean, retryable response. Mapped to 409 there, same
+// single-chokepoint pattern as TenancyMismatchError/IdempotencyKeyConflictError.
+export class PromptTemplateConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PromptTemplateConflictError";
+  }
+}

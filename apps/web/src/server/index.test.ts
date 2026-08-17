@@ -6,7 +6,7 @@ import {
   loadSessionKey,
   sealSession,
 } from "../lib/session";
-import { TenancyMismatchError } from "./repositories/errors";
+import { TenancyMismatchError, PromptTemplateConflictError } from "./repositories/errors";
 
 const SESSION_SECRET = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
 
@@ -57,11 +57,24 @@ vi.mock("./repositories/rateLimits", () => ({
   RATE_LIMIT_WINDOW_MS: 60_000,
 }));
 
+// #317 review, code-review follow-up: only upsertCourseScopedPromptTemplate
+// is exercised below (the PromptTemplateConflictError-mapping test) -- the
+// other two exports are no-op stubs so importing the real
+// routes/promptTemplates.ts module doesn't throw for tests that never hit
+// this route.
+const upsertCourseScopedPromptTemplateMock = vi.fn();
+vi.mock("./repositories/promptTemplates", () => ({
+  getCourseScopedPromptTemplate: vi.fn(),
+  upsertCourseScopedPromptTemplate: (...args: unknown[]) => upsertCourseScopedPromptTemplateMock(...args),
+  deactivateCourseScopedPromptTemplate: vi.fn(),
+}));
+
 beforeEach(() => {
   findMany.mockReset();
   findFirst.mockReset();
   findFirst.mockResolvedValue({ isActive: true, sessionEpoch: 0 });
   createConversationMock.mockReset();
+  upsertCourseScopedPromptTemplateMock.mockReset();
 });
 
 describe("app composition", () => {
@@ -125,6 +138,40 @@ describe("app composition", () => {
     );
 
     expect(res.status).toBe(404);
+    expect(consoleSpy).not.toHaveBeenCalled();
+
+    consoleSpy.mockRestore();
+  });
+
+  // #317 review, code-review follow-up: upsertCourseScopedPromptTemplate
+  // (repositories/promptTemplates.ts) throws this when two concurrent
+  // writers race the same course's scoped template -- same single-
+  // chokepoint mapping as TenancyMismatchError/IdempotencyKeyConflictError
+  // above, proven the same way.
+  it("maps a PromptTemplateConflictError to 409 (not the generic 503) and does not log it as a server error", async () => {
+    const courseId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    findMany.mockResolvedValue([
+      { id: "m1", userId: "u1", courseId, role: "instructor", droppedAt: null },
+    ]);
+    upsertCourseScopedPromptTemplateMock.mockRejectedValue(
+      new PromptTemplateConflictError("This course's tutor prompt was just changed by someone else. Reload and try again."),
+    );
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const key = await loadSessionKey(ENV);
+    const sealed = await sealSession(createSessionPayload("u1", "w1", 0), key);
+
+    const res = await app.request(
+      `/api/courses/${courseId}/prompt-template`,
+      {
+        method: "PUT",
+        headers: { cookie: `${SESSION_COOKIE_NAME}=${sealed}`, "content-type": "application/json" },
+        body: JSON.stringify({ content: "new content" }),
+      },
+      ENV,
+    );
+
+    expect(res.status).toBe(409);
     expect(consoleSpy).not.toHaveBeenCalled();
 
     consoleSpy.mockRestore();

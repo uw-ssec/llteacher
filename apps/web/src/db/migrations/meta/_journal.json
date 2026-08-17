@@ -239,6 +239,13 @@
       "when": 1786766766092,
       "tag": "0033_quick_calypso",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1786991449619,
+      "tag": "0034_breezy_hedge_knight",
+      "breakpoints": true
     }
   ]
 }

@@ -18,6 +18,7 @@ import { getOrgScopeForCourse } from "./organizations";
 import { deriveHomeworkStatus, isUnreleased } from "./homeworks";
 import { resolvePromptTemplate, sectionGreeting, sectionConversationTitle } from "../../lib/prompts";
 import { DEFAULT_MESSAGES_PAGE_SIZE } from "./conversations";
+import { isUniqueViolation } from "./errors";
 
 /* --------------------------------------------------------------------------
    Section-conversation lifecycle (#27), kept in its own module rather than
@@ -102,19 +103,9 @@ export class NotConversationOwnerError extends SectionConversationError {
   }
 }
 
-/** Postgres unique-violation SQLSTATE. */
-const PG_UNIQUE_VIOLATION = "23505";
-
-/** True when `err` is a Postgres unique-violation naming `constraint`.
- *
- *  Both drivers surface the SQLSTATE on a `code` property; neon-http also
- *  carries `constraint`, and node-postgres does too. Checked structurally
- *  rather than by message, which is locale- and version-dependent. */
-function isUniqueViolation(err: unknown, constraint: string): boolean {
-  if (typeof err !== "object" || err === null) return false;
-  const e = err as { code?: unknown; constraint?: unknown };
-  return e.code === PG_UNIQUE_VIOLATION && e.constraint === constraint;
-}
+// isUniqueViolation moved to repositories/errors.ts (code-review follow-up:
+// promptTemplates.ts needed the identical helper, so a third reimplementation
+// was the wrong move).
 
 type StartInput = {
   sectionId: string;

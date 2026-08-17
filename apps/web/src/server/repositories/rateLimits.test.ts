@@ -100,6 +100,12 @@ describe.skipIf(!DATABASE_URL)("reserveRateLimitSlot (#265, real DB)", () => {
   // a test, matching the pattern this doc comment on the purge itself
   // describes ("expected value" behavior, verified here as a hard branch).
   describe("best-effort purge (#326)", () => {
+    // #317 review, code-review follow-up: the purge is no longer awaited
+    // inline (fire-and-forget, so the ~1% of calls that trigger it don't
+    // block the reservation the caller actually asked for -- see the
+    // purge's own doc comment in rateLimits.ts), so its effect is no longer
+    // guaranteed visible the instant reserveRateLimitSlot resolves. Polls
+    // for the delete to land instead of asserting it happened synchronously.
     it("deletes windows older than the retention period when the purge triggers", async () => {
       const staleWindowStart = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
       await db.insert(chatRateLimitWindows).values({ userId, windowStart: staleWindowStart, count: 1 });
@@ -111,11 +117,18 @@ describe.skipIf(!DATABASE_URL)("reserveRateLimitSlot (#265, real DB)", () => {
         randomSpy.mockRestore();
       }
 
-      const [stale] = await db
-        .select()
-        .from(chatRateLimitWindows)
-        .where(and(eq(chatRateLimitWindows.userId, userId), eq(chatRateLimitWindows.windowStart, staleWindowStart)));
-      expect(stale).toBeUndefined();
+      const readStale = () =>
+        db
+          .select()
+          .from(chatRateLimitWindows)
+          .where(and(eq(chatRateLimitWindows.userId, userId), eq(chatRateLimitWindows.windowStart, staleWindowStart)));
+      let stale = await readStale();
+      const deadline = Date.now() + 5_000;
+      while (stale.length > 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        stale = await readStale();
+      }
+      expect(stale[0]).toBeUndefined();
     });
 
     it("leaves old windows alone when the purge does not trigger", async () => {

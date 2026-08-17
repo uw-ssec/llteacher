@@ -41,7 +41,7 @@ import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireGraderOf, requireInstructorOf, requireRole } from "./utils/guards";
 import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "./utils/errors";
-import { TenancyMismatchError, IdempotencyKeyConflictError } from "./repositories/errors";
+import { TenancyMismatchError, IdempotencyKeyConflictError, PromptTemplateConflictError } from "./repositories/errors";
 import type { AppEnv } from "./context";
 
 const app = new Hono<AppEnv>();
@@ -69,6 +69,12 @@ app.onError((err, c) => {
   // request is well-formed and the caller is who they say they are, the id
   // just collides. 409, not a silent 200 that discards the new message.
   if (err instanceof IdempotencyKeyConflictError) {
+    return c.json({ error: err.message }, 409);
+  }
+  // #317 review, code-review follow-up: same 409 treatment as
+  // IdempotencyKeyConflictError above -- a well-formed request that lost a
+  // genuine race against another writer, not a server-side failure.
+  if (err instanceof PromptTemplateConflictError) {
     return c.json({ error: err.message }, 409);
   }
   logServerError("server", err);

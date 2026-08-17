@@ -852,12 +852,22 @@ export async function chatHandler(c: Context<AppEnv>) {
     // reached this branch (predates promptTemplateId, or resolved to
     // nothing at creation and a template has since been added). Every
     // later turn then takes the pinned fast path above instead of
-    // repeating this walk. Best-effort and fire-and-forget: a write
-    // failure here must not fail the turn -- the walk simply runs again
-    // next time, same as today; the turn itself doesn't wait on it either,
-    // since it changes nothing about THIS turn's own system prompt.
+    // repeating this walk. Best-effort: a write failure here must not fail
+    // the turn -- caught and logged, not thrown -- the walk simply runs
+    // again next time, same as today.
+    //
+    // #317 review, code-review follow-up: awaited, not fire-and-forget.
+    // This used to be `.catch()`'d without an `await` -- on Cloudflare
+    // Workers, a promise that's neither awaited nor registered with
+    // `c.executionCtx.waitUntil()` isn't guaranteed to run to completion
+    // once the handler's synchronous work is done, which is exactly the
+    // "best-effort" this write is supposed to be, not "maybe never
+    // happens for reasons unrelated to its own .catch()". This only
+    // fires once per conversation (every later turn takes the pinned
+    // fast path above), so the extra round-trip here is not a
+    // steady-state cost.
     if (resolved.id !== null && conv.promptTemplateId === null) {
-      pinConversationPromptTemplate(db, conv.id, resolved.id).catch((err) => {
+      await pinConversationPromptTemplate(db, conv.id, resolved.id).catch((err) => {
         logServerError("chatHandler.pinPromptTemplate", err);
       });
     }

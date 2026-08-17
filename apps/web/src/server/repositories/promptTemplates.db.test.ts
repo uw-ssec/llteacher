@@ -16,6 +16,7 @@ import {
   upsertCourseScopedPromptTemplate,
   deactivateCourseScopedPromptTemplate,
 } from "./promptTemplates";
+import { PromptTemplateConflictError } from "./errors";
 import { organizations, courses, promptTemplates } from "../../db/schema";
 
 const RAW_DATABASE_URL = process.env.DATABASE_URL;
@@ -99,5 +100,42 @@ describe.skipIf(!RAW_DATABASE_URL)("course-scoped prompt_templates writers (real
     await upsertCourseScopedPromptTemplate(db, ctxB.courseScope, { content: "course B", composeWithParent: false });
 
     expect(await getCourseScopedPromptTemplate(db, ctxA.courseScope)).toBeNull();
+  });
+
+  // #317 review, code-review follow-up: upsertCourseScopedPromptTemplate
+  // reads `current` then writes with no row lock between the two -- two
+  // concurrent callers racing the same course (a double-click, two tabs)
+  // can both read the same `current` and both attempt to insert a
+  // conflicting active row; prompt_templates_scope_course_active_uq lets
+  // only one through per genuine collision. 10 writers (not 2) because a
+  // real connection pool doesn't guarantee any given pair's read-then-write
+  // windows actually overlap -- some of these may legitimately serialize
+  // into a normal version-bump chain rather than collide, which is correct
+  // behavior, not a test failure. What must hold regardless of how many
+  // happen to collide: every rejection is PromptTemplateConflictError
+  // (never a raw, unhandled constraint-violation exception), and the
+  // course ends up with exactly one active row, never zero or more than one.
+  it("translates a concurrent-write race into PromptTemplateConflictError, not an unhandled exception, and never corrupts state", async () => {
+    const ctx = await seedCourse();
+    const WRITER_COUNT = 10;
+
+    const results = await Promise.allSettled(
+      Array.from({ length: WRITER_COUNT }, (_, i) =>
+        upsertCourseScopedPromptTemplate(db, ctx.courseScope, { content: `writer ${i}`, composeWithParent: false }),
+      ),
+    );
+
+    const fulfilled = results.filter((r): r is PromiseFulfilledResult<{ id: string; version: number }> => r.status === "fulfilled");
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+    expect(fulfilled.length).toBeGreaterThan(0);
+    for (const r of rejected) {
+      expect(r.reason).toBeInstanceOf(PromptTemplateConflictError);
+    }
+
+    const activeRows = await db
+      .select()
+      .from(promptTemplates)
+      .where(and(eq(promptTemplates.scopeCourseId, ctx.courseScope), eq(promptTemplates.isActive, true)));
+    expect(activeRows).toHaveLength(1);
   });
 });

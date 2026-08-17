@@ -262,6 +262,12 @@ export const chatRateLimitWindows = pgTable(
       t.userId,
       t.windowStart,
     ),
+    // #317 review, code-review follow-up: reserveRateLimitSlot's own purge
+    // (repositories/rateLimits.ts) deletes `WHERE window_start < cutoff` --
+    // the unique index above leads with user_id, so it can't serve that
+    // predicate; without this, the purge was a full table scan of a table
+    // #313 itself estimated at ~600K rows/cohort/term.
+    index("chat_rate_limit_windows_window_start_idx").on(t.windowStart),
   ],
 );
 

@@ -3,6 +3,7 @@ import type { Db } from "../../db/client";
 import { promptTemplates } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import { runAtomically, type BatchStatement } from "./atomic";
+import { isUniqueViolation, PromptTemplateConflictError } from "./errors";
 
 /* --------------------------------------------------------------------------
    #317 review, #325 ("no write path"): resolvePromptTemplate (lib/prompts.ts)
@@ -55,7 +56,17 @@ export async function getCourseScopedPromptTemplate(
  *  lib/prompts.ts's module doc comment on pinning) keep resolving it via
  *  getPinnedPromptTemplateContent, which reads by id regardless of
  *  isActive -- deactivating it here does not retroactively change what an
- *  in-progress conversation says. */
+ *  in-progress conversation says.
+ *
+ *  #317 review, code-review follow-up: `current` above is a plain read, not
+ *  a row lock -- two concurrent calls for the same course (a double-click,
+ *  two tabs) can both read the same `current` and both attempt to insert a
+ *  new active row. Exactly one wins the partial unique index; the loser's
+ *  insert throws a Postgres unique-violation, caught here and translated to
+ *  PromptTemplateConflictError (mapped to 409 in server/index.ts's
+ *  app.onError) instead of falling through as an unhandled exception to the
+ *  generic 503 -- same translation startSectionConversation already does
+ *  for conversations_owner_section_active_uq's identical race shape. */
 export async function upsertCourseScopedPromptTemplate(
   db: Db,
   courseScope: CourseScope,
@@ -65,26 +76,35 @@ export async function upsertCourseScopedPromptTemplate(
   const newId = crypto.randomUUID();
   const newVersion = (current?.version ?? 0) + 1;
 
-  await runAtomically(db, (t) => {
-    const statements: BatchStatement[] = [];
-    if (current) {
+  try {
+    await runAtomically(db, (t) => {
+      const statements: BatchStatement[] = [];
+      if (current) {
+        statements.push(
+          t.update(promptTemplates).set({ isActive: false }).where(eq(promptTemplates.id, current.id)),
+        );
+      }
       statements.push(
-        t.update(promptTemplates).set({ isActive: false }).where(eq(promptTemplates.id, current.id)),
+        t.insert(promptTemplates).values({
+          id: newId,
+          scopeCourseId: courseScope,
+          content: input.content,
+          composeWithParent: input.composeWithParent,
+          version: newVersion,
+          previousVersionId: current?.id ?? null,
+          isActive: true,
+        }),
+      );
+      return statements;
+    });
+  } catch (err) {
+    if (isUniqueViolation(err, "prompt_templates_scope_course_active_uq")) {
+      throw new PromptTemplateConflictError(
+        "This course's tutor prompt was just changed by someone else. Reload and try again.",
       );
     }
-    statements.push(
-      t.insert(promptTemplates).values({
-        id: newId,
-        scopeCourseId: courseScope,
-        content: input.content,
-        composeWithParent: input.composeWithParent,
-        version: newVersion,
-        previousVersionId: current?.id ?? null,
-        isActive: true,
-      }),
-    );
-    return statements;
-  });
+    throw err;
+  }
 
   return { id: newId, version: newVersion };
 }
