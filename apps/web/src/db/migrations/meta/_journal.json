@@ -232,6 +232,13 @@
       "when": 1786765596115,
       "tag": "0032_ordinary_grey_gargoyle",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1786766766092,
+      "tag": "0033_quick_calypso",
+      "breakpoints": true
     }
   ]
 }

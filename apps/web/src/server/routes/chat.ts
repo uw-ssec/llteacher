@@ -57,6 +57,7 @@ import {
   getOwnedConversationOrNull,
   acquireConversationTurnLock,
   releaseConversationTurnLock,
+  pinConversationPromptTemplate,
 } from "../repositories/conversations";
 import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from "../repositories/rateLimits";
 import {
@@ -795,45 +796,67 @@ export async function chatHandler(c: Context<AppEnv>) {
   // verified scope -- the sanctioned case for this cast per scope.ts's
   // unsafeCourseScope docstring.
   const scope = unsafeCourseScope(conv.courseId);
-  // #25/#26: both prompt-template and LLM-config resolution need the org
-  // scope for their own fallback queries -- resolved once and shared,
-  // rather than each doing its own getOrgScopeForCourse round-trip.
-  const orgScope = await getOrgScopeForCourse(db, scope);
 
-  // #25: system prompt, resolved from the conversation's PINNED template
-  // (set once at creation/restart -- see lib/prompts.ts's module doc
-  // comment) rather than re-resolved here. A null promptTemplateId means
-  // either a genuinely-unset scope (DEFAULT_SYSTEM_PROMPT was already the
-  // right answer at creation) or a conversation that predates this column
-  // -- both degrade the same way: resolve fresh now rather than fail the
-  // turn over a missing pin.
-  //
-  // #317 review, #325: `isDefaultPrompt` tracks whether that resolution
-  // ever actually hit a real prompt_templates row -- a PINNED id is by
+  // #317 review, #326: these three reads have no data dependency on each
+  // other -- each only needs `conv`/`scope`, already resolved above -- so
+  // one Promise.all replaces three serialized Neon HTTP round-trips with
+  // one (the slowest of the three), instead of the sum of all three.
+  // resolvePromptTemplate (the "no pin" fallback branch below) is the one
+  // exception: it genuinely needs orgScope's result as an input, so it
+  // can't join this batch -- it runs after, only on the conversations that
+  // reach it (predate promptTemplateId, or never resolved a real template
+  // at creation).
+  const [orgScope, pinnedPromptContent, sectionPromptContext] = await Promise.all([
+    // #25/#26: both prompt-template and LLM-config resolution need the org
+    // scope for their own fallback queries -- resolved once and shared,
+    // rather than each doing its own getOrgScopeForCourse round-trip.
+    getOrgScopeForCourse(db, scope),
+    // #25: system prompt, resolved from the conversation's PINNED template
+    // (set once at creation/restart -- see lib/prompts.ts's module doc
+    // comment) rather than re-resolved here. A null promptTemplateId means
+    // either a genuinely-unset scope (DEFAULT_SYSTEM_PROMPT was already the
+    // right answer at creation) or a conversation that predates this column
+    // -- both degrade the same way: resolve fresh below rather than fail
+    // the turn over a missing pin.
+    conv.promptTemplateId ? getPinnedPromptTemplateContent(db, conv.promptTemplateId) : Promise.resolve(null),
+    conv.sectionId ? getSectionPromptContext(db, scope, conv.sectionId) : Promise.resolve(null),
+  ]);
+
+  // #317 review, #325: `isDefaultPrompt` tracks whether resolution ever
+  // actually hit a real prompt_templates row -- a PINNED id is by
   // definition a real row (DEFAULT_SYSTEM_PROMPT is never pinned, see
   // ResolvedPromptTemplate.id's own doc comment), so only the two
   // no-pin branches can set it true. Passed to assembleSystemPrompt so
   // TUTOR_GUARDRAIL is appended only for the code-level fallback, never a
   // project's own template (see that constant's doc comment).
-  const systemPromptTemplateContent = conv.promptTemplateId
-    ? await getPinnedPromptTemplateContent(db, conv.promptTemplateId)
-    : null;
   let resolvedSystemPromptContent: string;
   let isDefaultPrompt: boolean;
-  if (systemPromptTemplateContent !== null) {
-    resolvedSystemPromptContent = systemPromptTemplateContent;
+  if (pinnedPromptContent !== null) {
+    resolvedSystemPromptContent = pinnedPromptContent;
     isDefaultPrompt = false;
   } else if (orgScope) {
     const resolved = await resolvePromptTemplate(db, orgScope, scope, conv.sectionId);
     resolvedSystemPromptContent = resolved.content;
     isDefaultPrompt = resolved.id === null;
+    // #317 review, #326: "a null pin re-runs the full 4-scope template walk
+    // on every message forever" -- write the resolved id back the first
+    // time a real template is actually found for a conversation that
+    // reached this branch (predates promptTemplateId, or resolved to
+    // nothing at creation and a template has since been added). Every
+    // later turn then takes the pinned fast path above instead of
+    // repeating this walk. Best-effort and fire-and-forget: a write
+    // failure here must not fail the turn -- the walk simply runs again
+    // next time, same as today; the turn itself doesn't wait on it either,
+    // since it changes nothing about THIS turn's own system prompt.
+    if (resolved.id !== null && conv.promptTemplateId === null) {
+      pinConversationPromptTemplate(db, conv.id, resolved.id).catch((err) => {
+        logServerError("chatHandler.pinPromptTemplate", err);
+      });
+    }
   } else {
     resolvedSystemPromptContent = DEFAULT_SYSTEM_PROMPT;
     isDefaultPrompt = true;
   }
-  const sectionPromptContext = conv.sectionId
-    ? await getSectionPromptContext(db, scope, conv.sectionId)
-    : null;
   // #317 review, blocking finding #4: an unreleased section (draft,
   // scheduled, or hidden/expired) must not leak its content into the model's
   // context, even for a conversation that started while it was live -- see
@@ -862,7 +885,7 @@ export async function chatHandler(c: Context<AppEnv>) {
   }
   let resolvedLLMConfig: Awaited<ReturnType<typeof resolveLLMConfig>>;
   try {
-    resolvedLLMConfig = await resolveLLMConfig(db, orgScope, scope, sectionPromptContext?.homeworkId ?? null);
+    resolvedLLMConfig = await resolveLLMConfig(db, orgScope, scope, sectionPromptContext?.homeworkLlmConfigId ?? null);
   } catch (err) {
     if (err instanceof LLMConfigNotFoundError) {
       logServerError("chatHandler.llmConfig", err);

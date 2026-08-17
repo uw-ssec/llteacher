@@ -566,6 +566,33 @@ export async function releaseConversationTurnLock(db: Db, conversationId: string
     .where(eq(conversations.id, conversationId));
 }
 
+/** #317 review, #326: chat.ts calls this the first time resolvePromptTemplate
+ *  (lib/prompts.ts) finds a REAL template for a conversation that reached
+ *  its "no pin" fallback branch -- either the conversation predates the
+ *  promptTemplateId column, or nothing resolved at creation and a template
+ *  has since been added at some scope. Without this write-back, that same
+ *  4-scope walk re-runs on every future turn forever (the exact waste
+ *  #326's issue text names), even after this call has already told us the
+ *  answer once. Only ever moves promptTemplateId from null to a real id --
+ *  never overwrites an existing pin, matching the pinning invariant
+ *  (lib/prompts.ts's module doc comment: resolved ONCE, at creation,
+ *  never re-resolved to a DIFFERENT value later) via the `IS NULL` guard
+ *  in the WHERE clause, not just the caller's own `conv.promptTemplateId
+ *  === null` check -- a second concurrent turn on the same never-pinned
+ *  conversation could otherwise race this into overwriting a pin the first
+ *  turn already wrote (to the SAME id resolution would produce, but not
+ *  guaranteed if the template scope changed between the two reads). */
+export async function pinConversationPromptTemplate(
+  db: Db,
+  conversationId: string,
+  promptTemplateId: string,
+): Promise<void> {
+  await db
+    .update(conversations)
+    .set({ promptTemplateId })
+    .where(and(eq(conversations.id, conversationId), isNull(conversations.promptTemplateId)));
+}
+
 // Used by chatHandler's retry/idempotency check (#3, reworked #213): the
 // most recently persisted messages in a conversation, newest first (index 0
 // = last message). limit=2 is what chatHandler needs to distinguish its two

@@ -157,6 +157,12 @@ vi.mock("../repositories/conversations", () => ({
       .filter((m) => m.conversationId === conversationId)
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, limit),
+  // #317 review, #326: this file's own resolvePromptTemplate fake below
+  // always returns id: null, so the write-back branch never actually fires
+  // here -- a no-op fake, same defensive reasoning as the other
+  // repositories/conversations fakes above (the module must export
+  // SOMETHING chat.ts's import doesn't choke on).
+  pinConversationPromptTemplate: async () => {},
 }));
 
 // #219/#265: unmetered in this integration test -- rate limiting itself is

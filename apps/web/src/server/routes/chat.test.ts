@@ -30,6 +30,12 @@ const getLastMessagesMock = vi.fn();
 // blocked-turn 409.
 const acquireConversationTurnLockMock = vi.fn();
 const releaseConversationTurnLockMock = vi.fn();
+// #317 review, #326: the write-back chat.ts fires (fire-and-forget) the
+// first time resolvePromptTemplate finds a real template for a
+// never-pinned conversation -- mocked so a test that exercises that branch
+// doesn't hit "pinConversationPromptTemplate is not a function" against the
+// mocked module.
+const pinConversationPromptTemplateMock = vi.fn();
 vi.mock("../repositories/conversations", () => ({
   getOwnedConversationOrNull: (...args: unknown[]) => getOwnedConversationOrNullMock(...args),
   createConversation: (...args: unknown[]) => createConversationMock(...args),
@@ -37,6 +43,7 @@ vi.mock("../repositories/conversations", () => ({
   getLastMessages: (...args: unknown[]) => getLastMessagesMock(...args),
   acquireConversationTurnLock: (...args: unknown[]) => acquireConversationTurnLockMock(...args),
   releaseConversationTurnLock: (...args: unknown[]) => releaseConversationTurnLockMock(...args),
+  pinConversationPromptTemplate: (...args: unknown[]) => pinConversationPromptTemplateMock(...args),
 }));
 
 // #317 review, #321: llm_call_logs -- one row per turn, written from
@@ -235,6 +242,7 @@ describe("POST /api/chat", () => {
     // specifically about the lock itself expects the turn to proceed.
     acquireConversationTurnLockMock.mockReset().mockResolvedValue(true);
     releaseConversationTurnLockMock.mockReset().mockResolvedValue(undefined);
+    pinConversationPromptTemplateMock.mockReset().mockResolvedValue(undefined);
     recordLlmCallLogMock.mockReset().mockResolvedValue(undefined);
     mockUsage = { inputTokens: 10, outputTokens: 20 };
     mockResponseMeta = { id: "provider-resp-1" };
@@ -1745,5 +1753,71 @@ describe("POST /api/chat", () => {
       courseId: "55555555-5555-5555-5555-555555555555",
     });
     expect(res.status).toBe(200);
+  });
+
+  describe("#326 write back resolved prompt_template_id when a conversation has no pin", () => {
+    it("pins the resolved template id when the conversation has no promptTemplateId and resolution finds a real row", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+        sectionId: null,
+        promptTemplateId: null,
+      });
+      resolvePromptTemplateMock.mockResolvedValue({ id: "template-9", content: "real template", version: 1 });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(200);
+      expect(pinConversationPromptTemplateMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+        "template-9",
+      );
+    });
+
+    it("does not attempt to pin when the conversation already has a promptTemplateId", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+        sectionId: null,
+        promptTemplateId: "already-pinned",
+      });
+      getPinnedPromptTemplateContentMock.mockResolvedValue("pinned content");
+      getLastMessagesMock.mockResolvedValue([]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(200);
+      expect(pinConversationPromptTemplateMock).not.toHaveBeenCalled();
+    });
+
+    it("does not attempt to pin when resolution falls through to the built-in default (no real row)", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+        sectionId: null,
+        promptTemplateId: null,
+      });
+      resolvePromptTemplateMock.mockResolvedValue({ id: null, content: "default prompt", version: null });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(200);
+      expect(pinConversationPromptTemplateMock).not.toHaveBeenCalled();
+    });
   });
 });

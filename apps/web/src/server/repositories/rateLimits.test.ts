@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
@@ -93,5 +93,68 @@ describe.skipIf(!DATABASE_URL)("reserveRateLimitSlot (#265, real DB)", () => {
       .from(chatRateLimitWindows)
       .where(and(eq(chatRateLimitWindows.userId, userId), eq(chatRateLimitWindows.windowStart, windowStart)));
     expect(row?.count).toBe(N);
+  });
+
+  // #317 review, #326: reserveRateLimitSlot's own best-effort purge --
+  // Math.random is stubbed so the probabilistic trigger is deterministic in
+  // a test, matching the pattern this doc comment on the purge itself
+  // describes ("expected value" behavior, verified here as a hard branch).
+  describe("best-effort purge (#326)", () => {
+    it("deletes windows older than the retention period when the purge triggers", async () => {
+      const staleWindowStart = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+      await db.insert(chatRateLimitWindows).values({ userId, windowStart: staleWindowStart, count: 1 });
+
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+      try {
+        await reserveRateLimitSlot(db, userId, testWindow(5), windowMs);
+      } finally {
+        randomSpy.mockRestore();
+      }
+
+      const [stale] = await db
+        .select()
+        .from(chatRateLimitWindows)
+        .where(and(eq(chatRateLimitWindows.userId, userId), eq(chatRateLimitWindows.windowStart, staleWindowStart)));
+      expect(stale).toBeUndefined();
+    });
+
+    it("leaves old windows alone when the purge does not trigger", async () => {
+      const staleWindowStart = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+      await db.insert(chatRateLimitWindows).values({ userId, windowStart: staleWindowStart, count: 1 });
+
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.99);
+      try {
+        await reserveRateLimitSlot(db, userId, testWindow(6), windowMs);
+      } finally {
+        randomSpy.mockRestore();
+      }
+
+      const [stale] = await db
+        .select()
+        .from(chatRateLimitWindows)
+        .where(and(eq(chatRateLimitWindows.userId, userId), eq(chatRateLimitWindows.windowStart, staleWindowStart)));
+      expect(stale).toBeDefined();
+
+      await db.delete(chatRateLimitWindows).where(eq(chatRateLimitWindows.windowStart, staleWindowStart));
+    });
+
+    it("does not delete a window inside the retention period even when the purge triggers", async () => {
+      const now = testWindow(7);
+      await reserveRateLimitSlot(db, userId, now, windowMs);
+
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+      try {
+        await reserveRateLimitSlot(db, userId, now, windowMs);
+      } finally {
+        randomSpy.mockRestore();
+      }
+
+      const windowStart = new Date(Math.floor(now.getTime() / windowMs) * windowMs);
+      const [row] = await db
+        .select({ count: chatRateLimitWindows.count })
+        .from(chatRateLimitWindows)
+        .where(and(eq(chatRateLimitWindows.userId, userId), eq(chatRateLimitWindows.windowStart, windowStart)));
+      expect(row?.count).toBe(2);
+    });
   });
 });

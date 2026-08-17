@@ -1,10 +1,19 @@
 /* --------------------------------------------------------------------------
    resolveLLMConfig (#26), against a real Postgres. Same rationale as
    prompts.db.test.ts: the thing under test is an org-scoped query chain
-   (homework override -> org default -> not-found), and a mocked db would
-   need to fake each step's result in exactly the right order to be worth
-   anything. Skipped without DATABASE_URL, matching every other real-DB
-   suite in this repo.
+   (homework override -> course override -> org default -> not-found), and
+   a mocked db would need to fake each step's result in exactly the right
+   order to be worth anything. Skipped without DATABASE_URL, matching every
+   other real-DB suite in this repo.
+
+   #317 review, #326: resolveLLMConfig no longer reads `homeworks` itself --
+   it takes the homework's llm_config_id value directly (the caller,
+   chat.ts, already has it from getSectionPromptContext's own join, see
+   lib/prompts.ts). These tests pass that value straight through instead of
+   writing it onto a `homeworks` row and passing a homeworkId -- proving
+   `homeworks.llm_config_id` actually flows into a real resolution is
+   prompts.db.test.ts's job now (getSectionPromptContext's own coverage),
+   not this function's.
    -------------------------------------------------------------------------- */
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -13,7 +22,7 @@ import { makeNodeDb } from "../db/nodeClient";
 import type { Db } from "../db/client";
 import { unsafeOrgScope, unsafeCourseScope } from "../server/repositories/scope";
 import { resolveLLMConfig, LLMConfigNotFoundError } from "./llm-config";
-import { organizations, courses, users, courseMemberships, homeworks, llmConfigs } from "../db/schema";
+import { organizations, courses, llmConfigs } from "../db/schema";
 
 const RAW_DATABASE_URL = process.env.DATABASE_URL;
 
@@ -33,31 +42,12 @@ describe.skipIf(!RAW_DATABASE_URL)("resolveLLMConfig (real DB, #26)", () => {
       .insert(courses)
       .values({ organizationId: org!.id, code: `C-${crypto.randomUUID().slice(0, 8)}`, term: "T", title: "t" })
       .returning({ id: courses.id });
-    const [instructorUser] = await db
-      .insert(users)
-      .values({ email: crypto.getRandomValues(new Uint8Array(16)) as never, emailBlindIndex: crypto.getRandomValues(new Uint8Array(16)) as never })
-      .returning({ id: users.id });
-    const [instructorMembership] = await db
-      .insert(courseMemberships)
-      .values({ userId: instructorUser!.id, courseId: course!.id, role: "instructor" })
-      .returning({ id: courseMemberships.id });
-    const [hw] = await db
-      .insert(homeworks)
-      .values({
-        courseId: course!.id,
-        createdById: instructorMembership!.id,
-        title: "hw",
-        description: "d",
-        dueDate: new Date(Date.now() + 86_400_000),
-      })
-      .returning({ id: homeworks.id });
 
     return {
       orgScope: unsafeOrgScope(org!.id),
       courseScope: unsafeCourseScope(course!.id),
       orgId: org!.id,
       courseId: course!.id,
-      homeworkId: hw!.id,
     };
   }
 
@@ -82,20 +72,20 @@ describe.skipIf(!RAW_DATABASE_URL)("resolveLLMConfig (real DB, #26)", () => {
 
   it("throws LLMConfigNotFoundError with a referenceId when no config exists at any scope", async () => {
     const ctx = await seedCourse();
-    await expect(resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, ctx.homeworkId)).rejects.toBeInstanceOf(LLMConfigNotFoundError);
+    await expect(resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, null)).rejects.toBeInstanceOf(LLMConfigNotFoundError);
     try {
-      await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, ctx.homeworkId);
+      await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, null);
       expect.unreachable();
     } catch (err) {
       expect((err as LLMConfigNotFoundError).referenceId).toMatch(/^[0-9a-f-]{36}$/);
     }
   });
 
-  it("uses the org's default config when the homework has no override", async () => {
+  it("uses the org's default config when there is no homework or course override", async () => {
     const ctx = await seedCourse();
     const defaultId = await insertConfig(ctx.orgId, { isDefault: true, modelName: "org-default-model" });
 
-    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, ctx.homeworkId);
+    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, null);
     expect(resolved.id).toBe(defaultId);
     expect(resolved.modelName).toBe("org-default-model");
   });
@@ -108,7 +98,7 @@ describe.skipIf(!RAW_DATABASE_URL)("resolveLLMConfig (real DB, #26)", () => {
       provider: "llmoxie",
     });
 
-    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, ctx.homeworkId);
+    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, null);
     expect(resolved.id).toBe(configId);
     expect(resolved.provider).toBe("llmoxie");
   });
@@ -117,20 +107,19 @@ describe.skipIf(!RAW_DATABASE_URL)("resolveLLMConfig (real DB, #26)", () => {
     const ctx = await seedCourse();
     await insertConfig(ctx.orgId, { isDefault: true, modelName: "org-default-model" });
     const overrideId = await insertConfig(ctx.orgId, { modelName: "homework-override-model" });
-    await db.update(homeworks).set({ llmConfigId: overrideId }).where(eq(homeworks.id, ctx.homeworkId));
 
-    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, ctx.homeworkId);
+    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, overrideId);
     expect(resolved.id).toBe(overrideId);
     expect(resolved.modelName).toBe("homework-override-model");
   });
 
-  it("prefers the course's own llm_config_id over the org default when the homework has no override (#325)", async () => {
+  it("prefers the course's own llm_config_id over the org default when there is no homework override (#325)", async () => {
     const ctx = await seedCourse();
     await insertConfig(ctx.orgId, { isDefault: true, modelName: "org-default-model" });
     const courseOverrideId = await insertConfig(ctx.orgId, { modelName: "course-override-model" });
     await db.update(courses).set({ llmConfigId: courseOverrideId }).where(eq(courses.id, ctx.courseId));
 
-    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, ctx.homeworkId);
+    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, null);
     expect(resolved.id).toBe(courseOverrideId);
     expect(resolved.modelName).toBe("course-override-model");
   });
@@ -140,9 +129,8 @@ describe.skipIf(!RAW_DATABASE_URL)("resolveLLMConfig (real DB, #26)", () => {
     const courseOverrideId = await insertConfig(ctx.orgId, { modelName: "course-override-model" });
     await db.update(courses).set({ llmConfigId: courseOverrideId }).where(eq(courses.id, ctx.courseId));
     const hwOverrideId = await insertConfig(ctx.orgId, { modelName: "homework-override-model" });
-    await db.update(homeworks).set({ llmConfigId: hwOverrideId }).where(eq(homeworks.id, ctx.homeworkId));
 
-    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, ctx.homeworkId);
+    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, hwOverrideId);
     expect(resolved.id).toBe(hwOverrideId);
     expect(resolved.modelName).toBe("homework-override-model");
   });
@@ -153,11 +141,11 @@ describe.skipIf(!RAW_DATABASE_URL)("resolveLLMConfig (real DB, #26)", () => {
     const courseOverrideId = await insertConfig(ctx.orgId, { modelName: "stale-course-override", isActive: false });
     await db.update(courses).set({ llmConfigId: courseOverrideId }).where(eq(courses.id, ctx.courseId));
 
-    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, ctx.homeworkId);
+    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, null);
     expect(resolved.id).toBe(defaultId);
   });
 
-  it("resolves to the course override (no homeworkId) when homeworkId is null -- tutor-kind conversations (#325)", async () => {
+  it("resolves to the course override when homeworkLlmConfigId is null -- tutor-kind conversations (#325)", async () => {
     const ctx = await seedCourse();
     const courseOverrideId = await insertConfig(ctx.orgId, { modelName: "course-override-model" });
     await db.update(courses).set({ llmConfigId: courseOverrideId }).where(eq(courses.id, ctx.courseId));
@@ -171,9 +159,8 @@ describe.skipIf(!RAW_DATABASE_URL)("resolveLLMConfig (real DB, #26)", () => {
     const ctx = await seedCourse();
     const defaultId = await insertConfig(ctx.orgId, { isDefault: true, modelName: "org-default-model" });
     const overrideId = await insertConfig(ctx.orgId, { modelName: "stale-override", isActive: false });
-    await db.update(homeworks).set({ llmConfigId: overrideId }).where(eq(homeworks.id, ctx.homeworkId));
 
-    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, ctx.homeworkId);
+    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, overrideId);
     expect(resolved.id).toBe(defaultId);
   });
 
@@ -181,17 +168,25 @@ describe.skipIf(!RAW_DATABASE_URL)("resolveLLMConfig (real DB, #26)", () => {
     const ctx = await seedCourse();
     await insertConfig(ctx.orgId, { isDefault: true, isActive: false });
 
-    await expect(resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, ctx.homeworkId)).rejects.toBeInstanceOf(LLMConfigNotFoundError);
+    await expect(resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, null)).rejects.toBeInstanceOf(LLMConfigNotFoundError);
   });
 
-  it("resolves to the org default only (no homework lookup) when homeworkId is null -- tutor-kind conversations", async () => {
+  it("resolves to the org default only (no homework or course override) when homeworkLlmConfigId is null -- tutor-kind conversations", async () => {
     const ctx = await seedCourse();
-    const overrideId = await insertConfig(ctx.orgId, { modelName: "homework-override-model" });
-    await db.update(homeworks).set({ llmConfigId: overrideId }).where(eq(homeworks.id, ctx.homeworkId));
     const defaultId = await insertConfig(ctx.orgId, { isDefault: true, modelName: "org-default-model" });
 
     const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, null);
     expect(resolved.id).toBe(defaultId);
+  });
+
+  it("does not honor a homeworkLlmConfigId belonging to another org", async () => {
+    const ctxA = await seedCourse();
+    const ctxB = await seedCourse();
+    const otherOrgConfigId = await insertConfig(ctxB.orgId, { modelName: "org-b-config" });
+
+    await expect(
+      resolveLLMConfig(db, ctxA.orgScope, ctxA.courseScope, otherOrgConfigId),
+    ).rejects.toBeInstanceOf(LLMConfigNotFoundError);
   });
 
   it("does not leak another org's default config", async () => {
@@ -199,6 +194,6 @@ describe.skipIf(!RAW_DATABASE_URL)("resolveLLMConfig (real DB, #26)", () => {
     const ctxB = await seedCourse();
     await insertConfig(ctxB.orgId, { isDefault: true, modelName: "org-b-default" });
 
-    await expect(resolveLLMConfig(db, ctxA.orgScope, ctxA.courseScope, ctxA.homeworkId)).rejects.toBeInstanceOf(LLMConfigNotFoundError);
+    await expect(resolveLLMConfig(db, ctxA.orgScope, ctxA.courseScope, null)).rejects.toBeInstanceOf(LLMConfigNotFoundError);
   });
 });

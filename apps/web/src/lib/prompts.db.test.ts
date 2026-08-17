@@ -14,7 +14,7 @@ import { eq } from "drizzle-orm";
 import { makeNodeDb } from "../db/nodeClient";
 import type { Db } from "../db/client";
 import { unsafeOrgScope, unsafeCourseScope } from "../server/repositories/scope";
-import { resolvePromptTemplate, getPinnedPromptTemplateContent, DEFAULT_SYSTEM_PROMPT } from "./prompts";
+import { resolvePromptTemplate, getPinnedPromptTemplateContent, getSectionPromptContext, DEFAULT_SYSTEM_PROMPT } from "./prompts";
 import {
   organizations,
   courses,
@@ -23,6 +23,7 @@ import {
   homeworks,
   sections,
   promptTemplates,
+  llmConfigs,
 } from "../db/schema";
 
 const RAW_DATABASE_URL = process.env.DATABASE_URL;
@@ -219,5 +220,79 @@ describe.skipIf(!RAW_DATABASE_URL)("resolvePromptTemplate (real DB, #25)", () =>
   it("getPinnedPromptTemplateContent returns null for a nonexistent id", async () => {
     const content = await getPinnedPromptTemplateContent(db, "00000000-0000-0000-0000-000000000000");
     expect(content).toBeNull();
+  });
+});
+
+/* --------------------------------------------------------------------------
+   getSectionPromptContext (#317 review, #326): proves homeworkLlmConfigId
+   actually comes back from the SAME sections->homeworks join this function
+   already runs for title/content -- resolveLLMConfig (lib/llm-config.ts)
+   no longer re-reads `homeworks` itself, so this join is now the only
+   place that column is read for a section-kind conversation's turn.
+   -------------------------------------------------------------------------- */
+describe.skipIf(!RAW_DATABASE_URL)("getSectionPromptContext (real DB, #326)", () => {
+  let db: Db;
+
+  beforeAll(async () => {
+    db = makeNodeDb(RAW_DATABASE_URL!);
+  });
+
+  async function seedSection(opts: { homeworkLlmConfigId?: string } = {}) {
+    const [org] = await db
+      .insert(organizations)
+      .values({ name: "326-org", slug: `s326-${crypto.randomUUID().slice(0, 8)}`, workosOrganizationId: `org_${crypto.randomUUID().slice(0, 8)}` })
+      .returning({ id: organizations.id });
+    const [course] = await db
+      .insert(courses)
+      .values({ organizationId: org!.id, code: `C-${crypto.randomUUID().slice(0, 8)}`, term: "T", title: "t" })
+      .returning({ id: courses.id });
+    const [instructorUser] = await db
+      .insert(users)
+      .values({ email: randomBytes(), emailBlindIndex: randomBytes() })
+      .returning({ id: users.id });
+    const [instructorMembership] = await db
+      .insert(courseMemberships)
+      .values({ userId: instructorUser!.id, courseId: course!.id, role: "instructor" })
+      .returning({ id: courseMemberships.id });
+    const [hw] = await db
+      .insert(homeworks)
+      .values({
+        courseId: course!.id,
+        createdById: instructorMembership!.id,
+        title: "hw",
+        description: "d",
+        dueDate: new Date(Date.now() + 86_400_000),
+        publishedAt: new Date(Date.now() - 86_400_000),
+        releasedAt: new Date(Date.now() - 86_400_000),
+        llmConfigId: opts.homeworkLlmConfigId ?? null,
+      })
+      .returning({ id: homeworks.id });
+    const [section] = await db
+      .insert(sections)
+      .values({ homeworkId: hw!.id, title: "s", content: "c", order: 1 })
+      .returning({ id: sections.id });
+
+    return { courseScope: unsafeCourseScope(course!.id), orgId: org!.id, sectionId: section!.id };
+  }
+
+  it("returns homeworkLlmConfigId null when the homework has no override", async () => {
+    const ctx = await seedSection();
+    const result = await getSectionPromptContext(db, ctx.courseScope, ctx.sectionId);
+    expect(result?.homeworkLlmConfigId).toBeNull();
+  });
+
+  it("returns the homework's llm_config_id from the same join, no second query needed", async () => {
+    const orgForConfig = await db
+      .insert(organizations)
+      .values({ name: "326-cfg-org", slug: `s326cfg-${crypto.randomUUID().slice(0, 8)}`, workosOrganizationId: `org_${crypto.randomUUID().slice(0, 8)}` })
+      .returning({ id: organizations.id });
+    const [config] = await db
+      .insert(llmConfigs)
+      .values({ organizationId: orgForConfig[0]!.id, provider: "openrouter", modelName: "override-model" })
+      .returning({ id: llmConfigs.id });
+
+    const ctx = await seedSection({ homeworkLlmConfigId: config!.id });
+    const result = await getSectionPromptContext(db, ctx.courseScope, ctx.sectionId);
+    expect(result?.homeworkLlmConfigId).toBe(config!.id);
   });
 });

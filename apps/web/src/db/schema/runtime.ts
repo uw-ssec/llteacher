@@ -150,6 +150,11 @@ export const conversations = pgTable(
     // roster views) or the section-delete cascade -- both need section_id
     // leading. Found in PR #127 review, #135.
     index("conversations_section_idx").on(t.sectionId),
+    // #317 review, #326: prompt_template_id's own onDelete: "set null" write
+    // (a template row being deleted) had no index to serve it -- an
+    // unindexed FK forces a full table scan of `conversations` to find every
+    // row pointing at the id being deleted, on every such delete.
+    index("conversations_prompt_template_idx").on(t.promptTemplateId),
     // At most one active section-conversation per (user, section) -- the
     // active-conversation case only, not a transitive cap on submissions
     // per (user, section): a soft-delete-and-recreate cycle can still

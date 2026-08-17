@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import type { Db } from "../db/client";
-import { courses, homeworks, llmConfigs, organizationCredentials } from "../db/schema";
+import { courses, llmConfigs, organizationCredentials } from "../db/schema";
 import type { CourseScope, OrgScope } from "../server/repositories/scope";
 import { getOpenRouter, getLLMoxie } from "./ai";
 
@@ -91,33 +91,32 @@ const LLM_CONFIG_COLUMNS = {
  *  shared org, e.g. one of the four CDI projects, pin its own model without
  *  setting `llm_config_id` on every homework in it).
  *
- *  `homeworkId` is null for tutor-kind conversations (no homework to check
- *  an override against) -- resolution starts at the course level instead,
- *  same shape as resolvePromptTemplate's `sectionId: null` case. */
+ *  `homeworkLlmConfigId` -- #317 review, #326: the caller's job now, not
+ *  this function's -- passes the homework's `llm_config_id` column value
+ *  directly (null for "no override" or "tutor-kind, no homework at all"),
+ *  instead of a homeworkId this function re-reads `homeworks` with. Every
+ *  real caller (chat.ts) already has this column from a join it ran one
+ *  statement earlier (getSectionPromptContext, lib/prompts.ts) to fetch
+ *  the section/homework title text -- re-reading `homeworks` here was a
+ *  second Neon HTTP round-trip for a column the caller already had. */
 export async function resolveLLMConfig(
   db: Db,
   orgScope: OrgScope,
   courseScope: CourseScope,
-  homeworkId: string | null,
+  homeworkLlmConfigId: string | null,
 ): Promise<ResolvedLLMConfig> {
-  if (homeworkId) {
-    const [homework] = await db
-      .select({ llmConfigId: homeworks.llmConfigId })
-      .from(homeworks)
-      .where(eq(homeworks.id, homeworkId));
-    if (homework?.llmConfigId) {
-      const [override] = await db
-        .select(LLM_CONFIG_COLUMNS)
-        .from(llmConfigs)
-        .where(
-          and(
-            eq(llmConfigs.id, homework.llmConfigId),
-            eq(llmConfigs.organizationId, orgScope),
-            eq(llmConfigs.isActive, true),
-          ),
-        );
-      if (override) return override;
-    }
+  if (homeworkLlmConfigId) {
+    const [override] = await db
+      .select(LLM_CONFIG_COLUMNS)
+      .from(llmConfigs)
+      .where(
+        and(
+          eq(llmConfigs.id, homeworkLlmConfigId),
+          eq(llmConfigs.organizationId, orgScope),
+          eq(llmConfigs.isActive, true),
+        ),
+      );
+    if (override) return override;
   }
 
   const [course] = await db.select({ llmConfigId: courses.llmConfigId }).from(courses).where(eq(courses.id, courseScope));

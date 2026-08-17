@@ -195,6 +195,16 @@ export interface PromptSectionContext {
    *  a second query just to get the homeworkId lib/llm-config.ts's
    *  resolveLLMConfig needs. getSectionPromptContext always sets it. */
   homeworkId?: string;
+  /** #317 review, #326: the homework's own llm_config_id override, from the
+   *  SAME sections->homeworks join this function already runs -- chat.ts
+   *  used to re-read this one column via a second, separate `homeworks`
+   *  select inside resolveLLMConfig itself, one statement after this
+   *  function's own join already had it. resolveLLMConfig now takes this
+   *  value directly instead of a homeworkId to look it up from. Optional
+   *  for the same pure-test-fixture reason as homeworkId above;
+   *  getSectionPromptContext always sets it (possibly to null, if the
+   *  homework has no override). */
+  homeworkLlmConfigId?: string | null;
   /** #317 review, blocking finding #4: true when the parent homework's
    *  derived status (deriveHomeworkStatus, repositories/homeworks.ts) is
    *  draft/scheduled/hidden -- i.e. the instructor has not released this
@@ -234,6 +244,7 @@ export async function getSectionPromptContext(
       sectionContent: sections.content,
       homeworkTitle: homeworks.title,
       homeworkId: homeworks.id,
+      homeworkLlmConfigId: homeworks.llmConfigId,
       dueDate: homeworks.dueDate,
       publishedAt: homeworks.publishedAt,
       releasedAt: homeworks.releasedAt,
