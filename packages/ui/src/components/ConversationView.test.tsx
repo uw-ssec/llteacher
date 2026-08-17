@@ -133,26 +133,63 @@ describe("ConversationView hasMoreHistory notice (#280)", () => {
 // existing one (which is what the in-progress aria-busy message on
 // Message.tsx suppresses -- see that component's own #300 test).
 describe("ConversationView live region (#300)", () => {
+  // #317 review, #327: role="log" moved from .conversation-inner (which
+  // also held the breadcrumb/header-actions/title/hasMoreHistory notice --
+  // none of that is turn content) to a narrower .conversation-log wrapper
+  // around just the appended messages, so a header-row action (e.g. #248's
+  // Restart button) is no longer announced as a log insertion the moment
+  // it renders.
   it("marks the transcript as a polite, additions-only log region", () => {
     const { container } = render(
       <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} />,
     );
-    const log = container.querySelector(".conversation-inner")!;
+    const log = container.querySelector(".conversation-log")!;
     expect(log.getAttribute("role")).toBe("log");
     expect(log.getAttribute("aria-live")).toBe("polite");
     expect(log.getAttribute("aria-relevant")).toBe("additions");
   });
 
-  it("does NOT put aria-live on anything wider than .conversation-inner (no torrent re-announce of every streamed token)", () => {
+  it("does NOT put aria-live on anything wider than .conversation-log (no torrent re-announce of every streamed token)", () => {
     const { container } = render(
       <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} />,
     );
-    // .conversation-messages is .conversation-inner's own parent -- the
-    // issue explicitly warns against a live region wide enough to
-    // re-announce every streamed token, so nothing above .conversation-inner
-    // itself may carry aria-live.
+    // .conversation-inner is .conversation-log's own parent, and now also
+    // holds the header row/title/notice -- the issue explicitly warns
+    // against a live region wide enough to re-announce every streamed
+    // token, so nothing above .conversation-log itself may carry aria-live.
+    const inner = container.querySelector(".conversation-inner")!;
+    expect(inner.getAttribute("aria-live")).toBeNull();
     const messagesWrap = container.querySelector(".conversation-messages")!;
     expect(messagesWrap.getAttribute("aria-live")).toBeNull();
+  });
+
+  // #317 review, #327: the header row (breadcrumb + any headerActions, e.g.
+  // #248's Restart button) used to sit INSIDE the log region -- an eager
+  // section greeting landing would announce Restart as a node ADDITION.
+  it("renders the header row (breadcrumb + headerActions) outside the log region", () => {
+    const { container } = render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        headerActions={<button>Restart section</button>}
+      />,
+    );
+    const log = container.querySelector(".conversation-log")!;
+    expect(log.querySelector(".conversation-header-row")).toBeNull();
+    expect(screen.getByRole("button", { name: "Restart section" })).toBeTruthy();
+  });
+
+  // #317 review, #327: a role="status" that receives a deterministic
+  // "the reply is done" signal on the streaming->idle transition, since
+  // aria-busy's own replay behavior on completion is unspecified across AT.
+  it("announces a deterministic status when isSending transitions from true to false", () => {
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={true} />,
+    );
+    expect(screen.getByRole("status").textContent).toBe("");
+    rerender(<ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={false} />);
+    expect(screen.getByRole("status").textContent).toMatch(/response complete/i);
   });
 });
 
@@ -188,19 +225,37 @@ describe("ConversationView Stop control (#274)", () => {
     expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
   });
 
-  it("renders nothing when onStop is set but isSending is false", () => {
+  // #317 review, #327: Stop used to unmount the instant isSending flipped
+  // false -- a keyboard user who just activated it had focus dropped to
+  // document.body with nothing to restore it (the exact harm #270 already
+  // fixed for the composer). It now stays mounted whenever onStop is set,
+  // merely aria-disabled while nothing is in flight, so focus survives.
+  it("stays mounted (aria-disabled, not removed) when onStop is set but isSending is false", () => {
     render(
       <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={false} onStop={() => {}} />,
     );
-    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    const stopButton = screen.getByRole("button", { name: "Stop" }) as HTMLButtonElement;
+    expect(stopButton.disabled).toBe(false);
+    expect(stopButton.getAttribute("aria-disabled")).toBe("true");
   });
 
-  it("renders Stop and calls onStop when clicked, while isSending is true", async () => {
+  it("does not call onStop when clicked while aria-disabled (isSending false)", async () => {
+    const onStop = vi.fn();
+    render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={false} onStop={onStop} />,
+    );
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    expect(onStop).not.toHaveBeenCalled();
+  });
+
+  it("renders Stop, not aria-disabled, and calls onStop when clicked, while isSending is true", async () => {
     const onStop = vi.fn();
     render(
       <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={true} onStop={onStop} />,
     );
     const stopButton = screen.getByRole("button", { name: "Stop" });
+    expect(stopButton.getAttribute("aria-disabled")).toBeNull();
     const user = userEvent.setup();
     await user.click(stopButton);
     expect(onStop).toHaveBeenCalledTimes(1);

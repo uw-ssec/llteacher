@@ -165,7 +165,14 @@ describe("AlertDialog", () => {
     expect(onCancel).not.toHaveBeenCalled();
   });
 
-  it("disables both actions and shows a busy confirm button while confirming", () => {
+  // #317 review, #327: both actions used to go natively `disabled` while
+  // confirming (Cancel via its own `disabled` prop, Confirm via `loading`
+  // folding into native disabled too) -- a confirming dialog had ZERO
+  // focusable descendants, and "Confirming…" was announced nowhere (a
+  // native `disabled` button drops out of the accessibility tree in
+  // several AT). Both actions now stay focusable (native `.disabled` is
+  // false) and merely refuse activation via `aria-disabled`/`aria-busy`.
+  it("keeps both actions focusable (aria-disabled, not native disabled) and shows a busy confirm button while confirming", () => {
     render(
       <AlertDialog
         open
@@ -178,12 +185,35 @@ describe("AlertDialog", () => {
         confirming
       />,
     );
-    expect(
-      (screen.getByRole("button", { name: "Keep this conversation" }) as HTMLButtonElement).disabled,
-    ).toBe(true);
-    expect(
-      screen.getByRole("button", { name: /Restart section/ }).getAttribute("aria-busy"),
-    ).toBe("true");
+    const cancelButton = screen.getByRole("button", { name: "Keep this conversation" }) as HTMLButtonElement;
+    expect(cancelButton.disabled).toBe(false);
+    expect(cancelButton.getAttribute("aria-disabled")).toBe("true");
+    const confirmButton = screen.getByRole("button", { name: /Restart section/ }) as HTMLButtonElement;
+    expect(confirmButton.disabled).toBe(false);
+    expect(confirmButton.getAttribute("aria-disabled")).toBe("true");
+    expect(confirmButton.getAttribute("aria-busy")).toBe("true");
+    expect(screen.getByRole("status").textContent).toBe("Restart section in progress…");
+  });
+
+  it("neither action's click handler fires while confirming (aria-disabled is enforced, not just displayed)", async () => {
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AlertDialog
+        open
+        title="t"
+        description="d"
+        confirmLabel="Restart section"
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+        confirming
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: /Restart section/ }));
+    expect(onCancel).not.toHaveBeenCalled();
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 
   it("does not render into the accessibility tree when closed", () => {

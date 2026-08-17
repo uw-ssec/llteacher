@@ -283,4 +283,20 @@ describe("HomeworkForm", () => {
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.llmConfigId).toBe("cfg-inactive");
   });
+
+  // #317 review, #327: `isLoading` used to map to Save's native `disabled`,
+  // which blurs the instructor to document.body for the duration of the
+  // multi-step POST -> PATCH -> publish -> hide chain a save can trigger,
+  // with no progress announced anywhere. Save now stays focusable
+  // (aria-disabled, not native disabled) and a role="status" line
+  // announces the in-progress save.
+  it("keeps Save focusable and announces progress while isLoading is true", () => {
+    const onSubmit = vi.fn();
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} isLoading />);
+    const saveButton = screen.getByRole("button", { name: /save/i }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(false);
+    expect(saveButton.getAttribute("aria-disabled")).toBe("true");
+    expect(saveButton.getAttribute("aria-busy")).toBe("true");
+    expect(screen.getByRole("status").textContent).toBe("Saving homework…");
+  });
 });

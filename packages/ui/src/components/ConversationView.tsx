@@ -136,6 +136,35 @@ export function ConversationView({
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // #317 review, #327: no deterministic announcement existed for a
+  // streamed reply *finishing* -- the start is announced (Message.tsx's
+  // own "AI is responding" aria-busy row), but the end relied entirely on
+  // aria-busy clearing, whose replay behavior across AT is unspecified
+  // (Cordero's own finding: "a blind student hears 'AI is responding' then
+  // silence" is a plausible outcome, not a hypothetical one). A static,
+  // deterministic phrase -- not the reply's own text -- is used
+  // deliberately: `msg.content` is `React.ReactNode` (markdown-rendered,
+  // may include a CodeBlock or a generative-UI card), not always a string
+  // this component could safely re-read as plain text without risking a
+  // garbled or incomplete announcement.
+  // Counted, not just a static string: a role="status" region is expected
+  // to announce on any mutation regardless of whether the new text matches
+  // the old, but that's exactly the AT-dependent behavior this issue's own
+  // "manual AT verification" requirement flags as unconfirmed -- appending
+  // the turn count keeps consecutive completions textually distinct
+  // (and, as a side effect, informative) rather than relying on that
+  // assumption holding.
+  const [turnCompleteAnnouncement, setTurnCompleteAnnouncement] = useState("");
+  const completedTurnCountRef = useRef(0);
+  const wasSendingRef = useRef(isSending);
+  useEffect(() => {
+    if (wasSendingRef.current && !isSending) {
+      completedTurnCountRef.current += 1;
+      setTurnCompleteAnnouncement(`Response complete (turn ${completedTurnCountRef.current}).`);
+    }
+    wasSendingRef.current = isSending;
+  }, [isSending]);
+
   const handleSubmit = (text: string) => {
     onSendMessage?.(text);
     setDraft("");
@@ -152,21 +181,15 @@ export function ConversationView({
     <div className="conversation-column">
       {/* Scrollable message area */}
       <div className="conversation-messages">
-        {/* #300: role="log" is the ARIA role specified for exactly this
-            case -- a sequence of items where new ones append at the end
-            (vs. role="status"/"alert" for a single replaceable message).
-            aria-relevant="additions" (not the "additions text" default)
-            means only a newly APPENDED node is announced, not every text
-            mutation inside an existing one -- combined with aria-busy on
-            the in-progress AI message (Message.tsx), a streaming reply is
-            silent while it fills in and announced once, whole, on
-            completion. Deliberately NOT on the whole message list's
-            grandparent or higher -- see this issue's own explicit warning
-            against a live region wide enough to re-announce every
-            streamed token. */}
-        <div className="conversation-inner" role="log" aria-live="polite" aria-relevant="additions">
-          {/* Breadcrumb, with an optional surface-specific action alongside it
-              (e.g. #248's "Restart section" button) */}
+        <div className="conversation-inner">
+          {/* #317 review, #327: moved OUT of the role="log" region below --
+              this row (and the title/hasMoreHistory notice under it) used
+              to sit INSIDE it, so App.tsx's #248 Restart button was
+              announced as a node ADDITION the moment an eager section
+              greeting landed, and every section switch queued the whole
+              breadcrumb/title/notice as "new" log content alongside the
+              200 fetched messages. None of this is conversation TURN
+              content -- role="log" now wraps only the messages themselves. */}
           <div className="conversation-header-row">
             <p className="breadcrumb">{breadcrumb}</p>
             {headerActions}
@@ -197,54 +220,91 @@ export function ConversationView({
             </p>
           )}
 
-          {/* Messages */}
-          {messages.map((msg) => {
-            if (msg.role === "ai") {
+          {/* #300: role="log" is the ARIA role specified for exactly this
+              case -- a sequence of items where new ones append at the end
+              (vs. role="status"/"alert" for a single replaceable message).
+              aria-relevant="additions" (not the "additions text" default)
+              means only a newly APPENDED node is announced, not every text
+              mutation inside an existing one -- combined with aria-busy on
+              the in-progress AI message (Message.tsx), a streaming reply is
+              silent while it fills in and announced once, whole, on
+              completion.
+
+              #317 review, #327: wraps ONLY the appended turns now (the
+              breadcrumb/title/notice above moved out, see their own
+              comment). Bulk hydration/section-switch replacement is
+              handled at the CALLER: App.tsx keys the section
+              ConversationView by section id (the tutor surface was
+              already keyed by conversationId) so a switch remounts this
+              whole component -- including this region -- instead of
+              diffing up to 200 messages into a persistent live region as
+              node insertions. A freshly-mounted live region has nothing to
+              retroactively announce; only genuinely incremental appends
+              during an ACTIVE conversation reach an AT as insertions. */}
+          <div className="conversation-log" role="log" aria-live="polite" aria-relevant="additions">
+            {messages.map((msg) => {
+              if (msg.role === "ai") {
+                return (
+                  <Message key={msg.id} role="ai" isStreaming={msg.isStreaming}>
+                    {msg.content}
+                  </Message>
+                );
+              }
+              if (msg.role === "student") {
+                return (
+                  <Message key={msg.id} role="student">
+                    {msg.content}
+                  </Message>
+                );
+              }
               return (
-                <Message key={msg.id} role="ai" isStreaming={msg.isStreaming}>
+                <Message key={msg.id} role="system">
                   {msg.content}
                 </Message>
               );
-            }
-            if (msg.role === "student") {
-              return (
-                <Message key={msg.id} role="student">
-                  {msg.content}
-                </Message>
-              );
-            }
-            return (
-              <Message key={msg.id} role="system">
-                {msg.content}
-              </Message>
-            );
-          })}
+            })}
 
-          {/* #144: inline retryable error row -- shown when the owning
-              useChat's last turn failed (status "error"), so a failed or
-              rate-limited stream surfaces something instead of the
-              synthetic "thinking" placeholder just vanishing. */}
-          {error && (
-            <div className="conversation-error-row" role="alert">
-              <p className="conversation-error-row__message">{error.message}</p>
-              <Button variant="danger" size="sm" outlined onClick={error.onRetry}>
-                Retry
-              </Button>
-            </div>
-          )}
+            {/* #144: inline retryable error row -- shown when the owning
+                useChat's last turn failed (status "error"), so a failed or
+                rate-limited stream surfaces something instead of the
+                synthetic "thinking" placeholder just vanishing. */}
+            {error && (
+              <div className="conversation-error-row" role="alert">
+                <p className="conversation-error-row__message">{error.message}</p>
+                <Button variant="danger" size="sm" outlined onClick={error.onRetry}>
+                  Retry
+                </Button>
+              </div>
+            )}
 
-          {/* Bottom sentinel for scroll-to-latest */}
-          <div ref={bottomRef} aria-hidden="true" />
+            {/* Bottom sentinel for scroll-to-latest */}
+            <div ref={bottomRef} aria-hidden="true" />
+          </div>
+
+          {/* #317 review, #327: deterministic "the reply is done" signal --
+              see turnCompleteAnnouncement's own doc comment above for why
+              this is a fixed phrase, not the reply's own text. */}
+          <p className="sr-only" role="status">
+            {turnCompleteAnnouncement}
+          </p>
         </div>
       </div>
 
       {/* #274: a Stop affordance for a turn that's merely slow, not yet
           timed out (chat.ts's own STREAM_TIMEOUT_MS bounds the server side
-          of this) -- only rendered while a send is genuinely outstanding
-          and the caller actually tracks a useChat instance to stop. */}
-      {isSending && onStop && (
+          of this).
+          #317 review, #327: stays MOUNTED whenever the caller tracks a
+          useChat instance to stop (onStop set) -- previously conditional
+          on `isSending` too, so a keyboard user who activated Stop had it
+          unmount out from under their focus the instant `isSending`
+          flipped false, stranding them at document.body with no handoff
+          (same harm Composer.tsx's #270 fix already closed for the
+          composer). `ariaDisabled` (Button.tsx) keeps it focusable and
+          merely refuses activation while nothing is in flight, instead of
+          native `disabled` removing it from the tab order. */}
+      {onStop && (
         <div className="conversation-stop-row">
-          <Button variant="danger" size="sm" outlined onClick={onStop}>
+          <Button variant="danger" size="sm" outlined onClick={onStop} ariaDisabled={!isSending}>
             Stop
           </Button>
         </div>

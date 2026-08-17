@@ -2113,6 +2113,14 @@ describe("App Stop control (#274)", () => {
     expect(capturedSignal?.aborted).toBe(true);
     // Stop's whole point: the composer must come back, not stay wedged
     // behind isSending forever.
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Stop" })).toBeNull());
+    //
+    // #317 review, #327: Stop itself now stays MOUNTED once isSending goes
+    // false (aria-disabled, not removed -- see ConversationView.tsx's own
+    // #274/#327 doc comment for why: a keyboard user who just activated it
+    // must not have focus dropped to document.body with nothing to restore
+    // it). The composer re-enabling is the real assertion the old
+    // "Stop unmounts" check stood in for.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Stop" }).getAttribute("aria-disabled")).toBe("true"));
+    expect(composer.getAttribute("aria-disabled")).toBe("false");
   });
 });

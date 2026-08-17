@@ -1809,14 +1809,49 @@ body {
     color: var(--color-accent-hover);
   }
 
+  /* #317 review, #327: same #296 remedy as .tutor-sidebar__new-btn above --
+     --color-border-strong measured 1.48:1 against --color-bg and 1.40:1
+     against the dialog surface, well under WCAG 1.4.11's 3:1 for a
+     component boundary. Applies to every outlined button regardless of
+     variant (Stop, Restart section, the confirm dialog's Cancel) --
+     --color-accent clears 3:1 in both light and dark themes (it's already
+     used as body text/link color at well over that ratio) and reads as a
+     visually neutral border even on a non-accent-variant button, the same
+     way --color-border-strong was meant to before it failed contrast. */
   .btn--outlined {
-    border: 1px solid var(--color-border-strong);
+    border: 1px solid var(--color-accent);
     border-radius: var(--radius-sm);
     padding: var(--space-2) var(--space-3);
   }
 
   .btn--outlined:hover {
-    border-color: var(--color-text-muted);
+    border-color: var(--color-accent-hover);
+  }
+
+  /* #317 review, #327: had no definition anywhere -- every destructive
+     control (Remove section, Remove widget, the confirm dialog's
+     destructive Confirm) fell back to plain secondary text with no visual
+     weight, inverting the hierarchy in a confirm dialog where the
+     destructive action should read as MORE prominent, not less, than
+     Cancel. Underline is the non-colour cue WCAG 1.4.1 asks for (colour
+     alone must not be the only way a destructive action is distinguished)
+     -- --color-error's own contrast is unaffected by variant/theme, so no
+     separate dark-mode override is needed here. */
+  .btn--danger {
+    color: var(--color-error);
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+  }
+
+  .btn--danger:hover {
+    color: var(--color-error);
+    text-decoration-thickness: 2px;
+  }
+
+  .btn--danger.btn--outlined,
+  .btn--danger.btn--outlined:hover {
+    border-color: var(--color-error);
   }
 
   .btn:disabled,

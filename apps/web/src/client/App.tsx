@@ -1283,7 +1283,17 @@ export default function App() {
           </ErrorBoundary>
         ) : (
           <ErrorBoundary key="section">
+            {/* #317 review, #327: keyed by section, the same reasoning the
+                tutor ConversationView above already gets from
+                key={tutorConversationId} -- without this, switching
+                sections replaced `messages` (up to 200 rows) inside a
+                STILL-MOUNTED role="log" region, so the whole hydrated
+                transcript queued as node-addition announcements. Keying
+                forces a remount on every section switch instead: a fresh
+                live region has nothing to retroactively announce, so only
+                genuine mid-conversation appends reach an AT as insertions. */}
             <ConversationView
+              key={currentSection}
               breadcrumb={`STATS 311 · ${hwTitle} · Section ${currentSection}${
                 currentSectionTitle ? `: ${currentSectionTitle}` : ""
               }`}

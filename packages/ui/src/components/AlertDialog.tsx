@@ -120,14 +120,31 @@ export function AlertDialog({
       <div id={descriptionId} className="alert-dialog__description">
         {description}
       </div>
+      {/* #317 review, #327: `ariaDisabled`/`loading` (both aria-disabled
+          under the hood, see Button.tsx), not `disabled` -- the previous
+          version's `disabled={confirming}` on Cancel plus `loading`'s own
+          old native-disable behavior on Confirm meant a confirming dialog
+          had ZERO focusable descendants: nothing to receive focus, and
+          "Confirming…" announced nowhere (a native `disabled` button is
+          dropped from the accessibility tree in several AT). Both actions
+          now stay focusable and merely refuse activation while confirming. */}
       <div className="alert-dialog__actions">
-        <Button variant="default" outlined onClick={onCancel} disabled={confirming}>
+        <Button variant="default" outlined onClick={onCancel} ariaDisabled={confirming}>
           {cancelLabel}
         </Button>
         <Button variant={confirmVariant} onClick={onConfirm} loading={confirming}>
           {confirmLabel}
         </Button>
       </div>
+      {/* #327: role="status" progress line -- announced the moment
+          `confirming` flips true, independent of whichever action happens
+          to have focus. Visually hidden via the .sr-only utility class
+          (styles.css) so it doesn't shift the dialog's layout. */}
+      {confirming && (
+        <p className="sr-only" role="status">
+          {confirmLabel} in progress…
+        </p>
+      )}
     </dialog>
   );
 }

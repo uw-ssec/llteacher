@@ -282,7 +282,19 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
 
       {submitError && <p role="alert">{submitError}</p>}
 
-      <Button type="submit" variant="accent" disabled={isLoading}>Save</Button>
+      {/* #317 review, #327: `loading`, not `disabled` -- native `disabled`
+          blurred the instructor to document.body for the duration of the
+          multi-step POST -> PATCH -> publish -> hide chain a save can
+          trigger, with no progress announced (the `loading` prop, which
+          also sets aria-busy, was going unused). `loading` keeps Save
+          focusable and merely refuses re-activation, and the role="status"
+          line below gives AT something to announce while the chain runs. */}
+      <Button type="submit" variant="accent" loading={isLoading}>Save</Button>
+      {isLoading && (
+        <p className="sr-only" role="status">
+          Saving homework…
+        </p>
+      )}
     </form>
   );
 }
