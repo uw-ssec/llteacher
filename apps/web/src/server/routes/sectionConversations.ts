@@ -21,6 +21,35 @@ import { courseScopeFromAuthContext } from "../repositories/scope";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 
+// #317 review, #326: same limit/before validation as
+// routes/conversations.ts's listConversationMessagesHandler, shared by this
+// file's two message-history handlers below (getActiveSectionConversationHandler,
+// getSectionConversationHandler) instead of tripling the copy across two
+// files. Returns a Response for the (rare) malformed-param case so a caller
+// can `if (parsed instanceof Response) return parsed;` and otherwise use
+// `parsed` directly as getSectionConversationMessages' opts.
+function parseMessagesPageParams(c: Context<AppEnv>): { limit?: number; before?: number } | Response {
+  const limitParam = c.req.query("limit");
+  let limit: number | undefined;
+  if (limitParam !== undefined) {
+    const parsed = Number(limitParam);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 500) {
+      return c.json({ error: "limit must be an integer between 1 and 500" }, 400);
+    }
+    limit = parsed;
+  }
+  const beforeParam = c.req.query("before");
+  let before: number | undefined;
+  if (beforeParam !== undefined) {
+    const parsed = Number(beforeParam);
+    if (!Number.isInteger(parsed)) {
+      return c.json({ error: "before must be an integer seq value" }, 400);
+    }
+    before = parsed;
+  }
+  return { limit, before };
+}
+
 /* --------------------------------------------------------------------------
    Section-conversation routes (#27).
 
@@ -114,7 +143,9 @@ export async function getActiveSectionConversationHandler(c: Context<AppEnv>) {
   // state the client renders as a start affordance.
   if (!conversation) return c.json({ conversation: null, messages: [] });
 
-  const messages = await getSectionConversationMessages(db, conversation.id);
+  const pageParams = parseMessagesPageParams(c);
+  if (pageParams instanceof Response) return pageParams;
+  const messages = await getSectionConversationMessages(db, conversation.id, pageParams);
   return c.json({
     conversation: {
       id: conversation.id,
@@ -158,7 +189,9 @@ export async function getSectionConversationHandler(c: Context<AppEnv>) {
   // ids should learn nothing from the status code.
   if (!allowed) return notFound(c);
 
-  const messages = await getSectionConversationMessages(db, conversation.id);
+  const pageParams = parseMessagesPageParams(c);
+  if (pageParams instanceof Response) return pageParams;
+  const messages = await getSectionConversationMessages(db, conversation.id, pageParams);
   return c.json({
     conversation: {
       id: conversation.id,

@@ -194,6 +194,35 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
     expect(messages.map((m) => m.seq)).toEqual([...messages.map((m) => m.seq)].sort((a, b) => a - b));
   });
 
+  // #317 review, #326: was completely unbounded before this pass -- same
+  // "limits to the most recent page in chronological order, `before` pages
+  // further back" shape as conversations.test.ts's getMessagesForConversation
+  // pagination coverage, since both now share one convention.
+  it("limits to the most recent page in chronological order, and `before` pages further back (#326)", async () => {
+    await reset();
+    const scope = unsafeCourseScope(courseId);
+    const created = await startSectionConversation(db, scope, {
+      sectionId,
+      ownerUserId: studentId,
+      isTeacherTest: false,
+      canViewDrafts: true,
+    });
+    // The greeting is row 1; append four more so there are 5 total.
+    const inserted = [];
+    for (const text of ["1", "2", "3", "4"]) {
+      inserted.push(await appendMessage(db, scope, created.id, { role: "user", parts: [{ type: "text", text }] }));
+    }
+
+    const lastPage = await getSectionConversationMessages(db, created.id, { limit: 2 });
+    expect(lastPage.map((m) => (m.parts as { text: string }[])[0]?.text)).toEqual(["3", "4"]);
+
+    const olderPage = await getSectionConversationMessages(db, created.id, {
+      limit: 2,
+      before: inserted[2]!.row.seq,
+    });
+    expect(olderPage.map((m) => (m.parts as { text: string }[])[0]?.text)).toEqual(["1", "2"]);
+  });
+
   it("refuses a second active conversation on the same section", async () => {
     await reset();
     const scope = unsafeCourseScope(courseId);

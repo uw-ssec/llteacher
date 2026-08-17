@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, lt } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import {
   conversations,
@@ -17,6 +17,7 @@ import { SubmissionGradedError } from "./submissions";
 import { getOrgScopeForCourse } from "./organizations";
 import { deriveHomeworkStatus, isUnreleased } from "./homeworks";
 import { resolvePromptTemplate, sectionGreeting, sectionConversationTitle } from "../../lib/prompts";
+import { DEFAULT_MESSAGES_PAGE_SIZE } from "./conversations";
 
 /* --------------------------------------------------------------------------
    Section-conversation lifecycle (#27), kept in its own module rather than
@@ -550,11 +551,28 @@ export async function getActiveSectionConversation(
  *  the conversation and its greeting message in one atomic `db.batch`
  *  group, exactly the "batched writes" condition this file's own doc
  *  comment on `seq` names as when `createdAt` stops being safe. `seq` is
- *  included in the projection (not just used for ordering) so a future
- *  caller can page consistently the way getMessagesForConversation's
- *  `before` cursor does. */
-export async function getSectionConversationMessages(db: Db, conversationId: string) {
-  return db
+ *  included in the projection (not just used for ordering) so a caller can
+ *  page consistently via `before` -- exactly the same shape as
+ *  getMessagesForConversation's own `before` cursor.
+ *
+ *  #317 review, #326: was completely unbounded (no `.limit()`, no cursor)
+ *  while its tutor-side equivalent (getMessagesForConversation) was already
+ *  paginated at DEFAULT_MESSAGES_PAGE_SIZE -- a long-running section
+ *  conversation's full transcript, unbounded jsonb `parts` included, on
+ *  every reload. Same "fetch the tail descending, reverse to ascending"
+ *  shape as getMessagesForConversation, so both message-history endpoints
+ *  in this app now share one pagination convention, not two. */
+export async function getSectionConversationMessages(
+  db: Db,
+  conversationId: string,
+  opts?: { limit?: number; before?: number },
+) {
+  const limit = opts?.limit ?? DEFAULT_MESSAGES_PAGE_SIZE;
+  const conditions = [eq(messages.conversationId, conversationId)];
+  if (opts?.before !== undefined) {
+    conditions.push(lt(messages.seq, opts.before));
+  }
+  const rows = await db
     .select({
       id: messages.id,
       role: messages.role,
@@ -563,8 +581,10 @@ export async function getSectionConversationMessages(db: Db, conversationId: str
       seq: messages.seq,
     })
     .from(messages)
-    .where(eq(messages.conversationId, conversationId))
-    .orderBy(messages.seq);
+    .where(and(...conditions))
+    .orderBy(desc(messages.seq))
+    .limit(limit);
+  return rows.reverse();
 }
 
 /** Who may read a given section conversation (#27 access rules).

@@ -8,7 +8,12 @@ import { getOrgScopeForCourse } from "./organizations";
 import { resolvePromptTemplate } from "../../lib/prompts";
 
 export const DEFAULT_CONVERSATIONS_PAGE_SIZE = 50;
-const DEFAULT_MESSAGES_PAGE_SIZE = 200;
+// #317 review, #326: exported so getSectionConversationMessages
+// (repositories/sectionConversations.ts) can share the exact same default
+// page size instead of hand-picking its own -- one pagination convention
+// for "a page of a conversation's messages", not two independently-tuned
+// ones.
+export const DEFAULT_MESSAGES_PAGE_SIZE = 200;
 
 export async function listConversationsForOwner(
   db: Db,
