@@ -17,6 +17,162 @@ import { CodeBlock } from "./CodeBlock";
 import { EditableTitle } from "./EditableTitle";
 import { Button } from "./Button";
 
+/** The student-facing copy for a failed turn.
+ *
+ *  Two rules, both learned the hard way by auditing the previous version of
+ *  this function:
+ *
+ *  1. **The client owns the copy; the server owns the classification.** The
+ *     earlier version pattern-matched the error *prose* to guess whether a
+ *     string was safe to show. That is unfixable in principle -- it matched
+ *     one provider's English, so it missed WebKit's "Load failed", missed
+ *     Bedrock's `ThrottlingException`, and missed every string this server
+ *     itself emits (none of which contain the words it looked for). The
+ *     server now sends a stable `code` and the copy lives here.
+ *
+ *  2. **Fail safe, not open.** An unrecognized string is treated as machine
+ *     output, never promoted to the student's headline. The previous version
+ *     failed open: anything it did not recognize became the sentence the
+ *     student read, which is how `OPENROUTER_API_KEY is not set. Add it via
+ *     wrangler secret put ...` could have been rendered into a homework
+ *     thread, and how a failed JSON unwrap rendered the raw body -- the exact
+ *     defect the function existed to prevent.
+ */
+export type StoppedReason =
+  | "unauthorized"
+  | "rate_limited"
+  | "history_too_long"
+  | "not_found"
+  | "denied"
+  | "in_progress"
+  | "section_closed"
+  | "tutor_stopped"
+  | "unavailable"
+  | "unknown";
+
+export interface StoppedCopy {
+  /** Short status line. Names what stopped, not what the student did. */
+  label: string;
+  /** One or two sentences the student can act on. */
+  message: string;
+  /** Machine text, kept for a bug report. Never the headline. */
+  detail?: string;
+  /** False when retrying provably cannot succeed, so no retry is offered. */
+  retryable: boolean;
+}
+
+/** Longest machine string worth showing. A body generated above this app --
+ *  a gateway or WAF error page -- is unbounded, and the detail line has no
+ *  height cap, so an unclamped body pushes the recovery control off-screen. */
+const MAX_DETAIL_CHARS = 300;
+
+function clampDetail(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > MAX_DETAIL_CHARS
+    ? `${trimmed.slice(0, MAX_DETAIL_CHARS)}…`
+    : trimmed;
+}
+
+export function readErrorMessage(raw: string): StoppedCopy {
+  /* Defensive: the SDK stores whatever was thrown, typed `unknown`. A
+     non-Error throw yields `undefined` here, and `.trim()` on it would raise
+     inside the render body -- escalating a recoverable failed turn into a
+     boundary swap that destroys the student's unsent draft. */
+  const trimmed = typeof raw === "string" ? raw.trim() : "";
+
+  let code: StoppedReason = "unknown";
+  let serverError: string | undefined;
+
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      const obj = parsed as { error?: unknown; code?: unknown };
+      if (typeof obj?.code === "string") code = obj.code as StoppedReason;
+      if (typeof obj?.error === "string") serverError = obj.error;
+    } catch {
+      /* Not JSON. Falls through as "unknown" -- deliberately NOT rendered. */
+    }
+  }
+
+  switch (code) {
+    case "unauthorized":
+      return {
+        label: "Signed out",
+        message:
+          "Your session expired while you were working. Sign in again and your conversation will still be here.",
+        retryable: false,
+      };
+    case "rate_limited":
+      return {
+        label: "Slow down",
+        message:
+          "You're sending messages faster than the tutor can answer. Wait a few seconds, then send again.",
+        retryable: true,
+      };
+    case "history_too_long":
+      return {
+        label: "Conversation too long",
+        message:
+          "This conversation has grown past what the tutor can take in one go. Start a new one to keep going — this transcript stays saved.",
+        // Retrying re-sends the same oversized history and fails identically.
+        retryable: false,
+      };
+    case "not_found":
+      return {
+        label: "Not found",
+        message:
+          "This conversation isn't available any more. It may have been restarted, or the section may have been withdrawn by your instructor.",
+        retryable: false,
+      };
+    case "denied":
+      return {
+        label: "No access",
+        message: "You don't have access to this course any more. Check with your instructor.",
+        retryable: false,
+      };
+    case "in_progress":
+      return {
+        label: "Already sending",
+        message: "That message is already on its way. Give it a moment before sending again.",
+        retryable: true,
+      };
+    case "section_closed":
+      /* Distinct from in_progress on purpose: both are 409s, but this one is
+         permanent. Sharing a code meant a closed section rendered "already on
+         its way" with a retry that 409s identically forever. */
+      return {
+        label: "Section closed",
+        message:
+          "This section isn't open for conversation. Your instructor may have closed it, or you may have already submitted it.",
+        retryable: false,
+      };
+    case "tutor_stopped":
+      return {
+        label: "No response",
+        message: "The tutor stopped partway through. Nothing you wrote was lost.",
+        retryable: true,
+      };
+    case "unavailable":
+      return {
+        label: "Tutor unavailable",
+        message:
+          "The tutor isn't available right now. This is a problem on our side, not yours — your work is saved. Try again shortly, and tell your instructor if it persists.",
+        retryable: true,
+      };
+    default:
+      /* Everything unrecognized -- a provider string, a gateway HTML page, a
+         WebKit "Load failed", a body whose shape we do not know. The student
+         gets a sentence; the machine's words go to the detail line only. */
+      return {
+        label: "No response",
+        message: "The tutor didn't finish answering. Nothing you wrote was lost.",
+        detail: clampDetail(serverError ?? trimmed),
+        retryable: true,
+      };
+  }
+}
+
 /* -- Message data shape ---------------------------------------------------- */
 
 export interface AIMessageData {
@@ -131,10 +287,14 @@ export function ConversationView({
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  /* Scroll to bottom when new messages arrive */
+  /* Scroll to bottom when new messages arrive -- and when a turn fails.
+     `error` belongs in the deps: a failed turn does not change `messages`
+     (the assistant reply is deliberately not persisted), so without it the
+     error row mounts below the fold and nothing scrolls to it, leaving the
+     only recovery control off-screen. */
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, error]);
 
   // #317 review, #327: no deterministic announcement existed for a
   // streamed reply *finishing* -- the start is announced (Message.tsx's
@@ -176,6 +336,10 @@ export function ConversationView({
     .filter((m): m is StudentMessageData => m.role === "student")
     .map((m) => m.content)
     .slice(-10);
+
+  /* Hoisted rather than computed inside JSX: the previous inline IIFE
+     existed only to bind locals, and foreclosed memoising or extracting. */
+  const errorCopy = error ? readErrorMessage(error.message) : null;
 
   return (
     <div className="conversation-column">
@@ -263,22 +427,6 @@ export function ConversationView({
                 </Message>
               );
             })}
-
-            {/* #144: inline retryable error row -- shown when the owning
-                useChat's last turn failed (status "error"), so a failed or
-                rate-limited stream surfaces something instead of the
-                synthetic "thinking" placeholder just vanishing. */}
-            {error && (
-              <div className="conversation-error-row" role="alert">
-                <p className="conversation-error-row__message">{error.message}</p>
-                <Button variant="danger" size="sm" outlined onClick={error.onRetry}>
-                  Retry
-                </Button>
-              </div>
-            )}
-
-            {/* Bottom sentinel for scroll-to-latest */}
-            <div ref={bottomRef} aria-hidden="true" />
           </div>
 
           {/* #317 review, #327: deterministic "the reply is done" signal --
@@ -288,6 +436,65 @@ export function ConversationView({
             {turnCompleteAnnouncement}
           </p>
         </div>
+
+        {/* Deliberately OUTSIDE the role="log" region above.
+
+            A role="alert" nested inside a live region is two overlapping
+            live regions governing one insertion, with conflicting settings:
+            the log is polite + aria-relevant="additions" + non-atomic, and
+            alert is implicitly assertive + atomic. ARIA defines no
+            resolution for that and screen readers diverge. Worse, because
+            "additions" excludes text changes, a second consecutive failure
+            producing an identical message mutates no DOM and announces
+            nothing at all -- the student hears silence after pressing
+            Try again.
+
+            Hoisted here, its alert semantics work unopposed. It keeps
+            .conversation-inner for the reading measure, and stays inside
+            .conversation-messages so it scrolls with the thread. */}
+        {error && errorCopy && (
+          <div className="conversation-inner">
+            <div className="conversation-error-row">
+              {/* role="alert" scoped to the two lines the student must hear.
+                  It was on the whole block, which meant the machine detail
+                  was announced at the same weight as the sentence -- the
+                  visual demotion existed only in CSS. */}
+              <div role="alert">
+                <span className="conversation-error-row__label">{errorCopy.label}</span>
+                <p className="conversation-error-row__message">{errorCopy.message}</p>
+              </div>
+
+              {/* Before the detail, not after. A gateway error body pushed the
+                  only recovery control arbitrarily far down a thread that does
+                  not auto-scroll on error. */}
+              {errorCopy.retryable && (
+                <button
+                  type="button"
+                  className="conversation-error-row__retry"
+                  onClick={error.onRetry}
+                >
+                  Try again
+                  <span className="conversation-error-row__retry-arrow" aria-hidden="true">
+                    →
+                  </span>
+                </button>
+              )}
+
+              {errorCopy.detail && (
+                <details className="conversation-error-row__detail-wrap">
+                  <summary className="conversation-error-row__detail-toggle">
+                    Details for support
+                  </summary>
+                  <p className="conversation-error-row__detail">{errorCopy.detail}</p>
+                </details>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Sentinel last, so "scroll to bottom" means the real bottom --
+            below the error row, not above it. */}
+        <div ref={bottomRef} aria-hidden="true" />
       </div>
 
       {/* #274: a Stop affordance for a turn that's merely slow, not yet

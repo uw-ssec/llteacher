@@ -32,8 +32,28 @@ function RouteErrorBoundary() {
     <div className="page-frame">
       <div className="app-shell">
         <div className="error-boundary-fallback" role="alert" tabIndex={-1} ref={fallbackRef}>
-          <p>Something went wrong. Please refresh the page.</p>
-          <a href="/">Go home</a>
+          {/* h1 because this replaces the entire route -- a page whose whole
+              purpose is to explain a failure previously had no heading at all,
+              so a screen-reader user pressing H found nothing. */}
+          <h1 className="error-boundary-fallback__label">Page stopped</h1>
+          <p className="error-boundary-fallback__body">
+            This page couldn&apos;t be displayed. Anything you already submitted is saved.
+            Reloading usually fixes it.
+          </p>
+          {/* Reload first, because that is what the copy prescribes and what
+              actually re-runs the failed render. "Go home" navigates away from
+              the thing the reader was trying to reach. */}
+          <button
+            type="button"
+            className="error-boundary-fallback__retry"
+            onClick={() => window.location.reload()}
+          >
+            Reload this page
+            <span aria-hidden="true">→</span>
+          </button>
+          <a className="error-boundary-fallback__secondary" href="/">
+            Back to your homework
+          </a>
         </div>
       </div>
     </div>
@@ -49,8 +69,15 @@ const router = createBrowserRouter([
 function NotFound() {
   return (
     <div className="not-found">
-      <h1>Page not found</h1>
-      <a href="/">Go home</a>
+      <h1>That page isn&apos;t here</h1>
+      <p>
+        The link may be out of date, or the homework may have been withdrawn by your
+        instructor.
+      </p>
+      <a href="/">
+        Back to your homework
+        <span aria-hidden="true">→</span>
+      </a>
     </div>
   );
 }

@@ -62,7 +62,7 @@ describe("App error boundary (#144)", () => {
     // The chat column shows the boundary's recoverable fallback instead of
     // the component that threw.
     expect(await screen.findByRole("alert")).toBeTruthy();
-    expect(screen.getByText(/something went wrong/i)).toBeTruthy();
+    expect(screen.getByText(/couldn't be displayed/i)).toBeTruthy();
 
     consoleError.mockRestore();
   });

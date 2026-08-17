@@ -151,7 +151,18 @@ export function HomeworksView({
               >
                 {hw.title}
               </button>
+              {/* Status leads the meta line rather than occupying its own
+                  column beside the buttons. It is an attribute of the record,
+                  like the section count and the due date -- parked next to
+                  Submissions/Open it read as a third action, and it was the
+                  only element in the row with its own optical nudge (4px
+                  against everything else's 2px), which is what made it look
+                  like it was floating. First position keeps it at a fixed x
+                  down the list, so a column of rows still scans. */}
               <div className="admin-record-row__meta">
+                <StatusBadge kind={hw.status === "past_due" ? "past_due" : hw.status}>
+                  {STATUS_LABEL[hw.status]}
+                </StatusBadge>
                 <span className="admin-record-row__meta-chip">
                   <Folder size={12} weight="regular" aria-hidden="true" />
                   {hw.sectionCount} {hw.sectionCount === 1 ? "section" : "sections"}
@@ -162,12 +173,6 @@ export function HomeworksView({
                 </span>
               </div>
               <p className="admin-record-row__desc">{hw.description}</p>
-            </div>
-
-            <div className="admin-record-row__status">
-              <StatusBadge kind={hw.status === "past_due" ? "past_due" : hw.status}>
-                {STATUS_LABEL[hw.status]}
-              </StatusBadge>
             </div>
 
             <div className="admin-record-row__actions">

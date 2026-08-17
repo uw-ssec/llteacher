@@ -567,7 +567,7 @@ async function resolveConversation(
       authContext.isMemberOf,
     );
     if (!existing) {
-      return c.json({ error: "Conversation not found" }, 404);
+      return c.json({ error: "Conversation not found", code: "not_found" }, 404);
     }
     return { conv: existing, sectionGreetingParts: undefined };
   }
@@ -588,7 +588,7 @@ async function resolveConversation(
   const courseId = envelope.courseId;
   const scope = courseScopeFromAuthContext(authContext, courseId);
   if (!scope) {
-    return c.json({ error: "Course access denied" }, 403);
+    return c.json({ error: "Course access denied", code: "denied" }, 403);
   }
   // #214: kind defaults to "tutor" (every existing caller's behavior) --
   // only a caller that explicitly asks for "section" (App.tsx's
@@ -651,10 +651,10 @@ async function resolveConversation(
         };
       }
       if (err instanceof SectionNotFoundError) {
-        return c.json({ error: "Section not found" }, 404);
+        return c.json({ error: "Section not found", code: "not_found" }, 404);
       }
       if (err instanceof SectionNotInteractiveError) {
-        return c.json({ error: err.message }, 409);
+        return c.json({ error: err.message, code: "in_progress" }, 409);
       }
       throw err;
     }
@@ -687,7 +687,7 @@ export async function chatHandler(c: Context<AppEnv>) {
   // re-check convention used throughout homeworks.ts/submissions.ts.
   const authContext = c.get("authContext") as AuthContext | undefined;
   if (!authContext) {
-    return c.json({ error: "Unauthorized" }, 401);
+    return c.json({ error: "Unauthorized", code: "unauthorized" }, 401);
   }
 
   // #143: read the raw body ourselves (not c.req.json()) so the size cap is
@@ -740,7 +740,10 @@ export async function chatHandler(c: Context<AppEnv>) {
   // MAX_MESSAGES_PER_REQUEST's doc comment for why this is generous relative
   // to MAX_HISTORY_MESSAGES.
   if (uiMessages.length > MAX_MESSAGES_PER_REQUEST) {
-    return c.json({ error: `messages must contain at most ${MAX_MESSAGES_PER_REQUEST} entries` }, 400);
+    return c.json(
+      { error: `messages must contain at most ${MAX_MESSAGES_PER_REQUEST} entries`, code: "history_too_long" },
+      400,
+    );
   }
   // #264: every element, not just the tail -- see historyMessageSchema's
   // doc comment. Runs before the tail-specific check below so a forged
@@ -787,7 +790,10 @@ export async function chatHandler(c: Context<AppEnv>) {
   );
   if (requestCount > RATE_LIMIT_MAX_PER_MINUTE) {
     return c.json(
-      { error: "You're sending messages too quickly. Please wait a moment and try again." },
+      {
+        error: "You're sending messages too quickly. Please wait a moment and try again.",
+        code: "rate_limited",
+      },
       429,
       { "Retry-After": String(Math.ceil(RATE_LIMIT_WINDOW_MS / 1000)) },
     );
@@ -884,7 +890,7 @@ export async function chatHandler(c: Context<AppEnv>) {
   // indistinguishable from a genuinely missing section, same rationale as
   // every sibling release gate in this codebase (#172 audit).
   if (sectionPromptContext?.isUnreleased && !authContext.canViewDraftsIn(conv.courseId)) {
-    return c.json({ error: "Section not found" }, 404);
+    return c.json({ error: "Section not found", code: "not_found" }, 404);
   }
   const systemPrompt = assembleSystemPrompt(resolvedSystemPromptContent, sectionPromptContext ?? undefined, isDefaultPrompt);
 
@@ -1083,7 +1089,7 @@ export async function chatHandler(c: Context<AppEnv>) {
     } catch (err) {
       await releaseConversationTurnLock(db, conv.id);
       if (err instanceof IdempotencyKeyConflictError) {
-        return c.json({ error: err.message }, 409);
+        return c.json({ error: err.message, code: "in_progress" }, 409);
       }
       throw err;
     }
@@ -1205,21 +1211,30 @@ export async function chatHandler(c: Context<AppEnv>) {
 
     return result.toUIMessageStreamResponse({
       headers: { "x-conversation-id": conv.id },
-      // #317 review, #321 + "strongly recommend" item: previously absent,
-      // so the SDK's default error-to-string conversion reached the client
-      // unfiltered -- combined with App.tsx rendering chatError.message
+      // #317 review, #321 + "strongly recommend" item, #334: previously
+      // absent, so the SDK's default error-to-string conversion reached the
+      // client unfiltered -- combined with App.tsx rendering chatError.message
       // verbatim, a provider error (e.g. a raw 429 JSON body, "You're
       // sending messages too quickly...") reached the student exactly as
       // the provider phrased it. Logged for the same reason as streamText's
       // own onError above (this hook can fire for stream-processing errors
-      // that one doesn't see), and replaced with a message that's actually
-      // safe to show a student.
+      // that one doesn't see).
+      //
+      // #334: a JSON envelope, not a bare sentence -- ConversationView's
+      // readErrorMessage (packages/ui) parses `{error, code}` off this
+      // string and classifies by `code`, the same contract every other
+      // c.json({error, code}) response on this route already uses. A bare
+      // string would classify as "unknown" and bury this sentence in the
+      // "details for support" disclosure instead of the headline.
       onError: (error) => {
         logServerError(
           "chatHandler.toUIMessageStreamResponse.onError",
           error instanceof Error ? error : new Error(String(error)),
         );
-        return "Something went wrong while generating a response. Please try again.";
+        return JSON.stringify({
+          error: "The tutor stopped partway through. Nothing you wrote was lost.",
+          code: "tutor_stopped",
+        });
       },
       // The AI SDK's natural hook for persisting the assistant turn --
       // responseMessage is the full final UIMessage (text parts + any

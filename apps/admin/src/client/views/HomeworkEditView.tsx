@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { HomeworkForm, type HomeworkFormInitialData, type LLMConfigOption } from "../components/HomeworkForm";
+import { AdminNotice } from "../components/AdminNotice";
 
 /** ISO datetime string -> the `YYYY-MM-DDTHH:mm` shape a <input
  *  type="datetime-local"> requires, in the *browser's local* timezone (a
@@ -124,7 +125,13 @@ export function HomeworkEditView({
         <button type="button" className="admin-back" onClick={onCancel}>
           Cancel
         </button>
-        <p role="alert">{loadError}</p>
+        <AdminNotice
+          eyebrow="Could not load"
+          title="This homework didn't load"
+          body="The assignment couldn't be fetched for editing. Nothing has been saved or changed — reopening it is safe."
+          detail={`GET /api/courses/${courseId}/homeworks/${homeworkId}`}
+          secondaryAction={{ label: "Back", onClick: onCancel }}
+        />
       </div>
     );
   }

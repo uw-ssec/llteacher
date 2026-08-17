@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import { Button, Input } from "@llteacher/ui";
 import type { SectionDetail } from "../lib/fixtures";
 import { computeSectionDiff, type FormSection } from "../lib/computeSectionDiff";
+import { AdminNotice } from "./AdminNotice";
 
 /** The picker only ever renders an id + a label -- decoupled from the full
  *  fixtures.LLMConfig shape (which models the LLM-configs catalog page's
@@ -76,6 +77,13 @@ export interface HomeworkFormProps {
 }
 
 const MAX_SECTIONS = 20;
+
+/* `submitError` carries two unrelated kinds of message: this one (the network
+   save actually failed) and form-shape complaints like "No more than 20
+   sections". Only the former earns the reassurance copy about unsaved edits,
+   so the render branch compares against this constant rather than dressing
+   every submit error as a server failure. */
+const SAVE_FAILED = "Failed to save homework. Please try again.";
 
 export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: HomeworkFormProps) {
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -157,7 +165,7 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
         hidden: values.hidden, expiresAt: values.expiresAt,
       });
     } catch {
-      setSubmitError("Failed to save homework. Please try again.");
+      setSubmitError(SAVE_FAILED);
     }
   });
 
@@ -171,7 +179,7 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
   };
 
   return (
-    <form onSubmit={submit} noValidate>
+    <form className="admin-form" onSubmit={submit} noValidate>
       <div className="admin-form-field">
         <Input
           label="Title"
@@ -188,7 +196,10 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
       <div className="admin-form-field">
         <label htmlFor="hw-due-date">Due date</label>
         <input id="hw-due-date" type="datetime-local" {...register("dueDate", { required: "Due date required" })} />
-        {errors.dueDate && <p role="alert">{errors.dueDate.message}</p>}
+        <p className="admin-form-hint">
+          The deadline. Once it passes the homework reads as past due and <strong>stays visible</strong> to students.
+        </p>
+        {errors.dueDate && <p role="alert" className="admin-field-error">{errors.dueDate.message}</p>}
       </div>
 
       <div className="admin-form-field">
@@ -199,52 +210,99 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
         </select>
       </div>
 
-      <fieldset>
+      <fieldset className="admin-form-group">
         <legend>Publish</legend>
-        <label>
+        {/* The checkbox's own text and its qualifier are separate lines now.
+            Inline, "Published" and "Release at (optional, future only)" ran
+            together into one unreadable run of text. */}
+        <label className="admin-form-check">
           <input type="checkbox" {...register("publish")} />
-          Published
+          <span className="admin-form-check__label">Published</span>
         </label>
-        <label htmlFor="hw-released-at">Release at (optional, future only)</label>
-        <input id="hw-released-at" type="datetime-local" {...register("releasedAt")} />
+        <div className="admin-form-field">
+          <label htmlFor="hw-released-at">Release at</label>
+          <input id="hw-released-at" type="datetime-local" {...register("releasedAt")} />
+          <p className="admin-form-hint">Optional. Must be in the future.</p>
+        </div>
       </fieldset>
 
-      <fieldset>
+      <fieldset className="admin-form-group">
         <legend>Visibility</legend>
-        <label>
+        <label className="admin-form-check">
           <input type="checkbox" {...register("hidden")} />
-          Hidden (pulled from student view regardless of publish state)
+          <span className="admin-form-check__label">
+            Hidden
+            <span>Pulled from student view regardless of publish state.</span>
+          </span>
         </label>
-        <label htmlFor="hw-expires-at">Expires at (optional — auto-hides once passed)</label>
-        <input id="hw-expires-at" type="datetime-local" {...register("expiresAt")} />
+        <div className="admin-form-field">
+          <label htmlFor="hw-expires-at">Expires at</label>
+          <input id="hw-expires-at" type="datetime-local" {...register("expiresAt")} />
+          {/* #328: "auto-hides once passed" never explained how this differs
+              from the due date, and the two are easy to conflate. Expiry
+              outranks every other state in deriveHomeworkStatus, so it is the
+              one field here that can silently remove a whole class's access. */}
+          <p className="admin-form-hint">
+            Optional, and <strong>not</strong> the due date. Once it passes the homework is hidden from students
+            entirely — including their own submitted work and tutor conversations. Leave empty unless you
+            mean to withdraw access.
+          </p>
+        </div>
       </fieldset>
 
       {fields.map((field, index) => (
-        <fieldset key={field.id} aria-labelledby={`section-${index}-legend`}>
-          <legend id={`section-${index}-legend`}>Section {index + 1}</legend>
-          <label htmlFor={`section-${index}-title`}>Section title</label>
-          <input id={`section-${index}-title`} aria-label="Section title" {...register(`sections.${index}.title`, { required: true })} />
-          <label htmlFor={`section-${index}-type`}>Section type</label>
-          <select id={`section-${index}-type`} aria-label="Section type" {...register(`sections.${index}.type`)}>
-            <option value="conversation">Conversation</option>
-            <option value="non_interactive">Question (student types an answer)</option>
-          </select>
-          <label htmlFor={`section-${index}-content`}>Section content</label>
-          <textarea id={`section-${index}-content`} aria-label="Section content" {...register(`sections.${index}.content`, { required: true })} />
-          <div className="admin-markdown-preview" aria-label={`Section ${index + 1} content preview`}>
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{watch(`sections.${index}.content`) || ""}</ReactMarkdown>
+        <fieldset key={field.id} className="admin-form-record" aria-labelledby={`section-${index}-legend`}>
+          {/* Numbered like the list view's HW-001 chip, so a section reads as
+              a record rather than as browser fieldset chrome. */}
+          <legend id={`section-${index}-legend`}>
+            SEC · {String(index + 1).padStart(3, "0")}
+          </legend>
+
+          <div className="admin-form-field">
+            <label htmlFor={`section-${index}-title`}>Section title</label>
+            <input id={`section-${index}-title`} aria-label="Section title" {...register(`sections.${index}.title`, { required: true })} />
           </div>
-          <label htmlFor={`section-${index}-solution`}>Solution (optional)</label>
-          <textarea id={`section-${index}-solution`} aria-label="Section solution" {...register(`sections.${index}.solutionContent`)} />
-          <div className="admin-markdown-preview" aria-label={`Section ${index + 1} solution preview`}>
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{watch(`sections.${index}.solutionContent`) || ""}</ReactMarkdown>
+
+          <div className="admin-form-field">
+            <label htmlFor={`section-${index}-type`}>Section type</label>
+            <select id={`section-${index}-type`} aria-label="Section type" {...register(`sections.${index}.type`)}>
+              <option value="conversation">Conversation</option>
+              <option value="non_interactive">Question (student types an answer)</option>
+            </select>
           </div>
+
+          <div className="admin-form-field">
+            <label htmlFor={`section-${index}-content`}>Section content</label>
+            <textarea id={`section-${index}-content`} aria-label="Section content" {...register(`sections.${index}.content`, { required: true })} />
+            <p className="admin-form-hint">
+              Markdown. This is the problem statement the student sees, and the context the AI tutor works from.
+            </p>
+            <div className="admin-markdown-preview" aria-label={`Section ${index + 1} content preview`}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{watch(`sections.${index}.content`) || ""}</ReactMarkdown>
+            </div>
+          </div>
+
+          <div className="admin-form-field">
+            <label htmlFor={`section-${index}-solution`}>Solution</label>
+            <textarea id={`section-${index}-solution`} aria-label="Section solution" {...register(`sections.${index}.solutionContent`)} />
+            <p className="admin-form-hint">
+              Optional. Never shown to students — visible only to graders holding the solutions capability.
+            </p>
+            <div className="admin-markdown-preview" aria-label={`Section ${index + 1} solution preview`}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{watch(`sections.${index}.solutionContent`) || ""}</ReactMarkdown>
+            </div>
+          </div>
+
           <Button
             type="button"
             variant="danger"
+            className="admin-form-record__remove"
             aria-label="Remove section"
             onClick={() => {
-              if (window.confirm(`Remove section ${index + 1}? This cannot be undone until you save.`)) remove(index);
+              // #328: the old copy ("cannot be undone until you save") read as
+              // "it CAN be undone after you save" -- the opposite of the truth
+              // -- and never mentioned the student conversations that go with it.
+              if (window.confirm(`Remove section ${index + 1}? It will be deleted when you save this homework, along with any student conversations in it.`)) remove(index);
             }}
           >
             Remove section
@@ -252,23 +310,42 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
         </fieldset>
       ))}
 
-      {errors.sections && <p role="alert">At least 1 section is required</p>}
+      {errors.sections && <p role="alert" className="admin-field-error">At least 1 section is required</p>}
 
-      <Button type="button" onClick={() => append({ title: "", content: "", solutionContent: undefined, type: "conversation" })}>
-        + Add section
-      </Button>
+      <div className="admin-form-add">
+        <Button type="button" onClick={() => append({ title: "", content: "", solutionContent: undefined, type: "conversation" })}>
+          + Add section
+        </Button>
+      </div>
 
       {widgetFields.map((field, index) => (
-        <fieldset key={field.id} aria-labelledby={`widget-${index}-legend`}>
-          <legend id={`widget-${index}-legend`}>Progress Widget {index + 1}</legend>
-          <label htmlFor={`widget-${index}-pre`}>Pre-section prompt</label>
-          <input id={`widget-${index}-pre`} aria-label="Pre-section prompt" {...register(`widgets.${index}.prePrompt`, { required: true })} />
-          <label htmlFor={`widget-${index}-post`}>Post-section prompt</label>
-          <input id={`widget-${index}-post`} aria-label="Post-section prompt" {...register(`widgets.${index}.postPrompt`, { required: true })} />
+        <fieldset key={field.id} className="admin-form-record" aria-labelledby={`widget-${index}-legend`}>
+          <legend id={`widget-${index}-legend`}>
+            WIDGET · {String(index + 1).padStart(3, "0")}
+          </legend>
+
+          <div className="admin-form-field">
+            <label htmlFor={`widget-${index}-pre`}>Pre-section prompt</label>
+            <input id={`widget-${index}-pre`} aria-label="Pre-section prompt" {...register(`widgets.${index}.prePrompt`, { required: true })} />
+          </div>
+
+          <div className="admin-form-field">
+            <label htmlFor={`widget-${index}-post`}>Post-section prompt</label>
+            <input id={`widget-${index}-post`} aria-label="Post-section prompt" {...register(`widgets.${index}.postPrompt`, { required: true })} />
+          </div>
+
           <Button
             type="button"
             variant="danger"
+            className="admin-form-record__remove"
             aria-label="Remove widget"
+            /* Deliberately unconfirmed, and pinned by a test ("no confirmation
+               required"). It reads as an inconsistency next to Remove section,
+               but it is proportionality: a section carries the problem
+               statement, the solution, and the student conversations held
+               against it, while a widget is two prompt strings that may have
+               been added seconds ago. Confirming the cheap one would be
+               friction, not safety. */
             onClick={() => removeWidget(index)}
           >
             Remove widget
@@ -276,25 +353,44 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
         </fieldset>
       ))}
 
-      <Button type="button" onClick={() => appendWidget({ prePrompt: "", postPrompt: "" })}>
-        + Add progress widget
-      </Button>
+      <div className="admin-form-add">
+        <Button type="button" onClick={() => appendWidget({ prePrompt: "", postPrompt: "" })}>
+          + Add progress widget
+        </Button>
+      </div>
 
-      {submitError && <p role="alert">{submitError}</p>}
-
-      {/* #317 review, #327: `loading`, not `disabled` -- native `disabled`
-          blurred the instructor to document.body for the duration of the
-          multi-step POST -> PATCH -> publish -> hide chain a save can
-          trigger, with no progress announced (the `loading` prop, which
-          also sets aria-busy, was going unused). `loading` keeps Save
-          focusable and merely refuses re-activation, and the role="status"
-          line below gives AT something to announce while the chain runs. */}
-      <Button type="submit" variant="accent" loading={isLoading}>Save</Button>
-      {isLoading && (
-        <p className="sr-only" role="status">
-          Saving homework…
-        </p>
+      {/* No retry action here — the Save button below IS the retry, and a
+          second "Try again" next to it would be two controls for one act. */}
+      {submitError && (
+        <AdminNotice
+          eyebrow={submitError === SAVE_FAILED ? "Not saved" : "Check this form"}
+          title={submitError}
+          body={
+            submitError === SAVE_FAILED
+              ? "Your edits are still on screen and nothing was written to the server. Nothing is lost until you leave this page."
+              : undefined
+          }
+        />
       )}
+
+      {/* Save sits in its own ruled band. Inline, it rendered as
+          "+ Add section+ Add progress widgetSave" -- the commitment carrying
+          no more weight than the two controls that merely extend a list. */}
+      <div className="admin-form-actions">
+        {/* #317 review, #327: `loading`, not `disabled` -- native `disabled`
+            blurred the instructor to document.body for the duration of the
+            multi-step POST -> PATCH -> publish -> hide chain a save can
+            trigger, with no progress announced (the `loading` prop, which
+            also sets aria-busy, was going unused). `loading` keeps Save
+            focusable and merely refuses re-activation, and the role="status"
+            line below gives AT something to announce while the chain runs. */}
+        <Button type="submit" variant="accent" loading={isLoading}>Save</Button>
+        {isLoading && (
+          <p className="sr-only" role="status">
+            Saving homework…
+          </p>
+        )}
+      </div>
     </form>
   );
 }

@@ -921,7 +921,7 @@ describe("POST /api/chat", () => {
       });
 
       expect(res.status).toBe(404);
-      expect(await res.json()).toEqual({ error: "Section not found" });
+      expect(await res.json()).toEqual({ error: "Section not found", code: "not_found" });
       // The whole point: the model must never see the section content.
       expect(streamTextMock).not.toHaveBeenCalled();
       expect(appendMessageMock).not.toHaveBeenCalled();
@@ -1448,7 +1448,7 @@ describe("POST /api/chat", () => {
       errorSpy.mockRestore();
     });
 
-    it("replaces the client-visible stream error with a safe message instead of the raw provider error", async () => {
+    it("replaces the client-visible stream error with a safe {error,code} envelope instead of the raw provider error", async () => {
       createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
       getLastMessagesMock.mockResolvedValue([]);
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1460,7 +1460,13 @@ describe("POST /api/chat", () => {
         new Error('{"error":"You\'re sending messages too quickly. Please slow down."}'),
       );
       expect(clientVisibleMessage).not.toContain("sending messages too quickly");
-      expect(clientVisibleMessage).toBe("Something went wrong while generating a response. Please try again.");
+      // #334: readErrorMessage (packages/ui/ConversationView) parses this as
+      // JSON and classifies by `code`, so the wire shape is the contract, not
+      // a plain sentence.
+      expect(JSON.parse(clientVisibleMessage)).toEqual({
+        error: "The tutor stopped partway through. Nothing you wrote was lost.",
+        code: "tutor_stopped",
+      });
       errorSpy.mockRestore();
     });
 

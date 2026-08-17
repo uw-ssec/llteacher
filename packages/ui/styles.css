@@ -250,6 +250,12 @@
   --color-border:        #2E2C28;
   --color-border-strong: #3A3834;
 
+  /* #334: --color-error was the one token the stopped states use that this
+     block never overrode. It was a border colour (3:1 obligation); the
+     stopped-state label makes it 12px TEXT, which needs 4.5:1, and
+     #C92A2A on this block's --color-bg #1A1A1A is 3.19:1. #FF8787 clears it. */
+  --color-error:         #FF8787;
+
   --color-text:          #FAFAF7;
   --color-text-secondary: #B5B0AA;
   /* #296: was #7A7570 -- 3.82:1 / 3.31:1 / 3.06:1 against this file's
@@ -1460,23 +1466,206 @@ body {
      the owning useChat's last turn failed (status "error") instead of the
      stream just silently disappearing.
      ------------------------------------------------------------------------- */
+  /* -------------------------------------------------------------------------
+     .conversation-error-row — the turn that did not arrive.
+
+     This was a pink-washed rounded rectangle with a red left bar and an
+     outlined button in the corner: the generic alert component every tool
+     produces, and a thing that belongs to no product in particular. It also
+     contradicted the rules this app already sets for itself -- `.btn` is
+     documented as "Text-link or minimal outlined. Never a vivid filled
+     pill", and `.message--ai` as "no fill, no border. Pure text."
+
+     Redesigned from the conversation outward instead. Every turn here
+     already has a voice: the tutor speaks as bare text on paper, the student
+     as a right-aligned bubble, the system as centred mono small-caps. A
+     failure is not an alert interrupting that thread -- it is the tutor's
+     turn *failing to arrive*. So it occupies the tutor's own position and
+     register, and is rendered severed rather than boxed.
+
+     The device is a rule that breaks off: a hairline runs from the text
+     margin and stops short, ending in an error-red tick. An utterance cut
+     mid-flow. It only reads as anything inside a conversation, which is the
+     point -- it cannot be lifted into some other product's alert slot.
+
+     Paper stays paper. Error red appears as a hairline mark, never a wash.
+     ------------------------------------------------------------------------- */
   .conversation-error-row {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-4);
-    margin-block: var(--space-4);
-    padding: var(--space-3) var(--space-4);
-    border-radius: 6px;
-    background-color: rgba(190, 60, 50, 0.06);
-    border-inline-start: 2px solid var(--color-error);
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
+    /* Sits where an AI turn would, and carries .message--ai's own bottom
+       rhythm so the thread's spacing does not stutter around a failure. */
+    margin-block: var(--space-4) var(--space-8);
   }
 
+  /* The severed rule. Solid from the margin, then fading -- the fade is the
+     "cut off" rather than a hard stop, which would read as a border. */
+  /* The severed rule's geometry lives here once. Three states draw it and
+     only the colour differs -- previously all of it was written out three
+     times, and the animation had already been dropped from two copies. */
+  .conversation-error-row,
+  .error-boundary-fallback,
+  .not-found {
+    --stopped-rule-width: min(280px, 60%);
+    --stopped-rule-tick: 18px;
+    --stopped-rule-color: var(--color-error);
+  }
+
+  .conversation-error-row::before,
+  .error-boundary-fallback::before,
+  .not-found::before {
+    content: "";
+    display: block;
+    width: var(--stopped-rule-width);
+    height: 1px;
+    background-image: linear-gradient(
+      to right,
+      var(--stopped-rule-color) 0,
+      var(--stopped-rule-color) var(--stopped-rule-tick),
+      var(--color-border-strong) var(--stopped-rule-tick),
+      transparent 100%
+    );
+    transform-origin: left;
+    animation: error-rule-sever 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  @keyframes error-rule-sever {
+    from { transform: scaleX(0); }
+    to   { transform: scaleX(1); }
+  }
+
+  @keyframes error-turn-rise {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Same construction as .message__system-text -- this is the system's
+     existing voice for "something happened here that is not a turn". */
+  .conversation-error-row__label {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-variant: small-caps;
+    color: var(--color-error);
+    animation: error-turn-rise 320ms ease-out both;
+    animation-delay: 80ms;
+  }
+
+  /* The tutor's body register, one step quieter -- it occupies the speaking
+     position but is not itself a thing the tutor said. */
   .conversation-error-row__message {
     margin: 0;
+    max-width: 58ch;
+    font-family: var(--font-sans);
+    font-size: var(--font-size-base);
+    line-height: var(--leading-body);
+    color: var(--color-text-secondary);
+    animation: error-turn-rise 320ms ease-out both;
+    animation-delay: 120ms;
+  }
+
+  /* The machine's words, demoted. Present for a bug report, not shouted at
+     a student who cannot act on "Provider returned error". */
+  .conversation-error-row__detail {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    line-height: var(--leading-normal);
+    color: var(--color-text-muted);
+    word-break: break-word;
+    animation: error-turn-rise 320ms ease-out both;
+    animation-delay: 160ms;
+  }
+
+  /* Retry borrows the sidebar's submit affordance -- a text link whose arrow
+     slides on hover -- rather than an outlined button in the corner. The
+     recovery is offered in the thread's own voice. */
+  /* The machine's words sit behind a disclosure now. Previously they were a
+     sibling <p> inside role="alert", so a screen reader announced the raw
+     string at the same weight as the sentence -- the demotion existed only
+     in CSS and reached sighted users only. */
+  .conversation-error-row__detail-wrap {
+    margin-block-start: var(--space-1);
+  }
+
+  .conversation-error-row__detail-toggle {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    cursor: pointer;
+  }
+
+  .conversation-error-row__detail-toggle:hover {
+    color: var(--color-text-secondary);
+  }
+
+  /* Underlined by default. Without it this was the same colour and family as
+     the paragraph directly above, distinguished only on :hover -- which touch
+     users never get, so nothing marked it as actionable at all. */
+  .error-boundary-fallback__secondary {
     font-family: var(--font-sans);
     font-size: var(--font-size-sm);
+    color: var(--color-text-secondary);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .error-boundary-fallback__secondary:hover {
     color: var(--color-text);
+    text-decoration: underline;
+  }
+
+  .conversation-error-row__retry {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45em;
+    margin-block-start: var(--space-1);
+    /* 2.5.8 Target Size: padding:0 at 14px/1.7 gave 23.8px, just under the
+       24px minimum. The Button component this replaced was ~30px. */
+    padding-block: var(--space-1);
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-sans);
+    font-size: var(--font-size-sm);
+    font-weight: var(--weight-medium);
+    color: var(--color-accent);
+    transition: color 140ms ease-out;
+    animation: error-turn-rise 320ms ease-out both;
+    animation-delay: 200ms;
+  }
+
+  .conversation-error-row__retry:hover {
+    color: var(--color-accent-hover);
+  }
+
+  .conversation-error-row__retry-arrow {
+    display: inline-block;
+    transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .conversation-error-row__retry:hover .conversation-error-row__retry-arrow {
+    transform: translateX(3px);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .conversation-error-row::before,
+    .error-boundary-fallback::before,
+    .not-found::before,
+    .conversation-error-row__label,
+    .conversation-error-row__message,
+    .conversation-error-row__detail,
+    .conversation-error-row__retry {
+      animation: none;
+    }
+    .conversation-error-row__retry-arrow {
+      transition: none;
+    }
   }
 
   /* -------------------------------------------------------------------------
@@ -1500,31 +1689,131 @@ body {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    gap: var(--space-3);
+    gap: var(--space-2);
+    /* Inline padding matters here because this also renders as a route's
+       whole content inside .app-shell (a flex row) -- without it the fallback
+       sat flush against the viewport's left edge. */
     margin: var(--space-6) 0;
-    padding: var(--space-4) var(--space-5);
-    border-radius: 6px;
-    background-color: rgba(190, 60, 50, 0.06);
-    border-inline-start: 2px solid var(--color-error);
+    /* Shell-sized. `.error-boundary-fallback--inline` below drops it for the
+       in-page uses (ProfileView), where this class is reused inside a
+       non-flex parent and the shell padding reads as a stray indent. */
+    padding-inline: var(--space-8);
+    /* Owns the scroll its predecessor had. .page-frame is 100vh/overflow
+       hidden and .app-shell clips too, so without this the content below the
+       fold at 400% zoom (1.4.10/1.4.4) is unreachable -- including the only
+       recovery control. */
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  /* Same language, but not the page's whole content: no scroll ownership and
+     no shell padding. */
+  .error-boundary-fallback--inline {
+    flex: initial;
+    overflow-y: visible;
+    padding-inline: 0;
+  }
+
+  /* Same severed rule as .conversation-error-row -- a render failure and a
+     failed turn are the same event to a student ("the tutor stopped"), so
+     they should not arrive in two different visual languages. */
+
+  .error-boundary-fallback__label {
+    margin: 0;
+    font-weight: var(--weight-medium);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-variant: small-caps;
+    color: var(--color-error);
+  }
+
+  .error-boundary-fallback__body {
+    margin: 0;
+    max-width: 58ch;
     font-family: var(--font-sans);
-    font-size: var(--font-size-sm);
-    color: var(--color-text);
+    font-size: var(--font-size-base);
+    line-height: var(--leading-body);
+    color: var(--color-text-secondary);
   }
 
   .error-boundary-fallback__retry {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45em;
+    margin-block-start: var(--space-1);
+    /* 2.5.8: same 23.8px this class's twin was fixed for. Left behind in the
+       first pass, and this work grew it from two call sites to four. */
+    padding-block: var(--space-1);
+    background: none;
+    border: none;
+    cursor: pointer;
     font-family: var(--font-sans);
     font-size: var(--font-size-sm);
     font-weight: var(--weight-medium);
-    color: var(--color-error);
-    background: none;
-    border: 1px solid var(--color-error);
-    border-radius: 6px;
-    padding: var(--space-1) var(--space-3);
-    cursor: pointer;
+    color: var(--color-accent);
+    transition: color 140ms ease-out;
   }
 
   .error-boundary-fallback__retry:hover {
-    background-color: rgba(190, 60, 50, 0.08);
+    color: var(--color-accent-hover);
+  }
+
+  /* -------------------------------------------------------------------------
+     .not-found — the 404. Had no rule anywhere in this stylesheet, so it
+     rendered as a raw browser <h1> and a blue underlined link. Same severed
+     rule as the other stopped states: a page that isn't there and a turn
+     that didn't arrive are the same promise broken, and should not arrive in
+     two different visual languages.
+     ------------------------------------------------------------------------- */
+  .not-found {
+    --stopped-rule-color: var(--color-accent-warm);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-3);
+    min-height: 100dvh;
+    justify-content: center;
+    padding-inline: clamp(var(--space-6), 8vw, var(--space-12));
+    background-color: var(--color-bg);
+  }
+
+  .not-found h1 {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: var(--font-size-2xl);
+    font-weight: var(--weight-semibold);
+    letter-spacing: -0.02em;
+    line-height: var(--leading-tight);
+    color: var(--color-text);
+  }
+
+  .not-found p {
+    margin: 0;
+    max-width: 52ch;
+    font-family: var(--font-sans);
+    font-size: var(--font-size-sm);
+    line-height: var(--leading-body);
+    color: var(--color-text-secondary);
+  }
+
+  .not-found a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45em;
+    margin-block-start: var(--space-2);
+    font-family: var(--font-sans);
+    font-size: var(--font-size-sm);
+    font-weight: var(--weight-medium);
+    color: var(--color-accent);
+    text-decoration: none;
+    transition: color 140ms ease-out;
+  }
+
+  .not-found a:hover {
+    color: var(--color-accent-hover);
   }
 
   /* -------------------------------------------------------------------------
@@ -2214,9 +2503,14 @@ body {
   padding-block-start: var(--space-2);
   padding-block-end: var(--space-5);
   padding-inline: var(--space-3);
-  /* Smooth width transition when collapsing — pairs with the base
-     .sidebar transition rule */
-  transition: width 200ms ease-out, padding 200ms ease-out;
+  /* No transition override here on purpose. This block sits OUTSIDE
+     @layer components, so it beats the base .sidebar rule regardless of
+     specificity -- an override that declared itself a pairing while
+     actually replacing it, collapsing this rail in 200ms against the
+     student rail's 240ms. Inheriting the base rule is what makes the two
+     sidebars animate identically, and it narrows the animated properties
+     to padding-inline (the only padding that changes on collapse) instead
+     of all four sides. */
 }
 
 .admin-sidebar__label {
@@ -2417,7 +2711,10 @@ body {
   display: none;
 }
 
-.sidebar--collapsed .admin-sidebar {
+/* Compound, not descendant: both classes sit on the same <aside>, so
+   `.sidebar--collapsed .admin-sidebar` never matched and the rail kept its
+   expanded inline padding at 64px wide. */
+.admin-sidebar.sidebar--collapsed {
   padding-inline: 0;
 }
 
@@ -2745,9 +3042,16 @@ body {
 
 .admin-record-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  /* [id] [body] [actions]. The status badge used to hold a fourth column
+     between body and actions, which put a record attribute inside the action
+     cluster; it now leads the body's meta line with the other attributes. */
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: var(--space-4);
   align-items: start;
+  /* One nudge, declared once. The id chip and the action buttons both need to
+     optically align to the first line of the title; they were carrying
+     separate literals that had already drifted apart from the status badge's. */
+  --record-row-first-line: 2px;
   padding: var(--space-5) var(--space-3);
   border-block-end: 1px solid var(--color-border);
   transition: background-color 140ms ease-out;
@@ -2758,7 +3062,7 @@ body {
 }
 
 .admin-record-row__id {
-  padding-block-start: 2px;  /* optical alignment with first line of body */
+  padding-block-start: var(--record-row-first-line);
 }
 
 .admin-record-row__body {
@@ -2796,6 +3100,10 @@ body {
 .admin-record-row__meta {
   display: inline-flex;
   flex-wrap: wrap;
+  /* Explicit: the status pill is taller than the bare icon chips it now sits
+     beside (padding + a 1.4 line box vs. plain text), so the default stretch
+     would leave the row's items sitting on different centre lines. */
+  align-items: center;
   gap: var(--space-3);
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
@@ -2840,17 +3148,14 @@ body {
   margin: 0 0.15em;
 }
 
-.admin-record-row__status {
-  display: flex;
-  align-items: flex-start;
-  padding-block-start: 4px;
-}
+/* .admin-record-row__status intentionally removed — the status badge now sits
+   in .admin-record-row__meta with the other record attributes. */
 
 .admin-record-row__actions {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  padding-block-start: 2px;
+  padding-block-start: var(--record-row-first-line);
 }
 
 /* Staggered entrance — gentle fade + 2px rise */
@@ -3322,6 +3627,636 @@ body {
   background-color: rgba(75, 46, 131, 0.06);
   padding: 1px 5px;
   border-radius: 3px;
+}
+
+/* ==========================================================================
+   .admin-form — the homework authoring surface (#328).
+
+   Before this, .admin-form-field had no rule anywhere in the stylesheet, so
+   every control in HomeworkForm fell back to inline browser flow: labels
+   ran into their inputs, "Publish / Published / Release at" collided on one
+   line, and a section's title, type, and content sat side by side on a
+   single row. Only the Title looked right, because it is the one field that
+   uses the Input component.
+
+   The direction is the console's own, not a new one: a specification
+   document. Mono small-caps field labels matching Input's inline label and
+   the sidebar's CATALOG rule, ruled groups instead of browser fieldset
+   chrome, and each section rendered as a numbered record echoing the
+   HW-001 chip vocabulary from the list view. Authoring a homework and
+   reading the homework list should feel like the same product.
+   ========================================================================== */
+
+.admin-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  /* Narrower than the 1080px records column. This is prose authoring, and a
+     full-width datetime input next to a full-width textarea reads as two
+     unrelated things rather than one form. */
+  max-width: 820px;
+}
+
+/* -- Field: label over control, the unit the whole form is built from ----- */
+
+.admin-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* Matches Input.tsx's inline label exactly (mono, xs, small-caps, uppercase,
+   0.06em, secondary) so the Title field and every hand-rolled field below it
+   read as the same control. */
+.admin-form-field > label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-variant: small-caps;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.admin-form-field input[type="text"],
+.admin-form-field input[type="datetime-local"],
+.admin-form-field select,
+.admin-form-field textarea,
+.admin-form-record input[type="text"],
+.admin-form-record input:not([type]),
+.admin-form-record select,
+.admin-form-record textarea {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  transition:
+    border-color 140ms ease-out,
+    background-color 140ms ease-out;
+}
+
+.admin-form-field textarea,
+.admin-form-record textarea {
+  /* Prose, not a one-line box. Section content becomes the tutor's context
+     and the solution is a full worked answer -- both were rendering as a
+     bare resize handle. */
+  min-height: 7.5rem;
+  line-height: var(--leading-body);
+  resize: vertical;
+}
+
+.admin-form-record textarea[id$="-solution"] {
+  min-height: 5.5rem;
+}
+
+.admin-form-field input:focus,
+.admin-form-field select:focus,
+.admin-form-field textarea:focus,
+.admin-form-record input:focus,
+.admin-form-record select:focus,
+.admin-form-record textarea:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+  border-color: var(--color-accent);
+  background-color: var(--color-bg);
+}
+
+.admin-form-field input[aria-invalid="true"] {
+  border-color: var(--color-error);
+}
+
+/* Secondary line under a control -- the parenthetical explanations that were
+   previously jammed inline against a checkbox label. */
+.admin-form-hint {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-normal);
+  color: var(--color-text-muted);
+}
+
+/* -- Group: a ruled fieldset, replacing the browser's default box --------- */
+
+.admin-form-group {
+  margin: 0;
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background-color: var(--color-surface-raised);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* Same construction as the sidebar's ● CATALOG label, so a form group and a
+   nav group are recognisably the same kind of heading. */
+.admin-form-group > legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.admin-form-group > legend::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background-color: var(--color-accent-warm);
+}
+
+/* -- Checkbox row: box, label, and its explanation on separate axes ------- */
+
+.admin-form-check {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 0.6em;
+  cursor: pointer;
+}
+
+.admin-form-check input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  margin-block-start: 1px;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.admin-form-check__label {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  line-height: var(--leading-normal);
+}
+
+.admin-form-check__label span {
+  display: block;
+  margin-block-start: 2px;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+/* -- Record: a section or widget, styled as the list view's rows are ------ */
+
+.admin-form-record {
+  position: relative;
+  margin: 0;
+  padding: var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background-color: var(--color-surface-raised);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* The numbered chip, borrowing RecordId's vocabulary from the list view so a
+   section reads as a record rather than a browser fieldset. */
+.admin-form-record > legend {
+  padding: 3px 9px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 4px;
+  background-color: var(--color-bg);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+/* -- Markdown preview: the authored text as the student will meet it ------ */
+
+.admin-markdown-preview {
+  padding: var(--space-3) var(--space-4);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-bg);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  color: var(--color-text-secondary);
+}
+
+/* Empty is the common case while typing has not started -- label it instead
+   of rendering an unexplained empty dashed box. */
+.admin-markdown-preview:empty::before {
+  content: "Preview";
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.admin-markdown-preview > :first-child { margin-block-start: 0; }
+.admin-markdown-preview > :last-child  { margin-block-end: 0; }
+
+.admin-markdown-preview code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background-color: var(--color-surface);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+/* -- Actions -------------------------------------------------------------- */
+
+/* The add-actions belong with the list they extend, not with Save. */
+.admin-form-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* Save is the commitment; it gets its own ruled band so it cannot read as a
+   third add-button the way it did when all three ran together inline. */
+.admin-form-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding-block-start: var(--space-4);
+  border-block-start: 1px solid var(--color-border);
+}
+
+/* `.btn--danger` has no rule anywhere in this stylesheet (#327), so every
+   destructive control falls back to plain secondary text -- here that put
+   "Remove section" in the same visual register as a label. Scoped to the
+   authoring form on purpose: defining the shared variant is #327's job, and
+   #317 adds new danger controls that would collide with it. */
+.admin-form-record__remove {
+  align-self: flex-start;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-error);
+  transition:
+    border-color 140ms ease-out,
+    background-color 140ms ease-out;
+}
+
+.admin-form-record__remove:hover {
+  border-color: var(--color-error);
+  background-color: rgba(201, 42, 42, 0.05);
+}
+
+/* The shared Button's variants are text-link styles (`.btn--accent` sets a
+   colour and nothing else), which is right in a record row and wrong for a
+   form's primary action -- Save rendered as plain purple text with no more
+   weight than "+ Add section". These give the authoring controls real
+   affordance without changing Button for every other caller. */
+.admin-form-actions .btn {
+  padding: var(--space-2) var(--space-5);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-accent);
+  font-weight: var(--weight-medium);
+  color: var(--form-action-fg, #FFFFFF);
+  transition:
+    background-color 140ms ease-out,
+    border-color 140ms ease-out;
+}
+
+/* --color-accent is deep Husky Purple in light mode and light Accent
+   Lavender under [data-theme="dark"], so the label flips with the surface. */
+[data-theme="dark"] .admin-form-actions .btn {
+  --form-action-fg: var(--raw-text);
+}
+
+.admin-form-actions .btn:hover:not(:disabled) {
+  background-color: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.admin-form-actions .btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Dashed, echoing the sidebar's own QUICK ACTIONS buttons -- an add-control
+   reads as "there could be another one here", which is exactly what a dashed
+   edge says and a solid one does not. */
+.admin-form-add .btn {
+  padding: var(--space-2) var(--space-4);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  transition:
+    border-color 140ms ease-out,
+    color 140ms ease-out;
+}
+
+.admin-form-add .btn:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* ==========================================================================
+   .admin-notice — the console's failure + denial state.
+
+   One visual family for every "this did not work" moment: a 403 denial, a
+   failed fetch, a failed save. Before this they were a bare <p role="alert">
+   (and, for the 403, a class with no stylesheet at all), which read as an
+   unstyled document rather than a considered state.
+
+   The register is deliberate. This is an instructor's records console, not a
+   consumer app -- a screaming red alert box is the wrong voice for "the
+   homework list did not load." The direction is the same editorial-ledger
+   language the rest of the console already speaks:
+
+     · a filed record on warm paper, hairline-ruled
+     · a mono small-caps status eyebrow with a state dot   (cf. ● CATALOG)
+     · a semantic rule down the leading edge               (cf. .admin-alert)
+     · the ¶ pilcrow promoted from a stray glyph to a letterpress watermark
+     · a diagonal hatch in the corner — a stamped, filed-away texture
+
+   Colour carries the state (red = failed, gold = denied); everything else is
+   shared, so a reader learns the shape once.
+   ========================================================================== */
+
+.admin-notice {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  max-width: 620px;
+  padding: var(--space-6) var(--space-6) var(--space-6) var(--space-8);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background-color: var(--color-surface);
+  font-family: var(--font-sans);
+  /* The state colour every child inherits. Modifiers below re-point it. */
+  --notice-tone: var(--color-error);
+  --notice-tone-wash: rgba(201, 42, 42, 0.05);
+  /* Red carries more visual weight than gold at equal alpha, so the two tones
+     tune the watermark separately to land at the same perceived quietness. */
+  --notice-mark-opacity: 0.07;
+}
+
+/* Leading rule — the console's active-state motif, reused as a status mark.
+   Draws downward on entrance. */
+.admin-notice::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  inset-block: 0;
+  width: 3px;
+  background-color: var(--notice-tone);
+  transform-origin: top;
+  animation: notice-rule 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Corner hatch — a stamped/filed texture, not decoration for its own sake.
+   Fades out toward the content so it never competes with the text. */
+.admin-notice::after {
+  content: "";
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-end: 0;
+  width: 180px;
+  /* Top-right only. The ¶ mark owns the bottom-right; giving the hatch full
+     height put two textures in one corner, where they read as noise rather
+     than as two deliberate marks. */
+  height: 58%;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--notice-tone) 0,
+    var(--notice-tone) 1px,
+    transparent 1px,
+    transparent 9px
+  );
+  opacity: 0.07;
+  -webkit-mask-image: linear-gradient(200deg, #000, transparent 70%);
+  mask-image: linear-gradient(200deg, #000, transparent 70%);
+}
+
+@keyframes notice-rule {
+  from { transform: scaleY(0); }
+  to   { transform: scaleY(1); }
+}
+
+@keyframes notice-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Denial, not failure — Heritage Gold. A 403 is an authorization fact, not a
+   fault, and it should not wear the same red as a broken request. */
+.admin-notice--denied {
+  --notice-tone: var(--color-accent-warm);
+  --notice-tone-wash: rgba(133, 117, 77, 0.06);
+  --notice-mark-opacity: 0.10;
+}
+
+/* The ¶ watermark. The pilcrow already appears in this console's empty and
+   403 states as a 25px glyph floating with no role; at this scale it becomes
+   the letterpress mark the aesthetic was reaching for. */
+/* Anchored to the bottom-right and bled off BOTH edges. Bleeding off a single
+   edge reads as a clipping bug; off the corner it reads as ink running past
+   the plate, which is the intent. It also fills the card's empty lower-right
+   quadrant instead of sitting behind the text. */
+.admin-notice__mark {
+  position: absolute;
+  inset-block-end: -0.30em;
+  inset-inline-end: -0.06em;
+  font-family: var(--font-sans);
+  font-size: 148px;
+  line-height: 1;
+  font-weight: var(--weight-semibold);
+  color: var(--notice-tone);
+  opacity: var(--notice-mark-opacity);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Status eyebrow — mono small-caps with a state dot, the same construction as
+   the sidebar's ● CATALOG label, so it reads as the same system. */
+.admin-notice__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55em;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--notice-tone);
+  animation: notice-rise 340ms ease-out both;
+  animation-delay: 60ms;
+}
+
+.admin-notice__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--notice-tone);
+  flex-shrink: 0;
+}
+
+.admin-notice__title {
+  margin: 0;
+  font-size: var(--font-size-xl);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.015em;
+  line-height: var(--leading-tight);
+  color: var(--color-text);
+  animation: notice-rise 340ms ease-out both;
+  animation-delay: 110ms;
+}
+
+.admin-notice__body {
+  margin: 0;
+  /* The comfortable measure, held regardless of the 1080px admin column the
+     block sits in — and short enough to keep a clear right gutter so the text
+     never runs into the corner marks. */
+  max-width: 46ch;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  color: var(--color-text-secondary);
+  animation: notice-rise 340ms ease-out both;
+  animation-delay: 160ms;
+}
+
+/* Technical line — the failing resource, in mono, for an admin who is about
+   to paste it into a bug report. Quiet by default; selectable. */
+.admin-notice__detail {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: 4px;
+  background-color: var(--notice-tone-wash);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-normal);
+  /* Secondary, not muted: --color-text-muted over the tinted wash lands near
+     2.8:1, and this line exists to be read and copied into a bug report. */
+  color: var(--color-text-secondary);
+  word-break: break-all;
+  animation: notice-rise 340ms ease-out both;
+  animation-delay: 200ms;
+}
+
+.admin-notice__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-block-start: var(--space-1);
+  animation: notice-rise 340ms ease-out both;
+  animation-delay: 240ms;
+}
+
+.admin-notice__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--color-accent);
+  border-radius: 4px;
+  background-color: var(--color-accent);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  /* --color-accent is deep Husky Purple in light mode but light Accent
+     Lavender under [data-theme="dark"], so a hardcoded white label would fail
+     contrast on the dark theme. The foreground flips with the surface. */
+  color: var(--notice-action-fg, #FFFFFF);
+  cursor: pointer;
+  transition:
+    background-color 140ms ease-out,
+    border-color 140ms ease-out,
+    transform 140ms ease-out;
+}
+
+[data-theme="dark"] .admin-notice__action {
+  --notice-action-fg: var(--raw-text);
+}
+
+.admin-notice__action:hover {
+  background-color: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.admin-notice__action:active {
+  transform: translateY(1px);
+}
+
+.admin-notice__action:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.admin-notice__action--ghost {
+  background-color: transparent;
+  border-color: var(--color-border-strong);
+  color: var(--color-text-secondary);
+}
+
+.admin-notice__action--ghost:hover {
+  background-color: transparent;
+  border-color: var(--color-text-secondary);
+  color: var(--color-text);
+}
+
+/* The retry glyph spins one turn on hover — the one micro-interaction in this
+   block, spent on the control that matters. */
+.admin-notice__action-glyph {
+  display: inline-flex;
+  transition: transform 420ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.admin-notice__action:hover .admin-notice__action-glyph {
+  transform: rotate(360deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .admin-notice::before,
+  .admin-notice__eyebrow,
+  .admin-notice__title,
+  .admin-notice__body,
+  .admin-notice__detail,
+  .admin-notice__actions {
+    animation: none;
+  }
+  .admin-notice__action-glyph {
+    transition: none;
+  }
+}
+
+/* Field-level validation errors in the admin forms. Not part of the notice
+   family -- these are inline corrections, not failures -- but they were the
+   same bare <p role="alert"> and would otherwise sit unstyled next to a
+   styled save failure in the very same form. */
+.admin-field-error {
+  display: flex;
+  align-items: center;
+  gap: 0.45em;
+  margin: var(--space-1) 0 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  color: var(--color-error);
+}
+
+.admin-field-error::before {
+  content: "";
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background-color: var(--color-error);
+  flex-shrink: 0;
 }
 
 /* #172 (FUN-002): read-only homework view for a non-authoring grader. */

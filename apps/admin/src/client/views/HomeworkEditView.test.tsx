@@ -40,7 +40,7 @@ describe("HomeworkEditView", () => {
       <HomeworkEditView courseId="course-a" homeworkId="hw-1" llmConfigs={LLM_CONFIGS} onSaved={vi.fn()} onCancel={vi.fn()} />,
     );
     await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
-    expect(screen.getByText(/failed to load homework/i)).toBeTruthy();
+    expect(screen.getByText(/didn't load/i)).toBeTruthy();
   });
 
   it("does not call /publish when saving without touching the publish checkbox", async () => {

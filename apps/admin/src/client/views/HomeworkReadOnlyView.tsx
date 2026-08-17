@@ -17,6 +17,7 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, Lock } from "@phosphor-icons/react";
 import { PageHeader } from "../components/PageHeader";
+import { AdminNotice } from "../components/AdminNotice";
 import { StatusBadge } from "../components/StatusBadge";
 import { abortAfter } from "../lib/abortAfter";
 import type { HomeworkStatus } from "./HomeworksView";
@@ -163,7 +164,13 @@ export function HomeworkReadOnlyView({
     return (
       <div className="admin-view">
         {heading}
-        <p role="alert">Failed to load this homework.</p>
+        <AdminNotice
+          eyebrow="Could not load"
+          title="This homework didn't load"
+          body="The assignment and its sections couldn't be fetched. Nothing is missing on the server — this is a read-only view, so nothing was at risk."
+          detail={`GET /api/courses/${courseId}/homeworks/${homeworkId}`}
+          secondaryAction={{ label: "Back", onClick: onBack }}
+        />
       </div>
     );
   }
