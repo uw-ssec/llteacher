@@ -608,6 +608,18 @@ export async function pinConversationPromptTemplate(
 // createdAt is timestamptz (microsecond resolution) and safe today only
 // because each append is its own transaction, so two rows can never share a
 // timestamp; `seq` makes that guarantee independent of that fact.
+// #317 review, #326: narrowed from `db.select()` (all 7 columns, including
+// the never-read-by-a-caller `conversationId`/`seq`/`createdAt`) to the 4
+// columns chat.ts's two consumers -- classifyTurn's idempotency check and
+// the model-context mapping -- actually read. `seq` still drives the
+// ORDER BY below without needing to be part of the projection.
+const LAST_MESSAGE_COLUMNS = {
+  id: messages.id,
+  role: messages.role,
+  parts: messages.parts,
+  clientMessageId: messages.clientMessageId,
+} as const;
+
 export async function getLastMessages(
   db: Db,
   scope: CourseScope,
@@ -623,7 +635,7 @@ export async function getLastMessages(
     if (!owned) return [];
   }
   return db
-    .select()
+    .select(LAST_MESSAGE_COLUMNS)
     .from(messages)
     .where(eq(messages.conversationId, conversationId))
     .orderBy(desc(messages.seq))

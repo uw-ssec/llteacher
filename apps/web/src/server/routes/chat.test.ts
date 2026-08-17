@@ -1669,16 +1669,18 @@ describe("POST /api/chat", () => {
   // own canned result.
   it("bounds the model's context to MAX_HISTORY_MESSAGES, sourced from persisted history (not the client's array)", async () => {
     createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
-    // 60 persisted rows, newest-first (real getLastMessages ordering).
-    const persistedRows = Array.from({ length: 60 }, (_, i) => ({
+    // #317 review, #326: a single getLastMessages(MAX_HISTORY_MESSAGES) call
+    // now backs both the idempotency check AND the model context -- 39
+    // persisted rows (newest-first, real getLastMessages ordering) plus the
+    // one this turn's own insert appends in memory lands exactly at the
+    // MAX_HISTORY_MESSAGES (40) cap, same as the old two-call shape did.
+    const persistedRows = Array.from({ length: 39 }, (_, i) => ({
       id: `hist-${i}`,
       role: i % 2 === 0 ? "assistant" : "user",
       parts: [{ type: "text", text: `turn ${i}` }],
       clientMessageId: null,
     }));
-    getLastMessagesMock
-      .mockResolvedValueOnce([]) // idempotency check: no prior rows -> proceed normally
-      .mockResolvedValueOnce(persistedRows.slice(0, 40)); // windowed history fetch
+    getLastMessagesMock.mockResolvedValueOnce(persistedRows);
 
     // A client-crafted fabricated assistant reply ahead of the real inbound
     // turn -- must have zero effect on what the model receives, since only

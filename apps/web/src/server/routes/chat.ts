@@ -486,6 +486,14 @@ const LOCK_STALE_MS = 90_000;
 // mocks.
 export type TurnClassification = "replay" | "skip-insert" | "insert";
 
+// #317 review, #326: the shape both getLastMessages (its narrowed
+// LAST_MESSAGE_COLUMNS projection, repositories/conversations.ts) and the
+// in-memory "insert" row built below actually need -- just enough for
+// classifyTurn's idempotency check and the model-context mapping further
+// down. appendMessage's returned row carries more columns (conversationId,
+// seq, createdAt) that persistedHistory below never reads.
+type MessageHistoryRow = { id: string; role: string; parts: unknown };
+
 export function classifyTurn(
   lastMessage: { role: string; parts: unknown; clientMessageId: string | null } | undefined,
   secondLastMessage: { role: string; clientMessageId: string | null } | undefined,
@@ -962,14 +970,25 @@ export async function chatHandler(c: Context<AppEnv>) {
     );
   }
 
+  // #317 review, #326: one fetch, sized for the model's context window
+  // (MAX_HISTORY_MESSAGES), instead of a `limit: 2` idempotency-only read
+  // followed by a SECOND, separate `limit: 40` read further down for the
+  // model context -- the second read's own result differs from this one by
+  // at most the single row the "insert" branch below is about to write, so
+  // it's cheaper to append that row in memory (persistedHistory below) than
+  // to re-fetch the same window from Postgres a second time. `recentMessages`
+  // is also what backs the idempotency check immediately below, same as the
+  // old `limit: 2` read (its first two elements).
+  //
   // #279: skipOwnershipCheck -- `conv` above already proved this
   // conversation is in scope (getOwnedConversationOrNull, or a row this
   // same request just created/raced onto inside resolveConversation), so
   // re-running the same id/courseId/isDeleted select here would be a
   // redundant round-trip.
-  const [lastMessage, secondLastMessage] = await getLastMessages(db, scope, conv.id, 2, {
+  const recentMessages = await getLastMessages(db, scope, conv.id, MAX_HISTORY_MESSAGES, {
     skipOwnershipCheck: true,
   });
+  const [lastMessage, secondLastMessage] = recentMessages;
   const initialClassification = classifyTurn(lastMessage, secondLastMessage, parsedInbound.data.id);
 
   if (initialClassification === "replay") {
@@ -978,6 +997,12 @@ export async function chatHandler(c: Context<AppEnv>) {
     await releaseConversationTurnLock(db, conv.id);
     return replayResponse(conv.id, lastMessage!.parts);
   }
+  // #317 review, #326: "skip-insert" means `recentMessages[0]` already IS
+  // the inbound message (that's classifyTurn's own definition of this
+  // case) -- persistedHistory starts as `recentMessages` unmodified and
+  // only the "insert" branch below needs to change it, by prepending the
+  // row it's about to write.
+  let persistedHistory: MessageHistoryRow[] = recentMessages;
   if (initialClassification === "insert") {
     // #266: appendMessage's return value used to be discarded entirely, so
     // a reused clientMessageId with different content silently dropped the
@@ -987,7 +1012,7 @@ export async function chatHandler(c: Context<AppEnv>) {
     // with the same request/response shape every other refusal on this
     // route already uses.
     try {
-      const { created } = await appendMessage(
+      const { row: insertedRow, created } = await appendMessage(
         db,
         scope,
         conv.id,
@@ -1011,7 +1036,10 @@ export async function chatHandler(c: Context<AppEnv>) {
         // normal circumstances -- this remains reachable only via the
         // staleness escape hatch (acquireConversationTurnLock's own doc
         // comment), so it stays as a defensive backstop rather than dead
-        // code.
+        // code. A genuine re-fetch, unlike persistedHistory above -- this
+        // request's own recentMessages snapshot predates the race winner's
+        // write, so it cannot be reused here the way the normal path reuses
+        // its own snapshot.
         const [raceLast, raceSecondLast] = await getLastMessages(db, scope, conv.id, 2, {
           skipOwnershipCheck: true,
         });
@@ -1025,6 +1053,18 @@ export async function chatHandler(c: Context<AppEnv>) {
           409,
         );
       }
+      // #317 review, #326: the row this call just wrote, prepended ahead of
+      // the pre-insert snapshot -- exactly what a fresh
+      // `getLastMessages(MAX_HISTORY_MESSAGES)` read would return post-insert
+      // (newest-first, capped at the same limit), without actually
+      // re-reading it from Postgres. role/parts come from the input this
+      // handler itself constructed the insert from (already known, not
+      // re-derived from appendMessage's returned row) -- only `id` is
+      // server-generated and genuinely needs the DB round-trip's result.
+      persistedHistory = [
+        { id: insertedRow.id, role: "user", parts: inboundMessage.parts },
+        ...recentMessages.slice(0, MAX_HISTORY_MESSAGES - 1),
+      ];
     } catch (err) {
       await releaseConversationTurnLock(db, conv.id);
       if (err instanceof IdempotencyKeyConflictError) {
@@ -1050,16 +1090,15 @@ export async function chatHandler(c: Context<AppEnv>) {
     // fabricated assistant replies or a smuggled system-role message ahead of
     // it, overriding the Socratic guardrail (the exact academic-integrity
     // bypass this issue's "Trust boundary on history" requirement calls out).
-    // Re-fetching from the row(s) this handler itself just confirmed or wrote
-    // above closes that: everything the model sees is either a prior
-    // assistant reply the server generated, or a prior user message this same
-    // idempotency check already accepted. getLastMessages orders newest-first
-    // (matches its use above); reversed here into the chronological order the
-    // model needs. Same MAX_HISTORY_MESSAGES cap as before (#215), just
-    // sourced server-side now instead of trusting the client's own window.
-    const persistedHistory = await getLastMessages(db, scope, conv.id, MAX_HISTORY_MESSAGES, {
-      skipOwnershipCheck: true,
-    });
+    // Built from the row(s) this handler itself just confirmed or wrote above
+    // (persistedHistory, computed alongside the idempotency check -- #326)
+    // closes that: everything the model sees is either a prior assistant
+    // reply the server generated, or a prior user message this same
+    // idempotency check already accepted. persistedHistory is newest-first
+    // (matches getLastMessages' own order); reversed here into the
+    // chronological order the model needs. Same MAX_HISTORY_MESSAGES cap as
+    // before (#215), just sourced server-side now instead of trusting the
+    // client's own window.
     const modelMessages: UIMessage[] = [...persistedHistory].reverse().map((m) => ({
       id: m.id,
       role: m.role as UIMessage["role"],
