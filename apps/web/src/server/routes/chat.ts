@@ -922,7 +922,12 @@ export async function chatHandler(c: Context<AppEnv>) {
     // dynamic lookup (an allowlisted binding name) to a single scoped cast,
     // instead of this call site erasing the whole Env contract.
     resolvedApiKey = await resolveApiKey(c.env, db, orgScope, resolvedLLMConfig);
-    providerClient = buildProviderClient(resolvedLLMConfig.provider, resolvedApiKey);
+    // #333: LLMOXIE_BASE_URL overrides the gateway host (lib/ai.ts's own
+    // LLMOXIE_DEFAULT_BASE_URL otherwise) -- unset for every provider that
+    // isn't llmoxie, and buildProviderClient ignores it for those.
+    providerClient = buildProviderClient(resolvedLLMConfig.provider, resolvedApiKey, {
+      llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL,
+    });
   } catch (err) {
     if (err instanceof LLMCredentialMissingError || err instanceof UnsupportedLLMProviderError) {
       const referenceId = crypto.randomUUID();

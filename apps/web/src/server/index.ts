@@ -37,6 +37,7 @@ import {
   putCoursePromptTemplateHandler,
   deleteCoursePromptTemplateHandler,
 } from "./routes/promptTemplates";
+import { listLlmModelsHandler } from "./routes/llmModels";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireGraderOf, requireInstructorOf, requireRole } from "./utils/guards";
@@ -102,6 +103,7 @@ app.get("/api/courses/:courseId/llm-configs", requireInstructorOf()(listLlmConfi
 app.get("/api/courses/:courseId/prompt-template", requireInstructorOf()(getCoursePromptTemplateHandler));
 app.put("/api/courses/:courseId/prompt-template", requireInstructorOf()(putCoursePromptTemplateHandler));
 app.delete("/api/courses/:courseId/prompt-template", requireInstructorOf()(deleteCoursePromptTemplateHandler));
+app.get("/api/courses/:courseId/llm-models", requireInstructorOf()(listLlmModelsHandler));
 app.post("/api/courses/:courseId/homeworks", requireInstructorOf()(createHomeworkHandler));
 app.get(
   "/api/courses/:courseId/homeworks/:homeworkId",
