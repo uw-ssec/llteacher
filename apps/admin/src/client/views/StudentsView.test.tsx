@@ -237,3 +237,79 @@ describe("RosterImportPanel through StudentsView (#86)", () => {
     await waitFor(() => screen.getByText(/Choose a \.csv file/i));
   });
 });
+
+/* --------------------------------------------------------------------------
+   Audit fixes: #356, #357, #358.
+   -------------------------------------------------------------------------- */
+describe("StudentsView audit fixes", () => {
+  const INSTRUCTOR = {
+    ...ACTIVE,
+    membershipId: "m-instructor",
+    userId: "u-instructor",
+    displayName: "Anjali Chen",
+    email: "achen@uw.edu",
+    role: "instructor" as const,
+  };
+
+  it("offers no Remove on a membership the server refuses to remove (#357)", async () => {
+    stub(() => rosterResponse([ACTIVE, INSTRUCTOR]));
+    renderView();
+    await waitFor(() => screen.getByText("Anjali Chen"));
+    // A course with nobody who can add an instructor back is the failure the
+    // server rule prevents, and this page is reachable by an instructor on
+    // their OWN row -- so the button was a destructive-looking control that
+    // always 409s.
+    expect(screen.queryByRole("button", { name: /Remove Anjali Chen/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /Remove Ada Lovelace/i })).toBeTruthy();
+  });
+
+  it("announces the roster load and its result (#358)", async () => {
+    stub(() => rosterResponse([ACTIVE, PENDING]));
+    renderView();
+    // Without this a screen-reader user got silence while the roster loaded
+    // and no signal that it had arrived. `role="status"` on the visible
+    // block would not fix it -- that is #204/ACC-028's unreliable pattern.
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toMatch(/2 people on this course/i),
+    );
+  });
+
+  it("keeps the import result on screen after a commit (#356)", async () => {
+    stub((_url, init) => {
+      if (init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            preview: JSON.parse(String(init.body)).preview,
+            added: 1,
+            restored: 0,
+            failed: 1,
+            rows: [
+              { line: 1, email: "ada@uw.edu", name: "", role: "", status: "added" },
+              { line: 2, email: "bad@gmail.com", name: "", role: "", status: "disallowed_domain" },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      return rosterResponse([]);
+    });
+    renderView();
+    await waitFor(() => screen.getByText(/Nobody is enrolled/i));
+    fireEvent.click(screen.getAllByRole("button", { name: /Import from CSV/i })[0]!);
+
+    const file = new File(["email\nada@uw.edu\nbad@gmail.com\n"], "roster.csv", { type: "text/csv" });
+    fireEvent.change(screen.getByLabelText(/Choose a roster CSV file/i), {
+      target: { files: [file] },
+    });
+    await waitFor(() => screen.getByRole("button", { name: /Import 1 person/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Import 1 person/i }));
+
+    // "Which of my eighty rows were skipped" is the thing the instructor
+    // needs at exactly this moment; closing the panel took it away.
+    await waitFor(() => screen.getByText(/Imported\./i));
+    expect(screen.getByText("Row 2")).toBeTruthy();
+    expect(screen.getByText("bad@gmail.com")).toBeTruthy();
+    // And it is dismissable by the instructor, not by the app.
+    expect(screen.getByRole("button", { name: /^Done$/ })).toBeTruthy();
+  });
+});

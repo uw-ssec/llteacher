@@ -232,3 +232,57 @@ describe("GradingPanel (#75)", () => {
     expect(screen.getByRole("button", { name: /Save grade/i })).toBeTruthy();
   });
 });
+
+/* --------------------------------------------------------------------------
+   Audit fixes: #358, #361.
+   -------------------------------------------------------------------------- */
+describe("GradingPanel audit fixes", () => {
+  it("announces the load and the grade currently in force (#358)", async () => {
+    stub(() => gradesResponse([HUMAN_GRADE]));
+    renderPanel();
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toMatch(/Currently graded 82 out of 100/i),
+    );
+  });
+
+  it("says so when a submission has not been graded", async () => {
+    stub(() => gradesResponse([]));
+    renderPanel();
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toMatch(/Not graded yet/i),
+    );
+  });
+
+  it("will not record the same grade twice on a second click (#361)", async () => {
+    // The GET reflects the save, as the server's would -- otherwise the
+    // reload reports "not graded" straight after grading, and the button
+    // label under test would be measuring the double rather than the view.
+    let saved = false;
+    const fetchMock = stub((_url, init) => {
+      if (init?.method === "POST") {
+        saved = true;
+        return gradesResponse([HUMAN_GRADE]);
+      }
+      return gradesResponse(saved ? [HUMAN_GRADE] : []);
+    });
+    renderPanel();
+    await waitFor(() => screen.getByLabelText("Feedback"));
+
+    fireEvent.change(screen.getByLabelText("Score"), { target: { value: "80" } });
+    fireEvent.change(screen.getByLabelText("Feedback"), { target: { value: "Good work." } });
+    fireEvent.click(screen.getByRole("button", { name: /Save grade/i }));
+
+    // The values stay on screen -- the instructor wants to see what they
+    // recorded -- but submit locks until something changes. Grades are
+    // insert-only, so a stray second click would be permanent history.
+    await waitFor(() => screen.getByRole("button", { name: /^Saved$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Saved$/ }));
+    expect(
+      fetchMock.mock.calls.filter((c) => (c[1] as RequestInit)?.method === "POST"),
+    ).toHaveLength(1);
+
+    // Editing anything unlocks it again: a regrade is a supported act.
+    fireEvent.change(screen.getByLabelText("Feedback"), { target: { value: "Revised." } });
+    expect(screen.getByRole("button", { name: /Save a new grade/i })).toBeTruthy();
+  });
+});

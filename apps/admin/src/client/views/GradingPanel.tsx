@@ -57,6 +57,9 @@ export function GradingPanel({
   const [draft, setDraft] = useState<GradeDraftPayload | null>(null);
   const [drafting, setDrafting] = useState(false);
   const [saving, setSaving] = useState(false);
+  /** #361: the field values as of the last successful save, so an unchanged
+   *  form cannot be submitted again. Null until something has been saved. */
+  const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState<{ text: string; nonce: number }>({ text: "", nonce: 0 });
 
@@ -68,6 +71,17 @@ export function GradingPanel({
   const grades = useApiResource(
     (opts) => apiClient.grades.list(courseId, submissionId, opts),
     [courseId, submissionId],
+    {
+      announce,
+      loadingMessage: "Loading grades…",
+      describeResult: (result) => {
+        const inForce = result.grades.find((g) => g.isCurrent);
+        if (!inForce) return "Not graded yet.";
+        return inForce.score === null
+          ? "Graded with written feedback and no mark."
+          : `Currently graded ${inForce.score} out of ${inForce.maxScore}.`;
+      },
+    },
   );
 
   const requestDraft = useCallback(async () => {
@@ -145,6 +159,14 @@ export function GradingPanel({
         announce("Grade saved.");
         setFromDraftId(null);
         setDraft(null);
+        /* #361: the entry fields keep their values -- an instructor wants to
+           see what they just recorded -- but `savedSnapshot` marks them as
+           matching the grade now in force, which disables submit until
+           something changes. Clearing the form instead would hide the
+           result at the moment it is most wanted; leaving submit live made a
+           duplicate grade one stray click away, and since grades are
+           insert-only that duplicate is permanent history. */
+        setSavedSnapshot(`${score}|${maxScore}|${feedback}`);
         grades.reload();
       } catch (err) {
         const message = err instanceof ApiError ? err.message : "Could not save that grade.";
@@ -159,6 +181,7 @@ export function GradingPanel({
 
   const history = grades.data?.grades ?? [];
   const current = history.find((g) => g.isCurrent);
+  const unchangedSinceSave = savedSnapshot === `${score}|${maxScore}|${feedback}`;
 
   return (
     <div className="admin-view">
@@ -242,8 +265,12 @@ export function GradingPanel({
         </fieldset>
 
         <div className="admin-form-actions">
-          <button type="submit" className="admin-button admin-button--primary" disabled={saving}>
-            {saving ? "Saving…" : current ? "Save a new grade" : "Save grade"}
+          <button
+            type="submit"
+            className="admin-button admin-button--primary"
+            disabled={saving || unchangedSinceSave}
+          >
+            {saving ? "Saving…" : unchangedSinceSave ? "Saved" : current ? "Save a new grade" : "Save grade"}
           </button>
         </div>
       </form>

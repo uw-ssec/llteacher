@@ -19,8 +19,10 @@ import { parseRosterCsv } from "../../lib/csv";
 import {
   allowedDomainsForCourse,
   listCourseRoster,
+  previewCourseMembers,
   removeCourseMember,
   upsertCourseMember,
+  upsertCourseMembers,
   type CourseRole,
   type ProvisionResult,
 } from "../repositories/roster";
@@ -31,11 +33,7 @@ import { logServerError } from "../utils/errors";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { CourseScope } from "../repositories/scope";
-import type {
-  RosterImportRowPayload,
-  RosterListPayload,
-  RosterRowStatus,
-} from "@llteacher/ui/api";
+import type { RosterImportRowPayload, RosterListPayload, RosterRowStatus } from "@llteacher/ui/api";
 
 /** Roles an instructor may enrol someone as from the console.
  *
@@ -184,7 +182,18 @@ export async function importRosterHandler(c: Context<AppEnv>) {
   const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
   const allowedDomains = await allowedDomainsForCourse(db, ctx.scope);
 
+  /* #355: the whole file is classified in one pass and then resolved in a
+     FIXED number of queries, rather than a query per row.
+     `upsertCourseMembers` documents why; the shape here is that this loop
+     does only local work -- parsing, deduplication, role validation -- and
+     hands everything that survives to one batched call.
+
+     Preview and commit run the same classification. They differ in one
+     statement: preview asks the batch path what it WOULD do (a read), commit
+     lets it write. That is what keeps the promise honest -- the rows an
+     instructor confirms come from the code that will write them. */
   const rows: RosterImportRowPayload[] = [];
+  const batch: { rowIndex: number; entry: { email: string; displayName?: string; role: CourseRole } }[] = [];
   // Within-file duplicates are reported rather than silently collapsed: a
   // roster with the same address twice usually means two different people
   // were pasted onto one line, and the instructor needs to look.
@@ -213,30 +222,47 @@ export async function importRosterHandler(c: Context<AppEnv>) {
       continue;
     }
 
-    if (preview) {
-      // The read half of upsertCourseMember, without the write: the domain
-      // check is the same call the commit makes, so a row that previews as
-      // valid cannot fail validation on commit.
-      const check = await previewRow(db, ctx.scope, cipher, key, role, allowedDomains);
-      rows.push({ ...base, status: check.status, message: check.message });
-      continue;
-    }
+    // Placeholder, replaced below once the batch resolves. Pushed now so the
+    // rows array stays in file order without a second sort.
+    rows.push({ ...base, status: "added" });
+    batch.push({
+      rowIndex: rows.length - 1,
+      entry: {
+        email: rawEmail,
+        displayName: name || undefined,
+        role: role as CourseRole,
+      },
+    });
+  }
 
-    const result = await upsertCourseMember(
-      db,
-      ctx.scope,
-      cipher,
-      { email: rawEmail, displayName: name || undefined, role: role as CourseRole },
-      allowedDomains,
-    );
-    rows.push({
-      ...base,
-      status: toRowStatus(result.status),
-      membershipId: result.membershipId,
-      message:
-        result.status === "role_conflict"
-          ? `Already on this course as ${result.existingRole}. Not changed.`
-          : result.message,
+  if (batch.length > 0) {
+    const outcomes = preview
+      ? await previewCourseMembers(
+          db,
+          ctx.scope,
+          cipher,
+          batch.map((b) => b.entry),
+          allowedDomains,
+        )
+      : await upsertCourseMembers(
+          db,
+          ctx.scope,
+          cipher,
+          batch.map((b) => b.entry),
+          allowedDomains,
+        );
+
+    outcomes.forEach((result, i) => {
+      const target = batch[i]!;
+      rows[target.rowIndex] = {
+        ...rows[target.rowIndex]!,
+        status: toRowStatus(result.status),
+        membershipId: result.membershipId,
+        message:
+          result.status === "role_conflict"
+            ? `Already on this course as ${result.existingRole}. ${preview ? "Would not be changed." : "Not changed."}`
+            : result.message,
+      };
     });
   }
 
@@ -265,40 +291,6 @@ export async function importRosterHandler(c: Context<AppEnv>) {
   }
 
   return c.json({ rows, preview, added, restored, failed });
-}
-
-/** The preview's verdict for one row: everything the commit checks, minus
- *  the write. Kept beside the importer rather than in the repository because
- *  it exists only to answer "what would happen", which is a route-layer
- *  question -- the repository's job is to make it happen. */
-async function previewRow(
-  db: ReturnType<typeof makeDb>,
-  scope: CourseScope,
-  cipher: IdentityCipher,
-  normalizedEmail: string,
-  role: EnrollableRole,
-  allowedDomains: string[],
-): Promise<{ status: RosterRowStatus; message?: string }> {
-  const { DomainAllowlistService } = await import("../../lib/services/DomainAllowlistService");
-  const check = DomainAllowlistService.validateEmailDomain(normalizedEmail, allowedDomains);
-  if (!check.allowed) {
-    return {
-      status: check.reason === "Invalid email format" ? "invalid_email" : "disallowed_domain",
-      message: check.reason,
-    };
-  }
-
-  const { members } = await listCourseRoster(db, scope, cipher, { search: normalizedEmail });
-  const existing = members.find((m) => m.email === normalizedEmail);
-  if (!existing) return { status: "added" };
-  if (existing.status === "dropped") return { status: "restored" };
-  if (existing.role !== role) {
-    return {
-      status: "role_conflict",
-      message: `Already on this course as ${existing.role}. Would not be changed.`,
-    };
-  }
-  return { status: "already_enrolled" };
 }
 
 function toRowStatus(status: ProvisionResult["status"]): RosterRowStatus {

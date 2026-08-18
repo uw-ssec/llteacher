@@ -23,6 +23,8 @@ const MEMBERSHIP_ID = "11111111-2222-4333-8444-555555555555";
 
 const listMock = vi.fn();
 const upsertMock = vi.fn();
+const upsertBatchMock = vi.fn();
+const previewBatchMock = vi.fn();
 const removeMock = vi.fn();
 const allowedDomainsMock = vi.fn();
 const getOrgScopeForCourseMock = vi.fn();
@@ -31,6 +33,11 @@ const auditBestEffortMock = vi.fn();
 vi.mock("../repositories/roster", () => ({
   listCourseRoster: (...a: unknown[]) => listMock(...a),
   upsertCourseMember: (...a: unknown[]) => upsertMock(...a),
+  // #355: the import path is batched -- one call for the whole file rather
+  // than one per row. The single-entry `upsertCourseMember` remains the
+  // manual-add door.
+  upsertCourseMembers: (...a: unknown[]) => upsertBatchMock(...a),
+  previewCourseMembers: (...a: unknown[]) => previewBatchMock(...a),
   removeCourseMember: (...a: unknown[]) => removeMock(...a),
   allowedDomainsForCourse: (...a: unknown[]) => allowedDomainsMock(...a),
 }));
@@ -79,6 +86,16 @@ beforeEach(() => {
   listMock.mockReset().mockResolvedValue({ members: [], total: 0 });
   upsertMock.mockReset().mockResolvedValue({ email: "a@uw.edu", status: "added", membershipId: MEMBERSHIP_ID });
   removeMock.mockReset().mockResolvedValue({ outcome: "removed", membershipId: MEMBERSHIP_ID, userId: "u1" });
+  upsertBatchMock.mockReset().mockImplementation(async (_db, _scope, _cipher, entries) =>
+    (entries as { email: string }[]).map((e) => ({
+      email: e.email,
+      status: "added",
+      membershipId: MEMBERSHIP_ID,
+    })),
+  );
+  previewBatchMock.mockReset().mockImplementation(async (_db, _scope, _cipher, entries) =>
+    (entries as { email: string }[]).map((e) => ({ email: e.email, status: "added" })),
+  );
   allowedDomainsMock.mockReset().mockResolvedValue(["uw.edu"]);
   getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
   auditBestEffortMock.mockReset().mockResolvedValue(undefined);
@@ -184,21 +201,33 @@ describe("POST /roster/import (#86)", () => {
     const res = await importCsv({ csv: "email\nada@uw.edu\n" });
     const body = (await res.json()) as { preview: boolean };
     expect(body.preview).toBe(true);
-    expect(upsertMock).not.toHaveBeenCalled();
+    expect(previewBatchMock).toHaveBeenCalledTimes(1);
+    expect(upsertBatchMock).not.toHaveBeenCalled();
+  });
+
+  it("resolves the whole file in ONE call, not one per row (#355)", async () => {
+    // The scalability invariant: a 300-student import must not issue 300
+    // sequential round trips, which exceeded the Worker subrequest cap.
+    const csv = ["email", ...Array.from({ length: 50 }, (_, i) => `s${i}@uw.edu`)].join("\n");
+    await importCsv({ csv, preview: false });
+    expect(upsertBatchMock).toHaveBeenCalledTimes(1);
+    expect((upsertBatchMock.mock.calls[0]![3] as unknown[]).length).toBe(50);
   });
 
   it("commits only when preview is explicitly false", async () => {
     await importCsv({ csv: "email\nada@uw.edu\n", preview: false });
-    expect(upsertMock).toHaveBeenCalledTimes(1);
+    expect(upsertBatchMock).toHaveBeenCalledTimes(1);
+    expect(previewBatchMock).not.toHaveBeenCalled();
   });
 
   it("isolates per-row failures so valid rows still land", async () => {
     // An all-or-nothing import of an 80-row file with four typos is a file
     // the instructor cannot use.
-    upsertMock
-      .mockResolvedValueOnce({ email: "ada@uw.edu", status: "added", membershipId: "m1" })
-      .mockResolvedValueOnce({ email: "bad@gmail.com", status: "disallowed_domain", message: "no" })
-      .mockResolvedValueOnce({ email: "grace@uw.edu", status: "added", membershipId: "m2" });
+    upsertBatchMock.mockResolvedValue([
+      { email: "ada@uw.edu", status: "added", membershipId: "m1" },
+      { email: "bad@gmail.com", status: "disallowed_domain", message: "no" },
+      { email: "grace@uw.edu", status: "added", membershipId: "m2" },
+    ]);
     const res = await importCsv({
       csv: "email\nada@uw.edu\nbad@gmail.com\ngrace@uw.edu\n",
       preview: false,
@@ -220,7 +249,8 @@ describe("POST /roster/import (#86)", () => {
     const res = await importCsv({ csv: "email\nada@uw.edu\nADA@uw.edu\n", preview: false });
     const body = (await res.json()) as { rows: { status: string }[] };
     expect(body.rows[1]!.status).toBe("duplicate_row");
-    expect(upsertMock).toHaveBeenCalledTimes(1);
+    // A duplicate never reaches the batch -- it is caught in the local pass.
+    expect((upsertBatchMock.mock.calls[0]![3] as unknown[]).length).toBe(1);
   });
 
   it("names an unrecognised role rather than defaulting it", async () => {
@@ -228,7 +258,8 @@ describe("POST /roster/import (#86)", () => {
     const body = (await res.json()) as { rows: { status: string; message: string }[] };
     expect(body.rows[0]!.status).toBe("role_conflict");
     expect(body.rows[0]!.message).toMatch(/wizard/);
-    expect(upsertMock).not.toHaveBeenCalled();
+    // An unparseable role never reaches the batch either.
+    expect(upsertBatchMock).not.toHaveBeenCalled();
   });
 
   it("rejects a file with no rows, and one with no email column", async () => {
@@ -244,7 +275,6 @@ describe("POST /roster/import (#86)", () => {
   it("writes one audit event for the whole import, not one per row", async () => {
     // A 200-row file would otherwise bury every other event in the org's
     // log for that day.
-    upsertMock.mockResolvedValue({ email: "x@uw.edu", status: "added", membershipId: "m" });
     await importCsv({ csv: "email\na@uw.edu\nb@uw.edu\nc@uw.edu\n", preview: false });
     expect(auditBestEffortMock).toHaveBeenCalledTimes(1);
     expect(auditBestEffortMock.mock.calls[0]![2].action).toBe("membership.roster_imported");

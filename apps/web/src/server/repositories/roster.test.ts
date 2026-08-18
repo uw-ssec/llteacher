@@ -17,8 +17,10 @@ import { unsafeCourseScope } from "./scope";
 import {
   allowedDomainsForCourse,
   listCourseRoster,
+  previewCourseMembers,
   removeCourseMember,
   upsertCourseMember,
+  upsertCourseMembers,
 } from "./roster";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
@@ -262,5 +264,222 @@ describe.skipIf(!DATABASE_URL)("roster provisioning (#32, #86)", () => {
       where: and(eq(courseMemberships.courseId, courseId)),
     });
     expect(rows.every((r) => r.courseId === courseId)).toBe(true);
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #355: the batched provisioning path.
+
+   The single-entry `upsertCourseMember` is the manual-add door and one row
+   is one row. It could not be a loop body: each call issues two to four
+   SEQUENTIAL round trips, and on Workers every neon-http query is a
+   subrequest, capped per invocation. A 300-student import -- the size #86
+   exists to serve -- issued ~900 and exceeded both the cap and the wall
+   clock, leaving a half-written roster.
+
+   These assert the batch produces the SAME outcomes as the single path, in
+   input order, because a faster path that disagrees with the one it replaced
+   is not a fix.
+   -------------------------------------------------------------------------- */
+describe.skipIf(!DATABASE_URL)("upsertCourseMembers / previewCourseMembers (#355)", () => {
+  let db: Db;
+  let cipher: IdentityCipher;
+  let courseId: string;
+  let orgId: string;
+
+  const scope = () => unsafeCourseScope(courseId);
+  const UW = ["uw.edu"];
+  const email = () => `b-${crypto.randomUUID().slice(0, 8)}@uw.edu`;
+
+  beforeAll(async () => {
+    db = makeNodeDb(DATABASE_URL!);
+    cipher = new IdentityCipher(
+      await loadIdentityCipherKeys({
+        ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+        BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+      } as Env),
+    );
+    const [org] = await db
+      .insert(organizations)
+      .values({
+        slug: `b-${crypto.randomUUID()}`,
+        name: "Batch org",
+        workosOrganizationId: `w-${crypto.randomUUID()}`,
+        allowedDomains: ["uw.edu"],
+      })
+      .returning({ id: organizations.id });
+    orgId = org!.id;
+    const [course] = await db
+      .insert(courses)
+      .values({ organizationId: orgId, code: "B1", term: "T", title: "Batch" })
+      .returning({ id: courses.id });
+    courseId = course!.id;
+  });
+
+  afterAll(async () => {
+    await db.delete(organizations).where(eq(organizations.id, orgId));
+  });
+
+  it("returns one result per entry, in input order, mixing every outcome", async () => {
+    const fresh = email();
+    const existing = email();
+    const dropped = email();
+    const conflicting = email();
+
+    // Pre-existing states the batch must recognise.
+    await upsertCourseMember(db, scope(), cipher, { email: existing, role: "student" }, UW);
+    const droppedRow = await upsertCourseMember(db, scope(), cipher, { email: dropped, role: "student" }, UW);
+    await removeCourseMember(db, scope(), droppedRow.membershipId!);
+    await upsertCourseMember(db, scope(), cipher, { email: conflicting, role: "ta" }, UW);
+
+    const entries = [
+      { email: fresh, role: "student" as const },
+      { email: existing, role: "student" as const },
+      { email: dropped, role: "student" as const },
+      { email: conflicting, role: "student" as const },
+      { email: "nope@gmail.com", role: "student" as const },
+      { email: "not-an-email", role: "student" as const },
+    ];
+
+    const results = await upsertCourseMembers(db, scope(), cipher, entries, UW);
+    // Order is load-bearing: the route zips these back onto CSV rows by
+    // position to report a spreadsheet line number.
+    expect(results.map((r) => r.status)).toEqual([
+      "added",
+      "already_enrolled",
+      "restored",
+      "role_conflict",
+      "disallowed_domain",
+      "invalid_email",
+    ]);
+    expect(results[3]!.existingRole).toBe("ta");
+  });
+
+  it("agrees with the single-entry path it replaced", async () => {
+    const viaBatch = email();
+    const viaSingle = email();
+    const [batched] = await upsertCourseMembers(
+      db,
+      scope(),
+      cipher,
+      [{ email: viaBatch, displayName: "Batched Person", role: "student" }],
+      UW,
+    );
+    const single = await upsertCourseMember(
+      db,
+      scope(),
+      cipher,
+      { email: viaSingle, displayName: "Single Person", role: "student" },
+      UW,
+    );
+    expect(batched!.status).toBe(single.status);
+
+    // And the ROWS agree, not just the statuses: pending, ungranted, named.
+    for (const [addr, name] of [
+      [viaBatch, "Batched Person"],
+      [viaSingle, "Single Person"],
+    ] as const) {
+      const { members } = await listCourseRoster(db, scope(), cipher, { search: addr });
+      const member = members.find((m) => m.email === addr)!;
+      expect(member.status).toBe("pending");
+      expect(member.displayName).toBe(name);
+      expect(member.role).toBe("student");
+    }
+  });
+
+  it("clears capability flags on a batched restore", async () => {
+    const addr = email();
+    const added = await upsertCourseMember(db, scope(), cipher, { email: addr, role: "ta" }, UW);
+    await db
+      .update(courseMemberships)
+      .set({ canViewSolutions: true })
+      .where(eq(courseMemberships.id, added.membershipId!));
+    await removeCourseMember(db, scope(), added.membershipId!);
+
+    const [restored] = await upsertCourseMembers(
+      db,
+      scope(),
+      cipher,
+      [{ email: addr, role: "ta" }],
+      UW,
+    );
+    expect(restored!.status).toBe("restored");
+    const row = await db.query.courseMemberships.findFirst({
+      where: eq(courseMemberships.id, added.membershipId!),
+    });
+    // Re-adding someone must not silently re-grant the answer key -- and
+    // since #207 the database refuses a dropped row that still carries one,
+    // so a restore that forgot would fail rather than be quietly wrong.
+    expect(row!.canViewSolutions).toBe(false);
+    expect(row!.droppedAt).toBeNull();
+  });
+
+  it("creates each identity once when the same address appears twice", async () => {
+    // The route deduplicates before batching, but the repository must not
+    // rely on that -- a duplicated entry would otherwise insert two users
+    // racing for one uniquely-indexed email_blind_index.
+    const addr = email();
+    const results = await upsertCourseMembers(
+      db,
+      scope(),
+      cipher,
+      [
+        { email: addr, role: "student" },
+        { email: addr.toUpperCase(), role: "student" },
+      ],
+      UW,
+    );
+    expect(results).toHaveLength(2);
+    const rows = await db.query.users.findMany({
+      where: eq(users.emailBlindIndex, await cipher.computeBlindIndex(addr)),
+    });
+    expect(rows).toHaveLength(1);
+  });
+
+  it("previews without writing anything", async () => {
+    const addr = email();
+    const preview = await previewCourseMembers(
+      db,
+      scope(),
+      cipher,
+      [{ email: addr, role: "student" }],
+      UW,
+    );
+    expect(preview[0]!.status).toBe("added");
+    // Nothing was created: the preview's whole promise.
+    const found = await db.query.users.findFirst({
+      where: eq(users.emailBlindIndex, await cipher.computeBlindIndex(addr)),
+    });
+    expect(found).toBeUndefined();
+  });
+
+  it("previews the same outcomes the commit then produces", async () => {
+    const fresh = email();
+    const existing = email();
+    await upsertCourseMember(db, scope(), cipher, { email: existing, role: "student" }, UW);
+
+    const entries = [
+      { email: fresh, role: "student" as const },
+      { email: existing, role: "student" as const },
+      { email: "nope@gmail.com", role: "student" as const },
+    ];
+    const previewed = await previewCourseMembers(db, scope(), cipher, entries, UW);
+    const committed = await upsertCourseMembers(db, scope(), cipher, entries, UW);
+    // The promise the preview makes. A separate validator is free to
+    // disagree with the real path; sharing the classification is what stops
+    // a commit doing something the preview did not say it would.
+    expect(previewed.map((r) => r.status)).toEqual(committed.map((r) => r.status));
+  });
+
+  it("handles a batch far larger than any per-row path could", async () => {
+    // 200 entries: ~600 sequential round trips under the old shape, which is
+    // over the Worker subrequest cap. Here it is a handful of statements.
+    const entries = Array.from({ length: 200 }, () => ({
+      email: email(),
+      role: "student" as const,
+    }));
+    const results = await upsertCourseMembers(db, scope(), cipher, entries, UW);
+    expect(results).toHaveLength(200);
+    expect(results.every((r) => r.status === "added")).toBe(true);
   });
 });

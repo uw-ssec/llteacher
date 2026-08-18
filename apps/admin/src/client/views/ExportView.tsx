@@ -59,6 +59,7 @@ export function ExportView({ courseId, courseTitle }: { courseId: string; course
   const roster = useApiResource(
     (opts) => apiClient.roster.list(courseId, {}, opts),
     [courseId],
+    { announce, loadingMessage: "Loading the roster…" },
   );
 
   const allowedFormats: readonly ExportFormat[] = SUBJECTS[subject].formats;
@@ -184,6 +185,29 @@ export function ExportView({ courseId, courseTitle }: { courseId: string; course
           <label htmlFor="export-scope">Scope</label>
           {roster.loading ? (
             <ViewLoading label="Loading the roster…" />
+          ) : roster.error ? (
+            /* #359: a failed roster load and an empty course are different
+               facts. Reported inline rather than replacing the page, because
+               the whole-course export still works -- an instructor who came
+               here for one student's records needs to know the list is
+               missing, not to lose the page. */
+            <div className="admin-alert">
+              <span className="admin-alert__icon" aria-hidden="true">
+                <Warning size={16} weight="regular" />
+              </span>
+              <span>
+                The student list could not be loaded, so you can only export the whole course.{" "}
+                {roster.error.retryable && (
+                  <button type="button" className="admin-link-button" onClick={roster.reload}>
+                    Try again
+                  </button>
+                )}
+              </span>
+            </div>
+          ) : students.length === 0 ? (
+            <p className="admin-form-hint">
+              Nobody is enrolled in this course yet, so only a whole-course export is available.
+            </p>
           ) : (
             <select
               id="export-scope"

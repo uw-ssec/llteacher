@@ -18,7 +18,7 @@
    violates the index.
    -------------------------------------------------------------------------- */
 
-import { and, asc, eq, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { courseMemberships, courses, organizations, users } from "../../db/schema";
 import type { CourseScope } from "./scope";
@@ -203,6 +203,364 @@ function deriveNetidForEmail(normalizedEmail: string): string | null {
     return IdentityCipher.normalizeNetid(normalizedEmail.split("@")[0] ?? "");
   }
   return null;
+}
+
+
+/* --------------------------------------------------------------------------
+   #355: the batched provisioning path.
+
+   `upsertCourseMember` above is the single-entry door and stays exactly as
+   it is -- it is what the manual-add route calls, and one row is one row.
+   What it cannot be is a loop body: each call issues two to four SEQUENTIAL
+   round trips, and on Workers every `neon-http` query is a subrequest, which
+   are capped per invocation (50 free, 1000 paid) and cost tens of
+   milliseconds each. A 300-student CSV import -- the size #86 exists to
+   serve -- issued ~900 of them and exceeded both the cap and the wall clock,
+   leaving a half-written roster with no report of where it stopped.
+
+   So the bulk path resolves the whole batch in a fixed number of queries:
+
+     1. one SELECT for every user by blind index
+     2. one INSERT for every user that does not exist
+     3. one SELECT for every existing membership on this course
+     4. one INSERT for the new memberships, one UPDATE for the restores
+
+   Five queries for a thousand rows, rather than four thousand. The per-row
+   OUTCOME reporting is unchanged, which is the point: #86 turns on being
+   able to say which four rows of eighty were skipped, and batching must not
+   collapse that into a count.
+   -------------------------------------------------------------------------- */
+
+/** Enrols a batch in a fixed number of queries, returning one result per
+ *  entry in the order given.
+ *
+ *  Same invariants as `upsertCourseMember`, restated because they are now
+ *  enforced by different statements: course scope in every WHERE, both
+ *  capability flags explicitly false on create and restore, and an active
+ *  membership under another role refused rather than promoted. */
+export async function upsertCourseMembers(
+  db: Db,
+  scope: CourseScope,
+  cipher: IdentityCipher,
+  entries: ProvisionEntry[],
+  allowedDomains: string[],
+): Promise<ProvisionResult[]> {
+  const results = new Map<number, ProvisionResult>();
+
+  /* Pass 1 -- pure validation, no I/O. Rows that fail here never reach a
+     query, which is also why the domain check is cheap enough to do per
+     row: it is string work against a list read once by the caller. */
+  const pending: { index: number; email: string; entry: ProvisionEntry }[] = [];
+  for (const [index, entry] of entries.entries()) {
+    const email = IdentityCipher.normalizeEmail(entry.email);
+    const domainCheck = DomainAllowlistService.validateEmailDomain(email, allowedDomains);
+    if (!domainCheck.allowed) {
+      const malformed = domainCheck.reason === "Invalid email format";
+      results.set(index, {
+        email,
+        status: malformed ? "invalid_email" : "disallowed_domain",
+        message: domainCheck.reason,
+      });
+      continue;
+    }
+    pending.push({ index, email, entry });
+  }
+  if (pending.length === 0) return orderedResults(entries, results);
+
+  /* Pass 2 -- resolve every identity in one query. The blind indexes are
+     computed locally (HMAC, no I/O); the lookup is a single IN over a
+     uniquely-indexed column. */
+  const blindIndexes = await Promise.all(pending.map((p) => cipher.computeBlindIndex(p.email)));
+  const existingUsers = await db
+    .select({ id: users.id, emailBlindIndex: users.emailBlindIndex })
+    .from(users)
+    .where(inArray(users.emailBlindIndex, blindIndexes));
+  // Keyed by hex, because a Uint8Array is not a usable Map key by value.
+  const userIdByIndex = new Map(existingUsers.map((u) => [hex(u.emailBlindIndex), u.id]));
+
+  /* Pass 3 -- create the users that do not exist, in one INSERT. */
+  // Deduplicated WITHIN the batch as well as against what exists. Two
+  // entries for one address both miss `userIdByIndex`, so without this they
+  // would both be inserted and the second would violate
+  // users_email_blind_index_uq -- failing the whole import over a repeated
+  // line. The route deduplicates before calling, but the repository cannot
+  // rely on a caller's discipline for an invariant the database enforces.
+  const seenForCreate = new Set<string>();
+  const toCreate = pending
+    .map((entry, i) => ({ p: entry, blindIndex: blindIndexes[i]! }))
+    .filter((candidate) => {
+      const key = hex(candidate.blindIndex);
+      if (userIdByIndex.has(key) || seenForCreate.has(key)) return false;
+      seenForCreate.add(key);
+      return true;
+    });
+  if (toCreate.length > 0) {
+    const values = await Promise.all(
+      toCreate.map(async ({ p, blindIndex }) => {
+        const netid = deriveNetidForEmail(p.email);
+        return {
+          email: await cipher.encryptString(p.email),
+          emailBlindIndex: blindIndex,
+          displayName: p.entry.displayName
+            ? await cipher.encryptString(p.entry.displayName)
+            : null,
+          ...(netid
+            ? {
+                netid: await cipher.encryptString(netid),
+                netidBlindIndex: await cipher.computeBlindIndex(netid),
+              }
+            : {}),
+          isPending: true,
+        };
+      }),
+    );
+    const created = await db
+      .insert(users)
+      .values(values)
+      .returning({ id: users.id, emailBlindIndex: users.emailBlindIndex });
+    for (const row of created) userIdByIndex.set(hex(row.emailBlindIndex), row.id);
+  }
+
+  /* Pass 4 -- one lookup for every existing membership on this course. */
+  const userIds = pending
+    .map((_entry, i) => userIdByIndex.get(hex(blindIndexes[i]!)))
+    .filter((id): id is string => id !== undefined);
+  const existingMemberships =
+    userIds.length > 0
+      ? await db
+          .select({
+            id: courseMemberships.id,
+            userId: courseMemberships.userId,
+            role: courseMemberships.role,
+            droppedAt: courseMemberships.droppedAt,
+          })
+          .from(courseMemberships)
+          .where(
+            and(eq(courseMemberships.courseId, scope), inArray(courseMemberships.userId, userIds)),
+          )
+      : [];
+  const membershipByUser = new Map(existingMemberships.map((m) => [m.userId, m]));
+
+  /* Pass 5 -- classify, then write each class in one statement. */
+  const toInsert: { index: number; userId: string; email: string; role: CourseRole }[] = [];
+  const toRestore: { index: number; membershipId: string; email: string; role: CourseRole }[] = [];
+
+  pending.forEach((p, i) => {
+    const userId = userIdByIndex.get(hex(blindIndexes[i]!));
+    if (!userId) {
+      // Unreachable: pass 3 created every missing user. Reported rather than
+      // thrown so one impossible row cannot fail an import of 300 real ones.
+      results.set(p.index, {
+        email: p.email,
+        status: "invalid_email",
+        message: "That account could not be created.",
+      });
+      return;
+    }
+    const existing = membershipByUser.get(userId);
+    if (!existing) {
+      toInsert.push({ index: p.index, userId, email: p.email, role: p.entry.role });
+      return;
+    }
+    if (existing.droppedAt === null) {
+      results.set(p.index, {
+        email: p.email,
+        status: existing.role === p.entry.role ? "already_enrolled" : "role_conflict",
+        membershipId: existing.id,
+        ...(existing.role === p.entry.role ? {} : { existingRole: existing.role }),
+      });
+      return;
+    }
+    toRestore.push({ index: p.index, membershipId: existing.id, email: p.email, role: p.entry.role });
+  });
+
+  if (toInsert.length > 0) {
+    // Deduplicated by user for the same reason: two entries resolving to one
+    // identity would insert two memberships and violate
+    // course_memberships_user_course_uq. The FIRST occurrence wins and the
+    // rest are reported against the row that actually landed.
+    const firstByUser = new Map<string, (typeof toInsert)[number]>();
+    const duplicatesOfInsert: typeof toInsert = [];
+    for (const t of toInsert) {
+      if (firstByUser.has(t.userId)) duplicatesOfInsert.push(t);
+      else firstByUser.set(t.userId, t);
+    }
+    toInsert.length = 0;
+    toInsert.push(...firstByUser.values());
+
+    const inserted = await db
+      .insert(courseMemberships)
+      .values(
+        toInsert.map((t) => ({
+          userId: t.userId,
+          courseId: scope,
+          role: t.role,
+          canViewSolutions: false,
+          canViewDrafts: false,
+        })),
+      )
+      .returning({ id: courseMemberships.id, userId: courseMemberships.userId });
+    const idByUser = new Map(inserted.map((r) => [r.userId, r.id]));
+    for (const t of toInsert) {
+      results.set(t.index, {
+        email: t.email,
+        status: "added",
+        membershipId: idByUser.get(t.userId),
+      });
+    }
+    // A repeat of an address added earlier in the same batch: the person IS
+    // on the course, so `already_enrolled` is the honest report -- they were
+    // not added twice, and calling it an error would be wrong.
+    for (const t of duplicatesOfInsert) {
+      results.set(t.index, {
+        email: t.email,
+        status: "already_enrolled",
+        membershipId: idByUser.get(t.userId),
+      });
+    }
+  }
+
+  // Restores are grouped by role so each group is one UPDATE. A CSV rarely
+  // mixes roles among restored rows, so this is usually a single statement;
+  // the grouping is what keeps it bounded when it does.
+  const restoresByRole = new Map<CourseRole, typeof toRestore>();
+  for (const t of toRestore) {
+    const group = restoresByRole.get(t.role) ?? [];
+    group.push(t);
+    restoresByRole.set(t.role, group);
+  }
+  for (const [role, group] of restoresByRole) {
+    await db
+      .update(courseMemberships)
+      .set({
+        role,
+        droppedAt: null,
+        droppedReason: null,
+        canViewSolutions: false,
+        canViewDrafts: false,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(courseMemberships.courseId, scope),
+          inArray(
+            courseMemberships.id,
+            group.map((t) => t.membershipId),
+          ),
+        ),
+      );
+    for (const t of group) {
+      results.set(t.index, { email: t.email, status: "restored", membershipId: t.membershipId });
+    }
+  }
+
+  return orderedResults(entries, results);
+}
+
+/** #355: what `upsertCourseMembers` WOULD do, without writing.
+ *
+ *  Shares passes 1, 2 and 4 with the write path -- same validation, same
+ *  identity lookup, same membership lookup -- and stops before the inserts.
+ *  Two queries for a whole file.
+ *
+ *  Sharing the classification is the point rather than an optimization: a
+ *  separate validator is free to disagree with the real path, and the
+ *  disagreement only ever shows up as a commit that did something the
+ *  preview did not promise. The one thing it cannot know is whether the
+ *  roster changes between the preview and the commit, which is a race the
+ *  instructor can see in the committed result. */
+export async function previewCourseMembers(
+  db: Db,
+  scope: CourseScope,
+  cipher: IdentityCipher,
+  entries: ProvisionEntry[],
+  allowedDomains: string[],
+): Promise<ProvisionResult[]> {
+  const results = new Map<number, ProvisionResult>();
+
+  const pending: { index: number; email: string; entry: ProvisionEntry }[] = [];
+  for (const [index, entry] of entries.entries()) {
+    const email = IdentityCipher.normalizeEmail(entry.email);
+    const domainCheck = DomainAllowlistService.validateEmailDomain(email, allowedDomains);
+    if (!domainCheck.allowed) {
+      const malformed = domainCheck.reason === "Invalid email format";
+      results.set(index, {
+        email,
+        status: malformed ? "invalid_email" : "disallowed_domain",
+        message: domainCheck.reason,
+      });
+      continue;
+    }
+    pending.push({ index, email, entry });
+  }
+  if (pending.length === 0) return orderedResults(entries, results);
+
+  const blindIndexes = await Promise.all(pending.map((p) => cipher.computeBlindIndex(p.email)));
+  const existingUsers = await db
+    .select({ id: users.id, emailBlindIndex: users.emailBlindIndex })
+    .from(users)
+    .where(inArray(users.emailBlindIndex, blindIndexes));
+  const userIdByIndex = new Map(existingUsers.map((u) => [hex(u.emailBlindIndex), u.id]));
+
+  const userIds = [...userIdByIndex.values()];
+  const existingMemberships =
+    userIds.length > 0
+      ? await db
+          .select({
+            id: courseMemberships.id,
+            userId: courseMemberships.userId,
+            role: courseMemberships.role,
+            droppedAt: courseMemberships.droppedAt,
+          })
+          .from(courseMemberships)
+          .where(
+            and(eq(courseMemberships.courseId, scope), inArray(courseMemberships.userId, userIds)),
+          )
+      : [];
+  const membershipByUser = new Map(existingMemberships.map((m) => [m.userId, m]));
+
+  pending.forEach((p, i) => {
+    const userId = userIdByIndex.get(hex(blindIndexes[i]!));
+    const existing = userId ? membershipByUser.get(userId) : undefined;
+    if (!existing) {
+      results.set(p.index, { email: p.email, status: "added" });
+      return;
+    }
+    if (existing.droppedAt !== null) {
+      results.set(p.index, { email: p.email, status: "restored", membershipId: existing.id });
+      return;
+    }
+    results.set(p.index, {
+      email: p.email,
+      status: existing.role === p.entry.role ? "already_enrolled" : "role_conflict",
+      membershipId: existing.id,
+      ...(existing.role === p.entry.role ? {} : { existingRole: existing.role }),
+    });
+  });
+
+  return orderedResults(entries, results);
+}
+
+/** One result per input entry, in input order, so a caller can zip results
+ *  back onto the CSV rows they came from by position. */
+function orderedResults(
+  entries: ProvisionEntry[],
+  results: Map<number, ProvisionResult>,
+): ProvisionResult[] {
+  return entries.map(
+    (entry, index) =>
+      results.get(index) ?? {
+        email: IdentityCipher.normalizeEmail(entry.email),
+        status: "invalid_email" as const,
+        message: "That row could not be processed.",
+      },
+  );
+}
+
+/** Blind indexes are Uint8Arrays; Map keys them by identity, not value, so
+ *  every lookup would miss. Hex is the cheapest stable string form. */
+function hex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /** #32: the instructor's view of course_memberships.

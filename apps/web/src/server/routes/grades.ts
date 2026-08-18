@@ -10,7 +10,7 @@
    -------------------------------------------------------------------------- */
 
 import { type Context } from "hono";
-import { and, asc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { UUID_RE } from "../utils/uuid";
 import { makeDb } from "../../db/client";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
@@ -36,6 +36,7 @@ import { courseScopeFromAuthContext } from "../repositories/scope";
 import { draftGrade } from "../../lib/services/GradingEvaluator";
 import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
 import { logServerError } from "../utils/errors";
+import { messageTextOf } from "../utils/messageText";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { CourseScope } from "../repositories/scope";
@@ -231,13 +232,25 @@ export async function draftGradeHandler(c: Context<AppEnv>) {
     );
   }
 
+  /* #362: the TAIL, bounded, rather than every message in the conversation.
+     `draftGrade` keeps only the last ~24 000 characters -- understanding
+     lands at the END of a tutoring conversation -- so reading the whole
+     thing loads rows into the Worker only to throw most of them away.
+     Ordered descending with a limit, then reversed back into reading order.
+
+     240 is that character budget divided by a conservative 100 characters
+     per message. A conversation whose messages are shorter simply sends
+     fewer characters than the budget allows, which costs nothing. */
+  const TRANSCRIPT_MESSAGE_LIMIT = 240;
   const rows = await db
     .select({ role: messages.role, parts: messages.parts })
     .from(messages)
     .where(eq(messages.conversationId, found.conversationId))
-    .orderBy(asc(messages.seq));
+    .orderBy(desc(messages.seq))
+    .limit(TRANSCRIPT_MESSAGE_LIMIT);
+  rows.reverse();
 
-  const transcript = rows.map((r) => ({ role: r.role as string, text: textOf(r.parts) }));
+  const transcript = rows.map((r) => ({ role: r.role as string, text: messageTextOf(r.parts) }));
   if (transcript.every((t) => t.text.trim() === "")) {
     return c.json({ error: "This conversation has no content to assess." }, 409);
   }
@@ -296,22 +309,4 @@ export async function draftGradeHandler(c: Context<AppEnv>) {
   return c.json(body, 201);
 }
 
-/** Flattens a stored UIMessage `parts` array to plain text.
- *
- *  Only text parts. Tool calls and their results are the generative-UI
- *  machinery (definition cards and the like) -- they are not the student's
- *  reasoning, and feeding their JSON to a grader would spend context on
- *  markup. */
-function textOf(parts: unknown): string {
-  if (!Array.isArray(parts)) return "";
-  return parts
-    .filter(
-      (p): p is { type: string; text: string } =>
-        typeof p === "object" &&
-        p !== null &&
-        (p as { type?: unknown }).type === "text" &&
-        typeof (p as { text?: unknown }).text === "string",
-    )
-    .map((p) => p.text)
-    .join("\n");
-}
+

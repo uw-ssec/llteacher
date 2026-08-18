@@ -67,6 +67,7 @@ describe.skipIf(!DATABASE_URL)("POST /exports (#91, real DB)", () => {
   let otherCourseId: string;
   let adaUserId: string;
   let graceUserId: string;
+  let instructorUserId: string;
 
   const ENV = { DATABASE_URL: "", ENCRYPTION_KEY: ENC, BLIND_INDEX_KEY: BLIND } as Env;
 
@@ -91,11 +92,20 @@ describe.skipIf(!DATABASE_URL)("POST /exports (#91, real DB)", () => {
     );
 
   /** The auth context is keyed on the literal "COURSE"; rebind it to the
-   *  real id once the fixture exists. */
+   *  real id once the fixture exists.
+   *
+   *  #354: `session.userId` must be the REAL uuid of the instructor row,
+   *  not fakeAuthContext's default "u1". The transcript export compares it
+   *  against `conversations.owner_user_id` (a uuid column) to keep the
+   *  caller's own teacher-test runs while excluding other instructors' --
+   *  so a placeholder string reaches a uuid comparison and Postgres refuses
+   *  the whole query. Production always has a real uuid here; the double
+   *  should too. */
   function instructorOfCourse() {
-    return fakeAuthContext({
+    const base = fakeAuthContext({
       memberships: [fakeMembership({ courseId, role: "instructor" })],
     });
+    return { ...base, session: { ...base.session, userId: instructorUserId } };
   }
 
   async function seedStudent(name: string, section: string): Promise<{ userId: string; submissionId: string }> {
@@ -172,6 +182,7 @@ describe.skipIf(!DATABASE_URL)("POST /exports (#91, real DB)", () => {
         displayName: await cipher.encryptString("Anjali Chen"),
       })
       .returning({ id: users.id });
+    instructorUserId = iu!.id;
     const [im] = await db
       .insert(courseMemberships)
       .values({ userId: iu!.id, courseId, role: "instructor" })
@@ -198,6 +209,56 @@ describe.skipIf(!DATABASE_URL)("POST /exports (#91, real DB)", () => {
     adaUserId = ada.userId;
     const grace = await seedStudent("Grace Hopper", sectionTitle);
     graceUserId = grace.userId;
+
+    // #354: two conversations that must NOT appear in a transcript export --
+    // a student's general tutor chat (no section), and a teacher-test run
+    // owned by a DIFFERENT instructor.
+    const [tutorConv] = await db
+      .insert(conversations)
+      .values({
+        courseId,
+        ownerUserId: grace.userId,
+        kind: "tutor",
+        title: "General tutoring",
+      })
+      .returning({ id: conversations.id });
+    await db.insert(messages).values({
+      conversationId: tutorConv!.id,
+      role: "user",
+      parts: [{ type: "text", text: "SECRET-TUTOR-CHAT" }],
+    });
+
+    const [otherProf] = await db
+      .insert(users)
+      .values({
+        email: await cipher.encryptString("otherprof@uw.edu"),
+        emailBlindIndex: await cipher.computeBlindIndex(crypto.randomUUID()),
+        displayName: await cipher.encryptString("Other Prof"),
+      })
+      .returning({ id: users.id });
+    await db
+      .insert(courseMemberships)
+      .values({ userId: otherProf!.id, courseId, role: "instructor" });
+    const [otherSection] = await db
+      .select({ id: sections.id })
+      .from(sections)
+      .where(eq(sections.title, sectionTitle));
+    const [testConv] = await db
+      .insert(conversations)
+      .values({
+        courseId,
+        ownerUserId: otherProf!.id,
+        sectionId: otherSection!.id,
+        kind: "section",
+        isTeacherTest: true,
+        title: "Other prof test run",
+      })
+      .returning({ id: conversations.id });
+    await db.insert(messages).values({
+      conversationId: testConv!.id,
+      role: "user",
+      parts: [{ type: "text", text: "SECRET-OTHER-PROF-TEST" }],
+    });
 
     await db.insert(grades).values({
       organizationId: orgId,
@@ -283,6 +344,21 @@ describe.skipIf(!DATABASE_URL)("POST /exports (#91, real DB)", () => {
     const withMessages = parsed.conversations.find((c) => c.messages.length > 0)!;
     expect(withMessages.messages[0]!.role).toBe("user");
     expect(withMessages.messages[1]!.text).toBe("Tell me more.");
+  });
+
+  it("excludes conversations no instructor can view in the console (#354)", async () => {
+    const res = await post({ subject: "transcripts", format: "json" }, instructorOfCourse());
+    const body = ((await res.json()) as { body: string }).body;
+    // A tutor conversation is a student's general chat: nothing in the
+    // console surfaces one, and #91 requires the export not to exceed the
+    // view.
+    expect(body).not.toContain("SECRET-TUTOR-CHAT");
+    // #27 established that an instructor must not read another instructor's
+    // teacher-test run. An export that included them would be a way around
+    // that rule rather than an exception to it.
+    expect(body).not.toContain("SECRET-OTHER-PROF-TEST");
+    // The student work it exists to export is still there.
+    expect(body).toContain("Tell me more.");
   });
 
   it("refuses transcripts as CSV rather than producing something unreadable", async () => {

@@ -26,7 +26,7 @@
    -------------------------------------------------------------------------- */
 
 import { type Context } from "hono";
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, or } from "drizzle-orm";
 import { UUID_RE } from "../utils/uuid";
 import { makeDb } from "../../db/client";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
@@ -45,6 +45,7 @@ import { getOrgScopeForCourse } from "../repositories/organizations";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
 import { logServerError } from "../utils/errors";
+import { messageTextOf } from "../utils/messageText";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { CourseScope } from "../repositories/scope";
@@ -144,7 +145,7 @@ export async function createExportHandler(c: Context<AppEnv>) {
   try {
     const artifact =
       subject === "transcripts"
-        ? await exportTranscripts(db, ctx.scope, cipher, studentId)
+        ? await exportTranscripts(db, ctx.scope, cipher, studentId, ctx.authContext.session.userId)
         : subject === "grades"
           ? await exportGrades(db, ctx.scope, cipher, studentId, format)
           : await exportSubmissions(db, ctx.scope, cipher, studentId, format);
@@ -350,7 +351,24 @@ async function exportTranscripts(
   scope: CourseScope,
   cipher: IdentityCipher,
   studentId: string | null,
+  /** #354: the caller, so their OWN teacher-test conversations survive the
+   *  filter while other instructors' do not. */
+  requestingUserId: string,
 ): Promise<Artifact | null> {
+  // #354: the export is scoped to what an instructor can actually SEE in
+  // the console, which is narrower than "every conversation in the course".
+  // Two exclusions, both of which the original left-join let through:
+  //
+  //  · `kind = 'section'` only. A tutor conversation is a student's general
+  //    chat; nothing in the instructor console surfaces one, and #91 is
+  //    explicit that the export may not exceed the view. An inner join on
+  //    `sections` enforces the same thing structurally -- a conversation
+  //    with no section cannot appear at all.
+  //  · Teacher-test conversations belonging to SOMEONE ELSE. #27
+  //    established that an instructor must not read another instructor's
+  //    test run (canReadSectionConversation); an export that included them
+  //    would be a way around that rule, not an exception to it. The
+  //    caller's own tests are kept -- they are theirs.
   const convRows = await db
     .select({
       conversationId: conversations.id,
@@ -363,12 +381,18 @@ async function exportTranscripts(
     })
     .from(conversations)
     .innerJoin(users, eq(conversations.ownerUserId, users.id))
-    .leftJoin(sections, eq(conversations.sectionId, sections.id))
-    .leftJoin(homeworks, eq(sections.homeworkId, homeworks.id))
+    .innerJoin(sections, eq(conversations.sectionId, sections.id))
+    .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
     .where(
-      studentId
-        ? and(eq(conversations.courseId, scope), eq(conversations.ownerUserId, studentId))
-        : eq(conversations.courseId, scope),
+      and(
+        eq(conversations.courseId, scope),
+        eq(conversations.kind, "section"),
+        or(
+          eq(conversations.isTeacherTest, false),
+          eq(conversations.ownerUserId, requestingUserId),
+        ),
+        ...(studentId ? [eq(conversations.ownerUserId, studentId)] : []),
+      ),
     )
     .orderBy(asc(conversations.createdAt));
 
@@ -388,7 +412,7 @@ async function exportTranscripts(
   const byConversation = new Map<string, { role: string; text: string }[]>();
   for (const m of messageRows) {
     const list = byConversation.get(m.conversationId) ?? [];
-    list.push({ role: m.role, text: textOf(m.parts) });
+    list.push({ role: m.role, text: messageTextOf(m.parts) });
     byConversation.set(m.conversationId, list);
   }
 
@@ -398,8 +422,8 @@ async function exportTranscripts(
       conversationId: c.conversationId,
       student: c.displayName ? await cipher.decryptString(c.displayName) : "",
       email: await cipher.decryptString(c.email),
-      homework: c.homeworkTitle ?? null,
-      section: c.sectionTitle ?? null,
+      homework: c.homeworkTitle,
+      section: c.sectionTitle,
       startedAt: c.startedAt.toISOString(),
       messages: byConversation.get(c.conversationId) ?? [],
     });
@@ -412,18 +436,4 @@ async function exportTranscripts(
   };
 }
 
-/** Text parts only -- tool calls are generative-UI markup, not the
- *  conversation a human reads. Same reasoning as the grading evaluator's. */
-function textOf(parts: unknown): string {
-  if (!Array.isArray(parts)) return "";
-  return parts
-    .filter(
-      (p): p is { type: string; text: string } =>
-        typeof p === "object" &&
-        p !== null &&
-        (p as { type?: unknown }).type === "text" &&
-        typeof (p as { text?: unknown }).text === "string",
-    )
-    .map((p) => p.text)
-    .join("\n");
-}
+

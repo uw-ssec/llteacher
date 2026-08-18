@@ -78,6 +78,17 @@ export function StudentsView({ courseId, courseTitle }: { courseId: string; cour
   const roster = useApiResource(
     (opts) => apiClient.roster.list(courseId, {}, opts),
     [courseId],
+    // #358: the load is announced through the one permanently-mounted
+    // region above. Without it a screen-reader user got silence while the
+    // roster loaded and no signal that it had arrived.
+    {
+      announce,
+      loadingMessage: "Loading the roster…",
+      describeResult: (result) =>
+        result.members.length === 1
+          ? "1 person on this course."
+          : `${result.members.length} people on this course.`,
+    },
   );
 
   /* Filtering and search are CLIENT-side over the loaded roster, even
@@ -166,10 +177,12 @@ export function StudentsView({ courseId, courseTitle }: { courseId: string; cour
         <RosterImportPanel
           courseId={courseId}
           onAnnounce={announce}
-          onImported={() => {
-            roster.reload();
-            setShowImport(false);
-          }}
+          /* #356: the roster reloads, the panel STAYS OPEN. Closing it here
+             discarded the per-row result table that says which rows were
+             skipped -- which is the whole point of #86's per-row reporting,
+             and the thing the instructor needs at exactly that moment. The
+             panel's own Done button closes it. */
+          onImported={() => roster.reload()}
           onClose={() => setShowImport(false)}
         />
       )}
@@ -327,7 +340,15 @@ export function StudentsView({ courseId, courseTitle }: { courseId: string; cour
                           : relativeTime(m.lastLoginAt)}
                       </td>
                       <td className="admin-table__actions">
-                        {m.status === "dropped" ? (
+                        {/* #357: no control for a membership the server
+                            refuses to remove. An instructor cannot be removed
+                            here (a course with nobody who can add one back is
+                            the failure that rule prevents), and this route is
+                            reachable by an instructor on their OWN row -- so
+                            rendering the button offered a destructive-looking
+                            action that always 409s. Same treatment the config
+                            list gives the org default's Deactivate. */}
+                        {m.status === "dropped" || m.role === "instructor" || m.role === "admin" ? (
                           <span className="admin-roster-cell--muted">—</span>
                         ) : (
                           <button

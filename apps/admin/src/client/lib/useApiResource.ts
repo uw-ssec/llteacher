@@ -26,8 +26,28 @@
    showing an instructor the roster they are editing wants a fresh read.
    -------------------------------------------------------------------------- */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "./api-client";
+
+export interface UseApiResourceOptions<T> {
+  /** #358: what to announce while loading, and how to describe the result.
+   *
+   *  Loading states were silent for screen-reader users: `ViewLoading`
+   *  renders plain text with no live region, so a page simply changed under
+   *  them with no signal that anything was happening or that it had
+   *  finished. Adding `role="status"` to that block would NOT fix it -- an
+   *  element inserted into the DOM already containing its text does not
+   *  reliably announce, which is the pattern #204 (ACC-028) filed. The fix
+   *  is to write into the view's PERMANENTLY-MOUNTED region, which only the
+   *  view has, so the hook takes the writer rather than owning one. */
+  announce?: (message: string) => void;
+  /** Announced when the load starts. */
+  loadingMessage?: string;
+  /** Announced on success, given the result -- so it can say "24 people
+   *  loaded" rather than "loaded", which is the difference between a signal
+   *  and a useful one. */
+  describeResult?: (result: T) => string;
+}
 
 export interface ApiResource<T> {
   data: T | null;
@@ -43,6 +63,7 @@ export interface ApiResource<T> {
 export function useApiResource<T>(
   load: (opts: { signal: AbortSignal | null }) => Promise<T>,
   deps: readonly unknown[],
+  options: UseApiResourceOptions<T> = {},
 ): ApiResource<T> {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
@@ -54,26 +75,43 @@ export function useApiResource<T>(
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const run = useCallback(load, deps);
 
+  // Read through a ref so a caller can pass inline closures for these
+  // without the effect re-running on every render -- the announce function
+  // is a useCallback in practice, but describeResult rarely is.
+  const announcers = useRef(options);
+  announcers.current = options;
+
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
     setError(null);
+    const { announce, loadingMessage, describeResult } = announcers.current;
+    if (announce && loadingMessage) announce(loadingMessage);
     run({ signal: controller.signal })
       .then((result) => {
         if (controller.signal.aborted) return;
         setData(result);
         setLoading(false);
+        // Announced on completion as well as on start: without it the last
+        // thing a screen reader heard is "Loading…", with no signal that the
+        // content arrived.
+        if (announce && describeResult) announce(describeResult(result));
       })
       .catch((err: unknown) => {
         // The view moved on. Not a failure, and reporting it would flash an
         // error banner during teardown.
         if ((err as Error)?.name === "AbortError" || controller.signal.aborted) return;
-        setError(
+        const apiError =
           err instanceof ApiError
             ? err
-            : new ApiError("server", "Something went wrong. Please try again."),
-        );
+            : new ApiError("server", "Something went wrong. Please try again.");
+        setError(apiError);
         setLoading(false);
+        // ViewError renders through AdminNotice, whose error tone carries
+        // role="alert" -- but the denied tone deliberately does not (a 403
+        // is the page's content, not an interruption), so the polite region
+        // is the only channel for that case.
+        announce?.(apiError.message);
       });
     return () => controller.abort();
   }, [run, nonce]);

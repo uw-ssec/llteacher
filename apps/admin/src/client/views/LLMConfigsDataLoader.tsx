@@ -54,10 +54,32 @@ export function LLMConfigsDataLoader({
   onScreenChange: (next: ConfigScreen) => void;
 }) {
   const [actionError, setActionError] = useState<string | null>(null);
+  /** #358/#204: this loader owns the announcement channel for all three
+   *  config screens, mounted for its whole lifetime and keyed on a
+   *  monotonic nonce so a repeated identical message still announces. */
+  const [live, setLive] = useState<{ text: string; nonce: number }>({ text: "", nonce: 0 });
+  const announce = useCallback(
+    (text: string) => setLive((prev) => ({ text, nonce: prev.nonce + 1 })),
+    [],
+  );
 
   const configs = useApiResource(
     (opts) => apiClient.llmConfigs.list(courseId, opts),
     [courseId],
+    {
+      announce,
+      loadingMessage: "Loading configurations…",
+      describeResult: (result) =>
+        result.configs.length === 1
+          ? "1 configuration."
+          : `${result.configs.length} configurations.`,
+    },
+  );
+
+  const liveRegion = (
+    <div className="admin-visually-hidden" role="status" aria-live="polite">
+      <span key={live.nonce}>{live.text}</span>
+    </div>
   );
 
   const save = useCallback(
@@ -138,14 +160,24 @@ export function LLMConfigsDataLoader({
     [courseId],
   );
 
-  if (configs.loading) return <ViewLoading label="Loading configurations…" />;
+  if (configs.loading) {
+    return (
+      <>
+        {liveRegion}
+        <ViewLoading label="Loading configurations…" />
+      </>
+    );
+  }
   if (configs.error) {
     return (
-      <ViewError
-        error={configs.error}
-        onRetry={configs.reload}
-        detail={`GET /api/courses/${courseId}/llm-configs`}
-      />
+      <>
+        {liveRegion}
+        <ViewError
+          error={configs.error}
+          onRetry={configs.reload}
+          detail={`GET /api/courses/${courseId}/llm-configs`}
+        />
+      </>
     );
   }
 
@@ -169,6 +201,7 @@ export function LLMConfigsDataLoader({
   if (screen.kind === "create" || screen.kind === "edit") {
     return (
       <>
+        {liveRegion}
         {actionError && <AdminNotice eyebrow="Not saved" title={actionError} />}
         <LLMConfigFormView
           initialConfig={editing}
@@ -186,6 +219,7 @@ export function LLMConfigsDataLoader({
 
   return (
     <>
+      {liveRegion}
       {actionError && <AdminNotice eyebrow="Could not do that" title={actionError} />}
       <LLMConfigsView
         configs={all}
