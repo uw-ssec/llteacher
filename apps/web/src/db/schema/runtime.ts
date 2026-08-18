@@ -637,29 +637,41 @@ export const citationsRelations = relations(citations, ({ one }) => ({
 // 1:1 per message. conversation_id is denormalized (reachable via
 // message -> conversation, but the M8 analytics query shape is
 // "calls by conversation" and "calls by org+time" -- avoid a join for both).
-// Both FKs are ON DELETE RESTRICT, not CASCADE: this is the org's LLM
-// cost/telemetry accounting, and a user-deletion cascade reaching it here
-// (via conversation_id, the FK actually walked when a conversation is
-// deleted -- message_id would fire too late to matter, since the
-// conversation_id cascade would already have removed the row) would
-// silently shrink that accounting. Same reasoning as grades.submission_id
-// above; see docs/architecture/multi-tenant-data-model.md §3.5 Q5.
+//
+// #317 review, #341: both FKs were ON DELETE RESTRICT when this table had
+// no writer (docs/architecture/multi-tenant-data-model.md §3.5 point 5's
+// original reasoning: silently losing cost/telemetry accounting to a
+// cascade is worse than blocking the delete). #317 makes chat.ts write one
+// row per turn, so RESTRICT now blocks the two hard-delete paths in
+// repositories/homeworks.ts (`updateHomework`'s section removal,
+// `deleteHomework`) the moment any section has ever had a single chat
+// turn -- effectively every homework by mid-term, with the resulting
+// `23503` falling through to a generic 503 with no recovery path (a
+// student's own conversation soft-deletes instead, dodging this
+// entirely -- routes/conversations.ts:341's own comment). SET NULL instead
+// -- same choice llm_config_id already makes two lines below for the
+// analogous "the row it references can go away" case -- preserves the
+// accounting these FKs exist to protect (the cost/telemetry row survives
+// intact, just detached) rather than either destroying it via a cascade or
+// blocking the delete outright. `grades.submission_id` keeps RESTRICT:
+// graded work is written far less often and isn't a per-turn hot path.
 
 export const llmCallLogs = pgTable(
   "llm_call_logs",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    // Nullable, not notNull: a call that errors before the assistant
-    // message is persisted (provider timeout, malformed response) has
-    // nothing to attach to yet -- error_flag rows may have a null
-    // message_id. unique() still holds; Postgres doesn't treat multiple
-    // NULLs as duplicates under a unique constraint.
+    // Nullable: a call that errors before the assistant message is
+    // persisted (provider timeout, malformed response) has nothing to
+    // attach to yet -- error_flag rows may have a null message_id.
+    // unique() still holds; Postgres doesn't treat multiple NULLs as
+    // duplicates under a unique constraint. Also goes null on the
+    // message's own deletion now (see #341 note above).
     messageId: uuid("message_id")
       .unique()
-      .references(() => messages.id, { onDelete: "restrict" }),
-    conversationId: uuid("conversation_id")
-      .notNull()
-      .references(() => conversations.id, { onDelete: "restrict" }),
+      .references(() => messages.id, { onDelete: "set null" }),
+    // Nullable as of #341 (was notNull): the conversation this call
+    // belonged to can now be hard-deleted without this row disappearing.
+    conversationId: uuid("conversation_id").references(() => conversations.id, { onDelete: "set null" }),
     organizationId: uuid("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),

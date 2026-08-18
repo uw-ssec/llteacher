@@ -253,6 +253,13 @@
       "when": 1786992386348,
       "tag": "0035_llmoxie_default_config",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1787082235612,
+      "tag": "0036_llm_call_logs_set_null_on_delete",
+      "breakpoints": true
     }
   ]
 }
