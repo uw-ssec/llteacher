@@ -349,13 +349,19 @@ declare global {
     WORKOS_API_KEY: string;
     WORKOS_CLIENT_ID: string;
     OPENROUTER_API_KEY: string;
-    /* #178's gateway. Optional because a deployment serving only
-       openrouter-provider configs never reads it -- but declared, so a
-       missing binding is a typecheck concern rather than an undefined at
-       runtime. resolveApiKey previously cast Env away entirely
-       (`c.env as unknown as Record<string, string | undefined>`), which
-       meant neither tsc nor `wrangler types` could flag any absent secret. */
-    LLMOXIE_API_KEY?: string;
+    /* #178's gateway. Required, not optional (#317 review, #343): migration
+       0035 moves the platform-default llm_configs row for every org to
+       provider='llmoxie' with credential_id NULL, which routes every
+       student's every turn through PROVIDER_FALLBACK_ENV_VAR['llmoxie'] --
+       this binding -- so a deployment missing it is no longer a narrow
+       "openrouter-only configs never read it" case, it's a platform-wide
+       500 on every message. resolveApiKey previously cast Env away
+       entirely (`c.env as unknown as Record<string, string | undefined>`),
+       which meant neither tsc nor `wrangler types` could flag an absent
+       secret at all; that cast is now confined to one narrow,
+       allowlist-gated helper (llm-config.ts's readEnvSecret) instead of
+       erasing the whole Env contract at the chat.ts call site. */
+    LLMOXIE_API_KEY: string;
     /* Overrides the gateway host. Unset falls back to
        LLMOXIE_DEFAULT_BASE_URL in lib/ai.ts -- see the reasoning there for
        why a generated Azure hostname should not be a compile-time constant. */

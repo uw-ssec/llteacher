@@ -116,12 +116,30 @@ describe("resolveApiKey", () => {
     );
   });
 
+  // #317 review, #343: an operator debugging a 500 needs to know WHICH
+  // binding is missing without reading this module's source -- the message
+  // used to say "no fallback env var is set" with no name at all.
+  it("names the missing fallback env var in the thrown error's message", async () => {
+    const db = {} as never;
+    await expect(resolveApiKey(fakeEnv(), db, orgScope, baseConfig)).rejects.toThrow(
+      /fallback env var OPENROUTER_API_KEY is not set/,
+    );
+  });
+
   it("throws LLMCredentialMissingError when no credential and the provider has no fallback env var mapping at all", async () => {
     const db = {} as never;
     const localConfig: ResolvedLLMConfig = { ...baseConfig, provider: "local" };
     await expect(
       resolveApiKey(fakeEnv({ OPENROUTER_API_KEY: "sk-irrelevant" }), db, orgScope, localConfig),
     ).rejects.toBeInstanceOf(LLMCredentialMissingError);
+  });
+
+  it("names the fallback var as \"(none)\" when the provider has no mapping at all", async () => {
+    const db = {} as never;
+    const localConfig: ResolvedLLMConfig = { ...baseConfig, provider: "local" };
+    await expect(
+      resolveApiKey(fakeEnv({ OPENROUTER_API_KEY: "sk-irrelevant" }), db, orgScope, localConfig),
+    ).rejects.toThrow(/fallback env var \(none\) is not set/);
   });
 
   it("resolves through a linked credential's secretRef when it names an allowlisted binding", async () => {

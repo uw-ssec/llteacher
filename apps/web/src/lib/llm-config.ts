@@ -225,8 +225,12 @@ export async function resolveApiKey(
   const fallbackVar = PROVIDER_FALLBACK_ENV_VAR[config.provider];
   const key = fallbackVar ? readEnvSecret(env, fallbackVar) : undefined;
   if (!key) {
+    // #317 review, #343: names the actual binding (or "(none)" when this
+    // provider has no fallback mapped at all) instead of a generic "no
+    // fallback env var is set" -- an operator debugging a 500 needs to know
+    // which secret is missing without reading this module's source.
     throw new LLMCredentialMissingError(
-      `No credential configured for llm_configs ${config.id} (provider "${config.provider}") and no fallback env var is set`,
+      `No credential configured for llm_configs ${config.id} (provider "${config.provider}") and fallback env var ${fallbackVar ?? "(none)"} is not set`,
     );
   }
   return key;
