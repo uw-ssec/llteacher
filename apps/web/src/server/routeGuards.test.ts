@@ -76,6 +76,10 @@ const handlers = {
   addRosterMember: ok("addRosterMember"),
   importRoster: ok("importRoster"),
   removeRosterMember: ok("removeRosterMember"),
+  listGrades: ok("listGrades"),
+  saveGrade: ok("saveGrade"),
+  draftGrade: ok("draftGrade"),
+  createExport: ok("createExport"),
 };
 
 vi.mock("./routes/homeworks", () => ({
@@ -94,6 +98,14 @@ vi.mock("./routes/submissions", () => ({
 vi.mock("./routes/sectionAnswers", () => ({
   getSectionAnswerHandler: (c: Context) => handlers.getSectionAnswer(c),
   submitSectionAnswerHandler: (c: Context) => c.json({}, 200),
+}));
+vi.mock("./routes/grades", () => ({
+  listGradesHandler: (c: Context) => handlers.listGrades(c),
+  saveGradeHandler: (c: Context) => handlers.saveGrade(c),
+  draftGradeHandler: (c: Context) => handlers.draftGrade(c),
+}));
+vi.mock("./routes/exports", () => ({
+  createExportHandler: (c: Context) => handlers.createExport(c),
 }));
 vi.mock("./routes/roster", () => ({
   listRosterHandler: (c: Context) => handlers.listRoster(c),
@@ -240,6 +252,23 @@ const ROUTES: { method: string; path: string; handler: HandlerName; admits: Pers
   { method: "POST", path: "/api/courses/course-a/roster/import", handler: "importRoster",
     admits: ["instructor", "admin"] },
   { method: "DELETE", path: `/api/courses/course-a/roster/${HW}`, handler: "removeRosterMember",
+    admits: ["instructor", "admin"] },
+
+  // #75: grading is instructor-tier, deliberately NARROWER than the
+  // submission reads above, which admit a TA. A grade is an education record
+  // a student may dispute; reading their work and grading it are different
+  // authorities. A test that admitted "ta" here would be the mutation this
+  // row exists to catch.
+  { method: "GET", path: `/api/courses/course-a/submissions/${HW}/grades`, handler: "listGrades",
+    admits: ["instructor", "admin"] },
+  { method: "POST", path: `/api/courses/course-a/submissions/${HW}/grades`, handler: "saveGrade",
+    admits: ["instructor", "admin"] },
+  { method: "POST", path: `/api/courses/course-a/submissions/${HW}/grades/draft`, handler: "draftGrade",
+    admits: ["instructor", "admin"] },
+
+  // #91: export. Narrower than reading the same data in the console, because
+  // the artifact leaves the platform's control on download.
+  { method: "POST", path: "/api/courses/course-a/exports", handler: "createExport",
     admits: ["instructor", "admin"] },
 ];
 

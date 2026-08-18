@@ -51,6 +51,8 @@ import {
   listRosterHandler,
   removeRosterMemberHandler,
 } from "./routes/roster";
+import { draftGradeHandler, listGradesHandler, saveGradeHandler } from "./routes/grades";
+import { createExportHandler } from "./routes/exports";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireGraderOf, requireInstructorOf, requireRole } from "./utils/guards";
@@ -232,6 +234,30 @@ app.delete(
   "/api/courses/:courseId/roster/:membershipId",
   requireInstructorOf()(removeRosterMemberHandler),
 );
+
+// #75: grading. Instructor-tier, NOT grader-tier, unlike the submission
+// reads above -- a TA may read a student's work, but a grade is a record the
+// student may dispute and the institution may be asked to defend, so it is
+// attributed to someone with authority over the course. If TA grading is
+// ever wanted it should be a per-course grant like canViewSolutions rather
+// than a widening of these guards.
+app.get(
+  "/api/courses/:courseId/submissions/:submissionId/grades",
+  requireInstructorOf()(listGradesHandler),
+);
+app.post(
+  "/api/courses/:courseId/submissions/:submissionId/grades",
+  requireInstructorOf()(saveGradeHandler),
+);
+app.post(
+  "/api/courses/:courseId/submissions/:submissionId/grades/draft",
+  requireInstructorOf()(draftGradeHandler),
+);
+
+// #91: export. Instructor-tier: the artifact leaves the platform's control
+// the moment it is downloaded, so who may create one is a narrower question
+// than who may read the same data inside the console.
+app.post("/api/courses/:courseId/exports", requireInstructorOf()(createExportHandler));
 
 // #172 audit (CMP-005): an unmatched /api/* path fell through to the SPA
 // catch-all below, which serves index.html with a 200. A client calling a

@@ -18,8 +18,10 @@ export const AUDIT_TARGET_TYPES = {
    *  every course without an explicit choice runs on. */
   LLM_CONFIG: "llm_config",
   /** #86: the course itself, for events that concern a whole roster rather
-   *  than one person in it. */
+   *  than one person in it. Also #91's export scope. */
   COURSE: "course",
+  /** #75: one student's submitted section. */
+  SUBMISSION: "submission",
 } as const;
 
 /** The action vocabulary for audit_events (#147). One place so M3+ handlers
@@ -67,6 +69,17 @@ export const AUDIT_ACTIONS = {
   ROSTER_MEMBER_ADDED: "membership.roster_member_added",
   ROSTER_MEMBER_REMOVED: "membership.roster_member_removed",
   ROSTER_IMPORTED: "membership.roster_imported",
+  /** #75: a grade was recorded, or an AI draft produced. Both are audited:
+   *  the grade because it is an education record a student may dispute, the
+   *  draft because it spends money and sends a student's transcript to a
+   *  third-party provider. The score is recorded on the event; the written
+   *  feedback is not -- that is the record itself, not who-did-what. */
+  GRADE_RECORDED: "grade.recorded",
+  GRADE_DRAFTED: "grade.drafted",
+  /** #91: an instructor exported course data. FERPA-relevant: the artifact
+   *  leaves the platform's control the moment it is downloaded, so the event
+   *  records the scope of what left. */
+  DATA_EXPORTED: "export.created",
 } as const;
 
 /** Fans an audit write out across every org scope it's relevant to (a

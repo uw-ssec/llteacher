@@ -218,6 +218,10 @@ export async function recordGrade(
     gradedByAi: boolean;
     graderMembershipId?: string;
     score?: number;
+    /** #75: a score needs a scale -- grades_score_requires_max_chk rejects
+     *  one without the other. Optional here only because a feedback-only
+     *  grade (both absent) is a supported case. */
+    maxScore?: number;
     rubric?: unknown;
     feedback?: string;
   },

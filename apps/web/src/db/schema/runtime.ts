@@ -1,5 +1,6 @@
 import { relations, sql } from "drizzle-orm";
 import {
+  type AnyPgColumn,
   bigserial,
   boolean,
   check,
@@ -450,8 +451,29 @@ export const grades = pgTable(
     ),
     gradedByAi: boolean("graded_by_ai").notNull().default(false),
     score: doublePrecision("score"),
+    // #75: the denominator. Stored rather than assumed to be 100, because a
+    // section graded out of 4 on a rubric and one graded out of 100 are both
+    // ordinary, and a score with no scale is unreadable a term later.
+    maxScore: doublePrecision("max_score"),
     rubric: jsonb("rubric"),
     feedback: text("feedback"),
+    // #75: the AI draft a human grade was built from, when there was one.
+    //
+    // This is what makes "an AI draft is never final" a property of the data
+    // rather than of the UI. The rule is simply: a grade is IN FORCE only if
+    // graded_by_ai = false. A draft is therefore inert on its own -- no
+    // approval flag to forget to check, no state machine, and no way for a
+    // draft to become authoritative except by a human writing their own row
+    // that points back at it.
+    //
+    // Also the regrade chain: a new human grade supersedes the previous one
+    // and the history is preserved, because nothing here is ever updated in
+    // place. ON DELETE SET NULL so removing a draft cannot take a real grade
+    // with it.
+    supersedesGradeId: uuid("supersedes_grade_id").references(
+      (): AnyPgColumn => grades.id,
+      { onDelete: "set null" },
+    ),
     gradedAt: timestamp("graded_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -466,6 +488,22 @@ export const grades = pgTable(
       "grades_grader_consistency_chk",
       sql`(${t.gradedByAi} = true AND ${t.graderMembershipId} IS NULL)
           OR (${t.gradedByAi} = false AND ${t.graderMembershipId} IS NOT NULL)`,
+    ),
+    // #75: a grade cannot supersede itself. Same shape and same reasoning as
+    // llm_configs_fallback_not_self_chk -- the read walks one hop, so this
+    // closes the only degenerate case a single level admits.
+    check(
+      "grades_supersedes_not_self_chk",
+      sql`${t.supersedesGradeId} IS NULL OR ${t.supersedesGradeId} <> ${t.id}`,
+    ),
+    // #75: a score needs a scale. Either both are present or neither is --
+    // "7" with no denominator is unreadable, and a denominator with no score
+    // is a form half-filled. A feedback-only grade (both null) is a real and
+    // supported case: written comments with no number.
+    check(
+      "grades_score_requires_max_chk",
+      sql`(${t.score} IS NULL AND ${t.maxScore} IS NULL)
+          OR (${t.score} IS NOT NULL AND ${t.maxScore} IS NOT NULL AND ${t.maxScore} > 0)`,
     ),
   ],
 );
