@@ -314,11 +314,38 @@ export async function upsertCourseMembers(
         };
       }),
     );
+    // onConflictDoNothing, then read back what conflicted.
+    //
+    // `users_email_blind_index_uq` is what makes an identity unique, and two
+    // instructors importing overlapping rosters at the same moment can both
+    // pass the lookup above and both try to insert. Without this the second
+    // INSERT raises, and because it is ONE statement for the whole file that
+    // takes down an import of three hundred rows over one shared address --
+    // strictly worse than the per-row shape it replaced, where the same race
+    // cost one row.
+    //
+    // Doing nothing on conflict makes the loser's insert a no-op; the
+    // re-read below then finds the row the winner created, and both imports
+    // succeed with the same identity. The FK from course_memberships means
+    // the re-read has to happen before the memberships are written, which is
+    // why it is here rather than deferred.
     const created = await db
       .insert(users)
       .values(values)
+      .onConflictDoNothing({ target: users.emailBlindIndex })
       .returning({ id: users.id, emailBlindIndex: users.emailBlindIndex });
     for (const row of created) userIdByIndex.set(hex(row.emailBlindIndex), row.id);
+
+    const stillMissing = toCreate
+      .map((candidate) => candidate.blindIndex)
+      .filter((blindIndex) => !userIdByIndex.has(hex(blindIndex)));
+    if (stillMissing.length > 0) {
+      const raced = await db
+        .select({ id: users.id, emailBlindIndex: users.emailBlindIndex })
+        .from(users)
+        .where(inArray(users.emailBlindIndex, stillMissing));
+      for (const row of raced) userIdByIndex.set(hex(row.emailBlindIndex), row.id);
+    }
   }
 
   /* Pass 4 -- one lookup for every existing membership on this course. */

@@ -471,6 +471,36 @@ describe.skipIf(!DATABASE_URL)("upsertCourseMembers / previewCourseMembers (#355
     expect(previewed.map((r) => r.status)).toEqual(committed.map((r) => r.status));
   });
 
+  it("survives a concurrent import that creates the same identity first", async () => {
+    // Two instructors importing overlapping rosters at the same moment both
+    // pass the identity lookup and both try to insert. Because the batch is
+    // ONE statement for the whole file, an unhandled conflict would take
+    // down an import of three hundred rows over one shared address.
+    const shared = email();
+    const mine = email();
+    const results = await Promise.all([
+      upsertCourseMembers(db, scope(), cipher, [
+        { email: shared, role: "student" },
+        { email: mine, role: "student" },
+      ], UW),
+      upsertCourseMembers(db, scope(), cipher, [{ email: shared, role: "student" }], UW),
+    ]);
+
+    // Both imports succeeded, and neither reports a failure for the shared
+    // address -- it is either newly added or already there, depending on who
+    // won, and both are true answers.
+    for (const batch of results) {
+      for (const r of batch) {
+        expect(["added", "already_enrolled"]).toContain(r.status);
+      }
+    }
+    // One identity, not two.
+    const rows = await db.query.users.findMany({
+      where: eq(users.emailBlindIndex, await cipher.computeBlindIndex(shared)),
+    });
+    expect(rows).toHaveLength(1);
+  });
+
   it("handles a batch far larger than any per-row path could", async () => {
     // 200 entries: ~600 sequential round trips under the old shape, which is
     // over the Worker subrequest cap. Here it is a handful of statements.
