@@ -139,12 +139,21 @@ export function AlertDialog({
       {/* #327: role="status" progress line -- announced the moment
           `confirming` flips true, independent of whichever action happens
           to have focus. Visually hidden via the .sr-only utility class
-          (styles.css) so it doesn't shift the dialog's layout. */}
-      {confirming && (
-        <p className="sr-only" role="status">
-          {confirmLabel} in progress…
-        </p>
-      )}
+          (styles.css) so it doesn't shift the dialog's layout.
+
+          #317 review, #345: mounted unconditionally, with the text as the
+          only thing that changes -- a live region has to already be
+          registered in the accessibility tree BEFORE its content changes to
+          be observed as a change at all (ARIA22). The previous version
+          mounted this `<p>` conditionally, with its text already inside it
+          on arrival, which several AT never announce -- the student presses
+          Confirm and hears nothing for the whole request; if it then fails,
+          the role="alert" description is the first feedback of any kind.
+          ConversationView.tsx's turn-complete announcement 300+ lines away
+          already gets this right (mounted always, gated only on text). */}
+      <p className="sr-only" role="status">
+        {confirming ? `${confirmLabel} in progress…` : ""}
+      </p>
     </dialog>
   );
 }

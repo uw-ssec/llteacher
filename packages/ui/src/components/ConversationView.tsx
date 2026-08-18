@@ -323,15 +323,56 @@ export function ConversationView({
   // the turn count keeps consecutive completions textually distinct
   // (and, as a side effect, informative) rather than relying on that
   // assumption holding.
+  //
+  // #317 review, #345: the naive `isSending` true->false transition fired
+  // this same "Response complete" phrase on three outcomes that are not
+  // completion at all -- App.tsx's own `isSending` folds together
+  // `chatStatus === "submitted" || "streaming" || !!sectionHydrationError`,
+  // so it also flips false on Stop (the opposite of what the phrase
+  // claims -- the one feedback the student got for pressing Stop stated
+  // the reply finished), on error (redundant with, and contradicting, the
+  // assertive alert that fires alongside it), and on a hydration-retry
+  // clearing with no chat turn ever sent. Three independent guards below,
+  // one per false-positive source:
   const [turnCompleteAnnouncement, setTurnCompleteAnnouncement] = useState("");
   const completedTurnCountRef = useRef(0);
   const wasSendingRef = useRef(isSending);
+  // Set by the Stop button's own onClick below -- ConversationView owns
+  // that click, so it can flag "the next isSending->false transition was
+  // caused by Stop" without App.tsx needing to plumb a distinct status
+  // through `isSending`'s single boolean.
+  const stoppedRef = useRef(false);
+  // The message count at the moment `isSending` became true -- a genuine
+  // chat turn appends the student's own message essentially immediately
+  // (see handleSubmit below), so an unchanged count by the time
+  // `isSending` clears again means no turn was actually sent (the
+  // hydration-retry-clearing case).
+  const messagesLengthAtSendStartRef = useRef(messages.length);
   useEffect(() => {
+    if (isSending && !wasSendingRef.current) {
+      messagesLengthAtSendStartRef.current = messages.length;
+    }
     if (wasSendingRef.current && !isSending) {
-      completedTurnCountRef.current += 1;
-      setTurnCompleteAnnouncement(`Response complete (turn ${completedTurnCountRef.current}).`);
+      if (stoppedRef.current) {
+        stoppedRef.current = false;
+        setTurnCompleteAnnouncement("Response stopped.");
+      } else if (!error && messages.length !== messagesLengthAtSendStartRef.current) {
+        completedTurnCountRef.current += 1;
+        setTurnCompleteAnnouncement(`Response complete (turn ${completedTurnCountRef.current}).`);
+      }
+      // error !== null: the assertive role="alert" error row is the
+      // announcement -- a second, contradictory "complete" status right
+      // alongside it helps nobody.
+      // messages unchanged: nothing was actually sent (isSending was true
+      // only because of a hydration retry) -- no turn to announce.
     }
     wasSendingRef.current = isSending;
+    // messages.length, not the whole `messages` array/`error`, is the
+    // correct dependency here -- this effect only needs to READ their
+    // current values at the moment isSending's own edge fires, not
+    // re-run whenever a message's content mutates mid-stream (which
+    // would restart the "count runs of this exact turn" logic every
+    // token) or `error` changes independently of isSending.
   }, [isSending]);
 
   const handleSubmit = (text: string) => {
@@ -400,8 +441,32 @@ export function ConversationView({
               means only a newly APPENDED node is announced, not every text
               mutation inside an existing one -- combined with aria-busy on
               the in-progress AI message (Message.tsx), a streaming reply is
-              silent while it fills in and announced once, whole, on
-              completion.
+              silent while it fills in.
+
+              #317 review, #345 (correcting the claim this comment used to
+              make): "announced once, whole, on completion" describes
+              behavior ARIA does not specify and this markup does not
+              produce. "additions" excludes TEXT changes by definition --
+              the reply's own content is a text mutation inside the AI
+              message node that already exists (appended empty, then
+              filled in via streaming deltas), never a new node arriving.
+              So the reply text is never announced by this region at all;
+              aria-busy clearing does not retroactively announce the
+              subtree it was set on. What the student actually hears is the
+              turnCompleteAnnouncement fixed phrase below ("Response
+              complete") -- a deterministic signal that a reply finished,
+              deliberately not the reply's own words (see that state's own
+              doc comment for why: `msg.content` is markdown-rendered
+              ReactNode, not always safely re-readable as plain text).
+              Reading the actual answer requires leaving the composer and
+              navigating into the transcript. Known, real limitation --
+              not fixed here because it wants manual AT verification
+              (NVDA/JAWS/VoiceOver) this session cannot perform: the
+              candidate fix (aria-busy on the log root, aria-relevant back
+              to its "additions text" default) changes what gets announced
+              and when for every message in the transcript, and shipping
+              that blind risks a worse regression than the current,
+              honestly-documented gap.
 
               #317 review, #327: wraps ONLY the appended turns now (the
               breadcrumb/title/notice above moved out, see their own
@@ -520,7 +585,21 @@ export function ConversationView({
           native `disabled` removing it from the tab order. */}
       {onStop && (
         <div className="conversation-stop-row">
-          <Button variant="danger" size="sm" outlined onClick={onStop} ariaDisabled={!isSending}>
+          <Button
+            variant="danger"
+            size="sm"
+            outlined
+            // #317 review, #345: flags the next isSending->false transition
+            // as caused by Stop (see turnCompleteAnnouncement's own effect
+            // above) -- Button.tsx only invokes onClick when the button is
+            // genuinely actionable (not aria-disabled), so this can't set
+            // the flag from a click that didn't actually stop anything.
+            onClick={() => {
+              stoppedRef.current = true;
+              onStop();
+            }}
+            ariaDisabled={!isSending}
+          >
             Stop
           </Button>
         </div>

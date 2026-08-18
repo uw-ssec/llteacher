@@ -185,12 +185,77 @@ describe("ConversationView live region (#300)", () => {
   // "the reply is done" signal on the streaming->idle transition, since
   // aria-busy's own replay behavior on completion is unspecified across AT.
   it("announces a deterministic status when isSending transitions from true to false", () => {
+    // #317 review, #345: messages must actually change between the two
+    // renders -- an unchanged array now means "isSending was true only
+    // because of a hydration retry, no turn was sent" and correctly
+    // suppresses the announcement (see the #345 guard's own test below).
     const { rerender } = render(
       <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={true} />,
     );
     expect(screen.getByRole("status").textContent).toBe("");
-    rerender(<ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={false} />);
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[{ id: "a1", role: "ai", content: "answer" }]}
+        onSendMessage={() => {}}
+        isSending={false}
+      />,
+    );
     expect(screen.getByRole("status").textContent).toMatch(/response complete/i);
+  });
+
+  // #317 review, #345: `isSending` folds together chatStatus and a
+  // hydration-retry flag in App.tsx -- an unchanged `messages` array across
+  // the isSending true->false edge means no chat turn was actually sent,
+  // so announcing "Response complete" would be false.
+  it("does not announce completion when isSending clears with no message ever added (hydration retry, not a turn)", () => {
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={true} />,
+    );
+    rerender(<ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={false} />);
+    expect(screen.getByRole("status").textContent).toBe("");
+  });
+
+  // #317 review, #345: the error alert already covers a failed turn --
+  // announcing "Response complete" right alongside it, from the same
+  // isSending edge a genuine success would use, contradicts it.
+  it("does not announce completion when isSending clears with an error set", () => {
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={true} />,
+    );
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[{ id: "u1", role: "student", content: "hi" }]}
+        onSendMessage={() => {}}
+        isSending={false}
+        error={{ message: '{"error":"x","code":"unavailable"}', onRetry: () => {} }}
+      />,
+    );
+    expect(screen.getByRole("status").textContent).toBe("");
+  });
+
+  // #317 review, #345: Stop is the opposite of "complete" -- the previous
+  // behavior told a student who pressed Stop that the reply had finished.
+  it("announces that the response was stopped, not that it completed, when Stop was pressed", async () => {
+    const onStop = vi.fn();
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={true} onStop={onStop} />,
+    );
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    expect(onStop).toHaveBeenCalledTimes(1);
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[{ id: "u1", role: "student", content: "hi" }]}
+        onSendMessage={() => {}}
+        isSending={false}
+        onStop={onStop}
+      />,
+    );
+    expect(screen.getByRole("status").textContent).toMatch(/stopped/i);
+    expect(screen.getByRole("status").textContent).not.toMatch(/complete/i);
   });
 });
 
