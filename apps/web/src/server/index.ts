@@ -45,6 +45,12 @@ import {
   testLlmConfigHandler,
   updateLlmConfigHandler,
 } from "./routes/llmConfigs";
+import {
+  addRosterMemberHandler,
+  importRosterHandler,
+  listRosterHandler,
+  removeRosterMemberHandler,
+} from "./routes/roster";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireGraderOf, requireInstructorOf, requireRole } from "./utils/guards";
@@ -213,6 +219,18 @@ app.post(
 app.post(
   "/api/courses/:courseId/llm-configs/:configId/test",
   requireInstructorOf()(testLlmConfigHandler),
+);
+
+// #32/#86: the roster. Instructor-only -- a TA reads student work, they do
+// not decide who is in the class. The import shares one provisioning
+// pipeline with manual add and with #210's NetID entry (repositories/
+// roster.ts), which is what stops the three inputs from drifting.
+app.get("/api/courses/:courseId/roster", requireInstructorOf()(listRosterHandler));
+app.post("/api/courses/:courseId/roster", requireInstructorOf()(addRosterMemberHandler));
+app.post("/api/courses/:courseId/roster/import", requireInstructorOf()(importRosterHandler));
+app.delete(
+  "/api/courses/:courseId/roster/:membershipId",
+  requireInstructorOf()(removeRosterMemberHandler),
 );
 
 // #172 audit (CMP-005): an unmatched /api/* path fell through to the SPA

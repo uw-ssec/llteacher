@@ -17,6 +17,9 @@ export const AUDIT_TARGET_TYPES = {
   /** #31: an LLM configuration. Org-level blast radius -- the default is what
    *  every course without an explicit choice runs on. */
   LLM_CONFIG: "llm_config",
+  /** #86: the course itself, for events that concern a whole roster rather
+   *  than one person in it. */
+  COURSE: "course",
 } as const;
 
 /** The action vocabulary for audit_events (#147). One place so M3+ handlers
@@ -56,6 +59,14 @@ export const AUDIT_ACTIONS = {
   /** Audited because it spends money and reaches a third-party provider,
    *  even though it persists nothing else. */
   LLM_CONFIG_TESTED: "llm_config.tested",
+  /** #32/#86: roster changes. Enrolment decides who can see a course's work
+   *  at all, so it is audited with the same seriousness as a capability
+   *  grant. The import writes ONE event for the whole file rather than one
+   *  per row -- the act is "an instructor imported a roster", and a 200-row
+   *  file would otherwise bury every other event in the org's log that day. */
+  ROSTER_MEMBER_ADDED: "membership.roster_member_added",
+  ROSTER_MEMBER_REMOVED: "membership.roster_member_removed",
+  ROSTER_IMPORTED: "membership.roster_imported",
 } as const;
 
 /** Fans an audit write out across every org scope it's relevant to (a

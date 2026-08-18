@@ -72,6 +72,10 @@ const handlers = {
   deactivateLlmConfig: ok("deactivateLlmConfig"),
   cloneLlmConfig: ok("cloneLlmConfig"),
   testLlmConfig: ok("testLlmConfig"),
+  listRoster: ok("listRoster"),
+  addRosterMember: ok("addRosterMember"),
+  importRoster: ok("importRoster"),
+  removeRosterMember: ok("removeRosterMember"),
 };
 
 vi.mock("./routes/homeworks", () => ({
@@ -90,6 +94,12 @@ vi.mock("./routes/submissions", () => ({
 vi.mock("./routes/sectionAnswers", () => ({
   getSectionAnswerHandler: (c: Context) => handlers.getSectionAnswer(c),
   submitSectionAnswerHandler: (c: Context) => c.json({}, 200),
+}));
+vi.mock("./routes/roster", () => ({
+  listRosterHandler: (c: Context) => handlers.listRoster(c),
+  addRosterMemberHandler: (c: Context) => handlers.addRosterMember(c),
+  importRosterHandler: (c: Context) => handlers.importRoster(c),
+  removeRosterMemberHandler: (c: Context) => handlers.removeRosterMember(c),
 }));
 vi.mock("./routes/llmConfigs", () => ({
   listLlmConfigsHandler: (c: Context) => handlers.listLlmConfigs(c),
@@ -218,6 +228,18 @@ const ROUTES: { method: string; path: string; handler: HandlerName; admits: Pers
   { method: "POST", path: `/api/courses/course-a/llm-configs/${HW}/clone`, handler: "cloneLlmConfig",
     admits: ["instructor", "admin"] },
   { method: "POST", path: `/api/courses/course-a/llm-configs/${HW}/test`, handler: "testLlmConfig",
+    admits: ["instructor", "admin"] },
+
+  // #32/#86: deciding who is in the class is instructor authority. A TA
+  // reads student work -- admitting them here would let a grader enrol
+  // themselves anywhere, or remove the students whose work they grade.
+  { method: "GET", path: "/api/courses/course-a/roster", handler: "listRoster",
+    admits: ["instructor", "admin"] },
+  { method: "POST", path: "/api/courses/course-a/roster", handler: "addRosterMember",
+    admits: ["instructor", "admin"] },
+  { method: "POST", path: "/api/courses/course-a/roster/import", handler: "importRoster",
+    admits: ["instructor", "admin"] },
+  { method: "DELETE", path: `/api/courses/course-a/roster/${HW}`, handler: "removeRosterMember",
     admits: ["instructor", "admin"] },
 ];
 

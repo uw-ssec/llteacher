@@ -4,6 +4,7 @@ import { courseMemberships, users } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { emailForNetid, isValidNetid } from "../../lib/netid";
+import { allowedDomainsForCourse, upsertCourseMember } from "./roster";
 
 /** The stored grant on one TA membership. The PATCH echo returns exactly
  *  this -- no identity, because the caller already knows who they edited and
@@ -194,27 +195,20 @@ export interface AddTaResult {
 
 /** Adds TAs to a course by UW NetID, one independent outcome per entry.
  *
- *  `course_memberships_user_course_uq` is on (user_id, course_id) REGARDLESS
- *  of dropped_at, so this is an upsert and never a plain insert -- a
- *  previously-removed TA has a row waiting, and inserting a second one
- *  violates the index.
+ *  #86's rule -- manual add, CSV import and NetID entry must be ONE
+ *  provisioning pipeline -- means this is now an adapter rather than a
+ *  second implementation. It does the two things that are genuinely
+ *  NetID-specific (validate the format, derive the address) and hands the
+ *  rest to `upsertCourseMember`, which owns the upsert semantics, the
+ *  capability-flag clearing and the role-conflict rule for every caller.
  *
- *  Course-scoped in the WHERE clause rather than read-then-write (#174's
- *  lesson, as setTaCapabilities already does): a membership in another course
- *  matches zero rows instead of being read, checked, and then written by id.
+ *  An earlier version of this function duplicated that logic. The duplicate
+ *  was correct on the day it was written, which is exactly the state from
+ *  which two implementations drift.
  *
- *  Both capability flags are written false explicitly on every create and
- *  every restore. The CHECK constraint permits flags on any active `role='ta'`
- *  row, so the database does not stop a buggy write here -- being explicit is
- *  what makes "a new TA starts with nothing" a property of the code rather
- *  than of the column defaults, which only apply on insert and not on the
- *  restore path.
- *
- *  Not transactional: neon-http has no interactive transactions (the same
- *  constraint UserIdentityService documents). Each NetID is independent, and
- *  the only multi-statement case -- create user, then create membership --
- *  leaves at worst an unreferenced pending user if the second write fails,
- *  which the next attempt for that NetID finds and reuses. */
+ *  The status vocabulary stays NetID-shaped (`already_ta`, `invalid_netid`)
+ *  because that is what the admin panel renders and what #210 specifies;
+ *  the mapping from the shared vocabulary is the last thing this does. */
 export async function addTasByNetid(
   db: Db,
   scope: CourseScope,
@@ -228,6 +222,11 @@ export async function addTasByNetid(
   // first pass had just added, which reads as a contradiction.
   const seen = new Set<string>();
 
+  // Read once for the whole batch rather than per entry: a 100-NetID paste
+  // would otherwise issue 100 identical queries for a value that cannot
+  // change mid-request.
+  const allowedDomains = await allowedDomainsForCourse(db, scope);
+
   for (const raw of netids) {
     const netid = IdentityCipher.normalizeNetid(raw);
     if (netid === "" || seen.has(netid)) continue;
@@ -238,83 +237,38 @@ export async function addTasByNetid(
       continue;
     }
 
-    const netidBlindIndex = await cipher.computeBlindIndex(netid);
-    let user = await db.query.users.findFirst({
-      where: eq(users.netidBlindIndex, netidBlindIndex),
-      columns: { id: true },
-    });
+    const provisioned = await upsertCourseMember(
+      db,
+      scope,
+      cipher,
+      { email: emailForNetid(netid), role: "ta" },
+      allowedDomains,
+    );
 
-    if (!user) {
-      // A pending user: no workos_user_id yet. `createOrClaimUser` claims it
-      // on their first AuthKit login by matching the email blind index, so
-      // both indexes are written now -- matching on netid alone would leave
-      // the login path unable to find this row.
-      const [created] = await db
-        .insert(users)
-        .values({
-          email: await cipher.encryptString(emailForNetid(netid)),
-          emailBlindIndex: await cipher.computeBlindIndex(
-            IdentityCipher.normalizeEmail(emailForNetid(netid)),
-          ),
-          netid: await cipher.encryptString(netid),
-          netidBlindIndex,
-          isPending: true,
-        })
-        .returning({ id: users.id });
-      user = created;
+    switch (provisioned.status) {
+      case "added":
+      case "restored":
+        results.push({ netid, status: provisioned.status, membershipId: provisioned.membershipId });
+        break;
+      case "already_enrolled":
+        results.push({ netid, status: "already_ta", membershipId: provisioned.membershipId });
+        break;
+      case "role_conflict":
+        results.push({
+          netid,
+          status: "role_conflict",
+          existingRole: provisioned.existingRole,
+        });
+        break;
+      // A NetID that passed isValidNetid always yields a well-formed
+      // `netid@uw.edu`, so these are only reachable if an organization's
+      // allowlist excludes uw.edu -- a real configuration, and one an
+      // instructor should be told about rather than see as a silent no-op.
+      case "invalid_email":
+      case "disallowed_domain":
+        results.push({ netid, status: "invalid_netid" });
+        break;
     }
-
-    const existing = await db.query.courseMemberships.findFirst({
-      where: and(eq(courseMemberships.userId, user!.id), eq(courseMemberships.courseId, scope)),
-      columns: { id: true, role: true, droppedAt: true },
-    });
-
-    if (!existing) {
-      const [membership] = await db
-        .insert(courseMemberships)
-        .values({
-          userId: user!.id,
-          courseId: scope,
-          role: "ta",
-          canViewSolutions: false,
-          canViewDrafts: false,
-        })
-        .returning({ id: courseMemberships.id });
-      results.push({ netid, status: "added", membershipId: membership!.id });
-      continue;
-    }
-
-    if (existing.droppedAt === null) {
-      if (existing.role === "ta") {
-        results.push({ netid, status: "already_ta", membershipId: existing.id });
-        continue;
-      }
-      // Refused, not promoted. A grad student enrolled in the course they
-      // TA is a real case, but promoting student -> ta changes what they can
-      // see of their OWN coursework, and the console offers no way to
-      // explain or undo that. Refusing is the recoverable half of the
-      // trade: the instructor is told what the person already is and can
-      // decide deliberately, and nothing has been written.
-      results.push({ netid, status: "role_conflict", existingRole: existing.role });
-      continue;
-    }
-
-    // Dropped, for any reason. Restored as a TA with both grants cleared:
-    // whatever they held before removal is not re-granted by re-adding them,
-    // for the same reason SEC-006 clears grants on the way down.
-    const [restored] = await db
-      .update(courseMemberships)
-      .set({
-        role: "ta",
-        droppedAt: null,
-        droppedReason: null,
-        canViewSolutions: false,
-        canViewDrafts: false,
-        updatedAt: new Date(),
-      })
-      .where(and(eq(courseMemberships.id, existing.id), eq(courseMemberships.courseId, scope)))
-      .returning({ id: courseMemberships.id });
-    results.push({ netid, status: "restored", membershipId: restored!.id });
   }
 
   return results;
