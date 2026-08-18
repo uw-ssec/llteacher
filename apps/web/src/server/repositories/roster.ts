@@ -415,6 +415,11 @@ export async function upsertCourseMembers(
     toInsert.length = 0;
     toInsert.push(...firstByUser.values());
 
+    // Same race, one level down, and the one CI caught that a local run got
+    // lucky on: `course_memberships_user_course_uq` spans (user_id,
+    // course_id), so two concurrent imports that both read "no membership
+    // here" both try to insert, and the loser takes down the whole file.
+    // Doing nothing on conflict makes the loser's insert a no-op.
     const inserted = await db
       .insert(courseMemberships)
       .values(
@@ -426,8 +431,40 @@ export async function upsertCourseMembers(
           canViewDrafts: false,
         })),
       )
+      .onConflictDoNothing({ target: [courseMemberships.userId, courseMemberships.courseId] })
       .returning({ id: courseMemberships.id, userId: courseMemberships.userId });
     const idByUser = new Map(inserted.map((r) => [r.userId, r.id]));
+
+    // Read back whatever conflicted, so the report is accurate rather than
+    // silent. A row that lost the race IS on the course -- the other import
+    // put them there -- so `already_enrolled` is the honest status, and it
+    // carries the membership id the winner created.
+    const lostRace = toInsert.filter((t) => !idByUser.has(t.userId));
+    if (lostRace.length > 0) {
+      const existingNow = await db
+        .select({ id: courseMemberships.id, userId: courseMemberships.userId })
+        .from(courseMemberships)
+        .where(
+          and(
+            eq(courseMemberships.courseId, scope),
+            inArray(
+              courseMemberships.userId,
+              lostRace.map((t) => t.userId),
+            ),
+          ),
+        );
+      const raced = new Map(existingNow.map((r) => [r.userId, r.id]));
+      for (const t of lostRace) {
+        results.set(t.index, {
+          email: t.email,
+          status: "already_enrolled",
+          membershipId: raced.get(t.userId),
+        });
+      }
+      // Removed from the "added" set below, so one row is reported once.
+      const lost = new Set(lostRace.map((t) => t.userId));
+      toInsert.splice(0, toInsert.length, ...toInsert.filter((t) => !lost.has(t.userId)));
+    }
     for (const t of toInsert) {
       results.set(t.index, {
         email: t.email,

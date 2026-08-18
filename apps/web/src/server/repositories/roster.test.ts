@@ -471,34 +471,75 @@ describe.skipIf(!DATABASE_URL)("upsertCourseMembers / previewCourseMembers (#355
     expect(previewed.map((r) => r.status)).toEqual(committed.map((r) => r.status));
   });
 
-  it("survives a concurrent import that creates the same identity first", async () => {
-    // Two instructors importing overlapping rosters at the same moment both
-    // pass the identity lookup and both try to insert. Because the batch is
-    // ONE statement for the whole file, an unhandled conflict would take
-    // down an import of three hundred rows over one shared address.
-    const shared = email();
-    const mine = email();
-    const results = await Promise.all([
-      upsertCourseMembers(db, scope(), cipher, [
-        { email: shared, role: "student" },
-        { email: mine, role: "student" },
-      ], UW),
-      upsertCourseMembers(db, scope(), cipher, [{ email: shared, role: "student" }], UW),
-    ]);
+  it("reports an enrolment another importer already made, rather than failing", async () => {
+    // The DETERMINISTIC half of the concurrency story, and the one that
+    // actually pins the contract. When a membership already exists by the
+    // time the batch writes -- which is what losing the race looks like from
+    // this function's side -- the row must come back `already_enrolled` with
+    // the winner's membership id, not as a failure and not as a duplicate.
+    const addr = email();
+    const winner = await upsertCourseMember(db, scope(), cipher, { email: addr, role: "student" }, UW);
 
-    // Both imports succeeded, and neither reports a failure for the shared
-    // address -- it is either newly added or already there, depending on who
-    // won, and both are true answers.
+    const [result] = await upsertCourseMembers(
+      db,
+      scope(),
+      cipher,
+      [{ email: addr, role: "student" }],
+      UW,
+    );
+    expect(result).toMatchObject({ status: "already_enrolled", membershipId: winner.membershipId });
+  });
+
+  it("survives concurrent imports that share addresses", async () => {
+    // Two instructors importing overlapping rosters at the same moment race
+    // at BOTH unique indexes: `users_email_blind_index_uq` on the identity
+    // and `course_memberships_user_course_uq` on the enrolment. Because the
+    // batch is one statement per stage for the whole file, an unhandled
+    // conflict at either level takes down an import of three hundred rows
+    // over one shared address.
+    //
+    // BE HONEST ABOUT WHAT THIS TEST IS. It does not deterministically
+    // reproduce the race: whether two importers interleave between the
+    // membership SELECT and the membership INSERT depends on connection
+    // pooling and scheduling, and on a fast local database with a warm pool
+    // they routinely do not. An earlier version of this suite passed against
+    // code with the membership-level conflict unhandled; CI, which is slower
+    // and more contended, failed it. So this is a SMOKE test that has
+    // already earned its place by catching a real bug once, and the
+    // deterministic contract is pinned by the test above it.
+    const shared = Array.from({ length: 6 }, () => email());
+    const batches = Array.from({ length: 5 }, () =>
+      shared.map((addr) => ({ email: addr, role: "student" as const })),
+    );
+
+    const results = await Promise.all(
+      batches.map((entries) => upsertCourseMembers(db, scope(), cipher, entries, UW)),
+    );
+
     for (const batch of results) {
+      expect(batch).toHaveLength(shared.length);
       for (const r of batch) {
         expect(["added", "already_enrolled"]).toContain(r.status);
+        // Reported either way, so a caller can act on the row regardless of
+        // which importer won.
+        expect(r.membershipId).toBeTruthy();
       }
     }
-    // One identity, not two.
-    const rows = await db.query.users.findMany({
-      where: eq(users.emailBlindIndex, await cipher.computeBlindIndex(shared)),
-    });
-    expect(rows).toHaveLength(1);
+
+    // One identity and one membership per address, not five of each.
+    for (const addr of shared) {
+      const userRows = await db.query.users.findMany({
+        where: eq(users.emailBlindIndex, await cipher.computeBlindIndex(addr)),
+      });
+      expect(userRows).toHaveLength(1);
+      const memberships = await db.query.courseMemberships.findMany({
+        where: and(
+          eq(courseMemberships.userId, userRows[0]!.id),
+          eq(courseMemberships.courseId, courseId),
+        ),
+      });
+      expect(memberships).toHaveLength(1);
+    }
   });
 
   it("handles a batch far larger than any per-row path could", async () => {
