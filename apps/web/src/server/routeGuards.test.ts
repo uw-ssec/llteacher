@@ -63,6 +63,8 @@ const handlers = {
   getSectionAnswer: ok("getSectionAnswer"),
   listCourseTas: ok("listCourseTas"),
   updateTaCapabilities: ok("updateTaCapabilities"),
+  addCourseTas: ok("addCourseTas"),
+  removeCourseTa: ok("removeCourseTa"),
 };
 
 vi.mock("./routes/homeworks", () => ({
@@ -85,6 +87,8 @@ vi.mock("./routes/sectionAnswers", () => ({
 vi.mock("./routes/courseMemberships", () => ({
   listCourseTasHandler: (c: Context) => handlers.listCourseTas(c),
   updateTaCapabilitiesHandler: (c: Context) => handlers.updateTaCapabilities(c),
+  addCourseTasHandler: (c: Context) => handlers.addCourseTas(c),
+  removeCourseTaHandler: (c: Context) => handlers.removeCourseTa(c),
 }));
 
 const findMany = vi.fn();
@@ -170,6 +174,14 @@ const ROUTES: { method: string; path: string; handler: HandlerName; admits: Pers
   { method: "GET", path: "/api/courses/course-a/tas", handler: "listCourseTas",
     admits: ["instructor", "admin"] },
   { method: "PATCH", path: `/api/courses/course-a/tas/${HW}/capabilities`, handler: "updateTaCapabilities",
+    admits: ["instructor", "admin"] },
+
+  // #210: putting someone on the course as a TA, and taking them off, are
+  // the same authority as granting -- a TA must not be able to recruit
+  // another TA, nor re-add themselves after removal.
+  { method: "POST", path: "/api/courses/course-a/tas", handler: "addCourseTas",
+    admits: ["instructor", "admin"] },
+  { method: "DELETE", path: `/api/courses/course-a/tas/${HW}`, handler: "removeCourseTa",
     admits: ["instructor", "admin"] },
 ];
 

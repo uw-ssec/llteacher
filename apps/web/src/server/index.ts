@@ -30,7 +30,12 @@ import {
 } from "./routes/sectionConversations";
 import { submitSectionAnswerHandler, getSectionAnswerHandler } from "./routes/sectionAnswers";
 import { submitWidgetResponseHandler } from "./routes/progressWidgets";
-import { listCourseTasHandler, updateTaCapabilitiesHandler } from "./routes/courseMemberships";
+import {
+  addCourseTasHandler,
+  listCourseTasHandler,
+  removeCourseTaHandler,
+  updateTaCapabilitiesHandler,
+} from "./routes/courseMemberships";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireGraderOf, requireInstructorOf, requireRole } from "./utils/guards";
@@ -121,7 +126,7 @@ app.post("/api/conversations/:id/submit", requireRole(["student"])(submitSection
 // requireInstructorOf.
 app.get(
   "/api/courses/:courseId/homeworks/:homeworkId/submissions",
-  requireGraderOf()(getHomeworkSubmissionsHandler),
+  requireGraderOf("gates-unreleased")(getHomeworkSubmissionsHandler),
 );
 // #27: section-conversation lifecycle. requireCourseMember, not
 // requireRole(["student"]) -- an instructor starting one is the teacher-test
@@ -149,7 +154,7 @@ app.post(
 app.patch("/api/sections/:sectionId/answer", requireRole(["student"])(submitSectionAnswerHandler));
 app.get(
   "/api/courses/:courseId/sections/:sectionId/answers/:studentId",
-  requireGraderOf()(getSectionAnswerHandler),
+  requireGraderOf("gates-unreleased")(getSectionAnswerHandler),
 );
 app.patch("/api/widgets/:widgetId/response", requireRole(["student"])(submitWidgetResponseHandler));
 // #172: granting a capability is authoring-tier -- a TA must not be able to
@@ -158,6 +163,15 @@ app.get("/api/courses/:courseId/tas", requireInstructorOf()(listCourseTasHandler
 app.patch(
   "/api/courses/:courseId/tas/:membershipId/capabilities",
   requireInstructorOf()(updateTaCapabilitiesHandler),
+);
+// #210: putting someone on a course as a TA is authoring-tier authority over
+// who can read student work, so these join the grant routes above rather than
+// the grading reads -- a TA must not be able to recruit another TA or re-add
+// themselves after removal.
+app.post("/api/courses/:courseId/tas", requireInstructorOf()(addCourseTasHandler));
+app.delete(
+  "/api/courses/:courseId/tas/:membershipId",
+  requireInstructorOf()(removeCourseTaHandler),
 );
 
 // #172 audit (CMP-005): an unmatched /api/* path fell through to the SPA

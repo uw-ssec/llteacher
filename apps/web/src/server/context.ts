@@ -9,5 +9,10 @@ export interface AppEnv {
   Variables: {
     session?: SessionPayload;
     authContext?: AuthContext;
+    /** #208: set by requireGraderOf's instrumented AuthContext the first
+     *  time a grader-tier handler consults canViewDraftsIn. Exists so the
+     *  release-gate pairing can be *observed* rather than assumed -- see
+     *  utils/guards.ts. Nothing in production branches on it. */
+    draftGateConsulted?: boolean;
   };
 }

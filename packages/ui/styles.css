@@ -3274,6 +3274,268 @@ body {
   font-weight: var(--weight-semibold);
 }
 
+/* -- Accession panel: adding TAs by NetID (#210) ---------------------------
+   The console reads as a card catalog -- mono record ids, ruled rows, warm
+   paper. This is the accession slip in that register: you write down who is
+   joining the record, and every entry comes back stamped with what happened
+   to it.
+
+   The ledger is the load-bearing part. #210 requires a per-NetID outcome
+   because one collective "failed" cannot tell an instructor which three of
+   eight were typos; so entries are a numbered list with the NetID set in the
+   same mono the console reserves for identifiers, and the outcome sits in a
+   fixed column beside it. Scannable straight down the left edge. */
+
+.admin-accession {
+  margin-block-end: var(--space-6);
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  border: 1px solid var(--color-border);
+  /* Leading rule in Heritage Gold, matching .admin-notice: this is an
+     authoring affordance, not a failure, so it never borrows the error red. */
+  border-inline-start: 2px solid var(--color-accent-warm);
+  border-radius: 6px;
+  background-color: var(--color-surface-raised);
+}
+
+.admin-accession--closed {
+  padding: 0;
+  border: 0;
+  background: none;
+  margin-block-end: var(--space-5);
+}
+
+.admin-accession__open {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 5px;
+  background-color: var(--color-bg);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: background-color 140ms ease-out, border-color 140ms ease-out;
+}
+
+.admin-accession__open:hover {
+  background-color: var(--color-surface);
+  border-color: var(--color-accent-warm);
+}
+
+.admin-accession__eyebrow {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.admin-accession__label {
+  display: block;
+  margin-block-end: var(--space-1);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.admin-accession__hint {
+  margin: 0 0 var(--space-3);
+  max-width: 68ch;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+  color: var(--color-text-secondary);
+}
+
+.admin-accession__hint code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  color: var(--color-text);
+}
+
+.admin-accession__field {
+  display: block;
+  width: 100%;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 5px;
+  background-color: var(--color-bg);
+  /* Mono, because the content is identifiers. It also makes a pasted
+     "alovelace@uw.edu" visibly wider than its neighbours before submit. */
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: 1.7;
+  color: var(--color-text);
+  resize: vertical;
+}
+
+.admin-accession__field:focus-within,
+.admin-accession__field:focus {
+  border-color: var(--color-accent-warm);
+}
+
+.admin-accession__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-block-start: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.admin-accession__submit {
+  padding: var(--space-2) var(--space-4);
+  border: 0;
+  border-radius: 5px;
+  background-color: var(--color-accent);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  color: #fff;
+  cursor: pointer;
+  transition: background-color 140ms ease-out;
+}
+
+.admin-accession__submit:hover:not(:disabled) {
+  background-color: var(--color-accent-hover);
+}
+
+.admin-accession__submit:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.admin-accession__cap {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-error);
+}
+
+/* -- Outcome ledger -------------------------------------------------------- */
+
+.admin-accession__ledger {
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  list-style: none;
+  border-block-start: 1px solid var(--color-border);
+}
+
+.admin-accession__entry {
+  display: grid;
+  grid-template-columns: minmax(6.5rem, auto) minmax(7rem, auto) minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: baseline;
+  padding: var(--space-3) 0;
+  border-block-end: 1px solid var(--color-border);
+}
+
+.admin-accession__netid {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+/* A leading marker per outcome rather than a coloured chip: three of the five
+   outcomes are not failures, and chips of equal weight would read as five
+   equal alarms. The glyph is generated content and decorative -- the outcome
+   word beside it carries the meaning, so nothing depends on colour. */
+.admin-accession__outcome {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.admin-accession__outcome::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-inline-end: 0.55em;
+  border-radius: 50%;
+  vertical-align: 0.15em;
+  background-color: currentColor;
+}
+
+.admin-accession__entry--ok    .admin-accession__outcome { color: var(--color-success); }
+.admin-accession__entry--warn  .admin-accession__outcome { color: var(--color-warning); }
+.admin-accession__entry--neutral .admin-accession__outcome { color: var(--color-text-muted); }
+
+.admin-accession__detail {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+@media (max-width: 640px) {
+  .admin-accession__entry {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-1);
+  }
+}
+
+/* -- Degraded-permissions banner (#193) ------------------------------------
+   Page-level, above every view: the condition it reports affects the whole
+   console (nav entries, routing), not one screen. Deliberately quieter than
+   .admin-notice -- nothing has failed and nothing is denied; the console is
+   simply not sure yet, and the recovery is to wait. Heritage Gold rather
+   than red for that reason. */
+
+.admin-banner {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: var(--space-3);
+  margin-block-end: var(--space-5);
+  padding: var(--space-3) var(--space-4);
+  border-radius: 6px;
+  border-inline-start: 2px solid var(--color-warning);
+  background-color: rgba(190, 140, 50, 0.06);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.admin-banner__icon {
+  display: inline-flex;
+  padding-block-start: 1px;
+  color: var(--color-warning);
+}
+
+.admin-banner__body {
+  margin: 0;
+  line-height: 1.55;
+  max-width: 68ch;
+}
+
+.admin-banner__dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: background-color 140ms ease-out, color 140ms ease-out;
+}
+
+.admin-banner__dismiss:hover {
+  background-color: rgba(133, 117, 77, 0.08);
+  color: var(--color-text);
+}
+
 /* -- Submission row (specialized record row for student progress) ---------- */
 
 .admin-submission-row {
@@ -3509,6 +3771,42 @@ body {
 .admin-link-button:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
+}
+
+/* #210: removing a TA revokes access, so the control reads as consequential
+   without shouting -- red on hover and focus rather than at rest, since a
+   permanently red word in every row would make the table look like a list of
+   errors. */
+.admin-link-button--danger {
+  color: var(--color-text-secondary);
+}
+
+.admin-link-button--danger:hover,
+.admin-link-button--danger:focus-visible {
+  color: var(--color-error);
+}
+
+.admin-table__actions {
+  text-align: end;
+  white-space: nowrap;
+}
+
+/* #210: "added by NetID, has not signed in yet". Deliberately quieter than
+   StatusBadge -- it is a fact about an account's lifecycle, not a state of
+   the work, and it sits inside a name rather than in a status column. */
+.admin-pending-mark {
+  display: inline-block;
+  margin-inline-start: 0.5em;
+  padding: 0.1em 0.45em;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  vertical-align: 0.12em;
 }
 
 .admin-submission-row__activity {

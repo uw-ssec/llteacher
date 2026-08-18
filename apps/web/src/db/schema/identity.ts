@@ -279,9 +279,19 @@ export const courseMemberships = pgTable(
     // action and no audit event. No code path writes `role` today, which is
     // exactly why this belongs in the database: the future role-change path
     // cannot forget it.
+    //
+    // #207 widened it to `AND dropped_at IS NULL`. SEC-004 covered the role
+    // axis and left the lifecycle axis open: a *dropped* row still has
+    // `role = 'ta'`, so it satisfied the original predicate while carrying a
+    // live grant. That row is invisible to listCourseTas (which filters
+    // `dropped_at IS NULL`), so the grant was also unrevokable through the
+    // product -- the same defect SEC-006 fixed for the one drop path that
+    // existed, but expressed as a rule instead of a habit. Both current drop
+    // paths (deactivateByWorkosUserId, #210's removeCourseTa) already clear
+    // the flags; this is what stops the *next* one from forgetting.
     check(
       "course_memberships_capabilities_require_ta",
-      sql`${t.role} = 'ta' OR (${t.canViewSolutions} = false AND ${t.canViewDrafts} = false)`,
+      sql`(${t.role} = 'ta' AND ${t.droppedAt} IS NULL) OR (${t.canViewSolutions} = false AND ${t.canViewDrafts} = false)`,
     ),
   ],
 );

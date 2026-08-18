@@ -287,3 +287,55 @@ describe("homework routing by per-course role (#172, FUN-002)", () => {
     await waitFor(() => screen.getByText("TA permissions"));
   });
 });
+
+/* --------------------------------------------------------------------------
+   #193 (#172 re-audit, USE-024): the console says so when it has degraded
+   the caller to read-only.
+
+   The reachable condition is this feature's own rolling deploy: the admin
+   bundle updates before the Worker, so /api/profile briefly returns the
+   pre-#172 course shape with no `role`. parseCourse degrades that to the
+   narrowest console role -- correct, and unchanged here -- and the console
+   then hides the authoring controls a real instructor had a moment ago.
+   -------------------------------------------------------------------------- */
+describe("degraded-permissions banner (#193)", () => {
+  const profile = (courses: unknown[]) =>
+    vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/api/profile")) {
+        return new Response(JSON.stringify({ userId: "u1", role: "instructor", courses }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify([]), { status: 200 });
+    });
+
+  it("explains the degrade when the active course arrived without a role", async () => {
+    vi.stubGlobal("fetch", profile([{ id: "c1", title: "STATS 311" }]));
+    renderApp();
+    // Named against the banner's own text, not the page: TopNav carries a
+    // hardcoded "STATS 311" of its own until the course switcher (#70).
+    const banner = await screen.findByText(/Some permissions could not be confirmed/i);
+    expect(banner.textContent).toMatch(/for STATS 311/);
+    // The security posture is untouched: still read-only, still no New
+    // homework button. The banner adds the explanation, not the access.
+    expect(screen.queryByRole("button", { name: /new homework/i })).toBeNull();
+  });
+
+  it("stays silent when the server stated a role", async () => {
+    vi.stubGlobal(
+      "fetch",
+      profile([{ id: "c1", title: "STATS 311", role: "instructor" }]),
+    );
+    renderApp();
+    await waitFor(() => screen.getByText(/Instructor Console/i));
+    expect(screen.queryByText(/Some permissions could not be confirmed/i)).toBeNull();
+  });
+
+  it("can be dismissed", async () => {
+    vi.stubGlobal("fetch", profile([{ id: "c1", title: "STATS 311" }]));
+    renderApp();
+    await waitFor(() => screen.getByText(/Some permissions could not be confirmed/i));
+    fireEvent.click(screen.getByRole("button", { name: /dismiss permissions notice/i }));
+    expect(screen.queryByText(/Some permissions could not be confirmed/i)).toBeNull();
+  });
+});

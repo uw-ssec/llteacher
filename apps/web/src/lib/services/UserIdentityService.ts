@@ -289,9 +289,21 @@ export class UserIdentityService {
         // duplicate rather than violating course_memberships_user_course_uq.
         await this.db.delete(courseMemberships).where(eq(courseMemberships.id, membership.id));
       } else {
+        // #207: the flags are cleared on the way across, for the same
+        // reason SEC-006 clears them on drop and on restore. This is the
+        // third membership-mutating write in the tree and the only one that
+        // moves a membership between *accounts* -- a pending row's grant
+        // would otherwise ride along to the absorbing account with no
+        // instructor action and no audit event.
+        //
+        // #210 is what makes this reachable: it creates pending users
+        // holding `ta` memberships, and a roster sync (Canvas, #11x) will
+        // create more. Before that, no path in the tree produced a pending
+        // `ta` row, which is why the #172 security re-audit named this gap
+        // without rating it.
         await this.db
           .update(courseMemberships)
-          .set({ userId: existing.id })
+          .set({ userId: existing.id, canViewSolutions: false, canViewDrafts: false })
           .where(eq(courseMemberships.id, membership.id));
       }
     }

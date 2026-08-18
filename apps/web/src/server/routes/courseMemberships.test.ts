@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import { listCourseTasHandler, updateTaCapabilitiesHandler } from "./courseMemberships";
+import {
+  addCourseTasHandler,
+  listCourseTasHandler,
+  removeCourseTaHandler,
+  updateTaCapabilitiesHandler,
+  MAX_TAS_PER_REQUEST,
+} from "./courseMemberships";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
@@ -12,12 +18,16 @@ const MEMBERSHIP_ID = "11111111-2222-4333-8444-555555555555";
 
 const listCourseTasMock = vi.fn();
 const setTaCapabilitiesMock = vi.fn();
+const addTasByNetidMock = vi.fn();
+const removeCourseTaMock = vi.fn();
 const getOrgScopeForCourseMock = vi.fn();
 const auditBestEffortMock = vi.fn();
 
 vi.mock("../repositories/courseMemberships", () => ({
   listCourseTas: (...a: unknown[]) => listCourseTasMock(...a),
   setTaCapabilities: (...a: unknown[]) => setTaCapabilitiesMock(...a),
+  addTasByNetid: (...a: unknown[]) => addTasByNetidMock(...a),
+  removeCourseTa: (...a: unknown[]) => removeCourseTaMock(...a),
 }));
 vi.mock("../repositories/organizations", () => ({
   getOrgScopeForCourse: (...a: unknown[]) => getOrgScopeForCourseMock(...a),
@@ -42,6 +52,8 @@ function buildApp(authContext: AuthContext | undefined) {
   app.patch("/api/courses/:courseId/tas/:membershipId/capabilities", (c) =>
     updateTaCapabilitiesHandler(c),
   );
+  app.post("/api/courses/:courseId/tas", (c) => addCourseTasHandler(c));
+  app.delete("/api/courses/:courseId/tas/:membershipId", (c) => removeCourseTaHandler(c));
   return app;
 }
 
@@ -68,6 +80,11 @@ beforeEach(() => {
   });
   getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
   auditBestEffortMock.mockReset().mockResolvedValue(undefined);
+  addTasByNetidMock.mockReset().mockResolvedValue([]);
+  removeCourseTaMock.mockReset().mockResolvedValue({
+    membershipId: MEMBERSHIP_ID,
+    userId: "u-ta",
+  });
 });
 
 describe("GET /api/courses/:courseId/tas", () => {
@@ -213,4 +230,148 @@ describe("PATCH .../tas/:membershipId/capabilities — path param shape (#172, S
       expect(setTaCapabilitiesMock).not.toHaveBeenCalled();
     },
   );
+});
+
+/* --------------------------------------------------------------------------
+   #210: POST /tas and DELETE /tas/:membershipId.
+
+   Both are requireInstructorOf at the route table (routeGuards.test.ts pins
+   that), and both re-check defensively here so a direct call fails closed.
+   What this file owns is the request contract: what shapes are refused, what
+   a partly-failing batch answers with, and what reaches the audit log.
+   -------------------------------------------------------------------------- */
+describe("POST /api/courses/:courseId/tas (#210)", () => {
+  const post = (app: ReturnType<typeof buildApp>, body: unknown) =>
+    app.request(
+      "/api/courses/course-a/tas",
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+      TEST_ENV,
+    );
+
+  it("denies a TA of the same course", async () => {
+    // Recruiting another TA is authoring-tier authority: a TA must not be
+    // able to widen who can read student work, their own access included.
+    const res = await post(buildApp(taOfA()), { netids: ["ada"] });
+    expect(res.status).toBe(403);
+    expect(addTasByNetidMock).not.toHaveBeenCalled();
+  });
+
+  it("denies an instructor of a different course", async () => {
+    const other = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "course-z", role: "instructor" })],
+    });
+    expect((await post(buildApp(other), { netids: ["ada"] })).status).toBe(403);
+    expect(addTasByNetidMock).not.toHaveBeenCalled();
+  });
+
+  it("answers 200 with per-NetID results even when every entry failed", async () => {
+    // The request succeeded; it is the individual NetIDs that did not
+    // resolve. Collapsing eight independent outcomes into one status code is
+    // the shape #210 exists to reject.
+    addTasByNetidMock.mockResolvedValue([
+      { netid: "nope one", status: "invalid_netid" },
+      { netid: "bob", status: "role_conflict", existingRole: "student" },
+    ]);
+    const res = await post(buildApp(instructorOfA()), { netids: ["nope one", "bob"] });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      results: [
+        { netid: "nope one", status: "invalid_netid" },
+        { netid: "bob", status: "role_conflict", existingRole: "student" },
+      ],
+    });
+  });
+
+  for (const [label, body] of [
+    ["a non-array netids", { netids: "ada" }],
+    ["a non-string entry", { netids: ["ada", 7] }],
+    ["an empty list", { netids: [] }],
+  ] as const) {
+    it(`rejects ${label} with a 400`, async () => {
+      expect((await post(buildApp(instructorOfA()), body)).status).toBe(400);
+      expect(addTasByNetidMock).not.toHaveBeenCalled();
+    });
+  }
+
+  it("rejects a batch over the cap rather than silently truncating it", async () => {
+    // Adding the first 100 of 500 pasted NetIDs and reporting success would
+    // be worse than refusing.
+    const netids = Array.from({ length: MAX_TAS_PER_REQUEST + 1 }, (_, i) => `t${i}`);
+    const res = await post(buildApp(instructorOfA()), { netids });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain(String(MAX_TAS_PER_REQUEST));
+    expect(addTasByNetidMock).not.toHaveBeenCalled();
+  });
+
+  it("audits only the entries that changed something, against the course's org", async () => {
+    addTasByNetidMock.mockResolvedValue([
+      { netid: "ada", status: "added", membershipId: MEMBERSHIP_ID },
+      { netid: "grace", status: "restored", membershipId: "m-2" },
+      { netid: "bob", status: "already_ta", membershipId: "m-3" },
+      { netid: "nope one", status: "invalid_netid" },
+    ]);
+    await post(buildApp(instructorOfA()), { netids: ["ada", "grace", "bob", "nope one"] });
+
+    // already_ta and invalid_netid wrote nothing, so they are not events.
+    expect(auditBestEffortMock).toHaveBeenCalledTimes(2);
+    for (const call of auditBestEffortMock.mock.calls) {
+      // SEC-002: the course's org only, never a fan-out across every org the
+      // acting instructor belongs to.
+      expect(call[1]).toEqual(["org-1"]);
+      expect(call[2].action).toBe("membership.course_ta_added");
+      // The membership id, not the NetID -- a NetID is directly identifying
+      // and the audit log is org-scoped storage.
+      expect(String(call[2].targetId)).not.toContain("ada");
+    }
+  });
+
+  it("still reports the memberships when the audit write fails", async () => {
+    // Best-effort (#147): an audit outage must not fail memberships that
+    // already exist in the database.
+    addTasByNetidMock.mockResolvedValue([
+      { netid: "ada", status: "added", membershipId: MEMBERSHIP_ID },
+    ]);
+    getOrgScopeForCourseMock.mockRejectedValue(new Error("audit down"));
+    const res = await post(buildApp(instructorOfA()), { netids: ["ada"] });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { results: { status: string }[] };
+    expect(body.results[0]!.status).toBe("added");
+  });
+});
+
+describe("DELETE /api/courses/:courseId/tas/:membershipId (#210)", () => {
+  const del = (app: ReturnType<typeof buildApp>, id = MEMBERSHIP_ID) =>
+    app.request(`/api/courses/course-a/tas/${id}`, { method: "DELETE" }, TEST_ENV);
+
+  it("denies a TA of the same course", async () => {
+    expect((await del(buildApp(taOfA()))).status).toBe(403);
+    expect(removeCourseTaMock).not.toHaveBeenCalled();
+  });
+
+  it("removes the TA and audits it against the course's org", async () => {
+    const res = await del(buildApp(instructorOfA()));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ membershipId: MEMBERSHIP_ID });
+    expect(auditBestEffortMock).toHaveBeenCalledTimes(1);
+    expect(auditBestEffortMock.mock.calls[0][1]).toEqual(["org-1"]);
+    expect(auditBestEffortMock.mock.calls[0][2].action).toBe("membership.course_ta_removed");
+  });
+
+  it("404s a malformed membership id without reaching the database", async () => {
+    // SEC-003: a non-UUID would otherwise reach a uuid-typed comparison and
+    // surface as a 503 for a permanently malformed request.
+    const res = await del(buildApp(instructorOfA()), "not-a-uuid");
+    expect(res.status).toBe(404);
+    expect(removeCourseTaMock).not.toHaveBeenCalled();
+  });
+
+  it("404s when the repository matched nothing, without saying why", async () => {
+    // "no such id", "another course", "not a TA" and "already removed" are
+    // deliberately indistinguishable, so a probing caller learns nothing.
+    removeCourseTaMock.mockResolvedValue(null);
+    const res = await del(buildApp(instructorOfA()));
+    expect(res.status).toBe(404);
+    expect(auditBestEffortMock).not.toHaveBeenCalled();
+  });
 });

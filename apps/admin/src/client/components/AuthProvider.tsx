@@ -18,6 +18,17 @@ export interface CourseOption {
   role: CourseRole;
   canViewSolutions: boolean;
   canViewDrafts: boolean;
+  /** #193: true when this entry arrived with no `role` and was degraded to
+   *  NARROWEST_CONSOLE_ROLE rather than carrying a role the server stated.
+   *
+   *  The degrade itself is the SEC-005 fix and is correct. What was missing
+   *  was any way to say so: the only signal was a console.warn, and that
+   *  fires for *dropped* entries, not degraded ones. So a real instructor
+   *  reloading mid-deploy watched their authoring controls disappear with
+   *  nothing on screen distinguishing "your permissions were revoked" from
+   *  "the feature was pulled" from "the app is broken" -- for a condition
+   *  that resolves itself the moment the Worker catches up. */
+  roleDegraded: boolean;
 }
 
 export type AuthState = AuthSessionState & { role: CourseRole | null; courses: CourseOption[] };
@@ -55,8 +66,8 @@ function parseCourse(raw: unknown, fallbackRole: CourseRole | null): CourseOptio
   // worse -- it widens on a value that was explicitly narrower. Drop the
   // entry so the warning below fires and nothing is granted on a guess.
   if (c.role !== undefined && parseCourseRole(c.role) === null) return null;
-  const role = (typeof c.role === "string" ? parseCourseRole(c.role) : null)
-    ?? (fallbackRole ? NARROWEST_CONSOLE_ROLE : null);
+  const statedRole = typeof c.role === "string" ? parseCourseRole(c.role) : null;
+  const role = statedRole ?? (fallbackRole ? NARROWEST_CONSOLE_ROLE : null);
   if (!role) return null;
   return {
     id: c.id,
@@ -64,6 +75,9 @@ function parseCourse(raw: unknown, fallbackRole: CourseRole | null): CourseOptio
     role,
     canViewSolutions: c.canViewSolutions === true,
     canViewDrafts: c.canViewDrafts === true,
+    // #193: the degrade is recorded, not just performed. Nothing about the
+    // access decision changes -- this only lets the console explain itself.
+    roleDegraded: statedRole === null,
   };
 }
 

@@ -6,6 +6,10 @@ import type { CourseRole } from "../../server/middleware/roles";
 import { CONSOLE_ROLES, resolveTaCapabilities } from "@llteacher/ui/auth/courseRole";
 import type { ProfileWithStats } from "../../shared/types";
 
+/** `count(*)::int` -- Postgres returns bigint for count(), which the driver
+ *  hands back as a string; the ::int cast keeps it a number. */
+const sqlCount = () => sql<number>`count(*)::int`;
+
 /** Highest-privilege-first ordering used to derive a deterministic
  *  "primary role" for a user with multiple course memberships. Postgres
  *  gives no row-ordering guarantee without an explicit ORDER BY, so picking
@@ -15,11 +19,11 @@ import type { ProfileWithStats } from "../../shared/types";
  *  `satisfies Record<CourseRole, number>` makes this exhaustive against the
  *  enum at compile time -- adding a role to course_role without ranking it
  *  here fails to compile, instead of the new role silently never being
- *  selected as primary. */
-/** `count(*)::int` -- Postgres returns bigint for count(), which the driver
- *  hands back as a string; the ::int cast keeps it a number. */
-const sqlCount = () => sql<number>`count(*)::int`;
-
+ *  selected as primary.
+ *
+ *  #202 (MNT-023): sqlCount was inserted between this doc comment and the
+ *  declaration it describes, so the doc attached to sqlCount and this
+ *  constant read as undocumented. Moved rather than duplicated. */
 const ROLE_PRIORITY_RANK = {
   admin: 0,
   instructor: 1,

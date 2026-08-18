@@ -58,6 +58,10 @@ export interface CourseTaCapabilitiesResponse extends TaCapabilityGrantResponse 
    *  answer key needs to identify a person, not a UUID. */
   displayName: string;
   email: string;
+  /** #210: added by NetID, never signed in. Distinguishes "waiting for them"
+   *  from "something is wrong" -- before #210 nothing created a pending TA,
+   *  so this was uniformly false. */
+  isPending: boolean;
 }
 
 export interface CourseTaListResponse {
@@ -69,6 +73,28 @@ export interface CourseTaListResponse {
 export interface TaCapabilitiesBody {
   canViewSolutions?: boolean;
   canViewDrafts?: boolean;
+}
+
+/* -- #210: add / remove course TAs by NetID -------------------------------- */
+
+import type { AddTaResult } from "../server/repositories/courseMemberships";
+
+export type { AddTaResult };
+
+export interface AddCourseTasBody {
+  /** Raw as typed; normalized and validated server-side (lib/netid.ts). */
+  netids: string[];
+}
+
+/** One result per entered NetID. The response is 200 even when every entry
+ *  failed: the request succeeded, and it is the individual NetIDs that did or
+ *  did not resolve. */
+export interface AddCourseTasResponse {
+  results: AddTaResult[];
+}
+
+export interface RemoveCourseTaResponse {
+  membershipId: string;
 }
 
 import type { HomeworkStatus } from "../server/repositories/homeworks";

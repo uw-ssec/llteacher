@@ -347,7 +347,11 @@ describe("UserIdentityService.createOrClaimUser", () => {
     // Second entry is #142's unconditional reactivation-restore write (see
     // the mock's courseMemberships branch above), not another merge.
     expect(membershipUpdates).toEqual([
-      { userId: "existing-user-1" },
+      // #207: the merge clears the grants rather than carrying them onto the
+      // absorbing account. This is the write #210 makes reachable -- it
+      // creates pending users holding `ta` memberships, so a grant on a
+      // pending row is no longer hypothetical.
+      { userId: "existing-user-1", canViewSolutions: false, canViewDrafts: false },
       // #172 re-audit (SEC-006): the restore brings the membership back
       // without the capability grants that were on it when it was dropped.
       { droppedAt: null, droppedReason: null, canViewSolutions: false, canViewDrafts: false },

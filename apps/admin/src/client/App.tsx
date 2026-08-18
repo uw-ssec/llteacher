@@ -16,6 +16,7 @@
 
 import { useEffect, useState } from "react";
 import { TopNav, AUTHOR_ROLES, CONSOLE_ROLES } from "@llteacher/ui";
+import { DegradedRoleBanner } from "./components/DegradedRoleBanner";
 import { AdminSidebar } from "./components/AdminSidebar";
 import { AdminNotice } from "./components/AdminNotice";
 import type { AdminNavKey } from "./components/AdminSidebar";
@@ -193,6 +194,15 @@ export default function App() {
         <main className="conversation-column admin-main">
           <div className="conversation-messages">
             <div className="conversation-inner admin-inner">
+              {/* #193: page-level, above every view, because the degrade
+                  affects the whole console (nav entries and routing), not
+                  one screen. Rendered only for the ACTIVE course -- a
+                  degraded entry for a course the instructor is not looking
+                  at explains nothing about what they can see here. */}
+              {CURRENT_COURSE?.roleDegraded && (
+                <DegradedRoleBanner courseTitle={CURRENT_COURSE.title} />
+              )}
+
               {view.kind === "homeworks" && (
                 CURRENT_COURSE_ID ? (
                   <HomeworksDataLoader

@@ -26,6 +26,16 @@
    shipped. Callers MUST call `dispose()` (the timer would otherwise keep
    the callback alive for the full duration after the request settles, and
    the parent listener would accumulate one entry per request).
+
+   #202 (MNT-032): `parent` is REQUIRED, not optional. Two callers landed in
+   the same PR against this helper and used it two different ways -- one
+   passed a lifecycle signal, the other passed nothing and layered a
+   `let cancelled` flag on top. The flag is the weaker idiom: it lets an
+   abandoned request run to completion and only then declines to use the
+   result, so a view that unmounts mid-flight still pays for the response.
+   Requiring the parameter means the next caller cannot pick the weaker one
+   without noticing. Pass `null` only if a caller genuinely has no lifecycle
+   to follow -- and say why at the call site, because none does today.
    -------------------------------------------------------------------------- */
 
 export interface DisposableSignal {
@@ -35,7 +45,7 @@ export interface DisposableSignal {
   dispose: () => void;
 }
 
-export function abortAfter(ms: number, parent?: AbortSignal | null): DisposableSignal {
+export function abortAfter(ms: number, parent: AbortSignal | null): DisposableSignal {
   const controller = new AbortController();
 
   const timer = setTimeout(() => {

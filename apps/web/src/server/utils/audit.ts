@@ -22,6 +22,15 @@ export const AUDIT_ACTIONS = {
    *  widens or narrows one person's access to student work and answer keys
    *  -- the kind of change #50's audit viewer exists to make reviewable. */
   TA_CAPABILITIES_UPDATED: "membership.ta_capabilities_updated",
+  /** #210: a TA was put on a course, or restored to it after removal. Audited
+   *  because it hands someone access to every student's work in that course
+   *  -- the membership is the access, and the capability grant on top of it
+   *  is a separate, separately-audited decision. */
+  COURSE_TA_ADDED: "membership.course_ta_added",
+  /** #210: a TA was removed from a course. Soft: the row survives with
+   *  dropped_at set, so this event and the row it names both remain
+   *  reviewable afterwards. */
+  COURSE_TA_REMOVED: "membership.course_ta_removed",
 } as const;
 
 /** Fans an audit write out across every org scope it's relevant to (a
