@@ -894,6 +894,29 @@ describe("POST /api/chat", () => {
     expect(res.headers.get("x-conversation-id")).toBe("22222222-2222-2222-2222-222222222222");
   });
 
+  // #317 review, #326 (remaining requirement): getConversationById now
+  // joins courses for organizationId, so resolveConversation's
+  // conversationId branch resolves the org scope off that same row --
+  // getOrgScopeForCourse must not run a second, fully redundant round-trip
+  // for a course this request already read.
+  it("resolves org scope from the joined conversation row instead of a separate getOrgScopeForCourse call, for an existing conversation", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue({
+      id: "22222222-2222-2222-2222-222222222222",
+      ownerUserId: "u1",
+      courseId: "55555555-5555-5555-5555-555555555555",
+      organizationId: "org-from-join",
+    });
+    getLastMessagesMock.mockResolvedValue([]);
+
+    const res = await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      conversationId: "22222222-2222-2222-2222-222222222222",
+    });
+
+    expect(res.status).toBe(200);
+    expect(getOrgScopeForCourseMock).not.toHaveBeenCalled();
+  });
+
   // #317 review, blocking finding #4: an unreleased section (draft,
   // scheduled, hidden/expired) must not leak its content into the model's
   // context, even for an existing conversation started while it was live --

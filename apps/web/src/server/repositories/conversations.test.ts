@@ -290,6 +290,21 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     expect(found?.ownerUserId).toBe(userId);
   });
 
+  // #317 review, #326 (remaining requirement): getConversationById joins
+  // courses for organizationId -- chat.ts's resolveConversation uses this to
+  // resolve org scope off the same row instead of a second, separate
+  // getOrgScopeForCourse round-trip for the exact same course.
+  it("getConversationById joins courses and returns the owning course's organizationId", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Carries org scope",
+    });
+    const found = await getConversationById(db, created.id);
+    expect(found?.organizationId).toBe(orgAId);
+  });
+
   it("getConversationById returns null for a nonexistent id", async () => {
     const found = await getConversationById(db, "00000000-0000-0000-0000-000000000000");
     expect(found).toBeNull();

@@ -68,7 +68,7 @@ import {
   SectionNotFoundError,
   SectionNotInteractiveError,
 } from "../repositories/sectionConversations";
-import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
+import { courseScopeFromAuthContext, unsafeCourseScope, unsafeOrgScope, type OrgScope } from "../repositories/scope";
 import { IdempotencyKeyConflictError } from "../repositories/errors";
 import { getOrgScopeForCourse } from "../repositories/organizations";
 import { recordLlmCallLog } from "../repositories/llmCallLogs";
@@ -549,6 +549,15 @@ async function resolveConversation(
       // conversationId, tutor kind, race fallback), which already has real
       // persisted history a normal turn would see.
       sectionGreetingParts: unknown[] | undefined;
+      // #317 review, #326 (remaining requirement): set only on the
+      // conversationId branch, where getConversationById's own join already
+      // read it off the same row -- a second, separate getOrgScopeForCourse
+      // round-trip for the exact same course would be pure waste. undefined
+      // (not resolved) on the two conversation-creation branches below,
+      // which don't get an org scope for free from their own queries;
+      // chatHandler's Promise.all falls back to getOrgScopeForCourse only
+      // when this is undefined.
+      orgScope: OrgScope | undefined;
     }
   | Response
 > {
@@ -569,7 +578,11 @@ async function resolveConversation(
     if (!existing) {
       return c.json({ error: "Conversation not found", code: "not_found" }, 404);
     }
-    return { conv: existing, sectionGreetingParts: undefined };
+    return {
+      conv: existing,
+      sectionGreetingParts: undefined,
+      orgScope: unsafeOrgScope(existing.organizationId),
+    };
   }
 
   // #304: previously fell back to authContext.memberships[0]?.courseId when
@@ -629,6 +642,7 @@ async function resolveConversation(
           promptTemplateId: created.promptTemplateId,
         },
         sectionGreetingParts: Array.isArray(created.greetingParts) ? created.greetingParts : undefined,
+        orgScope: undefined,
       };
     } catch (err) {
       if (err instanceof SectionConversationExistsError) {
@@ -648,6 +662,7 @@ async function resolveConversation(
             promptTemplateId: active.promptTemplateId,
           },
           sectionGreetingParts: undefined,
+          orgScope: undefined,
         };
       }
       if (err instanceof SectionNotFoundError) {
@@ -668,7 +683,7 @@ async function resolveConversation(
     kind: "tutor",
     title,
   });
-  return { conv, sectionGreetingParts: undefined };
+  return { conv, sectionGreetingParts: undefined, orgScope: undefined };
 }
 
 export async function chatHandler(c: Context<AppEnv>) {
@@ -824,7 +839,15 @@ export async function chatHandler(c: Context<AppEnv>) {
     // #25/#26: both prompt-template and LLM-config resolution need the org
     // scope for their own fallback queries -- resolved once and shared,
     // rather than each doing its own getOrgScopeForCourse round-trip.
-    getOrgScopeForCourse(db, scope),
+    //
+    // #317 review, #326 (remaining requirement): resolveConversation's
+    // conversationId branch already reads this off the same
+    // getConversationById row (joined against courses) -- the dominant case,
+    // since most turns are on an already-existing conversation, not a
+    // brand-new one. Falls back to a real getOrgScopeForCourse call only for
+    // the two conversation-creation branches, which don't resolve it for
+    // free from their own queries.
+    resolved.orgScope !== undefined ? Promise.resolve(resolved.orgScope) : getOrgScopeForCourse(db, scope),
     // #25: system prompt, resolved from the conversation's PINNED template
     // (set once at creation/restart -- see lib/prompts.ts's module doc
     // comment) rather than re-resolved here. A null promptTemplateId means

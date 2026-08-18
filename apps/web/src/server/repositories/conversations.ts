@@ -1,6 +1,6 @@
-import { and, count, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, getTableColumns, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { conversations, messages, sections, homeworks, courseMemberships, submissions } from "../../db/schema";
+import { conversations, messages, sections, homeworks, courses, courseMemberships, submissions } from "../../db/schema";
 import type { ConversationKind } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import { TenancyMismatchError, IdempotencyKeyConflictError } from "./errors";
@@ -477,8 +477,21 @@ export async function appendMessage(
 // scope.ts's unsafeCourseScope docstring: "a row just read back from the DB
 // under an already-verified scope" is the sanctioned case for that cast --
 // the ownerUserId check below is what verifies it here).
+//
+// #317 review, #326 (remaining requirement): joins courses for
+// organizationId -- chat.ts's resolveConversation used to always call
+// getOrgScopeForCourse separately even on this path, a fully redundant
+// round-trip: this row's own courseId already determines the org, and
+// courses.organizationId is NOT NULL, so an inner join can't drop a
+// conversation that a plain select would have found. Every other caller
+// (routes/conversations.ts's PATCH/DELETE/GET-messages) just ignores the
+// extra field.
 export async function getConversationById(db: Db, conversationId: string) {
-  const [row] = await db.select().from(conversations).where(eq(conversations.id, conversationId));
+  const [row] = await db
+    .select({ ...getTableColumns(conversations), organizationId: courses.organizationId })
+    .from(conversations)
+    .innerJoin(courses, eq(conversations.courseId, courses.id))
+    .where(eq(conversations.id, conversationId));
   return row ?? null;
 }
 
