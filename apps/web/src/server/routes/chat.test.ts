@@ -1595,6 +1595,7 @@ describe("POST /api/chat", () => {
       expect(res.status).toBe(409);
       expect(await res.json()).toEqual({
         error: "Another message for this conversation is still being processed. Please wait a moment and try again.",
+        code: "in_progress",
       });
       expect(getLastMessagesMock).not.toHaveBeenCalled();
       expect(appendMessageMock).not.toHaveBeenCalled();

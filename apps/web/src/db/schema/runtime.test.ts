@@ -587,21 +587,48 @@ describe.skipIf(!DATABASE_URL)("llm_call_logs, student_profiles, audit_events sc
     ).rejects.toThrow();
   });
 
-  it("blocks deleting a message (and its conversation) while an llm_call_log still references it", async () => {
+  // #317 review, #341: llm_call_logs.message_id/.conversation_id flipped
+  // from ON DELETE RESTRICT to SET NULL (migration 0036) -- RESTRICT
+  // permanently blocked deleteHomework/updateHomework's section-removal
+  // path the moment any section had a single logged chat turn, once #317
+  // started writing this table every turn instead of never. Uses its own
+  // throwaway conversation (not the describe block's shared `conversationId`
+  // other tests below still depend on) so the delete doesn't disturb them.
+  it("allows deleting a message (and its conversation) while an llm_call_log still references it, detaching rather than blocking", async () => {
+    const [conv2] = await db
+      .insert(conversations)
+      .values({ ownerUserId: userId, courseId, sectionId: null, kind: "tutor", title: "t2" })
+      .returning({ id: conversations.id });
     const [msg2] = await db
       .insert(messages)
-      .values({ conversationId, role: "assistant", parts: [{ type: "text", text: "x" }] })
+      .values({ conversationId: conv2.id, role: "assistant", parts: [{ type: "text", text: "x" }] })
       .returning({ id: messages.id });
-    await db.insert(llmCallLogs).values({
-      messageId: msg2.id,
-      conversationId,
-      organizationId: orgId,
-      provider: "openai",
-      model: "gpt",
-    });
+    const [log2] = await db
+      .insert(llmCallLogs)
+      .values({
+        messageId: msg2.id,
+        conversationId: conv2.id,
+        organizationId: orgId,
+        provider: "openai",
+        model: "gpt",
+      })
+      .returning({ id: llmCallLogs.id });
 
-    await expect(db.delete(messages).where(eq(messages.id, msg2.id))).rejects.toThrow();
-    await expect(db.delete(conversations).where(eq(conversations.id, conversationId))).rejects.toThrow();
+    await expect(db.delete(messages).where(eq(messages.id, msg2.id))).resolves.not.toThrow();
+
+    const [afterMessageDelete] = await db.select().from(llmCallLogs).where(eq(llmCallLogs.id, log2.id));
+    expect(afterMessageDelete!.messageId).toBeNull();
+    expect(afterMessageDelete!.conversationId).toBe(conv2.id); // untouched by the message delete
+
+    await expect(db.delete(conversations).where(eq(conversations.id, conv2.id))).resolves.not.toThrow();
+
+    const [afterConversationDelete] = await db.select().from(llmCallLogs).where(eq(llmCallLogs.id, log2.id));
+    // The row itself survives both deletes -- the whole point of SET NULL
+    // over RESTRICT (blocks) or CASCADE (silently destroys the row).
+    expect(afterConversationDelete).toBeDefined();
+    expect(afterConversationDelete!.conversationId).toBeNull();
+
+    await db.delete(llmCallLogs).where(eq(llmCallLogs.id, log2.id));
   });
 
   it("rejects a second student_profile for the same (user, course)", async () => {

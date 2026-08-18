@@ -279,10 +279,34 @@ describe("readErrorMessage", () => {
   });
 
   it("does not offer retry when retrying provably cannot succeed", () => {
-    for (const code of ["unauthorized", "history_too_long", "not_found", "denied"]) {
+    for (const code of ["unauthorized", "history_too_long", "not_found", "denied", "unavailable"]) {
       const r = readErrorMessage(JSON.stringify({ error: "x", code }));
       expect(r.retryable).toBe(false);
     }
+  });
+
+  // #317 review, #344: "unavailable" is a server misconfiguration (a
+  // missing/invalid LLM credential, no resolvable config) -- retrying
+  // re-hits the exact same broken state every time, so offering one was a
+  // false promise. The server's own reference-ID message is the one thing
+  // an instructor can act on; it used to be hidden inside the collapsed
+  // "Details for support" disclosure the `default` case uses.
+  it("surfaces the server's own reference-ID message directly, not behind a details disclosure", () => {
+    const r = readErrorMessage(
+      JSON.stringify({
+        error: "I'm sorry, but there's no valid LLM configuration available right now. Reference ID: abc-123",
+        code: "unavailable",
+      }),
+    );
+    expect(r.retryable).toBe(false);
+    expect(r.message).toContain("Reference ID: abc-123");
+    expect(r.detail).toBeUndefined();
+  });
+
+  it("falls back to generic 'unavailable' copy when the server sent no error text", () => {
+    const r = readErrorMessage(JSON.stringify({ code: "unavailable" }));
+    expect(r.retryable).toBe(false);
+    expect(r.message).toMatch(/isn't available right now/i);
   });
 
   /* The defect this rewrite exists to fix: the previous version failed OPEN,

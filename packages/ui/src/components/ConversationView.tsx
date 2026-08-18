@@ -154,11 +154,20 @@ export function readErrorMessage(raw: string): StoppedCopy {
         retryable: true,
       };
     case "unavailable":
+      // #317 review, #344: retryable was true, but "unavailable" is a
+      // server misconfiguration (a missing/invalid LLM credential, no
+      // resolvable config) -- retrying re-hits the same broken state every
+      // time, so the button offered a false promise. The server's own
+      // message (e.g. "...Reference ID: abc123") is the one thing an
+      // instructor can actually act on, and it was hidden inside the
+      // collapsed "Details for support" disclosure the `default` case
+      // uses -- surfaced directly in the body instead.
       return {
         label: "Tutor unavailable",
-        message:
-          "The tutor isn't available right now. This is a problem on our side, not yours — your work is saved. Try again shortly, and tell your instructor if it persists.",
-        retryable: true,
+        message: serverError
+          ? `${serverError} This is a problem on our side, not yours — your work is saved.`
+          : "The tutor isn't available right now. This is a problem on our side, not yours — your work is saved. Tell your instructor if it persists.",
+        retryable: false,
       };
     default:
       /* Everything unrecognized -- a provider string, a gateway HTML page, a

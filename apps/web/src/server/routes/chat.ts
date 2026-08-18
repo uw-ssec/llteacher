@@ -734,7 +734,13 @@ export async function chatHandler(c: Context<AppEnv>) {
     return c.json({ error: "Request body must be valid JSON" }, 400);
   }
   if (new TextEncoder().encode(rawText).length > MAX_REQUEST_BODY_BYTES) {
-    return c.json({ error: `Request body exceeds the ${MAX_REQUEST_BODY_BYTES} byte limit` }, 400);
+    // #317 review, #344: matches its sibling array-length cap
+    // (MAX_MESSAGES_PER_REQUEST below), which already carries this code --
+    // readErrorMessage (packages/ui) classifies both the same way.
+    return c.json(
+      { error: `Request body exceeds the ${MAX_REQUEST_BODY_BYTES} byte limit`, code: "history_too_long" },
+      400,
+    );
   }
   let rawBody: unknown;
   try {
@@ -946,7 +952,12 @@ export async function chatHandler(c: Context<AppEnv>) {
   // found" rather than a separate error path.
   if (!orgScope) {
     logServerError("chatHandler.llmConfig", new Error(`No org scope for course ${scope}`));
-    return c.json({ error: "Something went wrong. Please try again later." }, 503);
+    // #317 review, #344: names the actual classification so the student
+    // sees the purpose-written "problem on our side, not yours" copy
+    // (packages/ui's readErrorMessage) instead of falling to the codeless
+    // default -- a permanent misconfiguration presented with a Retry
+    // button that can never succeed.
+    return c.json({ error: "Something went wrong. Please try again later.", code: "unavailable" }, 503);
   }
   let resolvedLLMConfig: Awaited<ReturnType<typeof resolveLLMConfig>>;
   try {
@@ -955,7 +966,10 @@ export async function chatHandler(c: Context<AppEnv>) {
     if (err instanceof LLMConfigNotFoundError) {
       logServerError("chatHandler.llmConfig", err);
       return c.json(
-        { error: `I'm sorry, but there's no valid LLM configuration available right now. Reference ID: ${err.referenceId}` },
+        {
+          error: `I'm sorry, but there's no valid LLM configuration available right now. Reference ID: ${err.referenceId}`,
+          code: "unavailable",
+        },
         500,
       );
     }
@@ -980,7 +994,10 @@ export async function chatHandler(c: Context<AppEnv>) {
       const referenceId = crypto.randomUUID();
       logServerError("chatHandler.llmConfig", new Error(`${err.message} (ref: ${referenceId})`));
       return c.json(
-        { error: `I'm sorry, but there's no valid LLM configuration available right now. Reference ID: ${referenceId}` },
+        {
+          error: `I'm sorry, but there's no valid LLM configuration available right now. Reference ID: ${referenceId}`,
+          code: "unavailable",
+        },
         500,
       );
     }
@@ -1024,9 +1041,14 @@ export async function chatHandler(c: Context<AppEnv>) {
   // conversations.ts) covers the staleness/abandoned-lock case.
   const lockAcquired = await acquireConversationTurnLock(db, conv.id, LOCK_STALE_MS);
   if (!lockAcquired) {
+    // #317 review, #344: matches the other two 409s on this route
+    // (the section-not-interactive gate, the idempotency-conflict catch
+    // below), which already carry this code -- readErrorMessage
+    // (packages/ui) renders it as "Already sending", retryable.
     return c.json(
       {
         error: "Another message for this conversation is still being processed. Please wait a moment and try again.",
+        code: "in_progress",
       },
       409,
     );
@@ -1110,8 +1132,11 @@ export async function chatHandler(c: Context<AppEnv>) {
           return replayResponse(conv.id, raceLast!.parts);
         }
         await releaseConversationTurnLock(db, conv.id);
+        // #317 review, #344: same code as the lock-acquisition 409 above --
+        // both are "a turn is already in flight for this conversation",
+        // just detected at different points.
         return c.json(
-          { error: "This message is already being processed. Please wait a moment." },
+          { error: "This message is already being processed. Please wait a moment.", code: "in_progress" },
           409,
         );
       }
