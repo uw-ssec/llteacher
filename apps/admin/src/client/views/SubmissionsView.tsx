@@ -30,6 +30,9 @@ export interface SubmissionCell {
   conversationCount: number;
   lastActivityAt: string | null;
   hasDeletedConversation: boolean;
+  /** #75: present on a submitted cell, so it can be graded. Null otherwise
+   *  -- there is nothing to grade until a student has submitted. */
+  submissionId: string | null;
 }
 
 export interface StudentSubmissionRow {
@@ -59,6 +62,11 @@ export interface HomeworkSubmissionsData {
 export type SubmissionsViewProps = {
   data: HomeworkSubmissionsData;
   onBack: () => void;
+  /** #75: drill from a submitted cell into grading. Absent for a caller
+   *  that may not grade -- a TA reads this dashboard (#172's requireGraderOf)
+   *  but grading is instructor-tier, so the cells stay non-interactive for
+   *  them rather than offering a route that 403s. */
+  onGrade?: (input: { submissionId: string; studentName: string; sectionTitle: string }) => void;
 };
 
 type Filter = "all" | ParticipationStatus;
@@ -81,7 +89,7 @@ const SORT_OPTIONS = [
   { value: "progress", label: "Least progress first" },
 ];
 
-export function SubmissionsView({ data, onBack }: SubmissionsViewProps) {
+export function SubmissionsView({ data, onBack, onGrade }: SubmissionsViewProps) {
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<Sort>("name");
@@ -231,15 +239,49 @@ export function SubmissionsView({ data, onBack }: SubmissionsViewProps) {
                 // the same 3 values the existing admin-progress-cell--* CSS classes
                 // expect (unchanged from the fixture-era shape), so no translation needed.
                 const state = cell?.status ?? "missing";
+                const deletedNote = cell?.hasDeletedConversation
+                  ? " (has a deleted conversation)"
+                  : "";
+                const body = (
+                  <>
+                    {header.order}
+                    {cell?.hasDeletedConversation && <sup aria-hidden="true">†</sup>}
+                  </>
+                );
+                // #75: only a SUBMITTED cell is gradeable, and only for a
+                // caller who may grade. Everything else stays a span --
+                // rendering a button that opens a panel with nothing in it,
+                // or one whose save always 403s, is the dead-end shape #172
+                // exists to remove.
+                const gradeable = onGrade && cell?.status === "submitted" && cell.submissionId;
+                if (gradeable) {
+                  return (
+                    <button
+                      key={header.id}
+                      type="button"
+                      className={`admin-progress-cell admin-progress-cell--${state} admin-progress-cell--gradeable`}
+                      aria-label={`Grade ${row.displayName}, ${header.title}`}
+                      title={`Grade ${header.title}`}
+                      onClick={() =>
+                        onGrade({
+                          submissionId: cell.submissionId!,
+                          studentName: row.displayName || row.email,
+                          sectionTitle: header.title,
+                        })
+                      }
+                    >
+                      {body}
+                    </button>
+                  );
+                }
                 return (
                   <span
                     key={header.id}
                     className={`admin-progress-cell admin-progress-cell--${state}`}
-                    aria-label={`${header.title}: ${state}${cell?.hasDeletedConversation ? " (has a deleted conversation)" : ""}`}
+                    aria-label={`${header.title}: ${state}${deletedNote}`}
                     title={`${header.title}: ${state}${cell?.hasDeletedConversation ? " -- includes a deleted conversation" : ""}`}
                   >
-                    {header.order}
-                    {cell?.hasDeletedConversation && <sup aria-hidden="true">†</sup>}
+                    {body}
                   </span>
                 );
               })}

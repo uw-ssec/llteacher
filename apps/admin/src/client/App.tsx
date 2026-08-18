@@ -29,6 +29,7 @@ import { SubmissionsView } from "./views/SubmissionsView";
 import { TaCapabilitiesView } from "./views/TaCapabilitiesView";
 import { LLMConfigsDataLoader, type ConfigScreen } from "./views/LLMConfigsDataLoader";
 import { StudentsView } from "./views/StudentsView";
+import { GradingPanel } from "./views/GradingPanel";
 import { ExportView } from "./views/ExportView";
 import { apiClient, setUnauthorizedHandler } from "./lib/api-client";
 import { useApiResource } from "./lib/useApiResource";
@@ -61,7 +62,19 @@ type View =
   | { kind: "edit-llm-config"; configId: string }
   | { kind: "students" }
   | { kind: "ta-permissions" }
-  | { kind: "exports" };
+  | { kind: "exports" }
+  /* #75: carries the identity the panel displays alongside the id it acts
+     on. Threaded through the view state rather than refetched, because the
+     dashboard the instructor came from already decrypted both -- and a
+     second fetch to re-learn a name it just showed would be a query per
+     drill-in for nothing. */
+  | {
+      kind: "grade";
+      homeworkId: string;
+      submissionId: string;
+      studentName: string;
+      sectionTitle: string;
+    };
 
 const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "homeworks":        "Instructor Console · Homeworks",
@@ -74,6 +87,7 @@ const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "students":         "Instructor Console · Roster",
   "ta-permissions":   "Instructor Console · TA permissions",
   "exports":          "Instructor Console · Export",
+  "grade":            "Instructor Console · Grading",
 };
 
 export default function App() {
@@ -152,7 +166,7 @@ export default function App() {
   }, [isSidebarCollapsed]);
 
   const navKey: AdminNavKey =
-    view.kind === "submissions"
+    view.kind === "submissions" || view.kind === "grade"
       ? "submissions"
       : view.kind === "create-homework" || view.kind === "edit-homework"
         ? "homeworks"
@@ -320,6 +334,20 @@ export default function App() {
                     courseId={CURRENT_COURSE_ID}
                     homeworkId={view.homeworkId}
                     onBack={() => setView({ kind: "homeworks" })}
+                    /* #75: grading is instructor-tier while this dashboard
+                       is grader-tier -- a TA reads it and cannot grade from
+                       it, so they get no drill-in rather than one that
+                       403s on save. */
+                    onGrade={
+                      canAuthor
+                        ? (input) =>
+                            setView({
+                              kind: "grade",
+                              homeworkId: view.homeworkId,
+                              ...input,
+                            })
+                        : undefined
+                    }
                   />
                 ) : (
                   <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
@@ -390,6 +418,30 @@ export default function App() {
                   />
                 ) : CURRENT_COURSE_ID ? (
                   <StudentsView courseId={CURRENT_COURSE_ID} courseTitle={CURRENT_COURSE.title} />
+                ) : (
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
+                )
+              )}
+
+              {/* #75: grading one submitted section. Reached from the
+                  submissions dashboard, which is where an instructor is
+                  already looking at who has submitted what. */}
+              {view.kind === "grade" && (
+                !canAuthor ? (
+                  <EmptyView
+                    label="Only instructors can grade in this course"
+                    body={NOT_INSTRUCTOR_BODY}
+                  />
+                ) : CURRENT_COURSE_ID ? (
+                  <GradingPanel
+                    courseId={CURRENT_COURSE_ID}
+                    submissionId={view.submissionId}
+                    studentName={view.studentName}
+                    sectionTitle={view.sectionTitle}
+                    onBack={() =>
+                      setView({ kind: "submissions", homeworkId: view.homeworkId })
+                    }
+                  />
                 ) : (
                   <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
                 )
@@ -473,10 +525,14 @@ function SubmissionsDataLoader({
   courseId,
   homeworkId,
   onBack,
+  onGrade,
 }: {
   courseId: string;
   homeworkId: string;
   onBack: () => void;
+  /** #75: absent for a caller who may not grade, so the cells stay
+   *  non-interactive rather than offering a route that 403s. */
+  onGrade?: (input: { submissionId: string; studentName: string; sectionTitle: string }) => void;
 }) {
   const [data, setData] = useState<import("./views/SubmissionsView").HomeworkSubmissionsData | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -504,7 +560,7 @@ function SubmissionsDataLoader({
       />
     );
   if (!data) return null;
-  return <SubmissionsView data={data} onBack={onBack} />;
+  return <SubmissionsView data={data} onBack={onBack} onGrade={onGrade} />;
 }
 
 /* #186 (#172 re-audit, USE-026): `body` is explicit and NOT defaulted to the

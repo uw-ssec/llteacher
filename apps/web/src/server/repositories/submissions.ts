@@ -279,6 +279,15 @@ export interface SubmissionCell {
   conversationCount: number;
   lastActivityAt: string | null;
   hasDeletedConversation: boolean;
+  /** #75: the submission behind a `submitted` cell, so the dashboard can
+   *  drill into grading. Null for every other status -- there is nothing to
+   *  grade until a student has submitted -- and null for a non_interactive
+   *  section, which records an answer rather than a submission.
+   *
+   *  Surfaced here rather than fetched per cell by the client: the matrix
+   *  already reads `submissions` to decide the status, so this is a field
+   *  off a row it holds, not another query. */
+  submissionId: string | null;
 }
 
 export type ParticipationStatus = "no_interaction" | "partial" | "active";
@@ -380,6 +389,9 @@ export async function getHomeworkSubmissionsMatrix(
     ? await db.query.submissions.findMany({ where: (s, { inArray }) => inArray(s.conversationId, conversationIds) })
     : [];
   const submittedConversationIds = new Set(allSubmissions.map((s) => s.conversationId));
+  // #75: conversation -> submission, so a submitted cell can carry the id
+  // the grading panel needs without a second query.
+  const submissionIdByConversation = new Map(allSubmissions.map((s) => [s.conversationId, s.id]));
 
   // #164: non_interactive sections never produce a conversation, so
   // submitted/activeConvo below are always empty/false for them -- fetched
@@ -424,6 +436,9 @@ export async function getHomeworkSubmissionsMatrix(
           conversationCount: 0,
           lastActivityAt: null,
           hasDeletedConversation: false,
+          // #164: a non_interactive section records a section_answers row,
+          // never a submission -- so there is no submission to grade here.
+          submissionId: null,
         });
         continue;
       }
@@ -431,7 +446,8 @@ export async function getHomeworkSubmissionsMatrix(
       const convosForCell = allConversations.filter((c) => c.sectionId === section.id && c.ownerUserId === membership.userId);
       const activeConvo = convosForCell.find((c) => !c.isDeleted);
       const hasDeleted = convosForCell.some((c) => c.isDeleted);
-      const submitted = convosForCell.some((c) => submittedConversationIds.has(c.id));
+      const submittedConvo = convosForCell.find((c) => submittedConversationIds.has(c.id));
+      const submitted = submittedConvo !== undefined;
 
       totalConversations += convosForCell.length;
       totalEngagement += convosForCell.length;
@@ -449,6 +465,7 @@ export async function getHomeworkSubmissionsMatrix(
         conversationCount: convosForCell.length,
         lastActivityAt: cellLastActivityAt?.toISOString() ?? null,
         hasDeletedConversation: hasDeleted,
+        submissionId: submittedConvo ? (submissionIdByConversation.get(submittedConvo.id) ?? null) : null,
       });
     }
 

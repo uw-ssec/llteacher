@@ -3274,6 +3274,152 @@ body {
   font-weight: var(--weight-semibold);
 }
 
+/* -- Grading (#75) ---------------------------------------------------------
+   The AI draft is deliberately quieter than the instructor's own form and
+   sits below it. Putting it first would make the instructor's job reviewing
+   a machine's work rather than doing their own -- and the rule this feature
+   rests on is that a grade is in force only when a human wrote it. */
+
+.admin-progress-cell--gradeable {
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  transition: transform 120ms ease-out, box-shadow 120ms ease-out;
+}
+
+.admin-progress-cell--gradeable:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 1px 4px rgba(26, 26, 26, 0.14);
+}
+
+.admin-grade-current {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-lg);
+  color: var(--color-text);
+}
+
+.admin-grade-score {
+  display: flex;
+  align-items: end;
+  gap: var(--space-3);
+}
+
+.admin-grade-score .admin-form-field {
+  max-width: 8rem;
+}
+
+.admin-grade-score__of {
+  padding-block-end: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-lg);
+  color: var(--color-text-muted);
+}
+
+.admin-form-actions--inline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.admin-draft {
+  margin-block: var(--space-6);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  /* Heritage Gold: the AI-voice marker across both apps. A draft is the
+     model speaking, and the console says so the same way the chat does. */
+  border-inline-start: 2px solid var(--color-accent-warm);
+  border-radius: 6px;
+  background-color: var(--color-surface-raised);
+}
+
+.admin-draft__result {
+  margin-block-start: var(--space-3);
+}
+
+.admin-draft__score {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-lg);
+  color: var(--color-text);
+}
+
+.admin-draft__model {
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.admin-draft__rationale {
+  margin: 0 0 var(--space-4);
+  max-width: 68ch;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: 1.6;
+  color: var(--color-text);
+}
+
+.admin-grade-history {
+  margin-block-start: var(--space-6);
+}
+
+/* The test-result region is mounted empty and filled on result, so it needs
+   no layout of its own until there is something in it. */
+.admin-test-result-region:empty {
+  display: none;
+}
+
+.admin-test-result {
+  margin-block-start: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: 6px;
+  border-inline-start: 2px solid var(--color-accent-warm);
+  background-color: var(--color-surface);
+}
+
+.admin-test-result--failed {
+  border-inline-start-color: var(--color-error);
+}
+
+.admin-test-result__eyebrow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.admin-test-result__usage {
+  font-family: var(--font-mono);
+  letter-spacing: 0.06em;
+}
+
+.admin-test-result__body {
+  max-width: 68ch;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  color: var(--color-text);
+}
+
+.admin-export-notice {
+  display: flex;
+  align-items: start;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: 6px;
+  background-color: rgba(190, 140, 50, 0.06);
+}
+
 /* -- Roster (#32) and CSV import (#86) -------------------------------------
    The roster is the one list in this console that is genuinely long -- a
    course has hundreds of students where it has three configs and two TAs --
