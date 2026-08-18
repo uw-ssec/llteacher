@@ -14,12 +14,18 @@ import { ListControls } from "@llteacher/ui";
 import { PageHeader } from "../components/PageHeader";
 import { RecordId } from "../components/RecordId";
 import { StatusBadge } from "../components/StatusBadge";
-import type { LLMConfig } from "../lib/fixtures";
+import type { LlmConfigPayload } from "@llteacher/ui/api";
 
 export type LLMConfigsViewProps = {
-  configs: LLMConfig[];
+  /** #33: the shared wire contract, not a local mirror. */
+  configs: LlmConfigPayload[];
   onOpenConfig: (id: string) => void;
   onNewConfig: () => void;
+  /** #170: an editable copy. Cloning is how an instructor experiments
+   *  without risking the config their students are currently talking to. */
+  onCloneConfig: (config: LlmConfigPayload) => void;
+  /** #31: deactivate, never delete -- homeworks reference these rows. */
+  onDeactivateConfig: (config: LlmConfigPayload) => void;
 };
 
 type Sort = "default" | "name" | "model";
@@ -33,6 +39,8 @@ const SORT_OPTIONS = [
 export function LLMConfigsView({
   configs,
   onOpenConfig,
+  onCloneConfig,
+  onDeactivateConfig,
   onNewConfig,
 }: LLMConfigsViewProps) {
   const activeCount = configs.filter((c) => c.isActive).length;
@@ -147,7 +155,12 @@ export function LLMConfigsView({
               </div>
               <p className="admin-record-row__desc admin-record-row__desc--quote">
                 <span className="admin-prompt-quote" aria-hidden="true">"</span>
-                {cfg.basePromptPreview}
+                {/* The stored prompt is the full text; the list shows an
+                    opening. Truncated here rather than server-side so the
+                    same payload serves the form, which needs all of it. */}
+                {cfg.basePrompt.length > 140
+                  ? `${cfg.basePrompt.slice(0, 140).trimEnd()}…`
+                  : cfg.basePrompt || "No base prompt set."}
                 <span className="admin-prompt-quote" aria-hidden="true">"</span>
               </p>
             </div>
@@ -160,6 +173,32 @@ export function LLMConfigsView({
               >
                 Open
               </button>
+              {/* #195 (ACC-021) on both: the accessible name LEADS with the
+                  visible word, so voice control still matches what is on
+                  screen while a controls list does not read six identical
+                  "Copy"s. */}
+              <button
+                type="button"
+                className="admin-link-button"
+                aria-label={`Copy ${cfg.name}`}
+                onClick={() => onCloneConfig(cfg)}
+              >
+                Copy
+              </button>
+              {/* The default has no Deactivate action at all, rather than a
+                  disabled one: the server refuses it (it is what every
+                  unpinned homework resolves to), and offering a control that
+                  always fails is the defect #172 exists to remove. */}
+              {cfg.isActive && !cfg.isDefault && (
+                <button
+                  type="button"
+                  className="admin-link-button admin-link-button--danger"
+                  aria-label={`Deactivate ${cfg.name}`}
+                  onClick={() => onDeactivateConfig(cfg)}
+                >
+                  Deactivate
+                </button>
+              )}
             </div>
           </article>
         ))}

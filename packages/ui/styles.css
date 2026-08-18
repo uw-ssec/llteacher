@@ -3274,6 +3274,208 @@ body {
   font-weight: var(--weight-semibold);
 }
 
+/* -- Roster (#32) and CSV import (#86) -------------------------------------
+   The roster is the one list in this console that is genuinely long -- a
+   course has hundreds of students where it has three configs and two TAs --
+   so it gets controls the shorter lists deliberately do without. */
+
+.admin-loading {
+  margin: var(--space-5) 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.admin-empty__title {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+}
+
+.admin-empty__body {
+  margin: var(--space-2) 0 0;
+  max-width: 60ch;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+  color: var(--color-text-secondary);
+}
+
+.admin-empty__action {
+  margin-block-start: var(--space-4);
+}
+
+.admin-roster-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  margin-block-end: var(--space-4);
+  padding-block-end: var(--space-3);
+  border-block-end: 1px solid var(--color-border);
+}
+
+.admin-roster-controls__search input {
+  width: min(320px, 60vw);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 5px;
+  background-color: var(--color-bg);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.admin-roster-controls__search input:focus {
+  border-color: var(--color-accent-warm);
+}
+
+.admin-roster-controls__filters {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* Counts live ON the filter, not beside it: an instructor choosing
+   "Invited" wants the number before they click, because "has anyone not
+   signed in?" is the question. */
+.admin-chip {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  background-color: var(--color-bg);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background-color 140ms ease-out, border-color 140ms ease-out, color 140ms ease-out;
+}
+
+.admin-chip:hover {
+  border-color: var(--color-accent-warm);
+  color: var(--color-text);
+}
+
+.admin-chip--selected {
+  border-color: var(--color-accent);
+  background-color: var(--color-accent-faint);
+  color: var(--color-accent);
+}
+
+.admin-roster-row__identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.admin-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 50%;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+}
+
+.admin-roster-cell--role {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.admin-roster-cell--muted {
+  color: var(--color-text-muted);
+}
+
+/* Status is the load-bearing column: "has not signed in yet" and "something
+   went wrong" look identical if the only signal is an empty Last active
+   cell. A word plus a dot, never colour alone. */
+.admin-roster-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.admin-roster-status::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background-color: currentColor;
+}
+
+.admin-roster-status--ok      { color: var(--color-success); }
+.admin-roster-status--pending { color: var(--color-accent-warm); }
+.admin-roster-status--dropped { color: var(--color-text-muted); }
+
+/* Dimmed, not hidden. A removal that leaves no trace is indistinguishable
+   from a person who was never added, and "why is this student gone" is a
+   question this page exists to answer. */
+.admin-roster-row--dropped th,
+.admin-roster-row--dropped td {
+  opacity: 0.55;
+}
+
+.admin-file-input {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.admin-file-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.admin-accession__summary {
+  margin: var(--space-4) 0 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+/* One extra column over the NetID ledger: the spreadsheet line number, so
+   an instructor with the file still open can find the row they must fix. */
+.admin-import-ledger .admin-accession__entry {
+  grid-template-columns: minmax(4.5rem, auto) minmax(10rem, auto) minmax(6rem, auto) minmax(0, 1fr);
+}
+
+.admin-import-line {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .admin-import-ledger .admin-accession__entry {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-1);
+  }
+}
+
 /* -- Accession panel: adding TAs by NetID (#210) ---------------------------
    The console reads as a card catalog -- mono record ids, ruled rows, warm
    paper. This is the accession slip in that register: you write down who is

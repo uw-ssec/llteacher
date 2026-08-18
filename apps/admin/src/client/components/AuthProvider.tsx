@@ -31,7 +31,15 @@ export interface CourseOption {
   roleDegraded: boolean;
 }
 
-export type AuthState = AuthSessionState & { role: CourseRole | null; courses: CourseOption[] };
+export type AuthState = AuthSessionState & {
+  role: CourseRole | null;
+  courses: CourseOption[];
+  /** #33: the signed-in instructor's own name, for the chrome. The console
+   *  used to take this from a fixture teacher, which meant every instructor
+   *  saw the same initials in the top nav of a tool whose whole purpose is
+   *  acting on their behalf. */
+  displayName: string | null;
+};
 
 /** Runtime-validated rather than cast (#124).
  *
@@ -81,9 +89,13 @@ function parseCourse(raw: unknown, fallbackRole: CourseRole | null): CourseOptio
   };
 }
 
-export const { AuthProvider, useAuth } = createAuthProvider<{ role: CourseRole | null; courses: CourseOption[] }>({
+export const { AuthProvider, useAuth } = createAuthProvider<{
+  role: CourseRole | null;
+  courses: CourseOption[];
+  displayName: string | null;
+}>({
   parseExtra: (body) => {
-    const raw = body as { role?: unknown; courses?: unknown } | null;
+    const raw = body as { role?: unknown; courses?: unknown; displayName?: unknown } | null;
     let role: CourseRole | null = null;
     if (raw?.role != null) {
       const parsed = parseCourseRole(raw.role);
@@ -103,7 +115,14 @@ export const { AuthProvider, useAuth } = createAuthProvider<{ role: CourseRole |
         `[AuthProvider] /api/profile returned ${rawCourses.length - courses.length} malformed course entr(ies); dropped`,
       );
     }
-    return { role, courses };
+    return {
+      role,
+      courses,
+      // Null rather than a placeholder when absent: the chrome falls back to
+      // a neutral glyph, because showing the WRONG person's initials in an
+      // admin console is worse than showing none.
+      displayName: typeof raw?.displayName === "string" ? raw.displayName : null,
+    };
   },
-  defaultExtra: { role: null, courses: [] },
+  defaultExtra: { role: null, courses: [], displayName: null },
 });

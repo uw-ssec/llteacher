@@ -27,12 +27,11 @@ import { HomeworkEditView } from "./views/HomeworkEditView";
 import { HomeworkReadOnlyView } from "./views/HomeworkReadOnlyView";
 import { SubmissionsView } from "./views/SubmissionsView";
 import { TaCapabilitiesView } from "./views/TaCapabilitiesView";
-import { LLMConfigsView } from "./views/LLMConfigsView";
-import { LLMConfigFormView } from "./views/LLMConfigFormView";
-import {
-  LLM_CONFIGS,
-  CURRENT_TEACHER,
-} from "./lib/fixtures";
+import { LLMConfigsDataLoader, type ConfigScreen } from "./views/LLMConfigsDataLoader";
+import { StudentsView } from "./views/StudentsView";
+import { ExportView } from "./views/ExportView";
+import { apiClient, setUnauthorizedHandler } from "./lib/api-client";
+import { useApiResource } from "./lib/useApiResource";
 import { useAuth, type CourseRole } from "./components/AuthProvider";
 import { UnauthenticatedAdmin } from "./components/UnauthenticatedAdmin";
 import { Forbidden } from "./components/Forbidden";
@@ -60,7 +59,9 @@ type View =
   | { kind: "llm-configs" }
   | { kind: "create-llm-config" }
   | { kind: "edit-llm-config"; configId: string }
-  | { kind: "students" };
+  | { kind: "students" }
+  | { kind: "ta-permissions" }
+  | { kind: "exports" };
 
 const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "homeworks":        "Instructor Console · Homeworks",
@@ -70,12 +71,22 @@ const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "llm-configs":      "Instructor Console · LLM Configs",
   "create-llm-config": "Instructor Console · New LLM Config",
   "edit-llm-config":  "Instructor Console · Edit LLM Config",
-  "students":         "Instructor Console · TA permissions",
+  "students":         "Instructor Console · Roster",
+  "ta-permissions":   "Instructor Console · TA permissions",
+  "exports":          "Instructor Console · Export",
 };
 
 export default function App() {
-  const { isAuthenticated, loading: authLoading, error: authError, role, courses, login, logout } =
-    useAuth();
+  const {
+    isAuthenticated,
+    loading: authLoading,
+    error: authError,
+    role,
+    courses,
+    displayName,
+    login,
+    logout,
+  } = useAuth();
 
   // Stopgap: this app assumes exactly one course everywhere else today
   // (TopNav's hardcoded course="STATS 311" string) -- courses[0] matches
@@ -95,6 +106,29 @@ export default function App() {
   const canAuthor = CURRENT_COURSE ? AUTHOR_ROLE_SET.has(CURRENT_COURSE.role) : false;
 
   const [view, setView] = useState<View>({ kind: "homeworks" });
+
+  /* #33: the homework forms' LLM-config picker, from the API rather than
+     fixtures. Loaded at the shell because two sibling views need the same
+     list and neither owns it; an empty list is a legitimate state (a brand
+     new organization) and the picker degrades to "course default" rather
+     than blocking authoring. */
+  const llmConfigResource = useApiResource(
+    (opts) =>
+      CURRENT_COURSE_ID
+        ? apiClient.llmConfigs.list(CURRENT_COURSE_ID, opts)
+        : Promise.resolve({ configs: [] }),
+    [CURRENT_COURSE_ID],
+  );
+  const llmConfigs = llmConfigResource.data?.configs ?? [];
+
+  /* One central response to a dead session, rather than each view deciding
+     what a logged-out instructor should see. The full reload is deliberate:
+     it re-runs the profile fetch, which is what decides between the login
+     screen and the console. */
+  useEffect(() => {
+    setUnauthorizedHandler(() => window.location.reload());
+    return () => setUnauthorizedHandler(null);
+  }, []);
 
   /* Sidebar collapse persists across reloads via localStorage. Lazy
      initializer reads on first render; the effect below writes on change.
@@ -151,11 +185,20 @@ export default function App() {
     }
   };
 
-  const initials = CURRENT_TEACHER.name
-    .split(" ")
-    .map((p) => p[0])
-    .join("")
-    .slice(0, 2);
+  /* #33: derived from the signed-in user rather than fixtures.CURRENT_TEACHER,
+     which was the last thing in the shell still claiming a hardcoded
+     identity. `displayName` arrives from /api/profile; the fallback is a
+     neutral glyph rather than invented initials, because showing the wrong
+     person's initials in the chrome of an admin console is worse than
+     showing none. */
+  const initials =
+    (displayName ?? "")
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((p) => p[0])
+      .join("")
+      .slice(0, 2)
+      .toUpperCase() || "·";
 
   if (authLoading) return null;
   if (!isAuthenticated) return <UnauthenticatedAdmin onLogin={login} error={authError} />;
@@ -232,7 +275,7 @@ export default function App() {
                 ) : CURRENT_COURSE_ID ? (
                   <HomeworkCreateView
                     courseId={CURRENT_COURSE_ID}
-                    llmConfigs={LLM_CONFIGS}
+                    llmConfigs={llmConfigs}
                     onCreated={() => setView({ kind: "homeworks" })}
                     onCancel={() => setView({ kind: "homeworks" })}
                   />
@@ -264,7 +307,7 @@ export default function App() {
                   <HomeworkEditView
                     courseId={CURRENT_COURSE_ID}
                     homeworkId={view.homeworkId}
-                    llmConfigs={LLM_CONFIGS}
+                    llmConfigs={llmConfigs}
                     onSaved={() => setView({ kind: "homeworks" })}
                     onCancel={() => setView({ kind: "homeworks" })}
                   />
@@ -283,38 +326,47 @@ export default function App() {
                 )
               )}
 
-              {view.kind === "llm-configs" && (
-                <LLMConfigsView
-                  configs={LLM_CONFIGS}
-                  onOpenConfig={(id) => setView({ kind: "edit-llm-config", configId: id })}
-                  onNewConfig={() => setView({ kind: "create-llm-config" })}
-                />
-              )}
-
-              {/* Both form views are fixture-backed for now: there is no
-                  llm-configs API on this branch at all (the read route ships
-                  in #317, and no create/update endpoint exists anywhere yet).
-                  onSave is therefore a no-op that returns to the list rather
-                  than a fetch that would 404 -- #332 tracks the write path. */}
-              {view.kind === "create-llm-config" && (
-                <LLMConfigFormView
-                  onSave={async () => setView({ kind: "llm-configs" })}
-                  onCancel={() => setView({ kind: "llm-configs" })}
-                />
-              )}
-
-              {view.kind === "edit-llm-config" && (
-                <LLMConfigFormView
-                  initialConfig={LLM_CONFIGS.find((c) => c.id === view.configId)}
-                  onSave={async () => setView({ kind: "llm-configs" })}
-                  onCancel={() => setView({ kind: "llm-configs" })}
-                />
-              )}
+              {/* #33: the three config screens are one loader, because they
+                  share the fetched collection -- the edit form needs the
+                  org's OTHER configs for its fallback picker, and the list
+                  must reload after any write. Three separate fetches would
+                  be three chances to disagree about what the org holds. */}
+              {(view.kind === "llm-configs" ||
+                view.kind === "create-llm-config" ||
+                view.kind === "edit-llm-config") &&
+                (!canAuthor ? (
+                  <EmptyView
+                    label="Only instructors can manage tutor configurations"
+                    body={NOT_INSTRUCTOR_BODY}
+                  />
+                ) : CURRENT_COURSE_ID ? (
+                  <LLMConfigsDataLoader
+                    courseId={CURRENT_COURSE_ID}
+                    screen={
+                      view.kind === "llm-configs"
+                        ? { kind: "list" }
+                        : view.kind === "create-llm-config"
+                          ? { kind: "create" }
+                          : { kind: "edit", configId: view.configId }
+                    }
+                    onScreenChange={(next: ConfigScreen) =>
+                      setView(
+                        next.kind === "list"
+                          ? { kind: "llm-configs" }
+                          : next.kind === "create"
+                            ? { kind: "create-llm-config" }
+                            : { kind: "edit-llm-config", configId: next.configId },
+                      )
+                    }
+                  />
+                ) : (
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
+                ))}
 
               {/* #172 audit: instructor-only. The nav entry is filtered for
                   a TA, and the route is guarded too so a stale view state
                   can't land them on a surface whose only fetch 403s. */}
-              {view.kind === "students" && (
+              {view.kind === "ta-permissions" && (
                 !canAuthor ? (
                   <EmptyView
                     label="Only instructors can manage TA permissions in this course"
@@ -322,6 +374,37 @@ export default function App() {
                   />
                 ) : CURRENT_COURSE_ID ? (
                   <TaCapabilitiesView courseId={CURRENT_COURSE_ID} courseTitle={CURRENT_COURSE.title} />
+                ) : (
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
+                )
+              )}
+
+              {/* #32: the roster. Instructor-only for the same reason the TA
+                  page is -- a TA reads student work, they do not decide who
+                  is in the class. */}
+              {view.kind === "students" && (
+                !canAuthor ? (
+                  <EmptyView
+                    label="Only instructors can manage this course's roster"
+                    body={NOT_INSTRUCTOR_BODY}
+                  />
+                ) : CURRENT_COURSE_ID ? (
+                  <StudentsView courseId={CURRENT_COURSE_ID} courseTitle={CURRENT_COURSE.title} />
+                ) : (
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
+                )
+              )}
+
+              {/* #91: export. Narrower than reading the same data here,
+                  because the artifact leaves the platform on download. */}
+              {view.kind === "exports" && (
+                !canAuthor ? (
+                  <EmptyView
+                    label="Only instructors can export this course's records"
+                    body={NOT_INSTRUCTOR_BODY}
+                  />
+                ) : CURRENT_COURSE_ID ? (
+                  <ExportView courseId={CURRENT_COURSE_ID} courseTitle={CURRENT_COURSE.title} />
                 ) : (
                   <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
                 )
@@ -429,7 +512,8 @@ function SubmissionsDataLoader({
 
    This component was written for genuinely unbuilt views, and its fixed body
    read "This view is scaffolded in the navigation but not yet implemented.
-   Wire it next -- the data shape lives in lib/fixtures.ts." #172 then reused
+   Wire it next -- the data shape lives in lib/fixtures.ts." (#33 has
+   since retired that module; the shapes live in @llteacher/ui/api.) #172 then reused
    it for permission and no-course states, so a TA refused the TA-permissions
    page was told the feature does not exist and handed an internal file path.
    They would reasonably tell their instructor not to look for it -- and the

@@ -3,7 +3,24 @@ import { useForm, useFieldArray } from "react-hook-form";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Button, Input } from "@llteacher/ui";
-import type { LLMConfig, SectionDetail } from "../lib/fixtures";
+import type { LlmConfigPayload } from "@llteacher/ui/api";
+
+/** #33: the section shape this form edits, declared where it is used rather
+ *  than imported from the retired fixture module. It is the FORM's working
+ *  type, not a wire payload -- `solutionContent` is optional here because
+ *  the form may be mid-edit with none written, which is a different thing
+ *  from what the API returns. */
+export type SectionDetail = {
+  id: string;
+  homeworkId: string;
+  title: string;
+  order: number;
+  hasSolution: boolean;
+  submissionsCount: number;
+  type: "conversation" | "non_interactive";
+  content: string;
+  solutionContent?: string;
+};
 import { computeSectionDiff, type FormSection } from "../lib/computeSectionDiff";
 import { AdminNotice } from "./AdminNotice";
 
@@ -62,7 +79,7 @@ export interface HomeworkFormProps {
     publish: boolean; releasedAt?: string;
     hidden: boolean; expiresAt?: string;
   }) => Promise<void>;
-  llmConfigs: LLMConfig[];
+  llmConfigs: LlmConfigPayload[];
   isLoading?: boolean;
 }
 

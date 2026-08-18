@@ -31,12 +31,12 @@
    it is coming, and a reviewer should see the gate.
    -------------------------------------------------------------------------- */
 
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { PageHeader } from "../components/PageHeader";
 import { AdminNotice } from "../components/AdminNotice";
-import type { LLMConfig } from "../lib/fixtures";
+import type { LlmConfigPayload } from "@llteacher/ui/api";
 
 export interface LLMConfigFormValues {
   name: string;
@@ -47,17 +47,30 @@ export interface LLMConfigFormValues {
   maxCompletionTokens: number;
   isDefault: boolean;
   isActive: boolean;
+  /** #98: the config to fall back to when this one's provider fails.
+   *  One level, never a chain -- see streamWithFallback. */
+  fallbackLlmConfigId: string | null;
 }
 
 export interface LLMConfigFormViewProps {
-  /** Present when editing; absent when creating. */
-  initialConfig?: LLMConfig;
+  /** Present when editing; absent when creating. Typed from the shared wire
+   *  contract (#33) rather than a local mirror, so a server field rename
+   *  stops compiling here instead of failing a runtime parse. */
+  initialConfig?: LlmConfigPayload;
   /** Models the gateway currently serves. Empty until #333's discovery
    *  endpoint lands, which is why this degrades to a free-text field
    *  rather than an empty select the instructor cannot escape. */
   availableModels?: string[];
+  /** #98: the org's other configs, for the fallback picker. The config
+   *  being edited is excluded by the picker itself -- a config cannot be
+   *  its own fallback, and the schema refuses it too. */
+  siblings?: { id: string; name: string; modelName: string; isActive: boolean }[];
   onSave: (values: LLMConfigFormValues) => Promise<void>;
   onCancel: () => void;
+  /** #31: "Test configuration". Absent when creating -- there is nothing
+   *  saved to test yet, and testing the unsaved form values would be a
+   *  different (and misleading) claim than "this configuration works". */
+  onTest?: (message: string) => Promise<{ ok: true; text: string; usage: { inputTokens: number | null; outputTokens: number | null } } | { ok: false; error: string }>;
 }
 
 /* Anchors, not adjectives. Each end says what the student experiences, so
@@ -96,8 +109,10 @@ function approxWords(tokens: number): string {
 export function LLMConfigFormView({
   initialConfig,
   availableModels = [],
+  siblings = [],
   onSave,
   onCancel,
+  onTest,
 }: LLMConfigFormViewProps) {
   const isEdit = initialConfig !== undefined;
 
@@ -105,11 +120,12 @@ export function LLMConfigFormView({
     name: initialConfig?.name ?? "",
     provider: "platform",
     modelName: initialConfig?.modelName ?? "",
-    basePrompt: initialConfig?.basePromptPreview ?? "",
+    basePrompt: initialConfig?.basePrompt ?? "",
     temperature: initialConfig?.temperature ?? 0.7,
     maxCompletionTokens: initialConfig?.maxCompletionTokens ?? 1000,
     isDefault: initialConfig?.isDefault ?? false,
     isActive: initialConfig?.isActive ?? true,
+    fallbackLlmConfigId: initialConfig?.fallbackLlmConfigId ?? null,
   });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -396,6 +412,47 @@ export function LLMConfigFormView({
           </div>
         </div>
 
+        {/* #98: one optional fallback, and the picker states the boundary
+            rather than implying seamlessness it cannot deliver. The switch
+            happens only before the first word reaches the student; a
+            provider that fails mid-answer still shows the stopped state,
+            because replaying a turn the student has half-read would be
+            worse. */}
+        <fieldset className="admin-form-group">
+          <legend>If the model is unavailable</legend>
+
+          <div className="admin-form-field">
+            <label htmlFor="cfg-fallback">Fall back to</label>
+            <select
+              id="cfg-fallback"
+              value={values.fallbackLlmConfigId ?? ""}
+              onChange={(e) => set("fallbackLlmConfigId", e.target.value || null)}
+            >
+              <option value="">Nothing — show the student an error</option>
+              {siblings
+                // A config cannot be its own fallback (the database refuses
+                // it), and an inactive one is a config an instructor has
+                // retired -- "except when the primary is down" is not
+                // something they said.
+                .filter((c) => c.id !== initialConfig?.id && c.isActive)
+                .map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name} · {c.modelName}
+                  </option>
+                ))}
+            </select>
+            <p className="admin-form-hint">
+              Used only when the provider refuses or times out before the tutor has said anything
+              — a rate limit or an outage. Once an answer has started, a failure mid-sentence
+              still stops the turn.
+            </p>
+          </div>
+        </fieldset>
+
+        {onTest && (
+          <TestConfigPanel onTest={onTest} />
+        )}
+
         <fieldset className="admin-form-group">
           <legend>Availability</legend>
 
@@ -439,5 +496,120 @@ export function LLMConfigFormView({
         </div>
       </form>
     </div>
+  );
+}
+
+/* --------------------------------------------------------------------------
+   TestConfigPanel — "does this configuration actually work?" (#31).
+
+   Django's llm app had a config_test view and it is the single most useful
+   thing on this page: a model id is a string an instructor typed, and the
+   difference between a working config and a typo is otherwise invisible
+   until a student hits it mid-homework.
+
+   Shown only when EDITING, and it tests the SAVED configuration rather than
+   the form's current values. That is a deliberate narrowing: testing unsaved
+   values would answer a different question than the one asked ("will this
+   work for my students"), and an instructor who fiddles a temperature,
+   tests, and navigates away would have proved something about a config that
+   does not exist.
+   -------------------------------------------------------------------------- */
+
+const DEFAULT_TEST_MESSAGE = "I'm stuck on this problem. Can you help me get started?";
+
+type TestResult =
+  | { ok: true; text: string; usage: { inputTokens: number | null; outputTokens: number | null } }
+  | { ok: false; error: string };
+
+function TestConfigPanel({
+  onTest,
+}: {
+  onTest: (message: string) => Promise<TestResult>;
+}) {
+  const [message, setMessage] = useState(DEFAULT_TEST_MESSAGE);
+  const [result, setResult] = useState<TestResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const fieldId = useId();
+
+  async function run() {
+    if (busy || !message.trim()) return;
+    setBusy(true);
+    setResult(null);
+    try {
+      setResult(await onTest(message.trim()));
+    } catch {
+      setResult({ ok: false, error: "Could not reach the model gateway. Please try again." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <fieldset className="admin-form-group">
+      <legend>Test this configuration</legend>
+
+      <div className="admin-form-field">
+        <label htmlFor={fieldId}>Send the tutor a message</label>
+        <textarea
+          id={fieldId}
+          rows={2}
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+        />
+        <p className="admin-form-hint">
+          Sends one message to the saved configuration and shows what comes back. Nothing is
+          recorded and no student sees it. Testing uses the configuration as saved, not the
+          unsaved changes above.
+        </p>
+      </div>
+
+      <div className="admin-form-actions admin-form-actions--inline">
+        {/* type="button": inside the same <form> as Save, a default submit
+            button would save the configuration every time an instructor
+            meant to test it. */}
+        <button
+          type="button"
+          className="admin-button"
+          disabled={busy || !message.trim()}
+          onClick={() => void run()}
+        >
+          {busy ? "Sending…" : "Send test message"}
+        </button>
+      </div>
+
+      {/* role="status": this is the answer to something the instructor just
+          asked for, and it can take several seconds to arrive -- exactly the
+          case a polite live region exists for. Mounted only on result, which
+          is acceptable here (unlike ACC-028's blocks) because the element is
+          created empty and filled by the same render... so it is keyed to
+          force a fresh node per result instead. */}
+      <div aria-live="polite" className="admin-test-result-region">
+        {result && (
+          <div
+            key={result.ok ? `ok-${result.text.length}` : `err-${result.error.length}`}
+            className={result.ok ? "admin-test-result" : "admin-test-result admin-test-result--failed"}
+          >
+            {result.ok ? (
+              <>
+                <p className="admin-test-result__eyebrow">
+                  The tutor replied
+                  {result.usage.outputTokens !== null && (
+                    <span className="admin-test-result__usage">
+                      {result.usage.inputTokens ?? "?"} in · {result.usage.outputTokens} out
+                    </span>
+                  )}
+                </p>
+                <div className="admin-test-result__body">{result.text}</div>
+              </>
+            ) : (
+              <>
+                <p className="admin-test-result__eyebrow">The tutor did not reply</p>
+                <div className="admin-test-result__body">{result.error}</div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </fieldset>
   );
 }

@@ -1,6 +1,6 @@
 import { HomeworkForm } from "../components/HomeworkForm";
 import { PageHeader } from "../components/PageHeader";
-import type { LLMConfig } from "../lib/fixtures";
+import type { LlmConfigPayload } from "@llteacher/ui/api";
 
 export function HomeworkCreateView({
   courseId,
@@ -9,7 +9,7 @@ export function HomeworkCreateView({
   onCancel,
 }: {
   courseId: string;
-  llmConfigs: LLMConfig[];
+  llmConfigs: LlmConfigPayload[];
   onCreated: (id: string) => void;
   onCancel: () => void;
 }) {

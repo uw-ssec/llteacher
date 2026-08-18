@@ -11,7 +11,9 @@
    SubmissionCell/ParticipationStatus (Tasks 19-20) -- apps/admin never
    imports from apps/web (the only cross-package import anywhere in
    apps/admin/src is @llteacher/ui), so these are the contract, same
-   convention as lib/fixtures.ts's own header comment.
+   convention SubmissionsView has always followed. (#33 retired
+   lib/fixtures.ts, which this note used to cite as the precedent; the
+   convention itself is unchanged and now lives in api-client.ts's header.)
    -------------------------------------------------------------------------- */
 
 import { useMemo, useState } from "react";

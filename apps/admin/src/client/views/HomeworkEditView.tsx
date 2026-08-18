@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { HomeworkForm, type HomeworkFormInitialData } from "../components/HomeworkForm";
 import { AdminNotice } from "../components/AdminNotice";
-import type { LLMConfig } from "../lib/fixtures";
+import type { LlmConfigPayload } from "@llteacher/ui/api";
 
 /** ISO datetime string -> the `YYYY-MM-DDTHH:mm` shape a <input
  *  type="datetime-local"> requires, in the *browser's local* timezone (a
@@ -22,7 +22,7 @@ export function HomeworkEditView({
 }: {
   courseId: string;
   homeworkId: string;
-  llmConfigs: LLMConfig[];
+  llmConfigs: LlmConfigPayload[];
   onSaved: () => void;
   onCancel: () => void;
 }) {

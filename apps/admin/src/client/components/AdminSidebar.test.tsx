@@ -38,7 +38,12 @@ describe("AdminSidebar authoring affordances (#172)", () => {
     // authoring entry must not hide the rest of it.
     expect(screen.getByText("Homeworks")).toBeTruthy();
     expect(screen.getByText("Submissions")).toBeTruthy();
-    expect(screen.getByText("LLM configs")).toBeTruthy();
+    // #31: LLM configs is NOT among them any more. It was visible to a TA
+    // while the list was fixture-driven static data; now every route behind
+    // it is requireInstructorOf, so showing the entry would be a link to a
+    // 403 -- which is the dead end #172 exists to remove, not a permission
+    // narrowing.
+    expect(screen.queryByText("LLM configs")).toBeNull();
   });
 
   it("shows every entry and the quick actions to an author", () => {
@@ -49,21 +54,34 @@ describe("AdminSidebar authoring affordances (#172)", () => {
     expect(screen.getByText("New homework")).toBeTruthy();
   });
 
-  it("filters exactly one entry, so a widened filter is visible here", () => {
+  it("shows a TA exactly the non-authoring entries, and nothing else", () => {
     const asAuthor = render(<AdminSidebar {...props} canAuthor />);
-    const authorItems = screen.getAllByRole("listitem").length;
+    const authorLabels = screen
+      .getAllByRole("listitem")
+      .map((li) => li.textContent ?? "");
     asAuthor.unmount();
 
     render(<AdminSidebar {...props} canAuthor={false} />);
-    const taItems = screen.getAllByRole("listitem").length;
+    const taLabels = screen.getAllByRole("listitem").map((li) => li.textContent ?? "");
 
-    // #201 (#172 re-audit, MNT-033): the RELATIONSHIP, not the totals. The
-    // old form asserted authorItems === 4 and taItems === 3 -- the size of
-    // NAV_ITEMS, which is unrelated to the filter under test, so adding any
-    // nav entry failed this test with a message about a number. What it
-    // means to pin is "the filter removes exactly one entry"; the entries a
-    // TA keeps are asserted by name in the test above.
-    expect(authorItems - taItems).toBe(1);
-    expect(taItems).toBeGreaterThan(0);
+    // #201 (MNT-033) asked for the RELATIONSHIP rather than the totals, and
+    // asserted `authorItems - taItems === 1`. That was still a fact about
+    // how many author-only entries NAV_ITEMS happened to contain -- #32 and
+    // #91 added two more and it failed with a message about a number again.
+    //
+    // The actual invariant is which entries a TA may reach: the roster, TA
+    // permissions and export are all authoring surfaces whose routes 403 for
+    // a TA, so a widened filter is a nav entry leading to a denial. Named,
+    // so widening it fails here saying what leaked.
+    expect(taLabels.some((l) => l.includes("Homeworks"))).toBe(true);
+    expect(taLabels.some((l) => l.includes("Submissions"))).toBe(true);
+    expect(taLabels.some((l) => l.includes("LLM configs"))).toBe(false);
+    expect(taLabels.some((l) => l.includes("Students"))).toBe(false);
+    expect(taLabels.some((l) => l.includes("TA permissions"))).toBe(false);
+    expect(taLabels.some((l) => l.includes("Export"))).toBe(false);
+    // And the author still sees strictly more, so the filter is doing
+    // something rather than hiding everything.
+    expect(authorLabels.length).toBeGreaterThan(taLabels.length);
+    expect(taLabels.length).toBeGreaterThan(0);
   });
 });
