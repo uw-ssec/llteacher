@@ -1412,7 +1412,7 @@ describe("POST /api/chat", () => {
         { type: "tool-showDefinition", toolCallId: "call-1", state: "output-available", input: { term: "p-value", body: "..." }, output: { status: "displayed", term: "p-value" } },
       ],
     };
-    await capturedOnFinish!({ responseMessage });
+    await capturedOnFinish!({ responseMessage, finishReason: "stop" });
 
     expect(appendMessageMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -1435,7 +1435,10 @@ describe("POST /api/chat", () => {
     expect(capturedOnFinish).toBeDefined();
 
     await expect(
-      capturedOnFinish!({ responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] } }),
+      capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+        finishReason: "stop",
+      }),
     ).resolves.not.toThrow();
   });
 
@@ -1501,7 +1504,10 @@ describe("POST /api/chat", () => {
       mockResponseMeta = { id: "req-abc" };
 
       await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
-      await capturedOnFinish!({ responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] } });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+        finishReason: "stop",
+      });
 
       expect(recordLlmCallLogMock).toHaveBeenCalledTimes(1);
       const logged = recordLlmCallLogMock.mock.calls[0]![1] as Record<string, unknown>;

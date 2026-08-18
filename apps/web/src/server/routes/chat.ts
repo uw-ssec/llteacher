@@ -302,46 +302,64 @@ const chatEnvelopeSchema = z.object({
 // lockstep with replayPersistedPart's emit-set is exactly what
 // chat.test.ts's "#307 gate/replay parity" test asserts, so the two can't
 // silently drift apart again.
+//
+// #342: requires every part to be complete, not just some part to be
+// renderable. The previous version was `parts.some(isRenderable)` -- "is
+// ANY part done" -- which a multi-part turn (step-start + a completed text
+// part + a tool call still mid-flight, or a completed part followed by a
+// text part still `state:"streaming"`) could satisfy on its completed part
+// alone while an incomplete one sat right next to it. That shape is exactly
+// what a client-side Stop or disconnect mid-multi-part-turn produces (the
+// onFinish finishReason-allowlist fix above is the primary guard against
+// persisting an aborted turn at all, but this function is the second layer
+// for whatever reaches it regardless -- an existing row from before that
+// fix shipped, or a future path that doesn't go through onFinish). Now:
+// reject the WHOLE array the moment any part is still mid-flight, and only
+// then check whether at least one part actually renders.
 function hasRenderableContent(parts: unknown): boolean {
   if (!Array.isArray(parts)) return false;
-  return parts.some((part) => {
-    if (!part || typeof part !== "object" || !("type" in part)) return false;
+  let sawRenderablePart = false;
+  for (const part of parts) {
+    if (!part || typeof part !== "object" || !("type" in part)) continue;
     const type = (part as { type: unknown }).type;
     if (type === "text") {
       const text = (part as { text?: unknown }).text;
-      if (typeof text !== "string" || text.length === 0) return false;
       // #268: a text part mid-generation carries state:"streaming" until
       // the SDK closes it out as state:"done" -- a part that never got
       // there (a provider error or a client disconnect mid-delta) is
       // exactly the truncated-answer case this whole function exists to
-      // catch, and length>0 alone doesn't see it (verified empirically:
-      // the persisted row from a text-then-error turn was
-      // {text:"...", state:"streaming"}, which the old check accepted).
-      // `state` is optional in the SDK's own type (older/synthetic parts
-      // omit it) -- only an EXPLICIT "streaming" is rejected here, not its
-      // absence, so replayPersistedPart's own always-complete text writes
-      // (which never set state) keep working.
+      // catch. `state` is optional in the SDK's own type (older/synthetic
+      // parts omit it) -- only an EXPLICIT "streaming" fails the whole
+      // array, not its absence, so replayPersistedPart's own
+      // always-complete text writes (which never set state) keep working.
       const state = (part as { state?: unknown }).state;
-      return state !== "streaming";
+      if (state === "streaming") return false;
+      if (typeof text === "string" && text.length > 0) sawRenderablePart = true;
+      continue;
     }
     if (typeof type === "string" && type.startsWith("tool-")) {
-      // #307: only a tool call that actually resolved -- output-available
-      // (a real result) or output-error (a real, renderable failure) --
-      // counts as content. input-available/input-streaming means the tool
-      // was invoked but the turn ended (aborted, provider error) before it
-      // resolved: replayPersistedPart has nothing to emit for that state
-      // beyond a dangling tool-input-available, which is exactly the
-      // "poisoned history" scenario (an unanswered tool call the model then
-      // can't recover from on the next turn) this fix exists to stop from
-      // ever being persisted as "answered" in the first place.
       const toolCallId = (part as { toolCallId?: unknown }).toolCallId;
       const state = (part as { state?: unknown }).state;
-      return typeof toolCallId === "string" && (state === "output-available" || state === "output-error");
+      // #307: only a tool call that actually resolved -- output-available
+      // (a real result) or output-error (a real, renderable failure) --
+      // counts as content. #342: input-available/input-streaming means the
+      // tool was invoked but the turn ended (aborted, provider error, or a
+      // client Stop between the call and its result) before it resolved --
+      // replayPersistedPart has nothing to emit for that state beyond a
+      // dangling tool-input-available (the "poisoned history" scenario an
+      // unanswered tool call leaves the model unable to recover from on the
+      // next turn), so it now fails the WHOLE array rather than being
+      // silently skipped while a completed part elsewhere still passes.
+      if (typeof toolCallId !== "string" || (state !== "output-available" && state !== "output-error")) return false;
+      sawRenderablePart = true;
+      continue;
     }
     // step-start, reasoning, file, source-url/document, and anything else
-    // this app's own TOOLS/renderer don't produce/display -- never counts.
-    return false;
-  });
+    // this app's own TOOLS/renderer don't produce/display -- never counts
+    // as renderable, and never fails the array either (these parts have no
+    // "incomplete" state of their own to poison the check on).
+  }
+  return sawRenderablePart;
 }
 
 // Replays an already-persisted assistant message's `parts` (jsonb, so typed
@@ -1263,30 +1281,8 @@ export async function chatHandler(c: Context<AppEnv>) {
       // responseMessage is the full final UIMessage (text parts + any
       // tool-call/tool-result parts), exactly the shape `messages.parts`
       // (jsonb) is meant to store; no manual text+toolCalls reconstruction
-      // needed.
-      //
-      // #268: NOT persisted when isAborted or finishReason === "error" (a
-      // client disconnect mid-delta, or a provider error after some content
-      // already streamed) -- previously this refused only a fully-empty
-      // response (hasRenderableContent's step-start-only case), which missed
-      // the partial case entirely: a text-then-error turn persisted a
-      // half-sentence as a normal-looking complete answer, and the
-      // idempotency replay path above then served that same half-sentence on
-      // every future retry, with no error chunk at all the second time. Two
-      // signals said "incomplete" at this exact decision point and neither
-      // was read: `finishReason`/`isAborted` on this callback's own event,
-      // and the persisted text part's own `state: "streaming"` (now also
-      // caught structurally by hasRenderableContent's strengthened text
-      // branch, in case a future SDK stops surfacing finishReason). "length"
-      // is deliberately NOT refused here -- that's a real, complete-as-far-
-      // as-the-model-went answer (hit its token budget), not a truncation.
-      //
-      // best-effort, not double-write-proof: if the *worker process* dies
-      // before onFinish runs (vs. the client just disconnecting), the
-      // assistant message is lost and the client's retry will only re-send
-      // the user message (already deduped above), so no response ever gets
-      // generated for that turn. That gap is a documented limitation (#3
-      // pitfall 2), not fixed here -- tracked as #96 (streaming resilience).
+      // needed. See the isErrorOutcome/hasRenderableContent doc comments
+      // inside this callback for the persistence gate itself.
       onFinish: async ({ responseMessage, isAborted, finishReason }) => {
         // #317 review, #322: unconditional, before anything below -- the
         // turn is over (successfully, aborted, or errored) the moment
@@ -1298,32 +1294,37 @@ export async function chatHandler(c: Context<AppEnv>) {
           logServerError("chatHandler.onFinish.releaseLock", err);
         });
 
-        // #268: NOT persisted when isAborted or finishReason === "error" (a
-        // client disconnect mid-delta, or a provider error after some
-        // content already streamed) -- previously this refused only a
-        // fully-empty response (hasRenderableContent's step-start-only
-        // case), which missed the partial case entirely: a text-then-error
-        // turn persisted a half-sentence as a normal-looking complete
-        // answer, and the idempotency replay path above then served that
-        // same half-sentence on every future retry, with no error chunk at
-        // all the second time. Two signals said "incomplete" at this exact
-        // decision point and neither was read: `finishReason`/`isAborted`
-        // on this callback's own event, and the persisted text part's own
-        // `state: "streaming"` (now also caught structurally by
-        // hasRenderableContent's strengthened text branch, in case a future
-        // SDK stops surfacing finishReason). "length" is deliberately NOT
-        // refused here -- that's a real, complete-as-far-as-the-model-went
-        // answer (hit its token budget), not a truncation.
-        //
-        // A provider failure mid-stream (ai@5.0.195 delivers this as an
-        // `error` chunk, not a rejection -- see hasRenderableContent's doc
-        // comment) still lands here with a `responseMessage` that has no
-        // real content. Persisting it anyway would write a permanently-empty
-        // assistant row that the idempotency check above would then treat as
-        // "already answered" on every future retry -- silently defeating the
-        // client's retry affordance (#144) forever. Not persisting instead
-        // leaves nothing for this turn, so a retry's idempotency check falls
-        // through to a genuine model call again.
+        // #268, #342: NOT persisted unless the turn reached a real terminal
+        // state. Originally this was `isAborted || finishReason === "error"`
+        // -- a denylist that let anything else through, including
+        // `finishReason === undefined` and `"unknown"`. #342 found the gap
+        // that denylist left: a client-side Stop or disconnect (not a
+        // server-side abort -- ai@5.0.195's `isAborted` is set only by an
+        // in-stream `abort` chunk, which the server emits only when its OWN
+        // `abortSignal` (STREAM_TIMEOUT_MS) trips, never on a client reader
+        // cancel) produces `isAborted: false` and `finishReason: undefined`,
+        // which the denylist waved through as "success." An allowlist of
+        // the finish reasons that actually mean "the model produced a real,
+        // complete-as-far-as-it-went answer" closes that: "stop" (normal
+        // completion), "length" (hit its token budget -- still a real
+        // answer, not a truncation, so deliberately included), and
+        // "tool-calls" (the model's last of the up-to-5 steps this route
+        // allows ended on a tool call). Everything else -- undefined,
+        // "unknown", "content-filter", "other", and "error" itself -- is
+        // treated as not-a-real-answer and falls through to the same
+        // not-persisted path an aborted/provider-error turn already took.
+        const TERMINAL_FINISH_REASONS = new Set(["stop", "length", "tool-calls"]);
+        const isErrorOutcome = isAborted || !finishReason || !TERMINAL_FINISH_REASONS.has(finishReason);
+
+        // Persisting a rejected turn anyway would write a row the
+        // idempotency replay path above (classifyTurn) would then treat as
+        // "already answered" on every future retry -- for the finishReason
+        // gate above, permanently serving the same half-sentence back with
+        // no error and no way out except Restart (which voids the
+        // submission); for hasRenderableContent's own gate (its own doc
+        // comment), a permanently-empty assistant row. Not persisting
+        // instead leaves nothing for this turn, so a retry's idempotency
+        // check falls through to a genuine model call again.
         //
         // best-effort, not double-write-proof: if the *worker process* dies
         // before onFinish runs (vs. the client just disconnecting), the
@@ -1331,7 +1332,6 @@ export async function chatHandler(c: Context<AppEnv>) {
         // the user message (already deduped above), so no response ever gets
         // generated for that turn. That gap is a documented limitation (#3
         // pitfall 2), not fixed here -- tracked as #96 (streaming resilience).
-        const isErrorOutcome = isAborted || finishReason === "error";
         let persistedMessageId: string | null = null;
         if (!isErrorOutcome && hasRenderableContent(responseMessage.parts)) {
           try {
