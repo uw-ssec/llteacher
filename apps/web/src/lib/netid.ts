@@ -24,19 +24,34 @@
    NetID and nothing else.
 
    ---------------------------------------------------------------------------
-   NEEDS CONFIRMATION FROM UW IT before this ships to a real roster.
+   THIS IS A SHAPE CHECK, NOT AN IDENTITY CHECK. Deliberately.
 
-   #210 says explicitly: "Get the actual rule from UW IT rather than inventing
-   a regex." That was not reachable from here, so this encodes the publicly
-   documented rule for personal NetIDs -- begins with a lowercase letter,
-   1-8 characters, letters and digits only -- and deliberately excludes the
-   administrative/shared forms (`joe-admin`, departmental IDs), which are not
-   people and should not be TAs on a course.
+   #210 says "get the actual rule from UW IT rather than inventing a regex."
+   The rule below is the publicly documented form of a *personal* UW NetID --
+   begins with a lowercase letter, 1-8 characters, letters and digits only --
+   and it deliberately excludes the administrative and shared forms
+   (`joe-admin`, departmental IDs), which are not people and should not be
+   TAs on a course.
 
-   If UW IT's rule differs, this is the ONE place to change: both the pattern
-   and the sentence shown to the instructor live here, and every caller
-   (#210's add-TA route, and #32/#86's roster paths) goes through
-   `validateNetid`.
+   Authoritative validation is not this function's job and will not become
+   it: it lands with Canvas (#73's instructor API tokens, #74's roster
+   import), where a NetID can be checked against a real enrolment rather
+   than against a pattern. That is a strictly better answer than any regex,
+   because "well-formed" and "a person who exists in this course" are
+   different questions and only the second one matters.
+
+   So what this buys in the meantime is narrow and worth stating: it stops a
+   pasted `alovelace@uw.edu`, a name with a space, or an empty cell from
+   minting a pending `users` row that permanently squats a uniquely-indexed
+   `netid_blind_index`. A rejected valid TA is visible and recoverable -- the
+   instructor sees which entry was refused and why. An accepted invalid one
+   is neither.
+
+   When #74 lands, the change here is to keep this as the cheap local guard
+   and add the Canvas lookup above it in the provisioning pipeline, not to
+   loosen the pattern. Both the regex and the sentence shown to the
+   instructor live in this file, and every caller (#210's add-TA route,
+   #32/#86's roster paths) reaches them through `isValidNetid`.
    -------------------------------------------------------------------------- */
 
 /** Personal UW NetID: lowercase letter first, then up to 7 more lowercase
