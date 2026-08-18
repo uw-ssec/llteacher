@@ -18,6 +18,19 @@ import type { AppEnv } from "../context";
 const TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "test-key" } as Env;
 
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
+/* #170: chatHandler now resolves the turn's config instead of running a
+   hardcoded model. Stubbed to "this org has no config yet", which is a real
+   state (a brand-new organization) and the one that preserves every
+   pre-existing expectation in this file -- the platform model and prompt.
+   The resolution rules themselves are owned by
+   repositories/llmConfigs.test.ts against a real database. */
+vi.mock("../repositories/organizations", () => ({
+  getOrgScopeForCourse: async () => "org-1",
+}));
+vi.mock("../repositories/llmConfigs", () => ({
+  resolveLlmConfig: async () => null,
+  resolveFallbackConfig: async () => null,
+}));
 
 const getOwnedConversationOrNullMock = vi.fn();
 const createConversationMock = vi.fn();
@@ -67,6 +80,15 @@ type FakeResponseMessage = { id?: string; role: string; parts: unknown[] };
 let capturedOnFinish: ((event: { responseMessage: FakeResponseMessage }) => void | Promise<void>) | undefined;
 const streamTextMock = vi.fn((_args: Record<string, unknown>) => {
   return {
+    /* #98: streamWithFallback awaits `response` to force the provider round
+       trip and learn whether it failed BEFORE any byte reaches the student.
+       A double without it would hang this suite rather than fail it, so it
+       resolves here; the failover suite (llm/streamWithFallback.test.ts)
+       owns the rejecting cases. `text`/`usage` are present because the
+       helper drains them when it abandons a failed attempt. */
+    response: Promise.resolve({ id: "res-1", modelId: "test-model", timestamp: new Date(0) }),
+    text: Promise.resolve(""),
+    usage: Promise.resolve({ inputTokens: 0, outputTokens: 0 }),
     toUIMessageStreamResponse: (opts?: {
       headers?: Record<string, string>;
       onFinish?: (event: { responseMessage: FakeResponseMessage }) => void | Promise<void>;

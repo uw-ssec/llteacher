@@ -64,10 +64,24 @@ import {
   SectionNotInteractiveError,
 } from "../repositories/sectionConversations";
 import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
+import { getOrgScopeForCourse } from "../repositories/organizations";
+import { resolveFallbackConfig, resolveLlmConfig } from "../repositories/llmConfigs";
+import { streamWithFallback } from "../llm/streamWithFallback";
 import { IdempotencyKeyConflictError } from "../repositories/errors";
-import { logServerError } from "../utils/errors";
+import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "../utils/errors";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
+
+/** The floor when an organization has configured nothing yet -- a brand-new
+ *  org, or the moment between creating one and authoring its first config.
+ *  #230 hardcoded these as the only behaviour; #31/#170 made them the
+ *  fallback behind resolveLlmConfig.
+ *
+ *  Gemma 4 31B (instruction-tuned) on OpenRouter's free tier: released
+ *  2026-04-02, 262K context, native function calling (a custom XML format
+ *  OpenRouter normalizes to the OpenAI-compatible tool-call shape the AI SDK
+ *  expects). Free, with rate limits. */
+const PLATFORM_MODEL = "google/gemma-4-31b-it:free";
 
 const SYSTEM_PROMPT = `You are an AI tutor for an introductory statistics course at the University of Washington. Your job is to guide students through homework problems using the Socratic method: ask leading questions, build intuition step by step, never just dump the answer.
 
@@ -801,14 +815,34 @@ export async function chatHandler(c: Context<AppEnv>) {
       ]
     : windowedMessages;
 
-  const result = streamText({
-    // Gemma 4 31B (instruction-tuned) on OpenRouter's free tier. Released
-    // 2026-04-02, 262K context, native function calling (custom XML format
-    // OpenRouter normalizes to the OpenAI-compatible tool call shape the AI
-    // SDK expects). Free, with rate limits. #230: hardcoded pending #26
-    // (LLM config resolution).
-    model: openrouter("google/gemma-4-31b-it:free"),
-    system: SYSTEM_PROMPT,
+  // #170: the config this turn runs under -- the section's homework if it
+  // pins one, otherwise the organization's default. `requestedSectionId` is
+  // the envelope's validated field rather than a column on `conv`, which
+  // carries only (id, ownerUserId, courseId); a tutor conversation has no
+  // section and resolves straight to the org default, which is correct. Resolution is documented
+  // on resolveLlmConfig; the two things worth restating here are that an
+  // inactive config is skipped at every tier, and that null is a legitimate
+  // answer (a brand-new organization has no default yet).
+  //
+  // #230/#26: this replaces the hardcoded model and prompt. The platform
+  // constants below remain the floor, not the norm -- an org with no config
+  // still gets a working tutor rather than a 503, which is the property that
+  // made the hardcoding defensible in the first place.
+  const orgScope = await getOrgScopeForCourse(db, conv.courseId);
+  const config = orgScope
+    ? await resolveLlmConfig(db, orgScope, { sectionId: requestedSectionId })
+    : null;
+  const fallbackConfig =
+    orgScope && config ? await resolveFallbackConfig(db, orgScope, config) : null;
+
+  const modelName = config?.modelName ?? PLATFORM_MODEL;
+  // An empty base_prompt is a legitimate stored state (the column defaults
+  // to ''), and means "this config states no voice of its own" -- so the
+  // platform prompt applies rather than the tutor being told nothing.
+  const systemPrompt = config?.basePrompt?.trim() ? config.basePrompt : SYSTEM_PROMPT;
+
+  const sharedParams = {
+    system: systemPrompt,
     messages: convertToModelMessages(modelContextMessages),
     // #264: belt-and-suspenders alongside historyMessageSchema's role
     // allowlist above -- the SDK warns and proceeds by default (its own
@@ -828,7 +862,52 @@ export async function chatHandler(c: Context<AppEnv>) {
     onError: ({ error }) => {
       logServerError(`chatHandler.streamText conversation=${conv.id}`, error);
     },
-  });
+  } satisfies Omit<Parameters<typeof streamText>[0], "model">;
+
+  // #98: one hop of failover, and only in the window before any byte has
+  // reached the student -- see streamWithFallback for exactly where that
+  // window is and why it is not wider. With no fallback configured this
+  // behaves precisely as the single streamText call it replaced.
+  let result;
+  let attribution;
+  try {
+    ({ result, attribution } = await streamWithFallback({
+      primary: { ...sharedParams, model: openrouter(modelName) },
+      fallback: fallbackConfig
+        ? {
+            ...sharedParams,
+            model: openrouter(fallbackConfig.modelName),
+            // #98: no silent capability downgrade. The tool catalog is only
+            // offered to the fallback when the primary had it too, so a
+            // generative-UI turn degrades to text rather than half-calling a
+            // tool the backup model cannot emit. Both configs run the same
+            // catalog today, so this is the statement of the rule rather
+            // than a live branch -- and it is where a per-model capability
+            // table plugs in when one exists.
+            tools: TOOLS,
+          }
+        : null,
+      primaryModelName: modelName,
+      fallbackModelName: fallbackConfig?.modelName ?? null,
+      logContext: `chatHandler.streamWithFallback conversation=${conv.id}`,
+    }));
+  } catch (err) {
+    // Both attempts failed before streaming, so nothing has been sent and a
+    // clean JSON error is still possible -- better than an empty 200 stream
+    // the client has to infer a failure from.
+    logServerError(`chatHandler conversation=${conv.id}`, err);
+    return c.json({ error: SERVICE_UNAVAILABLE_MESSAGE }, 503);
+  }
+
+  if (attribution.usedFallback) {
+    // #45/#48 will persist this on the call-log row; until that table is
+    // written by anything, the log is where a rising fallback rate -- the
+    // signal that the primary provider is in trouble -- is visible at all.
+    logServerError(
+      `chatHandler conversation=${conv.id} served-by-fallback=${attribution.servedBy}`,
+      new Error(`primary ${modelName} failed: ${attribution.primaryError ?? "unknown"}`),
+    );
+  }
 
   return result.toUIMessageStreamResponse({
     headers: { "x-conversation-id": conv.id },
