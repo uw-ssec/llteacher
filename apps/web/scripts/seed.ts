@@ -226,8 +226,13 @@ async function seed() {
     .insert(schema.llmConfigs)
     .values({
       organizationId: org.id,
+      name: "Socratic Default",
       provider: "anthropic",
       modelName: "claude-sonnet-4-5",
+      basePrompt:
+        "You are an AI tutor for an introductory statistics course. Guide students " +
+        "through problems using the Socratic method: ask leading questions, build " +
+        "intuition step by step, and never simply state the answer.",
       temperature: 0.7,
       maxCompletionTokens: 1000,
       isDefault: true,

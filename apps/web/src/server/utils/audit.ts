@@ -3,11 +3,24 @@ import { recordAuditEvent } from "../repositories/auditEvents";
 import type { OrgScope } from "../repositories/scope";
 import { logServerError } from "./errors";
 
-/** The action/target_type vocabulary for audit_events (#147). One place so
- *  M3+ handlers reuse these instead of ad-hoc strings drifting apart.
- *  target_type is always "user" for everything in this table so far --
- *  add a value here (not a new literal at the call site) when a handler
- *  needs to audit against a different kind of target. */
+/** The target_type vocabulary for audit_events (#147). Until #31 every row
+ *  in this table named a user; a config change names a config, so the value
+ *  lives here rather than as a literal at the call site -- which is what the
+ *  original note on AUDIT_ACTIONS asked the first such handler to do.
+ *
+ *  target_id is a plain uuid column with no FK, so nothing at the database
+ *  level ties an id to its type. Keeping the vocabulary in one place is what
+ *  makes `WHERE target_type = ...` a reliable query for the #50 audit
+ *  viewer. */
+export const AUDIT_TARGET_TYPES = {
+  USER: "user",
+  /** #31: an LLM configuration. Org-level blast radius -- the default is what
+   *  every course without an explicit choice runs on. */
+  LLM_CONFIG: "llm_config",
+} as const;
+
+/** The action vocabulary for audit_events (#147). One place so M3+ handlers
+ *  reuse these instead of ad-hoc strings drifting apart. */
 export const AUDIT_ACTIONS = {
   USER_LOGIN: "user.login",
   USER_LOGOUT: "user.logout",
@@ -31,6 +44,18 @@ export const AUDIT_ACTIONS = {
    *  dropped_at set, so this event and the row it names both remain
    *  reviewable afterwards. */
   COURSE_TA_REMOVED: "membership.course_ta_removed",
+  /** #31: LLM configuration lifecycle. Audited because a config decides which
+   *  model every student in the organization talks to and what it is told to
+   *  be -- and because the default is changeable by any instructor in the
+   *  org, so "who repointed us at this model" is a question that will be
+   *  asked. Deactivation rather than deletion is the sanctioned removal, so
+   *  there is no delete action here. */
+  LLM_CONFIG_CREATED: "llm_config.created",
+  LLM_CONFIG_UPDATED: "llm_config.updated",
+  LLM_CONFIG_DEACTIVATED: "llm_config.deactivated",
+  /** Audited because it spends money and reaches a third-party provider,
+   *  even though it persists nothing else. */
+  LLM_CONFIG_TESTED: "llm_config.tested",
 } as const;
 
 /** Fans an audit write out across every org scope it's relevant to (a

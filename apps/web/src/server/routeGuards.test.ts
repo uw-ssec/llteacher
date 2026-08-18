@@ -65,6 +65,13 @@ const handlers = {
   updateTaCapabilities: ok("updateTaCapabilities"),
   addCourseTas: ok("addCourseTas"),
   removeCourseTa: ok("removeCourseTa"),
+  listLlmConfigs: ok("listLlmConfigs"),
+  createLlmConfig: ok("createLlmConfig"),
+  getLlmConfig: ok("getLlmConfig"),
+  updateLlmConfig: ok("updateLlmConfig"),
+  deactivateLlmConfig: ok("deactivateLlmConfig"),
+  cloneLlmConfig: ok("cloneLlmConfig"),
+  testLlmConfig: ok("testLlmConfig"),
 };
 
 vi.mock("./routes/homeworks", () => ({
@@ -83,6 +90,15 @@ vi.mock("./routes/submissions", () => ({
 vi.mock("./routes/sectionAnswers", () => ({
   getSectionAnswerHandler: (c: Context) => handlers.getSectionAnswer(c),
   submitSectionAnswerHandler: (c: Context) => c.json({}, 200),
+}));
+vi.mock("./routes/llmConfigs", () => ({
+  listLlmConfigsHandler: (c: Context) => handlers.listLlmConfigs(c),
+  createLlmConfigHandler: (c: Context) => handlers.createLlmConfig(c),
+  getLlmConfigHandler: (c: Context) => handlers.getLlmConfig(c),
+  updateLlmConfigHandler: (c: Context) => handlers.updateLlmConfig(c),
+  deactivateLlmConfigHandler: (c: Context) => handlers.deactivateLlmConfig(c),
+  cloneLlmConfigHandler: (c: Context) => handlers.cloneLlmConfig(c),
+  testLlmConfigHandler: (c: Context) => handlers.testLlmConfig(c),
 }));
 vi.mock("./routes/courseMemberships", () => ({
   listCourseTasHandler: (c: Context) => handlers.listCourseTas(c),
@@ -182,6 +198,26 @@ const ROUTES: { method: string; path: string; handler: HandlerName; admits: Pers
   { method: "POST", path: "/api/courses/course-a/tas", handler: "addCourseTas",
     admits: ["instructor", "admin"] },
   { method: "DELETE", path: `/api/courses/course-a/tas/${HW}`, handler: "removeCourseTa",
+    admits: ["instructor", "admin"] },
+
+  // #31/#170: repointing the organization at a different model, or changing
+  // what the tutor is told it is, is authoring authority of the widest kind
+  // -- it changes what every student in every course in the org talks to. A
+  // TA is a grader and must not reach any of these, read included: the base
+  // prompt is instructional design, not student work.
+  { method: "GET", path: "/api/courses/course-a/llm-configs", handler: "listLlmConfigs",
+    admits: ["instructor", "admin"] },
+  { method: "POST", path: "/api/courses/course-a/llm-configs", handler: "createLlmConfig",
+    admits: ["instructor", "admin"] },
+  { method: "GET", path: `/api/courses/course-a/llm-configs/${HW}`, handler: "getLlmConfig",
+    admits: ["instructor", "admin"] },
+  { method: "PATCH", path: `/api/courses/course-a/llm-configs/${HW}`, handler: "updateLlmConfig",
+    admits: ["instructor", "admin"] },
+  { method: "DELETE", path: `/api/courses/course-a/llm-configs/${HW}`, handler: "deactivateLlmConfig",
+    admits: ["instructor", "admin"] },
+  { method: "POST", path: `/api/courses/course-a/llm-configs/${HW}/clone`, handler: "cloneLlmConfig",
+    admits: ["instructor", "admin"] },
+  { method: "POST", path: `/api/courses/course-a/llm-configs/${HW}/test`, handler: "testLlmConfig",
     admits: ["instructor", "admin"] },
 ];
 

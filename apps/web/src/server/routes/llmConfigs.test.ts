@@ -1,0 +1,385 @@
+/* --------------------------------------------------------------------------
+   #31 / #170: the LLM configuration routes.
+
+   The repository suite (repositories/llmConfigs.test.ts) owns the data
+   invariants against a real Postgres. This file owns the request contract:
+   who is admitted, which bodies are refused and with what sentence, what the
+   test button does and does not disclose, and what reaches the audit log.
+   -------------------------------------------------------------------------- */
+
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { Hono } from "hono";
+import {
+  cloneLlmConfigHandler,
+  createLlmConfigHandler,
+  deactivateLlmConfigHandler,
+  getLlmConfigHandler,
+  listLlmConfigsHandler,
+  testLlmConfigHandler,
+  updateLlmConfigHandler,
+} from "./llmConfigs";
+import type { AuthContext } from "../middleware/roles";
+import type { AppEnv } from "../context";
+import { fakeAuthContext, fakeMembership } from "../testing/authContext";
+
+const TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "sk-test" } as Env;
+const CONFIG_ID = "11111111-2222-4333-8444-555555555555";
+const OTHER_ID = "11111111-2222-4333-8444-555555555556";
+
+const CONFIG = {
+  id: CONFIG_ID,
+  recordNumber: 1,
+  name: "Socratic",
+  provider: "openrouter" as const,
+  modelName: "google/gemma-4-31b-it:free",
+  basePrompt: "You are a tutor.",
+  temperature: 0.7,
+  maxCompletionTokens: 1000,
+  fallbackLlmConfigId: null,
+  isDefault: true,
+  isActive: true,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+};
+
+const listMock = vi.fn();
+const getMock = vi.fn();
+const createMock = vi.fn();
+const updateMock = vi.fn();
+const deactivateMock = vi.fn();
+const cloneMock = vi.fn();
+const getOrgScopeForCourseMock = vi.fn();
+const auditBestEffortMock = vi.fn();
+const generateTextMock = vi.fn();
+
+vi.mock("../repositories/llmConfigs", () => ({
+  listLlmConfigsForOrg: (...a: unknown[]) => listMock(...a),
+  getLlmConfig: (...a: unknown[]) => getMock(...a),
+  createLlmConfig: (...a: unknown[]) => createMock(...a),
+  updateLlmConfig: (...a: unknown[]) => updateMock(...a),
+  deactivateLlmConfig: (...a: unknown[]) => deactivateMock(...a),
+  cloneLlmConfig: (...a: unknown[]) => cloneMock(...a),
+}));
+vi.mock("../repositories/organizations", () => ({
+  getOrgScopeForCourse: (...a: unknown[]) => getOrgScopeForCourseMock(...a),
+}));
+vi.mock("../utils/audit", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../utils/audit")>()),
+  auditBestEffort: (...a: unknown[]) => auditBestEffortMock(...a),
+}));
+vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
+vi.mock("ai", () => ({ generateText: (...a: unknown[]) => generateTextMock(...a) }));
+vi.mock("../../lib/ai", () => ({ getOpenRouter: () => (model: string) => ({ model }) }));
+
+function buildApp(authContext: AuthContext | undefined) {
+  const app = new Hono<AppEnv>();
+  app.use("*", async (c, next) => {
+    if (authContext) c.set("authContext", authContext);
+    await next();
+  });
+  const base = "/api/courses/:courseId/llm-configs";
+  app.get(base, (c) => listLlmConfigsHandler(c));
+  app.post(base, (c) => createLlmConfigHandler(c));
+  app.get(`${base}/:configId`, (c) => getLlmConfigHandler(c));
+  app.patch(`${base}/:configId`, (c) => updateLlmConfigHandler(c));
+  app.delete(`${base}/:configId`, (c) => deactivateLlmConfigHandler(c));
+  app.post(`${base}/:configId/clone`, (c) => cloneLlmConfigHandler(c));
+  app.post(`${base}/:configId/test`, (c) => testLlmConfigHandler(c));
+  return app;
+}
+
+const instructorOfA = () =>
+  fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] });
+const taOfA = () =>
+  fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "ta" })] });
+
+const url = (suffix = "") => `/api/courses/course-a/llm-configs${suffix}`;
+const json = (method: string, body: unknown) => ({
+  method,
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(body),
+});
+
+const VALID_BODY = {
+  name: "Socratic",
+  provider: "openrouter",
+  modelName: "google/gemma-4-31b-it:free",
+  basePrompt: "You are a tutor.",
+  temperature: 0.7,
+  maxCompletionTokens: 1000,
+  fallbackLlmConfigId: null,
+  isActive: true,
+  isDefault: false,
+};
+
+beforeEach(() => {
+  listMock.mockReset().mockResolvedValue([CONFIG]);
+  getMock.mockReset().mockResolvedValue(CONFIG);
+  createMock.mockReset().mockResolvedValue(CONFIG);
+  updateMock.mockReset().mockResolvedValue(CONFIG);
+  deactivateMock.mockReset().mockResolvedValue("deactivated");
+  cloneMock.mockReset().mockResolvedValue({ ...CONFIG, id: OTHER_ID, isDefault: false });
+  getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
+  auditBestEffortMock.mockReset().mockResolvedValue(undefined);
+  generateTextMock
+    .mockReset()
+    .mockResolvedValue({ text: "Hello.", usage: { inputTokens: 12, outputTokens: 3 } });
+});
+
+describe("LLM config authorization (#31)", () => {
+  /** A TA is a grader, not an author. Repointing the organization at a
+   *  different model is authoring authority of the widest kind -- it changes
+   *  what every student in every course talks to. */
+  const cases: [string, RequestInit | undefined, string][] = [
+    ["GET list", undefined, url()],
+    ["POST create", json("POST", VALID_BODY), url()],
+    ["GET detail", undefined, url(`/${CONFIG_ID}`)],
+    ["PATCH update", json("PATCH", VALID_BODY), url(`/${CONFIG_ID}`)],
+    ["DELETE deactivate", { method: "DELETE" }, url(`/${CONFIG_ID}`)],
+    ["POST clone", json("POST", { name: "Copy" }), url(`/${CONFIG_ID}/clone`)],
+    ["POST test", json("POST", { message: "hi" }), url(`/${CONFIG_ID}/test`)],
+  ];
+
+  for (const [label, init, path] of cases) {
+    it(`denies a TA on ${label}`, async () => {
+      const res = await buildApp(taOfA()).request(path, init, TEST_ENV);
+      expect(res.status).toBe(403);
+    });
+
+    it(`denies an instructor of another course on ${label}`, async () => {
+      const other = fakeAuthContext({
+        memberships: [fakeMembership({ courseId: "course-z", role: "instructor" })],
+      });
+      expect((await buildApp(other).request(path, init, TEST_ENV)).status).toBe(403);
+    });
+  }
+
+  it("403s when the course resolves to no organization", async () => {
+    // Fails closed: an unresolvable org must not become an unscoped query.
+    getOrgScopeForCourseMock.mockResolvedValue(null);
+    expect((await buildApp(instructorOfA()).request(url(), undefined, TEST_ENV)).status).toBe(403);
+    expect(listMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST/PATCH validation (#31)", () => {
+  const post = (body: unknown) =>
+    buildApp(instructorOfA()).request(url(), json("POST", body), TEST_ENV);
+
+  const bad: [string, Record<string, unknown>][] = [
+    ["a blank name", { name: "   " }],
+    ["an unknown provider", { provider: "hal9000" }],
+    ["a blank model id", { modelName: "" }],
+    ["temperature above 2", { temperature: 2.1 }],
+    ["temperature below 0", { temperature: -0.1 }],
+    ["a fractional token budget", { maxCompletionTokens: 100.5 }],
+    ["a token budget below the floor", { maxCompletionTokens: 1 }],
+    ["a token budget above the ceiling", { maxCompletionTokens: 999999 }],
+    ["a non-boolean isActive", { isActive: "on" }],
+    ["a non-boolean isDefault", { isDefault: "" }],
+    ["a non-uuid fallback", { fallbackLlmConfigId: "not-a-uuid" }],
+  ];
+
+  for (const [label, override] of bad) {
+    it(`rejects ${label} with a 400 and no write`, async () => {
+      const res = await post({ ...VALID_BODY, ...override });
+      expect(res.status).toBe(400);
+      expect(createMock).not.toHaveBeenCalled();
+    });
+  }
+
+  it("rejects a non-finite temperature", async () => {
+    // JSON admits 1e999, which parses to Infinity, passes a naive
+    // `>= 0 && <= 2` for the wrong reason, and reaches a double column.
+    const res = await buildApp(instructorOfA()).request(
+      url(),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: '{"name":"x","provider":"openrouter","modelName":"m","basePrompt":"","temperature":1e999,"maxCompletionTokens":1000,"fallbackLlmConfigId":null,"isActive":true,"isDefault":false}',
+      },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an inactive default with an instruction, not a constraint name", async () => {
+    const res = await post({ ...VALID_BODY, isActive: false, isDefault: true });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/must be active to be the default/i);
+    expect(body.error).not.toMatch(/chk|constraint/i);
+  });
+
+  it("rejects a fallback that belongs to another organization", async () => {
+    // The FK only requires the row to exist SOMEWHERE -- the same gap #161
+    // found on homeworks.llm_config_id. Without this, a provider outage would
+    // quietly run students on another tenant's config.
+    getMock.mockResolvedValue(null);
+    const res = await post({ ...VALID_BODY, fallbackLlmConfigId: OTHER_ID });
+    expect(res.status).toBe(400);
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a config naming itself as its fallback", async () => {
+    const res = await buildApp(instructorOfA()).request(
+      url(`/${CONFIG_ID}`),
+      json("PATCH", { ...VALID_BODY, fallbackLlmConfigId: CONFIG_ID }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it("reports a lost default race as a conflict, not a server fault", async () => {
+    // The partial unique index is the real enforcement; two instructors
+    // promoting at once means one loses. "Reload and see who won" is the
+    // action, which a 503 would not convey.
+    createMock.mockRejectedValue(
+      new Error('duplicate key value violates unique constraint "llm_configs_org_default_uq"'),
+    );
+    const res = await post({ ...VALID_BODY, isDefault: true });
+    expect(res.status).toBe(409);
+  });
+
+  it("creates and audits against the course's org", async () => {
+    const res = await post(VALID_BODY);
+    expect(res.status).toBe(201);
+    expect(auditBestEffortMock).toHaveBeenCalledTimes(1);
+    // SEC-002: the course's org only, never a fan-out.
+    expect(auditBestEffortMock.mock.calls[0]![1]).toEqual(["org-1"]);
+    expect(auditBestEffortMock.mock.calls[0]![2].action).toBe("llm_config.created");
+    expect(auditBestEffortMock.mock.calls[0]![2].targetType).toBe("llm_config");
+  });
+});
+
+describe("DELETE deactivates (#31)", () => {
+  it("refuses to deactivate the default, naming the unblocking step", async () => {
+    deactivateMock.mockResolvedValue("is_default");
+    const res = await buildApp(instructorOfA()).request(
+      url(`/${CONFIG_ID}`),
+      { method: "DELETE" },
+      TEST_ENV,
+    );
+    // 409, not 403: the caller is entitled to do this, the org's state does
+    // not permit it yet.
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toMatch(
+      /Make another configuration the default first/i,
+    );
+  });
+
+  it("404s a malformed config id without reaching the database", async () => {
+    const res = await buildApp(instructorOfA()).request(
+      url("/not-a-uuid"),
+      { method: "DELETE" },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(404);
+    expect(deactivateMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST clone (#170)", () => {
+  it("requires a name for the copy", async () => {
+    const res = await buildApp(instructorOfA()).request(
+      url(`/${CONFIG_ID}/clone`),
+      json("POST", { name: "  " }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+    expect(cloneMock).not.toHaveBeenCalled();
+  });
+
+  it("404s a source in another organization, disclosing nothing", async () => {
+    // Cloning must not become a way to learn that an id exists elsewhere.
+    cloneMock.mockResolvedValue(null);
+    const res = await buildApp(instructorOfA()).request(
+      url(`/${CONFIG_ID}/clone`),
+      json("POST", { name: "Copy" }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("returns the copy and audits it as a creation", async () => {
+    const res = await buildApp(instructorOfA()).request(
+      url(`/${CONFIG_ID}/clone`),
+      json("POST", { name: "Experiment" }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as { isDefault: boolean }).isDefault).toBe(false);
+    expect(auditBestEffortMock.mock.calls[0]![2].requestMetadata).toMatchObject({
+      clonedFrom: CONFIG_ID,
+    });
+  });
+});
+
+describe("POST test (#31)", () => {
+  const test = (body: unknown) =>
+    buildApp(instructorOfA()).request(url(`/${CONFIG_ID}/test`), json("POST", body), TEST_ENV);
+
+  it("sends the config's own prompt and settings, and returns usage", async () => {
+    const res = await test({ message: "Explain a p-value." });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      text: "Hello.",
+      modelName: CONFIG.modelName,
+      usage: { inputTokens: 12, outputTokens: 3 },
+    });
+    // The config as saved is what is under test -- not defaults, and not the
+    // chat route's prompt.
+    expect(generateTextMock.mock.calls[0]![0]).toMatchObject({
+      system: CONFIG.basePrompt,
+      temperature: CONFIG.temperature,
+      maxOutputTokens: CONFIG.maxCompletionTokens,
+    });
+  });
+
+  it("omits the system message entirely when the config states no prompt", async () => {
+    // '' is a legitimate stored state (the column defaults to it); sending an
+    // empty system message would be a different test than the one saved.
+    getMock.mockResolvedValue({ ...CONFIG, basePrompt: "" });
+    await test({ message: "hi" });
+    expect(generateTextMock.mock.calls[0]![0]).not.toHaveProperty("system");
+  });
+
+  it("answers 200 with ok:false when the provider refuses, and leaks nothing", async () => {
+    generateTextMock.mockRejectedValue(
+      new Error("401 from https://openrouter.ai/api/v1 key sk-or-v1-abcdef org_12345"),
+    );
+    const res = await test({ message: "hi" });
+    // A 5xx here would be indistinguishable from the console being broken,
+    // which is the opposite of what a test button is for.
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    // The provider's own message can carry urls, org ids and key prefixes.
+    expect(body.error).not.toMatch(/sk-or-v1|openrouter\.ai|org_12345|401/);
+    expect(body.error).toMatch(/model id/i);
+  });
+
+  it("rejects an empty message and one past the length bound", async () => {
+    expect((await test({ message: "   " })).status).toBe(400);
+    expect((await test({ message: "x".repeat(4001) })).status).toBe(400);
+    expect(generateTextMock).not.toHaveBeenCalled();
+  });
+
+  it("503s with an actionable sentence when the gateway key is missing", async () => {
+    const res = await buildApp(instructorOfA()).request(
+      url(`/${CONFIG_ID}/test`),
+      json("POST", { message: "hi" }),
+      { DATABASE_URL: "ignored" } as Env,
+    );
+    expect(res.status).toBe(503);
+    expect(generateTextMock).not.toHaveBeenCalled();
+  });
+
+  it("audits the test, because it spends money and reaches a provider", async () => {
+    await test({ message: "hi" });
+    expect(auditBestEffortMock.mock.calls[0]![2].action).toBe("llm_config.tested");
+  });
+});

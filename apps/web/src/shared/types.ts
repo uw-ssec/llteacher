@@ -97,6 +97,52 @@ export interface RemoveCourseTaResponse {
   membershipId: string;
 }
 
+/* -- #31 / #98 / #170: LLM configuration authoring ------------------------- */
+
+import type { LlmConfigRecord } from "../server/repositories/llmConfigs";
+
+export type { LlmConfigRecord };
+
+export interface LlmConfigListResponse {
+  configs: LlmConfigRecord[];
+}
+
+/** The create/update body. Deliberately has no credential field: the
+ *  platform gateway needs no key from an instructor, and an
+ *  instructor-supplied one requires the secret_ref allowlist (#323) first --
+ *  without it, choosing which binding to read is choosing from an
+ *  environment that holds ENCRYPTION_KEY and SESSION_SECRET. */
+export interface LlmConfigBody {
+  name: string;
+  provider: LlmConfigRecord["provider"];
+  modelName: string;
+  basePrompt: string;
+  temperature: number;
+  maxCompletionTokens: number;
+  fallbackLlmConfigId: string | null;
+  isActive: boolean;
+  isDefault: boolean;
+}
+
+export interface LlmConfigCloneBody {
+  name: string;
+}
+
+export interface LlmConfigTestBody {
+  message: string;
+}
+
+/** The test result is a 200 either way -- a model that refuses is a finding
+ *  the instructor needs to read, not a server fault. `ok` discriminates. */
+export type LlmConfigTestResponse =
+  | {
+      ok: true;
+      text: string;
+      modelName: string;
+      usage: { inputTokens: number | null; outputTokens: number | null };
+    }
+  | { ok: false; modelName: string; error: string };
+
 import type { HomeworkStatus } from "../server/repositories/homeworks";
 import type { SectionStatusType, StudentHomeworkSummary } from "../server/repositories/studentHomeworks";
 

@@ -36,6 +36,15 @@ import {
   removeCourseTaHandler,
   updateTaCapabilitiesHandler,
 } from "./routes/courseMemberships";
+import {
+  cloneLlmConfigHandler,
+  createLlmConfigHandler,
+  deactivateLlmConfigHandler,
+  getLlmConfigHandler,
+  listLlmConfigsHandler,
+  testLlmConfigHandler,
+  updateLlmConfigHandler,
+} from "./routes/llmConfigs";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireGraderOf, requireInstructorOf, requireRole } from "./utils/guards";
@@ -172,6 +181,38 @@ app.post("/api/courses/:courseId/tas", requireInstructorOf()(addCourseTasHandler
 app.delete(
   "/api/courses/:courseId/tas/:membershipId",
   requireInstructorOf()(removeCourseTaHandler),
+);
+
+// #31/#170: LLM configuration authoring. Instructor-gated on the COURSE,
+// operating on that course's ORGANIZATION pool -- llm_configs is a per-org
+// resource by design, so an instructor of one course can edit configs other
+// courses in the same org use. That widening is deliberate and documented at
+// the top of routes/llmConfigs.ts; it is not something these guards can
+// narrow, because the authority being checked and the scope being written
+// are different keys on purpose.
+app.get("/api/courses/:courseId/llm-configs", requireInstructorOf()(listLlmConfigsHandler));
+app.post("/api/courses/:courseId/llm-configs", requireInstructorOf()(createLlmConfigHandler));
+app.get(
+  "/api/courses/:courseId/llm-configs/:configId",
+  requireInstructorOf()(getLlmConfigHandler),
+);
+app.patch(
+  "/api/courses/:courseId/llm-configs/:configId",
+  requireInstructorOf()(updateLlmConfigHandler),
+);
+// DELETE deactivates; it never removes the row. homeworks.llm_config_id
+// references these, and conversations record which config produced them.
+app.delete(
+  "/api/courses/:courseId/llm-configs/:configId",
+  requireInstructorOf()(deactivateLlmConfigHandler),
+);
+app.post(
+  "/api/courses/:courseId/llm-configs/:configId/clone",
+  requireInstructorOf()(cloneLlmConfigHandler),
+);
+app.post(
+  "/api/courses/:courseId/llm-configs/:configId/test",
+  requireInstructorOf()(testLlmConfigHandler),
 );
 
 // #172 audit (CMP-005): an unmatched /api/* path fell through to the SPA
