@@ -44,6 +44,17 @@ vi.mock("../repositories/organizations", async (importOriginal) => {
 });
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
+// #317 review, #351 (requirement 1): the release gate the two read
+// handlers now carry -- mocked (real db is `{}` above) with a `null`
+// default so every existing test, none of which cares about release
+// state, keeps exercising the "released" path unchanged. The dedicated
+// describe block below overrides this per-test to prove the gate itself.
+const getSectionPromptContextMock = vi.fn();
+vi.mock("../../lib/prompts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/prompts")>();
+  return { ...actual, getSectionPromptContext: (...a: unknown[]) => getSectionPromptContextMock(...a) };
+});
+
 /** Mirrors server/index.ts's app.onError so a rethrown error is observed the
  *  way production observes it: logged, and answered with the generic 503.
  *  Without this the test app would report Hono's default 500 and the
@@ -92,6 +103,7 @@ beforeEach(() => {
   getActiveMock.mockReset();
   getMessagesMock.mockReset().mockResolvedValue([]);
   getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
+  getSectionPromptContextMock.mockReset().mockResolvedValue(null);
 });
 
 describe("POST /api/courses/:courseId/sections/:sectionId/conversations", () => {
@@ -210,6 +222,56 @@ describe("GET /api/courses/:courseId/sections/:sectionId/conversation", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ conversation: null, messages: [] });
   });
+
+  // #317 review, #351 (requirement 1): the write/model paths (chat.ts,
+  // startSectionConversation, restartSectionConversation) already gate on
+  // release state; this read handler did not -- an instructor withdrawing
+  // a homework left GET .../conversation still returning 200 with the
+  // withdrawn section's greeting/problem statement.
+  it("#317 review, #351: 404s an existing conversation on a section the instructor has withdrawn, for a student", async () => {
+    getActiveMock.mockResolvedValue({
+      id: CONV,
+      title: "t",
+      sectionId: SECTION,
+      isTeacherTest: false,
+      createdAt: new Date(),
+    });
+    getSectionPromptContextMock.mockResolvedValue({
+      homeworkTitle: "h",
+      sectionTitle: "s",
+      sectionContent: "c",
+      isUnreleased: true,
+    });
+    const res = await buildApp(student()).request(
+      `/api/courses/${COURSE}/sections/${SECTION}/conversation`,
+      {},
+      TEST_ENV,
+    );
+    expect(res.status).toBe(404);
+    expect(getMessagesMock).not.toHaveBeenCalled();
+  });
+
+  it("#317 review, #351: still returns the conversation on a withdrawn section for an instructor (can view drafts)", async () => {
+    getActiveMock.mockResolvedValue({
+      id: CONV,
+      title: "t",
+      sectionId: SECTION,
+      isTeacherTest: true,
+      createdAt: new Date(),
+    });
+    getSectionPromptContextMock.mockResolvedValue({
+      homeworkTitle: "h",
+      sectionTitle: "s",
+      sectionContent: "c",
+      isUnreleased: true,
+    });
+    const res = await buildApp(instructor()).request(
+      `/api/courses/${COURSE}/sections/${SECTION}/conversation`,
+      {},
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+  });
 });
 
 describe("GET /api/courses/:courseId/conversations/:conversationId — access matrix (#27)", () => {
@@ -267,6 +329,41 @@ describe("GET /api/courses/:courseId/conversations/:conversationId — access ma
 
   it("still lets an instructor read their own test conversation", async () => {
     getByIdMock.mockResolvedValue(conversationOwnedBy("instructor-1", true));
+    const res = await buildApp(instructor("instructor-1")).request(
+      `/api/courses/${COURSE}/conversations/${CONV}`,
+      {},
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  // #317 review, #351 (requirement 1): same gate as
+  // getActiveSectionConversationHandler's own describe block above.
+  it("#317 review, #351: 404s the owner's own conversation once the section is withdrawn", async () => {
+    getByIdMock.mockResolvedValue(conversationOwnedBy("student-1"));
+    getSectionPromptContextMock.mockResolvedValue({
+      homeworkTitle: "h",
+      sectionTitle: "s",
+      sectionContent: "c",
+      isUnreleased: true,
+    });
+    const res = await buildApp(student("student-1")).request(
+      `/api/courses/${COURSE}/conversations/${CONV}`,
+      {},
+      TEST_ENV,
+    );
+    expect(res.status).toBe(404);
+    expect(getMessagesMock).not.toHaveBeenCalled();
+  });
+
+  it("#317 review, #351: still lets an instructor (can view drafts) read a conversation on a withdrawn section", async () => {
+    getByIdMock.mockResolvedValue(conversationOwnedBy("student-1"));
+    getSectionPromptContextMock.mockResolvedValue({
+      homeworkTitle: "h",
+      sectionTitle: "s",
+      sectionContent: "c",
+      isUnreleased: true,
+    });
     const res = await buildApp(instructor("instructor-1")).request(
       `/api/courses/${COURSE}/conversations/${CONV}`,
       {},

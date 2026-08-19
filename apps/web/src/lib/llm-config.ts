@@ -165,7 +165,69 @@ export async function resolveLLMConfig(
     );
   if (orgDefault) return orgDefault;
 
-  throw new LLMConfigNotFoundError();
+  // #317 review, #351 (requirement, "make the invariant structural"):
+  // migration 0029 backfills every org missing a default config, but only
+  // orgs that exist AT MIGRATE TIME -- nothing enforces this afterwards
+  // (no column default, no constraint, no application code path that
+  // creates an organization at all). Onboarding a second tenant post-deploy
+  // left every one of its students getting a 500 on every message, with
+  // nothing in the symptom pointing at "the org was never given a config."
+  // Auto-provisions instead of just throwing, so the invariant holds for
+  // every org this function is ever called for, not only the ones that
+  // happened to exist when 0029 ran.
+  return ensurePlatformDefaultLLMConfig(db, orgScope);
+}
+
+/** Provider/model this deployment falls back to for an org with no default
+ *  config at all -- deliberately the same values migration 0029's own
+ *  backfill and scripts/seed.ts use, so a freshly-provisioned org and a
+ *  freshly-migrated one land on identical behavior. */
+const PLATFORM_DEFAULT_PROVIDER: LlmProvider = "llmoxie";
+const PLATFORM_DEFAULT_MODEL_NAME = "gpt-5.3-codex";
+
+/** Auto-provisions an org's default llm_configs row the first time
+ *  resolveLLMConfig finds none, instead of throwing LLMConfigNotFoundError
+ *  -- a real row with a real id, not a synthetic in-memory config: every
+ *  downstream consumer (llm_call_logs.llm_config_id's FK, the write-back
+ *  paths in chat.ts) expects `ResolvedLLMConfig.id` to reference an actual
+ *  row, so nothing here can fabricate one.
+ *
+ *  Race-safe: two concurrent first turns for a brand-new org (two students'
+ *  opening messages arriving close together) both reach this function.
+ *  `onConflictDoNothing` targets `llm_configs_org_default_uq` (a PARTIAL
+ *  unique index on organizationId WHERE isDefault = true -- the `where`
+ *  clause here has to match it exactly for Postgres to treat this as the
+ *  same conflict target), so exactly one INSERT wins; the loser's insert
+ *  silently no-ops, and both callers then read back the SAME winning row.
+ *
+ *  Deliberately does NOT fire when an org already has an is_default=true
+ *  row that is merely inactive (an admin deactivated it without picking a
+ *  replacement): the INSERT still conflicts against that row (the unique
+ *  index applies regardless of isActive, same fact #348's migration 0031
+ *  fix already relies on), so the re-select below finds nothing and this
+ *  throws LLMConfigNotFoundError same as before -- an intentional admin
+ *  action staying a real error, not something the platform silently papers
+ *  over by activating a config nobody chose. */
+async function ensurePlatformDefaultLLMConfig(db: Db, orgScope: OrgScope): Promise<ResolvedLLMConfig> {
+  await db
+    .insert(llmConfigs)
+    .values({
+      organizationId: orgScope,
+      provider: PLATFORM_DEFAULT_PROVIDER,
+      modelName: PLATFORM_DEFAULT_MODEL_NAME,
+      isDefault: true,
+      isActive: true,
+    })
+    .onConflictDoNothing({ target: llmConfigs.organizationId, where: eq(llmConfigs.isDefault, true) });
+
+  const [row] = await db
+    .select(LLM_CONFIG_COLUMNS)
+    .from(llmConfigs)
+    .where(
+      and(eq(llmConfigs.organizationId, orgScope), eq(llmConfigs.isDefault, true), eq(llmConfigs.isActive, true)),
+    );
+  if (!row) throw new LLMConfigNotFoundError();
+  return row;
 }
 
 /** Provider -> the conventional Worker-secret binding name used when a

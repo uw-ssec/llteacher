@@ -17,6 +17,7 @@ import {
 } from "../repositories/sectionConversations";
 import { getOrgScopeForCourse } from "../repositories/organizations";
 import { SubmissionGradedError } from "../repositories/submissions";
+import { getSectionPromptContext } from "../../lib/prompts";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
@@ -143,6 +144,22 @@ export async function getActiveSectionConversationHandler(c: Context<AppEnv>) {
   // state the client renders as a start affordance.
   if (!conversation) return c.json({ conversation: null, messages: [] });
 
+  // #317 review, #351 (requirement 1): the write/model paths (chat.ts,
+  // startSectionConversation, restartSectionConversation) all gate on the
+  // homework's release state; this read path -- returning `messages`,
+  // whose first row is sectionGreeting(section), the full problem statement
+  // verbatim -- did not. After an instructor withdraws a homework, POST
+  // /api/chat and restart correctly 404; this endpoint kept returning 200
+  // with the withdrawn section's content. getSectionPromptContext (already
+  // used by chat.ts for the same gate) runs the section->homework join
+  // purely for its isUnreleased field here -- notFound(c), not a distinct
+  // body, preserving the no-existence-oracle convention this file already
+  // states for getSectionConversationHandler below.
+  const sectionContext = await getSectionPromptContext(db, scope, sectionId);
+  if (sectionContext?.isUnreleased && !authContext.canViewDraftsIn(courseId!)) {
+    return notFound(c);
+  }
+
   const pageParams = parseMessagesPageParams(c);
   if (pageParams instanceof Response) return pageParams;
   const messages = await getSectionConversationMessages(db, conversation.id, pageParams);
@@ -188,6 +205,20 @@ export async function getSectionConversationHandler(c: Context<AppEnv>) {
   // confirm its own existence to another instructor, and a student probing
   // ids should learn nothing from the status code.
   if (!allowed) return notFound(c);
+
+  // #317 review, #351 (requirement 1): same gate as
+  // getActiveSectionConversationHandler above -- see that call site's own
+  // doc comment. `conversation.sectionId` is nullable at the schema level
+  // (shared with tutor conversations), but every row this route's own query
+  // can return is section-kind, so it's always set in practice; guarded
+  // rather than asserted so a future schema/data surprise degrades to
+  // "content visible" (today's status quo) rather than a crash.
+  if (conversation.sectionId) {
+    const sectionContext = await getSectionPromptContext(db, scope, conversation.sectionId);
+    if (sectionContext?.isUnreleased && !authContext.canViewDraftsIn(courseId!)) {
+      return notFound(c);
+    }
+  }
 
   const pageParams = parseMessagesPageParams(c);
   if (pageParams instanceof Response) return pageParams;

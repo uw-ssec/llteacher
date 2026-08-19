@@ -70,16 +70,52 @@ describe.skipIf(!RAW_DATABASE_URL)("resolveLLMConfig (real DB, #26)", () => {
     return row!.id;
   }
 
-  it("throws LLMConfigNotFoundError with a referenceId when no config exists at any scope", async () => {
+  // #317 review, #351 (requirement, "make the invariant structural"): a
+  // brand-new org (no llm_configs row of any kind -- the exact state an
+  // org onboarded post-deploy is in, since migration 0029 only ever
+  // backfilled orgs that existed when it ran) used to throw
+  // LLMConfigNotFoundError here. resolveLLMConfig now auto-provisions a
+  // real, persisted default row instead, so a tenant is never dead on
+  // arrival -- see ensurePlatformDefaultLLMConfig's own doc comment
+  // (lib/llm-config.ts) for the full rationale.
+  it("auto-provisions a real, persisted platform-default config when none exists at any scope (#351)", async () => {
     const ctx = await seedCourse();
-    await expect(resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, null)).rejects.toBeInstanceOf(LLMConfigNotFoundError);
-    try {
-      await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, null);
-      expect.unreachable();
-    } catch (err) {
-      expect((err as LLMConfigNotFoundError).referenceId).toMatch(/^[0-9a-f-]{36}$/);
-    }
+
+    const resolved = await resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, null);
+
+    expect(resolved.provider).toBe("llmoxie");
+    expect(resolved.modelName).toBe("gpt-5.3-codex");
+    // A REAL row, not a synthetic in-memory value -- readable back by its
+    // own id, scoped to this org, and now the org's active default.
+    const [persisted] = await db.select().from(llmConfigs).where(eq(llmConfigs.id, resolved.id));
+    expect(persisted).toBeDefined();
+    expect(persisted!.organizationId).toBe(ctx.orgId);
+    expect(persisted!.isDefault).toBe(true);
+    expect(persisted!.isActive).toBe(true);
   });
+
+  it("auto-provisions exactly once under real concurrency (two simultaneous first-resolutions for a brand-new org)", async () => {
+    const ctx = await seedCourse();
+
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => resolveLLMConfig(db, ctx.orgScope, ctx.courseScope, null)),
+    );
+
+    // All five callers must land on the SAME row -- the partial unique
+    // index (llm_configs_org_default_uq) is what makes that true, not
+    // application-level locking.
+    const ids = new Set(results.map((r) => r.id));
+    expect(ids.size).toBe(1);
+
+    const rows = await db.select().from(llmConfigs).where(eq(llmConfigs.organizationId, ctx.orgId));
+    expect(rows).toHaveLength(1);
+  });
+
+  // resolveLLMConfig still throws for an org that ALREADY has an
+  // is_default=true row that is merely inactive -- an admin's own
+  // deactivation must stay a real error, not something the platform
+  // silently papers over by activating a config nobody chose. Covered by
+  // "throws when the only configs at any scope are inactive" below.
 
   it("uses the org's default config when there is no homework or course override", async () => {
     const ctx = await seedCourse();
@@ -179,21 +215,32 @@ describe.skipIf(!RAW_DATABASE_URL)("resolveLLMConfig (real DB, #26)", () => {
     expect(resolved.id).toBe(defaultId);
   });
 
-  it("does not honor a homeworkLlmConfigId belonging to another org", async () => {
+  // #317 review, #351: ctxA has no config of its own at any scope, so this
+  // used to throw. It now auto-provisions -- the security property under
+  // test (org B's config is never used for org A) still holds and is
+  // asserted directly, just via "resolved to a fresh org-A row" instead of
+  // "threw."
+  it("does not honor a homeworkLlmConfigId belonging to another org (auto-provisions org A's own default instead)", async () => {
     const ctxA = await seedCourse();
     const ctxB = await seedCourse();
     const otherOrgConfigId = await insertConfig(ctxB.orgId, { modelName: "org-b-config" });
 
-    await expect(
-      resolveLLMConfig(db, ctxA.orgScope, ctxA.courseScope, otherOrgConfigId),
-    ).rejects.toBeInstanceOf(LLMConfigNotFoundError);
+    const resolved = await resolveLLMConfig(db, ctxA.orgScope, ctxA.courseScope, otherOrgConfigId);
+
+    expect(resolved.id).not.toBe(otherOrgConfigId);
+    const [persisted] = await db.select().from(llmConfigs).where(eq(llmConfigs.id, resolved.id));
+    expect(persisted!.organizationId).toBe(ctxA.orgId);
   });
 
-  it("does not leak another org's default config", async () => {
+  it("does not leak another org's default config (auto-provisions org A's own instead)", async () => {
     const ctxA = await seedCourse();
     const ctxB = await seedCourse();
     await insertConfig(ctxB.orgId, { isDefault: true, modelName: "org-b-default" });
 
-    await expect(resolveLLMConfig(db, ctxA.orgScope, ctxA.courseScope, null)).rejects.toBeInstanceOf(LLMConfigNotFoundError);
+    const resolved = await resolveLLMConfig(db, ctxA.orgScope, ctxA.courseScope, null);
+
+    expect(resolved.modelName).not.toBe("org-b-default");
+    const [persisted] = await db.select().from(llmConfigs).where(eq(llmConfigs.id, resolved.id));
+    expect(persisted!.organizationId).toBe(ctxA.orgId);
   });
 });
