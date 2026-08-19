@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
 import { chatHandler, classifyTurn } from "./chat";
 import type { AuthContext } from "../middleware/roles";
@@ -109,11 +109,18 @@ let capturedStreamResponseOnError: ((error: unknown) => string) | undefined;
 let mockUsage: { inputTokens?: number; outputTokens?: number } = { inputTokens: 10, outputTokens: 20 };
 let mockResponseMeta: { id?: string } = { id: "provider-resp-1" };
 let mockWarnings: unknown[] | undefined = undefined;
+// #317 review, #350 (requirement 2): when true, totalUsage/response/warnings
+// never resolve -- simulates the real failure mode this issue names (a
+// cancelled stream's finalStep promise never settling), so the
+// USAGE_FETCH_TIMEOUT_MS race in chat.ts's onFinish is exercised for real
+// (via vi.useFakeTimers, not a real 5s wait) instead of only ever seeing
+// the fast-resolving path.
+let mockHangUsageFetch = false;
 const streamTextMock = vi.fn((_args: Record<string, unknown>) => {
   return {
-    totalUsage: Promise.resolve(mockUsage),
-    response: Promise.resolve(mockResponseMeta),
-    warnings: Promise.resolve(mockWarnings),
+    totalUsage: mockHangUsageFetch ? new Promise<never>(() => {}) : Promise.resolve(mockUsage),
+    response: mockHangUsageFetch ? new Promise<never>(() => {}) : Promise.resolve(mockResponseMeta),
+    warnings: mockHangUsageFetch ? new Promise<never>(() => {}) : Promise.resolve(mockWarnings),
     toUIMessageStreamResponse: (opts?: {
       headers?: Record<string, string>;
       onFinish?: (event: FakeOnFinishEvent) => void | Promise<void>;
@@ -260,6 +267,7 @@ describe("POST /api/chat", () => {
     mockUsage = { inputTokens: 10, outputTokens: 20 };
     mockResponseMeta = { id: "provider-resp-1" };
     mockWarnings = undefined;
+    mockHangUsageFetch = false;
     startSectionConversationMock.mockReset();
     getActiveSectionConversationMock.mockReset();
     streamTextMock.mockClear();
@@ -1728,6 +1736,75 @@ describe("POST /api/chat", () => {
 
       const callArgs = streamTextMock.mock.calls[0]![0] as { providerOptions?: unknown };
       expect(callArgs.providerOptions).toBeUndefined();
+    });
+  });
+
+  // #317 review, #350 (requirement 2): result.totalUsage/response/warnings
+  // all derive from a promise that a genuinely cancelled stream never
+  // resolves -- onFinish used to hang forever waiting on it, meaning no
+  // lock release and no llm_call_logs row for a stopped turn. mockHangUsageFetch
+  // reproduces that hang; vi.useFakeTimers lets the test advance past
+  // USAGE_FETCH_TIMEOUT_MS instantly instead of waiting the real 5s.
+  describe("#350: onFinish does not hang forever when usage/response never resolve", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("finalizes the turn (null usage/cost, errorFlag true) instead of hanging when totalUsage/response never settle", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      mockHangUsageFetch = true;
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      expect(capturedOnFinish).toBeDefined();
+
+      const onFinishPromise = capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "half-sen" }] },
+        isAborted: false,
+        finishReason: undefined,
+      });
+
+      // Real time never advances in this test -- if the race didn't work,
+      // this would hang forever and the test would time out instead of
+      // resolving. Advancing fake time past USAGE_FETCH_TIMEOUT_MS is what
+      // proves the timeout branch actually fires.
+      await vi.advanceTimersByTimeAsync(5_000);
+      await onFinishPromise;
+
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+        null,
+        expect.objectContaining({
+          providerRequestId: null,
+          inputTokens: null,
+          outputTokens: null,
+          costCents: null,
+          errorFlag: true,
+        }),
+      );
+    });
+
+    it("does not time out when totalUsage/response resolve quickly (the normal case)", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      mockHangUsageFetch = false;
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+        finishReason: "stop",
+      });
+
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+        expect.objectContaining({ id: expect.any(String) }),
+        expect.objectContaining({ errorFlag: false }),
+      );
     });
   });
 

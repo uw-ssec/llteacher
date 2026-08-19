@@ -513,6 +513,21 @@ const SUPPORTS_REASONING_EFFORT_NONE = /^gpt-5\.[1-4]/;
 // the persistence work on either side of the streamText call itself.
 const LOCK_STALE_MS = 90_000;
 
+// #317 review, #350 (requirement 2): result.totalUsage/result.response/
+// result.warnings all derive from the AI SDK's finalStep -> _steps.promise,
+// resolved only in the recording stream's flush() -- which a genuinely
+// cancelled stream (client reader.cancel(), #342's own scenario) never
+// reaches. Measured: that await never settles at all, not just slowly, so
+// onFinish itself hangs forever for a stopped turn -- no lock release, no
+// llm_call_logs row, despite #321/#342's own doc comments both claiming
+// every outcome gets logged. Races the Promise.all below against this
+// timeout; on timeout, the turn is finalized with null usage/cost fields
+// instead of never being finalized at all. Short relative to
+// STREAM_TIMEOUT_MS -- this isn't waiting on the model, it's waiting on a
+// promise that either resolves almost immediately (a real, completed turn)
+// or never resolves at all (an abandoned one).
+const USAGE_FETCH_TIMEOUT_MS = 5_000;
+
 // #312: the idempotency decision below used to live inline, TWICE -- once
 // for the initial check, once for the race-fallback re-check after a lost
 // appendMessage race (#273) -- with no way to unit-test either copy without
@@ -1138,16 +1153,41 @@ export async function chatHandler(c: Context<AppEnv>) {
   // same request just created/raced onto inside resolveConversation), so
   // re-running the same id/courseId/isDeleted select here would be a
   // redundant round-trip.
-  const recentMessages = await getLastMessages(db, scope, conv.id, MAX_HISTORY_MESSAGES, {
-    skipOwnershipCheck: true,
-  });
+  //
+  // #317 review, #350 (requirement 1): wrapped in its own try/catch that
+  // releases the lock before rethrowing -- the handler's own comment further
+  // down ("everything from here through streamText... if any of it throws,
+  // the lock must be released here") stated the intent, but the try/catch
+  // that actually implements it didn't start until AFTER this call. A
+  // transient Neon blip here used to leak the lock: the request still 503s
+  // (app.onError), but processing_started_at stayed set, so every send on
+  // this conversation 409'd for the next LOCK_STALE_MS -- the student
+  // follows the 503's own "try again" advice into a false "already being
+  // processed" error.
+  let recentMessages: Awaited<ReturnType<typeof getLastMessages>>;
+  try {
+    recentMessages = await getLastMessages(db, scope, conv.id, MAX_HISTORY_MESSAGES, {
+      skipOwnershipCheck: true,
+    });
+  } catch (err) {
+    await releaseConversationTurnLock(db, conv.id).catch(() => {});
+    throw err;
+  }
   const [lastMessage, secondLastMessage] = recentMessages;
   const initialClassification = classifyTurn(lastMessage, secondLastMessage, parsedInbound.data.id);
 
   if (initialClassification === "replay") {
     // No model call is about to happen -- release immediately rather than
     // holding the lock until LOCK_STALE_MS expires for no reason.
-    await releaseConversationTurnLock(db, conv.id);
+    // #317 review, #350 (requirement 1): logged, not swallowed -- unlike
+    // the outer catch's own release (which is about to re-throw the
+    // original error anyway, so a release failure there is secondary
+    // noise), this path returns a normal 200 with nothing else to surface
+    // a stuck lock. Best-effort: a failure here still self-heals via
+    // LOCK_STALE_MS, same as every other release call on this route.
+    await releaseConversationTurnLock(db, conv.id).catch((err) => {
+      logServerError("chatHandler.releaseLock.replay", err);
+    });
     return replayResponse(conv.id, lastMessage!.parts);
   }
   // #317 review, #326: "skip-insert" means `recentMessages[0]` already IS
@@ -1196,11 +1236,19 @@ export async function chatHandler(c: Context<AppEnv>) {
         const [raceLast, raceSecondLast] = await getLastMessages(db, scope, conv.id, 2, {
           skipOwnershipCheck: true,
         });
+        // #317 review, #350 (requirement 1): logged, not swallowed -- both
+        // branches below return a normal response with nothing else to
+        // surface a release failure, same reasoning as the top-level replay
+        // release above.
         if (classifyTurn(raceLast, raceSecondLast, parsedInbound.data.id) === "replay") {
-          await releaseConversationTurnLock(db, conv.id);
+          await releaseConversationTurnLock(db, conv.id).catch((err) => {
+            logServerError("chatHandler.releaseLock.raceReplay", err);
+          });
           return replayResponse(conv.id, raceLast!.parts);
         }
-        await releaseConversationTurnLock(db, conv.id);
+        await releaseConversationTurnLock(db, conv.id).catch((err) => {
+          logServerError("chatHandler.releaseLock.raceConflict", err);
+        });
         // #317 review, #344: same code as the lock-acquisition 409 above --
         // both are "a turn is already in flight for this conversation",
         // just detected at different points.
@@ -1222,7 +1270,12 @@ export async function chatHandler(c: Context<AppEnv>) {
         ...recentMessages.slice(0, MAX_HISTORY_MESSAGES - 1),
       ];
     } catch (err) {
-      await releaseConversationTurnLock(db, conv.id);
+      // #317 review, #350 (requirement 1): `.catch(() => {})`, matching the
+      // outer catch's own release below -- this catch can re-throw `err`
+      // itself (the `throw err` branch), and a release failure surfacing
+      // here would mask the original error the caller actually needs to
+      // see. Best-effort: a stuck lock still self-heals via LOCK_STALE_MS.
+      await releaseConversationTurnLock(db, conv.id).catch(() => {});
       if (err instanceof IdempotencyKeyConflictError) {
         return c.json({ error: err.message, code: "in_progress" }, 409);
       }
@@ -1463,19 +1516,57 @@ export async function chatHandler(c: Context<AppEnv>) {
         // gap #321 names: a provider outage or a rotated key produced
         // "zero evidence" -- no error rate, no per-provider breakdown, no
         // latency, no cost.
+        // #317 review, #349 (requirement 3): result.totalUsage, not
+        // result.usage -- the AI SDK documents result.usage as "the token
+        // usage of the LAST STEP" only. stopWhen: stepCountIs(5) above
+        // makes multi-step turns (a tool call, then a follow-up text
+        // step) a designed path, and providers bill per call: result.usage
+        // alone silently dropped every earlier step's tokens from cost
+        // and usage reporting on any turn that used a tool.
+        //
+        // #317 review, #350 (requirement 2): raced against
+        // USAGE_FETCH_TIMEOUT_MS -- see that constant's own doc comment for
+        // why this Promise.all can hang forever on a genuinely cancelled
+        // stream instead of merely resolving slowly. `finalizeAssistantTurn`
+        // still runs on timeout (with null usage/cost fields, errorFlag
+        // true), rather than onFinish just hanging and never reaching it at
+        // all -- the lock still releases and a row still lands, even though
+        // this specific turn's token/cost numbers are unknowable.
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const timedOut = Symbol("usage-fetch-timed-out");
+        const timeoutPromise = new Promise<typeof timedOut>((resolve) => {
+          timeoutHandle = setTimeout(() => resolve(timedOut), USAGE_FETCH_TIMEOUT_MS);
+        });
         try {
-          // #317 review, #349 (requirement 3): result.totalUsage, not
-          // result.usage -- the AI SDK documents result.usage as "the token
-          // usage of the LAST STEP" only. stopWhen: stepCountIs(5) above
-          // makes multi-step turns (a tool call, then a follow-up text
-          // step) a designed path, and providers bill per call: result.usage
-          // alone silently dropped every earlier step's tokens from cost
-          // and usage reporting on any turn that used a tool.
-          const [usage, response, warnings] = await Promise.all([
-            result.totalUsage,
-            result.response,
-            result.warnings,
+          const usageResult = await Promise.race([
+            Promise.all([result.totalUsage, result.response, result.warnings]),
+            timeoutPromise,
           ]);
+          clearTimeout(timeoutHandle);
+
+          if (usageResult === timedOut) {
+            logServerError(
+              "chatHandler.onFinish.usageFetchTimedOut",
+              new Error(
+                `result.totalUsage/response/warnings never settled within ${USAGE_FETCH_TIMEOUT_MS}ms for conversation ${conv.id} -- likely a cancelled stream (#350); finalizing with null usage/cost`,
+              ),
+            );
+            await finalizeAssistantTurn(db, conv.id, assistantMessage, {
+              organizationId: orgScope,
+              llmConfigId: resolvedLLMConfig.id,
+              provider: resolvedLLMConfig.provider,
+              model: resolvedLLMConfig.modelName,
+              providerRequestId: null,
+              inputTokens: null,
+              outputTokens: null,
+              costCents: null,
+              latencyMs: Date.now() - turnStartedAt,
+              errorFlag: true,
+            });
+            return;
+          }
+
+          const [usage, response, warnings] = usageResult;
           // #317 review, #349 (requirement 1): nothing previously read
           // result.warnings -- an instructor setting a temperature that
           // then got silently dropped (SUPPORTS_REASONING_EFFORT_NONE's own
@@ -1511,6 +1602,7 @@ export async function chatHandler(c: Context<AppEnv>) {
             errorFlag: isErrorOutcome || !shouldPersist,
           });
         } catch (err) {
+          clearTimeout(timeoutHandle);
           // Best-effort, matching the release/persist/log steps this
           // replaces: a failure here must never surface as a second error
           // layered on the turn's own outcome. A conversation left locked
