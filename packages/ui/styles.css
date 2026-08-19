@@ -1841,6 +1841,17 @@ body {
     margin: 0;
   }
 
+  /* #317 review, #352: the trailing note on a reply the student stopped
+     mid-stream -- visually distinct from the reply's own text (muted,
+     smaller, no top margin collapse with the last real paragraph) so it
+     reads as metadata about the turn, not as more of the tutor's answer. */
+  .message__stopped-note {
+    margin-block-start: var(--space-3) !important;
+    font-size: var(--font-size-sm);
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
   /* Student message — right-aligned bubble with distinctive corner radius */
   .message--student {
     display: flex;

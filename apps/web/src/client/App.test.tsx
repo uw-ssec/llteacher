@@ -2123,4 +2123,142 @@ describe("App Stop control (#274)", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Stop" }).getAttribute("aria-disabled")).toBe("true"));
     expect(composer.getAttribute("aria-disabled")).toBe("false");
   });
+
+  // #317 review, #352 (requirement 1): server-side, chat.ts never persists
+  // this exact partial (hasRenderableContent/isErrorOutcome, #342) -- the
+  // visible transcript must say so instead of the fragment quietly reading
+  // as an ordinary, complete, remembered reply.
+  it("section chat: marks the partial reply as stopped/not-saved once Stop is clicked mid-stream", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    let capturedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(JSON.stringify(STOP_HOMEWORK_FIXTURE), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url === "/api/chat") {
+          capturedSignal = init?.signal ?? undefined;
+          const stream = new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "start" })}\n\n`));
+              controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "start-step" })}\n\n`));
+              controller.enqueue(
+                new TextEncoder().encode(`data: ${JSON.stringify({ type: "text-start", id: "t1" })}\n\n`),
+              );
+              controller.enqueue(
+                new TextEncoder().encode(
+                  `data: ${JSON.stringify({ type: "text-delta", id: "t1", delta: "Here is half of a" })}\n\n`,
+                ),
+              );
+              // No text-end, no finish -- the reply is genuinely mid-stream
+              // when Stop fires below.
+              capturedSignal?.addEventListener("abort", () => {
+                controller.error(new DOMException("The operation was aborted.", "AbortError"));
+              });
+            },
+          });
+          return new Response(stream, {
+            status: 200,
+            headers: { "content-type": "text/event-stream", "x-conversation-id": "conv-1" },
+          });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = await screen.findByLabelText("Message input");
+    const user = userEvent.setup();
+    await user.type(composer, "hello{Enter}");
+
+    await screen.findByText("Here is half of a");
+    const stopButton = await screen.findByRole("button", { name: "Stop" });
+    await user.click(stopButton);
+
+    await screen.findByText(/You stopped this response\. It wasn.t saved, so the tutor won.t remember it\./);
+    // The partial text itself must still be visible -- the note is
+    // additive (a trailing line), not a replacement of what was on screen.
+    // getByText throws if the element isn't present, which is the
+    // assertion here (no jest-dom matchers configured in this project).
+    screen.getByText("Here is half of a");
+  });
+
+  // #317 review, #352 (requirement 3): sectionHydrationError previously
+  // forced isSending true (so the composer stays disabled through it, which
+  // is correct), which ALSO made the Stop button render as active -- even
+  // though no turn is in flight and clicking it would be a no-op. Proves
+  // isStopActionable decouples the two: Stop stays aria-disabled while a
+  // hydration error is the only thing "sending".
+  it("section chat: Stop stays inactive when only a hydration error (not a genuine send) makes the composer disabled", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const homeworkWithStartedSection = {
+      homeworks: [
+        {
+          ...STOP_HOMEWORK_FIXTURE.homeworks[0],
+          sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "conv-1" }],
+        },
+      ],
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(JSON.stringify(homeworkWithStartedSection), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        // The section already has a conversationId, so App.tsx eagerly
+        // hydrates its history on mount -- failing that fetch is what sets
+        // sectionHydrationError without any chat turn ever having been sent.
+        if (url === "/api/conversations/conv-1/messages?limit=200") {
+          return new Response(JSON.stringify({ error: "boom" }), { status: 503 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = await screen.findByLabelText("Message input");
+    // The hydration failure disables the composer -- confirms isSending
+    // really is true here, so the Stop assertion below is meaningful and
+    // not just "Stop was never rendered."
+    await waitFor(() => expect(composer.getAttribute("aria-disabled")).toBe("true"));
+
+    const stopButton = screen.getByRole("button", { name: "Stop" });
+    expect(stopButton.getAttribute("aria-disabled")).toBe("true");
+  });
 });

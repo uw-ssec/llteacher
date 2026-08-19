@@ -275,6 +275,17 @@ export interface ConversationViewProps {
    *  STREAM_TIMEOUT_MS); this is the client's own escape hatch for a
    *  request that's merely slow, not yet timed out. */
   onStop?: () => void;
+  /** #317 review, #352 (requirement 3): whether a turn is GENUINELY in
+   *  flight (the owning `useChat`'s status is "submitted" or "streaming")
+   *  -- gates the Stop button's own active state. Distinct from
+   *  `isSending`, which callers also set true for reasons that leave
+   *  nothing for Stop to actually stop (App.tsx ORs in a hydration-error
+   *  flag so the composer stays disabled through it) -- without this,
+   *  Stop rendered as active while `onStop()` was a no-op against a chat
+   *  that was never streaming. Defaults to `isSending`, matching this
+   *  component's original (conflated) behavior for any caller that
+   *  doesn't pass it. */
+  isStopActionable?: boolean;
 }
 
 /* -- Component ------------------------------------------------------------- */
@@ -292,6 +303,7 @@ export function ConversationView({
   hasMoreHistory = false,
   headerActions,
   onStop,
+  isStopActionable = isSending,
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -598,7 +610,7 @@ export function ConversationView({
               stoppedRef.current = true;
               onStop();
             }}
-            ariaDisabled={!isSending}
+            ariaDisabled={!isStopActionable}
           >
             Stop
           </Button>

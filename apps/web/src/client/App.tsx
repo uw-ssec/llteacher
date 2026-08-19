@@ -153,10 +153,20 @@ export function useStudentHomework() {
 function buildMessageData(
   aiMessages: UIMessage[],
   chatStatus: ReturnType<typeof useChat>["status"],
+  // #317 review, #352: the id of the assistant message that was on screen
+  // the moment the student pressed Stop, if any -- App.tsx clears it the
+  // moment a new send starts (see handleStopSectionChat's own doc comment),
+  // so it only ever marks the ONE turn Stop actually interrupted, never a
+  // later one. Server-side, this exact partial is never persisted (chat.ts's
+  // hasRenderableContent/isErrorOutcome gate, #342) -- this note is what
+  // keeps the visible transcript honest about that instead of the fragment
+  // silently reading as an ordinary, complete, remembered reply.
+  stoppedMessageId?: string | null,
 ): MessageData[] {
   const messages: MessageData[] = aiMessages.map((m, idx) => {
     const isLast = idx === aiMessages.length - 1;
     const isStreaming = isLast && chatStatus === "streaming";
+    const isStopped = m.id === stoppedMessageId;
 
     if (m.role === "assistant") {
       const content = (
@@ -176,13 +186,21 @@ function buildMessageData(
             if (!isToolPart(part)) return null;
             return renderToolPart(part, `tool-${m.id}-${i}`);
           })}
+          {isStopped && (
+            <p className="message__stopped-note">
+              You stopped this response. It wasn&rsquo;t saved, so the tutor won&rsquo;t remember it.
+            </p>
+          )}
         </>
       );
       return {
         id: m.id,
         role: "ai" as const,
         content,
-        isStreaming,
+        // A stopped turn is definitionally done, even if this happened to
+        // still be the last message and chatStatus hasn't settled out of
+        // "streaming" yet by the render that first sees it.
+        isStreaming: isStreaming && !isStopped,
       };
     }
 
@@ -364,6 +382,21 @@ export default function App() {
     }),
   });
 
+  // #317 review, #352: the id of the assistant message on screen at the
+  // moment Stop was pressed, if any -- threaded into buildMessageData
+  // below so that ONE turn (never a later one) gets the "wasn't saved"
+  // note instead of silently reading as an ordinary complete reply. Set by
+  // handleStopSectionChat (wraps stopChat below, passed to ConversationView
+  // as onStop instead of stopChat directly); cleared the moment a new send
+  // starts (handleSendMessage) so a stale note doesn't linger onto a later
+  // turn that has nothing to do with the one that got stopped.
+  const [sectionStoppedMessageId, setSectionStoppedMessageId] = useState<string | null>(null);
+  const handleStopSectionChat = () => {
+    const last = aiMessages[aiMessages.length - 1];
+    if (last?.role === "assistant") setSectionStoppedMessageId(last.id);
+    stopChat();
+  };
+
   const {
     sections,
     setSections,
@@ -431,6 +464,21 @@ export default function App() {
     messages: tutorInitialMessages,
     transport: new DefaultChatTransport({ api: "/api/chat", prepareSendMessagesRequest }),
   });
+
+  // #317 review, #352: same reasoning as sectionStoppedMessageId above.
+  // Also reset on tutorConversationId change (switching conversations, or
+  // to none) -- useChat itself resets aiMessages there (its `id` changed),
+  // so a stale stopped-id from a previous conversation must not survive
+  // into this one's first render.
+  const [tutorStoppedMessageId, setTutorStoppedMessageId] = useState<string | null>(null);
+  useEffect(() => {
+    setTutorStoppedMessageId(null);
+  }, [tutorConversationId]);
+  const handleStopTutorChat = () => {
+    const last = tutorAiMessages[tutorAiMessages.length - 1];
+    if (last?.role === "assistant") setTutorStoppedMessageId(last.id);
+    stopTutorChat();
+  };
 
   /* #4 fix-round 2: tracks whichever tutor-surface switch was requested
      most recently -- a target conversation id, or undefined when the
@@ -870,8 +918,8 @@ export default function App() {
   /* Translate AI SDK UIMessages into the design system's MessageData --
      one call per Chat instance (buildMessageData, defined above the
      component). Whichever one is showing depends on tutorConversationId. */
-  const messages = buildMessageData(aiMessages, chatStatus);
-  const tutorMessages = buildMessageData(tutorAiMessages, tutorChatStatus);
+  const messages = buildMessageData(aiMessages, chatStatus, sectionStoppedMessageId);
+  const tutorMessages = buildMessageData(tutorAiMessages, tutorChatStatus, tutorStoppedMessageId);
 
   /* #144: inline retryable error rows for ConversationView, one per useChat
      instance. `regenerate` re-issues the last turn's request through the
@@ -974,6 +1022,9 @@ export default function App() {
     /* Each AI response counts as a hint — increments trigger the gold flash
        on the sidebar's hint-history-row count numeral. */
     setHintCount((n) => n + 1);
+    // #317 review, #352: a fresh send starts a new turn -- any stopped-note
+    // from a PRIOR turn must not linger onto it.
+    setSectionStoppedMessageId(null);
   };
 
   /* #4: sends into whichever tutor conversation is currently selected.
@@ -987,6 +1038,8 @@ export default function App() {
     if (!tutorConversationId) return;
     if (tutorChatStatus === "submitted" || tutorChatStatus === "streaming") return;
     sendTutorMessage({ text }, { body: { conversationId: tutorConversationId } });
+    // #317 review, #352: same reasoning as handleSendMessage above.
+    setTutorStoppedMessageId(null);
   };
 
   /* Selecting a homework section always means "I want the section chat" --
@@ -1279,10 +1332,17 @@ export default function App() {
                  error, there's no persisted conversation state to safely
                  send a fresh turn into while it's broken. */
               isSending={tutorChatStatus === "submitted" || tutorChatStatus === "streaming" || !!tutorHydrationError}
+              /* #317 review, #352 (requirement 3): isSending above also
+                 covers a hydration failure, which leaves nothing for Stop
+                 to stop -- isStopActionable is the narrower "a turn is
+                 genuinely in flight" check, so Stop doesn't render active
+                 (and stopTutorChat doesn't fire as a no-op) while the
+                 composer is merely disabled for an unrelated reason. */
+              isStopActionable={tutorChatStatus === "submitted" || tutorChatStatus === "streaming"}
               error={tutorChatErrorRow}
               autoFocusComposer={tutorConversationId === justCreatedTutorConversationId}
               hasMoreHistory={tutorHistoryHasMore}
-              onStop={stopTutorChat}
+              onStop={handleStopTutorChat}
             />
           </ErrorBoundary>
         ) : (
@@ -1310,9 +1370,12 @@ export default function App() {
                  #276: a hydration failure DOES disable sending -- see the
                  tutor instance's own isSending comment above. */
               isSending={chatStatus === "submitted" || chatStatus === "streaming" || !!sectionHydrationError}
+              /* #317 review, #352 (requirement 3): see the tutor
+                 ConversationView's own isStopActionable comment above. */
+              isStopActionable={chatStatus === "submitted" || chatStatus === "streaming"}
               error={sectionChatErrorRow}
               hasMoreHistory={sectionHistoryHasMore}
-              onStop={stopChat}
+              onStop={handleStopSectionChat}
               /* #248: only once there's an active conversation to restart --
                  a section the student hasn't started yet has nothing for
                  the affordance to act on. */
