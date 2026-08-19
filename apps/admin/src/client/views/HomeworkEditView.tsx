@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
-import { HomeworkForm, type HomeworkFormInitialData } from "../components/HomeworkForm";
+import { HomeworkForm, type HomeworkFormInitialData, type LLMConfigOption } from "../components/HomeworkForm";
 import { AdminNotice } from "../components/AdminNotice";
-import type { LLMConfig } from "../lib/fixtures";
 
 /** ISO datetime string -> the `YYYY-MM-DDTHH:mm` shape a <input
  *  type="datetime-local"> requires, in the *browser's local* timezone (a
@@ -22,7 +21,7 @@ export function HomeworkEditView({
 }: {
   courseId: string;
   homeworkId: string;
-  llmConfigs: LLMConfig[];
+  llmConfigs: LLMConfigOption[];
   onSaved: () => void;
   onCancel: () => void;
 }) {
@@ -40,6 +39,10 @@ export function HomeworkEditView({
   // PATCHing /hide on every save (same rationale as final review finding I3
   // for /publish).
   const [originalHideState, setOriginalHideState] = useState<{ hidden: boolean; expiresAt: string | undefined } | null>(null);
+  // Same double-submit gap as HomeworkCreateView -- the Save button was
+  // never disabled during the PATCH -> publish -> hide chain, so a second
+  // click while the first was still in flight fired an independent submit.
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     fetch(`/api/courses/${courseId}/homeworks/${homeworkId}`)
@@ -143,62 +146,68 @@ export function HomeworkEditView({
       <HomeworkForm
         initialData={initialData}
         llmConfigs={llmConfigs}
+        isLoading={isSubmitting}
         onSubmit={async (payload) => {
-          const patchRes = await fetch(`/api/courses/${courseId}/homeworks/${homeworkId}`, {
-            method: "PATCH",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              title: payload.title,
-              description: payload.description,
-              dueDate: payload.dueDate,
-              llmConfigId: payload.llmConfigId,
-              sections: payload.sections,
-              widgets: payload.widgets,
-            }),
-          });
-          if (!patchRes.ok) throw new Error("Failed to save homework");
-
-          const publishChanged =
-            payload.publish !== originalPublishState.publish ||
-            payload.releasedAt !== originalPublishState.releasedAt;
-          if (publishChanged) {
-            const publishRes = await fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/publish`, {
+          setIsSubmitting(true);
+          try {
+            const patchRes = await fetch(`/api/courses/${courseId}/homeworks/${homeworkId}`, {
               method: "PATCH",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ publish: payload.publish, releasedAt: payload.releasedAt }),
+              body: JSON.stringify({
+                title: payload.title,
+                description: payload.description,
+                dueDate: payload.dueDate,
+                llmConfigId: payload.llmConfigId,
+                sections: payload.sections,
+                widgets: payload.widgets,
+              }),
             });
-            if (publishRes.status === 409) {
-              const body = await publishRes.json();
-              if (body.hasStudentActivity && window.confirm("This homework already has student activity. Unpublish anyway?")) {
-                const retryRes = await fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/publish`, {
-                  method: "PATCH",
-                  headers: { "content-type": "application/json" },
-                  body: JSON.stringify({ publish: payload.publish, releasedAt: payload.releasedAt, confirm: true }),
-                });
-                if (!retryRes.ok) throw new Error("Failed to update publish state");
-              } else {
-                throw new Error("Publish state not changed");
+            if (!patchRes.ok) throw new Error("Failed to save homework");
+
+            const publishChanged =
+              payload.publish !== originalPublishState.publish ||
+              payload.releasedAt !== originalPublishState.releasedAt;
+            if (publishChanged) {
+              const publishRes = await fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/publish`, {
+                method: "PATCH",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ publish: payload.publish, releasedAt: payload.releasedAt }),
+              });
+              if (publishRes.status === 409) {
+                const body = await publishRes.json();
+                if (body.hasStudentActivity && window.confirm("This homework already has student activity. Unpublish anyway?")) {
+                  const retryRes = await fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/publish`, {
+                    method: "PATCH",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ publish: payload.publish, releasedAt: payload.releasedAt, confirm: true }),
+                  });
+                  if (!retryRes.ok) throw new Error("Failed to update publish state");
+                } else {
+                  throw new Error("Publish state not changed");
+                }
+              } else if (!publishRes.ok) {
+                throw new Error("Failed to update publish state");
               }
-            } else if (!publishRes.ok) {
-              throw new Error("Failed to update publish state");
             }
-          }
 
-          // #166: distinct from publish/unpublish -- its own conditional
-          // call, same "only PATCH when actually changed" guard as above.
-          const hideChanged =
-            payload.hidden !== originalHideState.hidden ||
-            payload.expiresAt !== originalHideState.expiresAt;
-          if (hideChanged) {
-            const hideRes = await fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/hide`, {
-              method: "PATCH",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ isHidden: payload.hidden, expiresAt: payload.expiresAt }),
-            });
-            if (!hideRes.ok) throw new Error("Failed to update visibility state");
-          }
+            // #166: distinct from publish/unpublish -- its own conditional
+            // call, same "only PATCH when actually changed" guard as above.
+            const hideChanged =
+              payload.hidden !== originalHideState.hidden ||
+              payload.expiresAt !== originalHideState.expiresAt;
+            if (hideChanged) {
+              const hideRes = await fetch(`/api/courses/${courseId}/homeworks/${homeworkId}/hide`, {
+                method: "PATCH",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ isHidden: payload.hidden, expiresAt: payload.expiresAt }),
+              });
+              if (!hideRes.ok) throw new Error("Failed to update visibility state");
+            }
 
-          onSaved();
+            onSaved();
+          } finally {
+            setIsSubmitting(false);
+          }
         }}
       />
     </div>

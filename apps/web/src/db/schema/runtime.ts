@@ -18,7 +18,14 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { courseMemberships, courses, organizations, users } from "./identity";
-import { llmConfigs, llmProviderEnum, materialChunks, sections, homeworkProgressWidgets } from "./content";
+import {
+  llmConfigs,
+  llmProviderEnum,
+  materialChunks,
+  sections,
+  homeworkProgressWidgets,
+  promptTemplates,
+} from "./content";
 
 // ---------- Enums ----------
 
@@ -81,8 +88,32 @@ export const conversations = pgTable(
     // which is what this column deliberately does not do, for the reason
     // above. Also avoids a second "type"-shaped column beside `kind`.
     isTeacherTest: boolean("is_teacher_test").notNull().default(false),
+    // #25: pinned once at conversation creation (resolvePromptTemplate,
+    // lib/prompts.ts) and never re-resolved per-message -- a mid-conversation
+    // template edit must not flip which version this conversation's system
+    // prompt uses (the cross-cutting invariant #30 lists for this epic).
+    // Nullable: a template row pins an exact version already (each edit is a
+    // new row via previousVersionId), so no separate version column is
+    // needed; null means resolution fell through to the built-in fallback
+    // constant (DEFAULT_SYSTEM_PROMPT) rather than a real template row, or
+    // the conversation predates this column.
+    promptTemplateId: uuid("prompt_template_id").references(() => promptTemplates.id, {
+      onDelete: "set null",
+    }),
     isDeleted: boolean("is_deleted").notNull().default(false),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    // #317 review, #322: a per-conversation turn lock -- set (via a
+    // conditional UPDATE, see acquireConversationTurnLock in
+    // repositories/conversations.ts) the moment a turn starts processing,
+    // cleared when it finishes. Two concurrent sends on one conversation
+    // (two tabs, a double-fired send) used to interleave into
+    // Q_a, Q_b, A_a, A_b with no ordering guarantee, and a lost-response
+    // retry could permanently 409 even though the real answer was already
+    // persisted (classifyTurn's replay path only ever inspects the last two
+    // rows). Nullable: null means no turn is in flight. A lock older than
+    // LOCK_STALE_MS (chat.ts) is treated as abandoned (a Worker killed
+    // mid-request never clears it) rather than a permanent deadlock.
+    processingStartedAt: timestamp("processing_started_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -119,6 +150,11 @@ export const conversations = pgTable(
     // roster views) or the section-delete cascade -- both need section_id
     // leading. Found in PR #127 review, #135.
     index("conversations_section_idx").on(t.sectionId),
+    // #317 review, #326: prompt_template_id's own onDelete: "set null" write
+    // (a template row being deleted) had no index to serve it -- an
+    // unindexed FK forces a full table scan of `conversations` to find every
+    // row pointing at the id being deleted, on every such delete.
+    index("conversations_prompt_template_idx").on(t.promptTemplateId),
     // At most one active section-conversation per (user, section) -- the
     // active-conversation case only, not a transitive cap on submissions
     // per (user, section): a soft-delete-and-recreate cycle can still
@@ -226,6 +262,12 @@ export const chatRateLimitWindows = pgTable(
       t.userId,
       t.windowStart,
     ),
+    // #317 review, code-review follow-up: reserveRateLimitSlot's own purge
+    // (repositories/rateLimits.ts) deletes `WHERE window_start < cutoff` --
+    // the unique index above leads with user_id, so it can't serve that
+    // predicate; without this, the purge was a full table scan of a table
+    // #313 itself estimated at ~600K rows/cohort/term.
+    index("chat_rate_limit_windows_window_start_idx").on(t.windowStart),
   ],
 );
 
@@ -595,29 +637,41 @@ export const citationsRelations = relations(citations, ({ one }) => ({
 // 1:1 per message. conversation_id is denormalized (reachable via
 // message -> conversation, but the M8 analytics query shape is
 // "calls by conversation" and "calls by org+time" -- avoid a join for both).
-// Both FKs are ON DELETE RESTRICT, not CASCADE: this is the org's LLM
-// cost/telemetry accounting, and a user-deletion cascade reaching it here
-// (via conversation_id, the FK actually walked when a conversation is
-// deleted -- message_id would fire too late to matter, since the
-// conversation_id cascade would already have removed the row) would
-// silently shrink that accounting. Same reasoning as grades.submission_id
-// above; see docs/architecture/multi-tenant-data-model.md §3.5 Q5.
+//
+// #317 review, #341: both FKs were ON DELETE RESTRICT when this table had
+// no writer (docs/architecture/multi-tenant-data-model.md §3.5 point 5's
+// original reasoning: silently losing cost/telemetry accounting to a
+// cascade is worse than blocking the delete). #317 makes chat.ts write one
+// row per turn, so RESTRICT now blocks the two hard-delete paths in
+// repositories/homeworks.ts (`updateHomework`'s section removal,
+// `deleteHomework`) the moment any section has ever had a single chat
+// turn -- effectively every homework by mid-term, with the resulting
+// `23503` falling through to a generic 503 with no recovery path (a
+// student's own conversation soft-deletes instead, dodging this
+// entirely -- routes/conversations.ts:341's own comment). SET NULL instead
+// -- same choice llm_config_id already makes two lines below for the
+// analogous "the row it references can go away" case -- preserves the
+// accounting these FKs exist to protect (the cost/telemetry row survives
+// intact, just detached) rather than either destroying it via a cascade or
+// blocking the delete outright. `grades.submission_id` keeps RESTRICT:
+// graded work is written far less often and isn't a per-turn hot path.
 
 export const llmCallLogs = pgTable(
   "llm_call_logs",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    // Nullable, not notNull: a call that errors before the assistant
-    // message is persisted (provider timeout, malformed response) has
-    // nothing to attach to yet -- error_flag rows may have a null
-    // message_id. unique() still holds; Postgres doesn't treat multiple
-    // NULLs as duplicates under a unique constraint.
+    // Nullable: a call that errors before the assistant message is
+    // persisted (provider timeout, malformed response) has nothing to
+    // attach to yet -- error_flag rows may have a null message_id.
+    // unique() still holds; Postgres doesn't treat multiple NULLs as
+    // duplicates under a unique constraint. Also goes null on the
+    // message's own deletion now (see #341 note above).
     messageId: uuid("message_id")
       .unique()
-      .references(() => messages.id, { onDelete: "restrict" }),
-    conversationId: uuid("conversation_id")
-      .notNull()
-      .references(() => conversations.id, { onDelete: "restrict" }),
+      .references(() => messages.id, { onDelete: "set null" }),
+    // Nullable as of #341 (was notNull): the conversation this call
+    // belonged to can now be hard-deleted without this row disappearing.
+    conversationId: uuid("conversation_id").references(() => conversations.id, { onDelete: "set null" }),
     organizationId: uuid("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),

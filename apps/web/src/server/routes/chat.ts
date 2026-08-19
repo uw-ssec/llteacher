@@ -1,10 +1,21 @@
 /* --------------------------------------------------------------------------
    POST /api/chat — Vercel AI SDK chat endpoint.
 
-   Receives the client's UIMessage history, converts to model messages,
-   calls OpenRouter via streamText with one display tool (showDefinition),
-   and streams the response back in the UI message stream format that the
-   client's useChat hook understands.
+   #317 review, #353: this header previously said "receives the client's
+   UIMessage history" and "calls OpenRouter" -- both stopped being true
+   earlier in the same PR and were never updated here, the same defect
+   class the prior review already caught four lines below (#26's own doc
+   comment). The client (prepareSendMessagesRequest, client/App.tsx) sends
+   only its LAST message per turn -- everything before that is rebuilt
+   server-side from persistedHistory (see the Persistence section below).
+   And the provider/model are resolved per-conversation (#26,
+   lib/llm-config.ts) to whichever of openrouter or llmoxie the resolved
+   llm_configs row names -- llmoxie is every org's intended default as of
+   migration 0035, not openrouter.
+
+   Converts the resolved history to model messages, calls streamText with
+   one display tool (showDefinition), and streams the response back in the
+   UI message stream format that the client's useChat hook understands.
 
    The model can produce either:
      · plain markdown text   — rendered as paragraphs in the AI message
@@ -27,9 +38,11 @@
      4. return the conversationId to the client via the x-conversation-id
         response header, so it can send it back on the next turn
 
-   System prompt + model stay hardcoded, per #230: this is FLX-001's own
-   filed scope, a duplicate of #25 (prompt assembly) and #26 (LLM config
-   resolution), later tasks in this epic -- not in scope here.
+   System prompt: resolved per-conversation (#25, lib/prompts.ts) from the
+   conversation's pinned prompt_templates row + section context, never
+   hardcoded. Model/provider/params are resolved per-conversation too (#26,
+   lib/llm-config.ts) from the org/course/homework's llm_configs row, never
+   hardcoded -- see resolveLLMConfig's own call site below.
    -------------------------------------------------------------------------- */
 
 import type { Context } from "hono";
@@ -45,14 +58,18 @@ import {
   type ToolSet,
 } from "ai";
 import { z } from "zod";
-import { getOpenRouter } from "../../lib/ai";
 import { makeDb } from "../../db/client";
+import type { Db } from "../../db/client";
 import type { ConversationKind } from "../../db/schema";
 import {
   createConversation,
   appendMessage,
   getLastMessages,
   getOwnedConversationOrNull,
+  acquireConversationTurnLock,
+  releaseConversationTurnLock,
+  finalizeAssistantTurn,
+  pinConversationPromptTemplate,
 } from "../repositories/conversations";
 import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from "../repositories/rateLimits";
 import {
@@ -63,17 +80,28 @@ import {
   SectionNotFoundError,
   SectionNotInteractiveError,
 } from "../repositories/sectionConversations";
-import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
+import { courseScopeFromAuthContext, unsafeCourseScope, unsafeOrgScope, type OrgScope } from "../repositories/scope";
 import { IdempotencyKeyConflictError } from "../repositories/errors";
+import { getOrgScopeAndLlmConfigForCourse } from "../repositories/organizations";
 import { logServerError } from "../utils/errors";
+import {
+  assembleSystemPrompt,
+  DEFAULT_SYSTEM_PROMPT,
+  getPinnedPromptTemplateContent,
+  getSectionPromptContext,
+  resolvePromptTemplate,
+} from "../../lib/prompts";
+import {
+  resolveLLMConfig,
+  resolveApiKey,
+  buildProviderClient,
+  estimateCostCents,
+  LLMConfigNotFoundError,
+  LLMCredentialMissingError,
+  UnsupportedLLMProviderError,
+} from "../../lib/llm-config";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
-
-const SYSTEM_PROMPT = `You are an AI tutor for an introductory statistics course at the University of Washington. Your job is to guide students through homework problems using the Socratic method: ask leading questions, build intuition step by step, never just dump the answer.
-
-You have one structured rendering tool available: showDefinition. Call it whenever you are formally introducing a named statistical concept ("p-value", "null hypothesis", "standard error", "confidence interval", "type I error", etc.) — give the student a polished definition card with the term and a 1–2 sentence plain-language body. For everything else (guiding questions, follow-ups, gentle nudges, walking through computations), reply in plain markdown — no tool call.
-
-Be warm, curious, and patient. Prefer questions over assertions.`;
 
 /* Tool catalog typed as ToolSet. We use the AI SDK's jsonSchema() helper
    instead of Zod here — Zod's deeply parameterized types collide with the
@@ -179,10 +207,19 @@ const CLIENT_MESSAGE_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_TEXT_PART_LENGTH = 8_000;
 // #308: also no bound on how many parts a single message could carry (a
 // message legitimately produced by this app's own composer/tool loop has a
-// handful at most) or how many messages the whole request could carry (the
-// client sends its full local history every turn, #3 pitfall 3) -- both
-// were `.min(1)` with no `.max()`, and `messages` itself was checked only
-// for `length > 0`.
+// handful at most) or how many messages the whole request could carry --
+// both were `.min(1)` with no `.max()`, and `messages` itself was checked
+// only for `length > 0`.
+//
+// #317 review, #353: "the client sends its full local history every turn"
+// stopped being true in this same PR -- prepareSendMessagesRequest
+// (client/App.tsx) now trims the request body to the single last message
+// (#3 pitfall 3's fix, see resolveConversation's own doc comment below)
+// before it ever reaches this route. This cap still exists, and every
+// element still gets validated (#264, below), because that trim is a
+// CLIENT-side behavior this server-side check cannot trust -- a caller
+// that skips the browser entirely can still POST an arbitrarily large
+// array directly.
 const MAX_PARTS_PER_MESSAGE = 32;
 // Generous relative to MAX_HISTORY_MESSAGES (40, the trailing window
 // actually forwarded to the model below) -- this bounds the REQUEST, not
@@ -285,46 +322,64 @@ const chatEnvelopeSchema = z.object({
 // lockstep with replayPersistedPart's emit-set is exactly what
 // chat.test.ts's "#307 gate/replay parity" test asserts, so the two can't
 // silently drift apart again.
+//
+// #342: requires every part to be complete, not just some part to be
+// renderable. The previous version was `parts.some(isRenderable)` -- "is
+// ANY part done" -- which a multi-part turn (step-start + a completed text
+// part + a tool call still mid-flight, or a completed part followed by a
+// text part still `state:"streaming"`) could satisfy on its completed part
+// alone while an incomplete one sat right next to it. That shape is exactly
+// what a client-side Stop or disconnect mid-multi-part-turn produces (the
+// onFinish finishReason-allowlist fix above is the primary guard against
+// persisting an aborted turn at all, but this function is the second layer
+// for whatever reaches it regardless -- an existing row from before that
+// fix shipped, or a future path that doesn't go through onFinish). Now:
+// reject the WHOLE array the moment any part is still mid-flight, and only
+// then check whether at least one part actually renders.
 function hasRenderableContent(parts: unknown): boolean {
   if (!Array.isArray(parts)) return false;
-  return parts.some((part) => {
-    if (!part || typeof part !== "object" || !("type" in part)) return false;
+  let sawRenderablePart = false;
+  for (const part of parts) {
+    if (!part || typeof part !== "object" || !("type" in part)) continue;
     const type = (part as { type: unknown }).type;
     if (type === "text") {
       const text = (part as { text?: unknown }).text;
-      if (typeof text !== "string" || text.length === 0) return false;
       // #268: a text part mid-generation carries state:"streaming" until
       // the SDK closes it out as state:"done" -- a part that never got
       // there (a provider error or a client disconnect mid-delta) is
       // exactly the truncated-answer case this whole function exists to
-      // catch, and length>0 alone doesn't see it (verified empirically:
-      // the persisted row from a text-then-error turn was
-      // {text:"...", state:"streaming"}, which the old check accepted).
-      // `state` is optional in the SDK's own type (older/synthetic parts
-      // omit it) -- only an EXPLICIT "streaming" is rejected here, not its
-      // absence, so replayPersistedPart's own always-complete text writes
-      // (which never set state) keep working.
+      // catch. `state` is optional in the SDK's own type (older/synthetic
+      // parts omit it) -- only an EXPLICIT "streaming" fails the whole
+      // array, not its absence, so replayPersistedPart's own
+      // always-complete text writes (which never set state) keep working.
       const state = (part as { state?: unknown }).state;
-      return state !== "streaming";
+      if (state === "streaming") return false;
+      if (typeof text === "string" && text.length > 0) sawRenderablePart = true;
+      continue;
     }
     if (typeof type === "string" && type.startsWith("tool-")) {
-      // #307: only a tool call that actually resolved -- output-available
-      // (a real result) or output-error (a real, renderable failure) --
-      // counts as content. input-available/input-streaming means the tool
-      // was invoked but the turn ended (aborted, provider error) before it
-      // resolved: replayPersistedPart has nothing to emit for that state
-      // beyond a dangling tool-input-available, which is exactly the
-      // "poisoned history" scenario (an unanswered tool call the model then
-      // can't recover from on the next turn) this fix exists to stop from
-      // ever being persisted as "answered" in the first place.
       const toolCallId = (part as { toolCallId?: unknown }).toolCallId;
       const state = (part as { state?: unknown }).state;
-      return typeof toolCallId === "string" && (state === "output-available" || state === "output-error");
+      // #307: only a tool call that actually resolved -- output-available
+      // (a real result) or output-error (a real, renderable failure) --
+      // counts as content. #342: input-available/input-streaming means the
+      // tool was invoked but the turn ended (aborted, provider error, or a
+      // client Stop between the call and its result) before it resolved --
+      // replayPersistedPart has nothing to emit for that state beyond a
+      // dangling tool-input-available (the "poisoned history" scenario an
+      // unanswered tool call leaves the model unable to recover from on the
+      // next turn), so it now fails the WHOLE array rather than being
+      // silently skipped while a completed part elsewhere still passes.
+      if (typeof toolCallId !== "string" || (state !== "output-available" && state !== "output-error")) return false;
+      sawRenderablePart = true;
+      continue;
     }
     // step-start, reasoning, file, source-url/document, and anything else
-    // this app's own TOOLS/renderer don't produce/display -- never counts.
-    return false;
-  });
+    // this app's own TOOLS/renderer don't produce/display -- never counts
+    // as renderable, and never fails the array either (these parts have no
+    // "incomplete" state of their own to poison the check on).
+  }
+  return sawRenderablePart;
 }
 
 // Replays an already-persisted assistant message's `parts` (jsonb, so typed
@@ -424,34 +479,332 @@ function deriveTutorConversationTitle(parts: unknown): string | null {
 // in rateLimits.ts itself (#308) -- routes/conversations.ts's
 // createConversationHandler shares the same budget/counter.
 
-// #215: bounds what the model sees on every turn. The client still sends
-// its full local history (useChat's own state), but only the trailing
-// window is forwarded to convertToModelMessages -- per-turn token cost is
-// therefore bounded regardless of how long the conversation has run.
-// Decision (documented per the issue's own request): a plain trailing
-// window, dropped silently -- no rolling summary. A summarization strategy
-// is real, separate work (tracked as #88, context-window management);
-// until it lands, the oldest turns beyond this window are simply not seen
-// by the model on a given turn, which is a graceful degradation (the
-// student can still reference them in the visible UI transcript) rather
-// than a hard failure.
+// #215: bounds what the model sees on every turn -- the trailing window
+// pulled from the server's own persisted history (#143 redesign below), so
+// per-turn token cost is bounded regardless of how long the conversation
+// has run. Decision (documented per the issue's own request): a plain
+// trailing window, dropped silently -- no rolling summary. A summarization
+// strategy is real, separate work (tracked as #88, context-window
+// management); until it lands, the oldest turns beyond this window are
+// simply not seen by the model on a given turn, which is a graceful
+// degradation (the student can still reference them in the visible UI
+// transcript) rather than a hard failure.
 const MAX_HISTORY_MESSAGES = 40;
 
-export async function chatHandler(c: Context<AppEnv>) {
-  const apiKey = c.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    /* The operator-facing detail goes to the log, not the HTTP body. Naming
-       the secret, the file, and the wrangler command in a response a student
-       can read is a reconnaissance description of our secret management --
-       and the client's detail line renders whatever arrives. */
-    logServerError(
-      "chatHandler.config",
-      new Error(
-        'Secret "OPENROUTER_API_KEY" is not set. Add it to apps/web/.dev.vars for local dev, or via `wrangler secret put OPENROUTER_API_KEY` for prod.',
-      ),
-    );
-    return c.json({ error: "The tutor is not configured.", code: "unavailable" }, 500);
+// #143: bound on the inbound request body itself, checked before any
+// parsing/db work -- distinct from MAX_HISTORY_MESSAGES above (which trims
+// what the model sees once a request is already accepted) and
+// MAX_MESSAGES_PER_REQUEST below (#308's array-length cap). A genuine
+// multi-turn Socratic exchange is plaintext and comfortably under it; it
+// exists to bound a runaway/malicious client, not to constrain normal usage.
+const MAX_REQUEST_BODY_BYTES = 256 * 1024;
+
+// #143: upstream model call timeout -- bounds how long a single turn can
+// hang the connection (and the Worker's wall-clock budget) if the provider
+// stalls instead of erroring. Generous for a Socratic turn (which can
+// include a tool call + follow-up text, i.e. multiple provider round-trips
+// within one streamText call, see stopWhen below), short enough that a
+// genuinely stuck upstream doesn't tie up the request indefinitely.
+const STREAM_TIMEOUT_MS = 60_000;
+
+// #317 review, #349: @ai-sdk/openai's reasoning-model heuristic (both
+// getOpenRouter and getLLMoxie, lib/ai.ts, use createOpenAI) treats any
+// model id NOT prefixed gpt-3/gpt-4/chatgpt-4o/gpt-5-chat as a reasoning
+// model and silently drops `temperature` (pushing a warning nothing here
+// used to read) unless `reasoningEffort: "none"` is passed AND the model
+// is one of the few families that support that escape hatch -- gpt-5.1
+// through gpt-5.4, which the #340 default (gpt-5.3-codex) is. Without
+// this, llm_configs.temperature (NOT NULL DEFAULT 0.7, always present) was
+// always discarded before the request left the Worker: an instructor
+// setting e.g. 0.2 for deterministic grading got no change and no visible
+// error. Scoped to this exact family, matching @ai-sdk/openai's own
+// `supportsNonReasoningParameters` check (dist/index.mjs) -- passing
+// reasoningEffort to a model that doesn't support the escape hatch (e.g.
+// a non-OpenAI model routed through the same OpenAI-compatible surface,
+// like the pre-#340 free Gemma default) wouldn't restore its temperature
+// and could misroute a parameter meant for OpenAI's own reasoning models.
+const SUPPORTS_REASONING_EFFORT_NONE = /^gpt-5\.[1-4]/;
+
+// #317 review, #322: how old a held turn lock (conversations.processing
+// started_at) must be before a new request is allowed to treat it as
+// abandoned rather than genuinely in-flight. Comfortably above
+// STREAM_TIMEOUT_MS -- a legitimate turn's lock must never go stale while
+// that same turn could still be legitimately running -- to leave room for
+// the persistence work on either side of the streamText call itself.
+const LOCK_STALE_MS = 90_000;
+
+// #317 review, #350 (requirement 2): result.totalUsage/result.response/
+// result.warnings all derive from the AI SDK's finalStep -> _steps.promise,
+// resolved only in the recording stream's flush() -- which a genuinely
+// cancelled stream (client reader.cancel(), #342's own scenario) never
+// reaches. Measured: that await never settles at all, not just slowly, so
+// onFinish itself hangs forever for a stopped turn -- no lock release, no
+// llm_call_logs row, despite #321/#342's own doc comments both claiming
+// every outcome gets logged. Races the Promise.all below against this
+// timeout; on timeout, the turn is finalized with null usage/cost fields
+// instead of never being finalized at all. Short relative to
+// STREAM_TIMEOUT_MS -- this isn't waiting on the model, it's waiting on a
+// promise that either resolves almost immediately (a real, completed turn)
+// or never resolves at all (an abandoned one).
+const USAGE_FETCH_TIMEOUT_MS = 5_000;
+
+// #312: the idempotency decision below used to live inline, TWICE -- once
+// for the initial check, once for the race-fallback re-check after a lost
+// appendMessage race (#273) -- with no way to unit-test either copy without
+// going through the full HTTP handler and its seven module mocks. Extracted
+// as a pure function (no db, no I/O) so both call sites share exactly one
+// copy and chat.test.ts can assert the decision table directly, with zero
+// mocks.
+export type TurnClassification = "replay" | "skip-insert" | "insert";
+
+// #317 review, #326: the shape both getLastMessages (its narrowed
+// LAST_MESSAGE_COLUMNS projection, repositories/conversations.ts) and the
+// in-memory "insert" row built below actually need -- just enough for
+// classifyTurn's idempotency check and the model-context mapping further
+// down. appendMessage's returned row carries more columns (conversationId,
+// seq, createdAt) that persistedHistory below never reads.
+type MessageHistoryRow = { id: string; role: string; parts: unknown };
+
+export function classifyTurn(
+  lastMessage: { role: string; parts: unknown; clientMessageId: string | null } | undefined,
+  secondLastMessage: { role: string; clientMessageId: string | null } | undefined,
+  inboundClientMessageId: string,
+): TurnClassification {
+  const matchesInboundUser = (msg: { role: string; clientMessageId: string | null } | undefined) =>
+    msg?.role === "user" && msg.clientMessageId === inboundClientMessageId;
+  // "Already answered": the model already ran and its response is already
+  // persisted for this exact user turn -- replay it, no model call.
+  if (
+    lastMessage?.role === "assistant" &&
+    hasRenderableContent(lastMessage.parts) &&
+    matchesInboundUser(secondLastMessage)
+  ) {
+    return "replay";
   }
+  // "Not answered yet": the user message already landed but the assistant
+  // hasn't responded (or its response hasn't been persisted) yet -- don't
+  // insert it again, fall through to a normal model call.
+  if (matchesInboundUser(lastMessage)) {
+    return "skip-insert";
+  }
+  return "insert";
+}
+
+/** #312: conversation resolution, extracted from chatHandler -- this step
+ *  has no coupling to streaming or the model call at all; it was folded into
+ *  the same function only because it happened to run first. Returns a
+ *  Response directly for every early-exit case (404/403/400/409) so this
+ *  one seam, at least, is independently testable and doesn't require
+ *  reading chatHandler's own body to follow -- callers must check
+ *  `instanceof Response` before touching `.conv`.
+ *
+ *  #317 review, #353: this comment used to claim the extraction "leaves
+ *  chatHandler's own body a thin 'resolve, then stream' dispatcher" --
+ *  measured false the moment it was written, and more so with every #317
+ *  review round since (request validation, rate limiting, prompt/config
+ *  resolution, the release gate, lock acquisition, history fetch, turn
+ *  classification, replay, model-context assembly, the streamText call,
+ *  and its three stream callbacks all still live in chatHandler itself).
+ *  `classifyTurn` (below) is the other extracted seam; the rest of that
+ *  list are real candidates for the same treatment
+ *  (`validateChatRequest`, `resolvePromptAndConfig`, `prepareTurn`) but
+ *  aren't done -- correcting the claim rather than leaving it stated as
+ *  true, per the same review's own reasoning: a doc comment asserting an
+ *  architectural property the code doesn't have is worse than no comment
+ *  at all. */
+async function resolveConversation(
+  c: Context<AppEnv>,
+  db: Db,
+  authContext: AuthContext,
+  envelope: { conversationId?: string; courseId?: string; sectionId?: string; kind?: ConversationKind },
+  inboundMessage: UIMessage,
+): Promise<
+  | {
+      conv: {
+        id: string;
+        ownerUserId: string;
+        courseId: string;
+        sectionId: string | null;
+        promptTemplateId: string | null;
+      };
+      // #272: set only when THIS call just created a fresh section
+      // conversation (the try branch below, not the race-fallback catch) --
+      // prepended to the model's context further down so the turn that
+      // creates a section conversation doesn't answer with zero knowledge of
+      // the section's actual question text, which the greeting is the sole
+      // delivery mechanism for. Undefined on every other path (existing
+      // conversationId, tutor kind, race fallback), which already has real
+      // persisted history a normal turn would see.
+      sectionGreetingParts: unknown[] | undefined;
+      // #317 review, #349 (requirement 4): the same row's id, generated by
+      // startSectionConversation itself (crypto.randomUUID(), not
+      // DB-returned) -- lets chatHandler's own prepend below check whether
+      // this exact row already made it into persistedHistory (the real,
+      // committed-then-read case on every driver this repo runs; see that
+      // prepend's own doc comment) instead of always prepending a second
+      // copy on top of one that, in production, is already there.
+      sectionGreetingMessageId: string | undefined;
+      // #317 review, #326 (remaining requirement): set only on the
+      // conversationId branch, where getConversationById's own join already
+      // read it off the same row -- a second, separate getOrgScopeForCourse
+      // round-trip for the exact same course would be pure waste. undefined
+      // (not resolved) on the two conversation-creation branches below,
+      // which don't get an org scope for free from their own queries;
+      // chatHandler's Promise.all falls back to getOrgScopeAndLlmConfigForCourse
+      // only when this is undefined.
+      orgScope: OrgScope | undefined;
+      // #317 review, #346 (requirement 1): same join, same reasoning --
+      // getConversationById now also projects courses.llmConfigId, so this
+      // is set (possibly to null, "no course-level override") whenever
+      // orgScope is. Always undefined exactly when orgScope is.
+      courseLlmConfigId: string | null | undefined;
+    }
+  | Response
+> {
+  if (envelope.conversationId) {
+    // #217/#222: getOwnedConversationOrNull collapses "doesn't exist",
+    // "exists but isn't yours", and "exists, is yours, but soft-deleted"
+    // into the same null -> 404, matching routes/conversations.ts's
+    // PATCH/DELETE/GET-messages handlers exactly (moved to the repository
+    // layer, repositories/conversations.ts, precisely so this route could
+    // reuse it instead of hand-rolling its own 404-vs-401 split, which was
+    // the existence oracle this rule exists to avoid).
+    const existing = await getOwnedConversationOrNull(
+      db,
+      envelope.conversationId,
+      authContext.session.userId,
+      authContext.isMemberOf,
+    );
+    if (!existing) {
+      return c.json({ error: "Conversation not found", code: "not_found" }, 404);
+    }
+    return {
+      conv: existing,
+      sectionGreetingParts: undefined,
+      sectionGreetingMessageId: undefined,
+      orgScope: unsafeOrgScope(existing.organizationId),
+      courseLlmConfigId: existing.courseLlmConfigId,
+    };
+  }
+
+  // #304: previously fell back to authContext.memberships[0]?.courseId when
+  // the client omitted courseId -- listMembershipsForUser has no ORDER BY,
+  // so Postgres gives no ordering guarantee and [0] was arbitrary, possibly
+  // differing between two requests from the same user. A user with two
+  // memberships (the norm for instructors and TAs) could get a tutor
+  // conversation silently minted into the wrong course. Requiring courseId
+  // explicitly loses no real caller: the section path already sends it on
+  // every no-conversationId request (see handleSendMessage in App.tsx), and
+  // courseScopeFromAuthContext below already rejects a course the caller
+  // isn't a member of, so this doesn't relax that check either.
+  if (!envelope.courseId) {
+    return c.json({ error: "courseId is required when conversationId is omitted" }, 400);
+  }
+  const courseId = envelope.courseId;
+  const scope = courseScopeFromAuthContext(authContext, courseId);
+  if (!scope) {
+    return c.json({ error: "Course access denied", code: "denied" }, 403);
+  }
+  // #214: kind defaults to "tutor" (every existing caller's behavior) --
+  // only a caller that explicitly asks for "section" (App.tsx's
+  // homework-section chat instance) needs a sectionId.
+  //
+  // #308/#267: an unrecognized kind used to silently coerce to "tutor"
+  // instead of 400ing -- chatEnvelopeSchema's z.enum(["section","tutor"])
+  // already rejects anything else before this is ever reached, so
+  // envelope.kind is only ever "section", "tutor", or undefined here.
+  const kind: ConversationKind = envelope.kind === "section" ? "section" : "tutor";
+  if (kind === "section") {
+    const requestedSectionId = envelope.sectionId;
+    if (!requestedSectionId) {
+      return c.json({ error: "sectionId is required when kind is 'section'" }, 400);
+    }
+    // #259: routed through the same startSectionConversation every other
+    // section-conversation caller uses (#27's own routes), not
+    // createConversation -- which enforced none of isTeacherTest derivation,
+    // non_interactive refusal, the duplicate-active-conversation check, or
+    // the Django-parity greeting as the first message.
+    try {
+      const created = await startSectionConversation(db, scope, {
+        sectionId: requestedSectionId,
+        ownerUserId: authContext.session.userId,
+        // #237: derived from the caller's actual course role, same rule
+        // startSectionConversationHandler uses -- a TA or observer sending
+        // into a section is not a student doing the assignment, but is also
+        // not who isInstructorOf's AUTHOR_ROLES tier means.
+        isTeacherTest: !isStudentInCourse(authContext.memberships, courseId),
+        canViewDrafts: authContext.canViewDraftsIn(courseId),
+      });
+      return {
+        conv: {
+          id: created.id,
+          ownerUserId: authContext.session.userId,
+          courseId,
+          sectionId: requestedSectionId,
+          promptTemplateId: created.promptTemplateId,
+        },
+        sectionGreetingParts: Array.isArray(created.greetingParts) ? created.greetingParts : undefined,
+        sectionGreetingMessageId: created.greetingMessageId,
+        orgScope: undefined,
+        courseLlmConfigId: undefined,
+      };
+    } catch (err) {
+      if (err instanceof SectionConversationExistsError) {
+        // #238-style race: two requests for the same section's first turn
+        // (a double-fired send, two tabs) both arrived with no
+        // conversationId yet. The loser doesn't get an error -- it uses the
+        // conversation the winner just created, same as any other retry
+        // lands on the same conversation.
+        const active = await getActiveSectionConversation(db, scope, requestedSectionId, authContext.session.userId);
+        if (!active) throw err; // existence was just proven; a missing row here is a genuine bug, not a race
+        return {
+          conv: {
+            id: active.id,
+            ownerUserId: active.ownerUserId,
+            courseId: active.courseId,
+            sectionId: active.sectionId,
+            promptTemplateId: active.promptTemplateId,
+          },
+          sectionGreetingParts: undefined,
+          sectionGreetingMessageId: undefined,
+          orgScope: undefined,
+          courseLlmConfigId: undefined,
+        };
+      }
+      if (err instanceof SectionNotFoundError) {
+        return c.json({ error: "Section not found", code: "not_found" }, 404);
+      }
+      if (err instanceof SectionNotInteractiveError) {
+        return c.json({ error: err.message, code: "in_progress" }, 409);
+      }
+      throw err;
+    }
+  }
+
+  // #231: auto-title tutor conversations from their first message.
+  const title = deriveTutorConversationTitle(inboundMessage.parts) || "New Conversation";
+  const conv = await createConversation(db, scope, {
+    ownerUserId: authContext.session.userId,
+    sectionId: null,
+    kind: "tutor",
+    title,
+  });
+  return {
+    conv,
+    sectionGreetingParts: undefined,
+    sectionGreetingMessageId: undefined,
+    orgScope: undefined,
+    courseLlmConfigId: undefined,
+  };
+}
+
+export async function chatHandler(c: Context<AppEnv>) {
+  // #26: the OPENROUTER_API_KEY-specific early check this replaced is gone
+  // -- which key (if any) is needed depends on the resolved config's
+  // provider, known only once conv/scope/homeworkId are, well below. A
+  // missing/unusable key now surfaces as the Django-parity graceful 500
+  // right before the model call, not as a blanket "OpenRouter isn't
+  // configured" regardless of what the resolved config actually needs.
 
   // authMiddleware/rolesMiddleware already gate every /api/* route (chat.ts
   // is wired in unguarded via app.post("/api/chat", chatHandler) in
@@ -464,9 +817,28 @@ export async function chatHandler(c: Context<AppEnv>) {
     return c.json({ error: "Unauthorized", code: "unauthorized" }, 401);
   }
 
+  // #143: read the raw body ourselves (not c.req.json()) so the size cap is
+  // enforced against the actual byte count before JSON.parse ever runs --
+  // c.req.json() would parse an oversize body first and only let a caller
+  // discover the problem after paying that cost.
+  let rawText: string;
+  try {
+    rawText = await c.req.text();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+  if (new TextEncoder().encode(rawText).length > MAX_REQUEST_BODY_BYTES) {
+    // #317 review, #344: matches its sibling array-length cap
+    // (MAX_MESSAGES_PER_REQUEST below), which already carries this code --
+    // readErrorMessage (packages/ui) classifies both the same way.
+    return c.json(
+      { error: `Request body exceeds the ${MAX_REQUEST_BODY_BYTES} byte limit`, code: "history_too_long" },
+      400,
+    );
+  }
   let rawBody: unknown;
   try {
-    rawBody = await c.req.json();
+    rawBody = JSON.parse(rawText);
   } catch {
     return c.json({ error: "Request body must be valid JSON" }, 400);
   }
@@ -488,12 +860,6 @@ export async function chatHandler(c: Context<AppEnv>) {
       400,
     );
   }
-  const {
-    conversationId,
-    courseId: requestedCourseId,
-    sectionId: requestedSectionId,
-    kind: requestedKind,
-  } = envelopeParsed.data;
   // `messages` stays an unchecked cast here, same as the ChatRequestBody
   // cast this replaced -- every element gets real validation via
   // historyMessageSchema/inboundUserMessageSchema below; this is only the
@@ -524,12 +890,21 @@ export async function chatHandler(c: Context<AppEnv>) {
     }
   }
 
-  // Full history vs. incremental (#3 pitfall 3): the client still sends the
-  // whole UIMessage[] history (it's what streamText needs for model
-  // context, subject to the #215 trailing-window truncation below), but
-  // only the LAST message -- the one just typed -- gets persisted per turn.
-  // Everything before it either came from the DB on a "load conversation"
-  // path (#4) or was already persisted on a prior turn.
+  // Full history vs. incremental (#3 pitfall 3): only the LAST message --
+  // the one just typed -- is trusted for anything, regardless of what
+  // `uiMessages` actually contains.
+  //
+  // #317 review, #353: as of prepareSendMessagesRequest (client/App.tsx),
+  // a real browser client trims the REQUEST BODY to that one message
+  // before it's ever sent -- `uiMessages` here is length 1 on every real
+  // turn, not the whole array useChat's own local state still holds
+  // client-side. This route still validates every element defensively
+  // (#264, above) and still only trusts the last one for anything: a
+  // caller that bypasses the browser (and its trim) can still POST a
+  // longer array directly, and nothing before the last entry gets
+  // persisted or reaches the model either way -- #143 stopped building the
+  // model's context from this client-supplied array at all (see the
+  // persistedHistory fetch further down).
   const inboundMessage = uiMessages[uiMessages.length - 1];
   const parsedInbound = inboundUserMessageSchema.safeParse(inboundMessage);
   if (!parsedInbound.success) {
@@ -564,138 +939,197 @@ export async function chatHandler(c: Context<AppEnv>) {
     );
   }
 
-  // #272: set only when THIS request just created a fresh section
-  // conversation (the try branch below, not the race-fallback catch) --
-  // prepended to the model's context further down so the turn that creates
-  // a section conversation doesn't answer with zero knowledge of the
-  // section's actual question text, which the greeting is the sole
-  // delivery mechanism for. Left undefined on every other path (existing
-  // conversationId, tutor kind, race fallback), which already has real
-  // persisted history a normal turn would see.
-  let sectionGreetingParts: unknown[] | undefined;
-
-  let conv: { id: string; ownerUserId: string; courseId: string };
-  if (conversationId) {
-    // #217/#222: getOwnedConversationOrNull collapses "doesn't exist",
-    // "exists but isn't yours", and "exists, is yours, but soft-deleted"
-    // into the same null -> 404, matching routes/conversations.ts's
-    // PATCH/DELETE/GET-messages handlers exactly (moved to the repository
-    // layer, repositories/conversations.ts, precisely so this route could
-    // reuse it instead of hand-rolling its own 404-vs-401 split, which was
-    // the existence oracle this rule exists to avoid). Previously this
-    // checked existence and ownership as two separate branches returning
-    // 404 and 401 respectively; a caller could tell "doesn't exist" apart
-    // from "exists, not yours" by response code, which the uniform-401
-    // comment on the old code claimed not to be possible.
-    const existing = await getOwnedConversationOrNull(
-      db,
-      conversationId,
-      authContext.session.userId,
-      authContext.isMemberOf,
-    );
-    if (!existing) {
-      return c.json({ error: "Conversation not found", code: "not_found" }, 404);
-    }
-    conv = existing;
-  } else {
-    // #304: previously fell back to authContext.memberships[0]?.courseId
-    // when the client omitted courseId -- listMembershipsForUser has no
-    // ORDER BY, so Postgres gives no ordering guarantee and [0] was
-    // arbitrary, possibly differing between two requests from the same
-    // user. ProfileService.ts already documents this exact pattern as a
-    // hazard ("memberships[0] would make the primary role flicker across
-    // requests") and deliberately avoids it; this PR reintroduced it on a
-    // write path. A user with two memberships -- the norm for instructors
-    // and TAs -- could get a tutor conversation silently minted into the
-    // wrong course. Requiring courseId explicitly loses no real caller:
-    // the section path already sends it on every no-conversationId
-    // request (see handleSendMessage in App.tsx), and courseScopeFromAuthContext
-    // below already rejects a course the caller isn't a member of, so
-    // this doesn't relax that check either.
-    if (!requestedCourseId) {
-      return c.json({ error: "courseId is required when conversationId is omitted" }, 400);
-    }
-    const courseId = requestedCourseId;
-    const scope = courseScopeFromAuthContext(authContext, courseId);
-    if (!scope) {
-      return c.json({ error: "Course access denied", code: "denied" }, 403);
-    }
-    // #214: kind defaults to "tutor" (every existing caller's behavior) --
-    // only a caller that explicitly asks for "section" (App.tsx's
-    // homework-section chat instance) needs a sectionId.
-    //
-    // #308/#267: an unrecognized kind used to silently coerce to "tutor"
-    // instead of 400ing -- precisely the failure mode #214 itself was filed
-    // for. chatEnvelopeSchema's z.enum(["section","tutor"]).optional()
-    // above already rejects anything else (a typo, a future client's
-    // not-yet-supported kind:"reflection") before this line is ever
-    // reached, so requestedKind is only ever "section", "tutor", or
-    // undefined here.
-    const kind: ConversationKind = requestedKind === "section" ? "section" : "tutor";
-    if (kind === "section") {
-      if (!requestedSectionId) {
-        return c.json({ error: "sectionId is required when kind is 'section'" }, 400);
-      }
-      // #259: routed through the same startSectionConversation every other
-      // section-conversation caller uses (#27's own routes), not
-      // createConversation -- which enforced none of isTeacherTest
-      // derivation, non_interactive refusal, the duplicate-active-conversation
-      // check, or the Django-parity greeting as the first message. This is
-      // what makes #27's routes live (previously reachable from no client
-      // code) instead of leaving two implementations of "start a section
-      // conversation" to drift, which is what produced this bug in the
-      // first place.
-      try {
-        const created = await startSectionConversation(db, scope, {
-          sectionId: requestedSectionId,
-          ownerUserId: authContext.session.userId,
-          // #237: derived from the caller's actual course role, same rule
-          // startSectionConversationHandler uses -- a TA or observer
-          // sending into a section is not a student doing the assignment,
-          // but is also not who isInstructorOf's AUTHOR_ROLES tier means.
-          isTeacherTest: !isStudentInCourse(authContext.memberships, courseId),
-        });
-        conv = { id: created.id, ownerUserId: authContext.session.userId, courseId };
-        sectionGreetingParts = Array.isArray(created.greetingParts) ? created.greetingParts : undefined;
-      } catch (err) {
-        if (err instanceof SectionConversationExistsError) {
-          // #238-style race: two requests for the same section's first
-          // turn (a double-fired send, two tabs) both arrived with no
-          // conversationId yet. The loser doesn't get an error -- it uses
-          // the conversation the winner just created, same as any other
-          // retry lands on the same conversation.
-          const active = await getActiveSectionConversation(
-            db,
-            scope,
-            requestedSectionId,
-            authContext.session.userId,
-          );
-          if (!active) throw err; // existence was just proven; a missing row here is a genuine bug, not a race
-          conv = { id: active.id, ownerUserId: active.ownerUserId, courseId: active.courseId };
-        } else if (err instanceof SectionNotFoundError) {
-          return c.json({ error: "Section not found", code: "not_found" }, 404);
-        } else if (err instanceof SectionNotInteractiveError) {
-          return c.json({ error: err.message, code: "in_progress" }, 409);
-        } else {
-          throw err;
-        }
-      }
-    } else {
-      // #231: auto-title tutor conversations from their first message.
-      const title = deriveTutorConversationTitle(inboundMessage.parts) || "New Conversation";
-      conv = await createConversation(db, scope, {
-        ownerUserId: authContext.session.userId,
-        sectionId: null,
-        kind: "tutor",
-        title,
-      });
-    }
-  }
+  // #312: conversation resolution extracted to its own function -- see
+  // resolveConversation's own doc comment. Early-exit cases (404/403/400/409)
+  // come back as a Response to return directly.
+  const resolved = await resolveConversation(c, db, authContext, envelopeParsed.data, inboundMessage);
+  if (resolved instanceof Response) return resolved;
+  const { conv, sectionGreetingParts, sectionGreetingMessageId } = resolved;
 
   // Row just read back (and ownership-checked) or just created under a
   // verified scope -- the sanctioned case for this cast per scope.ts's
   // unsafeCourseScope docstring.
   const scope = unsafeCourseScope(conv.courseId);
+
+  // #317 review, #326: these three reads have no data dependency on each
+  // other -- each only needs `conv`/`scope`, already resolved above -- so
+  // one Promise.all replaces three serialized Neon HTTP round-trips with
+  // one (the slowest of the three), instead of the sum of all three.
+  // resolvePromptTemplate (the "no pin" fallback branch below) is the one
+  // exception: it genuinely needs orgScope's result as an input, so it
+  // can't join this batch -- it runs after, only on the conversations that
+  // reach it (predate promptTemplateId, or never resolved a real template
+  // at creation).
+  const [{ orgScope, courseLlmConfigId }, pinnedPromptContent, sectionPromptContext] = await Promise.all([
+    // #25/#26: both prompt-template and LLM-config resolution need the org
+    // scope for their own fallback queries -- resolved once and shared,
+    // rather than each doing its own getOrgScopeForCourse round-trip.
+    //
+    // #317 review, #326 (remaining requirement), #346 (requirement 1):
+    // resolveConversation's conversationId branch already reads both
+    // orgScope AND courseLlmConfigId off the same getConversationById row
+    // (joined against courses) -- the dominant case, since most turns are
+    // on an already-existing conversation, not a brand-new one. Falls back
+    // to a real query only for the two conversation-creation branches,
+    // which don't resolve either for free from their own queries; that
+    // fallback fetches both together (getOrgScopeAndLlmConfigForCourse)
+    // rather than two separate round-trips.
+    resolved.orgScope !== undefined
+      ? Promise.resolve({ orgScope: resolved.orgScope, courseLlmConfigId: resolved.courseLlmConfigId ?? null })
+      : getOrgScopeAndLlmConfigForCourse(db, scope).then(
+          (r) => r ?? { orgScope: null, courseLlmConfigId: null },
+        ),
+    // #25: system prompt, resolved from the conversation's PINNED template
+    // (set once at creation/restart -- see lib/prompts.ts's module doc
+    // comment) rather than re-resolved here. A null promptTemplateId means
+    // either a genuinely-unset scope (DEFAULT_SYSTEM_PROMPT was already the
+    // right answer at creation) or a conversation that predates this column
+    // -- both degrade the same way: resolve fresh below rather than fail
+    // the turn over a missing pin.
+    conv.promptTemplateId ? getPinnedPromptTemplateContent(db, conv.promptTemplateId) : Promise.resolve(null),
+    conv.sectionId ? getSectionPromptContext(db, scope, conv.sectionId) : Promise.resolve(null),
+  ]);
+
+  // #317 review, #325: `isDefaultPrompt` tracks whether resolution ever
+  // actually hit a real prompt_templates row -- a PINNED id is by
+  // definition a real row (DEFAULT_SYSTEM_PROMPT is never pinned, see
+  // ResolvedPromptTemplate.id's own doc comment), so only the two
+  // no-pin branches can set it true. Passed to assembleSystemPrompt so
+  // TUTOR_GUARDRAIL is appended only for the code-level fallback, never a
+  // project's own template (see that constant's doc comment).
+  let resolvedSystemPromptContent: string;
+  let isDefaultPrompt: boolean;
+  if (pinnedPromptContent !== null) {
+    resolvedSystemPromptContent = pinnedPromptContent;
+    isDefaultPrompt = false;
+  } else if (orgScope) {
+    // #317 review, #346 (requirement 2): passes the homeworkId
+    // getSectionPromptContext already resolved one statement earlier
+    // (sectionPromptContext?.homeworkId) instead of letting
+    // resolvePromptTemplate re-read `sections` for the exact same column --
+    // `?? null` when sectionPromptContext itself is null (tutor-kind, or a
+    // section that failed to resolve within scope) matches
+    // resolvePromptTemplate's own "no sectionId -> no homework level" and
+    // "sectionId didn't resolve -> no homework level" behavior either way.
+    const resolved = await resolvePromptTemplate(
+      db,
+      orgScope,
+      scope,
+      conv.sectionId,
+      sectionPromptContext?.homeworkId ?? null,
+    );
+    resolvedSystemPromptContent = resolved.content;
+    isDefaultPrompt = resolved.id === null;
+    // #317 review, #326: "a null pin re-runs the full 4-scope template walk
+    // on every message forever" -- write the resolved id back the first
+    // time a real template is actually found for a conversation that
+    // reached this branch (predates promptTemplateId, or resolved to
+    // nothing at creation and a template has since been added). Every
+    // later turn then takes the pinned fast path above instead of
+    // repeating this walk. Best-effort: a write failure here must not fail
+    // the turn -- caught and logged, not thrown -- the walk simply runs
+    // again next time, same as today.
+    //
+    // #317 review, code-review follow-up: awaited, not fire-and-forget.
+    // This used to be `.catch()`'d without an `await` -- on Cloudflare
+    // Workers, a promise that's neither awaited nor registered with
+    // `c.executionCtx.waitUntil()` isn't guaranteed to run to completion
+    // once the handler's synchronous work is done, which is exactly the
+    // "best-effort" this write is supposed to be, not "maybe never
+    // happens for reasons unrelated to its own .catch()". This only
+    // fires once per conversation (every later turn takes the pinned
+    // fast path above), so the extra round-trip here is not a
+    // steady-state cost.
+    if (resolved.id !== null && conv.promptTemplateId === null) {
+      await pinConversationPromptTemplate(db, conv.id, resolved.id).catch((err) => {
+        logServerError("chatHandler.pinPromptTemplate", err);
+      });
+    }
+  } else {
+    resolvedSystemPromptContent = DEFAULT_SYSTEM_PROMPT;
+    isDefaultPrompt = true;
+  }
+  // #317 review, blocking finding #4: an unreleased section (draft,
+  // scheduled, or hidden/expired) must not leak its content into the model's
+  // context, even for a conversation that started while it was live -- see
+  // PromptSectionContext.isUnreleased's own doc comment. Collapses to the
+  // same "Section not found" 404 startSectionConversation's own equivalent
+  // gate (repositories/sectionConversations.ts) returns, so this stays
+  // indistinguishable from a genuinely missing section, same rationale as
+  // every sibling release gate in this codebase (#172 audit).
+  if (sectionPromptContext?.isUnreleased && !authContext.canViewDraftsIn(conv.courseId)) {
+    return c.json({ error: "Section not found", code: "not_found" }, 404);
+  }
+  const systemPrompt = assembleSystemPrompt(resolvedSystemPromptContent, sectionPromptContext ?? undefined, isDefaultPrompt);
+
+  // #26: model/provider, resolved per-request from the homework's
+  // llm_config_id override (if this is a section conversation) or the org's
+  // default config -- replaces the hardcoded model. Not pinned/cached on
+  // the conversation row the way #25's prompt template is (that's the
+  // cross-cutting invariant's stated ideal; out of scope for this pass,
+  // same "known gap, tracked separately" posture as #258 -- see #26's own
+  // closing comment). No org scope at all (a course whose org lookup
+  // failed) can't resolve any config; treated the same as "no config
+  // found" rather than a separate error path.
+  if (!orgScope) {
+    logServerError("chatHandler.llmConfig", new Error(`No org scope for course ${scope}`));
+    // #317 review, #344: names the actual classification so the student
+    // sees the purpose-written "problem on our side, not yours" copy
+    // (packages/ui's readErrorMessage) instead of falling to the codeless
+    // default -- a permanent misconfiguration presented with a Retry
+    // button that can never succeed.
+    return c.json({ error: "Something went wrong. Please try again later.", code: "unavailable" }, 503);
+  }
+  let resolvedLLMConfig: Awaited<ReturnType<typeof resolveLLMConfig>>;
+  try {
+    resolvedLLMConfig = await resolveLLMConfig(
+      db,
+      orgScope,
+      scope,
+      sectionPromptContext?.homeworkLlmConfigId ?? null,
+      courseLlmConfigId,
+    );
+  } catch (err) {
+    if (err instanceof LLMConfigNotFoundError) {
+      logServerError("chatHandler.llmConfig", err);
+      return c.json(
+        {
+          error: `I'm sorry, but there's no valid LLM configuration available right now. Reference ID: ${err.referenceId}`,
+          code: "unavailable",
+        },
+        500,
+      );
+    }
+    throw err;
+  }
+  let resolvedApiKey: string;
+  let providerClient: ReturnType<typeof buildProviderClient>;
+  try {
+    // #317 review, security finding #323: c.env is passed through with its
+    // real Env type now -- resolveApiKey itself confines the one genuinely
+    // dynamic lookup (an allowlisted binding name) to a single scoped cast,
+    // instead of this call site erasing the whole Env contract.
+    resolvedApiKey = await resolveApiKey(c.env, db, orgScope, resolvedLLMConfig);
+    // #333: LLMOXIE_BASE_URL overrides the gateway host (lib/ai.ts's own
+    // LLMOXIE_DEFAULT_BASE_URL otherwise) -- unset for every provider that
+    // isn't llmoxie, and buildProviderClient ignores it for those.
+    providerClient = buildProviderClient(resolvedLLMConfig.provider, resolvedApiKey, {
+      llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL,
+    });
+  } catch (err) {
+    if (err instanceof LLMCredentialMissingError || err instanceof UnsupportedLLMProviderError) {
+      const referenceId = crypto.randomUUID();
+      logServerError("chatHandler.llmConfig", new Error(`${err.message} (ref: ${referenceId})`));
+      return c.json(
+        {
+          error: `I'm sorry, but there's no valid LLM configuration available right now. Reference ID: ${referenceId}`,
+          code: "unavailable",
+        },
+        500,
+      );
+    }
+    throw err;
+  }
 
   // Idempotency (#3, reworked #213) -- two distinct retry shapes, both
   // covered so neither the user row nor the assistant row can be
@@ -722,18 +1156,90 @@ export async function chatHandler(c: Context<AppEnv>) {
   // -- the highest-frequency replies in a Socratic tutor) gets a NEW id
   // each send, so it is correctly treated as a new message, not a retry of
   // the old one.
-  const [lastMessage, secondLastMessage] = await getLastMessages(db, scope, conv.id, 2);
-  const matchesInboundUser = (msg: { role: string; clientMessageId: string | null } | undefined) =>
-    msg?.role === "user" && msg.clientMessageId === parsedInbound.data.id;
-
-  if (
-    lastMessage?.role === "assistant" &&
-    hasRenderableContent(lastMessage.parts) &&
-    matchesInboundUser(secondLastMessage)
-  ) {
-    return replayResponse(conv.id, lastMessage.parts);
+  // #317 review, #322: claims the per-conversation turn lock BEFORE the
+  // idempotency read below, not just around the model call -- the race
+  // Cordero found (two concurrent sends interleaving into Q_a, Q_b, A_a,
+  // A_b, and a lost-response retry permanently 409ing even though the real
+  // answer was already persisted) happens in the read-classify-write
+  // sequence itself, not only in streamText. A second concurrent request on
+  // this same conversation gets a distinct, retryable 409 immediately,
+  // rather than being allowed to race through this same sequence.
+  // acquireConversationTurnLock's own doc comment (repositories/
+  // conversations.ts) covers the staleness/abandoned-lock case.
+  const lockAcquired = await acquireConversationTurnLock(db, conv.id, LOCK_STALE_MS);
+  if (!lockAcquired) {
+    // #317 review, #344: matches the other two 409s on this route
+    // (the section-not-interactive gate, the idempotency-conflict catch
+    // below), which already carry this code -- readErrorMessage
+    // (packages/ui) renders it as "Already sending", retryable.
+    return c.json(
+      {
+        error: "Another message for this conversation is still being processed. Please wait a moment and try again.",
+        code: "in_progress",
+      },
+      409,
+    );
   }
-  if (!matchesInboundUser(lastMessage)) {
+
+  // #317 review, #326: one fetch, sized for the model's context window
+  // (MAX_HISTORY_MESSAGES), instead of a `limit: 2` idempotency-only read
+  // followed by a SECOND, separate `limit: 40` read further down for the
+  // model context -- the second read's own result differs from this one by
+  // at most the single row the "insert" branch below is about to write, so
+  // it's cheaper to append that row in memory (persistedHistory below) than
+  // to re-fetch the same window from Postgres a second time. `recentMessages`
+  // is also what backs the idempotency check immediately below, same as the
+  // old `limit: 2` read (its first two elements).
+  //
+  // #279: skipOwnershipCheck -- `conv` above already proved this
+  // conversation is in scope (getOwnedConversationOrNull, or a row this
+  // same request just created/raced onto inside resolveConversation), so
+  // re-running the same id/courseId/isDeleted select here would be a
+  // redundant round-trip.
+  //
+  // #317 review, #350 (requirement 1): wrapped in its own try/catch that
+  // releases the lock before rethrowing -- the handler's own comment further
+  // down ("everything from here through streamText... if any of it throws,
+  // the lock must be released here") stated the intent, but the try/catch
+  // that actually implements it didn't start until AFTER this call. A
+  // transient Neon blip here used to leak the lock: the request still 503s
+  // (app.onError), but processing_started_at stayed set, so every send on
+  // this conversation 409'd for the next LOCK_STALE_MS -- the student
+  // follows the 503's own "try again" advice into a false "already being
+  // processed" error.
+  let recentMessages: Awaited<ReturnType<typeof getLastMessages>>;
+  try {
+    recentMessages = await getLastMessages(db, scope, conv.id, MAX_HISTORY_MESSAGES, {
+      skipOwnershipCheck: true,
+    });
+  } catch (err) {
+    await releaseConversationTurnLock(db, conv.id).catch(() => {});
+    throw err;
+  }
+  const [lastMessage, secondLastMessage] = recentMessages;
+  const initialClassification = classifyTurn(lastMessage, secondLastMessage, parsedInbound.data.id);
+
+  if (initialClassification === "replay") {
+    // No model call is about to happen -- release immediately rather than
+    // holding the lock until LOCK_STALE_MS expires for no reason.
+    // #317 review, #350 (requirement 1): logged, not swallowed -- unlike
+    // the outer catch's own release (which is about to re-throw the
+    // original error anyway, so a release failure there is secondary
+    // noise), this path returns a normal 200 with nothing else to surface
+    // a stuck lock. Best-effort: a failure here still self-heals via
+    // LOCK_STALE_MS, same as every other release call on this route.
+    await releaseConversationTurnLock(db, conv.id).catch((err) => {
+      logServerError("chatHandler.releaseLock.replay", err);
+    });
+    return replayResponse(conv.id, lastMessage!.parts);
+  }
+  // #317 review, #326: "skip-insert" means `recentMessages[0]` already IS
+  // the inbound message (that's classifyTurn's own definition of this
+  // case) -- persistedHistory starts as `recentMessages` unmodified and
+  // only the "insert" branch below needs to change it, by prepending the
+  // row it's about to write.
+  let persistedHistory: MessageHistoryRow[] = recentMessages;
+  if (initialClassification === "insert") {
     // #266: appendMessage's return value used to be discarded entirely, so
     // a reused clientMessageId with different content silently dropped the
     // new message while the call below still ran the model against it --
@@ -742,11 +1248,13 @@ export async function chatHandler(c: Context<AppEnv>) {
     // with the same request/response shape every other refusal on this
     // route already uses.
     try {
-      const { created } = await appendMessage(db, scope, conv.id, {
-        role: "user",
-        parts: inboundMessage.parts,
-        clientMessageId: parsedInbound.data.id,
-      });
+      const { row: insertedRow, created } = await appendMessage(
+        db,
+        scope,
+        conv.id,
+        { role: "user", parts: inboundMessage.parts, clientMessageId: parsedInbound.data.id },
+        { skipOwnershipCheck: true },
+      );
       // #273: `created: false` means this request LOST a race against
       // another one carrying the same clientMessageId (double-fired send,
       // a duplicated tab, a fetch-layer retry -- the exact scenarios #254's
@@ -760,20 +1268,57 @@ export async function chatHandler(c: Context<AppEnv>) {
       // reply or, if the winner is still mid-flight, tells the client to
       // wait rather than also calling the model.
       if (!created) {
-        const [raceLast, raceSecondLast] = await getLastMessages(db, scope, conv.id, 2);
-        if (
-          raceLast?.role === "assistant" &&
-          hasRenderableContent(raceLast.parts) &&
-          matchesInboundUser(raceSecondLast)
-        ) {
-          return replayResponse(conv.id, raceLast.parts);
+        // #322: the lock above prevents this within one conversation under
+        // normal circumstances -- this remains reachable only via the
+        // staleness escape hatch (acquireConversationTurnLock's own doc
+        // comment), so it stays as a defensive backstop rather than dead
+        // code. A genuine re-fetch, unlike persistedHistory above -- this
+        // request's own recentMessages snapshot predates the race winner's
+        // write, so it cannot be reused here the way the normal path reuses
+        // its own snapshot.
+        const [raceLast, raceSecondLast] = await getLastMessages(db, scope, conv.id, 2, {
+          skipOwnershipCheck: true,
+        });
+        // #317 review, #350 (requirement 1): logged, not swallowed -- both
+        // branches below return a normal response with nothing else to
+        // surface a release failure, same reasoning as the top-level replay
+        // release above.
+        if (classifyTurn(raceLast, raceSecondLast, parsedInbound.data.id) === "replay") {
+          await releaseConversationTurnLock(db, conv.id).catch((err) => {
+            logServerError("chatHandler.releaseLock.raceReplay", err);
+          });
+          return replayResponse(conv.id, raceLast!.parts);
         }
+        await releaseConversationTurnLock(db, conv.id).catch((err) => {
+          logServerError("chatHandler.releaseLock.raceConflict", err);
+        });
+        // #317 review, #344: same code as the lock-acquisition 409 above --
+        // both are "a turn is already in flight for this conversation",
+        // just detected at different points.
         return c.json(
-          { error: "This message is already being processed. Please wait a moment." },
+          { error: "This message is already being processed. Please wait a moment.", code: "in_progress" },
           409,
         );
       }
+      // #317 review, #326: the row this call just wrote, prepended ahead of
+      // the pre-insert snapshot -- exactly what a fresh
+      // `getLastMessages(MAX_HISTORY_MESSAGES)` read would return post-insert
+      // (newest-first, capped at the same limit), without actually
+      // re-reading it from Postgres. role/parts come from the input this
+      // handler itself constructed the insert from (already known, not
+      // re-derived from appendMessage's returned row) -- only `id` is
+      // server-generated and genuinely needs the DB round-trip's result.
+      persistedHistory = [
+        { id: insertedRow.id, role: "user", parts: inboundMessage.parts },
+        ...recentMessages.slice(0, MAX_HISTORY_MESSAGES - 1),
+      ];
     } catch (err) {
+      // #317 review, #350 (requirement 1): `.catch(() => {})`, matching the
+      // outer catch's own release below -- this catch can re-throw `err`
+      // itself (the `throw err` branch), and a release failure surfacing
+      // here would mask the original error the caller actually needs to
+      // see. Best-effort: a stuck lock still self-heals via LOCK_STALE_MS.
+      await releaseConversationTurnLock(db, conv.id).catch(() => {});
       if (err instanceof IdempotencyKeyConflictError) {
         return c.json({ error: err.message, code: "in_progress" }, 409);
       }
@@ -781,131 +1326,338 @@ export async function chatHandler(c: Context<AppEnv>) {
     }
   }
 
-  const openrouter = getOpenRouter(apiKey);
+  // #317 review, #322: everything from here through the streamText call
+  // below is synchronous setup on the way to a held-open stream -- if any
+  // of it throws, the lock must be released here (the success path's
+  // release lives in onFinish, which only fires once the stream actually
+  // starts). Not needed for correctness under the current code (nothing
+  // between here and streamText is expected to throw), but the alternative
+  // -- a stuck lock silently blackholing a conversation for LOCK_STALE_MS
+  // -- is a worse failure mode than the extra try/catch.
+  try {
+    // #143: server-authoritative context, not the client's own copy. The old
+    // behavior forwarded the client-supplied `uiMessages` array (trailing-
+    // windowed) straight to convertToModelMessages -- only its LAST entry was
+    // ever validated (parsedInbound above), so a crafted array could inject
+    // fabricated assistant replies or a smuggled system-role message ahead of
+    // it, overriding the Socratic guardrail (the exact academic-integrity
+    // bypass this issue's "Trust boundary on history" requirement calls out).
+    // Built from the row(s) this handler itself just confirmed or wrote above
+    // (persistedHistory, computed alongside the idempotency check -- #326)
+    // closes that: everything the model sees is either a prior assistant
+    // reply the server generated, or a prior user message this same
+    // idempotency check already accepted. persistedHistory is newest-first
+    // (matches getLastMessages' own order); reversed here into the
+    // chronological order the model needs. Same MAX_HISTORY_MESSAGES cap as
+    // before (#215), just sourced server-side now instead of trusting the
+    // client's own window.
+    const modelMessages: UIMessage[] = [...persistedHistory].reverse().map((m) => ({
+      id: m.id,
+      role: m.role as UIMessage["role"],
+      parts: m.parts as UIMessage["parts"],
+    }));
 
-  // #215: trailing window -- see MAX_HISTORY_MESSAGES' doc comment above
-  // for the drop-silently decision.
-  const windowedMessages =
-    uiMessages.length > MAX_HISTORY_MESSAGES ? uiMessages.slice(-MAX_HISTORY_MESSAGES) : uiMessages;
-
-  // #272: the client's own array (windowedMessages, built above) has no way
-  // to know about a greeting the SERVER just wrote in startSectionConversation
-  // above -- it only knows the message it just sent. Prepending it here is
-  // what makes the model's very first answer in a section actually see the
-  // question (section.content, embedded in the greeting), instead of
-  // answering blind until a reload re-hydrates history that includes it.
-  const modelContextMessages: UIMessage[] = sectionGreetingParts
-    ? [
-        { id: crypto.randomUUID(), role: "assistant", parts: sectionGreetingParts } as UIMessage,
-        ...windowedMessages,
-      ]
-    : windowedMessages;
-
-  const result = streamText({
-    // Gemma 4 31B (instruction-tuned) on OpenRouter's free tier. Released
-    // 2026-04-02, 262K context, native function calling (custom XML format
-    // OpenRouter normalizes to the OpenAI-compatible tool call shape the AI
-    // SDK expects). Free, with rate limits. #230: hardcoded pending #26
-    // (LLM config resolution).
-    model: openrouter("google/gemma-4-31b-it:free"),
-    system: SYSTEM_PROMPT,
-    messages: convertToModelMessages(modelContextMessages),
-    // #264: belt-and-suspenders alongside historyMessageSchema's role
-    // allowlist above -- the SDK warns and proceeds by default (its own
-    // words: "a security risk because they may enable prompt injection
-    // attacks"). This makes a role:"system" element a hard model-input
-    // refusal even if some future change to that schema let one through.
-    allowSystemInMessages: false,
-    tools: TOOLS,
-    /* Allow up to 5 steps so the model can call a display tool and then
-       continue with the follow-up Socratic question in the same turn.
-       Without this, streamText stops the moment a tool call is emitted. */
-    stopWhen: stepCountIs(5),
-    /* The SDK default is a bare `console.error(error)` -- no conversation,
-       no user, no model, so a provider outage arrives in the logs as an
-       anonymous object. Everything else in this handler goes through
-       logServerError; this was the one path that did not. */
-    onError: ({ error }) => {
-      logServerError(`chatHandler.streamText conversation=${conv.id}`, error);
-    },
-  });
-
-  return result.toUIMessageStreamResponse({
-    headers: { "x-conversation-id": conv.id },
-    /* The server decides what crosses the wire, because it is the only place
-       that knows what the string is.
-
-       Without this the SDK default is `getErrorMessage`, which returns
-       `error.message` verbatim -- and for an OpenAI-compatible provider that
-       is the provider's own prose, streamed straight into a student's
-       homework thread. The client cannot fix this after the fact: it receives
-       an opaque string with no status, no code, and no provenance, and any
-       attempt to classify it there is pattern-matching one provider's English
-       (which breaks on the next provider, on Bedrock's exception names, and
-       on WebKit's differently-worded fetch failures).
-
-       So: log the real error with context, return one sentence the student
-       can act on. Everything downstream then only ever renders strings this
-       codebase authored. */
-    onError: (error) => {
-      logServerError(
-        `chatHandler.stream conversation=${conv.id}`,
-        error,
-      );
-      /* A JSON envelope, not a bare sentence: the client parses `{error, code}`
-         and would otherwise classify a bare string as `unknown` -- rendering
-         generic copy as the headline and burying this sentence in the
-         "details for support" disclosure, where it helps nobody. */
-      return JSON.stringify({
-        error: "The tutor stopped partway through. Nothing you wrote was lost.",
-        code: "tutor_stopped",
-      });
-    },
-    // The AI SDK's natural hook for persisting the assistant turn --
-    // responseMessage is the full final UIMessage (text parts + any
-    // tool-call/tool-result parts), exactly the shape `messages.parts`
-    // (jsonb) is meant to store; no manual text+toolCalls reconstruction
-    // needed.
+    // #272: getLastMessages above only knows what's already persisted -- a
+    // freshly-created section conversation's greeting was just written inside
+    // startSectionConversation's own atomic group. Passed through explicitly
+    // (not just assumed present in persistedHistory) so the model's very
+    // first answer in a section actually sees the question (section.content,
+    // embedded in the greeting) even in a test/mock configuration whose
+    // getLastMessages fake doesn't reflect what a real write-then-read would
+    // return.
     //
-    // #268: NOT persisted when isAborted or finishReason === "error" (a
-    // client disconnect mid-delta, or a provider error after some content
-    // already streamed) -- previously this refused only a fully-empty
-    // response (hasRenderableContent's step-start-only case), which missed
-    // the partial case entirely: a text-then-error turn persisted a
-    // half-sentence as a normal-looking complete answer, and the
-    // idempotency replay path above then served that same half-sentence on
-    // every future retry, with no error chunk at all the second time. Two
-    // signals said "incomplete" at this exact decision point and neither
-    // was read: `finishReason`/`isAborted` on this callback's own event,
-    // and the persisted text part's own `state: "streaming"` (now also
-    // caught structurally by hasRenderableContent's strengthened text
-    // branch, in case a future SDK stops surfacing finishReason). "length"
-    // is deliberately NOT refused here -- that's a real, complete-as-far-
-    // as-the-model-went answer (hit its token budget), not a truncation.
-    //
-    // best-effort, not double-write-proof: if the *worker process* dies
-    // before onFinish runs (vs. the client just disconnecting), the
-    // assistant message is lost and the client's retry will only re-send
-    // the user message (already deduped above), so no response ever gets
-    // generated for that turn. That gap is a documented limitation (#3
-    // pitfall 2), not fixed here -- tracked as #96 (streaming resilience).
-    onFinish: async ({ responseMessage, isAborted, finishReason }) => {
-      if (isAborted || finishReason === "error") return;
-      // A provider failure mid-stream (ai@5.0.195 delivers this as an
-      // `error` chunk, not a rejection -- see hasRenderableContent's doc
-      // comment) still lands here with a `responseMessage` that has no
-      // real content. Persisting it anyway would write a permanently-empty
-      // assistant row that the idempotency check above would then treat as
-      // "already answered" on every future retry -- silently defeating the
-      // client's retry affordance (#144) forever. Returning early instead
-      // leaves nothing persisted for this turn, so a retry's idempotency
-      // check falls through to a genuine model call again.
-      if (!hasRenderableContent(responseMessage.parts)) return;
-      try {
-        await appendMessage(db, scope, conv.id, { role: "assistant", parts: responseMessage.parts });
-      } catch (err) {
-        logServerError("chatHandler.onFinish", err);
-      }
-    },
-  });
+    // #317 review, #349 (requirement 4): only prepended when NOT already the
+    // first element of modelMessages, by id (startSectionConversation's own
+    // greetingMessageId -- the same id the greeting was persisted under).
+    // On every real driver this repo runs (neon-http's db.batch, and
+    // node-postgres's db.transaction fallback -- both awaited and committed
+    // before this same request's own getLastMessages call above runs), the
+    // greeting IS already in persistedHistory by the time this line runs;
+    // unconditionally prepending it here previously produced
+    // [greeting, greeting, user] on that path -- a real duplicate, not just
+    // a hypothetical one, verified by reproducing it against a real
+    // Postgres. The id check makes this correct on both that real path
+    // (skips the duplicate) and the "not yet visible" case (still prepends,
+    // preserving the original guarantee).
+    // sectionGreetingMessageId != null guards the id comparison itself --
+    // without it, a test/mock fixture that omits ids on both sides (the
+    // greeting and its persisted-history fakes) would compare
+    // undefined === undefined and wrongly conclude the greeting is already
+    // present, silently dropping it instead of prepending. Only a REAL,
+    // matching id counts as "already there."
+    const greetingAlreadyInHistory =
+      sectionGreetingMessageId != null && modelMessages.some((m) => m.id === sectionGreetingMessageId);
+    const modelContextMessages: UIMessage[] =
+      sectionGreetingParts && !greetingAlreadyInHistory
+        ? [
+            { id: sectionGreetingMessageId ?? crypto.randomUUID(), role: "assistant", parts: sectionGreetingParts } as UIMessage,
+            ...modelMessages,
+          ]
+        : modelMessages;
+
+    // #317 review, #321: latency for the llm_call_logs row written in
+    // onFinish below -- captured right before the model call actually
+    // starts, not at the top of chatHandler, so it reflects the LLM call
+    // itself rather than this turn's own persistence/setup overhead.
+    const turnStartedAt = Date.now();
+
+    const result = streamText({
+      // #26: model/provider/params all come from resolvedLLMConfig now --
+      // homework override or org default, never hardcoded.
+      model: providerClient(resolvedLLMConfig.modelName),
+      system: systemPrompt,
+      // #143: server-authoritative history (modelMessages, from
+      // persistedHistory above), not a client-supplied array -- see
+      // persistedHistory's own doc comment for the trust-boundary rationale
+      // this closes.
+      messages: convertToModelMessages(modelContextMessages),
+      // #264: belt-and-suspenders alongside historyMessageSchema's role
+      // allowlist above -- the SDK warns and proceeds by default (its own
+      // words: "a security risk because they may enable prompt injection
+      // attacks"). This makes a role:"system" element a hard model-input
+      // refusal even if some future change to that schema let one through.
+      allowSystemInMessages: false,
+      tools: TOOLS,
+      temperature: resolvedLLMConfig.temperature,
+      maxOutputTokens: resolvedLLMConfig.maxCompletionTokens,
+      // #317 review, #349: see SUPPORTS_REASONING_EFFORT_NONE's own doc
+      // comment -- this is what actually keeps `temperature` above from
+      // being silently dropped for the gpt-5.1-5.4 family.
+      providerOptions: SUPPORTS_REASONING_EFFORT_NONE.test(resolvedLLMConfig.modelName)
+        ? { openai: { reasoningEffort: "none" } }
+        : undefined,
+      /* Allow up to 5 steps so the model can call a display tool and then
+         continue with the follow-up Socratic question in the same turn.
+         Without this, streamText stops the moment a tool call is emitted. */
+      stopWhen: stepCountIs(5),
+      // #143: bounds how long a stuck/hanging upstream can hold this request
+      // open. A genuine provider error (including a 429) already arrives as
+      // an in-stream `error` chunk well before this fires (ai@5.0.195 -- see
+      // hasRenderableContent's doc comment); this specifically covers the
+      // "upstream never responds at all" case that chunk-based handling
+      // can't, by construction, ever see.
+      abortSignal: AbortSignal.timeout(STREAM_TIMEOUT_MS),
+      // #317 review, #321: a genuine failure in stream construction/
+      // processing itself -- e.g. a malformed request the provider rejects
+      // before any token streams. Distinct from a provider error mid-
+      // generation, which ai@5.0.195 delivers as an in-stream `error` chunk
+      // instead (handled by onFinish's finishReason check below), not a
+      // rejection this callback would ever see. Previously silent: the
+      // SDK's own default is a bare console.error with no request context
+      // this app could act on -- "zero evidence" was #321's whole complaint.
+      onError: ({ error }) => {
+        logServerError(
+          "chatHandler.streamText.onError",
+          new Error(
+            `LLM call failed for conversation ${conv.id}, user ${authContext.session.userId}, provider ${resolvedLLMConfig.provider}, model ${resolvedLLMConfig.modelName}: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+      },
+      // Fires specifically when abortSignal (STREAM_TIMEOUT_MS above)
+      // actually trips -- a stuck/hanging upstream that never errored and
+      // never finished, not a provider-reported failure. Logged under its
+      // own label so an operator can tell "the model is slow" apart from
+      // "the model is erroring" without guessing from timing alone.
+      onAbort: () => {
+        logServerError(
+          "chatHandler.streamText.onAbort",
+          new Error(
+            `LLM call timed out after ${STREAM_TIMEOUT_MS}ms for conversation ${conv.id}, provider ${resolvedLLMConfig.provider}, model ${resolvedLLMConfig.modelName}`,
+          ),
+        );
+      },
+    });
+
+    return result.toUIMessageStreamResponse({
+      headers: { "x-conversation-id": conv.id },
+      // #317 review, #321 + "strongly recommend" item, #334: previously
+      // absent, so the SDK's default error-to-string conversion reached the
+      // client unfiltered -- combined with App.tsx rendering chatError.message
+      // verbatim, a provider error (e.g. a raw 429 JSON body, "You're
+      // sending messages too quickly...") reached the student exactly as
+      // the provider phrased it. Logged for the same reason as streamText's
+      // own onError above (this hook can fire for stream-processing errors
+      // that one doesn't see).
+      //
+      // #334: a JSON envelope, not a bare sentence -- ConversationView's
+      // readErrorMessage (packages/ui) parses `{error, code}` off this
+      // string and classifies by `code`, the same contract every other
+      // c.json({error, code}) response on this route already uses. A bare
+      // string would classify as "unknown" and bury this sentence in the
+      // "details for support" disclosure instead of the headline.
+      onError: (error) => {
+        logServerError(
+          "chatHandler.toUIMessageStreamResponse.onError",
+          error instanceof Error ? error : new Error(String(error)),
+        );
+        return JSON.stringify({
+          error: "The tutor stopped partway through. Nothing you wrote was lost.",
+          code: "tutor_stopped",
+        });
+      },
+      // The AI SDK's natural hook for persisting the assistant turn --
+      // responseMessage is the full final UIMessage (text parts + any
+      // tool-call/tool-result parts), exactly the shape `messages.parts`
+      // (jsonb) is meant to store; no manual text+toolCalls reconstruction
+      // needed. See the isErrorOutcome/hasRenderableContent doc comments
+      // inside this callback for the persistence gate itself.
+      onFinish: async ({ responseMessage, isAborted, finishReason }) => {
+        // #268, #342: NOT persisted unless the turn reached a real terminal
+        // state. Originally this was `isAborted || finishReason === "error"`
+        // -- a denylist that let anything else through, including
+        // `finishReason === undefined` and `"unknown"`. #342 found the gap
+        // that denylist left: a client-side Stop or disconnect (not a
+        // server-side abort -- ai@5.0.195's `isAborted` is set only by an
+        // in-stream `abort` chunk, which the server emits only when its OWN
+        // `abortSignal` (STREAM_TIMEOUT_MS) trips, never on a client reader
+        // cancel) produces `isAborted: false` and `finishReason: undefined`,
+        // which the denylist waved through as "success." An allowlist of
+        // the finish reasons that actually mean "the model produced a real,
+        // complete-as-far-as-it-went answer" closes that: "stop" (normal
+        // completion), "length" (hit its token budget -- still a real
+        // answer, not a truncation, so deliberately included), and
+        // "tool-calls" (the model's last of the up-to-5 steps this route
+        // allows ended on a tool call). Everything else -- undefined,
+        // "unknown", "content-filter", "other", and "error" itself -- is
+        // treated as not-a-real-answer and falls through to the same
+        // not-persisted path an aborted/provider-error turn already took.
+        const TERMINAL_FINISH_REASONS = new Set(["stop", "length", "tool-calls"]);
+        const isErrorOutcome = isAborted || !finishReason || !TERMINAL_FINISH_REASONS.has(finishReason);
+
+        // Persisting a rejected turn anyway would write a row the
+        // idempotency replay path above (classifyTurn) would then treat as
+        // "already answered" on every future retry -- for the finishReason
+        // gate above, permanently serving the same half-sentence back with
+        // no error and no way out except Restart (which voids the
+        // submission); for hasRenderableContent's own gate (its own doc
+        // comment), a permanently-empty assistant row. Not persisting
+        // instead leaves nothing for this turn, so a retry's idempotency
+        // check falls through to a genuine model call again.
+        //
+        // best-effort, not double-write-proof: if the *worker process* dies
+        // before onFinish runs (vs. the client just disconnecting), the
+        // assistant message is lost and the client's retry will only re-send
+        // the user message (already deduped above), so no response ever gets
+        // generated for that turn. That gap is a documented limitation (#3
+        // pitfall 2), not fixed here -- tracked as #96 (streaming resilience).
+        //
+        // #317 review, #346 (requirement 3): the assistant message's id is
+        // generated here rather than read back from an INSERT -- see
+        // finalizeAssistantTurn's own doc comment for why that's what lets
+        // the lock release, the message persist, and the llm_call_logs
+        // write (previously three serialized round-trips, all directly
+        // perceived as tail latency since the SDK awaits onFinish inside
+        // the stream's flush) collapse into one db.batch()/transaction.
+        const shouldPersist = !isErrorOutcome && hasRenderableContent(responseMessage.parts);
+        const assistantMessage = shouldPersist
+          ? { id: crypto.randomUUID(), parts: responseMessage.parts }
+          : null;
+
+        // #317 review, #321: one llm_call_logs row per turn -- including the
+        // error/aborted/no-content cases above, which previously early-
+        // returned with nothing written anywhere. This was the operational
+        // gap #321 names: a provider outage or a rotated key produced
+        // "zero evidence" -- no error rate, no per-provider breakdown, no
+        // latency, no cost.
+        // #317 review, #349 (requirement 3): result.totalUsage, not
+        // result.usage -- the AI SDK documents result.usage as "the token
+        // usage of the LAST STEP" only. stopWhen: stepCountIs(5) above
+        // makes multi-step turns (a tool call, then a follow-up text
+        // step) a designed path, and providers bill per call: result.usage
+        // alone silently dropped every earlier step's tokens from cost
+        // and usage reporting on any turn that used a tool.
+        //
+        // #317 review, #350 (requirement 2): raced against
+        // USAGE_FETCH_TIMEOUT_MS -- see that constant's own doc comment for
+        // why this Promise.all can hang forever on a genuinely cancelled
+        // stream instead of merely resolving slowly. `finalizeAssistantTurn`
+        // still runs on timeout (with null usage/cost fields, errorFlag
+        // true), rather than onFinish just hanging and never reaching it at
+        // all -- the lock still releases and a row still lands, even though
+        // this specific turn's token/cost numbers are unknowable.
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const timedOut = Symbol("usage-fetch-timed-out");
+        const timeoutPromise = new Promise<typeof timedOut>((resolve) => {
+          timeoutHandle = setTimeout(() => resolve(timedOut), USAGE_FETCH_TIMEOUT_MS);
+        });
+        try {
+          const usageResult = await Promise.race([
+            Promise.all([result.totalUsage, result.response, result.warnings]),
+            timeoutPromise,
+          ]);
+          clearTimeout(timeoutHandle);
+
+          if (usageResult === timedOut) {
+            logServerError(
+              "chatHandler.onFinish.usageFetchTimedOut",
+              new Error(
+                `result.totalUsage/response/warnings never settled within ${USAGE_FETCH_TIMEOUT_MS}ms for conversation ${conv.id} -- likely a cancelled stream (#350); finalizing with null usage/cost`,
+              ),
+            );
+            await finalizeAssistantTurn(db, conv.id, assistantMessage, {
+              organizationId: orgScope,
+              llmConfigId: resolvedLLMConfig.id,
+              provider: resolvedLLMConfig.provider,
+              model: resolvedLLMConfig.modelName,
+              providerRequestId: null,
+              inputTokens: null,
+              outputTokens: null,
+              costCents: null,
+              latencyMs: Date.now() - turnStartedAt,
+              errorFlag: true,
+            });
+            return;
+          }
+
+          const [usage, response, warnings] = usageResult;
+          // #317 review, #349 (requirement 1): nothing previously read
+          // result.warnings -- an instructor setting a temperature that
+          // then got silently dropped (SUPPORTS_REASONING_EFFORT_NONE's own
+          // doc comment) had no way to find out. Logged, not persisted -- a
+          // best-effort operational signal, same tier as onError/onAbort
+          // above, not a per-turn column this table needs.
+          if (warnings && warnings.length > 0) {
+            logServerError(
+              "chatHandler.onFinish.warnings",
+              new Error(
+                `streamText warnings for conversation ${conv.id}, model ${resolvedLLMConfig.modelName}: ${JSON.stringify(warnings)}`,
+              ),
+            );
+          }
+          await finalizeAssistantTurn(db, conv.id, assistantMessage, {
+            organizationId: orgScope,
+            llmConfigId: resolvedLLMConfig.id,
+            provider: resolvedLLMConfig.provider,
+            model: resolvedLLMConfig.modelName,
+            providerRequestId: response.id ?? null,
+            inputTokens: usage.inputTokens ?? null,
+            outputTokens: usage.outputTokens ?? null,
+            costCents: estimateCostCents(
+              resolvedLLMConfig.modelName,
+              usage.inputTokens ?? null,
+              usage.outputTokens ?? null,
+              {
+                input: resolvedLLMConfig.pricePerMillionInputTokens,
+                output: resolvedLLMConfig.pricePerMillionOutputTokens,
+              },
+            ),
+            latencyMs: Date.now() - turnStartedAt,
+            errorFlag: isErrorOutcome || !shouldPersist,
+          });
+        } catch (err) {
+          clearTimeout(timeoutHandle);
+          // Best-effort, matching the release/persist/log steps this
+          // replaces: a failure here must never surface as a second error
+          // layered on the turn's own outcome. A conversation left locked
+          // by this failing self-heals via LOCK_STALE_MS, same as any other
+          // path that never reaches its own release call (see this
+          // function's trade-off note in conversations.ts).
+          logServerError("chatHandler.onFinish.finalizeAssistantTurn", err);
+        }
+      },
+    });
+  } catch (err) {
+    await releaseConversationTurnLock(db, conv.id).catch(() => {});
+    throw err;
+  }
 }

@@ -1,5 +1,6 @@
 import { relations, sql } from "drizzle-orm";
 import {
+  type AnyPgColumn,
   boolean,
   check,
   index,
@@ -14,6 +15,12 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { blindIndex, encryptedText } from "../types/encrypted";
+// Cross-file forward reference (content.ts imports FROM this file too, so
+// this is a real module cycle) -- safe because .references() only takes a
+// thunk, never calling llmConfigs until well after both modules finish
+// evaluating; the exact pattern content.ts already uses for same-file
+// forward refs (e.g. promptTemplates.scopeSectionId -> sections).
+import { llmConfigs } from "./content";
 
 // ---------- PII handling convention ----------
 // All directly identifying PII (name, email, NetID) is stored encrypted via
@@ -52,6 +59,10 @@ export const credentialProviderEnum = pgEnum("credential_provider", [
   "local",
   "canvas",
   "workos",
+  // #178: UW SSEC's LiteLLM gateway -- matches llmProviderEnum's own
+  // addition (content.ts) so a credential row can actually be tagged for
+  // an llm_configs row that uses it.
+  "llmoxie",
 ]);
 
 // Why a membership was dropped (issue #142). Distinguishing "this
@@ -203,6 +214,12 @@ export const courses = pgTable(
     code: text("code").notNull(),
     term: text("term").notNull(),
     title: text("title").notNull(),
+    // #317 review, #325: course-level override between the per-homework
+    // override and the org default in resolveLLMConfig (lib/llm-config.ts)
+    // -- lets one course under a shared org (e.g. one of the four CDI
+    // projects) pin its own model without setting llm_config_id on every
+    // homework in it.
+    llmConfigId: uuid("llm_config_id").references((): AnyPgColumn => llmConfigs.id, { onDelete: "set null" }),
     isActive: boolean("is_active").notNull().default(true),
     lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
@@ -400,6 +417,10 @@ export const coursesRelations = relations(courses, ({ one, many }) => ({
   organization: one(organizations, {
     fields: [courses.organizationId],
     references: [organizations.id],
+  }),
+  llmConfig: one(llmConfigs, {
+    fields: [courses.llmConfigId],
+    references: [llmConfigs.id],
   }),
   memberships: many(courseMemberships),
   lmsIntegration: one(lmsIntegrations),

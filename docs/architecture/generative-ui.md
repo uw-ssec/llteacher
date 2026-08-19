@@ -13,10 +13,15 @@ This document covers the architecture end-to-end, the contracts between layers, 
 | Tool renderers | React components | `packages/ui/src/generative/*.tsx` |
 | Server endpoint | Hono on Cloudflare Workers | `apps/web/src/server/routes/chat.ts` |
 | LLM streaming | Vercel AI SDK v5 `streamText` | `apps/web/src/server/routes/chat.ts` |
-| Provider | OpenRouter via `@ai-sdk/openai-compatible` | `apps/web/src/lib/ai.ts` |
-| Model | `google/gemma-4-31b-it:free` (Gemma 4 31B Instruct) | configured per-request |
+| Provider | OpenRouter or LLMOxie (UW SSEC's own LiteLLM gateway), both via `@ai-sdk/openai`'s `createOpenAI` pointed at each host's OpenAI-compatible surface | `apps/web/src/lib/ai.ts` |
+| Model | Resolved per-conversation (#26) from the org/course/homework's `llm_configs` row, never hardcoded — every org's default is `llmoxie`/`gpt-5.3-codex` as of migration 0035 | `apps/web/src/lib/llm-config.ts` |
 
 ## Loop
+
+*(#317 review, #353: this doc previously named OpenRouter/Gemma 4 as fixed
+participants -- both are resolved per-conversation now, see the Stack
+table above. "Provider"/"Model" below stand in for whichever config a
+given turn actually resolves to.)*
 
 ```mermaid
 sequenceDiagram
@@ -24,18 +29,18 @@ sequenceDiagram
     participant useChat as useChat hook
     participant Proxy as Vite dev proxy (dev only)
     participant Chat as POST /api/chat
-    participant OR as OpenRouter
-    participant Gemma as Gemma 4 31B
+    participant Provider as Resolved provider (OpenRouter or LLMOxie)
+    participant Model as Resolved model
     participant Render as renderToolPart
     participant Card as DefinitionCard
 
     Student->>useChat: types & submits
     useChat->>Proxy: POST /api/chat (UIMessage[])
     Proxy->>Chat: Web Request (loaded via Vite SSR)
-    Chat->>OR: streamText({ model, tools, messages, system })
-    OR->>Gemma: prompt + tool catalog (XML format)
-    Gemma-->>OR: text deltas + tool call (showDefinition)
-    OR-->>Chat: normalized to OpenAI-compatible stream
+    Chat->>Provider: streamText({ model, tools, messages, system })
+    Provider->>Model: prompt + tool catalog
+    Model-->>Provider: text deltas + tool call (showDefinition)
+    Provider-->>Chat: normalized to OpenAI-compatible stream
     Chat-->>Proxy: UI message stream Response
     Proxy-->>useChat: streamed UIMessage parts
     useChat->>Render: each part.type === "tool-showDefinition"
@@ -93,11 +98,26 @@ The prompt frames the assistant as a Socratic UW statistics tutor and gives the 
 
 Tuning this prompt is the primary lever for tool-call frequency.
 
-### Model: Gemma 4 31B IT (free)
+### Model: resolved per-conversation, not hardcoded (#26)
 
-Released 2026-04-02. 262K context window. Native function calling via a custom XML format that OpenRouter normalizes to OpenAI-compatible tool calls before the AI SDK sees them. Strong on Socratic-style instruction following per [Google's docs](https://ai.google.dev/gemma/docs/capabilities/text/function-calling-gemma4). Available on the free tier with rate limits — see [the model page](https://openrouter.ai/google/gemma-4-31b-it:free).
+*(#317 review, #353: this section originally documented a single
+hardcoded model, `google/gemma-4-31b-it:free`, and suggested wiring an
+`OPENROUTER_MODEL` env var to make it configurable — #26 shipped a more
+general fix instead, described below, before this doc was ever updated
+to match.)*
 
-The model is hardcoded in `chat.ts` for now. To make it configurable, wire `OPENROUTER_MODEL` through `c.env` and read it per-request.
+`resolveLLMConfig` (`apps/web/src/lib/llm-config.ts`) picks the model,
+provider, and generation params from the first matching row in a
+homework → course → org override chain, never from a hardcoded constant.
+Every organization's own default is `llmoxie`/`gpt-5.3-codex`
+(migration 0035, `scripts/seed.ts`) — LLMOxie is UW SSEC's own LiteLLM
+gateway, routed through the same OpenAI-compatible request shape
+OpenRouter uses (`buildProviderClient`, same file). An instructor can
+already override a specific homework's model without a code change or
+redeploy (`llmConfigId` on `PUT /api/courses/:courseId/homeworks/:id`,
+`routes/homeworks.ts`); a course-level or org-admin-facing override UI
+is not built yet (`courses.llmConfigId` has no write path of its own —
+see #351).
 
 ## Client: useChat + tool render registry
 
@@ -233,7 +253,6 @@ Both call the same `chatHandler` function. The only Worker-shape concerns (env b
 ## References
 
 - [Vercel AI SDK v5 docs](https://sdk.vercel.ai/docs)
-- [OpenRouter Gemma 4 31B IT](https://openrouter.ai/google/gemma-4-31b-it:free)
-- [Gemma 4 function calling format](https://ai.google.dev/gemma/docs/capabilities/text/function-calling-gemma4)
+- [OpenRouter](https://openrouter.ai/) — one of the two providers `buildProviderClient` (`apps/web/src/lib/ai.ts`) supports; the other is UW SSEC's own LLMOxie/LiteLLM gateway (internal, not publicly documented)
 - [dev-api-proxy.md](./dev-api-proxy.md) — how `/api/*` reaches the Worker in dev
 - [design-system/components.md#definitioncard](../design-system/components.md#definitioncard) — visual spec for the card

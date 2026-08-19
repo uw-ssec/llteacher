@@ -2,6 +2,47 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to execute this plan issue-by-issue (one fresh subagent per GitHub issue, task review after each, whole-branch review per PR). Scope: GitHub milestone 4 (21 issues as of the 2026-08-11 sync — see below) + the M3 issues that are blocked on M4 work. Broken into 4 sequential, independently-mergeable PRs. Ends with a full epic acceptance pass against issue #30's own checklist.
 
+## 2026-08-19 sync check (#340/#343 supersede this plan's own default-model claim)
+
+The 2026-08-15 entry below (Blocking #1/#2) named `openrouter`/
+`google/gemma-4-31b-it:free` as the new default -- accurate when written,
+but superseded the same PR by #340/#343 (migration 0035,
+`apps/web/scripts/seed.ts:245-246`): every organization's default
+`llm_configs` row is `llmoxie`/`gpt-5.3-codex` now, and `LLMOXIE_API_KEY`
+(not `OPENROUTER_API_KEY`) is the binding a real deploy needs set for
+chat to work at all -- see #343's own commit and `apps/web/README.md`'s
+"Deploying" section. Flagged here (#317 review, #353) so an operator
+reading only the entry below doesn't provision the wrong secret.
+
+## 2026-08-15 sync check (PR2 review-response pass)
+
+Cordero's review on [PR #317](https://github.com/uw-ssec/llteacher/pull/317) requested changes on 5 items and filed 7 follow-up issues (#321–#327) from an 11-axis audit, explicitly marked not blocking. Per Kshitij's decision, this pass fixes **all of it inline on `m4-conv-chat-pr2`** — the 5 blocking items, the 3 "strongly recommend" items, and 6 of the 7 deferred issues (#327's code-level fixes land; its manual-AT-verification requirement needs a human with a real screen reader, tracked as a residual).
+
+**Design decisions made this pass** (each was a genuine fork Cordero left open, not prescribed):
+
+- **#325 (course-scoped LLM config + write paths)** — built now, in this same branch, not deferred to a separate PR, despite being additive/feature-shaped rather than a regression fix.
+- **#322 (concurrent-turn ordering)** — implemented as a per-conversation turn lock (conditional update on the conversation row; a second concurrent turn gets a distinct retryable 409), not the alternative clientMessageId-keyed-replay approach.
+- **#324 (prompt_templates scope columns)** — implemented all 4 scope levels (org/course/homework/section) to match what the schema already documents, rather than dropping the unused `scope_section_id`/`scope_homework_id` columns.
+- **Blocking #1/#2 (llm_configs data migration)** — checked the real shared dev Neon DB directly rather than guessing: 118 of 166 orgs (mostly `.db.test.ts` debris, but the fix has to be correct regardless) have no `is_default=true` row; 0 rows currently have `provider='anthropic'` (item #2's specific failure mode isn't live here, but the fix is defensive/idempotent so it's harmless to apply). New default rows use `openrouter`/`google/gemma-4-31b-it:free`, matching `scripts/seed.ts`.
+- **Release gate (blocking #4)** — Cordero scoped his fix to `getSectionPromptContext` only, noting `startSectionConversation` "predates this PR." Fixed **both** paths: the greeting itself is built from `section.content`, so gating only the chat-turn query would still leak an unreleased section's content the moment a conversation starts.
+- **#321 (LLM call observability)** — full cost/token capture (`input_tokens`/`output_tokens`/`cost_cents`) implemented, not just outcome/error logging, per explicit decision (the issue itself left this open: "decide and document whether cost/token capture is required for the CDI reporting story").
+- **#326's rate-limit-window purge** — done as a lightweight inline best-effort purge (mirroring `webhookEvents.ts`'s existing purge-query precedent) rather than building PR4's not-yet-built `apps/web/src/server/jobs/` scheduled-job infra just for this. **This supersedes issue #313 and PR4's table entry below** — #313 is resolved by this pass, not still pending PR4.
+
+See the PR review thread and `gh issue view 321..327` for full technical detail on each item; not duplicated here.
+
+## 2026-08-14 sync check (PR2 completion pass)
+
+**Start here if you're picking up where this pass left off.** Re-verified the plan against live GitHub + repo state, and closed out PR2's remaining work:
+
+- **PR1 (#212) merged into `staging`** as squash commit `7d49636` — confirmed live. `m4-conv-chat-pr2` has since been merged with `origin/staging` (not rebased — squash-merges break rebase's history-matching, so a merge commit was the correct tool; see this session's own commentary if replaying that decision).
+- **Core PR2 issues are fully implemented**: #25, #26, #178, #27, #143, #248 (plus M3's #22/#23, verified against real data, and #128, already closed via Cordero's #247). Every requirement checkbox on all six is already checked on GitHub. **Do not close these issues directly** — reference them in PR2's own PR body (`Closes #25, #26, #178, #27, #143, #248`) so they auto-close on merge, per this epic's standing convention.
+- **Of PR2's table below, four of the five secondary issues are now also implemented**: #274 (client Stop control — the server-side timeout half was already done; added `onStop` to `ConversationView`, wired both `useChat` instances' own `stop()`), #279 (collapsed 3 of 4 redundant per-turn DB round-trips via a shared `assertConversationInScope` + `skipOwnershipCheck` opt-out), #305 (moved `sectionGreeting`/the `Section N: Title` template out of `sectionConversations.ts` into `lib/prompts.ts`), #312 (extracted `resolveConversation`/`classifyTurn` from `chatHandler`, both now independently testable — `classifyTurn` with zero mocks; documented rather than consolidated the `db.batch`/`runAtomically` question, matching the issue's own "consolidate or document" framing).
+  - **Scoped down, not fully done**: #312's full "31-place stale-comment sweep" was narrowed to only the comments the issue calls factually false — those had already been corrected as a side effect of #268 landing, so no further edits were needed there. #305's requirement 3 (generate the tool-usage paragraph from `TOOLS` instead of hand-writing it in `DEFAULT_SYSTEM_PROMPT`) is deliberately deferred to PR 3, which adds the second and third tools (`executeRCode`, `markSectionComplete`) — with exactly one tool today, there's no real drift for the abstraction to prevent yet.
+  - #279's own "Promise.all the rate-limit check and conversation resolution" suggestion was deliberately NOT done: `reserveRateLimitSlot` and conversation resolution both have real side effects now (an atomic increment; a possible new conversation/section-conversation row) — running them concurrently would mean a 429'd request could still leave a freshly-created conversation behind. The safe 3-of-4 round-trip reduction above captures most of the issue's value without that risk.
+- **#282 removed from PR2's active scope**: checked live and it is **not tagged to the M4 milestone at all** (`milestone: null`) despite appearing in this table below — the table itself may be stale on this point, or #282 was deliberately untagged and never reconciled. Its "global in-flight cap" requirement also needs new infra (a DB-backed in-flight counter with a staleness cutoff, or a Durable Object) this app has never used — a real architectural decision, not a PR2 side effect. Left in the table below for visibility, but not built this pass; milestone-tag it and scope it on its own before picking it up.
+- **New issue #313** (`chat_rate_limit_windows` unbounded growth — no cleanup path) is tagged M4 but was in no PR's table. Added to PR 4's table below: its own issue text names PR 4's not-yet-built `apps/web/src/server/jobs/` scheduled-job infra as its natural home, so it can't land standalone here.
+- **Full-milestone audit**: cross-checked all 79 M4-tagged issues (`gh issue list --milestone "M4..." --state all`) against every PR table in this doc. Several sit OPEN on GitHub but are already code-complete via commits already on this branch, part of PR1's own addendum work landing ahead of this doc being updated for them: #261, #262, #265, #271, #272, #276, #284, #296–299. No new work needed for any of these — they'll close whenever the PR that already contains their fix references them. No other gaps found.
+
 ## 2026-08-12 sync check (pre-PR-2 kickoff)
 
 **Start here if you're picking up PR 2.** Re-verified the plan against live GitHub + repo state before handing off:
@@ -209,6 +250,7 @@ scope.
 | [#309](https://github.com/uw-ssec/llteacher/issues/309) | cover the production atomicity path and count-shaped properties | test hygiene, pairs with PR 4's own regression-suite pass |
 | [#310](https://github.com/uw-ssec/llteacher/issues/310) | tutor rail interaction and rendering polish | polish |
 | [#311](https://github.com/uw-ssec/llteacher/issues/311) | drop unused option surface; document capacity assumptions | chore |
+| ~~[#313](https://github.com/uw-ssec/llteacher/issues/313)~~ | ~~reap `chat_rate_limit_windows` rows -- unbounded growth, no cleanup~~ | **RESOLVED in the 2026-08-15 PR2 review-response pass** -- rather than waiting on this PR's not-yet-built `jobs/` infra, landed as a lightweight inline best-effort purge inside `reserveRateLimitSlot` (same pattern `webhookEvents.ts` already uses). No longer needs its own PR 4 job; removed from scope here. |
 | [#286](https://github.com/uw-ssec/llteacher/issues/286) | chat errors render the raw HTTP response body to students | **flagged for PR 1 reconsideration** (see PR 1 addendum) -- parked here only by default |
 | [#287](https://github.com/uw-ssec/llteacher/issues/287) | #231's auto-titling landed on a path no client can reach | **flagged for PR 1 reconsideration** -- the feature is non-functional in production today |
 | [#291](https://github.com/uw-ssec/llteacher/issues/291) | rename errors persist forever and crush the input | **flagged for PR 1 reconsideration** -- bug in shipped #6 |

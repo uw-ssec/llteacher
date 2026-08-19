@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { renderHook, render, screen, waitFor, cleanup } from "@testing-library/react";
+import { renderHook, render, screen, waitFor, cleanup, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import App, { useStudentHomework } from "./App";
@@ -438,9 +438,14 @@ describe("App tutor-conversations rail (#4)", () => {
 
     expect(chatCalls).toHaveLength(1);
     expect(chatCalls[0]!.conversationId).toBe("tutor-conv-1");
-    // The actual bug: the outgoing model-context array must include the
-    // hydrated prior turns, not just the message just typed.
-    expect(chatCalls[0]!.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    // #317 review, blocking finding #3: the wire body is now trimmed to just
+    // the message just typed -- chat.ts has never read anything but the
+    // last element (server-authoritative history comes from the DB), and
+    // sending the whole local array eventually 400s long conversations on
+    // the byte cap. The hydrated history is still what's DISPLAYED (the
+    // findByText assertions above) and still seeds useChat's own local
+    // state; only what's transmitted over the wire changed.
+    expect(chatCalls[0]!.messages.map((m) => m.role)).toEqual(["user"]);
   });
 
   // #4 fix-round 2: the hydration fix above introduced an async gap
@@ -582,7 +587,7 @@ describe("App tutor-conversations rail (#4)", () => {
     await screen.findByText("STATS 311 · TUTOR CHAT");
 
     await user.click(screen.getByRole("button", { name: /Sec 1/ }));
-    await screen.findByText("STATS 311 · HW 3 · Section 3 P-VALUES");
+    await screen.findByText("STATS 311 · HW 3 · Section 1: Sec 1");
     expect(screen.queryByText("STATS 311 · TUTOR CHAT")).toBeNull();
   });
 });
@@ -747,7 +752,7 @@ describe("App tutor conversation header rename (#6)", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByText("STATS 311 · HW 3 · Section 3 P-VALUES");
+    await screen.findByText("STATS 311 · HW 3 · Section 1: Sec 1");
     expect(screen.queryByRole("button", { name: /Rename conversation/ })).toBeNull();
   });
 });
@@ -1248,10 +1253,10 @@ describe("App section chat resumes with hydrated history (#252)", () => {
 
     expect(chatCalls).toHaveLength(1);
     expect(chatCalls[0]!.conversationId).toBe("sec-conv-1");
-    // The actual bug: the outgoing model-context array must include the
-    // hydrated prior turns, not just the message just typed -- identical
-    // shape to the tutor rail's own #4 fix-round regression test above.
-    expect(chatCalls[0]!.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    // #317 review, blocking finding #3: wire body trimmed to just the
+    // message just typed -- identical rationale to the tutor rail's own
+    // regression test above.
+    expect(chatCalls[0]!.messages.map((m) => m.role)).toEqual(["user"]);
   });
 
   it("switching from a hydrated section back to it after visiting another surface re-hydrates rather than staying empty", async () => {
@@ -1309,6 +1314,166 @@ describe("App section chat resumes with hydrated history (#252)", () => {
     await user.click(screen.getByRole("button", { name: /Sec 1/ }));
     // Back on sec 1 -- re-hydrated, not left empty from sec 2's clear.
     expect(await screen.findByText("sec 1 question")).toBeTruthy();
+  });
+});
+
+describe("App eager section greeting (#318)", () => {
+  const HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
+      },
+    ],
+  };
+
+  it("shows the section's greeting on open, before the student sends anything", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    let startCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url === "/api/courses/course-a/sections/s1/conversations" && init?.method === "POST") {
+          startCalls += 1;
+          return new Response(
+            JSON.stringify({
+              id: "sec-conv-new",
+              title: "Section 1: Sec 1",
+              greetingMessageId: "g1",
+              greetingParts: [{ type: "text", text: "Hello! I'm here to help you with Section 1: Sec 1." }],
+              promptTemplateId: null,
+            }),
+            { status: 201 },
+          );
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // No message sent yet -- the greeting must already be visible.
+    expect(await screen.findByText("Hello! I'm here to help you with Section 1: Sec 1.")).toBeTruthy();
+    expect(startCalls).toBe(1);
+    // The sidebar dot must reflect the new conversation too, not stay
+    // "not_started" until a reload -- SectionItem marks the current section
+    // aria-current="step" only once its status flips to "current".
+    expect(screen.getByRole("button", { name: /Sec 1/ }).getAttribute("aria-current")).toBe("step");
+  });
+
+  it("leaves the composer empty (no crash) when the eager-start call 409s", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url === "/api/courses/course-a/sections/s1/conversations" && init?.method === "POST") {
+          return new Response(JSON.stringify({ error: "Section is not interactive" }), { status: 409 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = await screen.findByLabelText("Message input");
+    expect(composer).toBeTruthy();
+    expect(screen.queryByText(/Hello! I'm here to help you/)).toBeNull();
+  });
+
+  it("Submit does nothing for a section whose only content is the eager greeting -- no student turn yet", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    let submitCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url === "/api/courses/course-a/sections/s1/conversations" && init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              id: "sec-conv-new",
+              title: "Section 1: Sec 1",
+              greetingMessageId: "g1",
+              greetingParts: [{ type: "text", text: "Hello! I'm here to help you with Section 1: Sec 1." }],
+              promptTemplateId: null,
+            }),
+            { status: 201 },
+          );
+        }
+        if (url === "/api/conversations/sec-conv-new/submit" && init?.method === "POST") {
+          submitCalls += 1;
+          return new Response(JSON.stringify({}), { status: 200 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Hello! I'm here to help you with Section 1: Sec 1.");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Submit section 1/i }));
+
+    // Give any (wrongly-fired) submit request a tick to land, then assert
+    // it never did -- the greeting alone must not be submittable work.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(submitCalls).toBe(0);
   });
 });
 
@@ -1607,5 +1772,493 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
     expect(await screen.findByText(/Couldn't load that conversation/i)).toBeTruthy();
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     expect(isComposerDisabled(composer)).toBe(true);
+  });
+});
+
+// #248: the section chat's restart affordance -- confirm dialog copy,
+// wiring to POST .../conversations/:id/restart, and hydrating the
+// replacement conversation on success. Reuses HOMEWORK_FIXTURE's shape.
+describe("App section restart affordance (#248)", () => {
+  const RESTART_HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [
+          { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+        ],
+      },
+    ],
+  };
+
+  function stubBaseFetch(
+    extra: (url: string, init?: RequestInit) => Response | null,
+  ) {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+    };
+    HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
+      this.removeAttribute("open");
+      this.dispatchEvent(new Event("close"));
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(JSON.stringify(RESTART_HOMEWORK_FIXTURE), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
+          return new Response(
+            JSON.stringify([{ id: "m1", role: "user", parts: [{ type: "text", text: "sec 1 question" }] }]),
+            { status: 200 },
+          );
+        }
+        const res = extra(url, init);
+        if (res) return res;
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+  }
+
+  it("does not render the restart button for a section with no active conversation", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(
+            JSON.stringify({
+              homeworks: [
+                {
+                  ...RESTART_HOMEWORK_FIXTURE.homeworks[0],
+                  sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByLabelText("Message input");
+    expect(screen.queryByRole("button", { name: "Restart section" })).toBeNull();
+  });
+
+  it("opens a confirm dialog stating the conversation won't be recoverable, and cancel leaves it untouched", async () => {
+    stubBaseFetch(() => null);
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const restartButton = await screen.findByRole("button", { name: "Restart section" });
+    const user = userEvent.setup();
+    await user.click(restartButton);
+
+    const dialog = await screen.findByRole("alertdialog", { name: "Restart this section?" });
+    expect(dialog.textContent).toContain("you won't be able to see it again");
+    // Not submitted -- no "submission will be undone" line.
+    expect(dialog.textContent).not.toContain("submission for this section will be undone");
+
+    await user.click(screen.getByRole("button", { name: "Keep this conversation" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    // Original conversation untouched.
+    expect(await screen.findByText("sec 1 question")).toBeTruthy();
+  });
+
+  it("shows the submission-will-be-undone line when the section is already submitted", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+    };
+    HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
+      this.removeAttribute("open");
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(
+            JSON.stringify({
+              homeworks: [
+                {
+                  ...RESTART_HOMEWORK_FIXTURE.homeworks[0],
+                  sections: [{ id: "s1", title: "Sec 1", order: 1, status: "submitted", conversationId: "sec-conv-1" }],
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
+          return new Response(
+            JSON.stringify([{ id: "m1", role: "user", parts: [{ type: "text", text: "sec 1 question" }] }]),
+            { status: 200 },
+          );
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const restartButton = await screen.findByRole("button", { name: "Restart section" });
+    const user = userEvent.setup();
+    await user.click(restartButton);
+
+    const dialog = await screen.findByRole("alertdialog", { name: "Restart this section?" });
+    expect(dialog.textContent).toContain("submission for this section will be undone");
+  });
+
+  it("confirming restart POSTs to the restart endpoint and hydrates the replacement conversation", async () => {
+    let restartCalled = false;
+    stubBaseFetch((url) => {
+      if (url === "/api/courses/course-a/conversations/sec-conv-1/restart") {
+        restartCalled = true;
+        return new Response(
+          JSON.stringify({
+            conversation: { id: "sec-conv-2", title: "Section 1: Sec 1", greetingMessageId: "g1" },
+            voidedSubmission: null,
+          }),
+          { status: 201 },
+        );
+      }
+      if (url.startsWith("/api/conversations/sec-conv-2/messages")) {
+        return new Response(
+          JSON.stringify([{ id: "g1", role: "assistant", parts: [{ type: "text", text: "fresh greeting" }] }]),
+          { status: 200 },
+        );
+      }
+      return null;
+    });
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const restartButton = await screen.findByRole("button", { name: "Restart section" });
+    const user = userEvent.setup();
+    await user.click(restartButton);
+    const dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Restart section" }));
+
+    expect(await screen.findByText("fresh greeting")).toBeTruthy();
+    expect(restartCalled).toBe(true);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.queryByText("sec 1 question")).toBeNull();
+  });
+
+  it("a 409 (graded submission) keeps the dialog open and shows the server's message inline", async () => {
+    stubBaseFetch((url) => {
+      if (url === "/api/courses/course-a/conversations/sec-conv-1/restart") {
+        return new Response(
+          JSON.stringify({ error: "Submission has already been graded and cannot be restarted" }),
+          { status: 409 },
+        );
+      }
+      return null;
+    });
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const restartButton = await screen.findByRole("button", { name: "Restart section" });
+    const user = userEvent.setup();
+    await user.click(restartButton);
+    const dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Restart section" }));
+
+    const errorText = await screen.findByText("Submission has already been graded and cannot be restarted");
+    expect(errorText).toBeTruthy();
+    // Dialog stayed open -- the original conversation is untouched.
+    expect(screen.getByRole("alertdialog")).toBeTruthy();
+  });
+});
+
+// #274: a client-side Stop control for a turn that's merely slow, not yet
+// timed out server-side. Uses a manually-controlled SSE stream (never
+// closed on its own) so the request stays genuinely in flight long enough
+// to assert the button, then click it.
+describe("App Stop control (#274)", () => {
+  const STOP_HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
+      },
+    ],
+  };
+
+  it("section chat: shows Stop while a turn is in flight, and clicking it aborts the request", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    let capturedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(JSON.stringify(STOP_HOMEWORK_FIXTURE), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url === "/api/chat") {
+          capturedSignal = init?.signal ?? undefined;
+          // Never-closing stream -- chatStatus stays "streaming" until the
+          // test itself aborts it, same as a genuinely stalled upstream.
+          // Wired to the request's own AbortSignal the same way a real
+          // fetch's body stream would be: aborting cancels the in-progress
+          // read, which is what lets useChat notice Stop actually happened.
+          const stream = new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "start" })}\n\n`));
+              capturedSignal?.addEventListener("abort", () => {
+                controller.error(new DOMException("The operation was aborted.", "AbortError"));
+              });
+            },
+          });
+          return new Response(stream, {
+            status: 200,
+            headers: { "content-type": "text/event-stream", "x-conversation-id": "conv-1" },
+          });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = await screen.findByLabelText("Message input");
+    const user = userEvent.setup();
+    await user.type(composer, "hello{Enter}");
+
+    const stopButton = await screen.findByRole("button", { name: "Stop" });
+    expect(capturedSignal?.aborted).toBe(false);
+
+    await user.click(stopButton);
+    expect(capturedSignal?.aborted).toBe(true);
+    // Stop's whole point: the composer must come back, not stay wedged
+    // behind isSending forever.
+    //
+    // #317 review, #327: Stop itself now stays MOUNTED once isSending goes
+    // false (aria-disabled, not removed -- see ConversationView.tsx's own
+    // #274/#327 doc comment for why: a keyboard user who just activated it
+    // must not have focus dropped to document.body with nothing to restore
+    // it). The composer re-enabling is the real assertion the old
+    // "Stop unmounts" check stood in for.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Stop" }).getAttribute("aria-disabled")).toBe("true"));
+    expect(composer.getAttribute("aria-disabled")).toBe("false");
+  });
+
+  // #317 review, #352 (requirement 1): server-side, chat.ts never persists
+  // this exact partial (hasRenderableContent/isErrorOutcome, #342) -- the
+  // visible transcript must say so instead of the fragment quietly reading
+  // as an ordinary, complete, remembered reply.
+  it("section chat: marks the partial reply as stopped/not-saved once Stop is clicked mid-stream", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    let capturedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(JSON.stringify(STOP_HOMEWORK_FIXTURE), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url === "/api/chat") {
+          capturedSignal = init?.signal ?? undefined;
+          const stream = new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "start" })}\n\n`));
+              controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "start-step" })}\n\n`));
+              controller.enqueue(
+                new TextEncoder().encode(`data: ${JSON.stringify({ type: "text-start", id: "t1" })}\n\n`),
+              );
+              controller.enqueue(
+                new TextEncoder().encode(
+                  `data: ${JSON.stringify({ type: "text-delta", id: "t1", delta: "Here is half of a" })}\n\n`,
+                ),
+              );
+              // No text-end, no finish -- the reply is genuinely mid-stream
+              // when Stop fires below.
+              capturedSignal?.addEventListener("abort", () => {
+                controller.error(new DOMException("The operation was aborted.", "AbortError"));
+              });
+            },
+          });
+          return new Response(stream, {
+            status: 200,
+            headers: { "content-type": "text/event-stream", "x-conversation-id": "conv-1" },
+          });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = await screen.findByLabelText("Message input");
+    const user = userEvent.setup();
+    await user.type(composer, "hello{Enter}");
+
+    await screen.findByText("Here is half of a");
+    const stopButton = await screen.findByRole("button", { name: "Stop" });
+    await user.click(stopButton);
+
+    await screen.findByText(/You stopped this response\. It wasn.t saved, so the tutor won.t remember it\./);
+    // The partial text itself must still be visible -- the note is
+    // additive (a trailing line), not a replacement of what was on screen.
+    // getByText throws if the element isn't present, which is the
+    // assertion here (no jest-dom matchers configured in this project).
+    screen.getByText("Here is half of a");
+  });
+
+  // #317 review, #352 (requirement 3): sectionHydrationError previously
+  // forced isSending true (so the composer stays disabled through it, which
+  // is correct), which ALSO made the Stop button render as active -- even
+  // though no turn is in flight and clicking it would be a no-op. Proves
+  // isStopActionable decouples the two: Stop stays aria-disabled while a
+  // hydration error is the only thing "sending".
+  it("section chat: Stop stays inactive when only a hydration error (not a genuine send) makes the composer disabled", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const homeworkWithStartedSection = {
+      homeworks: [
+        {
+          ...STOP_HOMEWORK_FIXTURE.homeworks[0],
+          sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "conv-1" }],
+        },
+      ],
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(JSON.stringify(homeworkWithStartedSection), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        // The section already has a conversationId, so App.tsx eagerly
+        // hydrates its history on mount -- failing that fetch is what sets
+        // sectionHydrationError without any chat turn ever having been sent.
+        if (url === "/api/conversations/conv-1/messages?limit=200") {
+          return new Response(JSON.stringify({ error: "boom" }), { status: 503 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = await screen.findByLabelText("Message input");
+    // The hydration failure disables the composer -- confirms isSending
+    // really is true here, so the Stop assertion below is meaningful and
+    // not just "Stop was never rendered."
+    await waitFor(() => expect(composer.getAttribute("aria-disabled")).toBe("true"));
+
+    const stopButton = screen.getByRole("button", { name: "Stop" });
+    expect(stopButton.getAttribute("aria-disabled")).toBe("true");
   });
 });

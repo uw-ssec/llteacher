@@ -3,9 +3,19 @@ import { useForm, useFieldArray } from "react-hook-form";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Button, Input } from "@llteacher/ui";
-import type { LLMConfig, SectionDetail } from "../lib/fixtures";
+import type { SectionDetail } from "../lib/fixtures";
 import { computeSectionDiff, type FormSection } from "../lib/computeSectionDiff";
 import { AdminNotice } from "./AdminNotice";
+
+/** The picker only ever renders an id + a label -- decoupled from the full
+ *  fixtures.LLMConfig shape (which models the LLM-configs catalog page's
+ *  row, not what a dropdown needs) so a real, server-fetched config summary
+ *  (server/routes/llmConfigs.ts) can be mapped in without dragging along
+ *  fields (recordNumber, basePromptPreview, ...) it doesn't have. */
+export interface LLMConfigOption {
+  id: string;
+  name: string;
+}
 
 /** #165: an authored pre/post prompt pair, before the order-renumbering
  *  submit-time transform (mirrors FormSection's role for sections). */
@@ -62,7 +72,7 @@ export interface HomeworkFormProps {
     publish: boolean; releasedAt?: string;
     hidden: boolean; expiresAt?: string;
   }) => Promise<void>;
-  llmConfigs: LLMConfig[];
+  llmConfigs: LLMConfigOption[];
   isLoading?: boolean;
 }
 
@@ -96,6 +106,22 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
           hidden: false, expiresAt: undefined,
         },
   });
+  /* #317 review, "strongly recommend before merge": the <select> below is
+     uncontrolled (register()), so its DOM value on mount is whatever
+     <option> matches defaultValues.llmConfigId -- if the assigned config is
+     inactive (llmConfigs is pre-filtered to isActive) or the fetch failed
+     (llmConfigsError below, .catch(() => {})'d upstream), no matching
+     <option> exists and the browser silently falls back to the FIRST
+     option, "(course/org default)". Saving an unrelated field edit then
+     PATCHes llmConfigId: "" -> null, dropping the override with no warning.
+     Always including the currently-assigned id as its own option -- even
+     when it's missing from the active list -- means the DOM's initial
+     value always has somewhere real to land. */
+  const assignedConfigId = initialData?.llmConfigId ?? undefined;
+  const selectableConfigs =
+    assignedConfigId && !llmConfigs.some((cfg) => cfg.id === assignedConfigId)
+      ? [...llmConfigs, { id: assignedConfigId, name: "Currently assigned (inactive or unavailable)" }]
+      : llmConfigs;
   const { fields, append, remove } = useFieldArray({ control, name: "sections" });
   const { fields: widgetFields, append: appendWidget, remove: removeWidget } = useFieldArray({ control, name: "widgets" });
 
@@ -180,7 +206,7 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
         <label htmlFor="hw-llm-config">LLM config</label>
         <select id="hw-llm-config" {...register("llmConfigId")}>
           <option value="">(course/org default)</option>
-          {llmConfigs.map((cfg) => <option key={cfg.id} value={cfg.id}>{cfg.name}</option>)}
+          {selectableConfigs.map((cfg) => <option key={cfg.id} value={cfg.id}>{cfg.name}</option>)}
         </select>
       </div>
 
@@ -351,9 +377,19 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
           "+ Add section+ Add progress widgetSave" -- the commitment carrying
           no more weight than the two controls that merely extend a list. */}
       <div className="admin-form-actions">
-        <Button type="submit" variant="accent" disabled={isLoading}>
-          {isLoading ? "Saving…" : "Save"}
-        </Button>
+        {/* #317 review, #327: `loading`, not `disabled` -- native `disabled`
+            blurred the instructor to document.body for the duration of the
+            multi-step POST -> PATCH -> publish -> hide chain a save can
+            trigger, with no progress announced (the `loading` prop, which
+            also sets aria-busy, was going unused). `loading` keeps Save
+            focusable and merely refuses re-activation, and the role="status"
+            line below gives AT something to announce while the chain runs. */}
+        <Button type="submit" variant="accent" loading={isLoading}>Save</Button>
+        {isLoading && (
+          <p className="sr-only" role="status">
+            Saving homework…
+          </p>
+        )}
       </div>
     </form>
   );

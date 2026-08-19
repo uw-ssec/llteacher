@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { and, eq, inArray } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
-import { organizations, courses, users, courseMemberships, homeworks, sections, conversations } from "../../db/schema";
+import { organizations, courses, users, courseMemberships, homeworks, sections, conversations, messages, llmCallLogs, llmConfigs } from "../../db/schema";
 import { unsafeCourseScope } from "./scope";
 import { TenancyMismatchError, IdempotencyKeyConflictError } from "./errors";
 import {
@@ -16,6 +16,9 @@ import {
   getLastMessages,
   getMessagesForConversation,
   updateConversationTitle,
+  acquireConversationTurnLock,
+  releaseConversationTurnLock,
+  finalizeAssistantTurn,
 } from "./conversations";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -30,6 +33,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
   let otherUserId: string;
   let droppedUserId: string;
   let sectionBId: string;
+  let llmConfigAId: string;
 
   beforeAll(async () => {
     db = makeNodeDb(DATABASE_URL!);
@@ -100,6 +104,12 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       .values({ homeworkId: hwB.id, order: 1, title: "s", content: "c" })
       .returning({ id: sections.id });
     sectionBId = sectionB.id;
+
+    const [llmConfigA] = await db
+      .insert(llmConfigs)
+      .values({ organizationId: orgAId, provider: "openrouter", modelName: "test/model" })
+      .returning({ id: llmConfigs.id });
+    llmConfigAId = llmConfigA.id;
   });
 
   it("createConversation + listConversationsForOwner round-trips a tutor conversation", async () => {
@@ -288,6 +298,21 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     expect(found?.ownerUserId).toBe(userId);
   });
 
+  // #317 review, #326 (remaining requirement): getConversationById joins
+  // courses for organizationId -- chat.ts's resolveConversation uses this to
+  // resolve org scope off the same row instead of a second, separate
+  // getOrgScopeForCourse round-trip for the exact same course.
+  it("getConversationById joins courses and returns the owning course's organizationId", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Carries org scope",
+    });
+    const found = await getConversationById(db, created.id);
+    expect(found?.organizationId).toBe(orgAId);
+  });
+
   it("getConversationById returns null for a nonexistent id", async () => {
     const found = await getConversationById(db, "00000000-0000-0000-0000-000000000000");
     expect(found).toBeNull();
@@ -329,6 +354,79 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     });
     const last = await getLastMessages(db, unsafeCourseScope(courseBId), created.id, 2);
     expect(last).toEqual([]);
+  });
+
+  // #279: skipOwnershipCheck exists so chatHandler can skip a redundant
+  // round-trip once it has already proven scope membership elsewhere in the
+  // same request -- it must never become an accidental way to bypass the
+  // check for a caller that hasn't. These two tests pin both halves: the
+  // flag genuinely skips (misuse is possible, by design, for a caller that
+  // opts in) and the DEFAULT (omitted, matching every non-chat.ts caller)
+  // still enforces it.
+  it("getLastMessages still returns [] for a wrong-scope conversation when skipOwnershipCheck is omitted (default-safe)", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Default-safe target",
+    });
+    await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      role: "user",
+      parts: [{ type: "text", text: "hello" }],
+    });
+    const last = await getLastMessages(db, unsafeCourseScope(courseBId), created.id, 2, {});
+    expect(last).toEqual([]);
+  });
+
+  it("getLastMessages returns rows for a wrong-scope conversation when skipOwnershipCheck is true (opt-in bypass, not a default)", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Opt-in-bypass target",
+    });
+    await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      role: "user",
+      parts: [{ type: "text", text: "hello" }],
+    });
+    // Wrong scope (courseB), but the caller asserts it already verified --
+    // the row comes back anyway, proving the check genuinely didn't run.
+    const last = await getLastMessages(db, unsafeCourseScope(courseBId), created.id, 2, {
+      skipOwnershipCheck: true,
+    });
+    expect(last).toHaveLength(1);
+  });
+
+  it("appendMessage still throws TenancyMismatchError for a wrong-scope conversation when skipOwnershipCheck is omitted (default-safe)", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Default-safe append target",
+    });
+    await expect(
+      appendMessage(db, unsafeCourseScope(courseBId), created.id, {
+        role: "user",
+        parts: [{ type: "text", text: "hello" }],
+      }),
+    ).rejects.toThrow(TenancyMismatchError);
+  });
+
+  it("appendMessage writes into a wrong-scope conversation when skipOwnershipCheck is true (opt-in bypass, not a default)", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Opt-in-bypass append target",
+    });
+    const { row } = await appendMessage(
+      db,
+      unsafeCourseScope(courseBId),
+      created.id,
+      { role: "user", parts: [{ type: "text", text: "hello" }] },
+      { skipOwnershipCheck: true },
+    );
+    expect(row.conversationId).toBe(created.id);
   });
 
   it("getMessagesForConversation (#4 fix-round) returns full history oldest-first", async () => {
@@ -897,6 +995,217 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       });
       const found = await getOwnedConversationOrNull(db, created.id, userId, () => false);
       expect(found).toBeNull();
+    });
+  });
+
+  // #317 review, #322: the per-conversation turn lock chat.ts now acquires
+  // before its idempotency read, closing the race where two concurrent
+  // sends interleaved into Q_a, Q_b, A_a, A_b with no ordering guarantee.
+  describe("acquireConversationTurnLock / releaseConversationTurnLock (#322)", () => {
+    async function makeLockableConversation() {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Lock test conversation",
+      });
+      return created.id;
+    }
+
+    it("grants the lock when none is held", async () => {
+      const id = await makeLockableConversation();
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(true);
+    });
+
+    it("refuses a second acquisition while the first is still held", async () => {
+      const id = await makeLockableConversation();
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(true);
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(false);
+    });
+
+    it("grants the lock again after it's released", async () => {
+      const id = await makeLockableConversation();
+      await acquireConversationTurnLock(db, id, 90_000);
+      await releaseConversationTurnLock(db, id);
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(true);
+    });
+
+    // The abandoned-lock escape hatch: a Worker killed mid-request never
+    // calls releaseConversationTurnLock, so without this a conversation
+    // would stay permanently locked. staleMs=0 makes any already-held lock
+    // immediately eligible for reclaim, without needing to wait a real
+    // 90 seconds in a test.
+    it("treats a lock older than staleMs as abandoned and grants a new one", async () => {
+      const id = await makeLockableConversation();
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(true);
+      await expect(acquireConversationTurnLock(db, id, 0)).resolves.toBe(true);
+    });
+
+    it("does not treat a lock younger than staleMs as abandoned", async () => {
+      const id = await makeLockableConversation();
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(true);
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(false);
+    });
+
+    it("releasing a conversation with no held lock is a harmless no-op", async () => {
+      const id = await makeLockableConversation();
+      await expect(releaseConversationTurnLock(db, id)).resolves.toBeUndefined();
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(true);
+    });
+
+    // Real concurrency, same rationale as rateLimits.test.ts's own
+    // "under real concurrency" test: the conditional UPDATE is the thing
+    // that makes this race-safe, and that guarantee is only actually
+    // proven by real simultaneous requests hitting real Postgres, not by
+    // sequential awaits that never overlap.
+    it("under real concurrency, exactly one of N parallel acquisitions succeeds", async () => {
+      const id = await makeLockableConversation();
+      const results = await Promise.all(
+        Array.from({ length: 8 }, () => acquireConversationTurnLock(db, id, 90_000)),
+      );
+      expect(results.filter(Boolean)).toHaveLength(1);
+    });
+  });
+
+  // #317 review, #346 (requirement 3): finalizeAssistantTurn collapses
+  // chat.ts's onFinish release-lock/persist/log writes into one
+  // db.batch()/transaction -- real Postgres proves the lock genuinely
+  // clears and both the message and the llm_call_logs row genuinely land,
+  // not just that the mocked route test (chat.test.ts) called the function.
+  describe("finalizeAssistantTurn (#346)", () => {
+    async function makeLockedConversation() {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "finalizeAssistantTurn test conversation",
+      });
+      await acquireConversationTurnLock(db, created.id, 90_000);
+      return created;
+    }
+
+    function llmLogFixture(overrides: Partial<Parameters<typeof finalizeAssistantTurn>[3]> = {}) {
+      return {
+        organizationId: orgAId,
+        llmConfigId: llmConfigAId,
+        provider: "openrouter" as const,
+        model: "test/model",
+        providerRequestId: "req-1",
+        inputTokens: 10,
+        outputTokens: 20,
+        costCents: 0,
+        latencyMs: 42,
+        errorFlag: false,
+        ...overrides,
+      };
+    }
+
+    it("persists the assistant message and the llm_call_logs row, and releases the lock, in one batch", async () => {
+      const conv = await makeLockedConversation();
+      const assistantMessageId = crypto.randomUUID();
+
+      await finalizeAssistantTurn(
+        db,
+        conv.id,
+        { id: assistantMessageId, parts: [{ type: "text", text: "the answer" }] },
+        llmLogFixture(),
+      );
+
+      const [messageRow] = await db.select().from(messages).where(eq(messages.id, assistantMessageId));
+      expect(messageRow).toBeDefined();
+      expect(messageRow!.role).toBe("assistant");
+      expect(messageRow!.conversationId).toBe(conv.id);
+      expect(messageRow!.clientMessageId).toBeNull();
+
+      const [logRow] = await db.select().from(llmCallLogs).where(eq(llmCallLogs.messageId, assistantMessageId));
+      expect(logRow).toBeDefined();
+      expect(logRow!.conversationId).toBe(conv.id);
+      expect(logRow!.errorFlag).toBe(false);
+
+      // Lock released, atomically with the persist above.
+      await expect(acquireConversationTurnLock(db, conv.id, 90_000)).resolves.toBe(true);
+    });
+
+    it("releases the lock and writes a null-messageId log row when assistantMessage is null (error/aborted turn)", async () => {
+      const conv = await makeLockedConversation();
+
+      await finalizeAssistantTurn(db, conv.id, null, llmLogFixture({ errorFlag: true }));
+
+      const rowsForConv = await db.select().from(messages).where(eq(messages.conversationId, conv.id));
+      expect(rowsForConv).toHaveLength(0);
+
+      const [logRow] = await db
+        .select()
+        .from(llmCallLogs)
+        .where(eq(llmCallLogs.conversationId, conv.id));
+      expect(logRow).toBeDefined();
+      expect(logRow!.messageId).toBeNull();
+      expect(logRow!.errorFlag).toBe(true);
+
+      await expect(acquireConversationTurnLock(db, conv.id, 90_000)).resolves.toBe(true);
+    });
+
+    // conversations.updatedAt (schema/runtime.ts) carries its own
+    // `.$onUpdate(() => new Date())` -- every Drizzle UPDATE against this
+    // row bumps it, regardless of which other columns the caller sets. This
+    // predates #346: the plain releaseConversationTurnLock finalizeAssistantTurn
+    // replaces has always done this too, on every turn including error/
+    // aborted ones with nothing to persist -- not a behavior change.
+    it("bumps conversations.updatedAt on every call, persisted message or not (pre-existing $onUpdate, not new here)", async () => {
+      const withMessage = await makeLockedConversation();
+      const beforeWithMessage = (
+        await db.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, withMessage.id))
+      )[0]!.updatedAt;
+      await new Promise((r) => setTimeout(r, 5));
+      await finalizeAssistantTurn(
+        db,
+        withMessage.id,
+        { id: crypto.randomUUID(), parts: [{ type: "text", text: "hi" }] },
+        llmLogFixture(),
+      );
+      const afterWithMessage = (
+        await db.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, withMessage.id))
+      )[0]!.updatedAt;
+      expect(afterWithMessage.getTime()).toBeGreaterThan(beforeWithMessage.getTime());
+
+      const noMessage = await makeLockedConversation();
+      const beforeNoMessage = (
+        await db.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, noMessage.id))
+      )[0]!.updatedAt;
+      await new Promise((r) => setTimeout(r, 5));
+      await finalizeAssistantTurn(db, noMessage.id, null, llmLogFixture({ errorFlag: true }));
+      const afterNoMessage = (
+        await db.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, noMessage.id))
+      )[0]!.updatedAt;
+      expect(afterNoMessage.getTime()).toBeGreaterThan(beforeNoMessage.getTime());
+    });
+
+    // Real atomicity, not just "all three calls happened": a failure in the
+    // log insert (here, a non-existent organizationId violating its FK)
+    // must roll back the message insert AND the lock release too -- not
+    // leave a persisted assistant message with no corresponding log row, or
+    // a released lock with no persisted answer. This is the one property a
+    // sequence of three independently-awaited statements can't give; only
+    // a real single transaction/batch can.
+    it("rolls back the message insert and the lock release too when the log insert fails (real atomicity)", async () => {
+      const conv = await makeLockedConversation();
+      const assistantMessageId = crypto.randomUUID();
+      const bogusOrgId = "00000000-0000-0000-0000-000000000000";
+
+      await expect(
+        finalizeAssistantTurn(
+          db,
+          conv.id,
+          { id: assistantMessageId, parts: [{ type: "text", text: "should not survive" }] },
+          llmLogFixture({ organizationId: bogusOrgId }),
+        ),
+      ).rejects.toThrow();
+
+      const [messageRow] = await db.select().from(messages).where(eq(messages.id, assistantMessageId));
+      expect(messageRow).toBeUndefined();
+
+      // Lock still held -- release was rolled back along with the persist.
+      await expect(acquireConversationTurnLock(db, conv.id, 90_000)).resolves.toBe(false);
     });
   });
 

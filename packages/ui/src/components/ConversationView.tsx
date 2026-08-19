@@ -15,6 +15,7 @@ import { Message } from "./Message";
 import { Composer } from "./Composer";
 import { CodeBlock } from "./CodeBlock";
 import { EditableTitle } from "./EditableTitle";
+import { Button } from "./Button";
 
 /** The student-facing copy for a failed turn.
  *
@@ -153,11 +154,20 @@ export function readErrorMessage(raw: string): StoppedCopy {
         retryable: true,
       };
     case "unavailable":
+      // #317 review, #344: retryable was true, but "unavailable" is a
+      // server misconfiguration (a missing/invalid LLM credential, no
+      // resolvable config) -- retrying re-hits the same broken state every
+      // time, so the button offered a false promise. The server's own
+      // message (e.g. "...Reference ID: abc123") is the one thing an
+      // instructor can actually act on, and it was hidden inside the
+      // collapsed "Details for support" disclosure the `default` case
+      // uses -- surfaced directly in the body instead.
       return {
         label: "Tutor unavailable",
-        message:
-          "The tutor isn't available right now. This is a problem on our side, not yours — your work is saved. Try again shortly, and tell your instructor if it persists.",
-        retryable: true,
+        message: serverError
+          ? `${serverError} This is a problem on our side, not yours — your work is saved.`
+          : "The tutor isn't available right now. This is a problem on our side, not yours — your work is saved. Tell your instructor if it persists.",
+        retryable: false,
       };
     default:
       /* Everything unrecognized -- a provider string, a gateway HTML page, a
@@ -251,6 +261,31 @@ export interface ConversationViewProps {
    *  than silent (a conversation with exactly 200 messages is otherwise
    *  indistinguishable from one truncated at 200). */
   hasMoreHistory?: boolean;
+  /** #248: optional slot rendered alongside the breadcrumb for
+   *  surface-specific header actions -- e.g. the homework-section chat's
+   *  "Restart section" button. `undefined` renders nothing, so surfaces
+   *  with no header action (the tutor chat) are unaffected. */
+  headerActions?: React.ReactNode;
+  /** #274: the owning `useChat` instance's own `stop()` -- rendered as a
+   *  "Stop" affordance next to the composer while `isSending` is true.
+   *  `undefined` renders nothing (matches every other optional-callback
+   *  prop here), so a caller that doesn't track a `useChat` instance (e.g.
+   *  a fixture in tests) is unaffected. The server-side half of #274 (a
+   *  timeout on the model call itself) already exists (chat.ts's
+   *  STREAM_TIMEOUT_MS); this is the client's own escape hatch for a
+   *  request that's merely slow, not yet timed out. */
+  onStop?: () => void;
+  /** #317 review, #352 (requirement 3): whether a turn is GENUINELY in
+   *  flight (the owning `useChat`'s status is "submitted" or "streaming")
+   *  -- gates the Stop button's own active state. Distinct from
+   *  `isSending`, which callers also set true for reasons that leave
+   *  nothing for Stop to actually stop (App.tsx ORs in a hydration-error
+   *  flag so the composer stays disabled through it) -- without this,
+   *  Stop rendered as active while `onStop()` was a no-op against a chat
+   *  that was never streaming. Defaults to `isSending`, matching this
+   *  component's original (conflated) behavior for any caller that
+   *  doesn't pass it. */
+  isStopActionable?: boolean;
 }
 
 /* -- Component ------------------------------------------------------------- */
@@ -266,6 +301,9 @@ export function ConversationView({
   error = null,
   autoFocusComposer = false,
   hasMoreHistory = false,
+  headerActions,
+  onStop,
+  isStopActionable = isSending,
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -278,6 +316,76 @@ export function ConversationView({
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, error]);
+
+  // #317 review, #327: no deterministic announcement existed for a
+  // streamed reply *finishing* -- the start is announced (Message.tsx's
+  // own "AI is responding" aria-busy row), but the end relied entirely on
+  // aria-busy clearing, whose replay behavior across AT is unspecified
+  // (Cordero's own finding: "a blind student hears 'AI is responding' then
+  // silence" is a plausible outcome, not a hypothetical one). A static,
+  // deterministic phrase -- not the reply's own text -- is used
+  // deliberately: `msg.content` is `React.ReactNode` (markdown-rendered,
+  // may include a CodeBlock or a generative-UI card), not always a string
+  // this component could safely re-read as plain text without risking a
+  // garbled or incomplete announcement.
+  // Counted, not just a static string: a role="status" region is expected
+  // to announce on any mutation regardless of whether the new text matches
+  // the old, but that's exactly the AT-dependent behavior this issue's own
+  // "manual AT verification" requirement flags as unconfirmed -- appending
+  // the turn count keeps consecutive completions textually distinct
+  // (and, as a side effect, informative) rather than relying on that
+  // assumption holding.
+  //
+  // #317 review, #345: the naive `isSending` true->false transition fired
+  // this same "Response complete" phrase on three outcomes that are not
+  // completion at all -- App.tsx's own `isSending` folds together
+  // `chatStatus === "submitted" || "streaming" || !!sectionHydrationError`,
+  // so it also flips false on Stop (the opposite of what the phrase
+  // claims -- the one feedback the student got for pressing Stop stated
+  // the reply finished), on error (redundant with, and contradicting, the
+  // assertive alert that fires alongside it), and on a hydration-retry
+  // clearing with no chat turn ever sent. Three independent guards below,
+  // one per false-positive source:
+  const [turnCompleteAnnouncement, setTurnCompleteAnnouncement] = useState("");
+  const completedTurnCountRef = useRef(0);
+  const wasSendingRef = useRef(isSending);
+  // Set by the Stop button's own onClick below -- ConversationView owns
+  // that click, so it can flag "the next isSending->false transition was
+  // caused by Stop" without App.tsx needing to plumb a distinct status
+  // through `isSending`'s single boolean.
+  const stoppedRef = useRef(false);
+  // The message count at the moment `isSending` became true -- a genuine
+  // chat turn appends the student's own message essentially immediately
+  // (see handleSubmit below), so an unchanged count by the time
+  // `isSending` clears again means no turn was actually sent (the
+  // hydration-retry-clearing case).
+  const messagesLengthAtSendStartRef = useRef(messages.length);
+  useEffect(() => {
+    if (isSending && !wasSendingRef.current) {
+      messagesLengthAtSendStartRef.current = messages.length;
+    }
+    if (wasSendingRef.current && !isSending) {
+      if (stoppedRef.current) {
+        stoppedRef.current = false;
+        setTurnCompleteAnnouncement("Response stopped.");
+      } else if (!error && messages.length !== messagesLengthAtSendStartRef.current) {
+        completedTurnCountRef.current += 1;
+        setTurnCompleteAnnouncement(`Response complete (turn ${completedTurnCountRef.current}).`);
+      }
+      // error !== null: the assertive role="alert" error row is the
+      // announcement -- a second, contradictory "complete" status right
+      // alongside it helps nobody.
+      // messages unchanged: nothing was actually sent (isSending was true
+      // only because of a hydration retry) -- no turn to announce.
+    }
+    wasSendingRef.current = isSending;
+    // messages.length, not the whole `messages` array/`error`, is the
+    // correct dependency here -- this effect only needs to READ their
+    // current values at the moment isSending's own edge fires, not
+    // re-run whenever a message's content mutates mid-stream (which
+    // would restart the "count runs of this exact turn" logic every
+    // token) or `error` changes independently of isSending.
+  }, [isSending]);
 
   const handleSubmit = (text: string) => {
     onSendMessage?.(text);
@@ -299,21 +407,19 @@ export function ConversationView({
     <div className="conversation-column">
       {/* Scrollable message area */}
       <div className="conversation-messages">
-        {/* #300: role="log" is the ARIA role specified for exactly this
-            case -- a sequence of items where new ones append at the end
-            (vs. role="status"/"alert" for a single replaceable message).
-            aria-relevant="additions" (not the "additions text" default)
-            means only a newly APPENDED node is announced, not every text
-            mutation inside an existing one -- combined with aria-busy on
-            the in-progress AI message (Message.tsx), a streaming reply is
-            silent while it fills in and announced once, whole, on
-            completion. Deliberately NOT on the whole message list's
-            grandparent or higher -- see this issue's own explicit warning
-            against a live region wide enough to re-announce every
-            streamed token. */}
-        <div className="conversation-inner" role="log" aria-live="polite" aria-relevant="additions">
-          {/* Breadcrumb */}
-          <p className="breadcrumb" aria-label="Location">{breadcrumb}</p>
+        <div className="conversation-inner">
+          {/* #317 review, #327: moved OUT of the role="log" region below --
+              this row (and the title/hasMoreHistory notice under it) used
+              to sit INSIDE it, so App.tsx's #248 Restart button was
+              announced as a node ADDITION the moment an eager section
+              greeting landed, and every section switch queued the whole
+              breadcrumb/title/notice as "new" log content alongside the
+              200 fetched messages. None of this is conversation TURN
+              content -- role="log" now wraps only the messages themselves. */}
+          <div className="conversation-header-row">
+            <p className="breadcrumb">{breadcrumb}</p>
+            {headerActions}
+          </div>
 
           {/* #6: conversation header title -- only for surfaces that pass
               one (the homework-section chat has no per-conversation title
@@ -340,29 +446,81 @@ export function ConversationView({
             </p>
           )}
 
-          {/* Messages */}
-          {messages.map((msg) => {
-            if (msg.role === "ai") {
-              return (
-                <Message key={msg.id} role="ai" isStreaming={msg.isStreaming}>
-                  {msg.content}
-                </Message>
-              );
-            }
-            if (msg.role === "student") {
-              return (
-                <Message key={msg.id} role="student">
-                  {msg.content}
-                </Message>
-              );
-            }
-            return (
-              <Message key={msg.id} role="system">
-                {msg.content}
-              </Message>
-            );
-          })}
+          {/* #300: role="log" is the ARIA role specified for exactly this
+              case -- a sequence of items where new ones append at the end
+              (vs. role="status"/"alert" for a single replaceable message).
+              aria-relevant="additions" (not the "additions text" default)
+              means only a newly APPENDED node is announced, not every text
+              mutation inside an existing one -- combined with aria-busy on
+              the in-progress AI message (Message.tsx), a streaming reply is
+              silent while it fills in.
 
+              #317 review, #345 (correcting the claim this comment used to
+              make): "announced once, whole, on completion" describes
+              behavior ARIA does not specify and this markup does not
+              produce. "additions" excludes TEXT changes by definition --
+              the reply's own content is a text mutation inside the AI
+              message node that already exists (appended empty, then
+              filled in via streaming deltas), never a new node arriving.
+              So the reply text is never announced by this region at all;
+              aria-busy clearing does not retroactively announce the
+              subtree it was set on. What the student actually hears is the
+              turnCompleteAnnouncement fixed phrase below ("Response
+              complete") -- a deterministic signal that a reply finished,
+              deliberately not the reply's own words (see that state's own
+              doc comment for why: `msg.content` is markdown-rendered
+              ReactNode, not always safely re-readable as plain text).
+              Reading the actual answer requires leaving the composer and
+              navigating into the transcript. Known, real limitation --
+              not fixed here because it wants manual AT verification
+              (NVDA/JAWS/VoiceOver) this session cannot perform: the
+              candidate fix (aria-busy on the log root, aria-relevant back
+              to its "additions text" default) changes what gets announced
+              and when for every message in the transcript, and shipping
+              that blind risks a worse regression than the current,
+              honestly-documented gap.
+
+              #317 review, #327: wraps ONLY the appended turns now (the
+              breadcrumb/title/notice above moved out, see their own
+              comment). Bulk hydration/section-switch replacement is
+              handled at the CALLER: App.tsx keys the section
+              ConversationView by section id (the tutor surface was
+              already keyed by conversationId) so a switch remounts this
+              whole component -- including this region -- instead of
+              diffing up to 200 messages into a persistent live region as
+              node insertions. A freshly-mounted live region has nothing to
+              retroactively announce; only genuinely incremental appends
+              during an ACTIVE conversation reach an AT as insertions. */}
+          <div className="conversation-log" role="log" aria-live="polite" aria-relevant="additions">
+            {messages.map((msg) => {
+              if (msg.role === "ai") {
+                return (
+                  <Message key={msg.id} role="ai" isStreaming={msg.isStreaming}>
+                    {msg.content}
+                  </Message>
+                );
+              }
+              if (msg.role === "student") {
+                return (
+                  <Message key={msg.id} role="student">
+                    {msg.content}
+                  </Message>
+                );
+              }
+              return (
+                <Message key={msg.id} role="system">
+                  {msg.content}
+                </Message>
+              );
+            })}
+          </div>
+
+          {/* #317 review, #327: deterministic "the reply is done" signal --
+              see turnCompleteAnnouncement's own doc comment above for why
+              this is a fixed phrase, not the reply's own text. */}
+          <p className="sr-only" role="status">
+            {turnCompleteAnnouncement}
+          </p>
         </div>
 
         {/* Deliberately OUTSIDE the role="log" region above.
@@ -424,6 +582,40 @@ export function ConversationView({
             below the error row, not above it. */}
         <div ref={bottomRef} aria-hidden="true" />
       </div>
+
+      {/* #274: a Stop affordance for a turn that's merely slow, not yet
+          timed out (chat.ts's own STREAM_TIMEOUT_MS bounds the server side
+          of this).
+          #317 review, #327: stays MOUNTED whenever the caller tracks a
+          useChat instance to stop (onStop set) -- previously conditional
+          on `isSending` too, so a keyboard user who activated Stop had it
+          unmount out from under their focus the instant `isSending`
+          flipped false, stranding them at document.body with no handoff
+          (same harm Composer.tsx's #270 fix already closed for the
+          composer). `ariaDisabled` (Button.tsx) keeps it focusable and
+          merely refuses activation while nothing is in flight, instead of
+          native `disabled` removing it from the tab order. */}
+      {onStop && (
+        <div className="conversation-stop-row">
+          <Button
+            variant="danger"
+            size="sm"
+            outlined
+            // #317 review, #345: flags the next isSending->false transition
+            // as caused by Stop (see turnCompleteAnnouncement's own effect
+            // above) -- Button.tsx only invokes onClick when the button is
+            // genuinely actionable (not aria-disabled), so this can't set
+            // the flag from a click that didn't actually stop anything.
+            onClick={() => {
+              stoppedRef.current = true;
+              onStop();
+            }}
+            ariaDisabled={!isStopActionable}
+          >
+            Stop
+          </Button>
+        </div>
+      )}
 
       {/* Sticky composer -- #144: disabled while a send is genuinely in
           flight, so Enter mid-stream can't fire a second, overlapping

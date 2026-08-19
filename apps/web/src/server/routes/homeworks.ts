@@ -37,6 +37,18 @@ interface CreateHomeworkBody {
   dueDate?: unknown;
 }
 
+// #317 review, #349 (requirement 4): sections.content (the problem
+// statement) had no length bound anywhere -- no maxLength on the admin
+// textarea, no route validation, unlike routes/promptTemplates.ts's own
+// MAX_CONTENT_LENGTH for template content. It reaches the model's context
+// at least twice per turn (assembleSystemPrompt's <section_content> block,
+// and again as the persisted greeting -- lib/prompts.ts), so an unbounded
+// value here is an unbounded, uncapped cost per turn for the life of the
+// section, not just a one-time write. Same limit as MAX_CONTENT_LENGTH
+// (promptTemplates.ts) for consistency; nothing here requires it to match,
+// but there's no reason to invent a second number.
+const MAX_SECTION_CONTENT_LENGTH = 20_000;
+
 export async function listHomeworksHandler(c: Context<AppEnv>) {
   const courseId = c.req.param("courseId");
   const authContext = c.get("authContext") as AuthContext | undefined;
@@ -249,6 +261,17 @@ export async function updateHomeworkHandler(c: Context<AppEnv>) {
     body = await c.req.json<HomeworkUpdateBody>();
   } catch {
     return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+
+  if (body.sections) {
+    for (const section of body.sections) {
+      if (typeof section.content === "string" && section.content.length > MAX_SECTION_CONTENT_LENGTH) {
+        return c.json(
+          { error: `Each section's content must be ${MAX_SECTION_CONTENT_LENGTH} characters or fewer` },
+          400,
+        );
+      }
+    }
   }
 
   let dueDate: Date | undefined;

@@ -146,7 +146,18 @@ export async function getHomeworkById(db: Db, scope: CourseScope, id: string) {
 export async function deleteHomework(db: Db, scope: CourseScope, id: string) {
   // sections/sectionSolutions/conversations/messages/submissions all cascade
   // from homeworks.id -> sections.homeworkId -> ... (see Resolved Design
-  // Decision 3) -- a single delete on this scoped row is sufficient.
+  // Decision 3), and (#317 review, #341) llm_call_logs' conversation_id/
+  // message_id FKs are ON DELETE SET NULL (migration 0036, matching
+  // llm_config_id's existing pattern on the same table) -- the cost/
+  // telemetry rows survive, just detached, rather than blocking this
+  // delete with a generic 503 the moment a section has a single chat turn
+  // logged against it. A single delete on this scoped row is sufficient.
+  //
+  // #353: grades.submission_id keeps its own RESTRICT (pre-existing,
+  // narrower: only blocks a homework with a GRADED submission, not any
+  // chat activity -- see docs/architecture/multi-tenant-data-model.md
+  // §3.5 point 5) -- that path is NOT covered by the SET NULL fix above,
+  // and can still surface as a 503 here.
   const [deleted] = await db
     .delete(homeworks)
     .where(and(eq(homeworks.id, id), eq(homeworks.courseId, scope)))

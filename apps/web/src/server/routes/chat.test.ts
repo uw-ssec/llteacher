@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import { chatHandler } from "./chat";
+import { chatHandler, classifyTurn } from "./chat";
 import type { AuthContext } from "../middleware/roles";
 import { fakeAuthContext as buildFakeAuthContext, fakeMembership } from "../testing/authContext";
 import {
@@ -23,11 +23,34 @@ const getOwnedConversationOrNullMock = vi.fn();
 const createConversationMock = vi.fn();
 const appendMessageMock = vi.fn();
 const getLastMessagesMock = vi.fn();
+// #317 review, #322: the per-conversation turn lock -- acquireConversationTurnLockMock
+// defaults to true (lock granted) in beforeEach below so every existing test
+// exercises the same "got the lock" path it always implicitly assumed;
+// the dedicated #322 describe block overrides it to false to test the new
+// blocked-turn 409.
+const acquireConversationTurnLockMock = vi.fn();
+const releaseConversationTurnLockMock = vi.fn();
+// #317 review, #326: the write-back chat.ts fires (fire-and-forget) the
+// first time resolvePromptTemplate finds a real template for a
+// never-pinned conversation -- mocked so a test that exercises that branch
+// doesn't hit "pinConversationPromptTemplate is not a function" against the
+// mocked module.
+const pinConversationPromptTemplateMock = vi.fn();
+// #317 review, #346 (requirement 3): onFinish's release-lock/persist/log
+// steps collapsed into one call -- mocked here instead of separate
+// appendMessage/recordLlmCallLog calls for that path (appendMessage stays
+// mocked above for the USER-message idempotency-insert path, which is
+// unchanged).
+const finalizeAssistantTurnMock = vi.fn();
 vi.mock("../repositories/conversations", () => ({
   getOwnedConversationOrNull: (...args: unknown[]) => getOwnedConversationOrNullMock(...args),
   createConversation: (...args: unknown[]) => createConversationMock(...args),
   appendMessage: (...args: unknown[]) => appendMessageMock(...args),
   getLastMessages: (...args: unknown[]) => getLastMessagesMock(...args),
+  acquireConversationTurnLock: (...args: unknown[]) => acquireConversationTurnLockMock(...args),
+  releaseConversationTurnLock: (...args: unknown[]) => releaseConversationTurnLockMock(...args),
+  finalizeAssistantTurn: (...args: unknown[]) => finalizeAssistantTurnMock(...args),
+  pinConversationPromptTemplate: (...args: unknown[]) => pinConversationPromptTemplateMock(...args),
 }));
 
 // #265: reserveRateLimitSlot returns the POST-increment count (unlike the
@@ -64,14 +87,47 @@ vi.mock("../repositories/sectionConversations", async (importOriginal) => {
 // convertToModelMessages/jsonSchema/stepCountIs (used by chat.ts, untouched
 // by #3) running for real.
 type FakeResponseMessage = { id?: string; role: string; parts: unknown[] };
-let capturedOnFinish: ((event: { responseMessage: FakeResponseMessage }) => void | Promise<void>) | undefined;
+type FakeOnFinishEvent = {
+  responseMessage: FakeResponseMessage;
+  isAborted?: boolean;
+  finishReason?: string;
+};
+let capturedOnFinish: ((event: FakeOnFinishEvent) => void | Promise<void>) | undefined;
+let capturedStreamResponseOnError: ((error: unknown) => string) | undefined;
+// #317 review, #321: chat.ts's own onFinish awaits result.totalUsage/
+// result.response/result.warnings to build the llm_call_logs row --
+// individual tests override these via mockUsage/mockResponseMeta/
+// mockWarnings when they care about the exact values; otherwise these
+// sensible defaults keep every other test from having to know about #321's
+// fields at all.
+//
+// #317 review, #349 (requirement 3): totalUsage, not usage -- chat.ts
+// switched from result.usage (documented as "the LAST step's usage only")
+// to result.totalUsage (the summed one) so a multi-step, tool-using turn's
+// earlier steps aren't silently dropped from cost/usage reporting. This
+// fake's own field is named to match.
+let mockUsage: { inputTokens?: number; outputTokens?: number } = { inputTokens: 10, outputTokens: 20 };
+let mockResponseMeta: { id?: string } = { id: "provider-resp-1" };
+let mockWarnings: unknown[] | undefined = undefined;
+// #317 review, #350 (requirement 2): when true, totalUsage/response/warnings
+// never resolve -- simulates the real failure mode this issue names (a
+// cancelled stream's finalStep promise never settling), so the
+// USAGE_FETCH_TIMEOUT_MS race in chat.ts's onFinish is exercised for real
+// (via vi.useFakeTimers, not a real 5s wait) instead of only ever seeing
+// the fast-resolving path.
+let mockHangUsageFetch = false;
 const streamTextMock = vi.fn((_args: Record<string, unknown>) => {
   return {
+    totalUsage: mockHangUsageFetch ? new Promise<never>(() => {}) : Promise.resolve(mockUsage),
+    response: mockHangUsageFetch ? new Promise<never>(() => {}) : Promise.resolve(mockResponseMeta),
+    warnings: mockHangUsageFetch ? new Promise<never>(() => {}) : Promise.resolve(mockWarnings),
     toUIMessageStreamResponse: (opts?: {
       headers?: Record<string, string>;
-      onFinish?: (event: { responseMessage: FakeResponseMessage }) => void | Promise<void>;
+      onFinish?: (event: FakeOnFinishEvent) => void | Promise<void>;
+      onError?: (error: unknown) => string;
     }) => {
       capturedOnFinish = opts?.onFinish;
+      capturedStreamResponseOnError = opts?.onError;
       return new Response("stream-body", { status: 200, headers: opts?.headers });
     },
   };
@@ -79,6 +135,48 @@ const streamTextMock = vi.fn((_args: Record<string, unknown>) => {
 vi.mock("ai", async (importOriginal) => {
   const actual = await importOriginal<typeof import("ai")>();
   return { ...actual, streamText: (args: Record<string, unknown>) => streamTextMock(args) };
+});
+
+// #25: system-prompt resolution -- mocked so these tests (which mock db to
+// `{}`) don't hit real Drizzle calls chat.ts now makes on every turn.
+// assembleSystemPrompt/DEFAULT_SYSTEM_PROMPT stay real (pure, no db) via
+// importOriginal, so `system:` passed to streamTextMock reflects the actual
+// composition logic, not a second mock of it.
+// #317 review, #346 (requirement 1): the combined org-scope +
+// course-level-LLM-config-override lookup, used only by resolveConversation's
+// two conversation-creation branches (the conversationId branch resolves
+// both off the same getConversationById join instead).
+const getOrgScopeAndLlmConfigForCourseMock = vi.fn();
+vi.mock("../repositories/organizations", () => ({
+  getOrgScopeAndLlmConfigForCourse: (...args: unknown[]) => getOrgScopeAndLlmConfigForCourseMock(...args),
+}));
+
+const getPinnedPromptTemplateContentMock = vi.fn();
+const resolvePromptTemplateMock = vi.fn();
+const getSectionPromptContextMock = vi.fn();
+vi.mock("../../lib/prompts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/prompts")>();
+  return {
+    ...actual,
+    getPinnedPromptTemplateContent: (...args: unknown[]) => getPinnedPromptTemplateContentMock(...args),
+    resolvePromptTemplate: (...args: unknown[]) => resolvePromptTemplateMock(...args),
+    getSectionPromptContext: (...args: unknown[]) => getSectionPromptContextMock(...args),
+  };
+});
+
+// #26: LLM config resolution -- mocked for the same reason as #25's prompt
+// mocks above (these tests mock db to `{}`); buildProviderClient stays real
+// (importOriginal) so `model:` passed to streamTextMock reflects the actual
+// getOpenRouter(apiKey) call, not a second mock of it.
+const resolveLLMConfigMock = vi.fn();
+const resolveApiKeyMock = vi.fn();
+vi.mock("../../lib/llm-config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/llm-config")>();
+  return {
+    ...actual,
+    resolveLLMConfig: (...args: unknown[]) => resolveLLMConfigMock(...args),
+    resolveApiKey: (...args: unknown[]) => resolveApiKeyMock(...args),
+  };
 });
 
 function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
@@ -115,6 +213,41 @@ function postChat(
   );
 }
 
+// #312: classifyTurn is a pure function (no db, no I/O) -- zero mocks
+// needed, unlike every other case in this file. Covers the decision table
+// directly instead of only ever exercising it indirectly through the full
+// HTTP handler.
+describe("classifyTurn", () => {
+  const ANSWERED = { role: "assistant", parts: [{ type: "text", text: "a real reply" }], clientMessageId: null };
+  const UNANSWERED_ASSISTANT = { role: "assistant", parts: [{ type: "step-start" }], clientMessageId: null };
+  const USER_TURN = { role: "user", parts: [{ type: "text", text: "hi" }], clientMessageId: "client-1" };
+  const OTHER_USER_TURN = { role: "user", parts: [{ type: "text", text: "hi" }], clientMessageId: "some-other-send" };
+
+  it("replays when the last row is a renderable assistant reply to this exact turn", () => {
+    expect(classifyTurn(ANSWERED, USER_TURN, "client-1")).toBe("replay");
+  });
+
+  it("does not replay when the assistant row has no renderable content (step-start only)", () => {
+    expect(classifyTurn(UNANSWERED_ASSISTANT, USER_TURN, "client-1")).toBe("insert");
+  });
+
+  it("does not replay when the assistant row answers a DIFFERENT turn", () => {
+    expect(classifyTurn(ANSWERED, OTHER_USER_TURN, "client-1")).toBe("insert");
+  });
+
+  it("skips the insert when the last row is already this exact user turn (not yet answered)", () => {
+    expect(classifyTurn(USER_TURN, undefined, "client-1")).toBe("skip-insert");
+  });
+
+  it("inserts when the last row is a DIFFERENT user turn (a genuine new message)", () => {
+    expect(classifyTurn(OTHER_USER_TURN, undefined, "client-1")).toBe("insert");
+  });
+
+  it("inserts on a brand-new conversation with no prior messages at all", () => {
+    expect(classifyTurn(undefined, undefined, "client-1")).toBe("insert");
+  });
+});
+
 describe("POST /api/chat", () => {
   beforeEach(() => {
     getOwnedConversationOrNullMock.mockReset();
@@ -125,14 +258,44 @@ describe("POST /api/chat", () => {
     // this explicitly; the race-specific tests below override it.
     appendMessageMock.mockReset().mockResolvedValue({ row: { id: "msg-1" }, created: true });
     getLastMessagesMock.mockReset();
+    // #317 review, #322: true (lock granted) by default -- every test not
+    // specifically about the lock itself expects the turn to proceed.
+    acquireConversationTurnLockMock.mockReset().mockResolvedValue(true);
+    releaseConversationTurnLockMock.mockReset().mockResolvedValue(undefined);
+    pinConversationPromptTemplateMock.mockReset().mockResolvedValue(undefined);
+    finalizeAssistantTurnMock.mockReset().mockResolvedValue(undefined);
+    mockUsage = { inputTokens: 10, outputTokens: 20 };
+    mockResponseMeta = { id: "provider-resp-1" };
+    mockWarnings = undefined;
+    mockHangUsageFetch = false;
     startSectionConversationMock.mockReset();
     getActiveSectionConversationMock.mockReset();
     streamTextMock.mockClear();
     capturedOnFinish = undefined;
+    capturedStreamResponseOnError = undefined;
     // #219/#265: under the rate limit by default -- individual rate-limit
     // tests override this. 1 is the post-increment count for "the first
     // request in the window," not a pre-increment 0.
     reserveRateLimitSlotMock.mockReset().mockResolvedValue(1);
+    // #25: none of these tests assert on system-prompt *content* -- default
+    // to "resolved, no pin, no section context" for every test so chatHandler's
+    // new prompt-assembly branch runs without touching the mocked-empty db.
+    getOrgScopeAndLlmConfigForCourseMock.mockReset().mockResolvedValue({ orgScope: "org-a", courseLlmConfigId: null });
+    getPinnedPromptTemplateContentMock.mockReset().mockResolvedValue(null);
+    resolvePromptTemplateMock.mockReset().mockResolvedValue({ id: null, content: "test system prompt", version: null });
+    getSectionPromptContextMock.mockReset().mockResolvedValue(null);
+    // #26: none of these tests assert on model/provider specifics -- a
+    // resolvable openrouter config + a fake key by default, same "no test
+    // needs to care" posture as the #25 defaults above.
+    resolveLLMConfigMock.mockReset().mockResolvedValue({
+      id: "llm-config-1",
+      provider: "openrouter",
+      modelName: "test/model",
+      temperature: 0.7,
+      maxCompletionTokens: 1000,
+      credentialId: null,
+    });
+    resolveApiKeyMock.mockReset().mockResolvedValue("sk-test-key");
   });
 
   it("returns 401 when there is no authContext", async () => {
@@ -141,19 +304,86 @@ describe("POST /api/chat", () => {
     expect(createConversationMock).not.toHaveBeenCalled();
   });
 
-  it("returns 500 when OPENROUTER_API_KEY is not set", async () => {
-    const app = new Hono<AppEnv>();
-    app.use("*", async (c, next) => {
-      c.set("authContext", fakeAuthContext());
-      await next();
+  // #26: replaces the old hardcoded-OPENROUTER_API_KEY-missing test -- that
+  // check is gone; a missing/unusable key now surfaces through
+  // resolveApiKey's own LLMCredentialMissingError instead.
+  it("returns 500 with a Reference ID when no LLM config exists at any scope (Django parity)", async () => {
+    createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    const { LLMConfigNotFoundError } = await import("../../lib/llm-config");
+    const err = new LLMConfigNotFoundError();
+    resolveLLMConfigMock.mockRejectedValueOnce(err);
+
+    const res = await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
     });
-    app.post("/api/chat", (c) => chatHandler(c));
-    const res = await app.request(
-      "/api/chat",
-      { method: "POST", body: JSON.stringify({ messages: [userUiMessage] }), headers: { "content-type": "application/json" } },
-      { DATABASE_URL: "ignored" } as Env,
-    );
     expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain(err.referenceId);
+    expect(streamTextMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 with a Reference ID when the resolved config's API key can't be resolved", async () => {
+    createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    const { LLMCredentialMissingError } = await import("../../lib/llm-config");
+    resolveApiKeyMock.mockRejectedValueOnce(new LLMCredentialMissingError("no key configured"));
+
+    const res = await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("Reference ID");
+    expect(streamTextMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 with a Reference ID when the resolved config's provider has no client factory yet", async () => {
+    createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    resolveApiKeyMock.mockResolvedValueOnce("sk-test-key");
+    // buildProviderClient is real (importOriginal) -- give it a genuinely
+    // unsupported provider so it throws for real, not via a mock.
+    resolveLLMConfigMock.mockResolvedValueOnce({
+      id: "llm-config-1",
+      provider: "anthropic",
+      modelName: "claude-x",
+      temperature: 0.7,
+      maxCompletionTokens: 1000,
+      credentialId: null,
+    });
+
+    const res = await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("Reference ID");
+    expect(streamTextMock).not.toHaveBeenCalled();
+  });
+
+  it("resolves the model/provider/params from the resolved config and passes them to streamText", async () => {
+    createConversationMock.mockResolvedValue({ id: "conv-1", ownerUserId: "u1", courseId: "course-a" });
+    getLastMessagesMock.mockResolvedValue([]);
+    resolveLLMConfigMock.mockResolvedValueOnce({
+      id: "llm-config-2",
+      provider: "openrouter",
+      modelName: "some/specific-model",
+      temperature: 0.42,
+      maxCompletionTokens: 777,
+      credentialId: null,
+    });
+    resolveApiKeyMock.mockResolvedValueOnce("sk-specific-key");
+
+    await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+
+    expect(streamTextMock).toHaveBeenCalledTimes(1);
+    const callArgs = streamTextMock.mock.calls[0]![0] as { temperature: number; maxOutputTokens: number };
+    expect(callArgs.temperature).toBe(0.42);
+    expect(callArgs.maxOutputTokens).toBe(777);
   });
 
   it("400s when the last message isn't a well-formed user message", async () => {
@@ -394,6 +624,9 @@ describe("POST /api/chat", () => {
         // shared isStudentInCourse, not duplicated route-local logic.
         // fakeAuthContext's default membership is a "student" of 55555555-5555-5555-5555-555555555555.
         isTeacherTest: false,
+        // #317 review, blocking finding #4: a plain student membership has
+        // no canViewDrafts grant.
+        canViewDrafts: false,
       });
     });
 
@@ -425,7 +658,14 @@ describe("POST /api/chat", () => {
         id: "22222222-2222-2222-2222-222222222222",
         greetingParts: [{ type: "text", text: "Hello! Here is the actual homework question." }],
       });
-      getLastMessagesMock.mockResolvedValue([]);
+      // #143: persistedHistory (not the client's array) now supplies the
+      // student's own turn to modelMessages -- idempotency check (limit 2,
+      // first call) sees no prior rows, the windowed fetch (second call)
+      // sees the user turn appendMessage just persisted above it in the
+      // handler.
+      getLastMessagesMock
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" }]);
 
       await postChat(buildApp(fakeAuthContext()), {
         courseId: "55555555-5555-5555-5555-555555555555",
@@ -443,9 +683,51 @@ describe("POST /api/chat", () => {
       expect(JSON.stringify(callArgs.messages[0])).toContain("Hello! Here is the actual homework question.");
     });
 
+    // #317 review, #349 (requirement 4): on every real driver, the greeting
+    // is already committed and visible by the time getLastMessages runs
+    // (see the prepend's own doc comment in chat.ts) -- reproduced here by
+    // having getLastMessagesMock's windowed-fetch return actually include a
+    // row whose id matches startSectionConversation's own greetingMessageId,
+    // the same shape a real write-then-read produces. Before the fix this
+    // still prepended a second copy: [greeting, greeting, user].
+    it("#317 review, #349: does not duplicate the greeting when it's already present in persistedHistory (the real write-then-read case)", async () => {
+      startSectionConversationMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        greetingMessageId: "greeting-msg-1",
+        greetingParts: [{ type: "text", text: "Hello! Here is the actual homework question." }],
+      });
+      getLastMessagesMock
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+          {
+            id: "greeting-msg-1",
+            role: "assistant",
+            parts: [{ type: "text", text: "Hello! Here is the actual homework question." }],
+            clientMessageId: null,
+          },
+        ]);
+
+      await postChat(buildApp(fakeAuthContext()), {
+        courseId: "55555555-5555-5555-5555-555555555555",
+        messages: [userUiMessage],
+        kind: "section",
+        sectionId: "11111111-1111-1111-1111-111111111111",
+      });
+
+      const callArgs = streamTextMock.mock.calls[0]![0] as { messages: Array<{ role: string }> };
+      // greeting, then the student's turn -- 2 total, not 3. The greeting
+      // came from persistedHistory (already committed), not a synthetic
+      // prepend on top of it.
+      expect(callArgs.messages).toHaveLength(2);
+      expect(callArgs.messages[0]!.role).toBe("assistant");
+    });
+
     it("#272: does not prepend a greeting on an existing (not freshly-created) conversation", async () => {
       getOwnedConversationOrNullMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
-      getLastMessagesMock.mockResolvedValue([]);
+      getLastMessagesMock
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" }]);
 
       await postChat(buildApp(fakeAuthContext()), {
         messages: [userUiMessage],
@@ -477,6 +759,7 @@ describe("POST /api/chat", () => {
         expect.anything(),
         expect.anything(),
         "conv-existing",
+        expect.anything(),
         expect.anything(),
       );
     });
@@ -641,6 +924,7 @@ describe("POST /api/chat", () => {
       expect.anything(),
       "22222222-2222-2222-2222-222222222222",
       { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+      expect.anything(),
     );
     // Persisted before streamText is invoked -- the model call must not be
     // able to race ahead of the DB write it depends on being durable.
@@ -672,6 +956,120 @@ describe("POST /api/chat", () => {
     expect(res.headers.get("x-conversation-id")).toBe("22222222-2222-2222-2222-222222222222");
   });
 
+  // #317 review, #326 (remaining requirement), #346 (requirement 1):
+  // getConversationById now joins courses for organizationId AND
+  // llmConfigId, so resolveConversation's conversationId branch resolves
+  // both the org scope and the course-level LLM config override off that
+  // same row -- getOrgScopeAndLlmConfigForCourse must not run a second,
+  // fully redundant round-trip for a course this request already read.
+  it("resolves org scope and course LLM config from the joined conversation row instead of a separate call, for an existing conversation", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue({
+      id: "22222222-2222-2222-2222-222222222222",
+      ownerUserId: "u1",
+      courseId: "55555555-5555-5555-5555-555555555555",
+      organizationId: "org-from-join",
+      courseLlmConfigId: null,
+    });
+    getLastMessagesMock.mockResolvedValue([]);
+
+    const res = await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      conversationId: "22222222-2222-2222-2222-222222222222",
+    });
+
+    expect(res.status).toBe(200);
+    expect(getOrgScopeAndLlmConfigForCourseMock).not.toHaveBeenCalled();
+  });
+
+  // #317 review, blocking finding #4: an unreleased section (draft,
+  // scheduled, hidden/expired) must not leak its content into the model's
+  // context, even for an existing conversation started while it was live --
+  // getSectionPromptContext's own doc comment. Collapses to the same
+  // "Section not found" 404 startSectionConversation's own gate uses.
+  describe("#317 blocking finding #4: unreleased-section release gate", () => {
+    it("404s a turn on an existing conversation when the section is unreleased and the caller cannot view drafts", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+        sectionId: "11111111-1111-1111-1111-111111111111",
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+      getSectionPromptContextMock.mockResolvedValue({
+        homeworkTitle: "HW",
+        sectionTitle: "Sec",
+        sectionContent: "The full problem statement.",
+        isUnreleased: true,
+      });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "Section not found", code: "not_found" });
+      // The whole point: the model must never see the section content.
+      expect(streamTextMock).not.toHaveBeenCalled();
+      expect(appendMessageMock).not.toHaveBeenCalled();
+    });
+
+    it("does not gate an unreleased section for a caller who can view drafts (instructor)", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+        sectionId: "11111111-1111-1111-1111-111111111111",
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+      getSectionPromptContextMock.mockResolvedValue({
+        homeworkTitle: "HW",
+        sectionTitle: "Sec",
+        sectionContent: "The full problem statement.",
+        isUnreleased: true,
+      });
+
+      const res = await postChat(
+        buildApp(
+          fakeAuthContext({
+            memberships: [
+              fakeMembership({ courseId: "55555555-5555-5555-5555-555555555555", role: "instructor" }),
+            ],
+          }),
+        ),
+        {
+          messages: [userUiMessage],
+          conversationId: "22222222-2222-2222-2222-222222222222",
+        },
+      );
+
+      expect(res.status).toBe(200);
+    });
+
+    it("does not gate a released section", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+        sectionId: "11111111-1111-1111-1111-111111111111",
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+      getSectionPromptContextMock.mockResolvedValue({
+        homeworkTitle: "HW",
+        sectionTitle: "Sec",
+        sectionContent: "The full problem statement.",
+        isUnreleased: false,
+      });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(200);
+    });
+  });
+
   // #217/#222: getOwnedConversationOrNull collapses "doesn't exist", "exists
   // but isn't yours", and "exists, is yours, but soft-deleted" into null --
   // chatHandler must turn that into a uniform 404 in every case, never a
@@ -688,6 +1086,30 @@ describe("POST /api/chat", () => {
       expect(res.status).toBe(404);
       expect(appendMessageMock).not.toHaveBeenCalled();
       expect(streamTextMock).not.toHaveBeenCalled();
+    });
+
+    // #143: a malformed conversationId must 400 before it ever reaches
+    // getOwnedConversationOrNull (a real Postgres query would reject a
+    // non-uuid literal, surfacing as an uncaught 503 instead of a clean 400).
+    it("400s when conversationId is not a valid UUID, without ever querying the db", async () => {
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "not-a-uuid",
+      });
+
+      expect(res.status).toBe(400);
+      expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
+    });
+
+    it("400s when sectionId is not a valid UUID, without ever calling startSectionConversation", async () => {
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        kind: "section",
+        sectionId: "not-a-uuid",
+      });
+
+      expect(res.status).toBe(400);
+      expect(startSectionConversationMock).not.toHaveBeenCalled();
     });
 
     it("passes the caller's userId to getOwnedConversationOrNull, not just the raw conversationId", async () => {
@@ -937,6 +1359,7 @@ describe("POST /api/chat", () => {
         expect.anything(),
         "22222222-2222-2222-2222-222222222222",
         { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+        expect.anything(),
       );
       expect(streamTextMock).toHaveBeenCalledTimes(1);
     });
@@ -976,6 +1399,7 @@ describe("POST /api/chat", () => {
         expect.anything(),
         "22222222-2222-2222-2222-222222222222",
         { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+        expect.anything(),
       );
     });
 
@@ -1032,6 +1456,7 @@ describe("POST /api/chat", () => {
         expect.anything(),
         "22222222-2222-2222-2222-222222222222",
         { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+        expect.anything(),
       );
     });
   });
@@ -1051,52 +1476,642 @@ describe("POST /api/chat", () => {
         { type: "tool-showDefinition", toolCallId: "call-1", state: "output-available", input: { term: "p-value", body: "..." }, output: { status: "displayed", term: "p-value" } },
       ],
     };
-    await capturedOnFinish!({ responseMessage });
+    await capturedOnFinish!({ responseMessage, finishReason: "stop" });
 
-    expect(appendMessageMock).toHaveBeenCalledWith(
-      expect.anything(),
+    // #317 review, #346 (requirement 3): the assistant persist now goes
+    // through finalizeAssistantTurn (collapsed with the lock release and
+    // the llm_call_logs write), not appendMessage -- appendMessage stays
+    // reserved for the user-message idempotency-insert path.
+    expect(finalizeAssistantTurnMock).toHaveBeenCalledWith(
       expect.anything(),
       "22222222-2222-2222-2222-222222222222",
-      { role: "assistant", parts: responseMessage.parts },
+      { id: expect.any(String), parts: responseMessage.parts },
+      expect.anything(),
     );
   });
 
   it("logs (does not throw) when the assistant persistence write fails inside onFinish", async () => {
     createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
     getLastMessagesMock.mockResolvedValue([]);
-    appendMessageMock.mockImplementation(async (_db, _scope, _id, input) => {
-      if (input.role === "assistant") throw new Error("db unavailable");
-      return { row: { id: "msg-1" }, created: true };
-    });
+    finalizeAssistantTurnMock.mockRejectedValue(new Error("db unavailable"));
 
     await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
     expect(capturedOnFinish).toBeDefined();
 
     await expect(
-      capturedOnFinish!({ responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] } }),
+      capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+        finishReason: "stop",
+      }),
     ).resolves.not.toThrow();
   });
 
-  // #215
-  it("bounds the message array sent to the model to the trailing window on a long conversation", async () => {
-    createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
-    getLastMessagesMock.mockResolvedValue([]);
+  // #317 review, #321: LLM call observability -- a provider failure was
+  // previously invisible on the server (no error rate, no per-provider
+  // breakdown, no latency, no cost). Also folds in the "strongly recommend"
+  // finding that a raw provider error (e.g. a 429's JSON body) reached the
+  // student verbatim via App.tsx's chatError.message.
+  describe("#321 LLM call observability", () => {
+    it("passes onError and onAbort to streamText", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
 
-    const longHistory = Array.from({ length: 60 }, (_, i) => ({
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+
+      const streamTextArgs = streamTextMock.mock.calls[0]![0] as { onError?: unknown; onAbort?: unknown };
+      expect(typeof streamTextArgs.onError).toBe("function");
+      expect(typeof streamTextArgs.onAbort).toBe("function");
+    });
+
+    it("streamText's onError logs without throwing (best-effort)", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      const streamTextArgs = streamTextMock.mock.calls[0]![0] as { onError: (e: { error: unknown }) => void };
+      expect(() => streamTextArgs.onError({ error: new Error("upstream rejected the request") })).not.toThrow();
+      expect(errorSpy).toHaveBeenCalledWith(
+        "[chatHandler.streamText.onError]",
+        expect.objectContaining({ message: expect.stringContaining("upstream rejected the request") }),
+      );
+      errorSpy.mockRestore();
+    });
+
+    it("replaces the client-visible stream error with a safe {error,code} envelope instead of the raw provider error", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      expect(capturedStreamResponseOnError).toBeDefined();
+
+      const clientVisibleMessage = capturedStreamResponseOnError!(
+        new Error('{"error":"You\'re sending messages too quickly. Please slow down."}'),
+      );
+      expect(clientVisibleMessage).not.toContain("sending messages too quickly");
+      // #334: readErrorMessage (packages/ui/ConversationView) parses this as
+      // JSON and classifies by `code`, so the wire shape is the contract, not
+      // a plain sentence.
+      expect(JSON.parse(clientVisibleMessage)).toEqual({
+        error: "The tutor stopped partway through. Nothing you wrote was lost.",
+        code: "tutor_stopped",
+      });
+      errorSpy.mockRestore();
+    });
+
+    it("writes one llm_call_logs row with token/cost/latency data on a successful turn", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      mockUsage = { inputTokens: 100, outputTokens: 50 };
+      mockResponseMeta = { id: "req-abc" };
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+        finishReason: "stop",
+      });
+
+      // #317 review, #346 (requirement 3): the log write is now the 4th
+      // arg of the single finalizeAssistantTurn call, and messageId is no
+      // longer a field on it -- finalizeAssistantTurn derives messageId
+      // itself from the (also caller-generated) assistantMessage id, the
+      // 3rd arg.
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledTimes(1);
+      const [, , assistantMessage, logged] = finalizeAssistantTurnMock.mock.calls[0]! as [
+        unknown,
+        unknown,
+        { id: string } | null,
+        Record<string, unknown>,
+      ];
+      expect(assistantMessage).toEqual({ id: expect.any(String), parts: [{ type: "text", text: "hi" }] });
+      expect(logged).toMatchObject({
+        providerRequestId: "req-abc",
+        inputTokens: 100,
+        outputTokens: 50,
+        errorFlag: false,
+      });
+      expect(typeof logged.latencyMs).toBe("number");
+    });
+
+    it("passes a null assistantMessage (and errorFlag true) when the turn is aborted", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "half-sen" }] },
+        isAborted: true,
+      });
+
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledTimes(1);
+      const [, , assistantMessage, logged] = finalizeAssistantTurnMock.mock.calls[0]! as [
+        unknown,
+        unknown,
+        unknown,
+        Record<string, unknown>,
+      ];
+      expect(assistantMessage).toBeNull();
+      expect(logged).toMatchObject({ errorFlag: true });
+      expect(appendMessageMock).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ role: "assistant" }),
+        expect.anything(),
+      );
+    });
+
+    it("passes a null assistantMessage (and errorFlag true) when finishReason is 'error'", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "" }] },
+        finishReason: "error",
+      });
+
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledTimes(1);
+      const [, , assistantMessage, logged] = finalizeAssistantTurnMock.mock.calls[0]! as [
+        unknown,
+        unknown,
+        unknown,
+        Record<string, unknown>,
+      ];
+      expect(assistantMessage).toBeNull();
+      expect(logged).toMatchObject({ errorFlag: true });
+    });
+
+    it("a finalizeAssistantTurn failure does not throw out of onFinish (best-effort)", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      finalizeAssistantTurnMock.mockRejectedValue(new Error("db unavailable"));
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+
+      await expect(
+        capturedOnFinish!({ responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] } }),
+      ).resolves.not.toThrow();
+    });
+
+    // #317 review, #349 (requirement 1): nothing previously read
+    // result.warnings -- e.g. temperature silently dropped by the AI SDK's
+    // reasoning-model heuristic (SUPPORTS_REASONING_EFFORT_NONE's own doc
+    // comment, chat.ts) had no visible trace anywhere. Logged (not thrown,
+    // not persisted) so it's at least discoverable.
+    it("logs streamText warnings when present, alongside the llm_call_logs write", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      mockWarnings = [{ type: "unsupported-setting", setting: "temperature", details: "reasoning models do not support temperature" }];
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+        finishReason: "stop",
+      });
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        "[chatHandler.onFinish.warnings]",
+        expect.objectContaining({ message: expect.stringContaining("temperature") }),
+      );
+      errorSpy.mockRestore();
+    });
+
+    it("does not log anything when streamText reports no warnings", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      mockWarnings = undefined;
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+        finishReason: "stop",
+      });
+
+      expect(errorSpy).not.toHaveBeenCalledWith("[chatHandler.onFinish.warnings]", expect.anything());
+      errorSpy.mockRestore();
+    });
+  });
+
+  // #317 review, #349: the reasoning-model temperature escape hatch.
+  describe("#349 SUPPORTS_REASONING_EFFORT_NONE / providerOptions", () => {
+    it("passes reasoningEffort: none for a gpt-5.1-5.4 family model, so llm_configs.temperature isn't silently dropped", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      resolveLLMConfigMock.mockResolvedValueOnce({
+        id: "llm-config-1",
+        provider: "llmoxie",
+        modelName: "gpt-5.3-codex",
+        temperature: 0.2,
+        maxCompletionTokens: 1000,
+        credentialId: null,
+        pricePerMillionInputTokens: null,
+        pricePerMillionOutputTokens: null,
+      });
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+
+      const callArgs = streamTextMock.mock.calls[0]![0] as { providerOptions?: unknown };
+      expect(callArgs.providerOptions).toEqual({ openai: { reasoningEffort: "none" } });
+    });
+
+    it("does not set providerOptions for a model outside the gpt-5.1-5.4 family", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      resolveLLMConfigMock.mockResolvedValueOnce({
+        id: "llm-config-1",
+        provider: "openrouter",
+        modelName: "google/gemma-4-31b-it:free",
+        temperature: 0.7,
+        maxCompletionTokens: 1000,
+        credentialId: null,
+        pricePerMillionInputTokens: null,
+        pricePerMillionOutputTokens: null,
+      });
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+
+      const callArgs = streamTextMock.mock.calls[0]![0] as { providerOptions?: unknown };
+      expect(callArgs.providerOptions).toBeUndefined();
+    });
+  });
+
+  // #317 review, #350 (requirement 2): result.totalUsage/response/warnings
+  // all derive from a promise that a genuinely cancelled stream never
+  // resolves -- onFinish used to hang forever waiting on it, meaning no
+  // lock release and no llm_call_logs row for a stopped turn. mockHangUsageFetch
+  // reproduces that hang; vi.useFakeTimers lets the test advance past
+  // USAGE_FETCH_TIMEOUT_MS instantly instead of waiting the real 5s.
+  describe("#350: onFinish does not hang forever when usage/response never resolve", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("finalizes the turn (null usage/cost, errorFlag true) instead of hanging when totalUsage/response never settle", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      mockHangUsageFetch = true;
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      expect(capturedOnFinish).toBeDefined();
+
+      const onFinishPromise = capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "half-sen" }] },
+        isAborted: false,
+        finishReason: undefined,
+      });
+
+      // Real time never advances in this test -- if the race didn't work,
+      // this would hang forever and the test would time out instead of
+      // resolving. Advancing fake time past USAGE_FETCH_TIMEOUT_MS is what
+      // proves the timeout branch actually fires.
+      await vi.advanceTimersByTimeAsync(5_000);
+      await onFinishPromise;
+
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+        null,
+        expect.objectContaining({
+          providerRequestId: null,
+          inputTokens: null,
+          outputTokens: null,
+          costCents: null,
+          errorFlag: true,
+        }),
+      );
+    });
+
+    it("does not time out when totalUsage/response resolve quickly (the normal case)", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      mockHangUsageFetch = false;
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+        finishReason: "stop",
+      });
+
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+        expect.objectContaining({ id: expect.any(String) }),
+        expect.objectContaining({ errorFlag: false }),
+      );
+    });
+  });
+
+  // #317 review, #322: the per-conversation turn lock. Two concurrent sends
+  // on one conversation used to interleave into Q_a, Q_b, A_a, A_b with no
+  // ordering guarantee; a lost-response retry could permanently 409 even
+  // though the real answer was already persisted. The lock closes the race
+  // at its source (before the idempotency read, not just around the model
+  // call) instead of only detecting it after the fact.
+  describe("#322 per-conversation turn lock", () => {
+    it("409s immediately when another turn already holds the lock for this conversation, without touching the model or persisting anything", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      acquireConversationTurnLockMock.mockResolvedValue(false);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: "Another message for this conversation is still being processed. Please wait a moment and try again.",
+        code: "in_progress",
+      });
+      expect(getLastMessagesMock).not.toHaveBeenCalled();
+      expect(appendMessageMock).not.toHaveBeenCalled();
+      expect(streamTextMock).not.toHaveBeenCalled();
+    });
+
+    it("acquires the lock before the idempotency read", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(acquireConversationTurnLockMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+        expect.any(Number),
+      );
+      const acquireOrder = acquireConversationTurnLockMock.mock.invocationCallOrder[0]!;
+      const getLastMessagesOrder = getLastMessagesMock.mock.invocationCallOrder[0]!;
+      expect(acquireOrder).toBeLessThan(getLastMessagesOrder);
+    });
+
+    it("releases the lock without ever calling the model when the turn replays", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      const answered = { id: "a1", role: "assistant", parts: [{ type: "text", text: "the answer" }], clientMessageId: null };
+      getLastMessagesMock.mockResolvedValue([answered, { id: "u1", role: "user", parts: [], clientMessageId: "client-1" }]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(200);
+      expect(streamTextMock).not.toHaveBeenCalled();
+      expect(releaseConversationTurnLockMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+      );
+    });
+
+    // #317 review, #346 (requirement 3): the lock release folded into
+    // finalizeAssistantTurn's own db.batch()/transaction (see that
+    // function's doc comment, repositories/conversations.ts) -- these three
+    // tests now assert finalizeAssistantTurn ran instead of a separate
+    // releaseConversationTurnLock call; finalizeAssistantTurn's own tests
+    // (conversations.test.ts, and the real-DB suite) cover that its batch
+    // actually clears processingStartedAt.
+    it("calls finalizeAssistantTurn (lock release + persist + log, one batch) once the stream finishes successfully", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      expect(capturedOnFinish).toBeDefined();
+      expect(finalizeAssistantTurnMock).not.toHaveBeenCalled();
+
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+        finishReason: "stop",
+      });
+
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+        expect.objectContaining({ id: expect.any(String) }),
+        expect.anything(),
+      );
+    });
+
+    it("calls finalizeAssistantTurn (releasing the lock) even when the turn is aborted (no renderable content persisted)", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      expect(capturedOnFinish).toBeDefined();
+
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "half-sen" }] },
+        isAborted: true,
+      });
+
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+        null,
+        expect.anything(),
+      );
+      expect(appendMessageMock).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ role: "assistant" }),
+        expect.anything(),
+      );
+    });
+
+    it("a finalizeAssistantTurn failure (lock release + persist + log) does not throw out of onFinish (best-effort)", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      finalizeAssistantTurnMock.mockRejectedValue(new Error("db unavailable"));
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      expect(capturedOnFinish).toBeDefined();
+
+      await expect(
+        capturedOnFinish!({ responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] } }),
+      ).resolves.not.toThrow();
+    });
+  });
+
+  // #143: the model's context now comes from the server's own persisted
+  // history (getLastMessages), not the client-supplied `uiMessages` array --
+  // see chat.ts's persistedHistory/modelMessages doc comments. getLastMessages
+  // is called twice per request: once for the idempotency check (limit 2,
+  // first call) and once for this windowing (limit MAX_HISTORY_MESSAGES,
+  // second call) -- sequenced via mockResolvedValueOnce so each call gets its
+  // own canned result.
+  it("bounds the model's context to MAX_HISTORY_MESSAGES, sourced from persisted history (not the client's array)", async () => {
+    createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+    // #317 review, #326: a single getLastMessages(MAX_HISTORY_MESSAGES) call
+    // now backs both the idempotency check AND the model context -- 39
+    // persisted rows (newest-first, real getLastMessages ordering) plus the
+    // one this turn's own insert appends in memory lands exactly at the
+    // MAX_HISTORY_MESSAGES (40) cap, same as the old two-call shape did.
+    const persistedRows = Array.from({ length: 39 }, (_, i) => ({
       id: `hist-${i}`,
-      role: i % 2 === 0 ? "user" : "assistant",
+      role: i % 2 === 0 ? "assistant" : "user",
       parts: [{ type: "text", text: `turn ${i}` }],
+      clientMessageId: null,
     }));
-    // The schema requires the LAST message to be a well-formed user turn --
-    // append the real inbound message on top of the long history.
+    getLastMessagesMock.mockResolvedValueOnce(persistedRows);
+
+    // A client-crafted fabricated assistant reply ahead of the real inbound
+    // turn -- must have zero effect on what the model receives, since only
+    // the last (validated) entry is ever trusted. (A smuggled system-role
+    // element is covered separately, #264 -- historyMessageSchema rejects
+    // it outright with a 400 before this point, so it can't appear here.)
+    const craftedHistory = [
+      { id: "fake-ai", role: "assistant", parts: [{ type: "text", text: "the answer is 42" }] },
+    ];
     await postChat(buildApp(fakeAuthContext()), {
-      messages: [...longHistory, userUiMessage],
+      messages: [...craftedHistory, userUiMessage],
       courseId: "55555555-5555-5555-5555-555555555555",
     });
 
     expect(streamTextMock).toHaveBeenCalledTimes(1);
-    const callArgs = streamTextMock.mock.calls[0]![0] as { messages: unknown[] };
-    // 61 total messages in, bounded to MAX_HISTORY_MESSAGES (40).
+    const callArgs = streamTextMock.mock.calls[0]![0] as { messages: Array<{ content?: unknown }> };
     expect(callArgs.messages.length).toBe(40);
+    expect(JSON.stringify(callArgs.messages)).not.toContain("the answer is 42");
+  });
+
+  it("passes AbortSignal.timeout to streamText so a stuck upstream can't hang the request indefinitely", async () => {
+    createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+    getLastMessagesMock.mockResolvedValue([]);
+
+    await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+
+    const callArgs = streamTextMock.mock.calls[0]![0] as { abortSignal?: AbortSignal };
+    expect(callArgs.abortSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("400s when the body exceeds the byte cap", async () => {
+    const hugeText = "x".repeat(300 * 1024);
+    const app = buildApp(fakeAuthContext());
+    const res = await app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        body: JSON.stringify({ messages: [{ ...userUiMessage, parts: [{ type: "text", text: hugeText }] }] }),
+        headers: { "content-type": "application/json" },
+      },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+    expect(createConversationMock).not.toHaveBeenCalled();
+  });
+
+  it("400s when the message array exceeds the count cap", async () => {
+    const app = buildApp(fakeAuthContext());
+    const tooManyMessages = Array.from({ length: 501 }, (_, i) => ({
+      id: `m${i}`,
+      role: "user",
+      parts: [{ type: "text", text: "hi" }],
+    }));
+    const res = await app.request(
+      "/api/chat",
+      {
+        method: "POST",
+        body: JSON.stringify({ messages: tooManyMessages }),
+        headers: { "content-type": "application/json" },
+      },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+    expect(createConversationMock).not.toHaveBeenCalled();
+  });
+
+  it("still accepts a normal-sized request (byte/count caps don't false-positive)", async () => {
+    createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+    getLastMessagesMock.mockResolvedValue([]);
+    const res = await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+    expect(res.status).toBe(200);
+  });
+
+  describe("#326 write back resolved prompt_template_id when a conversation has no pin", () => {
+    it("pins the resolved template id when the conversation has no promptTemplateId and resolution finds a real row", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+        sectionId: null,
+        promptTemplateId: null,
+      });
+      resolvePromptTemplateMock.mockResolvedValue({ id: "template-9", content: "real template", version: 1 });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(200);
+      expect(pinConversationPromptTemplateMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+        "template-9",
+      );
+    });
+
+    it("does not attempt to pin when the conversation already has a promptTemplateId", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+        sectionId: null,
+        promptTemplateId: "already-pinned",
+      });
+      getPinnedPromptTemplateContentMock.mockResolvedValue("pinned content");
+      getLastMessagesMock.mockResolvedValue([]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(200);
+      expect(pinConversationPromptTemplateMock).not.toHaveBeenCalled();
+    });
+
+    it("does not attempt to pin when resolution falls through to the built-in default (no real row)", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+        sectionId: null,
+        promptTemplateId: null,
+      });
+      resolvePromptTemplateMock.mockResolvedValue({ id: null, content: "default prompt", version: null });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(200);
+      expect(pinConversationPromptTemplateMock).not.toHaveBeenCalled();
+    });
   });
 });
