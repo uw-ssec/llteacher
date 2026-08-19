@@ -1,10 +1,21 @@
 /* --------------------------------------------------------------------------
    POST /api/chat — Vercel AI SDK chat endpoint.
 
-   Receives the client's UIMessage history, converts to model messages,
-   calls OpenRouter via streamText with one display tool (showDefinition),
-   and streams the response back in the UI message stream format that the
-   client's useChat hook understands.
+   #317 review, #353: this header previously said "receives the client's
+   UIMessage history" and "calls OpenRouter" -- both stopped being true
+   earlier in the same PR and were never updated here, the same defect
+   class the prior review already caught four lines below (#26's own doc
+   comment). The client (prepareSendMessagesRequest, client/App.tsx) sends
+   only its LAST message per turn -- everything before that is rebuilt
+   server-side from persistedHistory (see the Persistence section below).
+   And the provider/model are resolved per-conversation (#26,
+   lib/llm-config.ts) to whichever of openrouter or llmoxie the resolved
+   llm_configs row names -- llmoxie is every org's intended default as of
+   migration 0035, not openrouter.
+
+   Converts the resolved history to model messages, calls streamText with
+   one display tool (showDefinition), and streams the response back in the
+   UI message stream format that the client's useChat hook understands.
 
    The model can produce either:
      · plain markdown text   — rendered as paragraphs in the AI message
@@ -196,10 +207,19 @@ const CLIENT_MESSAGE_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_TEXT_PART_LENGTH = 8_000;
 // #308: also no bound on how many parts a single message could carry (a
 // message legitimately produced by this app's own composer/tool loop has a
-// handful at most) or how many messages the whole request could carry (the
-// client sends its full local history every turn, #3 pitfall 3) -- both
-// were `.min(1)` with no `.max()`, and `messages` itself was checked only
-// for `length > 0`.
+// handful at most) or how many messages the whole request could carry --
+// both were `.min(1)` with no `.max()`, and `messages` itself was checked
+// only for `length > 0`.
+//
+// #317 review, #353: "the client sends its full local history every turn"
+// stopped being true in this same PR -- prepareSendMessagesRequest
+// (client/App.tsx) now trims the request body to the single last message
+// (#3 pitfall 3's fix, see resolveConversation's own doc comment below)
+// before it ever reaches this route. This cap still exists, and every
+// element still gets validated (#264, below), because that trim is a
+// CLIENT-side behavior this server-side check cannot trust -- a caller
+// that skips the browser entirely can still POST an arbitrarily large
+// array directly.
 const MAX_PARTS_PER_MESSAGE = 32;
 // Generous relative to MAX_HISTORY_MESSAGES (40, the trailing window
 // actually forwarded to the model below) -- this bounds the REQUEST, not
@@ -573,9 +593,25 @@ export function classifyTurn(
 /** #312: conversation resolution, extracted from chatHandler -- this step
  *  has no coupling to streaming or the model call at all; it was folded into
  *  the same function only because it happened to run first. Returns a
- *  Response directly for every early-exit case (404/403/400/409) so
- *  chatHandler's own body stays a thin "resolve, then stream" dispatcher --
- *  callers must check `instanceof Response` before touching `.conv`. */
+ *  Response directly for every early-exit case (404/403/400/409) so this
+ *  one seam, at least, is independently testable and doesn't require
+ *  reading chatHandler's own body to follow -- callers must check
+ *  `instanceof Response` before touching `.conv`.
+ *
+ *  #317 review, #353: this comment used to claim the extraction "leaves
+ *  chatHandler's own body a thin 'resolve, then stream' dispatcher" --
+ *  measured false the moment it was written, and more so with every #317
+ *  review round since (request validation, rate limiting, prompt/config
+ *  resolution, the release gate, lock acquisition, history fetch, turn
+ *  classification, replay, model-context assembly, the streamText call,
+ *  and its three stream callbacks all still live in chatHandler itself).
+ *  `classifyTurn` (below) is the other extracted seam; the rest of that
+ *  list are real candidates for the same treatment
+ *  (`validateChatRequest`, `resolvePromptAndConfig`, `prepareTurn`) but
+ *  aren't done -- correcting the claim rather than leaving it stated as
+ *  true, per the same review's own reasoning: a doc comment asserting an
+ *  architectural property the code doesn't have is worse than no comment
+ *  at all. */
 async function resolveConversation(
   c: Context<AppEnv>,
   db: Db,
@@ -854,14 +890,21 @@ export async function chatHandler(c: Context<AppEnv>) {
     }
   }
 
-  // Full history vs. incremental (#3 pitfall 3): the client still sends the
-  // whole UIMessage[] history (useChat's own local state), but only the
-  // LAST message -- the one just typed -- is trusted for anything. It gets
-  // validated below and is the only part of `uiMessages` that gets
-  // persisted or reaches the model; #143 stopped building the model's
-  // context from the rest of this client-supplied array (see the
-  // persistedHistory fetch further down) specifically because nothing
-  // before the last entry is checked here.
+  // Full history vs. incremental (#3 pitfall 3): only the LAST message --
+  // the one just typed -- is trusted for anything, regardless of what
+  // `uiMessages` actually contains.
+  //
+  // #317 review, #353: as of prepareSendMessagesRequest (client/App.tsx),
+  // a real browser client trims the REQUEST BODY to that one message
+  // before it's ever sent -- `uiMessages` here is length 1 on every real
+  // turn, not the whole array useChat's own local state still holds
+  // client-side. This route still validates every element defensively
+  // (#264, above) and still only trusts the last one for anything: a
+  // caller that bypasses the browser (and its trim) can still POST a
+  // longer array directly, and nothing before the last entry gets
+  // persisted or reaches the model either way -- #143 stopped building the
+  // model's context from this client-supplied array at all (see the
+  // persistedHistory fetch further down).
   const inboundMessage = uiMessages[uiMessages.length - 1];
   const parsedInbound = inboundUserMessageSchema.safeParse(inboundMessage);
   if (!parsedInbound.success) {

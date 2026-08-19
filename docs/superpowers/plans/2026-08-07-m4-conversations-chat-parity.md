@@ -2,6 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to execute this plan issue-by-issue (one fresh subagent per GitHub issue, task review after each, whole-branch review per PR). Scope: GitHub milestone 4 (21 issues as of the 2026-08-11 sync — see below) + the M3 issues that are blocked on M4 work. Broken into 4 sequential, independently-mergeable PRs. Ends with a full epic acceptance pass against issue #30's own checklist.
 
+## 2026-08-19 sync check (#340/#343 supersede this plan's own default-model claim)
+
+The 2026-08-15 entry below (Blocking #1/#2) named `openrouter`/
+`google/gemma-4-31b-it:free` as the new default -- accurate when written,
+but superseded the same PR by #340/#343 (migration 0035,
+`apps/web/scripts/seed.ts:245-246`): every organization's default
+`llm_configs` row is `llmoxie`/`gpt-5.3-codex` now, and `LLMOXIE_API_KEY`
+(not `OPENROUTER_API_KEY`) is the binding a real deploy needs set for
+chat to work at all -- see #343's own commit and `apps/web/README.md`'s
+"Deploying" section. Flagged here (#317 review, #353) so an operator
+reading only the entry below doesn't provision the wrong secret.
+
 ## 2026-08-15 sync check (PR2 review-response pass)
 
 Cordero's review on [PR #317](https://github.com/uw-ssec/llteacher/pull/317) requested changes on 5 items and filed 7 follow-up issues (#321–#327) from an 11-axis audit, explicitly marked not blocking. Per Kshitij's decision, this pass fixes **all of it inline on `m4-conv-chat-pr2`** — the 5 blocking items, the 3 "strongly recommend" items, and 6 of the 7 deferred issues (#327's code-level fixes land; its manual-AT-verification requirement needs a human with a real screen reader, tracked as a residual).

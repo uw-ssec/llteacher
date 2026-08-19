@@ -23,7 +23,7 @@ import { deriveHomeworkStatus, isUnreleased } from "../server/repositories/homew
    Resolved ONCE per conversation (at creation, by the caller -- see
    sectionConversations.ts/conversations.ts) and the chosen template's id is
    pinned onto conversations.promptTemplateId, never re-resolved per-message
-   (cross-cutting invariant, #30). chat.ts uses getPinnedPromptTemplate for
+   (cross-cutting invariant, #30). chat.ts uses getPinnedPromptTemplateContent for
    that pinned id, falling back to a fresh resolvePromptTemplate call only
    for conversations that predate the promptTemplateId column.
    -------------------------------------------------------------------------- */
