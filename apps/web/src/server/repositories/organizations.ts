@@ -41,3 +41,22 @@ export async function getOrgScopeForCourse(db: Db, courseId: string): Promise<Or
   });
   return course ? unsafeOrgScope(course.organizationId) : null;
 }
+
+/** #317 review, #346 (requirement 1): the org-scope + course-level LLM
+ *  config override in one round-trip, for chat.ts's two conversation-
+ *  creation branches (resolveConversation's own doc comment) -- the only
+ *  callers that don't already have a `courses` row's llmConfigId for free
+ *  from an earlier join. Kept separate from getOrgScopeForCourse above
+ *  (not a widened return type on that function) because that function has
+ *  many callers that want only the org scope and have no reason to pull in
+ *  a lib/llm-config.ts-shaped column alongside it. */
+export async function getOrgScopeAndLlmConfigForCourse(
+  db: Db,
+  courseId: string,
+): Promise<{ orgScope: OrgScope; courseLlmConfigId: string | null } | null> {
+  const course = await db.query.courses.findFirst({
+    where: eq(courses.id, courseId),
+    columns: { organizationId: true, llmConfigId: true },
+  });
+  return course ? { orgScope: unsafeOrgScope(course.organizationId), courseLlmConfigId: course.llmConfigId } : null;
+}

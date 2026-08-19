@@ -113,6 +113,26 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
           hidden: false, expiresAt: undefined,
         },
   });
+  /* #317 review, "strongly recommend before merge" -- carried across the
+     #317/#363 merge, where this branch's rewrite of the picker dropped it:
+     the <select> below is uncontrolled (register()), so its DOM value on
+     mount is whatever <option> matches defaultValues.llmConfigId. If the
+     assigned config is inactive (llmConfigs is pre-filtered to isActive) or
+     the fetch failed, no matching <option> exists and the browser silently
+     falls back to the FIRST option, "(course/org default)". Saving an
+     unrelated field edit then PATCHes llmConfigId: "" -> null, dropping the
+     override with no warning. Always including the currently-assigned id as
+     its own option -- even when it's missing from the active list -- means
+     the DOM's initial value always has somewhere real to land.
+
+     Typed as the {id, name} subset the <option> actually reads, rather than
+     LlmConfigPayload[]: the synthesised entry is a placeholder for a config
+     this form could not load, so it has no real payload to stand in for. */
+  const assignedConfigId = initialData?.llmConfigId ?? undefined;
+  const selectableConfigs: { id: string; name: string }[] =
+    assignedConfigId && !llmConfigs.some((cfg) => cfg.id === assignedConfigId)
+      ? [...llmConfigs, { id: assignedConfigId, name: "Currently assigned (inactive or unavailable)" }]
+      : llmConfigs;
   const { fields, append, remove } = useFieldArray({ control, name: "sections" });
   const { fields: widgetFields, append: appendWidget, remove: removeWidget } = useFieldArray({ control, name: "widgets" });
 
@@ -197,7 +217,7 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
         <label htmlFor="hw-llm-config">LLM config</label>
         <select id="hw-llm-config" {...register("llmConfigId")}>
           <option value="">(course/org default)</option>
-          {llmConfigs.map((cfg) => <option key={cfg.id} value={cfg.id}>{cfg.name}</option>)}
+          {selectableConfigs.map((cfg) => <option key={cfg.id} value={cfg.id}>{cfg.name}</option>)}
         </select>
       </div>
 
@@ -368,9 +388,21 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
           "+ Add section+ Add progress widgetSave" -- the commitment carrying
           no more weight than the two controls that merely extend a list. */}
       <div className="admin-form-actions">
-        <Button type="submit" variant="accent" disabled={isLoading}>
-          {isLoading ? "Saving…" : "Save"}
+        {/* #317 review (#345 accessibility) -- carried across the #317/#363
+            merge, where this branch's `disabled={isLoading}` regressed it.
+            A native `disabled` drops Save out of the tab order mid-save, so
+            a keyboard user loses their place and hears nothing. `loading`
+            keeps Save focusable, sets aria-disabled/aria-busy, and merely
+            refuses re-activation; the role="status" line gives AT something
+            to announce while the save runs. */}
+        <Button type="submit" variant="accent" loading={isLoading}>
+          Save
         </Button>
+        {isLoading && (
+          <p className="sr-only" role="status">
+            Saving homework…
+          </p>
+        )}
       </div>
     </form>
   );

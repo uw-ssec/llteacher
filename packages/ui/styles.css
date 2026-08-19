@@ -1427,6 +1427,18 @@ body {
     text-transform: uppercase;
     color: var(--color-text-muted);
     font-variant: small-caps;
+    margin: 0;
+  }
+
+  /* #248: wraps .breadcrumb + an optional header action (e.g. "Restart
+     section") on one row -- carries the divider/spacing .breadcrumb used to
+     own alone, so the rule (and the composer/message column below it) reads
+     identically whether or not a caller passes headerActions. */
+  .conversation-header-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-4);
     padding-block-end: var(--space-6);
     border-block-end: 1px solid var(--color-border);
     margin-block-end: var(--space-6);
@@ -1657,6 +1669,18 @@ body {
   }
 
   /* -------------------------------------------------------------------------
+     .conversation-stop-row — #274: a Stop affordance above the composer
+     while a turn is genuinely outstanding, so a merely-slow (not yet timed
+     out) response has an escape hatch beyond a full page reload.
+     ------------------------------------------------------------------------- */
+  .conversation-stop-row {
+    display: flex;
+    justify-content: flex-end;
+    padding-inline: var(--space-4);
+    margin-block-start: var(--space-2);
+  }
+
+  /* -------------------------------------------------------------------------
      .error-boundary-fallback — #144: shown in place of a chat column that
      threw during render, instead of white-screening the whole app. See
      packages/ui/src/components/ErrorBoundary.tsx.
@@ -1815,6 +1839,17 @@ body {
 
   .message__ai-body p {
     margin: 0;
+  }
+
+  /* #317 review, #352: the trailing note on a reply the student stopped
+     mid-stream -- visually distinct from the reply's own text (muted,
+     smaller, no top margin collapse with the last real paragraph) so it
+     reads as metadata about the turn, not as more of the tutor's answer. */
+  .message__stopped-note {
+    margin-block-start: var(--space-3) !important;
+    font-size: var(--font-size-sm);
+    color: var(--color-text-muted);
+    font-style: italic;
   }
 
   /* Student message — right-aligned bubble with distinctive corner radius */
@@ -2074,14 +2109,49 @@ body {
     color: var(--color-accent-hover);
   }
 
+  /* #317 review, #327: same #296 remedy as .tutor-sidebar__new-btn above --
+     --color-border-strong measured 1.48:1 against --color-bg and 1.40:1
+     against the dialog surface, well under WCAG 1.4.11's 3:1 for a
+     component boundary. Applies to every outlined button regardless of
+     variant (Stop, Restart section, the confirm dialog's Cancel) --
+     --color-accent clears 3:1 in both light and dark themes (it's already
+     used as body text/link color at well over that ratio) and reads as a
+     visually neutral border even on a non-accent-variant button, the same
+     way --color-border-strong was meant to before it failed contrast. */
   .btn--outlined {
-    border: 1px solid var(--color-border-strong);
+    border: 1px solid var(--color-accent);
     border-radius: var(--radius-sm);
     padding: var(--space-2) var(--space-3);
   }
 
   .btn--outlined:hover {
-    border-color: var(--color-text-muted);
+    border-color: var(--color-accent-hover);
+  }
+
+  /* #317 review, #327: had no definition anywhere -- every destructive
+     control (Remove section, Remove widget, the confirm dialog's
+     destructive Confirm) fell back to plain secondary text with no visual
+     weight, inverting the hierarchy in a confirm dialog where the
+     destructive action should read as MORE prominent, not less, than
+     Cancel. Underline is the non-colour cue WCAG 1.4.1 asks for (colour
+     alone must not be the only way a destructive action is distinguished)
+     -- --color-error's own contrast is unaffected by variant/theme, so no
+     separate dark-mode override is needed here. */
+  .btn--danger {
+    color: var(--color-error);
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+  }
+
+  .btn--danger:hover {
+    color: var(--color-error);
+    text-decoration-thickness: 2px;
+  }
+
+  .btn--danger.btn--outlined,
+  .btn--danger.btn--outlined:hover {
+    border-color: var(--color-error);
   }
 
   .btn:disabled,
@@ -5281,6 +5351,56 @@ body {
 .admin-solution summary:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
+}
+
+/* -------------------------------------------------------------------------
+   .alert-dialog — AlertDialog (#248): labelled, focus-trapped,
+   Escape-dismissible confirm dialog for destructive actions. Built on the
+   native <dialog> element; ::backdrop styles the dimming layer it creates
+   automatically on showModal().
+   ------------------------------------------------------------------------- */
+.alert-dialog {
+  max-width: 28rem;
+  width: calc(100% - var(--space-8));
+  padding: var(--space-6);
+  border: none;
+  border-radius: var(--radius-lg);
+  background-color: var(--color-surface-raised);
+  color: var(--color-text);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.28);
+}
+
+.alert-dialog::backdrop {
+  background-color: rgba(0, 0, 0, 0.4);
+}
+
+.alert-dialog__title {
+  margin: 0 0 var(--space-3) 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-lg);
+  font-weight: var(--weight-semibold);
+}
+
+.alert-dialog__description {
+  margin: 0 0 var(--space-6) 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--leading-body);
+  color: var(--color-text-secondary);
+}
+
+.alert-dialog__description p {
+  margin: 0 0 var(--space-3) 0;
+}
+
+.alert-dialog__description p:last-child {
+  margin-bottom: 0;
+}
+
+.alert-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
 }
 
 /* ==========================================================================

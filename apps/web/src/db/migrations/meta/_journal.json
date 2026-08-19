@@ -194,22 +194,99 @@
     {
       "idx": 27,
       "version": "7",
-      "when": 1787079279890,
-      "tag": "0027_ta_capability_dropped_constraint",
+      "when": 1786655456340,
+      "tag": "0027_certain_master_mold",
       "breakpoints": true
     },
     {
       "idx": 28,
       "version": "7",
-      "when": 1787081020615,
-      "tag": "0028_llm_config_authoring",
+      "when": 1786659209225,
+      "tag": "0028_pale_karnak",
       "breakpoints": true
     },
     {
       "idx": 29,
       "version": "7",
-      "when": 1787082589899,
-      "tag": "0029_grading_workflow",
+      "when": 1786762063718,
+      "tag": "0029_default_llm_configs_and_provider_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1786763013243,
+      "tag": "0030_jittery_weapon_omega",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1786765336783,
+      "tag": "0031_good_whistler",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1786765596115,
+      "tag": "0032_ordinary_grey_gargoyle",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1786766766092,
+      "tag": "0033_quick_calypso",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1786991449619,
+      "tag": "0034_breezy_hedge_knight",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1786992386348,
+      "tag": "0035_llmoxie_default_config",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1787082235612,
+      "tag": "0036_llm_call_logs_set_null_on_delete",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1787084531919,
+      "tag": "0037_prompt_templates_org_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1787099921995,
+      "tag": "0038_drop_inert_homework_section_prompt_template_fk",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1787101291267,
+      "tag": "0039_llm_configs_price_per_million_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1787170634700,
+      "tag": "0040_llm_config_authoring_ta_capability_grading",
       "breakpoints": true
     }
   ]

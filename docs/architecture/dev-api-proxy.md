@@ -35,7 +35,7 @@ Critically, this means:
 
 - The **same Hono code** runs in dev and prod
 - HMR + source maps work via Vite SSR
-- `.dev.vars` is parsed manually so secrets like `OPENROUTER_API_KEY` are available
+- `.dev.vars` is parsed manually so secrets like `LLMOXIE_API_KEY`/`OPENROUTER_API_KEY` are available
 - Streaming responses (SSE, AI SDK UI message stream) pass through correctly via a ReadableStream reader loop
 
 ## How it works
@@ -45,6 +45,7 @@ Critically, this means:
 `.dev.vars` uses Cloudflare's format (not Vite's `.env`):
 
 ```
+LLMOXIE_API_KEY=llmoxie-key-...
 OPENROUTER_API_KEY=sk-or-...
 DATABASE_URL=postgres://...
 ```
@@ -118,7 +119,7 @@ A quick check: comment out `devApiProxy` from the `plugins` array and curl `/api
 |---|---|---|
 | Edit `vite.config.ts` while dev is running | The proxy middleware doesn't HMR — config changes don't take effect | Restart `npx turbo dev` |
 | Worker throws at module load | Vite SSR caches the failed module; subsequent requests fail with the same error | Restart Vite, fix the error |
-| `.dev.vars` missing | `env` has only the `ASSETS` stub; routes requiring `OPENROUTER_API_KEY` return 500 with a "not set" message | Add the key |
+| `.dev.vars` missing | `env` has only the `ASSETS` stub; `/api/chat` returns 500 with a "no valid LLM configuration available" message (#343 -- `LLMOXIE_API_KEY` is the binding every org's default config needs; `OPENROUTER_API_KEY` only matters for a config that explicitly uses that provider) | Add the key(s) |
 | `.dev.vars` in `apps/web/` not workspace root | `loadDevVars(workspaceRoot)` resolves it correctly — workspace root is `apps/web/` | n/a — works as expected |
 | Streamed response hangs | The reader loop is awaiting forever | Check Worker logs; likely a downstream stream that never closes |
 

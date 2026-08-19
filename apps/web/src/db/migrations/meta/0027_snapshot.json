@@ -1,5 +1,5 @@
 {
-  "id": "6ee9db7b-e698-44ea-961a-ad9c11b0094e",
+  "id": "2e2eb456-1724-4674-883d-091d8bb0fced",
   "prevId": "d673e4cf-ab93-4488-b1b5-86db0233ab8a",
   "version": "7",
   "dialect": "postgresql",
@@ -226,7 +226,7 @@
         },
         "course_memberships_capabilities_require_ta": {
           "name": "course_memberships_capabilities_require_ta",
-          "value": "(\"course_memberships\".\"role\" = 'ta' AND \"course_memberships\".\"dropped_at\" IS NULL) OR (\"course_memberships\".\"can_view_solutions\" = false AND \"course_memberships\".\"can_view_drafts\" = false)"
+          "value": "\"course_memberships\".\"role\" = 'ta' OR (\"course_memberships\".\"can_view_solutions\" = false AND \"course_memberships\".\"can_view_drafts\" = false)"
         }
       },
       "isRLSEnabled": false
@@ -2738,6 +2738,12 @@
           "notNull": true,
           "default": false
         },
+        "prompt_template_id": {
+          "name": "prompt_template_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "is_deleted": {
           "name": "is_deleted",
           "type": "boolean",
@@ -2918,6 +2924,19 @@
             "id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "conversations_prompt_template_id_prompt_templates_id_fk": {
+          "name": "conversations_prompt_template_id_prompt_templates_id_fk",
+          "tableFrom": "conversations",
+          "tableTo": "prompt_templates",
+          "columnsFrom": [
+            "prompt_template_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },

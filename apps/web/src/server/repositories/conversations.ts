@@ -1,12 +1,20 @@
-import { and, count, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, getTableColumns, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { conversations, messages, sections, homeworks, courseMemberships, submissions } from "../../db/schema";
+import { conversations, messages, sections, homeworks, courses, courseMemberships, submissions, llmCallLogs } from "../../db/schema";
 import type { ConversationKind } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import { TenancyMismatchError, IdempotencyKeyConflictError } from "./errors";
+import { getOrgScopeForCourse } from "./organizations";
+import { resolvePromptTemplate } from "../../lib/prompts";
+import type { LlmProvider } from "../../lib/llm-config";
 
 export const DEFAULT_CONVERSATIONS_PAGE_SIZE = 50;
-const DEFAULT_MESSAGES_PAGE_SIZE = 200;
+// #317 review, #326: exported so getSectionConversationMessages
+// (repositories/sectionConversations.ts) can share the exact same default
+// page size instead of hand-picking its own -- one pagination convention
+// for "a page of a conversation's messages", not two independently-tuned
+// ones.
+export const DEFAULT_MESSAGES_PAGE_SIZE = 200;
 
 export async function listConversationsForOwner(
   db: Db,
@@ -134,9 +142,18 @@ export async function createConversation(
     }
   }
 
+  // #25: pinned once here, at creation -- never re-resolved per-message (see
+  // lib/prompts.ts's module doc comment for why). orgScope isn't something
+  // this function's callers carry (only CourseScope), so it's derived here
+  // rather than widening every caller's signature for one internal lookup.
+  const orgScope = await getOrgScopeForCourse(db, scope);
+  const promptTemplateId = orgScope
+    ? (await resolvePromptTemplate(db, orgScope, scope, input.sectionId)).id
+    : null;
+
   const [created] = await db
     .insert(conversations)
-    .values({ courseId: scope, ...input })
+    .values({ courseId: scope, promptTemplateId, ...input })
     .returning();
   return created;
 }
@@ -347,12 +364,17 @@ async function resolveConflict(
   return existing;
 }
 
-export async function appendMessage(
-  db: Db,
+// #312: the id/courseId/isDeleted predicate below was written verbatim in
+// three places (this function, getLastMessages, getMessagesForConversation)
+// -- a tenancy guard duplicated three times has to change in lockstep or one
+// copy silently becomes more permissive than the others. `Pick<Db, "select">`
+// (not `Db`) so the transaction-path caller in appendMessage below can pass
+// its `tx` handle, which lacks driver-capability members like `batch`.
+export async function assertConversationInScope(
+  db: Pick<Db, "select">,
   scope: CourseScope,
   conversationId: string,
-  input: { role: "user" | "assistant" | "system"; parts: unknown; clientMessageId?: string | null },
-) {
+): Promise<boolean> {
   const [owned] = await db
     .select({ id: conversations.id })
     .from(conversations)
@@ -363,8 +385,28 @@ export async function appendMessage(
         eq(conversations.isDeleted, false),
       ),
     );
-  if (!owned) {
-    throw new TenancyMismatchError("Conversation not found in this course scope");
+  return !!owned;
+}
+
+export async function appendMessage(
+  db: Db,
+  scope: CourseScope,
+  conversationId: string,
+  input: { role: "user" | "assistant" | "system"; parts: unknown; clientMessageId?: string | null },
+  // #279: chatHandler calls this after it has already resolved/verified
+  // `conv` for the current request (via getOwnedConversationOrNull,
+  // startSectionConversation, or createConversation, all of which prove
+  // scope membership) -- re-running the same select here is a fourth
+  // redundant round-trip per turn. Every OTHER caller (none exist outside
+  // chat.ts today, but the type stays safe by default) has not already
+  // proven this, so the check stays on unless a caller explicitly opts out.
+  opts?: { skipOwnershipCheck?: boolean },
+) {
+  if (!opts?.skipOwnershipCheck) {
+    const owned = await assertConversationInScope(db, scope, conversationId);
+    if (!owned) {
+      throw new TenancyMismatchError("Conversation not found in this course scope");
+    }
   }
 
   const clientMessageId = input.clientMessageId ?? null;
@@ -376,6 +418,17 @@ export async function appendMessage(
   };
   const conflictTarget = { target: [messages.conversationId, messages.clientMessageId] };
 
+  // #312: this duplicates the same db.batch()/db.transaction() capability
+  // branch as atomic.ts's runAtomically and repositories/homeworks.ts's
+  // updateHomework, rather than reusing runAtomically -- deliberately, same
+  // reasoning runAtomically's own doc comment already gives for
+  // updateHomework: runAtomically returns Promise<void>, but this call site
+  // needs the INSERT's own `.returning()` row (and the created/existing
+  // distinction below, #273) back from whichever branch ran. Consolidating
+  // would mean widening runAtomically's signature to carry a result back out
+  // through both the batch and per-statement-await transaction paths -- a
+  // real change to a helper already shared by sectionConversations.ts, not
+  // a drop-in swap here.
   if (typeof db.batch === "function") {
     // Production path: neon-http, one atomic HTTP round-trip.
     const [[created]] = await db.batch([
@@ -425,8 +478,31 @@ export async function appendMessage(
 // scope.ts's unsafeCourseScope docstring: "a row just read back from the DB
 // under an already-verified scope" is the sanctioned case for that cast --
 // the ownerUserId check below is what verifies it here).
+//
+// #317 review, #326 (remaining requirement): joins courses for
+// organizationId -- chat.ts's resolveConversation used to always call
+// getOrgScopeForCourse separately even on this path, a fully redundant
+// round-trip: this row's own courseId already determines the org, and
+// courses.organizationId is NOT NULL, so an inner join can't drop a
+// conversation that a plain select would have found. Every other caller
+// (routes/conversations.ts's PATCH/DELETE/GET-messages) just ignores the
+// extra field.
+//
+// #317 review, #346 (requirement 1): also projects courses.llmConfigId --
+// resolveLLMConfig (lib/llm-config.ts) used to re-read this same courses
+// row itself, one statement after this join already had it, exactly the
+// redundant-read shape #326's homeworkLlmConfigId fix already closed one
+// function earlier. chat.ts threads it through as courseLlmConfigId.
 export async function getConversationById(db: Db, conversationId: string) {
-  const [row] = await db.select().from(conversations).where(eq(conversations.id, conversationId));
+  const [row] = await db
+    .select({
+      ...getTableColumns(conversations),
+      organizationId: courses.organizationId,
+      courseLlmConfigId: courses.llmConfigId,
+    })
+    .from(conversations)
+    .innerJoin(courses, eq(conversations.courseId, courses.id))
+    .where(eq(conversations.id, conversationId));
   return row ?? null;
 }
 
@@ -472,6 +548,189 @@ export async function getOwnedConversationOrNull(
   return existing;
 }
 
+/** #317 review, #322: claims the per-conversation turn lock via a single
+ *  conditional UPDATE -- the only thing that makes this race-safe under
+ *  concurrent requests is that the WHERE clause and the write happen
+ *  atomically in one statement; a read-then-write pair here would have the
+ *  exact same race window classifyTurn's retry logic was already losing to.
+ *
+ *  `RETURNING id` is how the caller tells "I got the lock" from "someone
+ *  else holds it" apart: a real conflict updates 0 rows, and this returns
+ *  false without touching anything. `staleMs` treats an old lock as
+ *  abandoned (a Worker killed mid-request -- an uncaught exception, a
+ *  platform-level timeout -- never reaches the release call below) rather
+ *  than a permanent deadlock; chat.ts's own STREAM_TIMEOUT_MS bounds how
+ *  long a legitimate turn can hold it, so staleMs is set comfortably above
+ *  that, not equal to it. */
+export async function acquireConversationTurnLock(
+  db: Db,
+  conversationId: string,
+  staleMs: number,
+): Promise<boolean> {
+  const staleBefore = new Date(Date.now() - staleMs);
+  const rows = await db
+    .update(conversations)
+    .set({ processingStartedAt: new Date() })
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        or(isNull(conversations.processingStartedAt), lt(conversations.processingStartedAt, staleBefore)),
+      ),
+    )
+    .returning({ id: conversations.id });
+  return rows.length > 0;
+}
+
+/** Releases the lock acquired above. Best-effort by design: called from
+ *  chat.ts's onFinish/onAbort/catch paths, all of which run after the
+ *  response has already started streaming to the client -- a failure here
+ *  must never surface as a second error layered on top of whatever the
+ *  turn itself already reported. A conversation stuck locked past staleMs
+ *  self-heals on the next send via the staleness check above, so silently
+ *  losing a release is degraded, not broken. */
+export async function releaseConversationTurnLock(db: Db, conversationId: string): Promise<void> {
+  await db
+    .update(conversations)
+    .set({ processingStartedAt: null })
+    .where(eq(conversations.id, conversationId));
+}
+
+/** #317 review, #346 (requirement 3): collapses the three writes chat.ts's
+ *  onFinish previously ran as three strictly serialized round-trips --
+ *  release the turn lock, persist the assistant reply (when the turn
+ *  produced one), record the llm_call_logs row -- into a single
+ *  db.batch()/transaction. Unlike the pre-model reads #326 already
+ *  collapsed, this tail is directly perceived: the AI SDK awaits onFinish
+ *  inside the stream's flush, so the student's UI stays in the in-flight
+ *  state for every hop here, after the last token has already arrived.
+ *
+ *  No data dependency forces the old order: the caller generates the
+ *  assistant message's id itself (crypto.randomUUID()) instead of reading
+ *  it back from an INSERT's `.returning()`, so llm_call_logs.messageId can
+ *  reference it in the SAME batch/transaction as the INSERT that creates
+ *  it -- Postgres validates a same-transaction FK against a row an earlier
+ *  statement in that transaction just inserted. `assistantMessage` is null
+ *  for the error/aborted/no-content cases (chat.ts's isErrorOutcome /
+ *  hasRenderableContent) -- nothing to persist, but the lock still must
+ *  release and the log still must record the outcome.
+ *
+ *  Trade-off, deliberately accepted: because the lock release now shares
+ *  the message insert's atomicity, a failure in either the message or the
+ *  log insert also rolls back the lock release (previously independent,
+ *  always-runs-regardless). This is the same "abandoned lock" shape
+ *  LOCK_STALE_MS (chat.ts) already exists to self-heal -- a worker dying
+ *  mid-request already left a stuck lock for that mechanism to clear, so
+ *  this doesn't introduce a new failure class, only makes the rare "message
+ *  or log insert throws" case resolve the same way.
+ *
+ *  Unlike appendMessage, no ON CONFLICT handling on the message insert: the
+ *  assistant reply has no clientMessageId (never a client-submitted,
+ *  retryable send), so it can never collide with an existing row the way a
+ *  resent user message can -- every call here is a genuinely new row. */
+export async function finalizeAssistantTurn(
+  db: Db,
+  conversationId: string,
+  assistantMessage: { id: string; parts: unknown } | null,
+  llmLog: {
+    organizationId: string;
+    llmConfigId: string;
+    provider: LlmProvider;
+    model: string;
+    providerRequestId: string | null;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    costCents: number | null;
+    latencyMs: number;
+    errorFlag: boolean;
+  },
+): Promise<void> {
+  // Statements are built against `target` (the outer db on the batch path,
+  // the transaction handle on the fallback path) -- building against the
+  // outer db and then merely awaiting the result inside db.transaction()
+  // would run every write outside that transaction, on its own
+  // auto-committed statement (atomic.ts's runAtomically doc comment names
+  // this exact mistake). A closure rebuilds the statements per branch
+  // instead of building them once against `db`.
+  function buildStatements(target: Db): BatchStatement[] {
+    // Just processingStartedAt -- conversations.updatedAt (schema.ts)
+    // carries its own $onUpdate(() => new Date()), so every UPDATE through
+    // Drizzle bumps it regardless of which other columns are set; this
+    // already held for the plain releaseConversationTurnLock this
+    // replaces, error/aborted turns included.
+    const releaseLock = target
+      .update(conversations)
+      .set({ processingStartedAt: null })
+      .where(eq(conversations.id, conversationId));
+
+    const logInsert = target.insert(llmCallLogs).values({
+      messageId: assistantMessage?.id ?? null,
+      conversationId,
+      organizationId: llmLog.organizationId,
+      llmConfigId: llmLog.llmConfigId,
+      provider: llmLog.provider,
+      model: llmLog.model,
+      providerRequestId: llmLog.providerRequestId,
+      inputTokens: llmLog.inputTokens,
+      outputTokens: llmLog.outputTokens,
+      costCents: llmLog.costCents,
+      latencyMs: llmLog.latencyMs,
+      errorFlag: llmLog.errorFlag,
+    });
+
+    return assistantMessage
+      ? [
+          releaseLock,
+          target.insert(messages).values({
+            id: assistantMessage.id,
+            conversationId,
+            role: "assistant",
+            parts: assistantMessage.parts,
+            clientMessageId: null,
+          }),
+          logInsert,
+        ]
+      : [releaseLock, logInsert];
+  }
+
+  if (typeof db.batch === "function") {
+    const statements = buildStatements(db);
+    await db.batch(statements as [BatchStatement, ...BatchStatement[]]);
+    return;
+  }
+  await db.transaction(async (tx) => {
+    for (const statement of buildStatements(tx as unknown as Db)) {
+      await statement;
+    }
+  });
+}
+
+/** #317 review, #326: chat.ts calls this the first time resolvePromptTemplate
+ *  (lib/prompts.ts) finds a REAL template for a conversation that reached
+ *  its "no pin" fallback branch -- either the conversation predates the
+ *  promptTemplateId column, or nothing resolved at creation and a template
+ *  has since been added at some scope. Without this write-back, that same
+ *  4-scope walk re-runs on every future turn forever (the exact waste
+ *  #326's issue text names), even after this call has already told us the
+ *  answer once. Only ever moves promptTemplateId from null to a real id --
+ *  never overwrites an existing pin, matching the pinning invariant
+ *  (lib/prompts.ts's module doc comment: resolved ONCE, at creation,
+ *  never re-resolved to a DIFFERENT value later) via the `IS NULL` guard
+ *  in the WHERE clause, not just the caller's own `conv.promptTemplateId
+ *  === null` check -- a second concurrent turn on the same never-pinned
+ *  conversation could otherwise race this into overwriting a pin the first
+ *  turn already wrote (to the SAME id resolution would produce, but not
+ *  guaranteed if the template scope changed between the two reads). */
+export async function pinConversationPromptTemplate(
+  db: Db,
+  conversationId: string,
+  promptTemplateId: string,
+): Promise<void> {
+  await db
+    .update(conversations)
+    .set({ promptTemplateId })
+    .where(and(eq(conversations.id, conversationId), isNull(conversations.promptTemplateId)));
+}
+
 // Used by chatHandler's retry/idempotency check (#3, reworked #213): the
 // most recently persisted messages in a conversation, newest first (index 0
 // = last message). limit=2 is what chatHandler needs to distinguish its two
@@ -487,20 +746,34 @@ export async function getOwnedConversationOrNull(
 // createdAt is timestamptz (microsecond resolution) and safe today only
 // because each append is its own transaction, so two rows can never share a
 // timestamp; `seq` makes that guarantee independent of that fact.
-export async function getLastMessages(db: Db, scope: CourseScope, conversationId: string, limit = 2) {
-  const [owned] = await db
-    .select({ id: conversations.id })
-    .from(conversations)
-    .where(
-      and(
-        eq(conversations.id, conversationId),
-        eq(conversations.courseId, scope),
-        eq(conversations.isDeleted, false),
-      ),
-    );
-  if (!owned) return [];
+// #317 review, #326: narrowed from `db.select()` (all 7 columns, including
+// the never-read-by-a-caller `conversationId`/`seq`/`createdAt`) to the 4
+// columns chat.ts's two consumers -- classifyTurn's idempotency check and
+// the model-context mapping -- actually read. `seq` still drives the
+// ORDER BY below without needing to be part of the projection.
+const LAST_MESSAGE_COLUMNS = {
+  id: messages.id,
+  role: messages.role,
+  parts: messages.parts,
+  clientMessageId: messages.clientMessageId,
+} as const;
+
+export async function getLastMessages(
+  db: Db,
+  scope: CourseScope,
+  conversationId: string,
+  limit = 2,
+  // #279: same opt-out as appendMessage's own opts -- chatHandler's two call
+  // sites both run after `conv` is already resolved/verified for this
+  // request.
+  opts?: { skipOwnershipCheck?: boolean },
+) {
+  if (!opts?.skipOwnershipCheck) {
+    const owned = await assertConversationInScope(db, scope, conversationId);
+    if (!owned) return [];
+  }
   return db
-    .select()
+    .select(LAST_MESSAGE_COLUMNS)
     .from(messages)
     .where(eq(messages.conversationId, conversationId))
     .orderBy(desc(messages.seq))
@@ -528,16 +801,7 @@ export async function getMessagesForConversation(
   conversationId: string,
   opts?: { limit?: number; before?: number },
 ) {
-  const [owned] = await db
-    .select({ id: conversations.id })
-    .from(conversations)
-    .where(
-      and(
-        eq(conversations.id, conversationId),
-        eq(conversations.courseId, scope),
-        eq(conversations.isDeleted, false),
-      ),
-    );
+  const owned = await assertConversationInScope(db, scope, conversationId);
   if (!owned) return [];
 
   const limit = opts?.limit ?? DEFAULT_MESSAGES_PAGE_SIZE;

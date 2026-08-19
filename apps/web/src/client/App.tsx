@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { useNavigate } from "react-router";
-import { Sidebar, TopNav, ConversationView, renderToolPart, isToolPart, ErrorBoundary } from "@llteacher/ui";
+import { Sidebar, TopNav, ConversationView, AlertDialog, Button, renderToolPart, isToolPart, ErrorBoundary } from "@llteacher/ui";
 import type { SidebarSection, MessageData } from "@llteacher/ui";
 import { useAuth } from "./components/AuthProvider";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
@@ -153,10 +153,20 @@ export function useStudentHomework() {
 function buildMessageData(
   aiMessages: UIMessage[],
   chatStatus: ReturnType<typeof useChat>["status"],
+  // #317 review, #352: the id of the assistant message that was on screen
+  // the moment the student pressed Stop, if any -- App.tsx clears it the
+  // moment a new send starts (see handleStopSectionChat's own doc comment),
+  // so it only ever marks the ONE turn Stop actually interrupted, never a
+  // later one. Server-side, this exact partial is never persisted (chat.ts's
+  // hasRenderableContent/isErrorOutcome gate, #342) -- this note is what
+  // keeps the visible transcript honest about that instead of the fragment
+  // silently reading as an ordinary, complete, remembered reply.
+  stoppedMessageId?: string | null,
 ): MessageData[] {
   const messages: MessageData[] = aiMessages.map((m, idx) => {
     const isLast = idx === aiMessages.length - 1;
     const isStreaming = isLast && chatStatus === "streaming";
+    const isStopped = m.id === stoppedMessageId;
 
     if (m.role === "assistant") {
       const content = (
@@ -176,13 +186,21 @@ function buildMessageData(
             if (!isToolPart(part)) return null;
             return renderToolPart(part, `tool-${m.id}-${i}`);
           })}
+          {isStopped && (
+            <p className="message__stopped-note">
+              You stopped this response. It wasn&rsquo;t saved, so the tutor won&rsquo;t remember it.
+            </p>
+          )}
         </>
       );
       return {
         id: m.id,
         role: "ai" as const,
         content,
-        isStreaming,
+        // A stopped turn is definitionally done, even if this happened to
+        // still be the last message and chatStatus hasn't settled out of
+        // "streaming" yet by the render that first sees it.
+        isStreaming: isStreaming && !isStopped,
       };
     }
 
@@ -221,6 +239,29 @@ function buildMessageData(
   }
 
   return messages;
+}
+
+/* #317 review, blocking finding #3: DefaultChatTransport's default request
+   body sends useChat's ENTIRE local message array on every turn -- for a
+   long-running section (hydration restores up to 200 messages), that array
+   alone measures ~189KB at 100 realistic messages and eventually exceeds
+   MAX_REQUEST_BODY_BYTES (chat.ts), 400ing every further send with no
+   recovery (reloading just re-hydrates the same history). chat.ts has never
+   actually needed more than the last message -- #143's server-authoritative
+   history redesign already reads persisted history from the DB, not from
+   this array (see chatEnvelopeSchema's own doc comment) -- so trimming here
+   costs nothing server-side. `body` already carries the envelope fields
+   (conversationId, or courseId/kind/sectionId) merged in by the transport
+   before this runs; only `messages` needs overriding. Shared by both
+   useChat instances below since both hit the same cap. */
+function prepareSendMessagesRequest({
+  messages,
+  body,
+}: {
+  messages: UIMessage[];
+  body: Record<string, unknown> | undefined;
+}) {
+  return { body: { ...body, messages: messages.slice(-1) } };
 }
 
 /* ==========================================================================
@@ -328,12 +369,33 @@ export default function App() {
     status: chatStatus,
     error: chatError,
     regenerate: regenerateChat,
+    // #274: a client-side escape hatch for a turn that's merely slow, not
+    // yet timed out (chat.ts's own STREAM_TIMEOUT_MS bounds the server
+    // side) -- aliased since both useChat instances below would otherwise
+    // collide on the name `stop`.
+    stop: stopChat,
   } = useChat({
     transport: new DefaultChatTransport({
       api: "/api/chat",
       fetch: chatFetch,
+      prepareSendMessagesRequest,
     }),
   });
+
+  // #317 review, #352: the id of the assistant message on screen at the
+  // moment Stop was pressed, if any -- threaded into buildMessageData
+  // below so that ONE turn (never a later one) gets the "wasn't saved"
+  // note instead of silently reading as an ordinary complete reply. Set by
+  // handleStopSectionChat (wraps stopChat below, passed to ConversationView
+  // as onStop instead of stopChat directly); cleared the moment a new send
+  // starts (handleSendMessage) so a stale note doesn't linger onto a later
+  // turn that has nothing to do with the one that got stopped.
+  const [sectionStoppedMessageId, setSectionStoppedMessageId] = useState<string | null>(null);
+  const handleStopSectionChat = () => {
+    const last = aiMessages[aiMessages.length - 1];
+    if (last?.role === "assistant") setSectionStoppedMessageId(last.id);
+    stopChat();
+  };
 
   const {
     sections,
@@ -394,11 +456,29 @@ export default function App() {
     status: tutorChatStatus,
     error: tutorChatError,
     regenerate: regenerateTutorChat,
+    // #274: see stopChat's own doc comment above -- same escape hatch, this
+    // instance's own turn.
+    stop: stopTutorChat,
   } = useChat({
     id: tutorConversationId,
     messages: tutorInitialMessages,
-    transport: new DefaultChatTransport({ api: "/api/chat" }),
+    transport: new DefaultChatTransport({ api: "/api/chat", prepareSendMessagesRequest }),
   });
+
+  // #317 review, #352: same reasoning as sectionStoppedMessageId above.
+  // Also reset on tutorConversationId change (switching conversations, or
+  // to none) -- useChat itself resets aiMessages there (its `id` changed),
+  // so a stale stopped-id from a previous conversation must not survive
+  // into this one's first render.
+  const [tutorStoppedMessageId, setTutorStoppedMessageId] = useState<string | null>(null);
+  useEffect(() => {
+    setTutorStoppedMessageId(null);
+  }, [tutorConversationId]);
+  const handleStopTutorChat = () => {
+    const last = tutorAiMessages[tutorAiMessages.length - 1];
+    if (last?.role === "assistant") setTutorStoppedMessageId(last.id);
+    stopTutorChat();
+  };
 
   /* #4 fix-round 2: tracks whichever tutor-surface switch was requested
      most recently -- a target conversation id, or undefined when the
@@ -650,7 +730,67 @@ export default function App() {
      error row, same as a chat-stream error), and the composer is disabled
      while it's set (see isSending below) so a context-free turn can't be
      sent into the real conversation while hydration is broken. */
-  const loadSectionConversation = async (sectionNumber: number, targetConversationId: string | undefined) => {
+  /* #318: a fresh section (no conversation yet) used to render an empty
+     composer until the student's own first message lazily created the
+     conversation server-side (chat.ts's resolveConversation) -- the
+     canonical greeting (#27's "Hello! I'm here to help you with Section
+     N...") never appeared until AFTER that first turn, bundled with the
+     model's reply to it. This calls the same start endpoint chatHandler
+     already uses internally, eagerly, so the greeting shows the moment the
+     student opens the section -- ordinary chat UX. Guarded by
+     currentSectionRef rather than latestSectionConversationRef: the latter
+     can't tell two different never-started sections apart (both target
+     `undefined`), so a fast section switch mid-request would otherwise let
+     a stale response land on whichever section is now showing. */
+  const startFreshSectionConversation = async (sectionNumber: number, sectionId: string) => {
+    if (!courseId) return;
+    try {
+      const res = await fetch(`/api/courses/${courseId}/sections/${sectionId}/conversations`, { method: "POST" });
+      if (currentSectionRef.current !== sectionNumber) return; // superseded -- discard
+      if (!res.ok) {
+        // 409 covers both "already exists" (a race with another request for
+        // the same section) and "section isn't interactive" (#164) -- either
+        // way there's nothing to eagerly show. The composer stays empty and
+        // the student's own first message still creates/finds the
+        // conversation via chat.ts's existing lazy path, same as before
+        // this fix.
+        return;
+      }
+      const created = (await res.json()) as { id: string; greetingMessageId: string; greetingParts: unknown };
+      setConversationId(created.id);
+      latestSectionConversationRef.current = created.id;
+      setSectionMessages([
+        { id: created.greetingMessageId, role: "assistant", parts: created.greetingParts as UIMessage["parts"] },
+      ]);
+      setSectionMetaByOrder((prev) => {
+        const prevMeta = prev.get(sectionNumber);
+        if (!prevMeta) return prev;
+        const next = new Map(prev);
+        next.set(sectionNumber, { ...prevMeta, conversationId: created.id });
+        return next;
+      });
+      // Matches confirmRestart's own status update below -- a section with
+      // an active conversation is "current" (the sidebar's in-progress dot),
+      // not "pending" (not_started). Without this, the dot stays stale until
+      // a full reload re-derives status from the server.
+      setSections((prev) =>
+        prev.map((s) => (s.number === sectionNumber ? { ...s, status: "current" as const } : s)),
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[App] failed to eagerly start section conversation", err);
+      // Left as the empty state loadSectionConversation already set -- not
+      // surfaced as sectionHydrationError (which disables the composer):
+      // the student can still type, and chat.ts creates the same
+      // conversation lazily on send, same as before this fix.
+    }
+  };
+
+  const loadSectionConversation = async (
+    sectionNumber: number,
+    targetConversationId: string | undefined,
+    sectionId?: string,
+  ) => {
     setCurrentSection(sectionNumber);
     setConversationId(targetConversationId);
     latestSectionConversationRef.current = targetConversationId;
@@ -658,6 +798,7 @@ export default function App() {
     if (!targetConversationId) {
       setSectionMessages([]);
       setSectionHistoryHasMore(false);
+      if (sectionId) void startFreshSectionConversation(sectionNumber, sectionId);
       return;
     }
     try {
@@ -671,7 +812,7 @@ export default function App() {
       if (latestSectionConversationRef.current !== targetConversationId) return; // superseded -- discard
       setSectionHydrationError({
         message: "Couldn't load this section's conversation. Please try again.",
-        onRetry: () => void loadSectionConversation(sectionNumber, targetConversationId),
+        onRetry: () => void loadSectionConversation(sectionNumber, targetConversationId, sectionId),
       });
     }
   };
@@ -712,12 +853,27 @@ export default function App() {
       // SidebarSection's mapping drops it -- and hydrate its history so the
       // model (and the visible transcript) actually sees it, not just the
       // id.
-      void loadSectionConversation(first, sectionMetaByOrder.get(first)?.conversationId ?? undefined);
+      void loadSectionConversation(
+        first,
+        sectionMetaByOrder.get(first)?.conversationId ?? undefined,
+        sectionMetaByOrder.get(first)?.id,
+      );
       hasAutoSelectedSection.current = true;
     }
   }, [sections, sectionMetaByOrder]);
   const [hintCount, setHintCount] = useState(3);
   const [justSubmittedSection, setJustSubmittedSection] = useState<number | null>(null);
+  /* #248: restart-affordance dialog state for the section chat. `restarting`
+     keeps the dialog open through the request (rather than closing
+     optimistically) so a 409 (graded submission -- see
+     SubmissionGradedError, sectionConversations.ts) can be shown inline
+     instead of silently failing after the dialog already closed; per the
+     design decision on #248, the client does not try to predict this
+     state ahead of time (no separate "is this section graded" fetch) --
+     the restart endpoint is the single source of truth for it. */
+  const [restartDialogOpen, setRestartDialogOpen] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [restartError, setRestartError] = useState<string | null>(null);
   /* Sidebar collapse persists across reloads via localStorage. Lazy initializer
      reads on first render; the effect below writes whenever the state changes. */
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
@@ -762,8 +918,8 @@ export default function App() {
   /* Translate AI SDK UIMessages into the design system's MessageData --
      one call per Chat instance (buildMessageData, defined above the
      component). Whichever one is showing depends on tutorConversationId. */
-  const messages = buildMessageData(aiMessages, chatStatus);
-  const tutorMessages = buildMessageData(tutorAiMessages, tutorChatStatus);
+  const messages = buildMessageData(aiMessages, chatStatus, sectionStoppedMessageId);
+  const tutorMessages = buildMessageData(tutorAiMessages, tutorChatStatus, tutorStoppedMessageId);
 
   /* #144: inline retryable error rows for ConversationView, one per useChat
      instance. `regenerate` re-issues the last turn's request through the
@@ -866,6 +1022,9 @@ export default function App() {
     /* Each AI response counts as a hint — increments trigger the gold flash
        on the sidebar's hint-history-row count numeral. */
     setHintCount((n) => n + 1);
+    // #317 review, #352: a fresh send starts a new turn -- any stopped-note
+    // from a PRIOR turn must not linger onto it.
+    setSectionStoppedMessageId(null);
   };
 
   /* #4: sends into whichever tutor conversation is currently selected.
@@ -879,6 +1038,8 @@ export default function App() {
     if (!tutorConversationId) return;
     if (tutorChatStatus === "submitted" || tutorChatStatus === "streaming") return;
     sendTutorMessage({ text }, { body: { conversationId: tutorConversationId } });
+    // #317 review, #352: same reasoning as handleSendMessage above.
+    setTutorStoppedMessageId(null);
   };
 
   /* Selecting a homework section always means "I want the section chat" --
@@ -899,7 +1060,11 @@ export default function App() {
     // previously-viewed section's conversationId was, and why the fetch
     // needs the same staleness guard the tutor rail's own selection path
     // has (a section switch has the identical overlapping-request race).
-    void loadSectionConversation(sectionNumber, sectionMetaByOrder.get(sectionNumber)?.conversationId ?? undefined);
+    void loadSectionConversation(
+      sectionNumber,
+      sectionMetaByOrder.get(sectionNumber)?.conversationId ?? undefined,
+      sectionMetaByOrder.get(sectionNumber)?.id,
+    );
     latestTutorSelectionRef.current = undefined;
     setTutorConversationId(undefined);
     setTutorInitialMessages([]);
@@ -923,6 +1088,15 @@ export default function App() {
     // life with conversationId: null stayed that way here forever.
     const meta = sectionMetaByOrder.get(sectionNumber);
     if (!meta?.conversationId) return; // no active conversation yet -- nothing to submit
+    // #318: eagerly starting a section's conversation (above) means
+    // meta.conversationId is now populated the moment the greeting loads --
+    // before this check, that made a section submittable with zero student
+    // input, since the Sidebar's Submit button (packages/ui) has no content
+    // gate of its own. The Submit button always targets `currentSection`
+    // (Sidebar.tsx's own onClick), so `aiMessages` -- the live transcript
+    // for whichever section is currently shown -- is the right thing to
+    // check, not a second fetch.
+    if (!aiMessages.some((m) => m.role === "user")) return;
     try {
       const res = await fetch(`/api/conversations/${meta.conversationId}/submit`, { method: "POST" });
       if (!res.ok) throw new Error("submit failed");
@@ -942,6 +1116,92 @@ export default function App() {
       console.error("[App] section submit failed", err);
     }
   };
+
+  /* #248: opens the restart-confirm dialog for the section currently
+     showing. Only ever called from a button that's itself only rendered
+     when `conversationId` is set (see the section ConversationView render
+     below) -- there is nothing to restart otherwise. */
+  const openRestartDialog = () => {
+    setRestartError(null);
+    setRestartDialogOpen(true);
+  };
+
+  const cancelRestart = () => {
+    if (restarting) return; // AlertDialog disables Cancel while confirming; belt-and-suspenders
+    setRestartDialogOpen(false);
+    setRestartError(null);
+  };
+
+  /* POST /api/courses/:courseId/conversations/:conversationId/restart
+     (restartSectionConversationHandler, #27/#248). On success, reuses
+     loadSectionConversation -- the same hydration path the initial mount
+     and section-switch already go through -- rather than re-deriving the
+     new conversation's greeting client-side; the server is the source of
+     truth for that copy (sectionGreeting in lib/prompts.ts, #305).
+     Per the #248 design decision, a graded-submission refusal (409) is not
+     predicted client-side -- it's surfaced here, inline, from the
+     response the server actually gave. */
+  const confirmRestart = async () => {
+    if (!courseId || !conversationId) return;
+    setRestarting(true);
+    setRestartError(null);
+    try {
+      const res = await fetch(`/api/courses/${courseId}/conversations/${conversationId}/restart`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        setRestartError(
+          body?.error ?? "Something went wrong restarting this section. Please try again.",
+        );
+        return;
+      }
+      const result = (await res.json()) as {
+        conversation: { id: string; title: string };
+        voidedSubmission: { id: string; submittedAt: string } | null;
+      };
+      const sectionNumber = currentSection;
+      setSectionMetaByOrder((prev) => {
+        const next = new Map(prev);
+        const meta = next.get(sectionNumber);
+        if (meta) next.set(sectionNumber, { ...meta, conversationId: result.conversation.id });
+        return next;
+      });
+      setSections((prev) =>
+        prev.map((s) => (s.number === sectionNumber ? { ...s, status: "current" as const } : s)),
+      );
+      await loadSectionConversation(sectionNumber, result.conversation.id);
+      setRestartDialogOpen(false);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[App] section restart failed", err);
+      setRestartError("Something went wrong restarting this section. Please try again.");
+    } finally {
+      setRestarting(false);
+    }
+  };
+
+  /* #248: the confirm dialog's copy. Conditioned only on whether the
+     current conversation has an (ungraded -- see decision 1 in the #248
+     comment) submission, not on an attempt count: the schema doesn't track
+     attempt history (see #250's deferral of the append-only model), so the
+     copy says "your previous attempt," singular, rather than approximating
+     a number it can't get right. */
+  const currentSectionStatus = sections.find((s) => s.number === currentSection)?.status;
+  const currentSectionTitle = sections.find((s) => s.number === currentSection)?.title;
+  const restartDescription = (
+    <>
+      <p>You&apos;ll lose your conversation so far, and you won&apos;t be able to see it again.</p>
+      {currentSectionStatus === "submitted" && (
+        <p>Your submission for this section will be undone — you&apos;ll need to resubmit when you&apos;re ready.</p>
+      )}
+      {restartError && (
+        <p role="alert" style={{ color: "var(--color-error)" }}>
+          {restartError}
+        </p>
+      )}
+    </>
+  );
 
   /* Anonymous visitors get a minimal placeholder, not the fixture course
      demo below -- see UnauthenticatedHome for why this isn't the full
@@ -995,7 +1255,7 @@ export default function App() {
       <TopNav
         course="STATS 311"
         term="Autumn 2026"
-        homework="HW 3 · Probability and Distributions"
+        homework={hwTitle}
         userInitials="AC"
         isAuthenticated={isAuthenticated}
         onProfileClick={() => navigate("/profile")}
@@ -1072,15 +1332,35 @@ export default function App() {
                  error, there's no persisted conversation state to safely
                  send a fresh turn into while it's broken. */
               isSending={tutorChatStatus === "submitted" || tutorChatStatus === "streaming" || !!tutorHydrationError}
+              /* #317 review, #352 (requirement 3): isSending above also
+                 covers a hydration failure, which leaves nothing for Stop
+                 to stop -- isStopActionable is the narrower "a turn is
+                 genuinely in flight" check, so Stop doesn't render active
+                 (and stopTutorChat doesn't fire as a no-op) while the
+                 composer is merely disabled for an unrelated reason. */
+              isStopActionable={tutorChatStatus === "submitted" || tutorChatStatus === "streaming"}
               error={tutorChatErrorRow}
               autoFocusComposer={tutorConversationId === justCreatedTutorConversationId}
               hasMoreHistory={tutorHistoryHasMore}
+              onStop={handleStopTutorChat}
             />
           </ErrorBoundary>
         ) : (
           <ErrorBoundary key="section">
+            {/* #317 review, #327: keyed by section, the same reasoning the
+                tutor ConversationView above already gets from
+                key={tutorConversationId} -- without this, switching
+                sections replaced `messages` (up to 200 rows) inside a
+                STILL-MOUNTED role="log" region, so the whole hydrated
+                transcript queued as node-addition announcements. Keying
+                forces a remount on every section switch instead: a fresh
+                live region has nothing to retroactively announce, so only
+                genuine mid-conversation appends reach an AT as insertions. */}
             <ConversationView
-              breadcrumb="STATS 311 · HW 3 · Section 3 P-VALUES"
+              key={currentSection}
+              breadcrumb={`STATS 311 · ${hwTitle} · Section ${currentSection}${
+                currentSectionTitle ? `: ${currentSectionTitle}` : ""
+              }`}
               messages={messages}
               onSendMessage={handleSendMessage}
               /* #144: "error" excluded here matters most for the section
@@ -1090,13 +1370,41 @@ export default function App() {
                  #276: a hydration failure DOES disable sending -- see the
                  tutor instance's own isSending comment above. */
               isSending={chatStatus === "submitted" || chatStatus === "streaming" || !!sectionHydrationError}
+              /* #317 review, #352 (requirement 3): see the tutor
+                 ConversationView's own isStopActionable comment above. */
+              isStopActionable={chatStatus === "submitted" || chatStatus === "streaming"}
               error={sectionChatErrorRow}
               hasMoreHistory={sectionHistoryHasMore}
+              onStop={handleStopSectionChat}
+              /* #248: only once there's an active conversation to restart --
+                 a section the student hasn't started yet has nothing for
+                 the affordance to act on. */
+              headerActions={
+                conversationId ? (
+                  <Button variant="danger" size="sm" outlined onClick={openRestartDialog}>
+                    Restart section
+                  </Button>
+                ) : undefined
+              }
             />
           </ErrorBoundary>
         )}
         </main>
       </div>
+
+      {/* #248: restart-confirm dialog for the section chat -- see
+          confirmRestart's doc comment for the request/hydration flow and
+          restartDescription for the copy decision. */}
+      <AlertDialog
+        open={restartDialogOpen}
+        title="Restart this section?"
+        description={restartDescription}
+        confirmLabel="Restart section"
+        cancelLabel="Keep this conversation"
+        onConfirm={confirmRestart}
+        onCancel={cancelRestart}
+        confirming={restarting}
+      />
     </div>
   );
 }

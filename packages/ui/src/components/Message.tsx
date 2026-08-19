@@ -45,8 +45,10 @@ export function Message(props: MessageProps) {
   if (props.role === "ai") {
     return (
       // #300: aria-busy so the log region below (ConversationView's
-      // .conversation-inner, role="log" aria-live="polite") doesn't
-      // announce this message while it's still filling in -- an
+      // .conversation-log, role="log" aria-live="polite" -- #327 moved it
+      // out of .conversation-inner, which now also holds non-turn content
+      // like the breadcrumb/header actions) doesn't announce this message
+      // while it's still filling in -- an
       // in-progress node inside a polite live region is otherwise
       // announced repeatedly as it mutates, one of the worst-case
       // "torrent" failure modes for a streamed response. Flips to false

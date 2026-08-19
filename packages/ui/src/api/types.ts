@@ -35,7 +35,13 @@ export type LlmProvider =
   | "anthropic"
   | "claude_for_education"
   | "openrouter"
-  | "local";
+  | "local"
+  // #317/#363 merge: kept in step with llmProviderEnum (apps/web's
+  // db/schema/content.ts). Migration 0035 makes this every organization's
+  // default provider, so the console must be able to name it -- the
+  // _RecordMatchesWire guard in repositories/llmConfigs.ts is what caught
+  // its absence when the two branches met.
+  | "llmoxie";
 
 export interface LlmConfigPayload {
   id: string;

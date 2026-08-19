@@ -4,6 +4,25 @@ import { SubmissionGradedError } from "./submissions";
 import { unsafeOrgScope } from "./scope";
 import type { Db } from "../../db/client";
 
+// #25: both restartSectionConversation and startSectionConversation now
+// resolve+pin a prompt template internally. Mocked here (not just given a
+// canned queue result) because resolvePromptTemplate's real implementation
+// issues its own .select() chains against `db`, which would silently
+// consume from this file's hand-rolled `queue`/`selects` fakes below and
+// desync every carefully-ordered assertion that follows. getOrgScopeForCourse
+// uses db.query.courses.findFirst -- an API these fakes don't implement at
+// all -- so it must be mocked regardless.
+vi.mock("./organizations", () => ({
+  getOrgScopeForCourse: async () => "org-1",
+}));
+vi.mock("../../lib/prompts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/prompts")>();
+  return {
+    ...actual,
+    resolvePromptTemplate: async () => ({ id: null, content: "test system prompt", version: null }),
+  };
+});
+
 const SCOPE = unsafeOrgScope("org-1");
 const CONV = "11111111-2222-4333-8444-555555555555";
 const OWNER = "owner-1";
@@ -65,7 +84,7 @@ describe("restartSectionConversation (#27, #128)", () => {
   it("throws when the conversation is absent, deleted, or the wrong kind", async () => {
     const { db, batch } = makeDb([[]]);
 
-    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER)).rejects.toThrow(
+    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER, true)).rejects.toThrow(
       "Conversation not found or not accessible",
     );
     expect(batch).not.toHaveBeenCalled();
@@ -77,7 +96,7 @@ describe("restartSectionConversation (#27, #128)", () => {
     // collapse them (to avoid leaking existence) rather than being forced to.
     const { db, batch } = makeDb([[{ ...OWNED, ownerUserId: "someone-else" }]]);
 
-    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER)).rejects.toThrow(
+    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER, true)).rejects.toThrow(
       "Conversation is not owned by requester",
     );
     expect(batch).not.toHaveBeenCalled();
@@ -90,7 +109,7 @@ describe("restartSectionConversation (#27, #128)", () => {
       [{ id: "grade-1" }],
     ]);
 
-    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER)).rejects.toBeInstanceOf(
+    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER, true)).rejects.toBeInstanceOf(
       SubmissionGradedError,
     );
     // The guard has to run before the atomic group, not alongside it: a
@@ -103,7 +122,7 @@ describe("restartSectionConversation (#27, #128)", () => {
     const submittedAt = new Date();
     const { db, batch } = makeDb([[OWNED], [{ id: "sub-1", submittedAt }], []]);
 
-    const result = await restartSectionConversation(db, SCOPE, CONV, OWNER);
+    const result = await restartSectionConversation(db, SCOPE, CONV, OWNER, true);
 
     expect(result.voidedSubmission).toEqual({ id: "sub-1", submittedAt });
     expect(batch).toHaveBeenCalledTimes(1);
@@ -120,7 +139,7 @@ describe("restartSectionConversation (#27, #128)", () => {
   it("restarts a conversation that was never submitted", async () => {
     const { db, batch } = makeDb([[OWNED], [], []]);
 
-    const result = await restartSectionConversation(db, SCOPE, CONV, OWNER);
+    const result = await restartSectionConversation(db, SCOPE, CONV, OWNER, true);
 
     expect(result.voidedSubmission).toBeNull();
     expect(batch.mock.calls[0]![0]).toEqual([
@@ -136,7 +155,7 @@ describe("restartSectionConversation (#27, #128)", () => {
     // throw SubmissionGradedError instead of succeeding.
     const { db } = makeDb([[OWNED], [], [{ id: "grade-1" }]]);
 
-    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER)).resolves.toMatchObject({
+    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER, true)).resolves.toMatchObject({
       voidedSubmission: null,
     });
   });
@@ -147,7 +166,7 @@ describe("restartSectionConversation (#27, #128)", () => {
     // conversation must stay a test after restarting.
     const { db, inserted } = makeDb([[{ ...OWNED, isTeacherTest: true }], [], []]);
 
-    await restartSectionConversation(db, SCOPE, CONV, OWNER);
+    await restartSectionConversation(db, SCOPE, CONV, OWNER, true);
 
     const conversation = inserted.find((v) => !v.parts);
     expect(conversation).toMatchObject({ isTeacherTest: true, kind: "section" });
@@ -156,7 +175,7 @@ describe("restartSectionConversation (#27, #128)", () => {
   it("opens the replacement with the Django-parity greeting for its section", async () => {
     const { db, inserted, batch } = makeDb([[OWNED], [], []]);
 
-    const result = await restartSectionConversation(db, SCOPE, CONV, OWNER);
+    const result = await restartSectionConversation(db, SCOPE, CONV, OWNER, true);
 
     const greeting = inserted.find((v) => v.parts) as { parts: { text: string }[] };
     expect(greeting.parts[0]!.text).toBe(
@@ -205,6 +224,7 @@ describe("startSectionConversation constraint race (#238)", () => {
         sectionId: "section-1",
         ownerUserId: OWNER,
         isTeacherTest: false,
+        canViewDrafts: true,
       }),
     ).rejects.toBeInstanceOf(SectionConversationExistsError);
   });
@@ -221,6 +241,7 @@ describe("startSectionConversation constraint race (#238)", () => {
       sectionId: "section-1",
       ownerUserId: OWNER,
       isTeacherTest: false,
+      canViewDrafts: true,
     });
     await expect(promise).rejects.toThrow("duplicate key");
     await expect(promise).rejects.not.toBeInstanceOf(SectionConversationExistsError);

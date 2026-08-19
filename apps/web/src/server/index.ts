@@ -53,11 +53,17 @@ import {
 } from "./routes/roster";
 import { draftGradeHandler, listGradesHandler, saveGradeHandler } from "./routes/grades";
 import { createExportHandler } from "./routes/exports";
+import {
+  getCoursePromptTemplateHandler,
+  putCoursePromptTemplateHandler,
+  deleteCoursePromptTemplateHandler,
+} from "./routes/promptTemplates";
+import { listLlmModelsHandler } from "./routes/llmModels";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireGraderOf, requireInstructorOf, requireRole } from "./utils/guards";
 import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "./utils/errors";
-import { TenancyMismatchError, IdempotencyKeyConflictError } from "./repositories/errors";
+import { TenancyMismatchError, IdempotencyKeyConflictError, PromptTemplateConflictError } from "./repositories/errors";
 import type { AppEnv } from "./context";
 
 const app = new Hono<AppEnv>();
@@ -87,6 +93,12 @@ app.onError((err, c) => {
   if (err instanceof IdempotencyKeyConflictError) {
     return c.json({ error: err.message }, 409);
   }
+  // #317 review, code-review follow-up: same 409 treatment as
+  // IdempotencyKeyConflictError above -- a well-formed request that lost a
+  // genuine race against another writer, not a server-side failure.
+  if (err instanceof PromptTemplateConflictError) {
+    return c.json({ error: err.message }, 409);
+  }
   logServerError("server", err);
   return c.json({ error: SERVICE_UNAVAILABLE_MESSAGE }, 503);
 });
@@ -108,6 +120,10 @@ app.post("/api/webhooks/workos", workosWebhookHandler);
 app.get("/api/profile", getProfileHandler);
 app.patch("/api/profile", patchProfileHandler);
 app.get("/api/courses/:courseId/homeworks", requireCourseMember()(listHomeworksHandler));
+app.get("/api/courses/:courseId/prompt-template", requireInstructorOf()(getCoursePromptTemplateHandler));
+app.put("/api/courses/:courseId/prompt-template", requireInstructorOf()(putCoursePromptTemplateHandler));
+app.delete("/api/courses/:courseId/prompt-template", requireInstructorOf()(deleteCoursePromptTemplateHandler));
+app.get("/api/courses/:courseId/llm-models", requireInstructorOf()(listLlmModelsHandler));
 app.post("/api/courses/:courseId/homeworks", requireInstructorOf()(createHomeworkHandler));
 app.get(
   "/api/courses/:courseId/homeworks/:homeworkId",

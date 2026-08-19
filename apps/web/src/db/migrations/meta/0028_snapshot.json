@@ -1,6 +1,6 @@
 {
-  "id": "1d00bed4-7f48-4acb-8c12-07df1356d394",
-  "prevId": "6ee9db7b-e698-44ea-961a-ad9c11b0094e",
+  "id": "5c3c84a1-5cd0-4edb-8e42-8ed699415096",
+  "prevId": "2e2eb456-1724-4674-883d-091d8bb0fced",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -226,7 +226,7 @@
         },
         "course_memberships_capabilities_require_ta": {
           "name": "course_memberships_capabilities_require_ta",
-          "value": "(\"course_memberships\".\"role\" = 'ta' AND \"course_memberships\".\"dropped_at\" IS NULL) OR (\"course_memberships\".\"can_view_solutions\" = false AND \"course_memberships\".\"can_view_drafts\" = false)"
+          "value": "\"course_memberships\".\"role\" = 'ta' OR (\"course_memberships\".\"can_view_solutions\" = false AND \"course_memberships\".\"can_view_drafts\" = false)"
         }
       },
       "isRLSEnabled": false
@@ -1608,12 +1608,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
         "provider": {
           "name": "provider",
           "type": "llm_provider",
@@ -1626,13 +1620,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "base_prompt": {
-          "name": "base_prompt",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "''"
         },
         "temperature": {
           "name": "temperature",
@@ -1650,12 +1637,6 @@
         },
         "credential_id": {
           "name": "credential_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "fallback_llm_config_id": {
-          "name": "fallback_llm_config_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
@@ -1748,19 +1729,6 @@
           ],
           "onDelete": "set null",
           "onUpdate": "no action"
-        },
-        "llm_configs_fallback_llm_config_id_llm_configs_id_fk": {
-          "name": "llm_configs_fallback_llm_config_id_llm_configs_id_fk",
-          "tableFrom": "llm_configs",
-          "tableTo": "llm_configs",
-          "columnsFrom": [
-            "fallback_llm_config_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1770,14 +1738,6 @@
         "llm_configs_temperature_range_chk": {
           "name": "llm_configs_temperature_range_chk",
           "value": "\"llm_configs\".\"temperature\" >= 0 AND \"llm_configs\".\"temperature\" <= 2"
-        },
-        "llm_configs_active_required_for_default_chk": {
-          "name": "llm_configs_active_required_for_default_chk",
-          "value": "NOT (\"llm_configs\".\"is_default\" AND NOT \"llm_configs\".\"is_active\")"
-        },
-        "llm_configs_fallback_not_self_chk": {
-          "name": "llm_configs_fallback_not_self_chk",
-          "value": "\"llm_configs\".\"fallback_llm_config_id\" IS NULL OR \"llm_configs\".\"fallback_llm_config_id\" <> \"llm_configs\".\"id\""
         }
       },
       "isRLSEnabled": false
@@ -2778,6 +2738,12 @@
           "notNull": true,
           "default": false
         },
+        "prompt_template_id": {
+          "name": "prompt_template_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "is_deleted": {
           "name": "is_deleted",
           "type": "boolean",
@@ -2958,6 +2924,19 @@
             "id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "conversations_prompt_template_id_prompt_templates_id_fk": {
+          "name": "conversations_prompt_template_id_prompt_templates_id_fk",
+          "tableFrom": "conversations",
+          "tableTo": "prompt_templates",
+          "columnsFrom": [
+            "prompt_template_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -4098,7 +4077,8 @@
         "openrouter",
         "local",
         "canvas",
-        "workos"
+        "workos",
+        "llmoxie"
       ]
     },
     "public.lms_provider": {
@@ -4134,7 +4114,8 @@
         "anthropic",
         "claude_for_education",
         "openrouter",
-        "local"
+        "local",
+        "llmoxie"
       ]
     },
     "public.material_source_type": {

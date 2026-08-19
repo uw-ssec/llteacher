@@ -31,6 +31,11 @@ export const llmProviderEnum = pgEnum("llm_provider", [
   "claude_for_education",
   "openrouter",
   "local",
+  // #178: UW SSEC's LiteLLM gateway. Appended, not inserted, so existing
+  // rows' enum ordinals never shift (Postgres ALTER TYPE ... ADD VALUE is
+  // append-only within a migration anyway; this keeps the source and the
+  // generated migration in agreement).
+  "llmoxie",
 ]);
 
 export const materialSourceEnum = pgEnum("material_source_type", [
@@ -104,6 +109,20 @@ export const llmConfigs = pgTable(
       (): AnyPgColumn => llmConfigs.id,
       { onDelete: "set null" },
     ),
+    // #317 review, #349 (requirement, "move rates to configuration"):
+    // per-config $/1M-token rates for llm_call_logs.cost_cents
+    // (lib/llm-config.ts's estimateCostCents) -- the natural, per-tenant
+    // home for a rate that a TS literal (MODEL_PRICING_PER_MILLION_TOKENS,
+    // same file) can't be: OpenRouter and a gateway like LLMOxie both front
+    // many models at independently-set, changing rates, and a literal means
+    // a code change and redeploy per org per model change. Both nullable,
+    // and BOTH must be set for estimateCostCents to use them (a half-known
+    // rate isn't a half-known cost, it's an unknown one) -- null falls
+    // through to the static table, which itself falls through to null
+    // ("unknown," never a guessed number; see that table's own doc
+    // comment).
+    pricePerMillionInputTokens: doublePrecision("price_per_million_input_tokens"),
+    pricePerMillionOutputTokens: doublePrecision("price_per_million_output_tokens"),
     isDefault: boolean("is_default").notNull().default(false),
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true })
@@ -197,14 +216,37 @@ export const promptTemplates = pgTable(
     index("prompt_templates_scope_course_idx").on(t.scopeCourseId),
     index("prompt_templates_scope_homework_idx").on(t.scopeHomeworkId),
     index("prompt_templates_scope_section_idx").on(t.scopeSectionId),
+    // #317 review finding #324: mirrors llm_configs_org_default_uq -- at
+    // most one ACTIVE template per concrete scope target. Postgres unique
+    // indexes never treat two NULLs as a conflict, so each index only
+    // constrains rows that actually scope to that column; a row's other
+    // three scope columns (always NULL, per the CHECK above) never collide
+    // with anything here.
+    uniqueIndex("prompt_templates_scope_org_active_uq")
+      .on(t.scopeOrganizationId)
+      .where(sql`${t.isActive} = true`),
+    uniqueIndex("prompt_templates_scope_course_active_uq")
+      .on(t.scopeCourseId)
+      .where(sql`${t.isActive} = true`),
+    uniqueIndex("prompt_templates_scope_homework_active_uq")
+      .on(t.scopeHomeworkId)
+      .where(sql`${t.isActive} = true`),
+    uniqueIndex("prompt_templates_scope_section_active_uq")
+      .on(t.scopeSectionId)
+      .where(sql`${t.isActive} = true`),
   ],
 );
 
 // ---------- Homework ----------
-// Assignment owned by a Course. prompt_template_id and llm_config_id are
-// nullable overrides; resolution falls back to Course / Organization defaults
-// when null. created_by_id references a CourseMembership (not a User), so a
-// TA or co-instructor authoring an assignment is first-class.
+// Assignment owned by a Course. llm_config_id is a nullable override;
+// resolution falls back to Course / Organization defaults when null
+// (lib/llm-config.ts's resolveLLMConfig). Prompt-template resolution is by
+// prompt_templates.scope_*_id only (lib/prompts.ts's resolvePromptTemplate)
+// -- there is deliberately no homeworks/sections-level override column for
+// it; #317 review, #347 removed the prompt_template_id column that used to
+// suggest one, after finding nothing anywhere had ever read or written it.
+// created_by_id references a CourseMembership (not a User), so a TA or
+// co-instructor authoring an assignment is first-class.
 
 export const homeworks = pgTable(
   "homeworks",
@@ -216,10 +258,6 @@ export const homeworks = pgTable(
     createdById: uuid("created_by_id")
       .notNull()
       .references(() => courseMemberships.id, { onDelete: "restrict" }),
-    promptTemplateId: uuid("prompt_template_id").references(
-      () => promptTemplates.id,
-      { onDelete: "set null" },
-    ),
     llmConfigId: uuid("llm_config_id").references(() => llmConfigs.id, {
       onDelete: "set null",
     }),
@@ -268,10 +306,6 @@ export const sections = pgTable(
     homeworkId: uuid("homework_id")
       .notNull()
       .references(() => homeworks.id, { onDelete: "cascade" }),
-    promptTemplateId: uuid("prompt_template_id").references(
-      () => promptTemplates.id,
-      { onDelete: "set null" },
-    ),
     order: integer("order").notNull(),
     title: text("title").notNull(),
     content: text("content").notNull(),
@@ -500,10 +534,6 @@ export const homeworksRelations = relations(homeworks, ({ one, many }) => ({
     fields: [homeworks.createdById],
     references: [courseMemberships.id],
   }),
-  promptTemplate: one(promptTemplates, {
-    fields: [homeworks.promptTemplateId],
-    references: [promptTemplates.id],
-  }),
   llmConfig: one(llmConfigs, {
     fields: [homeworks.llmConfigId],
     references: [llmConfigs.id],
@@ -515,10 +545,6 @@ export const sectionsRelations = relations(sections, ({ one }) => ({
   homework: one(homeworks, {
     fields: [sections.homeworkId],
     references: [homeworks.id],
-  }),
-  promptTemplate: one(promptTemplates, {
-    fields: [sections.promptTemplateId],
-    references: [promptTemplates.id],
   }),
   solution: one(sectionSolutions),
 }));

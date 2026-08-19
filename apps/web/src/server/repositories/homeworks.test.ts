@@ -6,6 +6,7 @@ import {
   updateHomework,
   deriveHomeworkStatus,
   homeworkHasStudentActivity,
+  deleteHomework,
 } from "./homeworks";
 import { unsafeCourseScope } from "./scope";
 import type { Db } from "../../db/client";
@@ -252,8 +253,9 @@ describe("deriveHomeworkStatus", () => {
 // DATABASE_URL isn't set locally; always runs in CI per turbo.json's
 // declared env).
 import { makeNodeDb } from "../../db/nodeClient";
-import { organizations, courses, courseMemberships, users, conversations, homeworkProgressWidgets } from "../../db/schema";
+import { organizations, courses, courseMemberships, users, conversations, homeworkProgressWidgets, llmConfigs, llmCallLogs } from "../../db/schema";
 import { eq as eq2 } from "drizzle-orm";
+import { recordLlmCallLog } from "./llmCallLogs";
 
 // Fixed byte arrays would collide with users_email_blind_index_uq across
 // runs (the users table isn't cascade-deleted when a test's organizations
@@ -584,6 +586,76 @@ describe.skipIf(!process.env.DATABASE_URL)("homeworkHasStudentActivity (real DB)
 
     expect(await homeworkHasStudentActivity(db, created!.id)).toBe(true);
 
+    await db.delete(organizations).where(eq2(organizations.id, org.id));
+  });
+});
+
+// #317 review, #341: llm_call_logs.conversation_id/.message_id were ON
+// DELETE RESTRICT when this table had no writer -- #317 makes chat.ts write
+// one row per turn, so a section with a single logged LLM call permanently
+// blocked deleteHomework with a generic 503 (RESTRICT -> 23503, missed by
+// the 422 regex, fell through to the default error handler). Migration
+// 0036 flips both FKs to SET NULL, matching llm_config_id's existing
+// pattern on the same table. This proves the fix against the real cascade
+// chain, not a mock -- a mocked repositories/homeworks.test.ts unit test
+// can't see a Postgres foreign-key constraint fire at all.
+describe.skipIf(!process.env.DATABASE_URL)("deleteHomework with a persisted llm_call_logs row (real DB, #341)", () => {
+  it("succeeds and detaches (does not cascade-delete) the llm_call_logs row for a section's logged chat turn", async () => {
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const { org, membership } = await seedCourseWithInstructor(db, `7-${crypto.randomUUID()}`);
+    const scope = unsafeCourseScope(membership.courseId);
+    const created = await createHomework(db, scope, {
+      createdById: membership.id, title: "HW7", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    await updateHomework(db, scope, created!.id, {
+      sections: [{ title: "Sec A", content: "a", order: 1 }],
+    });
+    const withSections = await getHomeworkById(db, scope, created!.id);
+    const section = withSections!.sections[0]!;
+
+    const [conversation] = await db.insert(conversations).values({
+      ownerUserId: membership.userId,
+      courseId: membership.courseId,
+      sectionId: section.id,
+      kind: "section",
+      title: "t",
+    }).returning();
+
+    const [llmConfig] = await db.insert(llmConfigs).values({
+      organizationId: org.id, name: "Test Config", provider: "openrouter", modelName: "test/model", isDefault: true,
+    }).returning();
+
+    await recordLlmCallLog(db, {
+      messageId: null,
+      conversationId: conversation!.id,
+      organizationId: org.id,
+      llmConfigId: llmConfig!.id,
+      provider: "openrouter",
+      model: "test/model",
+      providerRequestId: "req-341",
+      inputTokens: 10,
+      outputTokens: 5,
+      costCents: 1,
+      latencyMs: 100,
+      errorFlag: false,
+    });
+    const [loggedRow] = await db.select().from(llmCallLogs).where(eq2(llmCallLogs.providerRequestId, "req-341"));
+    expect(loggedRow).toBeDefined();
+
+    // The actual assertion: this must not throw a 23503 foreign-key
+    // violation the way it did before migration 0036.
+    const deleted = await deleteHomework(db, scope, created!.id);
+    expect(deleted).not.toBeNull();
+
+    // The log row survives, detached rather than cascade-deleted -- the
+    // whole point of SET NULL over either RESTRICT (blocks the delete) or
+    // CASCADE (silently destroys the cost/telemetry accounting).
+    const [survivingRow] = await db.select().from(llmCallLogs).where(eq2(llmCallLogs.providerRequestId, "req-341"));
+    expect(survivingRow).toBeDefined();
+    expect(survivingRow!.conversationId).toBeNull();
+    expect(survivingRow!.costCents).toBe(1);
+
+    await db.delete(llmCallLogs).where(eq2(llmCallLogs.providerRequestId, "req-341"));
     await db.delete(organizations).where(eq2(organizations.id, org.id));
   });
 });

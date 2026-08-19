@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS "conversations_prompt_template_idx" ON "conversations" USING btree ("prompt_template_id");

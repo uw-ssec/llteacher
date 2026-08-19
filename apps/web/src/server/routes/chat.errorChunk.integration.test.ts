@@ -90,7 +90,17 @@ function fakeLanguageModel(chunks: LanguageModelV2StreamPart[]): LanguageModelV2
    exercise that REAL branching logic (routes/chat.ts is untouched by this
    mock) without a real Postgres. Rows carry an incrementing `createdAt` so
    getLastMessages' desc(seq) ordering is deterministic. */
-interface FakeConversation { id: string; ownerUserId: string; courseId: string }
+interface FakeConversation {
+  id: string;
+  ownerUserId: string;
+  courseId: string;
+  // #317 review, #322: mirrors conversations.processing_started_at so this
+  // fake can model the per-conversation turn lock the same way the real
+  // repository does -- this file's tests each drive one turn at a time
+  // sequentially, so acquire always succeeds and release always no-ops,
+  // but chat.ts calls both unconditionally and needs real functions here.
+  processingStartedAt: number | null;
+}
 interface FakeMessageRow {
   id: string;
   conversationId: string;
@@ -115,9 +125,28 @@ vi.mock("../repositories/conversations", () => ({
     scope: string,
     input: { ownerUserId: string },
   ) => {
-    const row: FakeConversation = { id: "22222222-2222-2222-2222-222222222222", ownerUserId: input.ownerUserId, courseId: scope };
+    const row: FakeConversation = {
+      id: "22222222-2222-2222-2222-222222222222",
+      ownerUserId: input.ownerUserId,
+      courseId: scope,
+      processingStartedAt: null,
+    };
     conversationsStore.set(row.id, row);
     return row;
+  },
+  // #317 review, #322: minimal fakes -- this file's own tests drive one
+  // turn at a time, so acquire always succeeds (mirroring the real
+  // conditional UPDATE's happy path) and release just clears the field.
+  // The lock's actual concurrency guarantee is proven for real in
+  // conversations.test.ts against a real Postgres, not re-proven here.
+  acquireConversationTurnLock: async (_db: unknown, conversationId: string) => {
+    const conv = conversationsStore.get(conversationId);
+    if (conv) conv.processingStartedAt = Date.now();
+    return true;
+  },
+  releaseConversationTurnLock: async (_db: unknown, conversationId: string) => {
+    const conv = conversationsStore.get(conversationId);
+    if (conv) conv.processingStartedAt = null;
   },
   appendMessage: async (
     _db: unknown,
@@ -145,6 +174,36 @@ vi.mock("../repositories/conversations", () => ({
       .filter((m) => m.conversationId === conversationId)
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, limit),
+  // #317 review, #326: this file's own resolvePromptTemplate fake below
+  // always returns id: null, so the write-back branch never actually fires
+  // here -- a no-op fake, same defensive reasoning as the other
+  // repositories/conversations fakes above (the module must export
+  // SOMETHING chat.ts's import doesn't choke on).
+  pinConversationPromptTemplate: async () => {},
+  // #317 review, #346 (requirement 3): onFinish's release-lock/persist/log
+  // steps collapsed into one call -- this fake models the two effects this
+  // file's tests actually assert on (a real appendMessage-equivalent write
+  // to messagesStore when assistantMessage is non-null; lock release always)
+  // and no-ops the llm_call_logs write, same as the separate
+  // recordLlmCallLog fake below used to.
+  finalizeAssistantTurn: async (
+    _db: unknown,
+    conversationId: string,
+    assistantMessage: { id: string; parts: unknown } | null,
+  ) => {
+    const conv = conversationsStore.get(conversationId);
+    if (conv) conv.processingStartedAt = null;
+    if (assistantMessage) {
+      messagesStore.push({
+        id: assistantMessage.id,
+        conversationId,
+        role: "assistant",
+        parts: assistantMessage.parts,
+        clientMessageId: null,
+        createdAt: nextCreatedAt++,
+      });
+    }
+  },
 }));
 
 // #219/#265: unmetered in this integration test -- rate limiting itself is
@@ -159,6 +218,45 @@ vi.mock("../repositories/rateLimits", () => ({
   RATE_LIMIT_MAX_PER_MINUTE: 20,
   RATE_LIMIT_WINDOW_MS: 60_000,
 }));
+
+// #25: system-prompt resolution isn't what this suite exercises (it's about
+// the error-chunk/idempotency seam) -- faked the same minimal way `lib/ai`
+// is above, so chat.ts's new per-turn prompt-assembly calls don't reach the
+// real Drizzle queries against the `{}` fake db. assembleSystemPrompt stays
+// real (pure, no db) via importOriginal.
+vi.mock("../repositories/organizations", () => ({
+  getOrgScopeAndLlmConfigForCourse: async () => ({ orgScope: "org-a", courseLlmConfigId: null }),
+}));
+vi.mock("../../lib/prompts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/prompts")>();
+  return {
+    ...actual,
+    getPinnedPromptTemplateContent: async () => null,
+    resolvePromptTemplate: async () => ({ id: null, content: "test system prompt", version: null }),
+    getSectionPromptContext: async () => null,
+  };
+});
+
+// #26: same rationale -- resolveLLMConfig/resolveApiKey are faked so
+// chat.ts's new per-turn config resolution doesn't reach the real Drizzle
+// queries. buildProviderClient stays real (it just builds a client object,
+// no network call), so the fake model factory below (../../lib/ai) is what
+// actually intercepts the call.
+vi.mock("../../lib/llm-config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/llm-config")>();
+  return {
+    ...actual,
+    resolveLLMConfig: async () => ({
+      id: "llm-config-1",
+      provider: "openrouter" as const,
+      modelName: "test-model",
+      temperature: 0.7,
+      maxCompletionTokens: 1000,
+      credentialId: null,
+    }),
+    resolveApiKey: async () => "sk-test-key",
+  };
+});
 
 function fakeAuthContext(): AuthContext {
   return buildFakeAuthContext({
@@ -227,6 +325,74 @@ function succeedingModel(replyText: string): LanguageModelV2 {
       usage: { inputTokens: 3, outputTokens: 3, totalTokens: 6 },
     },
   ]);
+}
+
+// #342: a real client-side Stop or disconnect -- the reader on the
+// response body is cancelled mid-stream, BEFORE any `finish` chunk is ever
+// produced. Distinct from partialThenErrorModel above (a server-observed
+// `error` chunk, finishReason "error"): a `reader.cancel()` never reaches
+// the model backend as an error chunk at all -- per ai@5.0.195 (verified in
+// #342's own issue text), this reaches onFinish through `cancel()`, not
+// `flush()`, with `isAborted: false` and `finishReason: undefined`.
+//
+// Two steps, matching chatHandler's own `stopWhen: stepCountIs(5)` design
+// (a tool call, then follow-up text in the same turn) and Cordero's exact
+// #342 example: step 1 is a genuinely COMPLETE, resolved showDefinition
+// tool call; step 2 is text cancelled mid-delta, never reaching text-end.
+// This is the case the old `hasRenderableContent`'s `.some()` missed that
+// a single-incomplete-part turn would NOT have: `.some()` finds the
+// completed tool part and calls the whole array renderable, even though
+// the text part sitting next to it never finished. `chunkDelayInMs` gives
+// the test a real window to read step 2's partial text before cancelling.
+function slowToolThenPartialTextModel(): LanguageModelV2 {
+  let doStreamCallCount = 0;
+  return {
+    specificationVersion: "v2",
+    provider: "test-provider",
+    modelId: "test-model",
+    supportedUrls: {},
+    async doGenerate() {
+      throw new Error("doGenerate should not be called by streamText's streaming path");
+    },
+    async doStream() {
+      doStreamCallCount += 1;
+      if (doStreamCallCount === 1) {
+        // Step 1: a real showDefinition call, fully resolved -- the SDK
+        // runs the app's own real `execute` and emits a tool-result before
+        // this step's `finish`, so responseMessage.parts gets a genuine
+        // `tool-showDefinition` part with state "output-available".
+        return {
+          stream: simulateReadableStream({
+            chunkDelayInMs: 5,
+            chunks: [
+              { type: "stream-start", warnings: [] },
+              { type: "tool-input-start", id: "call-1", toolName: "showDefinition" },
+              { type: "tool-input-delta", id: "call-1", delta: '{"term":"p-value","body":"..."}' },
+              { type: "tool-input-end", id: "call-1" },
+              { type: "tool-call", toolCallId: "call-1", toolName: "showDefinition", input: '{"term":"p-value","body":"..."}' },
+              { type: "finish", finishReason: "tool-calls", usage: { inputTokens: 3, outputTokens: 3, totalTokens: 6 } },
+            ] satisfies LanguageModelV2StreamPart[],
+          }),
+        };
+      }
+      // Step 2: follow-up text, cut short -- no text-end, no finish. A
+      // real cancel() never lets the stream reach either.
+      return {
+        stream: simulateReadableStream({
+          chunkDelayInMs: 20,
+          chunks: [
+            { type: "stream-start", warnings: [] },
+            { type: "text-start", id: "t1" },
+            { type: "text-delta", id: "t1", delta: "A p-value is " },
+            { type: "text-delta", id: "t1", delta: "the probability of" },
+            { type: "text-delta", id: "t1", delta: " seeing a result this extreme" },
+            { type: "text-end", id: "t1" },
+            { type: "finish", finishReason: "stop", usage: { inputTokens: 3, outputTokens: 3, totalTokens: 6 } },
+          ] satisfies LanguageModelV2StreamPart[],
+        }),
+      };
+    },
+  };
 }
 
 describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 whole-branch review, Critical)", () => {
@@ -349,6 +515,97 @@ describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 who
 
       const rows = messagesStore.filter((m) => m.conversationId === "22222222-2222-2222-2222-222222222222");
       expect(rows.filter((r) => r.role === "user")).toHaveLength(1);
+      expect(rows.filter((r) => r.role === "assistant")).toHaveLength(1);
+    });
+  });
+
+  // #342: the case the pre-fix suite never drove -- every other test in
+  // this file reaches onFinish by fully draining the response (`flush()`),
+  // the same path a completed or provider-erroring turn takes. A client
+  // Stop or disconnect reaches onFinish through `cancel()` instead, which
+  // pre-fix looked exactly like success to the `isAborted ||
+  // finishReason === "error"` check (both false/undefined on a plain
+  // reader cancel) -- so the truncated text got persisted as a normal
+  // answer, and a retry replayed the same fragment forever with no error
+  // and no recovery short of Restart (which voids the submission).
+  describe("#342: client Stop / disconnect mid-stream (real reader.cancel(), not flush())", () => {
+    it("does not persist the truncated text when the reader is cancelled mid-stream", async () => {
+      fakeModel = slowToolThenPartialTextModel();
+
+      const res = await postChat(buildApp(), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      expect(res.status).toBe(200);
+      expect(res.body).not.toBeNull();
+
+      const reader = res.body!.getReader();
+      // Read until at least one chunk of real text has come through, so
+      // this is a genuine mid-answer cancel -- not one that races the
+      // stream before it produces anything at all.
+      let sawText = false;
+      for (let i = 0; i < 20 && !sawText; i++) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value && new TextDecoder().decode(value).includes("probability of")) sawText = true;
+      }
+      expect(sawText).toBe(true); // sanity: the test actually raced a real partial answer, not nothing
+
+      // The Stop button's actual mechanism (App.tsx's stopChat, via
+      // useChat -> AbortController -> the fetch reader) -- cancel before
+      // the model's `finish` chunk (delayed 20ms per chunk) has a chance
+      // to arrive.
+      await reader.cancel();
+
+      // onFinish's own work (lock release, the persistence gate, the
+      // llm_call_logs write) is async and not awaited by reader.cancel()
+      // itself -- poll briefly for it to settle rather than assuming a
+      // fixed number of microtask ticks.
+      const deadline = Date.now() + 2000;
+      while (
+        Date.now() < deadline &&
+        conversationsStore.get("22222222-2222-2222-2222-222222222222")?.processingStartedAt !== null
+      ) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      const rows = messagesStore.filter((m) => m.conversationId === "22222222-2222-2222-2222-222222222222");
+      // Pre-fix, this persisted {text:"A p-value is the probability of...",
+      // state:"streaming"} as a normal-looking, permanently-replayed answer.
+      expect(rows.map((r) => r.role)).toEqual(["user"]);
+    });
+
+    it("calls the model again (not a replay of the cancelled fragment) on the next send", async () => {
+      fakeModel = slowToolThenPartialTextModel();
+      const app = buildApp();
+
+      const res = await postChat(app, { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      const reader = res.body!.getReader();
+      for (let i = 0; i < 20; i++) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value && new TextDecoder().decode(value).includes("probability of")) break;
+      }
+      await reader.cancel();
+
+      const deadline = Date.now() + 2000;
+      while (
+        Date.now() < deadline &&
+        conversationsStore.get("22222222-2222-2222-2222-222222222222")?.processingStartedAt !== null
+      ) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(messagesStore.map((m) => m.role)).toEqual(["user"]);
+
+      // A fresh send on the same conversation must reach the model again --
+      // the classifyTurn idempotency check must not see the (nonexistent,
+      // thanks to the fix) cancelled turn as "already answered".
+      fakeModel = succeedingModel("a p-value is the probability of seeing a result this extreme");
+      const secondRes = await postChat(app, {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+      const body = await secondRes.text();
+      expect(body).toContain("a p-value is the probability of seeing a result this extreme");
+
+      const rows = messagesStore.filter((m) => m.conversationId === "22222222-2222-2222-2222-222222222222");
       expect(rows.filter((r) => r.role === "assistant")).toHaveLength(1);
     });
   });

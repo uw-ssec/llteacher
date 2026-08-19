@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS "chat_rate_limit_windows_window_start_idx" ON "chat_rate_limit_windows" USING btree ("window_start");

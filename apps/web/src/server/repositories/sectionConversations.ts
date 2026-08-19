@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, lt } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import {
   conversations,
@@ -11,8 +11,14 @@ import {
   grades,
 } from "../../db/schema";
 import type { CourseScope, OrgScope } from "./scope";
+import { unsafeCourseScope } from "./scope";
 import { runAtomically } from "./atomic";
 import { SubmissionGradedError } from "./submissions";
+import { getOrgScopeForCourse } from "./organizations";
+import { deriveHomeworkStatus, isUnreleased } from "./homeworks";
+import { resolvePromptTemplate, sectionGreeting, sectionConversationTitle } from "../../lib/prompts";
+import { DEFAULT_MESSAGES_PAGE_SIZE } from "./conversations";
+import { isUniqueViolation } from "./errors";
 
 /* --------------------------------------------------------------------------
    Section-conversation lifecycle (#27), kept in its own module rather than
@@ -24,15 +30,12 @@ import { SubmissionGradedError } from "./submissions";
    submitted, and restarting one has to reason about that submission. Splitting
    them keeps each file about one thing, and it keeps this work off the file
    PR #212 is actively rewriting.
-   -------------------------------------------------------------------------- */
 
-/** Django parity greeting, verbatim from ConversationService.
- *  _create_initial_message (apps/conversations/src/conversations/services.py).
- *  Stored as an `assistant` message, matching Django's MESSAGE_TYPE_AI -- the
- *  tutor is speaking to the student, so it is not a `system` message. */
-export function sectionGreeting(section: { order: number; title: string; content: string }): string {
-  return `Hello! I'm here to help you with Section ${section.order}: ${section.title}.\n\n${section.content}\n\nHow can I assist you with this question?`;
-}
+   #305: sectionGreeting/sectionConversationTitle -- the persona/wording this
+   module used to own directly -- now live in lib/prompts.ts, imported above.
+   This repository stays about persistence; prompt-facing copy stays in the
+   prompt-assembly module.
+   -------------------------------------------------------------------------- */
 
 /** The message `parts` shape the AI SDK uses, and that messages.parts stores. */
 function greetingParts(text: string) {
@@ -100,19 +103,9 @@ export class NotConversationOwnerError extends SectionConversationError {
   }
 }
 
-/** Postgres unique-violation SQLSTATE. */
-const PG_UNIQUE_VIOLATION = "23505";
-
-/** True when `err` is a Postgres unique-violation naming `constraint`.
- *
- *  Both drivers surface the SQLSTATE on a `code` property; neon-http also
- *  carries `constraint`, and node-postgres does too. Checked structurally
- *  rather than by message, which is locale- and version-dependent. */
-function isUniqueViolation(err: unknown, constraint: string): boolean {
-  if (typeof err !== "object" || err === null) return false;
-  const e = err as { code?: unknown; constraint?: unknown };
-  return e.code === PG_UNIQUE_VIOLATION && e.constraint === constraint;
-}
+// isUniqueViolation moved to repositories/errors.ts (code-review follow-up:
+// promptTemplates.ts needed the identical helper, so a third reimplementation
+// was the wrong move).
 
 type StartInput = {
   sectionId: string;
@@ -121,6 +114,15 @@ type StartInput = {
    *  read time -- see the column comment on conversations.isTeacherTest. The
    *  route derives this from the caller's course role. */
   isTeacherTest: boolean;
+  /** #317 review, blocking finding #4: distinct from isTeacherTest above --
+   *  isTeacherTest is true for any non-student (TA, instructor, observer),
+   *  but #172's own capability model means a TA without the canViewDrafts
+   *  grant must NOT be able to start a conversation (test or otherwise) on
+   *  a section the instructor hasn't released, the same gate every sibling
+   *  read path already applies. Callers pass authContext.canViewDraftsIn
+   *  (courseId) here -- this function has no authContext of its own to
+   *  derive it from. */
+  canViewDrafts: boolean;
 };
 
 /** Creates a section conversation plus its opening tutor message.
@@ -139,7 +141,13 @@ export async function startSectionConversation(
   db: Db,
   scope: CourseScope,
   input: StartInput,
-): Promise<{ id: string; title: string; greetingMessageId: string; greetingParts: unknown }> {
+): Promise<{
+  id: string;
+  title: string;
+  greetingMessageId: string;
+  greetingParts: unknown;
+  promptTemplateId: string | null;
+}> {
   // Membership and section-in-course are both caller-supplied and must be
   // verified before writing -- same rationale as createConversation's checks
   // in conversations.ts. droppedAt IS NULL matches listMembershipsForUser:
@@ -167,11 +175,37 @@ export async function startSectionConversation(
       title: sections.title,
       content: sections.content,
       type: sections.type,
+      dueDate: homeworks.dueDate,
+      publishedAt: homeworks.publishedAt,
+      releasedAt: homeworks.releasedAt,
+      isHidden: homeworks.isHidden,
+      expiresAt: homeworks.expiresAt,
     })
     .from(sections)
     .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
     .where(and(eq(sections.id, input.sectionId), eq(homeworks.courseId, scope)));
   if (!section) {
+    throw new SectionNotFoundError();
+  }
+  // #317 review, blocking finding #4: the greeting written below is built
+  // from section.content -- an unreleased section's problem statement would
+  // leak into it the moment a conversation starts, before chat.ts's own
+  // per-turn gate (lib/prompts.ts's getSectionPromptContext) ever runs.
+  // Collapses to the same SectionNotFoundError the row-missing case above
+  // throws, so this stays indistinguishable from a genuinely missing
+  // section (#236/#241's own rationale).
+  if (
+    !input.canViewDrafts &&
+    isUnreleased(
+      deriveHomeworkStatus({
+        dueDate: section.dueDate,
+        publishedAt: section.publishedAt,
+        releasedAt: section.releasedAt,
+        isHidden: section.isHidden,
+        expiresAt: section.expiresAt,
+      }),
+    )
+  ) {
     throw new SectionNotFoundError();
   }
   // #164: a non_interactive section has no conversation by design -- it
@@ -198,8 +232,18 @@ export async function startSectionConversation(
 
   const conversationId = crypto.randomUUID();
   const greetingMessageId = crypto.randomUUID();
-  const title = `Section ${section.order}: ${section.title}`;
+  const title = sectionConversationTitle(section);
   const greeting = greetingParts(sectionGreeting(section));
+
+  // #25: resolved and pinned once, here, at creation -- see lib/prompts.ts's
+  // module doc comment for why this must never be re-resolved per-message.
+  // Best-effort: a missing org scope (shouldn't happen for a course that
+  // just passed every check above) degrades to no pin rather than failing
+  // section start entirely over a prompt-template lookup.
+  const orgScope = await getOrgScopeForCourse(db, scope);
+  const promptTemplateId = orgScope
+    ? (await resolvePromptTemplate(db, orgScope, scope, input.sectionId)).id
+    : null;
 
   // #238: the pre-check above is a courtesy, not the guarantee -- it and the
   // insert are separate round-trips, so a double-clicked "Start" can put two
@@ -216,6 +260,7 @@ export async function startSectionConversation(
         kind: "section",
         title,
         isTeacherTest: input.isTeacherTest,
+        promptTemplateId,
       }),
       t.insert(messages).values({
         id: greetingMessageId,
@@ -237,7 +282,7 @@ export async function startSectionConversation(
   // section having never seen the greeting (and therefore the section's
   // actual question text, section.content, which the greeting is the sole
   // delivery mechanism for).
-  return { id: conversationId, title, greetingMessageId, greetingParts: greeting };
+  return { id: conversationId, title, greetingMessageId, greetingParts: greeting, promptTemplateId };
 }
 
 /** Delete-and-restart, in one action (#27) with #128's voiding semantics.
@@ -261,6 +306,13 @@ export async function restartSectionConversation(
   scope: OrgScope,
   conversationId: string,
   requesterId: string,
+  // #317 review, blocking finding #4: same leak vector as
+  // startSectionConversation -- a restart writes a fresh greeting from
+  // section.content too, so this needs the same gate. Not part of
+  // Cordero's own flagged pair (getSectionPromptContext,
+  // startSectionConversation), but the identical vulnerability class:
+  // fixed alongside them rather than left for a separate pass.
+  canViewDrafts: boolean,
 ): Promise<{
   voidedSubmission: { id: string; submittedAt: Date } | null;
   conversation: { id: string; title: string; greetingMessageId: string };
@@ -279,10 +331,16 @@ export async function restartSectionConversation(
       sectionOrder: sections.order,
       sectionTitle: sections.title,
       sectionContent: sections.content,
+      dueDate: homeworks.dueDate,
+      publishedAt: homeworks.publishedAt,
+      releasedAt: homeworks.releasedAt,
+      isHidden: homeworks.isHidden,
+      expiresAt: homeworks.expiresAt,
     })
     .from(conversations)
     .innerJoin(courses, eq(conversations.courseId, courses.id))
     .innerJoin(sections, eq(conversations.sectionId, sections.id))
+    .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
     .where(
       and(
         eq(conversations.id, conversationId),
@@ -296,6 +354,24 @@ export async function restartSectionConversation(
   }
   if (owned.ownerUserId !== requesterId) {
     throw new NotConversationOwnerError();
+  }
+  if (
+    !canViewDrafts &&
+    isUnreleased(
+      deriveHomeworkStatus({
+        dueDate: owned.dueDate,
+        publishedAt: owned.publishedAt,
+        releasedAt: owned.releasedAt,
+        isHidden: owned.isHidden,
+        expiresAt: owned.expiresAt,
+      }),
+    )
+  ) {
+    // Same "absent" bucket ConversationNotFoundError already covers above --
+    // a withdrawn section's conversation must not be restartable (which
+    // would leak its content into a fresh greeting) any more than it's
+    // reachable for a first-ever start.
+    throw new ConversationNotFoundError();
   }
 
   const [submission] = await db
@@ -317,7 +393,16 @@ export async function restartSectionConversation(
 
   const newConversationId = crypto.randomUUID();
   const greetingMessageId = crypto.randomUUID();
-  const title = `Section ${owned.sectionOrder}: ${owned.sectionTitle}`;
+  const title = sectionConversationTitle({ order: owned.sectionOrder, title: owned.sectionTitle });
+
+  // #25: a restart is a fresh conversation lifecycle start (same reasoning
+  // as startSectionConversation's own pin) -- re-resolved now rather than
+  // carried over from the conversation being replaced, so a template edit
+  // made between the original start and this restart is picked up, exactly
+  // once, for the replacement's own lifetime.
+  const promptTemplateId = (
+    await resolvePromptTemplate(db, scope, unsafeCourseScope(owned.courseId), owned.sectionId)
+  ).id;
 
   await runAtomically(db, (t) => [
     // Soft-delete first: conversations_owner_section_active_uq permits only
@@ -341,6 +426,7 @@ export async function restartSectionConversation(
       // another test conversation, and a since-promoted student's restart
       // does not silently convert their work into a teacher test.
       isTeacherTest: owned.isTeacherTest,
+      promptTemplateId,
     }),
     t.insert(messages).values({
       id: greetingMessageId,
@@ -373,6 +459,7 @@ export type SectionConversationRow = {
   isTeacherTest: boolean;
   isDeleted: boolean;
   createdAt: Date;
+  promptTemplateId: string | null;
 };
 
 /** One section conversation by id, course-scoped. Returns soft-deleted rows
@@ -394,6 +481,7 @@ export async function getSectionConversationById(
       isTeacherTest: conversations.isTeacherTest,
       isDeleted: conversations.isDeleted,
       createdAt: conversations.createdAt,
+      promptTemplateId: conversations.promptTemplateId,
     })
     .from(conversations)
     .where(
@@ -423,6 +511,7 @@ export async function getActiveSectionConversation(
       isTeacherTest: conversations.isTeacherTest,
       isDeleted: conversations.isDeleted,
       createdAt: conversations.createdAt,
+      promptTemplateId: conversations.promptTemplateId,
     })
     .from(conversations)
     .where(
@@ -453,11 +542,28 @@ export async function getActiveSectionConversation(
  *  the conversation and its greeting message in one atomic `db.batch`
  *  group, exactly the "batched writes" condition this file's own doc
  *  comment on `seq` names as when `createdAt` stops being safe. `seq` is
- *  included in the projection (not just used for ordering) so a future
- *  caller can page consistently the way getMessagesForConversation's
- *  `before` cursor does. */
-export async function getSectionConversationMessages(db: Db, conversationId: string) {
-  return db
+ *  included in the projection (not just used for ordering) so a caller can
+ *  page consistently via `before` -- exactly the same shape as
+ *  getMessagesForConversation's own `before` cursor.
+ *
+ *  #317 review, #326: was completely unbounded (no `.limit()`, no cursor)
+ *  while its tutor-side equivalent (getMessagesForConversation) was already
+ *  paginated at DEFAULT_MESSAGES_PAGE_SIZE -- a long-running section
+ *  conversation's full transcript, unbounded jsonb `parts` included, on
+ *  every reload. Same "fetch the tail descending, reverse to ascending"
+ *  shape as getMessagesForConversation, so both message-history endpoints
+ *  in this app now share one pagination convention, not two. */
+export async function getSectionConversationMessages(
+  db: Db,
+  conversationId: string,
+  opts?: { limit?: number; before?: number },
+) {
+  const limit = opts?.limit ?? DEFAULT_MESSAGES_PAGE_SIZE;
+  const conditions = [eq(messages.conversationId, conversationId)];
+  if (opts?.before !== undefined) {
+    conditions.push(lt(messages.seq, opts.before));
+  }
+  const rows = await db
     .select({
       id: messages.id,
       role: messages.role,
@@ -466,8 +572,10 @@ export async function getSectionConversationMessages(db: Db, conversationId: str
       seq: messages.seq,
     })
     .from(messages)
-    .where(eq(messages.conversationId, conversationId))
-    .orderBy(messages.seq);
+    .where(and(...conditions))
+    .orderBy(desc(messages.seq))
+    .limit(limit);
+  return rows.reverse();
 }
 
 /** Who may read a given section conversation (#27 access rules).

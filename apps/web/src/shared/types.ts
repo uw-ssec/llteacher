@@ -287,6 +287,48 @@ export interface HomeworkUpdateBody {
   widgets?: ProgressWidgetDiffInput[];
 }
 
+/** A course's org-scoped `llm_configs` rows, read-only, for the homework
+ *  author's config picker (apps/admin). Deliberately thin -- no credential
+ *  or prompt-template internals -- since this is exposed to any instructor,
+ *  not just the org admin who manages the underlying config. */
+export interface LLMConfigSummary {
+  id: string;
+  provider: string;
+  modelName: string;
+  isDefault: boolean;
+}
+
+export interface LLMConfigListResponse {
+  llmConfigs: LLMConfigSummary[];
+}
+
+/** #317 review, #325: the instructor-facing view of a course's own scoped
+ *  prompt_templates row. `null` id/version fields would be a null instead
+ *  -- see CoursePromptTemplateResponse below -- there's nothing to summarize
+ *  when the course has no scoped template of its own (resolution just
+ *  falls through to org/default). */
+export interface CoursePromptTemplateSummary {
+  id: string;
+  content: string;
+  version: number;
+  composeWithParent: boolean;
+  updatedAt: string;
+}
+
+export interface CoursePromptTemplateResponse {
+  promptTemplate: CoursePromptTemplateSummary | null;
+}
+
+export interface CoursePromptTemplateUpsertBody {
+  content: string;
+  composeWithParent?: boolean;
+}
+
+export interface CoursePromptTemplateUpsertResponse {
+  id: string;
+  version: number;
+}
+
 export interface HomeworkPublishBody {
   publish: boolean;
   /** ISO datetime. If omitted and publish=true, releases immediately. Must
@@ -379,6 +421,23 @@ declare global {
     WORKOS_API_KEY: string;
     WORKOS_CLIENT_ID: string;
     OPENROUTER_API_KEY: string;
+    /* #178's gateway. Required, not optional (#317 review, #343): migration
+       0035 moves the platform-default llm_configs row for every org to
+       provider='llmoxie' with credential_id NULL, which routes every
+       student's every turn through PROVIDER_FALLBACK_ENV_VAR['llmoxie'] --
+       this binding -- so a deployment missing it is no longer a narrow
+       "openrouter-only configs never read it" case, it's a platform-wide
+       500 on every message. resolveApiKey previously cast Env away
+       entirely (`c.env as unknown as Record<string, string | undefined>`),
+       which meant neither tsc nor `wrangler types` could flag an absent
+       secret at all; that cast is now confined to one narrow,
+       allowlist-gated helper (llm-config.ts's readEnvSecret) instead of
+       erasing the whole Env contract at the chat.ts call site. */
+    LLMOXIE_API_KEY: string;
+    /* Overrides the gateway host. Unset falls back to
+       LLMOXIE_DEFAULT_BASE_URL in lib/ai.ts -- see the reasoning there for
+       why a generated Azure hostname should not be a compile-time constant. */
+    LLMOXIE_BASE_URL?: string;
     ASSETS: Fetcher;
     // Auth (M1): sealed session cookie key + IdentityCipher keys.
     SESSION_SECRET: string;
