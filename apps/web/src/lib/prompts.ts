@@ -130,10 +130,13 @@ async function resolveFromLevel(db: Db, levels: Array<SQL | null>, index: number
 
 /** Walks section -> homework -> course -> org -> built-in fallback, per the
  *  resolution order documented on promptTemplates itself
- *  (db/schema/content.ts) -- by each level's own `scope_*_id` column, not
- *  the `sections.promptTemplateId` / `homeworks.promptTemplateId` override
- *  FKs (#317 review finding #324: those FKs and this function's real
- *  resolution had diverged -- nothing in the codebase ever writes them).
+ *  (db/schema/content.ts) -- by each level's own `scope_*_id` column. An
+ *  earlier schema also had `sections.promptTemplateId` / `homeworks.
+ *  promptTemplateId` override FKs alongside this resolution order (#317
+ *  review finding #324: those FKs and this function's real resolution had
+ *  diverged -- nothing in the codebase ever wrote them); #317 review, #347
+ *  removed both columns rather than leave a second, inert representation
+ *  of "which template applies" for a future change to trip over.
  *  `sectionId` is null for tutor-kind conversations (no section to resolve
  *  a homework from either; homework-level resolution is only ever reached
  *  via a section, matching the schema).

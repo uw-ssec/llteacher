@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { promptTemplates } from "../../db/schema";
 import type { CourseScope } from "./scope";
@@ -26,7 +26,17 @@ export interface CourseScopedPromptTemplate {
 
 /** The course's own active prompt_templates row, if any. Used both to
  *  answer the instructor-facing GET (prefill the edit form) and internally
- *  by upsertCourseScopedPromptTemplate to decide create-vs-version-bump. */
+ *  by upsertCourseScopedPromptTemplate to decide create-vs-version-bump.
+ *
+ *  #317 review, #347: `.orderBy(desc(version)).limit(1)` -- the same fix
+ *  lib/prompts.ts's fetchActiveTemplateForScope already got, and the same
+ *  bug (an unordered `[row]` destructure resolves to whichever row Postgres
+ *  happens to return first) applied here too. The scope_course_id partial
+ *  unique index (#324) prevents two active rows at this scope going
+ *  forward, but a pre-migration DB or a raw-SQL insert can still produce
+ *  that residual state -- without the ordering, this function's caller
+ *  (upsertCourseScopedPromptTemplate's version-bump decision) could pick
+ *  the wrong row and hand back a 409 no reload clears. */
 export async function getCourseScopedPromptTemplate(
   db: Db,
   courseScope: CourseScope,
@@ -40,7 +50,9 @@ export async function getCourseScopedPromptTemplate(
       updatedAt: promptTemplates.updatedAt,
     })
     .from(promptTemplates)
-    .where(and(eq(promptTemplates.scopeCourseId, courseScope), eq(promptTemplates.isActive, true)));
+    .where(and(eq(promptTemplates.scopeCourseId, courseScope), eq(promptTemplates.isActive, true)))
+    .orderBy(desc(promptTemplates.version))
+    .limit(1);
   return row ?? null;
 }
 

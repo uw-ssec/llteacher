@@ -82,6 +82,22 @@ export async function putCoursePromptTemplateHandler(c: Context<AppEnv>) {
   if (body.composeWithParent !== undefined && typeof body.composeWithParent !== "boolean") {
     return c.json({ error: "composeWithParent must be a boolean" }, 400);
   }
+  // #317 review, #347 (requirement 1): resolveFromLevel (lib/prompts.ts)
+  // genuinely composes parent + child content -- but only on the FRESH
+  // resolution path. Every turn after the first reads the pinned row by id
+  // via getPinnedPromptTemplateContent, which selects `content` alone with
+  // no composition, so a true value here silently does nothing from turn 2
+  // onward: the instructor sees the toggle saved, gets a composed prompt
+  // once, then a truncated one for the rest of the conversation's life.
+  // Rejected here instead, until the pinned-read path can recompose (or
+  // conversations pin the resolved string, not just an id) -- refusing is
+  // the honest option; a silent no-op is what got this issue filed.
+  if (body.composeWithParent === true) {
+    return c.json(
+      { error: "composeWithParent is not yet supported -- pinned conversations do not recompose it" },
+      400,
+    );
+  }
 
   const db = makeDb(c.env.DATABASE_URL);
   const result = await upsertCourseScopedPromptTemplate(db, scope, {

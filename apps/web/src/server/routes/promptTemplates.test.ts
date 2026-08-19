@@ -166,8 +166,31 @@ describe("putCoursePromptTemplateHandler", () => {
     });
   });
 
-  it("passes composeWithParent through when explicitly set", async () => {
+  it("passes composeWithParent through when explicitly set to false", async () => {
     upsertCourseScopedPromptTemplateMock.mockResolvedValue({ id: "pt-2", version: 3 });
+    const app = makeApp(instructorAuth());
+    const res = await app.request(
+      "/api/courses/c1/prompt-template",
+      {
+        method: "PUT",
+        body: JSON.stringify({ content: "Be great.", composeWithParent: false }),
+        headers: { "content-type": "application/json" },
+      },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+    expect(upsertCourseScopedPromptTemplateMock).toHaveBeenCalledWith(expect.anything(), "c1", {
+      content: "Be great.",
+      composeWithParent: false,
+    });
+  });
+
+  // #317 review, #347 (requirement 1): getPinnedPromptTemplateContent (the
+  // path every turn after the first actually takes) never recomposes --
+  // resolveFromLevel's composition only ever runs on a fresh resolution.
+  // Rejected at the write API rather than silently accepted and then
+  // silently dropped from turn 2 onward.
+  it("400s composeWithParent: true -- not supported on the pinned-read path", async () => {
     const app = makeApp(instructorAuth());
     const res = await app.request(
       "/api/courses/c1/prompt-template",
@@ -178,11 +201,8 @@ describe("putCoursePromptTemplateHandler", () => {
       },
       TEST_ENV,
     );
-    expect(res.status).toBe(200);
-    expect(upsertCourseScopedPromptTemplateMock).toHaveBeenCalledWith(expect.anything(), "c1", {
-      content: "Be great.",
-      composeWithParent: true,
-    });
+    expect(res.status).toBe(400);
+    expect(upsertCourseScopedPromptTemplateMock).not.toHaveBeenCalled();
   });
 });
 

@@ -174,10 +174,15 @@ export const promptTemplates = pgTable(
 );
 
 // ---------- Homework ----------
-// Assignment owned by a Course. prompt_template_id and llm_config_id are
-// nullable overrides; resolution falls back to Course / Organization defaults
-// when null. created_by_id references a CourseMembership (not a User), so a
-// TA or co-instructor authoring an assignment is first-class.
+// Assignment owned by a Course. llm_config_id is a nullable override;
+// resolution falls back to Course / Organization defaults when null
+// (lib/llm-config.ts's resolveLLMConfig). Prompt-template resolution is by
+// prompt_templates.scope_*_id only (lib/prompts.ts's resolvePromptTemplate)
+// -- there is deliberately no homeworks/sections-level override column for
+// it; #317 review, #347 removed the prompt_template_id column that used to
+// suggest one, after finding nothing anywhere had ever read or written it.
+// created_by_id references a CourseMembership (not a User), so a TA or
+// co-instructor authoring an assignment is first-class.
 
 export const homeworks = pgTable(
   "homeworks",
@@ -189,10 +194,6 @@ export const homeworks = pgTable(
     createdById: uuid("created_by_id")
       .notNull()
       .references(() => courseMemberships.id, { onDelete: "restrict" }),
-    promptTemplateId: uuid("prompt_template_id").references(
-      () => promptTemplates.id,
-      { onDelete: "set null" },
-    ),
     llmConfigId: uuid("llm_config_id").references(() => llmConfigs.id, {
       onDelete: "set null",
     }),
@@ -241,10 +242,6 @@ export const sections = pgTable(
     homeworkId: uuid("homework_id")
       .notNull()
       .references(() => homeworks.id, { onDelete: "cascade" }),
-    promptTemplateId: uuid("prompt_template_id").references(
-      () => promptTemplates.id,
-      { onDelete: "set null" },
-    ),
     order: integer("order").notNull(),
     title: text("title").notNull(),
     content: text("content").notNull(),
@@ -473,10 +470,6 @@ export const homeworksRelations = relations(homeworks, ({ one, many }) => ({
     fields: [homeworks.createdById],
     references: [courseMemberships.id],
   }),
-  promptTemplate: one(promptTemplates, {
-    fields: [homeworks.promptTemplateId],
-    references: [promptTemplates.id],
-  }),
   llmConfig: one(llmConfigs, {
     fields: [homeworks.llmConfigId],
     references: [llmConfigs.id],
@@ -488,10 +481,6 @@ export const sectionsRelations = relations(sections, ({ one }) => ({
   homework: one(homeworks, {
     fields: [sections.homeworkId],
     references: [homeworks.id],
-  }),
-  promptTemplate: one(promptTemplates, {
-    fields: [sections.promptTemplateId],
-    references: [promptTemplates.id],
   }),
   solution: one(sectionSolutions),
 }));

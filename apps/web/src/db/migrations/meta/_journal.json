@@ -267,6 +267,13 @@
       "when": 1787084531919,
       "tag": "0037_prompt_templates_org_backfill",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1787099921995,
+      "tag": "0038_drop_inert_homework_section_prompt_template_fk",
+      "breakpoints": true
     }
   ]
 }
