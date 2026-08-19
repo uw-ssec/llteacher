@@ -163,6 +163,30 @@ vi.mock("../repositories/conversations", () => ({
   // repositories/conversations fakes above (the module must export
   // SOMETHING chat.ts's import doesn't choke on).
   pinConversationPromptTemplate: async () => {},
+  // #317 review, #346 (requirement 3): onFinish's release-lock/persist/log
+  // steps collapsed into one call -- this fake models the two effects this
+  // file's tests actually assert on (a real appendMessage-equivalent write
+  // to messagesStore when assistantMessage is non-null; lock release always)
+  // and no-ops the llm_call_logs write, same as the separate
+  // recordLlmCallLog fake below used to.
+  finalizeAssistantTurn: async (
+    _db: unknown,
+    conversationId: string,
+    assistantMessage: { id: string; parts: unknown } | null,
+  ) => {
+    const conv = conversationsStore.get(conversationId);
+    if (conv) conv.processingStartedAt = null;
+    if (assistantMessage) {
+      messagesStore.push({
+        id: assistantMessage.id,
+        conversationId,
+        role: "assistant",
+        parts: assistantMessage.parts,
+        clientMessageId: null,
+        createdAt: nextCreatedAt++,
+      });
+    }
+  },
 }));
 
 // #219/#265: unmetered in this integration test -- rate limiting itself is
@@ -178,22 +202,13 @@ vi.mock("../repositories/rateLimits", () => ({
   RATE_LIMIT_WINDOW_MS: 60_000,
 }));
 
-// #317 review, #321: llm_call_logs -- same reasoning as rateLimits above,
-// a no-op fake so chatHandler's onFinish doesn't call the real
-// db.insert(...) against the mocked (`{}`) db. This file's own tests are
-// about error-chunk/idempotency behavior, not #321's own observability
-// data, which chat.test.ts covers directly.
-vi.mock("../repositories/llmCallLogs", () => ({
-  recordLlmCallLog: async () => {},
-}));
-
 // #25: system-prompt resolution isn't what this suite exercises (it's about
 // the error-chunk/idempotency seam) -- faked the same minimal way `lib/ai`
 // is above, so chat.ts's new per-turn prompt-assembly calls don't reach the
 // real Drizzle queries against the `{}` fake db. assembleSystemPrompt stays
 // real (pure, no db) via importOriginal.
 vi.mock("../repositories/organizations", () => ({
-  getOrgScopeForCourse: async () => "org-a",
+  getOrgScopeAndLlmConfigForCourse: async () => ({ orgScope: "org-a", courseLlmConfigId: null }),
 }));
 vi.mock("../../lib/prompts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/prompts")>();

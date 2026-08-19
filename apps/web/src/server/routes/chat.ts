@@ -57,6 +57,7 @@ import {
   getOwnedConversationOrNull,
   acquireConversationTurnLock,
   releaseConversationTurnLock,
+  finalizeAssistantTurn,
   pinConversationPromptTemplate,
 } from "../repositories/conversations";
 import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from "../repositories/rateLimits";
@@ -70,8 +71,7 @@ import {
 } from "../repositories/sectionConversations";
 import { courseScopeFromAuthContext, unsafeCourseScope, unsafeOrgScope, type OrgScope } from "../repositories/scope";
 import { IdempotencyKeyConflictError } from "../repositories/errors";
-import { getOrgScopeForCourse } from "../repositories/organizations";
-import { recordLlmCallLog } from "../repositories/llmCallLogs";
+import { getOrgScopeAndLlmConfigForCourse } from "../repositories/organizations";
 import { logServerError } from "../utils/errors";
 import {
   assembleSystemPrompt,
@@ -573,9 +573,14 @@ async function resolveConversation(
       // round-trip for the exact same course would be pure waste. undefined
       // (not resolved) on the two conversation-creation branches below,
       // which don't get an org scope for free from their own queries;
-      // chatHandler's Promise.all falls back to getOrgScopeForCourse only
-      // when this is undefined.
+      // chatHandler's Promise.all falls back to getOrgScopeAndLlmConfigForCourse
+      // only when this is undefined.
       orgScope: OrgScope | undefined;
+      // #317 review, #346 (requirement 1): same join, same reasoning --
+      // getConversationById now also projects courses.llmConfigId, so this
+      // is set (possibly to null, "no course-level override") whenever
+      // orgScope is. Always undefined exactly when orgScope is.
+      courseLlmConfigId: string | null | undefined;
     }
   | Response
 > {
@@ -600,6 +605,7 @@ async function resolveConversation(
       conv: existing,
       sectionGreetingParts: undefined,
       orgScope: unsafeOrgScope(existing.organizationId),
+      courseLlmConfigId: existing.courseLlmConfigId,
     };
   }
 
@@ -661,6 +667,7 @@ async function resolveConversation(
         },
         sectionGreetingParts: Array.isArray(created.greetingParts) ? created.greetingParts : undefined,
         orgScope: undefined,
+        courseLlmConfigId: undefined,
       };
     } catch (err) {
       if (err instanceof SectionConversationExistsError) {
@@ -681,6 +688,7 @@ async function resolveConversation(
           },
           sectionGreetingParts: undefined,
           orgScope: undefined,
+          courseLlmConfigId: undefined,
         };
       }
       if (err instanceof SectionNotFoundError) {
@@ -701,7 +709,7 @@ async function resolveConversation(
     kind: "tutor",
     title,
   });
-  return { conv, sectionGreetingParts: undefined, orgScope: undefined };
+  return { conv, sectionGreetingParts: undefined, orgScope: undefined, courseLlmConfigId: undefined };
 }
 
 export async function chatHandler(c: Context<AppEnv>) {
@@ -859,19 +867,25 @@ export async function chatHandler(c: Context<AppEnv>) {
   // can't join this batch -- it runs after, only on the conversations that
   // reach it (predate promptTemplateId, or never resolved a real template
   // at creation).
-  const [orgScope, pinnedPromptContent, sectionPromptContext] = await Promise.all([
+  const [{ orgScope, courseLlmConfigId }, pinnedPromptContent, sectionPromptContext] = await Promise.all([
     // #25/#26: both prompt-template and LLM-config resolution need the org
     // scope for their own fallback queries -- resolved once and shared,
     // rather than each doing its own getOrgScopeForCourse round-trip.
     //
-    // #317 review, #326 (remaining requirement): resolveConversation's
-    // conversationId branch already reads this off the same
-    // getConversationById row (joined against courses) -- the dominant case,
-    // since most turns are on an already-existing conversation, not a
-    // brand-new one. Falls back to a real getOrgScopeForCourse call only for
-    // the two conversation-creation branches, which don't resolve it for
-    // free from their own queries.
-    resolved.orgScope !== undefined ? Promise.resolve(resolved.orgScope) : getOrgScopeForCourse(db, scope),
+    // #317 review, #326 (remaining requirement), #346 (requirement 1):
+    // resolveConversation's conversationId branch already reads both
+    // orgScope AND courseLlmConfigId off the same getConversationById row
+    // (joined against courses) -- the dominant case, since most turns are
+    // on an already-existing conversation, not a brand-new one. Falls back
+    // to a real query only for the two conversation-creation branches,
+    // which don't resolve either for free from their own queries; that
+    // fallback fetches both together (getOrgScopeAndLlmConfigForCourse)
+    // rather than two separate round-trips.
+    resolved.orgScope !== undefined
+      ? Promise.resolve({ orgScope: resolved.orgScope, courseLlmConfigId: resolved.courseLlmConfigId ?? null })
+      : getOrgScopeAndLlmConfigForCourse(db, scope).then(
+          (r) => r ?? { orgScope: null, courseLlmConfigId: null },
+        ),
     // #25: system prompt, resolved from the conversation's PINNED template
     // (set once at creation/restart -- see lib/prompts.ts's module doc
     // comment) rather than re-resolved here. A null promptTemplateId means
@@ -896,7 +910,21 @@ export async function chatHandler(c: Context<AppEnv>) {
     resolvedSystemPromptContent = pinnedPromptContent;
     isDefaultPrompt = false;
   } else if (orgScope) {
-    const resolved = await resolvePromptTemplate(db, orgScope, scope, conv.sectionId);
+    // #317 review, #346 (requirement 2): passes the homeworkId
+    // getSectionPromptContext already resolved one statement earlier
+    // (sectionPromptContext?.homeworkId) instead of letting
+    // resolvePromptTemplate re-read `sections` for the exact same column --
+    // `?? null` when sectionPromptContext itself is null (tutor-kind, or a
+    // section that failed to resolve within scope) matches
+    // resolvePromptTemplate's own "no sectionId -> no homework level" and
+    // "sectionId didn't resolve -> no homework level" behavior either way.
+    const resolved = await resolvePromptTemplate(
+      db,
+      orgScope,
+      scope,
+      conv.sectionId,
+      sectionPromptContext?.homeworkId ?? null,
+    );
     resolvedSystemPromptContent = resolved.content;
     isDefaultPrompt = resolved.id === null;
     // #317 review, #326: "a null pin re-runs the full 4-scope template walk
@@ -961,7 +989,13 @@ export async function chatHandler(c: Context<AppEnv>) {
   }
   let resolvedLLMConfig: Awaited<ReturnType<typeof resolveLLMConfig>>;
   try {
-    resolvedLLMConfig = await resolveLLMConfig(db, orgScope, scope, sectionPromptContext?.homeworkLlmConfigId ?? null);
+    resolvedLLMConfig = await resolveLLMConfig(
+      db,
+      orgScope,
+      scope,
+      sectionPromptContext?.homeworkLlmConfigId ?? null,
+      courseLlmConfigId,
+    );
   } catch (err) {
     if (err instanceof LLMConfigNotFoundError) {
       logServerError("chatHandler.llmConfig", err);
@@ -1309,16 +1343,6 @@ export async function chatHandler(c: Context<AppEnv>) {
       // needed. See the isErrorOutcome/hasRenderableContent doc comments
       // inside this callback for the persistence gate itself.
       onFinish: async ({ responseMessage, isAborted, finishReason }) => {
-        // #317 review, #322: unconditional, before anything below -- the
-        // turn is over (successfully, aborted, or errored) the moment
-        // onFinish fires at all, so the lock must release here regardless
-        // of which of those three this turn was. Best-effort
-        // (releaseConversationTurnLock's own doc comment): a failure here
-        // must never surface as a second error layered on the turn's own.
-        await releaseConversationTurnLock(db, conv.id).catch((err) => {
-          logServerError("chatHandler.onFinish.releaseLock", err);
-        });
-
         // #268, #342: NOT persisted unless the turn reached a real terminal
         // state. Originally this was `isAborted || finishReason === "error"`
         // -- a denylist that let anything else through, including
@@ -1357,35 +1381,28 @@ export async function chatHandler(c: Context<AppEnv>) {
         // the user message (already deduped above), so no response ever gets
         // generated for that turn. That gap is a documented limitation (#3
         // pitfall 2), not fixed here -- tracked as #96 (streaming resilience).
-        let persistedMessageId: string | null = null;
-        if (!isErrorOutcome && hasRenderableContent(responseMessage.parts)) {
-          try {
-            const { row } = await appendMessage(
-              db,
-              scope,
-              conv.id,
-              { role: "assistant", parts: responseMessage.parts },
-              { skipOwnershipCheck: true },
-            );
-            persistedMessageId = row.id;
-          } catch (err) {
-            logServerError("chatHandler.onFinish", err);
-          }
-        }
+        //
+        // #317 review, #346 (requirement 3): the assistant message's id is
+        // generated here rather than read back from an INSERT -- see
+        // finalizeAssistantTurn's own doc comment for why that's what lets
+        // the lock release, the message persist, and the llm_call_logs
+        // write (previously three serialized round-trips, all directly
+        // perceived as tail latency since the SDK awaits onFinish inside
+        // the stream's flush) collapse into one db.batch()/transaction.
+        const shouldPersist = !isErrorOutcome && hasRenderableContent(responseMessage.parts);
+        const assistantMessage = shouldPersist
+          ? { id: crypto.randomUUID(), parts: responseMessage.parts }
+          : null;
 
         // #317 review, #321: one llm_call_logs row per turn -- including the
         // error/aborted/no-content cases above, which previously early-
         // returned with nothing written anywhere. This was the operational
         // gap #321 names: a provider outage or a rotated key produced
         // "zero evidence" -- no error rate, no per-provider breakdown, no
-        // latency, no cost. Best-effort like the release/persist steps
-        // above: a logging failure must never surface as a second error
-        // layered on this turn's own outcome.
+        // latency, no cost.
         try {
           const [usage, response] = await Promise.all([result.usage, result.response]);
-          await recordLlmCallLog(db, {
-            messageId: persistedMessageId,
-            conversationId: conv.id,
+          await finalizeAssistantTurn(db, conv.id, assistantMessage, {
             organizationId: orgScope,
             llmConfigId: resolvedLLMConfig.id,
             provider: resolvedLLMConfig.provider,
@@ -1399,10 +1416,16 @@ export async function chatHandler(c: Context<AppEnv>) {
               usage.outputTokens ?? null,
             ),
             latencyMs: Date.now() - turnStartedAt,
-            errorFlag: isErrorOutcome || !persistedMessageId,
+            errorFlag: isErrorOutcome || !shouldPersist,
           });
         } catch (err) {
-          logServerError("chatHandler.onFinish.recordLlmCallLog", err);
+          // Best-effort, matching the release/persist/log steps this
+          // replaces: a failure here must never surface as a second error
+          // layered on the turn's own outcome. A conversation left locked
+          // by this failing self-heals via LOCK_STALE_MS, same as any other
+          // path that never reaches its own release call (see this
+          // function's trade-off note in conversations.ts).
+          logServerError("chatHandler.onFinish.finalizeAssistantTurn", err);
         }
       },
     });

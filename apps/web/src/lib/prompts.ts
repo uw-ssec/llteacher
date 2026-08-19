@@ -142,17 +142,31 @@ async function resolveFromLevel(db: Db, levels: Array<SQL | null>, index: number
  *  scoped to `orgScope`/`courseScope`/the caller-supplied `sectionId`,
  *  which the caller must have already verified belongs to the requester
  *  (mint via courseScopeFromAuthContext, never from unvalidated request
- *  input) -- this function does not itself re-check membership. */
+ *  input) -- this function does not itself re-check membership.
+ *
+ *  `knownHomeworkId` -- #317 review, #346: undefined (the default) means
+ *  "look it up" (a `sections` select keyed on `sectionId`); any other value
+ *  means the caller already has it and this function trusts it instead.
+ *  chat.ts's caller already ran getSectionPromptContext one statement
+ *  earlier, whose join has this exact column (PromptSectionContext.
+ *  homeworkId) -- this parameter is what lets that caller skip the
+ *  redundant re-read on the very fallback path (no pin yet) that's already
+ *  paying for four scope-predicate reads. */
 export async function resolvePromptTemplate(
   db: Db,
   orgScope: OrgScope,
   courseScope: CourseScope,
   sectionId: string | null,
+  knownHomeworkId?: string | null,
 ): Promise<ResolvedPromptTemplate> {
   let homeworkId: string | null = null;
   if (sectionId) {
-    const [section] = await db.select({ homeworkId: sections.homeworkId }).from(sections).where(eq(sections.id, sectionId));
-    homeworkId = section?.homeworkId ?? null;
+    if (knownHomeworkId !== undefined) {
+      homeworkId = knownHomeworkId;
+    } else {
+      const [section] = await db.select({ homeworkId: sections.homeworkId }).from(sections).where(eq(sections.id, sectionId));
+      homeworkId = section?.homeworkId ?? null;
+    }
   }
 
   const levels: Array<SQL | null> = [

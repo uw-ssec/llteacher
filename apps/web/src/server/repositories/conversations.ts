@@ -1,11 +1,12 @@
 import { and, count, desc, eq, getTableColumns, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { conversations, messages, sections, homeworks, courses, courseMemberships, submissions } from "../../db/schema";
+import { conversations, messages, sections, homeworks, courses, courseMemberships, submissions, llmCallLogs } from "../../db/schema";
 import type { ConversationKind } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import { TenancyMismatchError, IdempotencyKeyConflictError } from "./errors";
 import { getOrgScopeForCourse } from "./organizations";
 import { resolvePromptTemplate } from "../../lib/prompts";
+import type { LlmProvider } from "../../lib/llm-config";
 
 export const DEFAULT_CONVERSATIONS_PAGE_SIZE = 50;
 // #317 review, #326: exported so getSectionConversationMessages
@@ -486,9 +487,19 @@ export async function appendMessage(
 // conversation that a plain select would have found. Every other caller
 // (routes/conversations.ts's PATCH/DELETE/GET-messages) just ignores the
 // extra field.
+//
+// #317 review, #346 (requirement 1): also projects courses.llmConfigId --
+// resolveLLMConfig (lib/llm-config.ts) used to re-read this same courses
+// row itself, one statement after this join already had it, exactly the
+// redundant-read shape #326's homeworkLlmConfigId fix already closed one
+// function earlier. chat.ts threads it through as courseLlmConfigId.
 export async function getConversationById(db: Db, conversationId: string) {
   const [row] = await db
-    .select({ ...getTableColumns(conversations), organizationId: courses.organizationId })
+    .select({
+      ...getTableColumns(conversations),
+      organizationId: courses.organizationId,
+      courseLlmConfigId: courses.llmConfigId,
+    })
     .from(conversations)
     .innerJoin(courses, eq(conversations.courseId, courses.id))
     .where(eq(conversations.id, conversationId));
@@ -582,6 +593,115 @@ export async function releaseConversationTurnLock(db: Db, conversationId: string
     .update(conversations)
     .set({ processingStartedAt: null })
     .where(eq(conversations.id, conversationId));
+}
+
+/** #317 review, #346 (requirement 3): collapses the three writes chat.ts's
+ *  onFinish previously ran as three strictly serialized round-trips --
+ *  release the turn lock, persist the assistant reply (when the turn
+ *  produced one), record the llm_call_logs row -- into a single
+ *  db.batch()/transaction. Unlike the pre-model reads #326 already
+ *  collapsed, this tail is directly perceived: the AI SDK awaits onFinish
+ *  inside the stream's flush, so the student's UI stays in the in-flight
+ *  state for every hop here, after the last token has already arrived.
+ *
+ *  No data dependency forces the old order: the caller generates the
+ *  assistant message's id itself (crypto.randomUUID()) instead of reading
+ *  it back from an INSERT's `.returning()`, so llm_call_logs.messageId can
+ *  reference it in the SAME batch/transaction as the INSERT that creates
+ *  it -- Postgres validates a same-transaction FK against a row an earlier
+ *  statement in that transaction just inserted. `assistantMessage` is null
+ *  for the error/aborted/no-content cases (chat.ts's isErrorOutcome /
+ *  hasRenderableContent) -- nothing to persist, but the lock still must
+ *  release and the log still must record the outcome.
+ *
+ *  Trade-off, deliberately accepted: because the lock release now shares
+ *  the message insert's atomicity, a failure in either the message or the
+ *  log insert also rolls back the lock release (previously independent,
+ *  always-runs-regardless). This is the same "abandoned lock" shape
+ *  LOCK_STALE_MS (chat.ts) already exists to self-heal -- a worker dying
+ *  mid-request already left a stuck lock for that mechanism to clear, so
+ *  this doesn't introduce a new failure class, only makes the rare "message
+ *  or log insert throws" case resolve the same way.
+ *
+ *  Unlike appendMessage, no ON CONFLICT handling on the message insert: the
+ *  assistant reply has no clientMessageId (never a client-submitted,
+ *  retryable send), so it can never collide with an existing row the way a
+ *  resent user message can -- every call here is a genuinely new row. */
+export async function finalizeAssistantTurn(
+  db: Db,
+  conversationId: string,
+  assistantMessage: { id: string; parts: unknown } | null,
+  llmLog: {
+    organizationId: string;
+    llmConfigId: string;
+    provider: LlmProvider;
+    model: string;
+    providerRequestId: string | null;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    costCents: number | null;
+    latencyMs: number;
+    errorFlag: boolean;
+  },
+): Promise<void> {
+  // Statements are built against `target` (the outer db on the batch path,
+  // the transaction handle on the fallback path) -- building against the
+  // outer db and then merely awaiting the result inside db.transaction()
+  // would run every write outside that transaction, on its own
+  // auto-committed statement (atomic.ts's runAtomically doc comment names
+  // this exact mistake). A closure rebuilds the statements per branch
+  // instead of building them once against `db`.
+  function buildStatements(target: Db): BatchStatement[] {
+    // Just processingStartedAt -- conversations.updatedAt (schema.ts)
+    // carries its own $onUpdate(() => new Date()), so every UPDATE through
+    // Drizzle bumps it regardless of which other columns are set; this
+    // already held for the plain releaseConversationTurnLock this
+    // replaces, error/aborted turns included.
+    const releaseLock = target
+      .update(conversations)
+      .set({ processingStartedAt: null })
+      .where(eq(conversations.id, conversationId));
+
+    const logInsert = target.insert(llmCallLogs).values({
+      messageId: assistantMessage?.id ?? null,
+      conversationId,
+      organizationId: llmLog.organizationId,
+      llmConfigId: llmLog.llmConfigId,
+      provider: llmLog.provider,
+      model: llmLog.model,
+      providerRequestId: llmLog.providerRequestId,
+      inputTokens: llmLog.inputTokens,
+      outputTokens: llmLog.outputTokens,
+      costCents: llmLog.costCents,
+      latencyMs: llmLog.latencyMs,
+      errorFlag: llmLog.errorFlag,
+    });
+
+    return assistantMessage
+      ? [
+          releaseLock,
+          target.insert(messages).values({
+            id: assistantMessage.id,
+            conversationId,
+            role: "assistant",
+            parts: assistantMessage.parts,
+            clientMessageId: null,
+          }),
+          logInsert,
+        ]
+      : [releaseLock, logInsert];
+  }
+
+  if (typeof db.batch === "function") {
+    const statements = buildStatements(db);
+    await db.batch(statements as [BatchStatement, ...BatchStatement[]]);
+    return;
+  }
+  await db.transaction(async (tx) => {
+    for (const statement of buildStatements(tx as unknown as Db)) {
+      await statement;
+    }
+  });
 }
 
 /** #317 review, #326: chat.ts calls this the first time resolvePromptTemplate

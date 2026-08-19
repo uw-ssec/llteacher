@@ -98,12 +98,23 @@ const LLM_CONFIG_COLUMNS = {
  *  real caller (chat.ts) already has this column from a join it ran one
  *  statement earlier (getSectionPromptContext, lib/prompts.ts) to fetch
  *  the section/homework title text -- re-reading `homeworks` here was a
- *  second Neon HTTP round-trip for a column the caller already had. */
+ *  second Neon HTTP round-trip for a column the caller already had.
+ *
+ *  `courseLlmConfigId` -- #317 review, #346: same idiom, one level up.
+ *  Undefined (the default) means "the caller doesn't have this for free,
+ *  look it up here" -- chat.ts's two conversation-creation branches, which
+ *  don't get a `courses` row from an earlier join. Any other value
+ *  (including explicit null, "the course has no override") means the
+ *  caller already resolved it -- chat.ts's dominant existing-conversation
+ *  path gets it from the same getConversationById join `resolveConversation`
+ *  already runs, and this function trusts that instead of re-reading
+ *  `courses` for a row the caller already has. */
 export async function resolveLLMConfig(
   db: Db,
   orgScope: OrgScope,
   courseScope: CourseScope,
   homeworkLlmConfigId: string | null,
+  courseLlmConfigId?: string | null,
 ): Promise<ResolvedLLMConfig> {
   if (homeworkLlmConfigId) {
     const [override] = await db
@@ -119,14 +130,18 @@ export async function resolveLLMConfig(
     if (override) return override;
   }
 
-  const [course] = await db.select({ llmConfigId: courses.llmConfigId }).from(courses).where(eq(courses.id, courseScope));
-  if (course?.llmConfigId) {
+  const resolvedCourseLlmConfigId =
+    courseLlmConfigId !== undefined
+      ? courseLlmConfigId
+      : ((await db.select({ llmConfigId: courses.llmConfigId }).from(courses).where(eq(courses.id, courseScope)))[0]
+          ?.llmConfigId ?? null);
+  if (resolvedCourseLlmConfigId) {
     const [courseOverride] = await db
       .select(LLM_CONFIG_COLUMNS)
       .from(llmConfigs)
       .where(
         and(
-          eq(llmConfigs.id, course.llmConfigId),
+          eq(llmConfigs.id, resolvedCourseLlmConfigId),
           eq(llmConfigs.organizationId, orgScope),
           eq(llmConfigs.isActive, true),
         ),

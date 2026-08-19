@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { and, eq, inArray } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
-import { organizations, courses, users, courseMemberships, homeworks, sections, conversations } from "../../db/schema";
+import { organizations, courses, users, courseMemberships, homeworks, sections, conversations, messages, llmCallLogs, llmConfigs } from "../../db/schema";
 import { unsafeCourseScope } from "./scope";
 import { TenancyMismatchError, IdempotencyKeyConflictError } from "./errors";
 import {
@@ -18,6 +18,7 @@ import {
   updateConversationTitle,
   acquireConversationTurnLock,
   releaseConversationTurnLock,
+  finalizeAssistantTurn,
 } from "./conversations";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -32,6 +33,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
   let otherUserId: string;
   let droppedUserId: string;
   let sectionBId: string;
+  let llmConfigAId: string;
 
   beforeAll(async () => {
     db = makeNodeDb(DATABASE_URL!);
@@ -102,6 +104,12 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       .values({ homeworkId: hwB.id, order: 1, title: "s", content: "c" })
       .returning({ id: sections.id });
     sectionBId = sectionB.id;
+
+    const [llmConfigA] = await db
+      .insert(llmConfigs)
+      .values({ organizationId: orgAId, provider: "openrouter", modelName: "test/model" })
+      .returning({ id: llmConfigs.id });
+    llmConfigAId = llmConfigA.id;
   });
 
   it("createConversation + listConversationsForOwner round-trips a tutor conversation", async () => {
@@ -1056,6 +1064,148 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
         Array.from({ length: 8 }, () => acquireConversationTurnLock(db, id, 90_000)),
       );
       expect(results.filter(Boolean)).toHaveLength(1);
+    });
+  });
+
+  // #317 review, #346 (requirement 3): finalizeAssistantTurn collapses
+  // chat.ts's onFinish release-lock/persist/log writes into one
+  // db.batch()/transaction -- real Postgres proves the lock genuinely
+  // clears and both the message and the llm_call_logs row genuinely land,
+  // not just that the mocked route test (chat.test.ts) called the function.
+  describe("finalizeAssistantTurn (#346)", () => {
+    async function makeLockedConversation() {
+      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "finalizeAssistantTurn test conversation",
+      });
+      await acquireConversationTurnLock(db, created.id, 90_000);
+      return created;
+    }
+
+    function llmLogFixture(overrides: Partial<Parameters<typeof finalizeAssistantTurn>[3]> = {}) {
+      return {
+        organizationId: orgAId,
+        llmConfigId: llmConfigAId,
+        provider: "openrouter" as const,
+        model: "test/model",
+        providerRequestId: "req-1",
+        inputTokens: 10,
+        outputTokens: 20,
+        costCents: 0,
+        latencyMs: 42,
+        errorFlag: false,
+        ...overrides,
+      };
+    }
+
+    it("persists the assistant message and the llm_call_logs row, and releases the lock, in one batch", async () => {
+      const conv = await makeLockedConversation();
+      const assistantMessageId = crypto.randomUUID();
+
+      await finalizeAssistantTurn(
+        db,
+        conv.id,
+        { id: assistantMessageId, parts: [{ type: "text", text: "the answer" }] },
+        llmLogFixture(),
+      );
+
+      const [messageRow] = await db.select().from(messages).where(eq(messages.id, assistantMessageId));
+      expect(messageRow).toBeDefined();
+      expect(messageRow!.role).toBe("assistant");
+      expect(messageRow!.conversationId).toBe(conv.id);
+      expect(messageRow!.clientMessageId).toBeNull();
+
+      const [logRow] = await db.select().from(llmCallLogs).where(eq(llmCallLogs.messageId, assistantMessageId));
+      expect(logRow).toBeDefined();
+      expect(logRow!.conversationId).toBe(conv.id);
+      expect(logRow!.errorFlag).toBe(false);
+
+      // Lock released, atomically with the persist above.
+      await expect(acquireConversationTurnLock(db, conv.id, 90_000)).resolves.toBe(true);
+    });
+
+    it("releases the lock and writes a null-messageId log row when assistantMessage is null (error/aborted turn)", async () => {
+      const conv = await makeLockedConversation();
+
+      await finalizeAssistantTurn(db, conv.id, null, llmLogFixture({ errorFlag: true }));
+
+      const rowsForConv = await db.select().from(messages).where(eq(messages.conversationId, conv.id));
+      expect(rowsForConv).toHaveLength(0);
+
+      const [logRow] = await db
+        .select()
+        .from(llmCallLogs)
+        .where(eq(llmCallLogs.conversationId, conv.id));
+      expect(logRow).toBeDefined();
+      expect(logRow!.messageId).toBeNull();
+      expect(logRow!.errorFlag).toBe(true);
+
+      await expect(acquireConversationTurnLock(db, conv.id, 90_000)).resolves.toBe(true);
+    });
+
+    // conversations.updatedAt (schema/runtime.ts) carries its own
+    // `.$onUpdate(() => new Date())` -- every Drizzle UPDATE against this
+    // row bumps it, regardless of which other columns the caller sets. This
+    // predates #346: the plain releaseConversationTurnLock finalizeAssistantTurn
+    // replaces has always done this too, on every turn including error/
+    // aborted ones with nothing to persist -- not a behavior change.
+    it("bumps conversations.updatedAt on every call, persisted message or not (pre-existing $onUpdate, not new here)", async () => {
+      const withMessage = await makeLockedConversation();
+      const beforeWithMessage = (
+        await db.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, withMessage.id))
+      )[0]!.updatedAt;
+      await new Promise((r) => setTimeout(r, 5));
+      await finalizeAssistantTurn(
+        db,
+        withMessage.id,
+        { id: crypto.randomUUID(), parts: [{ type: "text", text: "hi" }] },
+        llmLogFixture(),
+      );
+      const afterWithMessage = (
+        await db.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, withMessage.id))
+      )[0]!.updatedAt;
+      expect(afterWithMessage.getTime()).toBeGreaterThan(beforeWithMessage.getTime());
+
+      const noMessage = await makeLockedConversation();
+      const beforeNoMessage = (
+        await db.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, noMessage.id))
+      )[0]!.updatedAt;
+      await new Promise((r) => setTimeout(r, 5));
+      await finalizeAssistantTurn(db, noMessage.id, null, llmLogFixture({ errorFlag: true }));
+      const afterNoMessage = (
+        await db.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, noMessage.id))
+      )[0]!.updatedAt;
+      expect(afterNoMessage.getTime()).toBeGreaterThan(beforeNoMessage.getTime());
+    });
+
+    // Real atomicity, not just "all three calls happened": a failure in the
+    // log insert (here, a non-existent organizationId violating its FK)
+    // must roll back the message insert AND the lock release too -- not
+    // leave a persisted assistant message with no corresponding log row, or
+    // a released lock with no persisted answer. This is the one property a
+    // sequence of three independently-awaited statements can't give; only
+    // a real single transaction/batch can.
+    it("rolls back the message insert and the lock release too when the log insert fails (real atomicity)", async () => {
+      const conv = await makeLockedConversation();
+      const assistantMessageId = crypto.randomUUID();
+      const bogusOrgId = "00000000-0000-0000-0000-000000000000";
+
+      await expect(
+        finalizeAssistantTurn(
+          db,
+          conv.id,
+          { id: assistantMessageId, parts: [{ type: "text", text: "should not survive" }] },
+          llmLogFixture({ organizationId: bogusOrgId }),
+        ),
+      ).rejects.toThrow();
+
+      const [messageRow] = await db.select().from(messages).where(eq(messages.id, assistantMessageId));
+      expect(messageRow).toBeUndefined();
+
+      // Lock still held -- release was rolled back along with the persist.
+      await expect(acquireConversationTurnLock(db, conv.id, 90_000)).resolves.toBe(false);
     });
   });
 

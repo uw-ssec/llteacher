@@ -36,6 +36,12 @@ const releaseConversationTurnLockMock = vi.fn();
 // doesn't hit "pinConversationPromptTemplate is not a function" against the
 // mocked module.
 const pinConversationPromptTemplateMock = vi.fn();
+// #317 review, #346 (requirement 3): onFinish's release-lock/persist/log
+// steps collapsed into one call -- mocked here instead of separate
+// appendMessage/recordLlmCallLog calls for that path (appendMessage stays
+// mocked above for the USER-message idempotency-insert path, which is
+// unchanged).
+const finalizeAssistantTurnMock = vi.fn();
 vi.mock("../repositories/conversations", () => ({
   getOwnedConversationOrNull: (...args: unknown[]) => getOwnedConversationOrNullMock(...args),
   createConversation: (...args: unknown[]) => createConversationMock(...args),
@@ -43,14 +49,8 @@ vi.mock("../repositories/conversations", () => ({
   getLastMessages: (...args: unknown[]) => getLastMessagesMock(...args),
   acquireConversationTurnLock: (...args: unknown[]) => acquireConversationTurnLockMock(...args),
   releaseConversationTurnLock: (...args: unknown[]) => releaseConversationTurnLockMock(...args),
+  finalizeAssistantTurn: (...args: unknown[]) => finalizeAssistantTurnMock(...args),
   pinConversationPromptTemplate: (...args: unknown[]) => pinConversationPromptTemplateMock(...args),
-}));
-
-// #317 review, #321: llm_call_logs -- one row per turn, written from
-// chatHandler's onFinish.
-const recordLlmCallLogMock = vi.fn();
-vi.mock("../repositories/llmCallLogs", () => ({
-  recordLlmCallLog: (...args: unknown[]) => recordLlmCallLogMock(...args),
 }));
 
 // #265: reserveRateLimitSlot returns the POST-increment count (unlike the
@@ -126,9 +126,13 @@ vi.mock("ai", async (importOriginal) => {
 // assembleSystemPrompt/DEFAULT_SYSTEM_PROMPT stay real (pure, no db) via
 // importOriginal, so `system:` passed to streamTextMock reflects the actual
 // composition logic, not a second mock of it.
-const getOrgScopeForCourseMock = vi.fn();
+// #317 review, #346 (requirement 1): the combined org-scope +
+// course-level-LLM-config-override lookup, used only by resolveConversation's
+// two conversation-creation branches (the conversationId branch resolves
+// both off the same getConversationById join instead).
+const getOrgScopeAndLlmConfigForCourseMock = vi.fn();
 vi.mock("../repositories/organizations", () => ({
-  getOrgScopeForCourse: (...args: unknown[]) => getOrgScopeForCourseMock(...args),
+  getOrgScopeAndLlmConfigForCourse: (...args: unknown[]) => getOrgScopeAndLlmConfigForCourseMock(...args),
 }));
 
 const getPinnedPromptTemplateContentMock = vi.fn();
@@ -243,7 +247,7 @@ describe("POST /api/chat", () => {
     acquireConversationTurnLockMock.mockReset().mockResolvedValue(true);
     releaseConversationTurnLockMock.mockReset().mockResolvedValue(undefined);
     pinConversationPromptTemplateMock.mockReset().mockResolvedValue(undefined);
-    recordLlmCallLogMock.mockReset().mockResolvedValue(undefined);
+    finalizeAssistantTurnMock.mockReset().mockResolvedValue(undefined);
     mockUsage = { inputTokens: 10, outputTokens: 20 };
     mockResponseMeta = { id: "provider-resp-1" };
     startSectionConversationMock.mockReset();
@@ -258,7 +262,7 @@ describe("POST /api/chat", () => {
     // #25: none of these tests assert on system-prompt *content* -- default
     // to "resolved, no pin, no section context" for every test so chatHandler's
     // new prompt-assembly branch runs without touching the mocked-empty db.
-    getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-a");
+    getOrgScopeAndLlmConfigForCourseMock.mockReset().mockResolvedValue({ orgScope: "org-a", courseLlmConfigId: null });
     getPinnedPromptTemplateContentMock.mockReset().mockResolvedValue(null);
     resolvePromptTemplateMock.mockReset().mockResolvedValue({ id: null, content: "test system prompt", version: null });
     getSectionPromptContextMock.mockReset().mockResolvedValue(null);
@@ -894,17 +898,19 @@ describe("POST /api/chat", () => {
     expect(res.headers.get("x-conversation-id")).toBe("22222222-2222-2222-2222-222222222222");
   });
 
-  // #317 review, #326 (remaining requirement): getConversationById now
-  // joins courses for organizationId, so resolveConversation's
-  // conversationId branch resolves the org scope off that same row --
-  // getOrgScopeForCourse must not run a second, fully redundant round-trip
-  // for a course this request already read.
-  it("resolves org scope from the joined conversation row instead of a separate getOrgScopeForCourse call, for an existing conversation", async () => {
+  // #317 review, #326 (remaining requirement), #346 (requirement 1):
+  // getConversationById now joins courses for organizationId AND
+  // llmConfigId, so resolveConversation's conversationId branch resolves
+  // both the org scope and the course-level LLM config override off that
+  // same row -- getOrgScopeAndLlmConfigForCourse must not run a second,
+  // fully redundant round-trip for a course this request already read.
+  it("resolves org scope and course LLM config from the joined conversation row instead of a separate call, for an existing conversation", async () => {
     getOwnedConversationOrNullMock.mockResolvedValue({
       id: "22222222-2222-2222-2222-222222222222",
       ownerUserId: "u1",
       courseId: "55555555-5555-5555-5555-555555555555",
       organizationId: "org-from-join",
+      courseLlmConfigId: null,
     });
     getLastMessagesMock.mockResolvedValue([]);
 
@@ -914,7 +920,7 @@ describe("POST /api/chat", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(getOrgScopeForCourseMock).not.toHaveBeenCalled();
+    expect(getOrgScopeAndLlmConfigForCourseMock).not.toHaveBeenCalled();
   });
 
   // #317 review, blocking finding #4: an unreleased section (draft,
@@ -1414,11 +1420,14 @@ describe("POST /api/chat", () => {
     };
     await capturedOnFinish!({ responseMessage, finishReason: "stop" });
 
-    expect(appendMessageMock).toHaveBeenCalledWith(
-      expect.anything(),
+    // #317 review, #346 (requirement 3): the assistant persist now goes
+    // through finalizeAssistantTurn (collapsed with the lock release and
+    // the llm_call_logs write), not appendMessage -- appendMessage stays
+    // reserved for the user-message idempotency-insert path.
+    expect(finalizeAssistantTurnMock).toHaveBeenCalledWith(
       expect.anything(),
       "22222222-2222-2222-2222-222222222222",
-      { role: "assistant", parts: responseMessage.parts },
+      { id: expect.any(String), parts: responseMessage.parts },
       expect.anything(),
     );
   });
@@ -1426,10 +1435,7 @@ describe("POST /api/chat", () => {
   it("logs (does not throw) when the assistant persistence write fails inside onFinish", async () => {
     createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
     getLastMessagesMock.mockResolvedValue([]);
-    appendMessageMock.mockImplementation(async (_db, _scope, _id, input) => {
-      if (input.role === "assistant") throw new Error("db unavailable");
-      return { row: { id: "msg-1" }, created: true };
-    });
+    finalizeAssistantTurnMock.mockRejectedValue(new Error("db unavailable"));
 
     await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
     expect(capturedOnFinish).toBeDefined();
@@ -1499,7 +1505,6 @@ describe("POST /api/chat", () => {
     it("writes one llm_call_logs row with token/cost/latency data on a successful turn", async () => {
       createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
       getLastMessagesMock.mockResolvedValue([]);
-      appendMessageMock.mockResolvedValue({ row: { id: "assistant-msg-1" }, created: true });
       mockUsage = { inputTokens: 100, outputTokens: 50 };
       mockResponseMeta = { id: "req-abc" };
 
@@ -1509,11 +1514,20 @@ describe("POST /api/chat", () => {
         finishReason: "stop",
       });
 
-      expect(recordLlmCallLogMock).toHaveBeenCalledTimes(1);
-      const logged = recordLlmCallLogMock.mock.calls[0]![1] as Record<string, unknown>;
+      // #317 review, #346 (requirement 3): the log write is now the 4th
+      // arg of the single finalizeAssistantTurn call, and messageId is no
+      // longer a field on it -- finalizeAssistantTurn derives messageId
+      // itself from the (also caller-generated) assistantMessage id, the
+      // 3rd arg.
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledTimes(1);
+      const [, , assistantMessage, logged] = finalizeAssistantTurnMock.mock.calls[0]! as [
+        unknown,
+        unknown,
+        { id: string } | null,
+        Record<string, unknown>,
+      ];
+      expect(assistantMessage).toEqual({ id: expect.any(String), parts: [{ type: "text", text: "hi" }] });
       expect(logged).toMatchObject({
-        messageId: "assistant-msg-1",
-        conversationId: "22222222-2222-2222-2222-222222222222",
         providerRequestId: "req-abc",
         inputTokens: 100,
         outputTokens: 50,
@@ -1522,7 +1536,7 @@ describe("POST /api/chat", () => {
       expect(typeof logged.latencyMs).toBe("number");
     });
 
-    it("writes an llm_call_logs row with errorFlag true and no messageId when the turn is aborted", async () => {
+    it("passes a null assistantMessage (and errorFlag true) when the turn is aborted", async () => {
       createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
       getLastMessagesMock.mockResolvedValue([]);
 
@@ -1532,9 +1546,15 @@ describe("POST /api/chat", () => {
         isAborted: true,
       });
 
-      expect(recordLlmCallLogMock).toHaveBeenCalledTimes(1);
-      const logged = recordLlmCallLogMock.mock.calls[0]![1] as Record<string, unknown>;
-      expect(logged).toMatchObject({ messageId: null, errorFlag: true });
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledTimes(1);
+      const [, , assistantMessage, logged] = finalizeAssistantTurnMock.mock.calls[0]! as [
+        unknown,
+        unknown,
+        unknown,
+        Record<string, unknown>,
+      ];
+      expect(assistantMessage).toBeNull();
+      expect(logged).toMatchObject({ errorFlag: true });
       expect(appendMessageMock).not.toHaveBeenCalledWith(
         expect.anything(),
         expect.anything(),
@@ -1544,7 +1564,7 @@ describe("POST /api/chat", () => {
       );
     });
 
-    it("writes an llm_call_logs row with errorFlag true when finishReason is 'error'", async () => {
+    it("passes a null assistantMessage (and errorFlag true) when finishReason is 'error'", async () => {
       createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
       getLastMessagesMock.mockResolvedValue([]);
 
@@ -1554,15 +1574,21 @@ describe("POST /api/chat", () => {
         finishReason: "error",
       });
 
-      expect(recordLlmCallLogMock).toHaveBeenCalledTimes(1);
-      const logged = recordLlmCallLogMock.mock.calls[0]![1] as Record<string, unknown>;
-      expect(logged).toMatchObject({ messageId: null, errorFlag: true });
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledTimes(1);
+      const [, , assistantMessage, logged] = finalizeAssistantTurnMock.mock.calls[0]! as [
+        unknown,
+        unknown,
+        unknown,
+        Record<string, unknown>,
+      ];
+      expect(assistantMessage).toBeNull();
+      expect(logged).toMatchObject({ errorFlag: true });
     });
 
-    it("a recordLlmCallLog failure does not throw out of onFinish (best-effort)", async () => {
+    it("a finalizeAssistantTurn failure does not throw out of onFinish (best-effort)", async () => {
       createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
       getLastMessagesMock.mockResolvedValue([]);
-      recordLlmCallLogMock.mockRejectedValue(new Error("db unavailable"));
+      finalizeAssistantTurnMock.mockRejectedValue(new Error("db unavailable"));
 
       await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
 
@@ -1647,20 +1673,35 @@ describe("POST /api/chat", () => {
       );
     });
 
-    it("releases the lock once the stream finishes successfully", async () => {
+    // #317 review, #346 (requirement 3): the lock release folded into
+    // finalizeAssistantTurn's own db.batch()/transaction (see that
+    // function's doc comment, repositories/conversations.ts) -- these three
+    // tests now assert finalizeAssistantTurn ran instead of a separate
+    // releaseConversationTurnLock call; finalizeAssistantTurn's own tests
+    // (conversations.test.ts, and the real-DB suite) cover that its batch
+    // actually clears processingStartedAt.
+    it("calls finalizeAssistantTurn (lock release + persist + log, one batch) once the stream finishes successfully", async () => {
       createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
       getLastMessagesMock.mockResolvedValue([]);
 
       await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
       expect(capturedOnFinish).toBeDefined();
-      expect(releaseConversationTurnLockMock).not.toHaveBeenCalled();
+      expect(finalizeAssistantTurnMock).not.toHaveBeenCalled();
 
-      await capturedOnFinish!({ responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] } });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+        finishReason: "stop",
+      });
 
-      expect(releaseConversationTurnLockMock).toHaveBeenCalledWith(expect.anything(), "22222222-2222-2222-2222-222222222222");
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+        expect.objectContaining({ id: expect.any(String) }),
+        expect.anything(),
+      );
     });
 
-    it("releases the lock even when the turn is aborted (no renderable content persisted)", async () => {
+    it("calls finalizeAssistantTurn (releasing the lock) even when the turn is aborted (no renderable content persisted)", async () => {
       createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
       getLastMessagesMock.mockResolvedValue([]);
 
@@ -1672,7 +1713,12 @@ describe("POST /api/chat", () => {
         isAborted: true,
       });
 
-      expect(releaseConversationTurnLockMock).toHaveBeenCalledWith(expect.anything(), "22222222-2222-2222-2222-222222222222");
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+        null,
+        expect.anything(),
+      );
       expect(appendMessageMock).not.toHaveBeenCalledWith(
         expect.anything(),
         expect.anything(),
@@ -1682,10 +1728,10 @@ describe("POST /api/chat", () => {
       );
     });
 
-    it("a lock-release failure does not throw out of onFinish (best-effort)", async () => {
+    it("a finalizeAssistantTurn failure (lock release + persist + log) does not throw out of onFinish (best-effort)", async () => {
       createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
       getLastMessagesMock.mockResolvedValue([]);
-      releaseConversationTurnLockMock.mockRejectedValue(new Error("db unavailable"));
+      finalizeAssistantTurnMock.mockRejectedValue(new Error("db unavailable"));
 
       await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
       expect(capturedOnFinish).toBeDefined();
