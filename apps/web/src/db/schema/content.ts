@@ -76,6 +76,20 @@ export const llmConfigs = pgTable(
       () => organizationCredentials.id,
       { onDelete: "set null" },
     ),
+    // #317 review, #349 (requirement, "move rates to configuration"):
+    // per-config $/1M-token rates for llm_call_logs.cost_cents
+    // (lib/llm-config.ts's estimateCostCents) -- the natural, per-tenant
+    // home for a rate that a TS literal (MODEL_PRICING_PER_MILLION_TOKENS,
+    // same file) can't be: OpenRouter and a gateway like LLMOxie both front
+    // many models at independently-set, changing rates, and a literal means
+    // a code change and redeploy per org per model change. Both nullable,
+    // and BOTH must be set for estimateCostCents to use them (a half-known
+    // rate isn't a half-known cost, it's an unknown one) -- null falls
+    // through to the static table, which itself falls through to null
+    // ("unknown," never a guessed number; see that table's own doc
+    // comment).
+    pricePerMillionInputTokens: doublePrecision("price_per_million_input_tokens"),
+    pricePerMillionOutputTokens: doublePrecision("price_per_million_output_tokens"),
     isDefault: boolean("is_default").notNull().default(false),
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true })

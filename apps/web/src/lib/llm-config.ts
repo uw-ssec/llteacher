@@ -71,6 +71,12 @@ export interface ResolvedLLMConfig {
   temperature: number;
   maxCompletionTokens: number;
   credentialId: string | null;
+  /** #317 review, #349: this config's own $/1M-token rates, if an operator
+   *  has set them -- estimateCostCents prefers these over its built-in
+   *  static table. Both null unless both columns are set (see the schema
+   *  column's own doc comment for why a half-known rate isn't used). */
+  pricePerMillionInputTokens: number | null;
+  pricePerMillionOutputTokens: number | null;
 }
 
 const LLM_CONFIG_COLUMNS = {
@@ -79,6 +85,8 @@ const LLM_CONFIG_COLUMNS = {
   modelName: llmConfigs.modelName,
   temperature: llmConfigs.temperature,
   maxCompletionTokens: llmConfigs.maxCompletionTokens,
+  pricePerMillionInputTokens: llmConfigs.pricePerMillionInputTokens,
+  pricePerMillionOutputTokens: llmConfigs.pricePerMillionOutputTokens,
   credentialId: llmConfigs.credentialId,
 } as const;
 
@@ -275,15 +283,31 @@ export function buildProviderClient(
   throw new UnsupportedLLMProviderError(provider);
 }
 
-/** #317 review, #321: per-model $/1M-token rates for llm_call_logs.cost_cents
- *  (the CDI reporting story). Best-effort and explicitly approximate --
- *  neither the AI SDK nor this app's schema tracks a canonical price list,
- *  and OpenRouter alone fronts hundreds of models with independently-set
- *  rates that change over time. Add a model's real published rate here as
- *  it's confirmed; an unlisted model resolves to a null cost (an honest
- *  "unknown," not a guessed number) rather than silently defaulting to $0
- *  or some other model's rate. ":free" OpenRouter model slugs are the one
- *  case genuinely known to always be $0 without needing per-model upkeep. */
+/** #317 review, #321: built-in per-model $/1M-token rates for
+ *  llm_call_logs.cost_cents (the CDI reporting story) -- the fallback
+ *  estimateCostCents uses when a config has no per-config rate of its own
+ *  (llm_configs.pricePerMillionInputTokens/OutputTokens, #349). Best-effort
+ *  and explicitly approximate -- neither the AI SDK nor this app's schema
+ *  tracks a canonical price list, and OpenRouter alone fronts hundreds of
+ *  models with independently-set rates that change over time. Add a
+ *  model's real published rate here (as a deployment-wide default) or set
+ *  it per-config in llm_configs when it's confirmed; an unlisted, unset
+ *  model resolves to a null cost (an honest "unknown," not a guessed
+ *  number) rather than silently defaulting to $0 or some other model's
+ *  rate.
+ *
+ *  #317 review, #349: this table was previously unreachable in practice --
+ *  its only entry was the ":free" model estimateCostCents already
+ *  short-circuits on before ever consulting the table, and no other entry
+ *  existed. `gpt-5.3-codex` (the #340/scripts/seed.ts default model, routed
+ *  through UW SSEC's own LLMOxie/LiteLLM gateway) is deliberately NOT
+ *  listed here: that gateway's actual per-org billing arrangement is not
+ *  public, institution-specific data this codebase has any source of
+ *  truth for, and a guessed number would be actively worse than the
+ *  honest null this function already returns for an unknown model --
+ *  exactly the failure mode this table's own philosophy exists to avoid.
+ *  Set it via llm_configs.pricePerMillionInputTokens/OutputTokens (or add
+ *  a real confirmed rate here) once that figure is known. */
 const MODEL_PRICING_PER_MILLION_TOKENS: Record<string, { input: number; output: number }> = {
   "google/gemma-4-31b-it:free": { input: 0, output: 0 },
 };
@@ -292,14 +316,25 @@ const MODEL_PRICING_PER_MILLION_TOKENS: Record<string, { input: number; output: 
  *  table's own doc comment for why guessing would be worse than omitting.
  *  Rounds to the nearest cent; a single turn's cost is expected to be a
  *  small fraction of a cent for most models, so this is aggregated cost
- *  reporting, not a per-turn billing primitive. */
+ *  reporting, not a per-turn billing primitive.
+ *
+ *  #317 review, #349: `configuredPricing` (the resolved config's own
+ *  pricePerMillionInputTokens/OutputTokens) takes precedence over the
+ *  built-in static table when BOTH its fields are set -- a per-tenant,
+ *  no-redeploy-needed rate for a model this table doesn't (or can't, see
+ *  its own doc comment) list. Only one of the two must be non-null to
+ *  count as "not configured": a half-set rate isn't a half-known cost. */
 export function estimateCostCents(
   modelName: string,
   inputTokens: number | null,
   outputTokens: number | null,
+  configuredPricing?: { input: number | null; output: number | null } | null,
 ): number | null {
   if (modelName.endsWith(":free")) return 0;
-  const pricing = MODEL_PRICING_PER_MILLION_TOKENS[modelName];
+  const pricing =
+    configuredPricing?.input != null && configuredPricing?.output != null
+      ? { input: configuredPricing.input, output: configuredPricing.output }
+      : MODEL_PRICING_PER_MILLION_TOKENS[modelName];
   if (!pricing || inputTokens === null || outputTokens === null) return null;
   const dollars = (inputTokens / 1_000_000) * pricing.input + (outputTokens / 1_000_000) * pricing.output;
   return Math.round(dollars * 100);

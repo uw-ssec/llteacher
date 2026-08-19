@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   buildProviderClient,
   resolveApiKey,
+  estimateCostCents,
   LLMConfigNotFoundError,
   LLMCredentialMissingError,
   UnsupportedLLMProviderError,
@@ -20,6 +21,8 @@ const baseConfig: ResolvedLLMConfig = {
   temperature: 0.7,
   maxCompletionTokens: 1000,
   credentialId: null,
+  pricePerMillionInputTokens: null,
+  pricePerMillionOutputTokens: null,
 };
 
 /** #317 review, security finding #323: resolveApiKey now takes the real
@@ -196,5 +199,59 @@ describe("resolveApiKey", () => {
 
     // fakeEnv() leaves OPENROUTER_API_KEY as "" (allowlisted, but unset).
     await expect(resolveApiKey(fakeEnv(), db, orgScope, config)).rejects.toBeInstanceOf(LLMCredentialMissingError);
+  });
+});
+
+// #317 review, #349: MODEL_PRICING_PER_MILLION_TOKENS' only real-world entry
+// was ":free" model, and estimateCostCents short-circuits on that suffix
+// BEFORE ever consulting the table -- meaning the table (and the dollar
+// arithmetic below it) was unreachable dead code for every possible input.
+// These tests prove the fix from both directions this file's own
+// `configuredPricing` param supports: a per-config rate (llm_configs.
+// pricePerMillionInputTokens/OutputTokens) and the built-in static table.
+describe("estimateCostCents", () => {
+  it("returns 0 for a ':free'-suffixed model regardless of token counts", () => {
+    expect(estimateCostCents("some/model:free", 1_000_000, 1_000_000)).toBe(0);
+  });
+
+  it("returns null for a model with no known rate and no configured pricing", () => {
+    expect(estimateCostCents("unknown/model", 100, 50)).toBeNull();
+  });
+
+  it("returns null when either token count is null, even with configured pricing", () => {
+    expect(estimateCostCents("priced/model", null, 50, { input: 1, output: 2 })).toBeNull();
+    expect(estimateCostCents("priced/model", 100, null, { input: 1, output: 2 })).toBeNull();
+  });
+
+  it("computes a non-zero cent value from a config's own per-config pricing", () => {
+    // $2/1M input, $10/1M output; 1,000,000 input + 500,000 output tokens
+    // -> $2 + $5 = $7.00 -> 700 cents. The exact number matters here, not
+    // just "non-zero": it's the whole point of #349's fix -- this cost path
+    // was structurally incapable of producing ANY number before it.
+    const cents = estimateCostCents("gpt-5.3-codex", 1_000_000, 500_000, { input: 2, output: 10 });
+    expect(cents).toBe(700);
+    expect(cents).not.toBe(0);
+  });
+
+  it("falls back to the built-in static table when no per-config pricing is set", () => {
+    // google/gemma-4-31b-it:free is only in the table because ":free" models
+    // are $0 -- but reaching the table at all (not short-circuiting on the
+    // suffix, not needing a configured rate) is what this test is for; a
+    // model that hit the ":free" short-circuit wouldn't prove the table
+    // lookup path itself works.
+    expect(estimateCostCents("google/gemma-4-31b-it:free", 1000, 1000, null)).toBe(0);
+  });
+
+  it("does not use a configured rate that has only one of the two fields set (a half-known rate is not a half-known cost)", () => {
+    expect(estimateCostCents("priced/model", 1_000_000, 1_000_000, { input: 5, output: null })).toBeNull();
+    expect(estimateCostCents("priced/model", 1_000_000, 1_000_000, { input: null, output: 5 })).toBeNull();
+  });
+
+  it("prefers configured pricing over a static-table entry for the same model", () => {
+    // google/gemma-4-31b-it:free hits the ":free" short-circuit before
+    // either pricing source is even consulted, so use a non-":free" model
+    // name that would otherwise need a static-table entry to price at all.
+    const cents = estimateCostCents("acme/priced-model", 1_000_000, 1_000_000, { input: 1, output: 1 });
+    expect(cents).toBe(200);
   });
 });

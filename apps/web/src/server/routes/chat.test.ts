@@ -94,17 +94,26 @@ type FakeOnFinishEvent = {
 };
 let capturedOnFinish: ((event: FakeOnFinishEvent) => void | Promise<void>) | undefined;
 let capturedStreamResponseOnError: ((error: unknown) => string) | undefined;
-// #317 review, #321: chat.ts's own onFinish awaits result.usage/result.response
-// to build the llm_call_logs row -- individual tests override these via
-// mockUsage/mockResponseMeta when they care about the exact values;
-// otherwise these sensible defaults keep every other test from having to
-// know about #321's fields at all.
+// #317 review, #321: chat.ts's own onFinish awaits result.totalUsage/
+// result.response/result.warnings to build the llm_call_logs row --
+// individual tests override these via mockUsage/mockResponseMeta/
+// mockWarnings when they care about the exact values; otherwise these
+// sensible defaults keep every other test from having to know about #321's
+// fields at all.
+//
+// #317 review, #349 (requirement 3): totalUsage, not usage -- chat.ts
+// switched from result.usage (documented as "the LAST step's usage only")
+// to result.totalUsage (the summed one) so a multi-step, tool-using turn's
+// earlier steps aren't silently dropped from cost/usage reporting. This
+// fake's own field is named to match.
 let mockUsage: { inputTokens?: number; outputTokens?: number } = { inputTokens: 10, outputTokens: 20 };
 let mockResponseMeta: { id?: string } = { id: "provider-resp-1" };
+let mockWarnings: unknown[] | undefined = undefined;
 const streamTextMock = vi.fn((_args: Record<string, unknown>) => {
   return {
-    usage: Promise.resolve(mockUsage),
+    totalUsage: Promise.resolve(mockUsage),
     response: Promise.resolve(mockResponseMeta),
+    warnings: Promise.resolve(mockWarnings),
     toUIMessageStreamResponse: (opts?: {
       headers?: Record<string, string>;
       onFinish?: (event: FakeOnFinishEvent) => void | Promise<void>;
@@ -250,6 +259,7 @@ describe("POST /api/chat", () => {
     finalizeAssistantTurnMock.mockReset().mockResolvedValue(undefined);
     mockUsage = { inputTokens: 10, outputTokens: 20 };
     mockResponseMeta = { id: "provider-resp-1" };
+    mockWarnings = undefined;
     startSectionConversationMock.mockReset();
     getActiveSectionConversationMock.mockReset();
     streamTextMock.mockClear();
@@ -663,6 +673,46 @@ describe("POST /api/chat", () => {
       expect(callArgs.messages).toHaveLength(2);
       expect(callArgs.messages[0]!.role).toBe("assistant");
       expect(JSON.stringify(callArgs.messages[0])).toContain("Hello! Here is the actual homework question.");
+    });
+
+    // #317 review, #349 (requirement 4): on every real driver, the greeting
+    // is already committed and visible by the time getLastMessages runs
+    // (see the prepend's own doc comment in chat.ts) -- reproduced here by
+    // having getLastMessagesMock's windowed-fetch return actually include a
+    // row whose id matches startSectionConversation's own greetingMessageId,
+    // the same shape a real write-then-read produces. Before the fix this
+    // still prepended a second copy: [greeting, greeting, user].
+    it("#317 review, #349: does not duplicate the greeting when it's already present in persistedHistory (the real write-then-read case)", async () => {
+      startSectionConversationMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        greetingMessageId: "greeting-msg-1",
+        greetingParts: [{ type: "text", text: "Hello! Here is the actual homework question." }],
+      });
+      getLastMessagesMock
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+          {
+            id: "greeting-msg-1",
+            role: "assistant",
+            parts: [{ type: "text", text: "Hello! Here is the actual homework question." }],
+            clientMessageId: null,
+          },
+        ]);
+
+      await postChat(buildApp(fakeAuthContext()), {
+        courseId: "55555555-5555-5555-5555-555555555555",
+        messages: [userUiMessage],
+        kind: "section",
+        sectionId: "11111111-1111-1111-1111-111111111111",
+      });
+
+      const callArgs = streamTextMock.mock.calls[0]![0] as { messages: Array<{ role: string }> };
+      // greeting, then the student's turn -- 2 total, not 3. The greeting
+      // came from persistedHistory (already committed), not a synthetic
+      // prepend on top of it.
+      expect(callArgs.messages).toHaveLength(2);
+      expect(callArgs.messages[0]!.role).toBe("assistant");
     });
 
     it("#272: does not prepend a greeting on an existing (not freshly-created) conversation", async () => {
@@ -1595,6 +1645,89 @@ describe("POST /api/chat", () => {
       await expect(
         capturedOnFinish!({ responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] } }),
       ).resolves.not.toThrow();
+    });
+
+    // #317 review, #349 (requirement 1): nothing previously read
+    // result.warnings -- e.g. temperature silently dropped by the AI SDK's
+    // reasoning-model heuristic (SUPPORTS_REASONING_EFFORT_NONE's own doc
+    // comment, chat.ts) had no visible trace anywhere. Logged (not thrown,
+    // not persisted) so it's at least discoverable.
+    it("logs streamText warnings when present, alongside the llm_call_logs write", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      mockWarnings = [{ type: "unsupported-setting", setting: "temperature", details: "reasoning models do not support temperature" }];
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+        finishReason: "stop",
+      });
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        "[chatHandler.onFinish.warnings]",
+        expect.objectContaining({ message: expect.stringContaining("temperature") }),
+      );
+      errorSpy.mockRestore();
+    });
+
+    it("does not log anything when streamText reports no warnings", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      mockWarnings = undefined;
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+        finishReason: "stop",
+      });
+
+      expect(errorSpy).not.toHaveBeenCalledWith("[chatHandler.onFinish.warnings]", expect.anything());
+      errorSpy.mockRestore();
+    });
+  });
+
+  // #317 review, #349: the reasoning-model temperature escape hatch.
+  describe("#349 SUPPORTS_REASONING_EFFORT_NONE / providerOptions", () => {
+    it("passes reasoningEffort: none for a gpt-5.1-5.4 family model, so llm_configs.temperature isn't silently dropped", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      resolveLLMConfigMock.mockResolvedValueOnce({
+        id: "llm-config-1",
+        provider: "llmoxie",
+        modelName: "gpt-5.3-codex",
+        temperature: 0.2,
+        maxCompletionTokens: 1000,
+        credentialId: null,
+        pricePerMillionInputTokens: null,
+        pricePerMillionOutputTokens: null,
+      });
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+
+      const callArgs = streamTextMock.mock.calls[0]![0] as { providerOptions?: unknown };
+      expect(callArgs.providerOptions).toEqual({ openai: { reasoningEffort: "none" } });
+    });
+
+    it("does not set providerOptions for a model outside the gpt-5.1-5.4 family", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      resolveLLMConfigMock.mockResolvedValueOnce({
+        id: "llm-config-1",
+        provider: "openrouter",
+        modelName: "google/gemma-4-31b-it:free",
+        temperature: 0.7,
+        maxCompletionTokens: 1000,
+        credentialId: null,
+        pricePerMillionInputTokens: null,
+        pricePerMillionOutputTokens: null,
+      });
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+
+      const callArgs = streamTextMock.mock.calls[0]![0] as { providerOptions?: unknown };
+      expect(callArgs.providerOptions).toBeUndefined();
     });
   });
 
