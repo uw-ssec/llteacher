@@ -4,12 +4,21 @@ WORKOS_CLIENT_ID="client_placeholder"
 OPENROUTER_API_KEY="sk-or-v1-placeholder"
 # UW SSEC's LiteLLM gateway (#178).
 LLMOXIE_API_KEY="llmoxie-key-placeholder"
-# Optional. Overrides the gateway host; unset uses LLMOXIE_DEFAULT_BASE_URL
-# in lib/ai.ts. Set this for local/preview so student traffic does not go to
-# the -prod gateway, and to recover without a redeploy if the Azure
-# Container Apps environment is ever recreated (the hostname's
-# `lemonmoss-19296c81` segment is generated and does not survive that).
-# LLMOXIE_BASE_URL="https://your-gateway.example/v1"
+# Overrides the gateway host; unset (or empty) falls through to
+# LLMOXIE_DEFAULT_BASE_URL in lib/ai.ts, which is the -prod host. Set this
+# for local/preview so student traffic does not go to -prod, and to recover
+# without a redeploy if the Azure Container Apps environment is ever
+# recreated (the hostname's `lemonmoss-19296c81` segment is generated and
+# does not survive that).
+#
+# #317 review, #348: left commented out, this line's own value WAS the trap
+# it describes -- a copied .dev.vars leaves the binding unset and every
+# local chat turn (and every /llm-models discovery call) bills and logs
+# against production, exactly what the paragraph above warns against.
+# Uncommented with an intentionally non-resolving placeholder instead: local
+# dev must fail closed (a connection error) and prompt filling in the real
+# non-prod gateway URL, rather than silently and successfully hitting prod.
+LLMOXIE_BASE_URL="https://your-nonprod-gateway.example/v1"
 
 # Auth (M1): 32-byte keys, base64-encoded. Generate with:
 #   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
