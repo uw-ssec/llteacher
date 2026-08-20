@@ -2262,3 +2262,132 @@ describe("App Stop control (#274)", () => {
     expect(stopButton.getAttribute("aria-disabled")).toBe("true");
   });
 });
+
+// #80: real hint state end-to-end at the App level -- Sidebar's hintCount
+// reads from the server (replacing the #20 fixture), and the "Give me a
+// hint" button (Composer.tsx) sends a chat turn flagged isHintRequest.
+describe("App hint state (#80)", () => {
+  const HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [
+          { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+        ],
+      },
+    ],
+  };
+
+  it("Sidebar's hint count comes from GET .../hints, not a fixture, and updates after a granted hint request", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    let hintsGetCount = 0;
+    const chatCalls: Array<{ isHintRequest?: boolean }> = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        if (url === "/api/courses/course-a/sections/s1/hints") {
+          hintsGetCount++;
+          // Second GET (after the hint request settles) reflects the grant.
+          const body = hintsGetCount === 1 ? { count: 1, limit: 3, remaining: 2 } : { count: 2, limit: 3, remaining: 1 };
+          return new Response(JSON.stringify(body), { status: 200 });
+        }
+        if (url === "/api/chat") {
+          const body = JSON.parse(String(init?.body)) as { isHintRequest?: boolean };
+          chatCalls.push(body);
+          return chatStreamResponse("sec-conv-1", "scaffolded nudge");
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // Real server state (1), not the old fixture's hardcoded 3.
+    await waitFor(() => expect(screen.getByLabelText("1 hints used")).toBeTruthy());
+
+    const hintButton = await screen.findByRole("button", { name: "Give me a hint" });
+    const user = userEvent.setup();
+    await user.click(hintButton);
+
+    await screen.findByText("scaffolded nudge");
+    expect(chatCalls).toHaveLength(1);
+    expect(chatCalls[0]!.isHintRequest).toBe(true);
+
+    // The count refetch fired once the turn settled, and reflects the grant.
+    await waitFor(() => expect(screen.getByLabelText("2 hints used")).toBeTruthy());
+    expect(hintsGetCount).toBeGreaterThanOrEqual(2);
+  });
+
+  it("rapid double-clicks on 'Give me a hint' send only one chat request (client-side suppression)", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const chatCalls: unknown[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        if (url === "/api/courses/course-a/sections/s1/hints") {
+          return new Response(JSON.stringify({ count: 0, limit: null, remaining: null }), { status: 200 });
+        }
+        if (url === "/api/chat") {
+          chatCalls.push(JSON.parse(String(init?.body)));
+          return chatStreamResponse("sec-conv-1", "reply");
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const hintButton = await screen.findByRole("button", { name: "Give me a hint" });
+    const user = userEvent.setup();
+    // Two rapid clicks, well within HINT_DOUBLE_SUBMIT_SUPPRESS_MS (1s).
+    await user.click(hintButton);
+    await user.click(hintButton);
+
+    await screen.findByText("reply");
+    expect(chatCalls).toHaveLength(1);
+  });
+});

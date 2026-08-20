@@ -2133,6 +2133,15 @@ body {
     opacity: 1;
   }
 
+  /* #80: "Give me a hint" row -- sits above .composer-wrap, right-aligned
+     so it reads as a small action on the conversation rather than part of
+     the text-entry surface itself. */
+  .composer-hint-request {
+    display: flex;
+    justify-content: flex-end;
+    margin-block-end: var(--space-2);
+  }
+
   /* -------------------------------------------------------------------------
      Utility — Badge (tiny small-caps mono label, no pill fill)
      ------------------------------------------------------------------------- */

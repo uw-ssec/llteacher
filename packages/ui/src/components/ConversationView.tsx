@@ -309,6 +309,13 @@ export interface ConversationViewProps {
    *  this is an additive opt-in, not a behavior change to the component's
    *  default shape. */
   hideComposer?: boolean;
+  /** #80: forwarded straight to Composer -- see its own doc comment.
+   *  `undefined` renders no hint affordance at all, matching every other
+   *  optional prop's degrade-to-nothing convention on this component. */
+  onRequestHint?: () => void;
+  /** Forwarded straight to Composer's own `hintDisabled` -- see its doc
+   *  comment. Ignored when `onRequestHint` is unset. */
+  hintDisabled?: boolean;
 }
 
 /* -- Component ------------------------------------------------------------- */
@@ -329,6 +336,8 @@ export function ConversationView({
   isStopActionable = isSending,
   onRunRCode,
   hideComposer = false,
+  onRequestHint,
+  hintDisabled = false,
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -658,6 +667,8 @@ export function ConversationView({
           disabled={isSending}
           history={composerHistory}
           autoFocus={autoFocusComposer}
+          onRequestHint={onRequestHint}
+          hintDisabled={hintDisabled}
         />
       )}
     </div>

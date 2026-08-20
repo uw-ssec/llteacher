@@ -54,6 +54,15 @@ export const sectionTypeEnum = pgEnum("section_type", [
   "non_interactive",
 ]);
 
+// #80: one value today ("request_hint" -- the issue's own explicit-action
+// model, see hintEvents' doc comment in runtime.ts for why this is
+// deterministic/countable instead of classifying the tutor's free-text
+// replies). A real enum (not a boolean/omitted column) because the issue's
+// own Code Framework asks for one and a second hint-adjacent action is a
+// plausible future addition (e.g. a TA-granted bonus hint) that shouldn't
+// need a column-type migration to add.
+export const hintActionEnum = pgEnum("hint_action", ["request_hint"]);
+
 // ---------- LLMConfig ----------
 // Per-Organization pool of model configurations. is_default is per-org; at
 // most one row per org may have is_default = true (enforced via partial
@@ -276,6 +285,61 @@ export const sections = pgTable(
       "sections_order_range_chk",
       sql`${t.order} >= 1 AND ${t.order} <= 20`,
     ),
+  ],
+);
+
+// ---------- HintBudget ----------
+// #80: optional per-section cap on explicit "give me a hint" requests (see
+// runtime.ts's hintEvents for the event log this bounds, and the usage
+// count it's checked against -- per (section, student), not a shared pool,
+// per this task's own ruling: a shared per-section pool would let one
+// student's hint use exhaust the budget for the whole class, and nothing
+// else in this schema's per-student state -- submissions, section_answers,
+// homework_progress_widget_responses -- shares state across students that
+// way).
+//
+// Config-like, not an event log -- placed here (content.ts) alongside
+// sections/homeworks/llmConfigs rather than runtime.ts, matching how this
+// table is actually used: authored once (rarely edited) by an instructor,
+// the same lifecycle as an llm_configs row, not appended-to on every
+// student turn the way hintEvents/messages are.
+//
+// One row per section (unique). NO row for a section -- the default,
+// unseeded state -- means unlimited; see maxHints below for the second,
+// explicit way to say the same thing.
+export const hintBudgets = pgTable(
+  "hint_budgets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sectionId: uuid("section_id")
+      .notNull()
+      .unique()
+      .references(() => sections.id, { onDelete: "cascade" }),
+    // Denormalized -- same FERPA-export/direct-predicate rationale
+    // sectionAnswers/homeworkProgressWidgetResponses already carry it
+    // (runtime.ts), even though this row's parent chain (section ->
+    // homework -> course -> org) could reach it via a join.
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    // NULL = unlimited. #80: the issue explicitly allows "unlimited" as the
+    // recorded decision -- every section defaults to it (no row at all, the
+    // common case today) until a real product decision sets a number here.
+    // A row that exists but still has maxHints NULL is the same outcome,
+    // reachable once an instructor-facing editor for this table exists (not
+    // built by this task) and explicitly saves "no limit."
+    maxHints: integer("max_hints"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("hint_budgets_org_idx").on(t.organizationId),
+    check("hint_budgets_max_hints_chk", sql`${t.maxHints} IS NULL OR ${t.maxHints} >= 0`),
   ],
 );
 
@@ -503,6 +567,17 @@ export const homeworkProgressWidgetsRelations = relations(homeworkProgressWidget
   homework: one(homeworks, {
     fields: [homeworkProgressWidgets.homeworkId],
     references: [homeworks.id],
+  }),
+}));
+
+export const hintBudgetsRelations = relations(hintBudgets, ({ one }) => ({
+  section: one(sections, {
+    fields: [hintBudgets.sectionId],
+    references: [sections.id],
+  }),
+  organization: one(organizations, {
+    fields: [hintBudgets.organizationId],
+    references: [organizations.id],
   }),
 }));
 

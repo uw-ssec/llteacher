@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { useNavigate } from "react-router";
@@ -9,7 +9,7 @@ import { useAuth } from "./components/AuthProvider";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
 import { TutorConversationsList } from "./views/TutorConversationsList";
 import { useTutorConversations } from "./hooks/useTutorConversations";
-import type { ConversationMessageResponse, StudentHomeworkListResponse } from "../shared/types";
+import type { ConversationMessageResponse, StudentHomeworkListResponse, HintCountResponse } from "../shared/types";
 
 /* ==========================================================================
    LLTeacher v2 — Chat-with-syllabus shell
@@ -873,7 +873,54 @@ export default function App() {
       hasAutoSelectedSection.current = true;
     }
   }, [sections, sectionMetaByOrder]);
-  const [hintCount, setHintCount] = useState(3);
+  /* #80: real hint usage, replacing the #20 fixture (which incremented
+     unconditionally on every message send -- see handleSendMessage's own
+     #80 note below). Fetched from GET .../hints for the active section
+     whenever it changes, and again once an in-flight hint request settles
+     (the effect below, keyed on chatStatus). `hintLimit` is null when the
+     section has no configured budget (unlimited by default -- see
+     hintBudgets' own doc comment, db/schema/content.ts) -- Sidebar itself
+     has no "limit" concept yet (out of scope for this task, see its own
+     hintCount prop), so only the Composer's disabled state reads it.
+     A fetch failure degrades to "0 used, no known limit" rather than
+     throwing -- same posture as useStudentHomework's own .catch() above,
+     since a stale count is cosmetic, not blocking. */
+  const [hintCount, setHintCount] = useState(0);
+  const [hintLimit, setHintLimit] = useState<number | null>(null);
+  const currentSectionId = sectionMetaByOrder.get(currentSection)?.id;
+  const refetchHintCount = useCallback(() => {
+    if (!courseId || !currentSectionId) return;
+    fetch(`/api/courses/${courseId}/sections/${currentSectionId}/hints`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`failed to load hint count: ${r.status}`);
+        return r.json() as Promise<HintCountResponse>;
+      })
+      .then((data) => {
+        setHintCount(data.count);
+        setHintLimit(data.limit);
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error("[App] failed to load hint count", err);
+      });
+  }, [courseId, currentSectionId]);
+  useEffect(() => {
+    refetchHintCount();
+  }, [refetchHintCount]);
+  /* Set by handleSendMessage the moment a hint-flagged turn is sent;
+     consumed the next time chatStatus settles back to "ready"/"error" (a
+     turn is genuinely done, granted or not) to refetch the real count --
+     this is the "on hint request" half of the staleness fix the #20
+     fixture never needed (Sidebar hint count staleness pitfall, issue
+     #80). A ref, not state: it's read/written only inside effects/
+     handlers, never rendered off of directly. */
+  const hintRequestPendingRef = useRef(false);
+  useEffect(() => {
+    if (hintRequestPendingRef.current && chatStatus !== "submitted" && chatStatus !== "streaming") {
+      hintRequestPendingRef.current = false;
+      refetchHintCount();
+    }
+  }, [chatStatus, refetchHintCount]);
   const [justSubmittedSection, setJustSubmittedSection] = useState<number | null>(null);
   /* #248: restart-affordance dialog state for the section chat. `restarting`
      keeps the dialog open through the request (rather than closing
@@ -994,7 +1041,7 @@ export default function App() {
     }
   }, [tutorChatStatus, tutorConversationId, bumpTutorConversation]);
 
-  const handleSendMessage = (text: string) => {
+  const handleSendMessage = (text: string, options?: { isHintRequest?: boolean }) => {
     /* #144: AI SDK v5's Chat#sendMessage has no internal guard against
        being called while a previous turn is still in flight -- it just
        pushes another message and starts another request. Composer's own
@@ -1028,20 +1075,40 @@ export default function App() {
        first-ever turn minted a tutor-rail row indistinguishable from an
        actual tutor conversation. */
     const currentSectionMeta = sectionMetaByOrder.get(currentSection);
+    /* #80: server-authoritative grant/deny -- see chat.ts's own
+       isHintRequest handling. This flag only REQUESTS the server treat this
+       turn as a hint; it grants nothing by itself. hintRequestPendingRef,
+       consumed by the useEffect right below, is what turns "this turn
+       settled" into "refetch the real count" -- replacing the #20 fixture's
+       unconditional per-message increment (every send used to bump
+       hintCount regardless of whether anything hint-shaped happened). */
+    if (options?.isHintRequest) hintRequestPendingRef.current = true;
     sendMessage(
       { text },
       {
-        body: conversationId
-          ? { conversationId }
-          : { courseId, kind: "section" as const, sectionId: currentSectionMeta?.id },
+        body: {
+          ...(conversationId
+            ? { conversationId }
+            : { courseId, kind: "section" as const, sectionId: currentSectionMeta?.id }),
+          ...(options?.isHintRequest ? { isHintRequest: true } : {}),
+        },
       },
     );
-    /* Each AI response counts as a hint — increments trigger the gold flash
-       on the sidebar's hint-history-row count numeral. */
-    setHintCount((n) => n + 1);
     // #317 review, #352: a fresh send starts a new turn -- any stopped-note
     // from a PRIOR turn must not linger onto it.
     setSectionStoppedMessageId(null);
+  };
+
+  /* #80: "Give me a hint" -- sends a fixed, clearly-labeled request through
+     the SAME pipeline as a typed message (handleSendMessage above), flagged
+     so the server treats it as a hint. Deliberately NOT a separate code
+     path or a direct fetch to a hint endpoint: the model still needs a
+     concrete turn to respond to, and reusing handleSendMessage keeps the
+     conversationId/section plumbing, the in-flight guard, and the
+     stopped-note reset all in exactly one place. */
+  const HINT_REQUEST_MESSAGE = "Give me a hint for this section, please.";
+  const handleRequestHint = () => {
+    handleSendMessage(HINT_REQUEST_MESSAGE, { isHintRequest: true });
   };
 
   /* #4: sends into whichever tutor conversation is currently selected.
@@ -1435,6 +1502,12 @@ export default function App() {
               messages={messages}
               onSendMessage={handleSendMessage}
               onRunRCode={runRCodeForSection}
+              /* #80: only the homework-section chat gets a hint affordance
+                 -- the free-standing tutor ConversationView above never
+                 passes these two props, so it renders none (see Composer's
+                 own degrade-to-nothing doc comment). */
+              onRequestHint={handleRequestHint}
+              hintDisabled={hintLimit !== null && hintCount >= hintLimit}
               /* #144: "error" excluded here matters most for the section
                  chat specifically -- its useChat instance has no `id`
                  (unlike the tutor chat), so nothing else ever resets it

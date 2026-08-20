@@ -469,3 +469,45 @@ describe("stopped-state rendering", () => {
     expect(screen.getByText("ThrottlingException")).toBeTruthy();
   });
 });
+
+// #80: the "Give me a hint" affordance -- forwarded through to Composer, so
+// this covers ConversationView's own wiring (does the button appear only
+// when onRequestHint is passed, does clicking it call through, does
+// hintDisabled disable it) rather than re-testing Composer's own rendering.
+describe("ConversationView onRequestHint (#80)", () => {
+  it("renders no hint affordance when onRequestHint is not passed -- every existing caller unaffected", () => {
+    render(<ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} />);
+    expect(screen.queryByRole("button", { name: /give me a hint/i })).toBeNull();
+  });
+
+  it("renders the hint button when onRequestHint is passed, and clicking it calls through", async () => {
+    const onRequestHint = vi.fn();
+    const user = userEvent.setup();
+    render(<ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} onRequestHint={onRequestHint} />);
+
+    const button = screen.getByRole("button", { name: "Give me a hint" });
+    await user.click(button);
+    expect(onRequestHint).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables the hint button (but keeps it visible) when hintDisabled is true", () => {
+    render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        onRequestHint={() => {}}
+        hintDisabled={true}
+      />,
+    );
+    const button = screen.getByRole("button", { name: /give me a hint/i });
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("omits the hint affordance entirely when hideComposer is set, same as the composer itself", () => {
+    render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} onRequestHint={() => {}} hideComposer />,
+    );
+    expect(screen.queryByRole("button", { name: /give me a hint/i })).toBeNull();
+  });
+});

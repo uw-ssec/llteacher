@@ -332,6 +332,16 @@ export interface WidgetResponseResponse {
   postSubmittedAt: string | null;
 }
 
+/** #80: GET /api/courses/:courseId/sections/:sectionId/hints -- the
+ *  requesting student's own real hint usage for that section, replacing the
+ *  #20 Sidebar hintCount fixture. `limit`/`remaining` are null when the
+ *  section has no configured hint budget (unlimited). */
+export interface HintCountResponse {
+  count: number;
+  limit: number | null;
+  remaining: number | null;
+}
+
 import type {
   HomeworkSubmissionsMatrix,
   ParticipationStatus,

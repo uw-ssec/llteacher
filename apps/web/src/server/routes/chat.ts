@@ -56,6 +56,7 @@ import {
   type UIMessage,
   type UIMessageStreamWriter,
   type ToolSet,
+  type ToolCallOptions,
 } from "ai";
 import { z } from "zod";
 import { makeDb } from "../../db/client";
@@ -82,6 +83,7 @@ import {
 } from "../repositories/sectionConversations";
 import { courseScopeFromAuthContext, unsafeCourseScope, unsafeOrgScope, type OrgScope } from "../repositories/scope";
 import { IdempotencyKeyConflictError } from "../repositories/errors";
+import { recordHintRequest } from "../repositories/hints";
 import { getOrgScopeAndLlmConfigForCourse } from "../repositories/organizations";
 import { logServerError } from "../utils/errors";
 import {
@@ -182,7 +184,87 @@ export const TOOLS: ToolSet = {
       code,
     }),
   },
+  /* #80: unlike showDefinition/executeRCode above -- pure, side-effect-free
+     display tools whose execute() only ever returns a sentinel -- requestHint
+     has a genuine server-side side effect: recording a hintEvents row and
+     checking the section's hint budget (recordHintRequest,
+     repositories/hints.ts). That's the deviation from the display-tool shape
+     this catalog otherwise follows, and it needs request-scoped context (db,
+     org scope, conversationId/sectionId/studentId/promptTemplateId) that a
+     static, module-level ToolSet has no way to close over. Threaded in via
+     streamText's own `experimental_context` option (see chatHandler's
+     streamText call below) -- the AI SDK's designed mechanism for exactly
+     this -- rather than rebuilding TOOLS from scratch on every request.
+
+     This is deliberately NOT the primary hint-request path. That's
+     chatHandler's own `isHintRequest` envelope flag (ChatRequestBody's own
+     doc comment): checked and deterministically granted/denied server-side
+     BEFORE the model is ever called, which is what "Give me a hint"
+     (Composer.tsx) actually triggers -- and what makes a hint request
+     "deterministic and countable" per the issue's own explicit preference
+     over anything model-mediated (a tool call is still the MODEL deciding
+     whether/when to invoke it, which is a weaker guarantee than a
+     server-side gate that runs unconditionally). This tool exists as a
+     secondary, best-effort path for a student who types something like "can
+     I get a hint?" in plain conversation instead of clicking the button --
+     it calls the exact SAME recordHintRequest function the envelope path
+     uses, so both paths write to one canonical event ledger with identical
+     budget/idempotency semantics; neither can grant a hint the other
+     wouldn't also count.
+
+     Also unlike the envelope path: by the time this executes, the system
+     prompt for this turn was already built and handed to the model (system
+     prompts are fixed for the whole streamText call, not retroactively
+     editable mid-stream once a tool result comes back) -- so there is
+     nothing left here to inject via lib/prompts.ts's assembleSystemPrompt.
+     This tool's own description is what tells the model to scaffold
+     instead. */
+  requestHint: {
+    description:
+      "Request a scaffolded hint for the student's CURRENT homework section, when they explicitly ask " +
+      "for one in conversation (e.g. 'can I get a hint?', 'give me a hint'). Checks the section's hint " +
+      "budget and records the request; only meaningful inside a homework-section conversation. Takes no " +
+      "arguments -- always call it with an empty object. " +
+      "If the result's status is \"hint_provided\": respond with a scaffolded nudge -- ask a leading " +
+      "question or highlight a key concept -- never the full solution. " +
+      "If \"budget_exceeded\": tell the student they've used all the hints available for this section, " +
+      "and do not answer the underlying question for them instead. " +
+      "If \"unavailable\": this isn't a homework-section conversation -- there is no hint to give; " +
+      "answer the student's message normally.",
+    inputSchema: jsonSchema<Record<string, never>>({
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    }),
+    execute: async (_input: Record<string, never>, options: ToolCallOptions) => {
+      const ctx = options.experimental_context as HintToolContext | undefined;
+      if (!ctx || !ctx.sectionId) {
+        return { status: "unavailable" as const };
+      }
+      const result = await recordHintRequest(ctx.db, ctx.orgScope, {
+        conversationId: ctx.conversationId,
+        sectionId: ctx.sectionId,
+        studentId: ctx.studentId,
+        promptTemplateId: ctx.promptTemplateId,
+      });
+      return { status: result.status, remainingHints: result.remainingHints };
+    },
+  },
 };
+
+/** #80: the shape threaded into streamText's `experimental_context` option
+ *  (chatHandler, below) for the requestHint tool's execute() to read via
+ *  its second argument -- see requestHint's own doc comment for why this
+ *  can't just be a closure over module-level TOOLS. `sectionId: null` for a
+ *  tutor-kind conversation (no section, hence "unavailable" from the tool). */
+interface HintToolContext {
+  db: Db;
+  orgScope: OrgScope;
+  conversationId: string;
+  sectionId: string | null;
+  studentId: string;
+  promptTemplateId: string | null;
+}
 
 interface ChatRequestBody {
   messages: UIMessage[];
@@ -210,6 +292,16 @@ interface ChatRequestBody {
   // conversations.ts), which throws TenancyMismatchError -> 404 on a
   // mismatch, the same mapping every other tenancy check in this app uses.
   sectionId?: string;
+  // #80: set by the "Give me a hint" trigger (Composer.tsx) -- a REQUEST to
+  // treat this turn as a hint, not a claim that it IS one. chatHandler
+  // independently, deterministically decides that via recordHintRequest
+  // (repositories/hints.ts) before the model is ever called; a client that
+  // sets this to true gets budget-checked and either granted (a real event
+  // is recorded and the prompt is scaffolded) or denied (no event, no model
+  // call) -- the flag itself grants nothing. Ignored (silently, not an
+  // error) for a tutor-kind conversation or one with no sectionId: hints
+  // are a section concept only.
+  isHintRequest?: boolean;
 }
 
 // Validates only the shape chatHandler actually depends on (id, role, and
@@ -329,6 +421,8 @@ const chatEnvelopeSchema = z.object({
   courseId: z.string().uuid().optional(),
   kind: z.enum(["section", "tutor"]).optional(),
   sectionId: z.string().uuid().optional(),
+  // #80: see ChatRequestBody.isHintRequest's own doc comment.
+  isHintRequest: z.boolean().optional(),
 });
 
 // In ai@5.0.195, a provider failure (e.g. a 429) arrives as an `error`
@@ -1104,7 +1198,12 @@ export async function chatHandler(c: Context<AppEnv>) {
   if (sectionPromptContext?.isUnreleased && !authContext.canViewDraftsIn(conv.courseId)) {
     return c.json({ error: "Section not found", code: "not_found" }, 404);
   }
-  const systemPrompt = assembleSystemPrompt(resolvedSystemPromptContent, sectionPromptContext ?? undefined, isDefaultPrompt);
+  // #80: systemPrompt assembly moved below, past the replay/idempotency
+  // check -- see the isHintRequest handling right after it for why: a
+  // "replay" (the model already answered; the client just never received
+  // it, #3 requirement 6) must NOT grant a second hint for the same
+  // original request, so the grant/deny decision has to happen AFTER
+  // classifyTurn has ruled that out, not before.
 
   // #26: model/provider, resolved per-request from the homework's
   // llm_config_id override (if this is a section conversation) or the org's
@@ -1277,6 +1376,67 @@ export async function chatHandler(c: Context<AppEnv>) {
     });
     return replayResponse(conv.id, lastMessage!.parts);
   }
+
+  // #80: deterministic hint grant/deny -- the primary, tested hint-request
+  // path (see ChatRequestBody.isHintRequest's own doc comment; the
+  // requestHint TOOLS entry above is a secondary, model-mediated path that
+  // shares this same recordHintRequest call). Runs here -- past the replay
+  // check above, under the turn lock already acquired, before any model
+  // call -- so: (1) a "replay" retry of an already-answered turn can never
+  // grant a second hint for the same original request; (2) concurrent sends
+  // on this SAME conversation are serialized by the lock, same as every
+  // other per-turn side effect on this route (recordHintRequest's own doc
+  // comment names the one race this does NOT close -- a different
+  // conversation/tab for the same student+section -- as an accepted
+  // simplification, not a security boundary). A budget-exceeded request
+  // short-circuits here with no model call: cheap, deterministic, and
+  // independently testable (chat.test.ts) without mocking streamText.
+  let isHintGranted = false;
+  if (envelopeParsed.data.isHintRequest === true && conv.sectionId) {
+    // Matches the getLastMessages call above and the appendMessage call
+    // below: any throw between lock acquisition and the streamText try
+    // block must release the lock itself before propagating, or a
+    // transient failure here leaves the conversation "processing" for the
+    // full LOCK_STALE_MS with nothing else to release it.
+    let hintResult: Awaited<ReturnType<typeof recordHintRequest>>;
+    try {
+      hintResult = await recordHintRequest(db, orgScope, {
+        conversationId: conv.id,
+        sectionId: conv.sectionId,
+        studentId: authContext.session.userId,
+        promptTemplateId: conv.promptTemplateId,
+      });
+    } catch (err) {
+      await releaseConversationTurnLock(db, conv.id).catch(() => {});
+      throw err;
+    }
+    if (hintResult.status === "budget_exceeded") {
+      await releaseConversationTurnLock(db, conv.id).catch((err) => {
+        logServerError("chatHandler.releaseLock.hintBudgetExceeded", err);
+      });
+      return c.json(
+        {
+          error: "You've used all the hints available for this section.",
+          code: "hint_budget_exceeded",
+          remainingHints: 0,
+        },
+        429,
+      );
+    }
+    isHintGranted = true;
+  }
+  // #80: assembled here (not at this route's earlier prompt-resolution
+  // point) so isHintGranted above is known first -- see prompts.ts's own
+  // assembleSystemPrompt doc comment for HINT_INSTRUCTION's placement/
+  // trust rationale (this flag is never taken from the client at face
+  // value; recordHintRequest above is what actually decided it).
+  const systemPrompt = assembleSystemPrompt(
+    resolvedSystemPromptContent,
+    sectionPromptContext ?? undefined,
+    isDefaultPrompt,
+    isHintGranted,
+  );
+
   // #317 review, #326: "skip-insert" means `recentMessages[0]` already IS
   // the inbound message (that's classifyTurn's own definition of this
   // case) -- persistedHistory starts as `recentMessages` unmodified and
@@ -1462,6 +1622,20 @@ export async function chatHandler(c: Context<AppEnv>) {
       // refusal even if some future change to that schema let one through.
       allowSystemInMessages: false,
       tools: TOOLS,
+      // #80: threads request-scoped context into the requestHint tool's
+      // execute() (its second argument's own `experimental_context` field)
+      // -- see TOOLS.requestHint's own doc comment for why a static,
+      // module-level ToolSet needs this instead of a closure. `sectionId`
+      // is conv.sectionId as-is (null for a tutor-kind conversation, which
+      // is exactly what makes the tool report "unavailable" for one).
+      experimental_context: {
+        db,
+        orgScope,
+        conversationId: conv.id,
+        sectionId: conv.sectionId,
+        studentId: authContext.session.userId,
+        promptTemplateId: conv.promptTemplateId,
+      } satisfies HintToolContext,
       temperature: resolvedLLMConfig.temperature,
       maxOutputTokens: resolvedLLMConfig.maxCompletionTokens,
       // #317 review, #349: see SUPPORTS_REASONING_EFFORT_NONE's own doc

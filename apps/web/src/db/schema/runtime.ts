@@ -25,6 +25,7 @@ import {
   sections,
   homeworkProgressWidgets,
   promptTemplates,
+  hintActionEnum,
 } from "./content";
 
 // ---------- Enums ----------
@@ -287,6 +288,79 @@ export const chatRateLimitWindows = pgTable(
   ],
 );
 
+// ---------- HintEvent ----------
+// #80: one row per explicit "give me a hint" request the server actually
+// granted (see hintBudgets, content.ts, for the optional per-section cap
+// checked before a row is written here) -- an append-only event log, unlike
+// hintBudgets' config-like lifecycle, which is why this lives in runtime.ts
+// alongside messages/auditEvents/llmCallLogs rather than content.ts.
+//
+// Deterministic and countable by construction: a row exists if and only if
+// a hint was granted. Never inferred by classifying the tutor's free-text
+// reply after the fact -- the issue's own explicitly-rejected alternative
+// (fragile; a Socratic tutor's ordinary leading question is not
+// distinguishable from a "hint" by text alone).
+//
+// Scoped to (section_id, student_id) for the usage count this task's
+// budget check reads (getHintCount, repositories/hints.ts) -- per this
+// task's ruling (see the PR report): a shared per-section pool would let
+// one student's hint use exhaust the budget for the whole class, and
+// nothing else in this schema's per-student state (submissions,
+// section_answers, homework_progress_widget_responses) shares state across
+// students that way. organization_id is denormalized for the same
+// FERPA-export/direct-predicate reasons those tables already carry it.
+export const hintEvents = pgTable(
+  "hint_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    sectionId: uuid("section_id")
+      .notNull()
+      .references(() => sections.id, { onDelete: "cascade" }),
+    studentId: uuid("student_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    action: hintActionEnum("action").notNull().default("request_hint"),
+    // Read-model convenience: whether THIS request pushed the student's
+    // (section, student) usage to (or past) the section's configured
+    // maxHints, computed once at insert time (recordHintRequest,
+    // repositories/hints.ts) rather than re-derived from a count query on
+    // every read. Always false when the section has no configured limit.
+    isLimitReached: boolean("is_limit_reached").notNull().default(false),
+    // The issue's own sketch's "promptTemplateVersionUsed" -- the
+    // conversation's pinned prompt_templates row (conversations.
+    // promptTemplateId, #25/#30) at the moment this hint was granted, so a
+    // later template edit can't retroactively change what a past hint
+    // event appears to have been scaffolded against. Nullable: null means
+    // the conversation had no pinned template yet (DEFAULT_SYSTEM_PROMPT
+    // was in effect, lib/prompts.ts).
+    promptTemplateId: uuid("prompt_template_id").references(() => promptTemplates.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    // getHintCount's own query shape (repositories/hints.ts): COUNT(*)
+    // WHERE section_id = ? AND student_id = ?.
+    index("hint_events_section_student_idx").on(t.sectionId, t.studentId),
+    // recordHintRequest's idempotency-window lookup: the most recent event
+    // for a given (conversation, student), ordered by created_at.
+    index("hint_events_conversation_student_created_idx").on(
+      t.conversationId,
+      t.studentId,
+      t.createdAt,
+    ),
+    index("hint_events_org_idx").on(t.organizationId),
+  ],
+);
+
 // ---------- Relations ----------
 
 export const conversationsRelations = relations(
@@ -312,6 +386,25 @@ export const messagesRelations = relations(messages, ({ one }) => ({
   conversation: one(conversations, {
     fields: [messages.conversationId],
     references: [conversations.id],
+  }),
+}));
+
+export const hintEventsRelations = relations(hintEvents, ({ one }) => ({
+  conversation: one(conversations, {
+    fields: [hintEvents.conversationId],
+    references: [conversations.id],
+  }),
+  section: one(sections, {
+    fields: [hintEvents.sectionId],
+    references: [sections.id],
+  }),
+  student: one(users, {
+    fields: [hintEvents.studentId],
+    references: [users.id],
+  }),
+  organization: one(organizations, {
+    fields: [hintEvents.organizationId],
+    references: [organizations.id],
   }),
 }));
 

@@ -9,6 +9,7 @@ import {
   SectionNotInteractiveError,
 } from "../repositories/sectionConversations";
 import { IdempotencyKeyConflictError } from "../repositories/errors";
+import { HINT_INSTRUCTION } from "../../lib/prompts";
 import type { AppEnv } from "../context";
 
 // Route test (mock db, mock the repository layer, mock streamText) -- per
@@ -179,6 +180,18 @@ vi.mock("../../lib/llm-config", async (importOriginal) => {
   };
 });
 
+// #80: hint grant/deny -- mocked so the isHintRequest envelope-wiring tests
+// below (describe("POST /api/chat -- isHintRequest (#80)")) assert
+// chatHandler's OWN wiring (does it call recordHintRequest with the right
+// args, does budget_exceeded short-circuit before streamText, does a grant
+// flow into the real assembleSystemPrompt's output) without re-testing
+// recordHintRequest's own budget/idempotency logic -- that's covered by the
+// real-DB repository suite, repositories/hints.test.ts.
+const recordHintRequestMock = vi.fn();
+vi.mock("../repositories/hints", () => ({
+  recordHintRequest: (...args: unknown[]) => recordHintRequestMock(...args),
+}));
+
 function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
   return buildFakeAuthContext({
     memberships: [fakeMembership({ courseId: "55555555-5555-5555-5555-555555555555", role: "student" })],
@@ -200,7 +213,14 @@ const userUiMessage = { id: "client-1", role: "user", parts: [{ type: "text", te
 
 function postChat(
   app: Hono<AppEnv>,
-  payload: { messages: unknown[]; conversationId?: string; courseId?: string; kind?: string; sectionId?: string },
+  payload: {
+    messages: unknown[];
+    conversationId?: string;
+    courseId?: string;
+    kind?: string;
+    sectionId?: string;
+    isHintRequest?: boolean;
+  },
 ) {
   return app.request(
     "/api/chat",
@@ -2142,5 +2162,214 @@ describe("POST /api/chat", () => {
       expect(res.status).toBe(200);
       expect(pinConversationPromptTemplateMock).not.toHaveBeenCalled();
     });
+  });
+
+  // #80: the primary, deterministic hint-request path -- see
+  // ChatRequestBody.isHintRequest's own doc comment (chat.ts) for why this
+  // is tested independently of TOOLS.requestHint below (a secondary,
+  // model-mediated path). recordHintRequest itself is mocked here (its own
+  // budget/idempotency logic is covered by the real-DB suite,
+  // repositories/hints.test.ts) -- these tests assert chatHandler's WIRING:
+  // does it call recordHintRequest with the right args, does a denial
+  // short-circuit before any model call, does a grant actually reach the
+  // assembled system prompt streamText receives.
+  describe("isHintRequest (#80)", () => {
+    const SECTION_CONV = {
+      id: "22222222-2222-2222-2222-222222222222",
+      ownerUserId: "u1",
+      courseId: "55555555-5555-5555-5555-555555555555",
+      sectionId: "11111111-1111-1111-1111-111111111111",
+      organizationId: "org-a",
+      courseLlmConfigId: null,
+      promptTemplateId: null,
+    };
+
+    beforeEach(() => {
+      recordHintRequestMock.mockReset();
+      getOwnedConversationOrNullMock.mockResolvedValue(SECTION_CONV);
+      getLastMessagesMock.mockResolvedValue([]);
+    });
+
+    it("grants: calls recordHintRequest with conversation/section/student, and the streamed system prompt is scaffolded", async () => {
+      recordHintRequestMock.mockResolvedValue({ status: "hint_provided", remainingHints: 2, deduped: false });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+        isHintRequest: true,
+      });
+
+      expect(res.status).toBe(200);
+      expect(recordHintRequestMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "org-a",
+        {
+          conversationId: SECTION_CONV.id,
+          sectionId: SECTION_CONV.sectionId,
+          studentId: "u1",
+          promptTemplateId: null,
+        },
+      );
+      // assembleSystemPrompt is REAL in these tests (see the #25 mock's own
+      // doc comment) -- this asserts the actual composed prompt streamText
+      // received, not a second mock of the injection.
+      expect(streamTextMock).toHaveBeenCalled();
+      const call = streamTextMock.mock.calls[0]![0] as { system: string };
+      expect(call.system).toContain(HINT_INSTRUCTION);
+    });
+
+    it("does not grant, and does not scaffold, an ordinary turn (isHintRequest omitted)", async () => {
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+      });
+
+      expect(res.status).toBe(200);
+      expect(recordHintRequestMock).not.toHaveBeenCalled();
+      const call = streamTextMock.mock.calls[0]![0] as { system: string };
+      expect(call.system).not.toContain(HINT_INSTRUCTION);
+    });
+
+    it("budget_exceeded: short-circuits with 429 before any model call, and releases the turn lock", async () => {
+      recordHintRequestMock.mockResolvedValue({ status: "budget_exceeded", remainingHints: 0, deduped: false });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+        isHintRequest: true,
+      });
+
+      expect(res.status).toBe(429);
+      const body = (await res.json()) as { code: string; remainingHints: number };
+      expect(body.code).toBe("hint_budget_exceeded");
+      expect(body.remainingHints).toBe(0);
+      expect(streamTextMock).not.toHaveBeenCalled();
+      expect(releaseConversationTurnLockMock).toHaveBeenCalledWith(expect.anything(), SECTION_CONV.id);
+    });
+
+    it("ignores isHintRequest for a tutor-kind conversation (no sectionId) -- no grant/deny decision is made", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ ...SECTION_CONV, sectionId: null });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+        isHintRequest: true,
+      });
+
+      expect(res.status).toBe(200);
+      expect(recordHintRequestMock).not.toHaveBeenCalled();
+    });
+
+    // #80: a "replay" (the model already answered this exact turn; the
+    // client just never received the response, #3 requirement 6) must NOT
+    // grant a second hint for the same original request -- see the
+    // isHintRequest handling's own doc comment in chat.ts for why this is
+    // placed after the replay check, not before.
+    it("does not call recordHintRequest again when the turn replays an already-answered response", async () => {
+      getLastMessagesMock.mockResolvedValue([
+        { id: "asst-1", role: "assistant", parts: [{ type: "text", text: "already answered" }], clientMessageId: null },
+        { id: "user-1", role: "user", parts: [{ type: "text", text: "hi there" }], clientMessageId: "client-1" },
+      ]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+        isHintRequest: true,
+      });
+
+      expect(res.status).toBe(200);
+      expect(recordHintRequestMock).not.toHaveBeenCalled();
+      expect(streamTextMock).not.toHaveBeenCalled();
+    });
+
+    it("a deduped grant (idempotent double-submit) still scaffolds the prompt exactly like a fresh grant", async () => {
+      recordHintRequestMock.mockResolvedValue({ status: "hint_provided", remainingHints: 1, deduped: true });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+        isHintRequest: true,
+      });
+
+      expect(res.status).toBe(200);
+      const call = streamTextMock.mock.calls[0]![0] as { system: string };
+      expect(call.system).toContain(HINT_INSTRUCTION);
+    });
+  });
+});
+
+// #80: requestHint -- the secondary, model-mediated hint path (see
+// TOOLS.requestHint's own doc comment for why it's secondary, and
+// isHintRequest's tests above for the primary one). Same testing posture as
+// TOOLS.executeRCode above: schema shape + execute()'s own contract, not a
+// full model round-trip.
+describe("TOOLS.requestHint (#80)", () => {
+  it("is registered in the tool catalog streamText is called with", () => {
+    expect(TOOLS.requestHint).toBeDefined();
+  });
+
+  it("takes no arguments -- an empty object schema, rejecting unknown properties", () => {
+    const schema = (TOOLS.requestHint!.inputSchema as { jsonSchema: Record<string, unknown> }).jsonSchema;
+    expect(schema.properties).toEqual({});
+    expect(schema.additionalProperties).toBe(false);
+  });
+
+  it("reports 'unavailable' (not a crash) when called with no experimental_context -- e.g. a tutor-kind conversation", async () => {
+    const execute = TOOLS.requestHint!.execute as (
+      input: Record<string, never>,
+      options: { experimental_context?: unknown },
+    ) => Promise<unknown>;
+    const result = await execute({}, { experimental_context: undefined });
+    expect(result).toEqual({ status: "unavailable" });
+  });
+
+  it("reports 'unavailable' when the threaded context has no sectionId (tutor-kind)", async () => {
+    const execute = TOOLS.requestHint!.execute as (
+      input: Record<string, never>,
+      options: { experimental_context?: unknown },
+    ) => Promise<unknown>;
+    const result = await execute(
+      {},
+      {
+        experimental_context: {
+          db: {},
+          orgScope: "org-a",
+          conversationId: "conv-1",
+          sectionId: null,
+          studentId: "u1",
+          promptTemplateId: null,
+        },
+      },
+    );
+    expect(result).toEqual({ status: "unavailable" });
+  });
+
+  it("delegates to recordHintRequest with the threaded context, for a real section conversation", async () => {
+    recordHintRequestMock.mockReset().mockResolvedValue({ status: "hint_provided", remainingHints: 4, deduped: false });
+    const execute = TOOLS.requestHint!.execute as (
+      input: Record<string, never>,
+      options: { experimental_context?: unknown },
+    ) => Promise<unknown>;
+    const fakeDb = {};
+    const result = await execute(
+      {},
+      {
+        experimental_context: {
+          db: fakeDb,
+          orgScope: "org-a",
+          conversationId: "conv-1",
+          sectionId: "sec-1",
+          studentId: "u1",
+          promptTemplateId: "tpl-1",
+        },
+      },
+    );
+    expect(recordHintRequestMock).toHaveBeenCalledWith(fakeDb, "org-a", {
+      conversationId: "conv-1",
+      sectionId: "sec-1",
+      studentId: "u1",
+      promptTemplateId: "tpl-1",
+    });
+    expect(result).toEqual({ status: "hint_provided", remainingHints: 4 });
   });
 });

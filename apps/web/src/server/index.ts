@@ -29,6 +29,7 @@ import {
   restartSectionConversationHandler,
 } from "./routes/sectionConversations";
 import { submitSectionAnswerHandler, getSectionAnswerHandler } from "./routes/sectionAnswers";
+import { getSectionHintsHandler } from "./routes/hints";
 import {
   listInstructorTranscriptsHandler,
   getInstructorTranscriptHandler,
@@ -189,6 +190,14 @@ app.get(
   requireGraderOf()(getSectionAnswerHandler),
 );
 app.patch("/api/widgets/:widgetId/response", requireRole(["student"])(submitWidgetResponseHandler));
+// #80: read-only -- the caller's own hint usage for a section, driving
+// Sidebar's real hintCount. requireCourseMember, not requireRole(["student"]),
+// matching the section-conversation routes above: an instructor/TA teacher-
+// testing a section still needs a real count for their own conversation.
+app.get(
+  "/api/courses/:courseId/sections/:sectionId/hints",
+  requireCourseMember()(getSectionHintsHandler),
+);
 // #172: granting a capability is authoring-tier -- a TA must not be able to
 // widen their own or another TA's access, so these stay requireInstructorOf.
 app.get("/api/courses/:courseId/tas", requireInstructorOf()(listCourseTasHandler));
