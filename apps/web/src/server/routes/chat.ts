@@ -425,11 +425,14 @@ function hasRenderableContent(parts: unknown): boolean {
 
 // Replays an already-persisted assistant message's `parts` (jsonb, so typed
 // unknown at the DB boundary) as UIMessageChunk writes -- used only by the
-// "already answered" retry path below, never by a fresh model turn. Only
-// handles the two part shapes this app's own TOOLS catalog can actually
-// produce (plain text, and a completed showDefinition tool call/result) --
-// anything else is dropped rather than guessed at, so an unrecognized part
-// shape fails safe instead of throwing mid-replay.
+// "already answered" retry path below, never by a fresh model turn. Handles
+// plain text and any completed tool-* call/result generically (#28: this
+// was "the two part shapes this app's own TOOLS catalog can actually
+// produce" back when showDefinition was the only tool; the `part.type.
+// startsWith("tool-")` branch below was already generic over the tool
+// name even then, so adding executeRCode -- or any future tool -- needs no
+// change here) -- anything else is dropped rather than guessed at, so an
+// unrecognized part shape fails safe instead of throwing mid-replay.
 function replayPersistedPart(part: { type: string } & Record<string, unknown>, writer: UIMessageStreamWriter) {
   if (part.type === "text" && typeof part.text === "string") {
     const id = crypto.randomUUID();

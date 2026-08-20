@@ -94,6 +94,71 @@ describe("useRExecution", () => {
     expect(out.output).toBe("before the error");
   });
 
+  // Code-review follow-up (#28): captureR()'s output items can carry
+  // type "message" or "warning" (from R's own message()/warning()) --
+  // both were previously silently dropped (matched neither the plain-
+  // string stdout/stderr branch nor the error branch). Real risk, not
+  // contrived: useWebR.ts installs dplyr/tidyr by default, and dplyr's
+  // summarise() emits a message() on every grouped call.
+  it("captures an R message() as informational output, in capture order alongside stdout", async () => {
+    const shelter = makeShelter(async () => ({
+      output: [
+        { type: "stdout", data: "before" },
+        { type: "message", data: { toString: async () => "`summarise()` has grouped output by 'g'" } },
+        { type: "stdout", data: "after" },
+      ],
+    }));
+    ensureReady.mockResolvedValue(makeWebR(shelter));
+
+    const { useRExecution } = await importUseRExecution();
+    const { result } = renderHook(() => useRExecution());
+
+    let out!: Awaited<ReturnType<typeof result.current.run>>;
+    await act(async () => {
+      out = await result.current.run("df |> group_by(g) |> summarise(n())");
+    });
+
+    expect(out.status).toBe("success");
+    expect(out.output).toBe("before\n`summarise()` has grouped output by 'g'\nafter");
+  });
+
+  it("captures an R warning() as output too -- does not flip status to error", async () => {
+    const shelter = makeShelter(async () => ({
+      output: [{ type: "warning", data: { toString: async () => "NAs introduced by coercion" } }],
+    }));
+    ensureReady.mockResolvedValue(makeWebR(shelter));
+
+    const { useRExecution } = await importUseRExecution();
+    const { result } = renderHook(() => useRExecution());
+
+    let out!: Awaited<ReturnType<typeof result.current.run>>;
+    await act(async () => {
+      out = await result.current.run("as.numeric('x')");
+    });
+
+    expect(out.status).toBe("success");
+    expect(out.output).toBe("NAs introduced by coercion");
+    expect(out.error).toBeUndefined();
+  });
+
+  it("falls back to a generic message/warning label when the condition's own toString is unusable", async () => {
+    const shelter = makeShelter(async () => ({
+      output: [{ type: "message", data: {} }],
+    }));
+    ensureReady.mockResolvedValue(makeWebR(shelter));
+
+    const { useRExecution } = await importUseRExecution();
+    const { result } = renderHook(() => useRExecution());
+
+    let out!: Awaited<ReturnType<typeof result.current.run>>;
+    await act(async () => {
+      out = await result.current.run("message('hi')");
+    });
+
+    expect(out.status).toBe("success");
+    expect(out.output).toBe("An R message occurred during execution");
+  });
+
   it("falls back to the last expression's own printed value when nothing was explicitly output", async () => {
     const shelter = makeShelter(async () => ({
       output: [],

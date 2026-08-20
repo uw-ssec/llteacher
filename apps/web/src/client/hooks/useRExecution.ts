@@ -48,21 +48,24 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-/** An R error item's `data` is an R error object (not a plain string) --
- *  r-execution-manager.js awaits its own `.toString()` to get readable
- *  text. Mirrors that: tolerates a sync OR async `toString`, and falls
- *  back to a generic message rather than throwing if neither shape holds. */
-async function stringifyErrorData(data: unknown): Promise<string> {
+/** An `error`/`message`/`warning` captured item's `data` is an R condition
+ *  object (an RObject proxy, not a plain string) -- r-execution-manager.js
+ *  awaits its own `.toString()` on the `error` case to get readable text;
+ *  this generalizes that to all three condition types (see processCapture
+ *  below), which share the same RObject-proxy shape. Tolerates a sync OR
+ *  async `toString`, and falls back to `fallback` rather than throwing if
+ *  neither shape holds. */
+async function stringifyConditionData(data: unknown, fallback: string): Promise<string> {
   if (data && typeof (data as { toString?: unknown }).toString === "function") {
     try {
       const maybe = (data as { toString(): unknown }).toString();
       const str = maybe instanceof Promise ? await maybe : maybe;
       if (typeof str === "string" && str.length > 0 && str !== "[object Object]") return str;
     } catch {
-      // fall through to the generic message below
+      // fall through to the fallback below
     }
   }
-  return "An error occurred during R execution";
+  return fallback;
 }
 
 interface ProcessedCapture {
@@ -73,19 +76,35 @@ interface ProcessedCapture {
 
 /** Turns WebR's raw captureR() result into plain text + an optional error,
  *  matching r-execution-manager.js's displayResults/executeCode exactly:
- *  stdout/stderr lines are joined in the order captured (#28 Pitfall
- *  "Output capture" -- interleaved stdout/stderr/errors must not be
+ *  stdout/stderr/message/warning lines are joined in the order captured
+ *  (#28 Pitfall "Output capture" -- interleaved output must not be
  *  reordered or dropped), an `error` item is captured but does not stop
  *  processing the rest of `output`, and if nothing was printed at all the
- *  last expression's own result value is used as a last resort. */
+ *  last expression's own result value is used as a last resort.
+ *
+ *  Code-review follow-up (#28): captureR()'s own docs (docs.r-wasm.org/
+ *  webr/latest/evaluating.html) list FIVE output item types, not three --
+ *  `message`/`warning` (from R's own message()/warning()) carry an
+ *  RObject-proxy `data`, same shape as `error`'s, and were previously
+ *  silently dropped (matched by neither the stdout/stderr branch, which
+ *  only handles a plain string, nor the error branch). Real, not
+ *  contrived: useWebR.ts installs dplyr/tidyr by default, and dplyr's
+ *  summarise() alone emits a message() on every grouped call. Treated as
+ *  OUTPUT (appended to `lines`, not surfaced via `errorText`) -- R itself
+ *  treats message()/warning() as informational conditions that don't stop
+ *  execution, unlike a stop()-raised error, so RCodeResult.status stays
+ *  "success" for a run that only ever produced these. */
 async function processCapture(captured: WebRCaptureResult): Promise<ProcessedCapture> {
   const lines: string[] = [];
   let errorText: string | null = null;
   for (const item of captured.output ?? []) {
     if (item.type === "stdout" || item.type === "stderr") {
       lines.push(typeof item.data === "string" ? item.data : String(item.data));
+    } else if (item.type === "message" || item.type === "warning") {
+      const fallback = item.type === "warning" ? "A warning occurred during execution" : "An R message occurred during execution";
+      lines.push(await stringifyConditionData(item.data, fallback));
     } else if (item.type === "error") {
-      errorText = await stringifyErrorData(item.data);
+      errorText = await stringifyConditionData(item.data, "An error occurred during R execution");
     }
   }
   let output = lines.join("\n");
