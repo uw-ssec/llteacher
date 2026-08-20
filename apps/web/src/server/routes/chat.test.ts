@@ -2295,6 +2295,49 @@ describe("POST /api/chat", () => {
       const call = streamTextMock.mock.calls[0]![0] as { system: string };
       expect(call.system).toContain(HINT_INSTRUCTION);
     });
+
+    // #80, review follow-up: prepareStep is what makes TOOLS.requestHint's
+    // secondary path actually reliable (not just hopeful tool-description
+    // text) -- confirms the REAL mechanism (ai@5.0.195's PrepareStepResult.
+    // system override), not the "system prompts can't be changed mid-turn"
+    // claim this test replaces. This is an ordinary, non-hint turn --
+    // prepareStep fires regardless of isHintRequest, purely off whether the
+    // model itself called requestHint and got a grant.
+    it("prepareStep injects HINT_INSTRUCTION for the model's next step when requestHint (the tool) granted a hint in the prior step", async () => {
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+      });
+      expect(res.status).toBe(200);
+
+      const call = streamTextMock.mock.calls[0]![0] as {
+        system: string;
+        prepareStep: (args: { steps: unknown[] }) => { system?: string } | undefined;
+      };
+      // Baseline: this turn's OWN system prompt (no hint granted yet) does
+      // not already contain the instruction -- otherwise the test below
+      // couldn't tell an injection apart from it already being there.
+      expect(call.system).not.toContain(HINT_INSTRUCTION);
+
+      const stepWithGrantedHint = {
+        toolResults: [{ toolName: "requestHint", output: { status: "hint_provided", remainingHints: 2 } }],
+      };
+      const result = call.prepareStep({ steps: [stepWithGrantedHint] });
+      expect(result?.system).toContain(HINT_INSTRUCTION);
+      expect(result?.system).toContain(call.system); // the base prompt is preserved, not replaced
+
+      // A step where the model called requestHint but was DENIED must not
+      // inject the scaffolding instruction -- there's no hint to scaffold.
+      const stepWithDeniedHint = {
+        toolResults: [{ toolName: "requestHint", output: { status: "budget_exceeded", remainingHints: 0 } }],
+      };
+      expect(call.prepareStep({ steps: [stepWithDeniedHint] })).toBeUndefined();
+
+      // A step with no requestHint call at all (e.g. showDefinition, or no
+      // tool call) is untouched -- prepareStep only reacts to a granted hint.
+      const stepWithUnrelatedTool = { toolResults: [{ toolName: "showDefinition", output: { status: "displayed" } }] };
+      expect(call.prepareStep({ steps: [stepWithUnrelatedTool] })).toBeUndefined();
+    });
   });
 });
 

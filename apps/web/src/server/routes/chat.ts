@@ -89,6 +89,7 @@ import { logServerError } from "../utils/errors";
 import {
   assembleSystemPrompt,
   DEFAULT_SYSTEM_PROMPT,
+  HINT_INSTRUCTION,
   getPinnedPromptTemplateContent,
   getSectionPromptContext,
   resolvePromptTemplate,
@@ -200,25 +201,32 @@ export const TOOLS: ToolSet = {
      chatHandler's own `isHintRequest` envelope flag (ChatRequestBody's own
      doc comment): checked and deterministically granted/denied server-side
      BEFORE the model is ever called, which is what "Give me a hint"
-     (Composer.tsx) actually triggers -- and what makes a hint request
-     "deterministic and countable" per the issue's own explicit preference
-     over anything model-mediated (a tool call is still the MODEL deciding
-     whether/when to invoke it, which is a weaker guarantee than a
-     server-side gate that runs unconditionally). This tool exists as a
-     secondary, best-effort path for a student who types something like "can
-     I get a hint?" in plain conversation instead of clicking the button --
-     it calls the exact SAME recordHintRequest function the envelope path
-     uses, so both paths write to one canonical event ledger with identical
-     budget/idempotency semantics; neither can grant a hint the other
-     wouldn't also count.
+     (Composer.tsx) actually triggers. The reason the envelope flag is
+     primary is NOT that a tool call can't shape the model's own output --
+     it genuinely can, via prepareStep below (ai@5.0.195's PrepareStepResult
+     supports a per-step `system` override, confirmed in
+     @ai-sdk/provider-utils' own type -- see prepareStep's doc comment for
+     how this tool actually uses that). The reason is issue #80's own
+     explicit preference (requirement 1): "an explicit student action...
+     is the recommended model -- deterministic and countable -- vs.
+     heuristic classification of tutor replies (fragile; avoid)." A tool
+     call is still the MODEL deciding whether/when to invoke it -- even
+     with prepareStep available to react to that decision, the decision
+     itself remains non-deterministic in exactly the way the issue asks to
+     avoid, unlike a server-side gate that runs unconditionally on every
+     hint-flagged request regardless of what the model would have chosen.
 
-     Also unlike the envelope path: by the time this executes, the system
-     prompt for this turn was already built and handed to the model (system
-     prompts are fixed for the whole streamText call, not retroactively
-     editable mid-stream once a tool result comes back) -- so there is
-     nothing left here to inject via lib/prompts.ts's assembleSystemPrompt.
-     This tool's own description is what tells the model to scaffold
-     instead. */
+     This tool exists as a secondary, best-effort path for a student who
+     types something like "can I get a hint?" in plain conversation instead
+     of clicking the button -- it calls the exact SAME recordHintRequest
+     function the envelope path uses, so both paths write to one canonical
+     event ledger with identical budget/idempotency semantics; neither can
+     grant a hint the other wouldn't also count. prepareStep (below) is what
+     makes this path's scaffolding actually reliable rather than merely
+     hoped-for from this tool's own description text: when this tool grants
+     a hint in one step, prepareStep injects the same HINT_INSTRUCTION the
+     envelope path uses into the system prompt for the model's NEXT step,
+     within the same streamText call. */
   requestHint: {
     description:
       "Request a scaffolded hint for the student's CURRENT homework section, when they explicitly ask " +
@@ -1636,6 +1644,36 @@ export async function chatHandler(c: Context<AppEnv>) {
         studentId: authContext.session.userId,
         promptTemplateId: conv.promptTemplateId,
       } satisfies HintToolContext,
+      // #80: strengthens TOOLS.requestHint's secondary path (see its own
+      // doc comment above) -- when the model calls requestHint and it
+      // grants a hint in one step, this injects the same HINT_INSTRUCTION
+      // the primary isHintRequest envelope path uses into the system
+      // prompt for the model's NEXT step, via ai@5.0.195's real per-step
+      // `system` override (PrepareStepResult.system,
+      // @ai-sdk/provider-utils -- confirmed present in the pinned
+      // version's own .d.ts, not assumed). Returning undefined (steps[0],
+      // or any step that didn't just get a granted requestHint result)
+      // leaves the outer `system` above untouched for that step. Guarded
+      // against double-injection: a turn where the ENVELOPE path already
+      // granted (isHintGranted above, so `systemPrompt` already ends in
+      // HINT_INSTRUCTION) skips this -- not a scenario recordHintRequest's
+      // own idempotency window is expected to produce in practice, but the
+      // guard is free either way. Loosely typed (TOOLS itself is declared
+      // `: ToolSet`, so streamText's TOOLS generic can't narrow `steps`'
+      // tool-result shape any further than this file's other tool-facing
+      // code already accepts, e.g. requestHint's own execute() cast).
+      prepareStep: ({ steps }) => {
+        const lastStep = steps[steps.length - 1];
+        const grantedHint = lastStep?.toolResults?.some(
+          (r) =>
+            (r as { toolName?: string }).toolName === "requestHint" &&
+            (r as { output?: { status?: string } }).output?.status === "hint_provided",
+        );
+        if (grantedHint && !systemPrompt.includes(HINT_INSTRUCTION)) {
+          return { system: `${systemPrompt}\n\n${HINT_INSTRUCTION}` };
+        }
+        return undefined;
+      },
       temperature: resolvedLLMConfig.temperature,
       maxOutputTokens: resolvedLLMConfig.maxCompletionTokens,
       // #317 review, #349: see SUPPORTS_REASONING_EFFORT_NONE's own doc
