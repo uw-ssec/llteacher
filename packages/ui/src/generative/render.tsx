@@ -14,6 +14,7 @@
 
 import type { ReactNode } from "react";
 import { DefinitionCard } from "./DefinitionCard";
+import { CodeExecution, type RCodeResult } from "./renderers/CodeExecution";
 
 /* The minimal shape of a tool part we care about. AI SDK v5 emits parts
    with `type: 'tool-<toolName>'` and a state machine on `state`. */
@@ -75,7 +76,31 @@ export function isToolPart(part: unknown): part is ToolPart {
   );
 }
 
-export function renderToolPart(part: ToolPart, key: string): ReactNode {
+/** Runtime-validates a `tool-executeRCode` part's untrusted `input` --
+ *  same deny-by-default reasoning as parseShowDefinitionInput above (the
+ *  model's own JSON, not to be trusted verbatim). Only `code` is required;
+ *  `showSource` is optional and defaults inside CodeExecution itself. */
+export function parseExecuteRCodeInput(
+  value: unknown,
+): { code: string; showSource?: boolean } | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { code, showSource } = value as Record<string, unknown>;
+  if (showSource !== undefined && typeof showSource !== "boolean") return null;
+  if (typeof code !== "string" || code.length === 0) return null;
+  return { code, showSource: typeof showSource === "boolean" ? showSource : undefined };
+}
+
+/** Handlers a caller can inject for tool parts whose rendering needs an
+ *  app-level side effect this package can't own itself (e.g. executeRCode
+ *  needs a real WebR-backed `run`, see CodeExecution's own doc comment for
+ *  why that lives in apps/web, not here). Optional and additive --
+ *  `renderToolPart(part, key)` with no third argument keeps working
+ *  exactly as it did before `tool-executeRCode` existed. */
+export interface ToolPartHandlers {
+  onRunRCode?: (code: string) => Promise<RCodeResult>;
+}
+
+export function renderToolPart(part: ToolPart, key: string, handlers?: ToolPartHandlers): ReactNode {
   if (part.type === "tool-showDefinition") {
     const input = parseShowDefinitionInput(part.input);
     if (!input) return null;
@@ -85,6 +110,19 @@ export function renderToolPart(part: ToolPart, key: string): ReactNode {
         term={input.term}
         body={input.body}
         isPartial={part.state === "input-streaming"}
+      />
+    );
+  }
+  if (part.type === "tool-executeRCode") {
+    const input = parseExecuteRCodeInput(part.input);
+    if (!input) return null;
+    return (
+      <CodeExecution
+        key={key}
+        code={input.code}
+        showSource={input.showSource}
+        isPartial={part.state === "input-streaming"}
+        onRun={handlers?.onRunRCode}
       />
     );
   }

@@ -16,6 +16,7 @@ import { Composer } from "./Composer";
 import { CodeBlock } from "./CodeBlock";
 import { EditableTitle } from "./EditableTitle";
 import { Button } from "./Button";
+import { renderTextWithCode, type RCodeResult } from "../generative";
 
 /** The student-facing copy for a failed turn.
  *
@@ -286,6 +287,16 @@ export interface ConversationViewProps {
    *  component's original (conflated) behavior for any caller that
    *  doesn't pass it. */
   isStopActionable?: boolean;
+  /** #28: bound to the app layer's own useRExecution().run -- lets a
+   *  student's own message render an R-fenced code block (see
+   *  renderTextWithCode's doc comment for why detection happens on the
+   *  raw string here, not upstream: StudentMessageData.content stays a
+   *  plain string because the composer's history-recall feature needs the
+   *  literal text back, not a React tree) as a runnable CodeExecution card
+   *  instead of inert text. `undefined` degrades to a read-only code block
+   *  with no Run affordance -- matches CodeExecution's own graceful
+   *  degradation when a caller hasn't wired R execution up at all. */
+  onRunRCode?: (code: string) => Promise<RCodeResult>;
 }
 
 /* -- Component ------------------------------------------------------------- */
@@ -304,6 +315,7 @@ export function ConversationView({
   headerActions,
   onStop,
   isStopActionable = isSending,
+  onRunRCode,
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -503,7 +515,7 @@ export function ConversationView({
               if (msg.role === "student") {
                 return (
                   <Message key={msg.id} role="student">
-                    {msg.content}
+                    {renderTextWithCode(msg.content, { onRun: onRunRCode, keyPrefix: msg.id })}
                   </Message>
                 );
               }

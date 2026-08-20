@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import { chatHandler, classifyTurn } from "./chat";
+import { chatHandler, classifyTurn, TOOLS } from "./chat";
 import type { AuthContext } from "../middleware/roles";
 import { fakeAuthContext as buildFakeAuthContext, fakeMembership } from "../testing/authContext";
 import {
@@ -245,6 +245,35 @@ describe("classifyTurn", () => {
 
   it("inserts on a brand-new conversation with no prior messages at all", () => {
     expect(classifyTurn(undefined, undefined, "client-1")).toBe("insert");
+  });
+});
+
+// #28: executeRCode is a display tool exactly like showDefinition -- a
+// server-side execute() that returns a sentinel (never real R output; this
+// Worker never runs R, see TOOLS.executeRCode's own doc comment) so the
+// model's tool call always resolves and the conversation can continue in
+// the same turn (stopWhen: stepCountIs(5) below). The actual execution
+// happens client-side (packages/ui's CodeExecution renderer, wired to
+// apps/web's useRExecution hook) -- out of reach for a route-level test,
+// per the issue's own Testing Strategy ("mock chat.ts and test that
+// executeRCode is in TOOLS... verify the execute handler's own contract").
+describe("TOOLS.executeRCode", () => {
+  it("is registered in the tool catalog streamText is called with", () => {
+    expect(TOOLS.executeRCode).toBeDefined();
+  });
+
+  it("requires `code` and rejects unknown properties in its input schema", () => {
+    const schema = (TOOLS.executeRCode!.inputSchema as { jsonSchema: Record<string, unknown> }).jsonSchema;
+    expect(schema.required).toEqual(["code"]);
+    expect(schema.additionalProperties).toBe(false);
+    expect((schema.properties as Record<string, unknown>).code).toBeDefined();
+    expect((schema.properties as Record<string, unknown>).showSource).toBeDefined();
+  });
+
+  it("execute() resolves to a sentinel (never a fabricated RCodeResult) so the model's tool call is never left unanswered", async () => {
+    const execute = TOOLS.executeRCode!.execute as (input: { code: string; showSource?: boolean }) => Promise<unknown>;
+    const result = await execute({ code: "sum(1:10)" });
+    expect(result).toEqual({ status: "displayed", code: "sum(1:10)" });
   });
 });
 

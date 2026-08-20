@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { useNavigate } from "react-router";
-import { Sidebar, TopNav, ConversationView, AlertDialog, Button, renderToolPart, isToolPart, ErrorBoundary } from "@llteacher/ui";
-import type { SidebarSection, MessageData } from "@llteacher/ui";
+import { Sidebar, TopNav, ConversationView, AlertDialog, Button, renderToolPart, renderTextWithCode, isToolPart, ErrorBoundary } from "@llteacher/ui";
+import type { SidebarSection, MessageData, RCodeResult } from "@llteacher/ui";
+import { useRExecution } from "./hooks/useRExecution";
 import { useAuth } from "./components/AuthProvider";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
 import { TutorConversationsList } from "./views/TutorConversationsList";
@@ -162,6 +163,17 @@ function buildMessageData(
   // keeps the visible transcript honest about that instead of the fragment
   // silently reading as an ordinary, complete, remembered reply.
   stoppedMessageId?: string | null,
+  /* #28: bound to this app's own useRExecution().run -- threaded through
+     to BOTH an assistant text part's own R-fenced code (renderTextWithCode
+     below) and a tool-executeRCode part (renderToolPart's handlers arg).
+     Deliberately the SAME, non-persisting callback for anything the model
+     produces, however it got there (a raw fenced block in its own text, or
+     the executeRCode display tool) -- unlike the student's OWN code (see
+     App.tsx's runRCodeForSection/runRCodeForTutor), running the tutor's
+     example code is exploratory and must not auto-generate a new
+     persisted turn on every click (see this file's own doc comment on
+     that decision). */
+  onRunRCode?: (code: string) => Promise<RCodeResult>,
 ): MessageData[] {
   const messages: MessageData[] = aiMessages.map((m, idx) => {
     const isLast = idx === aiMessages.length - 1;
@@ -173,7 +185,7 @@ function buildMessageData(
         <>
           {m.parts.map((part, i) => {
             if (part.type === "text") {
-              return <p key={`text-${m.id}-${i}`}>{part.text}</p>;
+              return renderTextWithCode(part.text, { onRun: onRunRCode, keyPrefix: `text-${m.id}-${i}` });
             }
             /* #144: no `part as ToolPart` cast -- useChat isn't given the
                server's tool-input generics, so the AI SDK's UIMessagePart
@@ -184,7 +196,7 @@ function buildMessageData(
                shape itself (parseShowDefinitionInput) rather than trusting
                a blind cast all the way through. */
             if (!isToolPart(part)) return null;
-            return renderToolPart(part, `tool-${m.id}-${i}`);
+            return renderToolPart(part, `tool-${m.id}-${i}`, { onRunRCode });
           })}
           {isStopped && (
             <p className="message__stopped-note">
@@ -915,11 +927,16 @@ export default function App() {
     }
   }, [isTutorSidebarCollapsed]);
 
-  /* Translate AI SDK UIMessages into the design system's MessageData --
-     one call per Chat instance (buildMessageData, defined above the
-     component). Whichever one is showing depends on tutorConversationId. */
-  const messages = buildMessageData(aiMessages, chatStatus, sectionStoppedMessageId);
-  const tutorMessages = buildMessageData(tutorAiMessages, tutorChatStatus, tutorStoppedMessageId);
+  /* #28: one shared useRExecution -- and therefore one shared WebR
+     singleton (see useWebR.ts's own doc comment) -- for both chat
+     surfaces. `messages`/`tutorMessages` (which need `runRCode` threaded
+     into buildMessageData) are computed further down, after
+     handleSendMessage/handleSendTutorMessage exist: running a STUDENT'S
+     OWN code auto-shares the result back into whichever conversation it
+     came from (runRCodeForSection/runRCodeForTutor below), which reuses
+     those handlers rather than duplicating their conversationId/courseId
+     plumbing. */
+  const { run: runRCode } = useRExecution();
 
   /* #144: inline retryable error rows for ConversationView, one per useChat
      instance. `regenerate` re-issues the last turn's request through the
@@ -1041,6 +1058,59 @@ export default function App() {
     // #317 review, #352: same reasoning as handleSendMessage above.
     setTutorStoppedMessageId(null);
   };
+
+  /* #28: after the STUDENT'S OWN code runs (a fenced ```r block in one of
+     THEIR messages -- see ConversationView's onRunRCode wiring below),
+     share code + result back into the same conversation as a new turn, so
+     the tutor can actually discuss it (issue requirement: "Executed code +
+     results replay into LLM context... so the tutor can discuss the
+     student's actual output"). Reuses handleSendMessage/handleSendTutorMessage
+     rather than calling sendMessage directly -- same in-flight guard, same
+     conversationId/courseId/sectionId body, same hint-count/stopped-note
+     bookkeeping every other send already gets.
+
+     Deliberately NOT done for the tutor's own suggested code (executeRCode
+     tool, or a fenced block in the assistant's own text) -- buildMessageData
+     above wires those to the bare `runRCode` with no persistence, so
+     experimenting with the tutor's example doesn't spam a new (paid) model
+     turn on every click. Only code the STUDENT wrote and sent counts as
+     their "actual output" worth sharing automatically.
+
+     Known limitation: handleSendMessage/handleSendTutorMessage silently
+     no-op while a turn is already in flight (#144's own guard) -- if the
+     student clicks Run again before the tutor's reply to their code
+     message finishes, this result is shown inline (the CodeExecution card
+     still updates) but is NOT auto-shared. Not fixed here: queuing a
+     pending send is real, separate scope; the student can just click Run
+     again once the turn completes. */
+  function formatRExecutionMessage(code: string, result: RCodeResult): string {
+    const codeFence = "```r\n" + code + "\n```";
+    if (result.status === "error") {
+      return `I ran this R code:\n${codeFence}\nIt produced an error:\n\`\`\`\n${result.error ?? "Unknown error"}\n\`\`\``;
+    }
+    const output = result.output && result.output.trim() ? result.output : "(no output)";
+    return `I ran this R code:\n${codeFence}\nOutput:\n\`\`\`\n${output}\n\`\`\``;
+  }
+  const runRCodeForSection = (code: string) =>
+    runRCode(code).then((result) => {
+      handleSendMessage(formatRExecutionMessage(code, result));
+      return result;
+    });
+  const runRCodeForTutor = (code: string) =>
+    runRCode(code).then((result) => {
+      handleSendTutorMessage(formatRExecutionMessage(code, result));
+      return result;
+    });
+
+  /* Translate AI SDK UIMessages into the design system's MessageData --
+     one call per Chat instance (buildMessageData, defined above the
+     component). Whichever one is showing depends on tutorConversationId.
+     `runRCode` (not the persisting wrappers above) is what the TUTOR's own
+     code -- an executeRCode tool call, or a fenced block in its own text --
+     runs against; see runRCodeForSection's own doc comment for why that's
+     deliberately the non-persisting path. */
+  const messages = buildMessageData(aiMessages, chatStatus, sectionStoppedMessageId, runRCode);
+  const tutorMessages = buildMessageData(tutorAiMessages, tutorChatStatus, tutorStoppedMessageId, runRCode);
 
   /* Selecting a homework section always means "I want the section chat" --
      switches back out of the tutor surface if one was showing. Clears
@@ -1326,6 +1396,7 @@ export default function App() {
               onRenameTitle={handleRenameTutorConversation}
               messages={tutorMessages}
               onSendMessage={handleSendTutorMessage}
+              onRunRCode={runRCodeForTutor}
               /* #144: "error" deliberately excluded -- see isSending's own
                  doc comment (ConversationView.tsx) for why. #276: a
                  hydration failure DOES disable sending -- unlike a chat
@@ -1363,6 +1434,7 @@ export default function App() {
               }`}
               messages={messages}
               onSendMessage={handleSendMessage}
+              onRunRCode={runRCodeForSection}
               /* #144: "error" excluded here matters most for the section
                  chat specifically -- its useChat instance has no `id`
                  (unlike the tutor chat), so nothing else ever resets it

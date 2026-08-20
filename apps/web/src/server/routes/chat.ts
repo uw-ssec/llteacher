@@ -114,7 +114,7 @@ import type { AppEnv } from "../context";
    model sees an assistant message with an unanswered tool call and either
    refuses or emits nothing). The sentinel also lets the model continue with
    follow-up text in the same turn via stopWhen below. */
-const TOOLS: ToolSet = {
+export const TOOLS: ToolSet = {
   showDefinition: {
     description:
       "Render a formal definition card for a named statistical concept. " +
@@ -139,6 +139,47 @@ const TOOLS: ToolSet = {
     execute: async ({ term }: { term: string; body: string }) => ({
       status: "displayed" as const,
       term,
+    }),
+  },
+  /* #28: R execution is entirely client-side (WebR/WASM in the browser --
+     see apps/web/src/client/hooks/useWebR.ts, useRExecution.ts) -- this
+     Worker never runs R itself (the issue's own non-goal: "no server-side
+     code execution"). executeRCode is a DISPLAY tool exactly like
+     showDefinition above: the model supplies `code` (and optionally
+     `showSource`) as its input, this execute() returns a sentinel that
+     satisfies the tool-call contract (a tool call with no result poisons
+     the next turn's history, see this catalog's own doc comment) without
+     claiming the code actually ran here, and the CLIENT (packages/ui's
+     CodeExecution renderer, dispatched by render.tsx's tool-executeRCode
+     case) is what lets the student actually run it via the shared WebR
+     singleton and renders the real result. `status: "displayed"` (not
+     "executed") is deliberate -- an "executed" sentinel from THIS
+     execute() would misstate that the server ran the code, when nothing
+     has run yet. */
+  executeRCode: {
+    description:
+      "Show the student a runnable R code snippet they can execute themselves in the browser. " +
+      "Use when demonstrating a technique or inviting hands-on practice with the student's own data. " +
+      "Args: code (the R source to show); showSource (whether to display the code itself " +
+      "alongside any result once run -- default true).",
+    inputSchema: jsonSchema<{ code: string; showSource?: boolean }>({
+      type: "object",
+      properties: {
+        code: {
+          type: "string",
+          description: "R source code, e.g. 'mean(c(1, 2, 3))'",
+        },
+        showSource: {
+          type: "boolean",
+          description: "Whether to display the code itself alongside any result. Defaults to true.",
+        },
+      },
+      required: ["code"],
+      additionalProperties: false,
+    }),
+    execute: async ({ code }: { code: string; showSource?: boolean }) => ({
+      status: "displayed" as const,
+      code,
     }),
   },
 };
