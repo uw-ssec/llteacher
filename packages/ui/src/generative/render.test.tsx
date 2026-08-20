@@ -176,4 +176,28 @@ describe("renderToolPart", () => {
     const part: ToolPart = { type: "tool-executeRCode", state: "input-streaming", input: {} };
     expect(renderToolPart(part, "k")).toBeNull();
   });
+
+  /* #168: markSectionComplete is a zero-argument tool -- there is no
+     model-generated `input` to validate the way showDefinition/executeRCode
+     above need to, so the renderer only branches on `part.type`/`state`. */
+  it("renders a SectionCompleteSuggestion for a resolved markSectionComplete tool call", () => {
+    const part: ToolPart = {
+      type: "tool-markSectionComplete",
+      state: "output-available",
+      input: {},
+    };
+    const { getByLabelText } = render(<>{renderToolPart(part, "k")}</>);
+    expect(getByLabelText("Section complete suggestion")).toBeTruthy();
+  });
+
+  it("still renders the SectionCompleteSuggestion while input-streaming (zero-argument tool, nothing to wait for)", () => {
+    const part: ToolPart = { type: "tool-markSectionComplete", state: "input-streaming", input: {} };
+    expect(renderToolPart(part, "k")).not.toBeNull();
+  });
+
+  it("renders no interactive controls -- the suggestion is informational only, never an auto-submit affordance", () => {
+    const part: ToolPart = { type: "tool-markSectionComplete", state: "output-available", input: {} };
+    const { queryByRole } = render(<>{renderToolPart(part, "k")}</>);
+    expect(queryByRole("button")).toBeNull();
+  });
 });

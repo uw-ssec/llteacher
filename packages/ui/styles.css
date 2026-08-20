@@ -2371,6 +2371,41 @@ body {
   }
 }
 
+/* SectionCompleteSuggestion (#168) — the tutor stopping-rule suggestion.
+   A quiet, success-toned card, deliberately with no button of its own (see
+   the component's own doc comment for why): --color-success carries the
+   "you're in good shape" signal without borrowing the Heritage Gold accent
+   DefinitionCard/CodeExecution use for "the model produced structured
+   output" — this is closer in register to the existing submitted-status
+   badges (.admin-status--submitted) than to a generative-display card. */
+.section-complete-suggestion {
+  margin-block: var(--space-6);
+  padding: var(--space-4) var(--space-6);
+  background-color: rgba(43, 138, 62, 0.06);
+  border-inline-start: 3px solid var(--color-success);
+  border-radius: 8px;
+  transition: opacity 240ms ease-out;
+}
+
+.section-complete-suggestion--partial {
+  opacity: 0.5;
+}
+
+.section-complete-suggestion__title {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  font-weight: var(--weight-semibold);
+  color: var(--color-success);
+  margin-block-end: var(--space-1);
+}
+
+.section-complete-suggestion__body {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--leading-body);
+  color: var(--color-text);
+}
+
 .streaming-dot {
   display: inline-flex;
   align-items: center;

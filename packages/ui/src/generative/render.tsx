@@ -15,6 +15,7 @@
 import type { ReactNode } from "react";
 import { DefinitionCard } from "./DefinitionCard";
 import { CodeExecution, type RCodeResult } from "./renderers/CodeExecution";
+import { SectionCompleteSuggestion } from "./renderers/SectionCompleteSuggestion";
 
 /* The minimal shape of a tool part we care about. AI SDK v5 emits parts
    with `type: 'tool-<toolName>'` and a state machine on `state`. */
@@ -125,6 +126,17 @@ export function renderToolPart(part: ToolPart, key: string, handlers?: ToolPartH
         onRun={handlers?.onRunRCode}
       />
     );
+  }
+  // #168: markSectionComplete is a zero-argument tool -- there is no
+  // model-generated `input` to validate (unlike showDefinition/
+  // executeRCode above), so this renders on any state, same as requestHint
+  // has no renderer at all because it has no display purpose. A stray
+  // tool-markSectionComplete part on a replayed/persisted message (this
+  // function also runs during replay, via replayPersistedPart's own
+  // tool-input-available/tool-output-available writes) still renders the
+  // same suggestion card it did live.
+  if (part.type === "tool-markSectionComplete") {
+    return <SectionCompleteSuggestion key={key} isPartial={part.state === "input-streaming"} />;
   }
   return null;
 }

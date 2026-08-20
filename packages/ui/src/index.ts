@@ -59,8 +59,17 @@ export {
   isToolPart,
   CodeExecution,
   renderTextWithCode,
+  SectionCompleteSuggestion,
 } from "./generative";
-export type { DefinitionCardProps, ToolPart, ToolPartHandlers, CodeExecutionProps, RCodeResult, RenderTextWithCodeOptions } from "./generative";
+export type {
+  DefinitionCardProps,
+  ToolPart,
+  ToolPartHandlers,
+  CodeExecutionProps,
+  RCodeResult,
+  RenderTextWithCodeOptions,
+  SectionCompleteSuggestionProps,
+} from "./generative";
 
 /* -- Auth session -----------------------------------------------------------
    Shared session-fetch-on-mount + login/logout for apps/web and apps/admin.

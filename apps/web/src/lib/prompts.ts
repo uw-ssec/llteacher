@@ -82,6 +82,32 @@ export const TUTOR_GUARDRAIL =
 export const HINT_INSTRUCTION =
   "IMPORTANT: This student asked for a hint. Provide a scaffolded nudge -- ask a leading question or highlight a key concept -- never give the full solution.";
 
+/** #168: the default stopping-rule pedagogy for the markSectionComplete
+ *  tool (chat.ts's TOOLS catalog) -- appended to every section-kind
+ *  conversation's system prompt (see assembleSystemPrompt's
+ *  `markCompleteInstruction` param below) UNLESS the resolved LLM config
+ *  has its own override (llm_configs.markCompleteInstruction, #168's own
+ *  "tunable per LLM config, not hardcoded" requirement -- chat.ts's call
+ *  site does `resolvedLLMConfig.markCompleteInstruction ??
+ *  DEFAULT_MARK_COMPLETE_INSTRUCTION`, not this module).
+ *
+ *  Paraphrases the reference implementation's pedagogy (issue #168's own
+ *  Context section, since the linked source is unfetchable from here):
+ *  tuned hard against over-gatekeeping -- students must not be blocked,
+ *  the goal is to unblock as early as possible, do not be pedantic, call
+ *  it immediately on a reasonable answer even if mastery is incomplete.
+ *  Explicitly reassures the model that calling the tool is low-stakes (a
+ *  suggestion, not a submission) so it has no reason to hold out for
+ *  certainty -- the tool's own zero-argument description (chat.ts)
+ *  intentionally does NOT restate this pedagogy, so a project can tune
+ *  it here without touching code. */
+export const DEFAULT_MARK_COMPLETE_INSTRUCTION =
+  "You have a mark_section_complete tool. Call it as soon as the student has given a reasonable answer that shows " +
+  "they understand this section -- do not wait for a perfect or complete answer, and do not be pedantic about " +
+  "small gaps. The goal is to unblock the student as early as possible, never to gatekeep. Calling this tool only " +
+  "surfaces a suggestion to the student that they may be ready to move on -- it does not submit anything on their " +
+  "behalf and does not end the conversation, so err on the side of calling it rather than withholding it.";
+
 export interface ResolvedPromptTemplate {
   /** Null when nothing was found at any scope (DEFAULT_SYSTEM_PROMPT was
    *  used) -- there is no real template row to pin. */
@@ -338,6 +364,20 @@ export function sectionConversationTitle(section: { order: number; title: string
  *  DEFAULT_SYSTEM_PROMPT, which would misfire for any org template whose
  *  content happens to match it verbatim.
  *
+ *  `markCompleteInstruction` (#168): appended after TUTOR_GUARDRAIL but
+ *  BEFORE `isHintRequest`'s HINT_INSTRUCTION -- this is a standing,
+ *  every-turn behavioral directive for a section-kind conversation (like
+ *  TUTOR_GUARDRAIL), not a same-turn, student-initiated one (like
+ *  HINT_INSTRUCTION), so it doesn't get HINT_INSTRUCTION's "most recent,
+ *  most specific" placement. Undefined (not just falsy/empty) is the
+ *  "don't append anything" case -- chat.ts's own call site only ever
+ *  passes a value for a section-kind conversation (where the
+ *  markSectionComplete tool is actually exposed, see chat.ts's own
+ *  gating), already resolved to `resolvedLLMConfig.markCompleteInstruction
+ *  ?? DEFAULT_MARK_COMPLETE_INSTRUCTION` -- this function stays a pure,
+ *  unconditional "append if present," same as every other conditional
+ *  part here, rather than re-deriving the fallback itself.
+ *
  *  `isHintRequest` (#80): appends HINT_INSTRUCTION LAST -- after
  *  <section_content> and the guardrail -- so it reads as the most recent,
  *  most specific instruction for THIS turn, and so it always lands after
@@ -355,6 +395,7 @@ export function assembleSystemPrompt(
   section?: PromptSectionContext,
   isDefaultPrompt = false,
   isHintRequest = false,
+  markCompleteInstruction?: string,
 ): string {
   const parts = [templateContent.trim()];
   if (section) {
@@ -368,6 +409,7 @@ export function assembleSystemPrompt(
     );
   }
   if (isDefaultPrompt) parts.push(TUTOR_GUARDRAIL);
+  if (markCompleteInstruction) parts.push(markCompleteInstruction);
   if (isHintRequest) parts.push(HINT_INSTRUCTION);
   return parts.join("\n\n");
 }

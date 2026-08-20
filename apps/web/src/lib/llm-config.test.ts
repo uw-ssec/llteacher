@@ -23,6 +23,7 @@ const baseConfig: ResolvedLLMConfig = {
   credentialId: null,
   pricePerMillionInputTokens: null,
   pricePerMillionOutputTokens: null,
+  markCompleteInstruction: null,
 };
 
 /** #317 review, security finding #323: resolveApiKey now takes the real

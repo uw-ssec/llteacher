@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import { chatHandler, classifyTurn, TOOLS } from "./chat";
+import { chatHandler, classifyTurn, TOOLS, toolsForConversation } from "./chat";
 import type { AuthContext } from "../middleware/roles";
 import { fakeAuthContext as buildFakeAuthContext, fakeMembership } from "../testing/authContext";
 import {
@@ -9,7 +9,7 @@ import {
   SectionNotInteractiveError,
 } from "../repositories/sectionConversations";
 import { IdempotencyKeyConflictError } from "../repositories/errors";
-import { HINT_INSTRUCTION } from "../../lib/prompts";
+import { HINT_INSTRUCTION, DEFAULT_MARK_COMPLETE_INSTRUCTION } from "../../lib/prompts";
 import type { AppEnv } from "../context";
 
 // Route test (mock db, mock the repository layer, mock streamText) -- per
@@ -2339,6 +2339,170 @@ describe("POST /api/chat", () => {
       expect(call.prepareStep({ steps: [stepWithUnrelatedTool] })).toBeUndefined();
     });
   });
+
+  // #168: end-to-end wiring through chatHandler itself -- confirms the tool
+  // streamText actually receives (not just what toolsForConversation returns
+  // in isolation), the config-tunable system-prompt wording, and the issue's
+  // own "persisted, doesn't lock the conversation" requirements. Nested
+  // inside "POST /api/chat" (not a sibling top-level describe, unlike
+  // TOOLS.markSectionComplete/toolsForConversation below) specifically so
+  // these tests inherit this describe's own beforeEach mock resets
+  // (getOwnedConversationOrNullMock, resolveLLMConfigMock, etc.) --
+  // matching "isHintRequest (#80)" directly above, the nearest precedent
+  // for a nested describe that drives full postChat() requests.
+  describe("markSectionComplete kind-gating & prompt wiring (#168)", () => {
+    const SECTION_CONV = {
+      id: "22222222-2222-2222-2222-222222222222",
+      ownerUserId: "u1",
+      courseId: "55555555-5555-5555-5555-555555555555",
+      sectionId: "11111111-1111-1111-1111-111111111111",
+      organizationId: "org-a",
+      courseLlmConfigId: null,
+      promptTemplateId: null,
+    };
+    const TUTOR_CONV = { ...SECTION_CONV, sectionId: null };
+
+    beforeEach(() => {
+      getLastMessagesMock.mockResolvedValue([]);
+    });
+
+    it("streamText receives markSectionComplete in its tools for a section-kind conversation", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(SECTION_CONV);
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+      });
+      expect(res.status).toBe(200);
+      const call = streamTextMock.mock.calls[0]![0] as { tools: Record<string, unknown> };
+      expect(call.tools.markSectionComplete).toBeDefined();
+    });
+
+    it("streamText does NOT receive markSectionComplete for a tutor-kind conversation, while the other tools remain present", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(TUTOR_CONV);
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: TUTOR_CONV.id,
+      });
+      expect(res.status).toBe(200);
+      const call = streamTextMock.mock.calls[0]![0] as { tools: Record<string, unknown> };
+      expect(call.tools.markSectionComplete).toBeUndefined();
+      expect(call.tools.showDefinition).toBeDefined();
+      expect(call.tools.requestHint).toBeDefined();
+    });
+
+    it("assembles the default stopping-rule instruction into the system prompt for a section-kind conversation", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(SECTION_CONV);
+      resolveLLMConfigMock.mockResolvedValueOnce({
+        id: "llm-config-1",
+        provider: "openrouter",
+        modelName: "test/model",
+        temperature: 0.7,
+        maxCompletionTokens: 1000,
+        credentialId: null,
+        markCompleteInstruction: null,
+      });
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+      });
+
+      const call = streamTextMock.mock.calls[0]![0] as { system: string };
+      expect(call.system).toContain(DEFAULT_MARK_COMPLETE_INSTRUCTION);
+    });
+
+    it("uses the LLM config's own override wording instead of the default when set (issue requirement: tunable per LLM config, not hardcoded)", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(SECTION_CONV);
+      resolveLLMConfigMock.mockResolvedValueOnce({
+        id: "llm-config-1",
+        provider: "openrouter",
+        modelName: "test/model",
+        temperature: 0.7,
+        maxCompletionTokens: 1000,
+        credentialId: null,
+        markCompleteInstruction: "CUSTOM STOPPING RULE TEXT FOR THIS ORG",
+      });
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+      });
+
+      const call = streamTextMock.mock.calls[0]![0] as { system: string };
+      expect(call.system).toContain("CUSTOM STOPPING RULE TEXT FOR THIS ORG");
+      expect(call.system).not.toContain(DEFAULT_MARK_COMPLETE_INSTRUCTION);
+    });
+
+    it("does not add the stopping-rule instruction to a tutor-kind conversation's system prompt (nothing to instruct the model about a tool it was never offered)", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(TUTOR_CONV);
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: TUTOR_CONV.id,
+      });
+
+      const call = streamTextMock.mock.calls[0]![0] as { system: string };
+      expect(call.system).not.toContain(DEFAULT_MARK_COMPLETE_INSTRUCTION);
+    });
+
+    // Issue requirements verified together: "Invocation is persisted against
+    // the conversation, with the message that triggered it" and "Students
+    // can keep working after the tool fires -- it must not lock the
+    // conversation." A turn whose response includes a resolved
+    // tool-markSectionComplete part persists via the SAME finalizeAssistantTurn
+    // path every other tool call in this catalog already uses (no bespoke
+    // persistence mechanism), and a second, ordinary message on the same
+    // conversation right afterward still succeeds -- proving the tool firing
+    // left nothing locked or otherwise unusable.
+    it("persists a markSectionComplete tool call as part of the assistant message, and the conversation stays usable for a follow-up turn", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(SECTION_CONV);
+
+      const res1 = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+      });
+      expect(res1.status).toBe(200);
+      expect(capturedOnFinish).toBeDefined();
+
+      const toolPart = {
+        type: "tool-markSectionComplete",
+        toolCallId: "call-1",
+        state: "output-available",
+        input: {},
+        output: { status: "suggested" },
+      };
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [toolPart] },
+        finishReason: "tool-calls",
+      });
+
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledTimes(1);
+      const [, , assistantMessage] = finalizeAssistantTurnMock.mock.calls[0]! as [
+        unknown,
+        unknown,
+        { id: string; parts: unknown[] } | null,
+        Record<string, unknown>,
+      ];
+      expect(assistantMessage).not.toBeNull();
+      expect(assistantMessage!.parts).toEqual([toolPart]);
+
+      // Follow-up turn on the SAME conversation: the lock must be
+      // re-acquirable and this new message must reach the model, not be
+      // blocked/409'd by anything the tool call left behind.
+      streamTextMock.mockClear();
+      getLastMessagesMock.mockResolvedValue([
+        { id: "resp-1", role: "assistant", parts: [toolPart], clientMessageId: null },
+        { id: "user-1", role: "user", parts: [{ type: "text", text: "hi there" }], clientMessageId: "client-1" },
+      ]);
+      const res2 = await postChat(buildApp(fakeAuthContext()), {
+        messages: [{ id: "client-2", role: "user", parts: [{ type: "text", text: "one more question" }] }],
+        conversationId: SECTION_CONV.id,
+      });
+
+      expect(res2.status).toBe(200);
+      expect(streamTextMock).toHaveBeenCalledTimes(1);
+    });
+  });
 });
 
 // #80: requestHint -- the secondary, model-mediated hint path (see
@@ -2414,5 +2578,54 @@ describe("TOOLS.requestHint (#80)", () => {
       promptTemplateId: "tpl-1",
     });
     expect(result).toEqual({ status: "hint_provided", remainingHints: 4 });
+  });
+});
+
+// #168: markSectionComplete -- the tutor stopping-rule tool. Same testing
+// posture as TOOLS.executeRCode/TOOLS.requestHint above: schema shape +
+// execute()'s own contract, not a full model round-trip.
+describe("TOOLS.markSectionComplete (#168)", () => {
+  it("is registered in the tool catalog streamText is called with", () => {
+    expect(TOOLS.markSectionComplete).toBeDefined();
+  });
+
+  it("takes no arguments -- an empty object schema, rejecting unknown properties (no confidence/reasoning parameter, per the issue's own explicit design guidance)", () => {
+    const schema = (TOOLS.markSectionComplete!.inputSchema as { jsonSchema: Record<string, unknown> }).jsonSchema;
+    expect(schema.properties).toEqual({});
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.required ?? []).toEqual([]);
+  });
+
+  it("execute() resolves to a sentinel -- no DB write, no submission side effect (a pure display tool, like showDefinition/executeRCode)", async () => {
+    const execute = TOOLS.markSectionComplete!.execute as (input: Record<string, never>) => Promise<unknown>;
+    const result = await execute({});
+    expect(result).toEqual({ status: "suggested" });
+  });
+});
+
+// #168: toolsForConversation is the actual mechanism that makes
+// section-kind-only gating real -- a genuinely different `tools`
+// object/subset per request, not just TOOLS.markSectionComplete's own
+// shape above (which alone would say nothing about whether the model ever
+// sees it on a tutor-kind conversation).
+describe("toolsForConversation (#168)", () => {
+  it("includes markSectionComplete for a section-kind conversation (non-null sectionId)", () => {
+    const tools = toolsForConversation("section-1");
+    expect(tools.markSectionComplete).toBeDefined();
+  });
+
+  it("withholds markSectionComplete entirely for a tutor-kind conversation (null sectionId) -- not merely a hopeful prompt instruction", () => {
+    const tools = toolsForConversation(null);
+    expect(tools.markSectionComplete).toBeUndefined();
+    expect(Object.keys(tools)).not.toContain("markSectionComplete");
+  });
+
+  it("never withholds showDefinition/executeRCode/requestHint, regardless of kind -- only markSectionComplete is gated this way today", () => {
+    for (const sectionId of ["section-1", null]) {
+      const tools = toolsForConversation(sectionId);
+      expect(tools.showDefinition).toBeDefined();
+      expect(tools.executeRCode).toBeDefined();
+      expect(tools.requestHint).toBeDefined();
+    }
   });
 });

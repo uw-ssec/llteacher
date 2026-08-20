@@ -89,6 +89,7 @@ import { logServerError } from "../utils/errors";
 import {
   assembleSystemPrompt,
   DEFAULT_SYSTEM_PROMPT,
+  DEFAULT_MARK_COMPLETE_INSTRUCTION,
   HINT_INSTRUCTION,
   getPinnedPromptTemplateContent,
   getSectionPromptContext,
@@ -258,7 +259,106 @@ export const TOOLS: ToolSet = {
       return { status: result.status, remainingHints: result.remainingHints };
     },
   },
+  /* #168: the tutor stopping rule -- a zero-argument tool the model calls
+     once it judges the student has demonstrated understanding of the
+     CURRENT section. The issue's own explicit design guidance (Implementation
+     Notes): no confidence/reasoning parameter -- the model signals only
+     THAT the section is complete, never a rubric or score, which keeps the
+     judgement cheap and avoids inventing assessment data this app has
+     nowhere real to put. Deliberately NOT gated behind a jsonSchema like
+     requestHint's Record<string, never> input either -- same shape,
+     matching that precedent exactly.
+
+     Unlike showDefinition/executeRCode/requestHint above, this tool's own
+     description text does NOT carry the pedagogy for WHEN to call it
+     ("unblock early, don't be pedantic," the issue's own Context section
+     paraphrasing the reference implementation) -- that wording is tunable
+     per LLM config (the issue's own explicit requirement) and lives
+     instead in the system prompt, assembled by lib/prompts.ts's
+     assembleSystemPrompt from resolvedLLMConfig.markCompleteInstruction
+     (falling back to DEFAULT_MARK_COMPLETE_INSTRUCTION) -- see
+     chatHandler's own systemPrompt assembly below. A description baked
+     into this static, module-level TOOLS catalog could never vary per
+     config the way a per-request system-prompt string can.
+
+     A pure display tool, same shape as showDefinition/executeRCode (see
+     this catalog's own doc comment) -- execute() has no side effect and
+     no DB write of its own. It does NOT submit the section (that stays
+     the student's own explicit action via the existing Submit button,
+     #22) and does NOT lock or end the conversation (issue requirements:
+     "surfaced... as a suggestion, not an automatic irreversible submit";
+     "students can keep working after the tool fires"). The client renders
+     a suggestion card (packages/ui's SectionCompleteSuggestion, dispatched
+     by render.tsx's tool-markSectionComplete case) that nudges the student
+     toward the existing Submit action without ever triggering it itself.
+
+     "Invocation is persisted against the conversation, with the message
+     that triggered it" (issue requirement) falls out of the SAME
+     message-persistence path every other tool call in this catalog
+     already goes through (onFinish -> finalizeAssistantTurn, replayed via
+     replayPersistedPart) -- no bespoke persistence mechanism needed: the
+     assistant message carrying this tool call is written to `messages`
+     like any other, in sequence right after the user message that
+     prompted it, so a later evaluation harness (#89, out of scope here)
+     can already query for it by scanning messages.parts for
+     tool-markSectionComplete.
+
+     Tenancy/rate-limiting (#143, issue's own "Interaction with #143"
+     note): this execute() runs inside the same streamText call, inside
+     the same already-authenticated (authMiddleware), tenancy-bound
+     (courseScopeFromAuthContext / getOwnedConversationOrNull), rate-limited
+     (reserveRateLimitSlot, checked before this handler ever reaches
+     streamText) request handler every other tool in this catalog runs
+     inside -- there is no separate/unauthenticated code path for it to
+     need hardening of its own. */
+  markSectionComplete: {
+    description:
+      "Mark this homework section as complete once you judge the student has demonstrated understanding. " +
+      "Takes no arguments -- always call it with an empty object. Calling it only surfaces a suggestion to " +
+      "the student that they may be ready to move on; it does not submit anything on their behalf and does " +
+      "not end the conversation, so the student can keep asking questions afterward.",
+    inputSchema: jsonSchema<Record<string, never>>({
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    }),
+    execute: async (_input: Record<string, never>) => ({ status: "suggested" as const }),
+  },
 };
+
+/** #168: tool names that must be withheld from a tutor-kind conversation --
+ *  there is no section to mark complete without one. Unlike
+ *  requestHint (which stays in every conversation's tool list and instead
+ *  reports `{ status: "unavailable" }` from inside its own execute() when
+ *  there's no sectionId, a prompt-level self-report the model could in
+ *  principle ignore) or executeRCode/showDefinition (never gated at all),
+ *  this is real, structural gating: the model is never even offered this
+ *  tool on a tutor-kind conversation, so "don't call this" isn't a hoped-for
+ *  instruction. See toolsForConversation below and its own doc comment for
+ *  why this deviates from #28/#80's precedent -- flagged for the PR3 final
+ *  review as an inconsistency worth weighing in on, not silently "fixed"
+ *  onto the other tools here (out of this task's scope). */
+const SECTION_ONLY_TOOL_NAMES = new Set<keyof typeof TOOLS>(["markSectionComplete"]);
+
+/** #168: the actual conditional that makes section-kind-only gating real
+ *  rather than cosmetic -- builds a DIFFERENT `tools` object/subset per
+ *  request, passed to streamText's own `tools` option (chatHandler, below),
+ *  instead of always passing the full static TOOLS catalog the way every
+ *  tool before this one did. `sectionId` is `conv.sectionId` as-is: null
+ *  for a tutor-kind conversation, non-null for a section-kind one -- the
+ *  same signal HintToolContext.sectionId already uses, and the same
+ *  invariant the DB enforces structurally (conversations_kind_section_chk,
+ *  db/schema/runtime.ts: kind='section' <=> section_id IS NOT NULL), so
+ *  this doesn't need conv.kind itself (resolveConversation's own return
+ *  type doesn't carry it) to gate correctly. Exported so this exact
+ *  conditional -- not just TOOLS.markSectionComplete's own shape -- is
+ *  unit-testable without going through the full HTTP handler. */
+export function toolsForConversation(sectionId: string | null): ToolSet {
+  if (sectionId) return TOOLS;
+  return Object.fromEntries(
+    Object.entries(TOOLS).filter(([name]) => !SECTION_ONLY_TOOL_NAMES.has(name as keyof typeof TOOLS)),
+  );
+}
 
 /** #80: the shape threaded into streamText's `experimental_context` option
  *  (chatHandler, below) for the requestHint tool's execute() to read via
@@ -1438,11 +1538,23 @@ export async function chatHandler(c: Context<AppEnv>) {
   // assembleSystemPrompt doc comment for HINT_INSTRUCTION's placement/
   // trust rationale (this flag is never taken from the client at face
   // value; recordHintRequest above is what actually decided it).
+  // #168: only assembled for a section-kind conversation -- markSectionComplete
+  // is withheld entirely from the model's tool list on a tutor-kind one
+  // (toolsForConversation, this file's own TOOLS catalog, below), so
+  // instructing the model about a tool it was never offered would be dead
+  // prompt text. `resolvedLLMConfig.markCompleteInstruction` is the
+  // per-config override (#168's own "tunable per LLM config, not
+  // hardcoded" requirement); DEFAULT_MARK_COMPLETE_INSTRUCTION is the
+  // fallback for every config that hasn't set one (the common case today).
+  const markCompleteInstruction = conv.sectionId
+    ? (resolvedLLMConfig.markCompleteInstruction ?? DEFAULT_MARK_COMPLETE_INSTRUCTION)
+    : undefined;
   const systemPrompt = assembleSystemPrompt(
     resolvedSystemPromptContent,
     sectionPromptContext ?? undefined,
     isDefaultPrompt,
     isHintGranted,
+    markCompleteInstruction,
   );
 
   // #317 review, #326: "skip-insert" means `recentMessages[0]` already IS
@@ -1629,7 +1741,11 @@ export async function chatHandler(c: Context<AppEnv>) {
       // attacks"). This makes a role:"system" element a hard model-input
       // refusal even if some future change to that schema let one through.
       allowSystemInMessages: false,
-      tools: TOOLS,
+      // #168: section-kind-only tools (markSectionComplete) withheld
+      // entirely for a tutor-kind conversation -- see toolsForConversation's
+      // own doc comment (this file's TOOLS catalog, above) for why this is
+      // real gating, not a prompt instruction alone.
+      tools: toolsForConversation(conv.sectionId),
       // #80: threads request-scoped context into the requestHint tool's
       // execute() (its second argument's own `experimental_context` field)
       // -- see TOOLS.requestHint's own doc comment for why a static,

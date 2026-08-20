@@ -99,6 +99,22 @@ export const llmConfigs = pgTable(
     // comment).
     pricePerMillionInputTokens: doublePrecision("price_per_million_input_tokens"),
     pricePerMillionOutputTokens: doublePrecision("price_per_million_output_tokens"),
+    // #168: the tutor stopping-rule pedagogy for the markSectionComplete
+    // tool (WHEN the model should call it -- "unblock early, don't be
+    // pedantic," per the issue's own reference implementation), assembled
+    // into the system prompt by lib/prompts.ts's assembleSystemPrompt
+    // (mirrors HINT_INSTRUCTION's placement, #80) rather than baked into
+    // TOOLS.markSectionComplete's own static description (chat.ts) --
+    // the issue's own explicit requirement is that this wording be
+    // "tunable per LLM config rather than hardcoded, given how much the
+    // behaviour depends on it." Null (the common case -- no org has
+    // authored a custom one yet) falls back to
+    // lib/prompts.ts's DEFAULT_MARK_COMPLETE_INSTRUCTION, not a DB
+    // default -- same "code-level fallback, not a DB default" posture
+    // DEFAULT_SYSTEM_PROMPT already uses for the analogous no-template
+    // case, so the fallback text lives in one place, in code, not
+    // duplicated into a migration.
+    markCompleteInstruction: text("mark_complete_instruction"),
     isDefault: boolean("is_default").notNull().default(false),
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true })
