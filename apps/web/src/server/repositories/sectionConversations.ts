@@ -578,23 +578,33 @@ export async function getSectionConversationMessages(
   return rows.reverse();
 }
 
-/** Who may read a given section conversation (#27 access rules).
+/** Who may read a given section conversation (#27 access rules, widened to
+ *  grader tier by #246).
  *
  *  Django parity, made explicit:
  *   - the owner always may;
- *   - an instructor of the course may read a *student's* conversation;
- *   - an instructor may NOT read another instructor's test conversation --
- *     someone else's scratch work trying out prompts is not course records.
- *     Their own remains readable, which the owner clause already covers.
+ *   - a grader of the course (#172's GRADER_ROLES: instructor, admin, ta)
+ *     may read a *student's* conversation;
+ *   - a grader may NOT read another grader's test conversation -- someone
+ *     else's scratch work trying out prompts is not course records. Their
+ *     own remains readable, which the owner clause already covers.
+ *
+ *  #246: originally gated on isInstructorOf (AUTHOR_ROLES: instructor/admin
+ *  only), while the submissions dashboard this feeds into is gated on
+ *  requireGraderOf (GRADER_ROLES, which also admits ta) -- a TA could see a
+ *  submission in the matrix and then 403 opening the transcript behind it.
+ *  Widened to consume isGraderOf's result so the two surfaces share one
+ *  tier; the checks themselves (ownership, teacher-test exclusion) are
+ *  unchanged, only who is entitled to reach them.
  *
  *  Pure function over already-fetched values so the rule is testable on its
  *  own and cannot silently diverge between the read route and the list route. */
 export function canReadSectionConversation(
   conversation: { ownerUserId: string; isTeacherTest: boolean },
-  viewer: { userId: string; isInstructor: boolean },
+  viewer: { userId: string; isGrader: boolean },
 ): boolean {
   if (conversation.ownerUserId === viewer.userId) return true;
-  if (!viewer.isInstructor) return false;
+  if (!viewer.isGrader) return false;
   return !conversation.isTeacherTest;
 }
 

@@ -199,7 +199,9 @@ export async function getSectionConversationHandler(c: Context<AppEnv>) {
 
   const allowed = canReadSectionConversation(conversation, {
     userId: authContext.session.userId,
-    isInstructor: authContext.isInstructorOf(courseId!),
+    // #246: grader-tier read (instructor/admin/ta), matching the tier the
+    // submissions dashboard that links here already uses (requireGraderOf).
+    isGrader: authContext.isGraderOf(courseId!),
   });
   // 404 rather than 403: an instructor's private test conversation should not
   // confirm its own existence to another instructor, and a student probing

@@ -145,9 +145,9 @@ app.get(
 // requireRole(["student"]) -- an instructor starting one is the teacher-test
 // case the isTeacherTest column exists for, and the handlers derive that from
 // the caller's own course role. Per-conversation ownership and the
-// instructor-can't-read-another-instructor's-test rule are enforced inside
-// the handlers (canReadSectionConversation), not by these guards, which only
-// answer "is this caller in this course."
+// grader-can't-read-another-grader's-test rule (#246: grader tier, not just
+// instructor) are enforced inside the handlers (canReadSectionConversation),
+// not by these guards, which only answer "is this caller in this course."
 app.post(
   "/api/courses/:courseId/sections/:sectionId/conversations",
   requireCourseMember()(startSectionConversationHandler),
