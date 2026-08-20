@@ -145,6 +145,22 @@ export const conversations = pgTable(
       t.kind,
       t.updatedAt,
     ),
+    // #29: same reasoning as conversations_owner_kind_updated_idx directly
+    // above, for the instructor transcript list's default (unfiltered)
+    // query -- listInstructorTranscripts (repositories/sectionConversations.ts)
+    // orders by updated_at DESC within (courseId, kind='section').
+    // conversations_course_kind_idx already serves the equality predicates;
+    // without this, Postgres still sorted every matching row in the course
+    // before applying LIMIT/OFFSET. The two optional list filters
+    // (sectionId, studentId) are already served by conversations_section_idx
+    // and conversations_owner_kind_course_idx respectively -- this index is
+    // only for the common unfiltered case, matching #281's own scope
+    // decision not to index every filter combination up front.
+    index("conversations_course_kind_updated_idx").on(
+      t.courseId,
+      t.kind,
+      t.updatedAt,
+    ),
     // conversations_owner_section_active_uq (below) leads with owner_user_id,
     // so it can't serve "all conversations on this section" (instructor
     // roster views) or the section-delete cascade -- both need section_id

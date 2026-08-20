@@ -25,6 +25,10 @@ import { HomeworkCreateView } from "./views/HomeworkCreateView";
 import { HomeworkEditView } from "./views/HomeworkEditView";
 import { HomeworkReadOnlyView } from "./views/HomeworkReadOnlyView";
 import { SubmissionsView } from "./views/SubmissionsView";
+import { TranscriptListView } from "./views/TranscriptListView";
+import type { TranscriptListData } from "./views/TranscriptListView";
+import { TranscriptDetailView } from "./views/TranscriptDetailView";
+import type { TranscriptDetailData } from "./views/TranscriptDetailView";
 import { TaCapabilitiesView } from "./views/TaCapabilitiesView";
 import { LLMConfigsView } from "./views/LLMConfigsView";
 import type { LLMConfigOption } from "./components/HomeworkForm";
@@ -56,16 +60,31 @@ type View =
   | { kind: "create-homework" }
   | { kind: "edit-homework"; homeworkId: string }
   | { kind: "submissions"; homeworkId: string }
+  // #29/#23: reached only via a SubmissionsView cell drill-in today, so
+  // homeworkId (for the "back" hop past the list, straight to submissions)
+  // and sectionId/studentId (the list's own filter) are always known at the
+  // point this state is created. `offset` lives here, not as separate
+  // useState in the list view, so navigating away and back (e.g. opening a
+  // transcript, then going back) preserves which page was showing.
+  | { kind: "transcript-list"; homeworkId: string; sectionId: string; studentId: string; offset: number }
+  | {
+      kind: "transcript-detail";
+      conversationId: string;
+      /** Exactly the transcript-list state to return to on "back". */
+      list: { homeworkId: string; sectionId: string; studentId: string; offset: number };
+    }
   | { kind: "llm-configs" }
   | { kind: "students" };
 
 const NAV_BREADCRUMB: Record<View["kind"], string> = {
-  "homeworks":        "Instructor Console · Homeworks",
-  "create-homework":  "Instructor Console · New Homework",
-  "edit-homework":    "Instructor Console · Edit Homework",
-  "submissions":      "Instructor Console · Submissions",
-  "llm-configs":      "Instructor Console · LLM Configs",
-  "students":         "Instructor Console · TA permissions",
+  "homeworks":          "Instructor Console · Homeworks",
+  "create-homework":    "Instructor Console · New Homework",
+  "edit-homework":      "Instructor Console · Edit Homework",
+  "submissions":        "Instructor Console · Submissions",
+  "transcript-list":    "Instructor Console · Transcripts",
+  "transcript-detail":  "Instructor Console · Transcript",
+  "llm-configs":        "Instructor Console · LLM Configs",
+  "students":           "Instructor Console · TA permissions",
 };
 
 export default function App() {
@@ -142,7 +161,7 @@ export default function App() {
   }, [isSidebarCollapsed]);
 
   const navKey: AdminNavKey =
-    view.kind === "submissions"
+    view.kind === "submissions" || view.kind === "transcript-list" || view.kind === "transcript-detail"
       ? "submissions"
       : view.kind === "create-homework" || view.kind === "edit-homework"
         ? "homeworks"
@@ -293,6 +312,45 @@ export default function App() {
                     courseId={CURRENT_COURSE_ID}
                     homeworkId={view.homeworkId}
                     onBack={() => setView({ kind: "homeworks" })}
+                    onOpenTranscript={(sectionId, studentId) =>
+                      setView({ kind: "transcript-list", homeworkId: view.homeworkId, sectionId, studentId, offset: 0 })
+                    }
+                  />
+                ) : (
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
+                )
+              )}
+
+              {/* #29/#23: per-cell conversation list -> transcript, reached
+                  from a SubmissionsView cell drill-in. */}
+              {view.kind === "transcript-list" && (
+                CURRENT_COURSE_ID ? (
+                  <TranscriptListDataLoader
+                    courseId={CURRENT_COURSE_ID}
+                    sectionId={view.sectionId}
+                    studentId={view.studentId}
+                    offset={view.offset}
+                    onBack={() => setView({ kind: "submissions", homeworkId: view.homeworkId })}
+                    onChangeOffset={(offset) => setView({ ...view, offset })}
+                    onOpenTranscript={(conversationId) =>
+                      setView({
+                        kind: "transcript-detail",
+                        conversationId,
+                        list: { homeworkId: view.homeworkId, sectionId: view.sectionId, studentId: view.studentId, offset: view.offset },
+                      })
+                    }
+                  />
+                ) : (
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
+                )
+              )}
+
+              {view.kind === "transcript-detail" && (
+                CURRENT_COURSE_ID ? (
+                  <TranscriptDetailDataLoader
+                    courseId={CURRENT_COURSE_ID}
+                    conversationId={view.conversationId}
+                    onBack={() => setView({ kind: "transcript-list", ...view.list })}
                   />
                 ) : (
                   <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
@@ -392,10 +450,12 @@ function SubmissionsDataLoader({
   courseId,
   homeworkId,
   onBack,
+  onOpenTranscript,
 }: {
   courseId: string;
   homeworkId: string;
   onBack: () => void;
+  onOpenTranscript: (sectionId: string, studentId: string) => void;
 }) {
   const [data, setData] = useState<import("./views/SubmissionsView").HomeworkSubmissionsData | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -423,7 +483,118 @@ function SubmissionsDataLoader({
       />
     );
   if (!data) return null;
-  return <SubmissionsView data={data} onBack={onBack} />;
+  return <SubmissionsView data={data} onBack={onBack} onOpenTranscript={onOpenTranscript} />;
+}
+
+/** #29/#23: the (student, section) conversation list a submissions-matrix
+ *  cell drills into. Same "presentational view + this loader fetches"
+ *  split as SubmissionsDataLoader/SubmissionsView just above.
+ *
+ *  contextLabel (the header's "Ada Lovelace · Section 2" line) is derived
+ *  from the first returned item rather than threaded down from
+ *  SubmissionsView -- the matrix cell only carries ids, and this loader
+ *  already has the real, decrypted studentName/sectionTitle the moment the
+ *  fetch resolves, so deriving it here avoids a second round trip just to
+ *  look up display names for a header. Falls back to no label (the view's
+ *  own "Conversation transcripts" default title) when the page is empty --
+ *  a section/student pair listed in the matrix as "missing" is not
+ *  reachable through the drill-in (SubmissionsView only makes a cell
+ *  clickable when conversationCount > 0), so this is a defensive fallback,
+ *  not an expected path. */
+function TranscriptListDataLoader({
+  courseId,
+  sectionId,
+  studentId,
+  offset,
+  onBack,
+  onChangeOffset,
+  onOpenTranscript,
+}: {
+  courseId: string;
+  sectionId: string;
+  studentId: string;
+  offset: number;
+  onBack: () => void;
+  onChangeOffset: (offset: number) => void;
+  onOpenTranscript: (conversationId: string) => void;
+}) {
+  const [data, setData] = useState<TranscriptListData | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    setData(null);
+    setLoadError(false);
+    const params = new URLSearchParams({ sectionId, studentId, offset: String(offset) });
+    fetch(`/api/courses/${courseId}/instructor/transcripts?${params}`)
+      .then((r) => {
+        if (!r.ok) throw new Error("failed");
+        return r.json();
+      })
+      .then(setData)
+      .catch(() => setLoadError(true));
+  }, [courseId, sectionId, studentId, offset, attempt]);
+  if (loadError)
+    return (
+      <AdminNotice
+        eyebrow="Could not load"
+        title="Transcripts didn't load"
+        body="This student's conversations for this section couldn't be fetched. Nothing has been altered — the records are intact on the server."
+        detail={`GET /api/courses/${courseId}/instructor/transcripts`}
+        onRetry={() => setAttempt((n) => n + 1)}
+        secondaryAction={{ label: "Back to submissions", onClick: onBack }}
+      />
+    );
+  if (!data) return null;
+  const first = data.items[0];
+  const contextLabel = first ? `${first.studentName || "(unnamed student)"} · ${first.sectionTitle}` : undefined;
+  return (
+    <TranscriptListView
+      data={data}
+      contextLabel={contextLabel}
+      onBack={onBack}
+      onOpenTranscript={onOpenTranscript}
+      onChangeOffset={onChangeOffset}
+    />
+  );
+}
+
+/** #29: one conversation's read-only transcript. Same loader/view split. */
+function TranscriptDetailDataLoader({
+  courseId,
+  conversationId,
+  onBack,
+}: {
+  courseId: string;
+  conversationId: string;
+  onBack: () => void;
+}) {
+  const [data, setData] = useState<TranscriptDetailData | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    setData(null);
+    setLoadError(false);
+    fetch(`/api/courses/${courseId}/instructor/transcripts/${conversationId}`)
+      .then((r) => {
+        if (!r.ok) throw new Error("failed");
+        return r.json();
+      })
+      .then(setData)
+      .catch(() => setLoadError(true));
+  }, [courseId, conversationId, attempt]);
+  if (loadError)
+    return (
+      <AdminNotice
+        eyebrow="Could not load"
+        title="This transcript didn't load"
+        body="The conversation couldn't be fetched. Nothing has been altered — the record is intact on the server."
+        detail={`GET /api/courses/${courseId}/instructor/transcripts/${conversationId}`}
+        onRetry={() => setAttempt((n) => n + 1)}
+        secondaryAction={{ label: "Back", onClick: onBack }}
+      />
+    );
+  if (!data) return null;
+  return <TranscriptDetailView data={data} onBack={onBack} />;
 }
 
 /* #186 (#172 re-audit, USE-026): `body` is explicit and NOT defaulted to the

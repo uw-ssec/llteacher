@@ -29,6 +29,10 @@ import {
   restartSectionConversationHandler,
 } from "./routes/sectionConversations";
 import { submitSectionAnswerHandler, getSectionAnswerHandler } from "./routes/sectionAnswers";
+import {
+  listInstructorTranscriptsHandler,
+  getInstructorTranscriptHandler,
+} from "./routes/instructor/transcripts";
 import { submitWidgetResponseHandler } from "./routes/progressWidgets";
 import { listCourseTasHandler, updateTaCapabilitiesHandler } from "./routes/courseMemberships";
 import { listLlmConfigsHandler } from "./routes/llmConfigs";
@@ -163,6 +167,21 @@ app.get(
 app.post(
   "/api/courses/:courseId/conversations/:conversationId/restart",
   requireCourseMember()(restartSectionConversationHandler),
+);
+// #29: instructor transcript viewer. Same grader tier as the submissions
+// dashboard it drills in from (requireGraderOf) -- #246's own resolution for
+// exactly this pairing. Per-conversation exclusions (a grader may not open
+// another grader's teacher-test conversation) are enforced inside the detail
+// handler via canReadSectionConversation, same split as every other guarded
+// route above: these guards only answer "is this caller a grader of this
+// course," not "of this specific conversation."
+app.get(
+  "/api/courses/:courseId/instructor/transcripts",
+  requireGraderOf()(listInstructorTranscriptsHandler),
+);
+app.get(
+  "/api/courses/:courseId/instructor/transcripts/:conversationId",
+  requireGraderOf()(getInstructorTranscriptHandler),
 );
 app.patch("/api/sections/:sectionId/answer", requireRole(["student"])(submitSectionAnswerHandler));
 app.get(

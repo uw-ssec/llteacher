@@ -56,6 +56,14 @@ export interface HomeworkSubmissionsData {
 export type SubmissionsViewProps = {
   data: HomeworkSubmissionsData;
   onBack: () => void;
+  /** #29/#23: drill-in from a submission-matrix cell to that (student,
+   *  section) pair's conversation list (TranscriptListView) -- the
+   *  "per-cell conversation list -> transcript" route #29's own issue text
+   *  describes. Optional so this view keeps working, cell un-clickable,
+   *  for any caller that hasn't wired the transcript viewer up (matches
+   *  every other optional callback prop pattern in this codebase, e.g.
+   *  ConversationView's onRunRCode). */
+  onOpenTranscript?: (sectionId: string, studentId: string) => void;
 };
 
 type Filter = "all" | "active" | "no_interaction";
@@ -70,7 +78,7 @@ function initialsFor(displayName: string): string {
   return displayName.split(" ").map((p) => p[0]).join("").slice(0, 2).toUpperCase() || "?";
 }
 
-export function SubmissionsView({ data, onBack }: SubmissionsViewProps) {
+export function SubmissionsView({ data, onBack, onOpenTranscript }: SubmissionsViewProps) {
   const [filter, setFilter] = useState<Filter>("all");
 
   const counts = useMemo(() => ({
@@ -177,16 +185,27 @@ export function SubmissionsView({ data, onBack }: SubmissionsViewProps) {
                 // the same 3 values the existing admin-progress-cell--* CSS classes
                 // expect (unchanged from the fixture-era shape), so no translation needed.
                 const state = cell?.status ?? "missing";
+                // #29/#23: a cell with at least one conversation (submitted,
+                // in progress, or missing-but-with-a-since-deleted attempt --
+                // conversationCount counts soft-deleted rows too, see
+                // getHomeworkSubmissionsMatrix) drills into that (student,
+                // section) pair's transcript list. A genuinely untouched
+                // section has nothing to show, so it stays inert.
+                const hasConversations = (cell?.conversationCount ?? 0) > 0;
+                const clickable = Boolean(onOpenTranscript) && hasConversations;
                 return (
-                  <span
+                  <button
                     key={header.id}
+                    type="button"
                     className={`admin-progress-cell admin-progress-cell--${state}`}
-                    aria-label={`${header.title}: ${state}${cell?.hasDeletedConversation ? " (has a deleted conversation)" : ""}`}
+                    aria-label={`${header.title}: ${state}${cell?.hasDeletedConversation ? " (has a deleted conversation)" : ""}${clickable ? " -- view transcripts" : ""}`}
                     title={`${header.title}: ${state}${cell?.hasDeletedConversation ? " -- includes a deleted conversation" : ""}`}
+                    disabled={!clickable}
+                    onClick={clickable ? () => onOpenTranscript!(header.id, row.studentId) : undefined}
                   >
                     {header.order}
                     {cell?.hasDeletedConversation && <sup aria-hidden="true">†</sup>}
-                  </span>
+                  </button>
                 );
               })}
             </div>

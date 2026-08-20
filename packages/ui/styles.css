@@ -3500,6 +3500,20 @@ body {
   font-size: 10.5px;
   font-weight: var(--weight-medium);
   font-variant-numeric: tabular-nums;
+  /* #29: this became a <button> (drill-in to that cell's transcript list)
+     rather than a plain <span> -- resets the browser's default button
+     padding/cursor so the per-state background/border rules above still
+     produce the exact same 24x24 chip they always have. */
+  padding: 0;
+  cursor: default;
+}
+
+.admin-progress-cell:not(:disabled) {
+  cursor: pointer;
+}
+
+.admin-progress-cell:disabled {
+  opacity: 0.55;
 }
 
 .admin-progress-cell--missing {

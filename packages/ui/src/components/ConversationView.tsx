@@ -297,6 +297,18 @@ export interface ConversationViewProps {
    *  with no Run affordance -- matches CodeExecution's own graceful
    *  degradation when a caller hasn't wired R execution up at all. */
   onRunRCode?: (code: string) => Promise<RCodeResult>;
+  /** #29: omits the Composer entirely rather than merely disabling it.
+   *  Every other prop on this component already degrades to a static,
+   *  useChat-free render when omitted (onSendMessage/isSending/onStop/etc.
+   *  are all optional) -- but the Composer's own textarea always rendered
+   *  regardless, which is a visible edit affordance even at
+   *  isSending=true/readOnly (the instructor transcript viewer's own
+   *  "copy-safe: no edit affordances" requirement, which a merely-disabled
+   *  textbox does not satisfy). Defaults to false, so every existing caller
+   *  (the student-facing section/tutor chats) is byte-for-byte unaffected --
+   *  this is an additive opt-in, not a behavior change to the component's
+   *  default shape. */
+  hideComposer?: boolean;
 }
 
 /* -- Component ------------------------------------------------------------- */
@@ -316,6 +328,7 @@ export function ConversationView({
   onStop,
   isStopActionable = isSending,
   onRunRCode,
+  hideComposer = false,
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -632,15 +645,21 @@ export function ConversationView({
       {/* Sticky composer -- #144: disabled while a send is genuinely in
           flight, so Enter mid-stream can't fire a second, overlapping
           send (see isSending's doc comment above for why "error" is
-          deliberately excluded). */}
-      <Composer
-        value={draft}
-        onChange={setDraft}
-        onSubmit={handleSubmit}
-        disabled={isSending}
-        history={composerHistory}
-        autoFocus={autoFocusComposer}
-      />
+          deliberately excluded).
+
+          #29: omitted entirely when hideComposer -- see that prop's own
+          doc comment for why a merely-disabled textarea isn't good enough
+          for a copy-safe, no-edit-affordances surface. */}
+      {!hideComposer && (
+        <Composer
+          value={draft}
+          onChange={setDraft}
+          onSubmit={handleSubmit}
+          disabled={isSending}
+          history={composerHistory}
+          autoFocus={autoFocusComposer}
+        />
+      )}
     </div>
   );
 }
