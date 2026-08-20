@@ -580,6 +580,47 @@ export async function getSectionConversationMessages(
   return rows.reverse();
 }
 
+/** The conversation's transcript from its actual beginning, capped
+ *  defensively at `limit` -- deliberately NOT the same query as
+ *  getSectionConversationMessages above, which always fetches the TAIL
+ *  page (most-recent-`limit`, optionally paging further back via
+ *  `before`) and is right for that: it's what a live chat reload wants.
+ *
+ *  #29 review: the instructor transcript detail route originally called
+ *  getSectionConversationMessages(db, id, { limit: 1000 }) with no cursor,
+ *  which -- for a conversation with more than 1000 messages -- silently
+ *  returned the most RECENT 1000, not the first 1000, while
+ *  TranscriptDetailView labelled it "Showing the first N messages." Wrong
+ *  end of the conversation, wrong label. A FERPA transcript read should
+ *  show the conversation from where it began (the opening exchange is
+ *  often the more consequential part of an academic record), not its most
+ *  recent slice.
+ *
+ *  A new, narrowly-scoped function rather than a new mode on
+ *  getSectionConversationMessages: that function's `before`-cursor
+ *  contract is shared with, and already well-tested by, the live tutor and
+ *  section chats (#215/#326) -- widening its behavior for one caller risks
+ *  the two access patterns drifting into each other by accident. This one
+ *  has exactly one job. */
+export async function getSectionConversationMessagesFromStart(
+  db: Db,
+  conversationId: string,
+  limit: number,
+) {
+  return db
+    .select({
+      id: messages.id,
+      role: messages.role,
+      parts: messages.parts,
+      createdAt: messages.createdAt,
+      seq: messages.seq,
+    })
+    .from(messages)
+    .where(eq(messages.conversationId, conversationId))
+    .orderBy(messages.seq)
+    .limit(limit);
+}
+
 /** Who may read a given section conversation (#27 access rules, widened to
  *  grader tier by #246).
  *

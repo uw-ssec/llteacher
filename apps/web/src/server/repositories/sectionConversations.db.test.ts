@@ -10,7 +10,7 @@
    -------------------------------------------------------------------------- */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import { unsafeCourseScope, unsafeOrgScope } from "./scope";
@@ -743,9 +743,7 @@ describe.skipIf(!RAW_DATABASE_URL)("instructor transcript queries (real DB, #29)
   // threshold in this range. A implementation with the single join-based
   // page query this repository actually uses stays a small, constant number
   // of round trips regardless of table size, so it should clear this
-  // threshold with room to spare even on a slow connection. Could not be
-  // run in the session that wrote it (no DATABASE_URL) -- see this task's
-  // own report for what was verified by query-plan reasoning instead.
+  // threshold with room to spare even on a slow connection.
   it("completes a page query over >1000 conversations in well under 1s (no N+1)", async () => {
     const [perfOrg] = await db
       .insert(organizations)
@@ -756,6 +754,13 @@ describe.skipIf(!RAW_DATABASE_URL)("instructor transcript queries (real DB, #29)
       })
       .returning({ id: organizations.id });
     const perfOrgId = perfOrg!.id;
+    // Declared outside the try block, not inside -- the finally clause
+    // below needs to clean these up too. Deleting perfOrgId alone cascades
+    // away perfCourse/its memberships/homework/sections/conversations/
+    // messages, but `users` rows are NOT owned by an organization (a user
+    // can belong to more than one), so the 1200 seeded student rows would
+    // otherwise leak into every later test run in this file.
+    let studentIds: string[] = [];
     try {
       const [perfCourse] = await db
         .insert(courses)
@@ -763,8 +768,6 @@ describe.skipIf(!RAW_DATABASE_URL)("instructor transcript queries (real DB, #29)
         .returning({ id: courses.id });
       const perfCourseId = perfCourse!.id;
 
-      const perfStudentId = await insertUser("transcript-perf-student@test.com");
-      await db.insert(courseMemberships).values({ userId: perfStudentId, courseId: perfCourseId, role: "student" });
       const [perfInstructorMembership] = await db
         .insert(courseMemberships)
         .values({ userId: instructorAId, courseId: perfCourseId, role: "instructor" })
@@ -791,10 +794,37 @@ describe.skipIf(!RAW_DATABASE_URL)("instructor transcript queries (real DB, #29)
       // Bulk insert, chunked to stay well under node-postgres's parameter
       // limit -- this is test-fixture setup, not the thing being timed.
       const CHUNK = 200;
-      const conversationIds: string[] = [];
+
+      // #29 review fix: the original seed reused ONE ownerUserId across all
+      // 1200 conversations, on the same sectionId -- which collides with
+      // conversations_owner_section_active_uq (#128, a partial unique index
+      // on (owner_user_id, section_id) WHERE kind='section' AND
+      // is_deleted=false, unrelated to this task and already merged before
+      // it). Every row past the first in a chunk violated that constraint,
+      // so the seed itself failed before the timed query ever ran -- the
+      // performance requirement was silently unverified, not just
+      // unexecuted. Fixed by giving each conversation its own distinct
+      // owner (many students, one conversation each), which also happens to
+      // be a closer match to the real "100+ students" scenario issue #29's
+      // own Pitfalls section describes than one student with 1200
+      // conversations ever was. Random email/blind-index bytes (not the
+      // cipher-backed insertUser helper above) -- this test never decrypts
+      // or asserts on these users' names, so there's no reason to pay for
+      // 1200 real AES-GCM encrypt calls just to seed fixture rows.
       for (let start = 0; start < CONVERSATION_COUNT; start += CHUNK) {
         const chunkRows = Array.from({ length: Math.min(CHUNK, CONVERSATION_COUNT - start) }, () => ({
-          ownerUserId: perfStudentId,
+          email: randomBytes(),
+          emailBlindIndex: randomBytes(),
+        }));
+        const inserted = await db.insert(users).values(chunkRows).returning({ id: users.id });
+        studentIds.push(...inserted.map((r) => r.id));
+      }
+
+      const conversationIds: string[] = [];
+      for (let start = 0; start < CONVERSATION_COUNT; start += CHUNK) {
+        const chunkStudentIds = studentIds.slice(start, start + CHUNK);
+        const chunkRows = chunkStudentIds.map((ownerUserId) => ({
+          ownerUserId,
           courseId: perfCourseId,
           sectionId: perfSectionId,
           kind: "section" as const,
@@ -825,6 +855,13 @@ describe.skipIf(!RAW_DATABASE_URL)("instructor transcript queries (real DB, #29)
       expect(elapsedMs).toBeLessThan(1500);
     } finally {
       await db.delete(organizations).where(eq(organizations.id, perfOrgId));
+      // Chunked for the same node-postgres parameter-limit reason as the
+      // inserts above -- a single IN (...) with 1200 placeholders is the
+      // kind of thing that's fine today and a surprise later.
+      for (let start = 0; start < studentIds.length; start += 200) {
+        const chunk = studentIds.slice(start, start + 200);
+        if (chunk.length) await db.delete(users).where(inArray(users.id, chunk));
+      }
     }
   });
 });

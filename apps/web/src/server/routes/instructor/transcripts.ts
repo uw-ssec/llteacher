@@ -4,7 +4,7 @@ import { UUID_RE } from "../../utils/uuid";
 import {
   listInstructorTranscripts,
   getInstructorTranscriptDetail,
-  getSectionConversationMessages,
+  getSectionConversationMessagesFromStart,
   canReadSectionConversation,
   DEFAULT_TRANSCRIPT_LIST_PAGE_SIZE,
 } from "../../repositories/sectionConversations";
@@ -130,9 +130,15 @@ export async function listInstructorTranscriptsHandler(c: Context<AppEnv>) {
  *  DEFAULT_MESSAGES_PAGE_SIZE (200, tuned for a live chat's per-scroll
  *  fetch): a single homework section's conversation running past a
  *  thousand messages is not a case this route optimizes for, it's a case
- *  this route refuses to let take the request down. `hasMore` (mirrors
- *  ConversationView's own hasMoreHistory prop) tells the truth about a
- *  transcript this large instead of silently truncating it. */
+ *  this route refuses to let take the request down.
+ *
+ *  Fetched via getSectionConversationMessagesFromStart (#29 review), not
+ *  getSectionConversationMessages -- the latter always returns the TAIL
+ *  page (most-recent-N), which for a conversation over this limit would
+ *  silently show the instructor the wrong end of the transcript.
+ *  `hasMore` (mirrors ConversationView's own hasMoreHistory prop) tells
+ *  the truth about a transcript this large instead of silently truncating
+ *  it -- and is now honest about which end got cut. */
 const TRANSCRIPT_DETAIL_MESSAGE_LIMIT = 1000;
 
 export async function getInstructorTranscriptHandler(c: Context<AppEnv>) {
@@ -168,9 +174,11 @@ export async function getInstructorTranscriptHandler(c: Context<AppEnv>) {
   );
   if (!allowed) return c.json({ error: "Transcript not found" }, 404);
 
-  const messages = await getSectionConversationMessages(db, conversationId, {
-    limit: TRANSCRIPT_DETAIL_MESSAGE_LIMIT,
-  });
+  const messages = await getSectionConversationMessagesFromStart(
+    db,
+    conversationId,
+    TRANSCRIPT_DETAIL_MESSAGE_LIMIT,
+  );
 
   const orgScope = await getOrgScopeForCourse(db, courseId);
   await recordTranscriptAccess(db, orgScope, {

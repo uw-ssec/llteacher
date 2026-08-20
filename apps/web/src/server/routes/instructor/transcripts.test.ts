@@ -33,7 +33,7 @@ vi.mock("../../repositories/sectionConversations", async (importOriginal) => {
     ...actual,
     listInstructorTranscripts: (...a: unknown[]) => listMock(...a),
     getInstructorTranscriptDetail: (...a: unknown[]) => getDetailMock(...a),
-    getSectionConversationMessages: (...a: unknown[]) => getMessagesMock(...a),
+    getSectionConversationMessagesFromStart: (...a: unknown[]) => getMessagesMock(...a),
   };
 });
 vi.mock("../../repositories/organizations", async (importOriginal) => {
