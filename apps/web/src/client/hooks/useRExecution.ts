@@ -176,17 +176,44 @@ export function useRExecution(): UseRExecutionResult {
           }
           return { status: "error", error: describeError(err), executionTimeMs };
         } finally {
-          // #28 Pitfall "Execution timeout": verify the instance recovers
-          // after a timeout rather than deadlocking subsequent calls --
-          // purging here (even when captureR itself never settled) frees
-          // whatever R-side objects this shelter already allocated so the
-          // NEXT run() starts clean instead of accumulating shelter state.
-          try {
-            await shelter.purge();
-          } catch {
-            // Best-effort cleanup; a purge failure must not mask the
-            // result already computed above.
-          }
+          // #28 Pitfall "Execution timeout" / final-review fix wave finding
+          // 2: fire-and-forget, NOT awaited. WebR's worker is
+          // single-threaded -- while a spinning evaluation (e.g. `while
+          // (TRUE) {}`) is still occupying it, a purge message queued
+          // behind that same worker never gets processed until the loop
+          // somehow stops, which for a genuine infinite loop is never. This
+          // `finally` block used to `await shelter.purge()`, which meant
+          // run() itself could never settle on the timeout path either --
+          // the `{status:"error", error:"Timeout: ..."}` object constructed
+          // in the catch block above was already built, but the caller
+          // never received it, isRunning never went back to false, and the
+          // UI stayed on "Running…" forever, exactly the hang the 30s
+          // timeout exists to prevent. Not awaiting here lets run() settle
+          // at the 30s mark regardless of whether the underlying worker is
+          // still occupied.
+          //
+          // Honest limitation, not full recovery: this does NOT interrupt a
+          // genuinely hung evaluation. The webr.mjs module here is loaded
+          // at runtime from a CDN (WEBR_MODULE_URL, useWebR.ts) rather than
+          // a pinned npm dependency this codebase can inspect/type for a
+          // real interrupt API, so implementing true cancellation is out of
+          // scope for this fix. If the worker really is stuck on an
+          // infinite loop, this purge call (and every future call sharing
+          // the same WebR instance) queues behind it and may never
+          // complete -- the NEXT run() call still starts a fresh Shelter
+          // (see the call site above), so a stuck shelter's own purge
+          // failing to ever run does not, by itself, block a later run()
+          // from returning; it only means this shelter's R-side objects may
+          // never actually get freed.
+          // WebRShelter.purge()'s return type is `unknown` (useWebR.ts's own
+          // minimal type surface for the CDN-loaded module) -- wrapped in
+          // Promise.resolve() so `.catch` is available regardless of
+          // whether the real call returns a promise or not.
+          void Promise.resolve(shelter.purge()).catch(() => {
+            // Best-effort cleanup; a purge failure (or a purge that never
+            // resolves at all) must not mask the result already computed
+            // above, and must not keep run() itself from settling.
+          });
         }
       } finally {
         setIsRunning(false);

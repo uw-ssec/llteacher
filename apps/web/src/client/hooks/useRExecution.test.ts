@@ -209,12 +209,39 @@ describe("useRExecution", () => {
     expect(out.error).toContain("network blocked");
   });
 
-  it("times out after 30s with a clear message, and the next call still succeeds (instance recovers)", async () => {
+  // Final-review fix wave finding 2: this test used to give hungShelter a
+  // `purge` that resolves INSTANTLY (`vi.fn().mockResolvedValue(undefined)`,
+  // via makeShelter's default) even while its own captureR is still "hung".
+  // That's not physically possible for real WebR -- the worker is
+  // single-threaded, so a purge message queued behind a genuinely spinning
+  // evaluation cannot be processed until the loop stops, which for `while
+  // (TRUE) {}` is never. The old finally block awaited purge() before
+  // run() could settle, so this test only passed because its mock was MORE
+  // capable than the real dependency it stands in for -- it couldn't have
+  // caught the real bug (run() hanging forever on a genuine timeout)
+  // because the mock never modeled the one property that caused it.
+  //
+  // Here hungShelter.purge() is a promise that never resolves either --
+  // the honest model of "queued behind a worker that's still occupied by
+  // an infinite loop, so this purge might never actually run." This is the
+  // regression test for the fix: with the OLD `await shelter.purge()` code,
+  // this test would time out/hang, because run() could never settle while
+  // purge() never resolves. With the fix (fire-and-forget), run() still
+  // settles with the timeout error at the 30s mark regardless.
+  it("times out after 30s with a clear message, and the run() promise settles even though the hung shelter's own purge() never resolves", async () => {
     vi.useFakeTimers();
     try {
-      // First call: captureR never resolves (simulates an infinite loop).
-      const hungShelter = makeShelter(() => new Promise(() => {}));
-      // Second call: a normal, fast result.
+      // First call: captureR never resolves (simulates an infinite loop) --
+      // and neither does purge(), modeling a worker still genuinely occupied
+      // by that same spinning evaluation (see this test's own doc comment).
+      const hungShelter = {
+        captureR: () => new Promise(() => {}),
+        purge: vi.fn(() => new Promise(() => {})),
+      };
+      // Second call: a normal, fast result on a FRESH shelter/instance --
+      // this hook always starts a new `Shelter()` per run() (see the call
+      // site in useRExecution.ts), so a later call's success never depends
+      // on the earlier hung shelter's purge() ever completing.
       const healthyShelter = makeShelter(async () => ({ output: [{ type: "stdout", data: "ok" }] }));
       ensureReady.mockResolvedValueOnce(makeWebR(hungShelter)).mockResolvedValueOnce(makeWebR(healthyShelter));
 
@@ -228,13 +255,22 @@ describe("useRExecution", () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(R_EXECUTION_TIMEOUT_MS);
       });
+      // The key assertion: `await firstRun` itself resolves. Under the old
+      // `await shelter.purge()` code, this line would never resolve at all
+      // (a real hang, not just a slow one) because hungShelter.purge() never
+      // settles -- fake timers can't unstick a promise that's waiting on
+      // nothing but another promise that itself never resolves.
       const timedOut = await firstRun;
 
       expect(timedOut.status).toBe("error");
       expect(timedOut.error).toContain("Timeout");
+      // Fire-and-forget still means purge() was CALLED (best-effort cleanup
+      // attempted) -- it's specifically not AWAITED that changed.
       expect(hungShelter.purge).toHaveBeenCalledTimes(1);
 
-      // The hook itself must be usable again -- not stuck in "running".
+      // The hook itself must be usable again -- not stuck in "running" --
+      // on a fresh run() call, independent of the still-pending purge()
+      // from the hung shelter above.
       let second!: Awaited<ReturnType<typeof result.current.run>>;
       await act(async () => {
         second = await result.current.run("cat('ok')");

@@ -2218,6 +2218,36 @@ describe("POST /api/chat", () => {
       expect(call.system).toContain(HINT_INSTRUCTION);
     });
 
+    // Final-review fix wave, finding 1 (hint double-grant, #80): the
+    // envelope path above already recorded exactly one hintEvents row for
+    // this turn (the assertion just above) -- if the model were ALSO
+    // offered requestHint for the same turn, its own description ("call
+    // this when they explicitly ask... in conversation") plus this turn's
+    // hint-primed system prompt and fixed user message
+    // ("Give me a hint for this section, please.", App.tsx) would prime it
+    // to call the tool too, recording a SECOND row for one button click.
+    // This is the actual regression test for that bug: streamText's tools
+    // must not include requestHint on a turn that just granted via the
+    // envelope.
+    it("withholds requestHint from streamText's tools on a turn that just granted via the envelope (prevents a double hintEvents write)", async () => {
+      recordHintRequestMock.mockResolvedValue({ status: "hint_provided", remainingHints: 2, deduped: false });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+        isHintRequest: true,
+      });
+
+      expect(res.status).toBe(200);
+      expect(recordHintRequestMock).toHaveBeenCalledTimes(1);
+      const call = streamTextMock.mock.calls[0]![0] as { tools: Record<string, unknown> };
+      expect(call.tools.requestHint).toBeUndefined();
+      // Every other tool stays available -- only requestHint is withheld,
+      // and only for this one turn.
+      expect(call.tools.showDefinition).toBeDefined();
+      expect(call.tools.executeRCode).toBeDefined();
+    });
+
     it("does not grant, and does not scaffold, an ordinary turn (isHintRequest omitted)", async () => {
       const res = await postChat(buildApp(fakeAuthContext()), {
         messages: [userUiMessage],
@@ -2226,8 +2256,12 @@ describe("POST /api/chat", () => {
 
       expect(res.status).toBe(200);
       expect(recordHintRequestMock).not.toHaveBeenCalled();
-      const call = streamTextMock.mock.calls[0]![0] as { system: string };
+      const call = streamTextMock.mock.calls[0]![0] as { system: string; tools: Record<string, unknown> };
       expect(call.system).not.toContain(HINT_INSTRUCTION);
+      // No grant happened this turn -- requestHint stays available so the
+      // secondary, model-mediated path (TOOLS.requestHint) still works for
+      // a student who asks in plain conversation instead of the button.
+      expect(call.tools.requestHint).toBeDefined();
     });
 
     it("budget_exceeded: short-circuits with 429 before any model call, and releases the turn lock", async () => {
@@ -2627,5 +2661,35 @@ describe("toolsForConversation (#168)", () => {
       expect(tools.executeRCode).toBeDefined();
       expect(tools.requestHint).toBeDefined();
     }
+  });
+
+  // Final-review fix wave, finding 1 (hint double-grant, #80): the second,
+  // independent gating axis this function grew to fix the bug -- see this
+  // function's own doc comment (chat.ts) for the full rationale.
+  describe("withholdRequestHint option (#80 finding: hint double-grant)", () => {
+    it("omits requestHint when withholdRequestHint is true, for a section-kind conversation", () => {
+      const tools = toolsForConversation("section-1", { withholdRequestHint: true });
+      expect(tools.requestHint).toBeUndefined();
+      expect(Object.keys(tools)).not.toContain("requestHint");
+    });
+
+    it("leaves every other tool untouched when withholding requestHint", () => {
+      const tools = toolsForConversation("section-1", { withholdRequestHint: true });
+      expect(tools.showDefinition).toBeDefined();
+      expect(tools.executeRCode).toBeDefined();
+      expect(tools.markSectionComplete).toBeDefined();
+    });
+
+    it("keeps requestHint when withholdRequestHint is false or omitted", () => {
+      expect(toolsForConversation("section-1", { withholdRequestHint: false }).requestHint).toBeDefined();
+      expect(toolsForConversation("section-1").requestHint).toBeDefined();
+    });
+
+    it("composes with the existing tutor-kind gating -- both markSectionComplete AND requestHint can be withheld on the same call", () => {
+      const tools = toolsForConversation(null, { withholdRequestHint: true });
+      expect(tools.markSectionComplete).toBeUndefined();
+      expect(tools.requestHint).toBeUndefined();
+      expect(tools.showDefinition).toBeDefined();
+    });
   });
 });

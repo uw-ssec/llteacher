@@ -14,15 +14,23 @@
    migration 0035, not openrouter.
 
    Converts the resolved history to model messages, calls streamText with
-   one display tool (showDefinition), and streams the response back in the
-   UI message stream format that the client's useChat hook understands.
+   this route's tool catalog (TOOLS, below), and streams the response back
+   in the UI message stream format that the client's useChat hook
+   understands.
 
-   The model can produce either:
-     · plain markdown text   — rendered as paragraphs in the AI message
-     · showDefinition tool   — rendered as a <DefinitionCard /> component
-
-   This is the minimum-viable Generative UI loop. Adding more tools is a
-   matter of: define the Zod schema here + ship a renderer in packages/ui.
+   The model can produce plain markdown text, and/or call any of:
+     · showDefinition      — a display tool; renders a <DefinitionCard />
+     · executeRCode        — a display tool; renders a runnable R snippet
+                              the student executes client-side via WebR (#28)
+     · requestHint         — a side-effecting tool; records a hint request
+                              via the same ledger the "Give me a hint" button
+                              uses (#80), for a student who asks in plain
+                              conversation instead
+     · markSectionComplete — a display tool; suggests (never auto-submits)
+                              that the student may be ready to move on (#168)
+   See TOOLS' own doc comment (below) for each tool's exact shape and the
+   reasoning behind it, and toolsForConversation for which of these a given
+   turn is actually offered.
 
    Persistence (#3): every turn writes to the DB so a conversation survives a
    reload --
@@ -352,11 +360,43 @@ const SECTION_ONLY_TOOL_NAMES = new Set<keyof typeof TOOLS>(["markSectionComplet
  *  this doesn't need conv.kind itself (resolveConversation's own return
  *  type doesn't carry it) to gate correctly. Exported so this exact
  *  conditional -- not just TOOLS.markSectionComplete's own shape -- is
- *  unit-testable without going through the full HTTP handler. */
-export function toolsForConversation(sectionId: string | null): ToolSet {
-  if (sectionId) return TOOLS;
+ *  unit-testable without going through the full HTTP handler.
+ *
+ *  Final-review fix wave, #80 finding (hint double-grant): `options.
+ *  withholdRequestHint` is the second, independent axis this function now
+ *  gates on -- passed `true` by chatHandler exactly when isHintGranted is
+ *  true for THIS turn (the envelope's isHintRequest flag already granted a
+ *  hint via recordHintRequest before streamText is ever called). Without
+ *  this, requestHint stayed in the model's tool list on a hint-granted turn
+ *  even though a grant already happened: the tool's own description ("call
+ *  this when they explicitly ask... in conversation") plus this turn's
+ *  hint-primed system prompt and its fixed user message (App.tsx's
+ *  HINT_REQUEST_MESSAGE, "Give me a hint for this section, please.")
+ *  maximally prime the model to call it too, recording a SECOND hintEvents
+ *  row for one button click -- corrupting the exact metric #80 exists to
+ *  define. The only other dedup (recordHintRequest's 2-second idempotency
+ *  window, repositories/hints.ts) can't be relied on here: a tool call from
+ *  the model necessarily happens AFTER the envelope grant's own provider
+ *  round-trip, which routinely exceeds 2 seconds. Deliberately reusing this
+ *  same function (rather than a second, separate gating mechanism at the
+ *  streamText call site) so there remains exactly one place that decides
+ *  which tools a turn is offered -- not two. Omitting `options` (or passing
+ *  `withholdRequestHint: false`) leaves requestHint's normal availability
+ *  untouched, matching every call site from before this fix. */
+export function toolsForConversation(
+  sectionId: string | null,
+  options?: { withholdRequestHint?: boolean },
+): ToolSet {
+  const withheldNames = new Set<keyof typeof TOOLS>();
+  if (!sectionId) {
+    for (const name of SECTION_ONLY_TOOL_NAMES) withheldNames.add(name);
+  }
+  if (options?.withholdRequestHint) {
+    withheldNames.add("requestHint");
+  }
+  if (withheldNames.size === 0) return TOOLS;
   return Object.fromEntries(
-    Object.entries(TOOLS).filter(([name]) => !SECTION_ONLY_TOOL_NAMES.has(name as keyof typeof TOOLS)),
+    Object.entries(TOOLS).filter(([name]) => !withheldNames.has(name as keyof typeof TOOLS)),
   );
 }
 
@@ -1745,7 +1785,16 @@ export async function chatHandler(c: Context<AppEnv>) {
       // entirely for a tutor-kind conversation -- see toolsForConversation's
       // own doc comment (this file's TOOLS catalog, above) for why this is
       // real gating, not a prompt instruction alone.
-      tools: toolsForConversation(conv.sectionId),
+      //
+      // Final-review fix wave, #80 finding (hint double-grant): also
+      // withholds requestHint for this exact turn when isHintGranted is
+      // true -- the envelope path (above) already recorded a hintEvents row
+      // for this turn before streamText was ever reached, so the model has
+      // no legitimate reason to call requestHint again this turn. See
+      // toolsForConversation's own doc comment for the full mechanism/
+      // rationale, and its `withholdRequestHint` option's doc comment for
+      // why the double-grant was possible without this.
+      tools: toolsForConversation(conv.sectionId, { withholdRequestHint: isHintGranted }),
       // #80: threads request-scoped context into the requestHint tool's
       // execute() (its second argument's own `experimental_context` field)
       // -- see TOOLS.requestHint's own doc comment for why a static,
