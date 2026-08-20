@@ -2411,7 +2411,7 @@ describe("POST /api/chat", () => {
       expect(call.tools.markSectionComplete).toBeDefined();
     });
 
-    it("streamText does NOT receive markSectionComplete for a tutor-kind conversation, while the other tools remain present", async () => {
+    it("streamText does NOT receive markSectionComplete or requestHint for a tutor-kind conversation, while showDefinition/executeRCode remain present", async () => {
       getOwnedConversationOrNullMock.mockResolvedValue(TUTOR_CONV);
       const res = await postChat(buildApp(fakeAuthContext()), {
         messages: [userUiMessage],
@@ -2420,8 +2420,9 @@ describe("POST /api/chat", () => {
       expect(res.status).toBe(200);
       const call = streamTextMock.mock.calls[0]![0] as { tools: Record<string, unknown> };
       expect(call.tools.markSectionComplete).toBeUndefined();
+      expect(call.tools.requestHint).toBeUndefined();
       expect(call.tools.showDefinition).toBeDefined();
-      expect(call.tools.requestHint).toBeDefined();
+      expect(call.tools.executeRCode).toBeDefined();
     });
 
     it("assembles the default stopping-rule instruction into the system prompt for a section-kind conversation", async () => {
@@ -2555,36 +2556,6 @@ describe("TOOLS.requestHint (#80)", () => {
     expect(schema.additionalProperties).toBe(false);
   });
 
-  it("reports 'unavailable' (not a crash) when called with no experimental_context -- e.g. a tutor-kind conversation", async () => {
-    const execute = TOOLS.requestHint!.execute as (
-      input: Record<string, never>,
-      options: { experimental_context?: unknown },
-    ) => Promise<unknown>;
-    const result = await execute({}, { experimental_context: undefined });
-    expect(result).toEqual({ status: "unavailable" });
-  });
-
-  it("reports 'unavailable' when the threaded context has no sectionId (tutor-kind)", async () => {
-    const execute = TOOLS.requestHint!.execute as (
-      input: Record<string, never>,
-      options: { experimental_context?: unknown },
-    ) => Promise<unknown>;
-    const result = await execute(
-      {},
-      {
-        experimental_context: {
-          db: {},
-          orgScope: "org-a",
-          conversationId: "conv-1",
-          sectionId: null,
-          studentId: "u1",
-          promptTemplateId: null,
-        },
-      },
-    );
-    expect(result).toEqual({ status: "unavailable" });
-  });
-
   it("delegates to recordHintRequest with the threaded context, for a real section conversation", async () => {
     recordHintRequestMock.mockReset().mockResolvedValue({ status: "hint_provided", remainingHints: 4, deduped: false });
     const execute = TOOLS.requestHint!.execute as (
@@ -2643,23 +2614,25 @@ describe("TOOLS.markSectionComplete (#168)", () => {
 // shape above (which alone would say nothing about whether the model ever
 // sees it on a tutor-kind conversation).
 describe("toolsForConversation (#168)", () => {
-  it("includes markSectionComplete for a section-kind conversation (non-null sectionId)", () => {
+  it("includes markSectionComplete and requestHint for a section-kind conversation (non-null sectionId)", () => {
     const tools = toolsForConversation("section-1");
     expect(tools.markSectionComplete).toBeDefined();
+    expect(tools.requestHint).toBeDefined();
   });
 
-  it("withholds markSectionComplete entirely for a tutor-kind conversation (null sectionId) -- not merely a hopeful prompt instruction", () => {
+  it("withholds both markSectionComplete and requestHint entirely for a tutor-kind conversation (null sectionId) -- not merely a hopeful prompt instruction", () => {
     const tools = toolsForConversation(null);
     expect(tools.markSectionComplete).toBeUndefined();
+    expect(tools.requestHint).toBeUndefined();
     expect(Object.keys(tools)).not.toContain("markSectionComplete");
+    expect(Object.keys(tools)).not.toContain("requestHint");
   });
 
-  it("never withholds showDefinition/executeRCode/requestHint, regardless of kind -- only markSectionComplete is gated this way today", () => {
+  it("never withholds showDefinition/executeRCode, regardless of kind -- both are meaningful on either conversation kind", () => {
     for (const sectionId of ["section-1", null]) {
       const tools = toolsForConversation(sectionId);
       expect(tools.showDefinition).toBeDefined();
       expect(tools.executeRCode).toBeDefined();
-      expect(tools.requestHint).toBeDefined();
     }
   });
 

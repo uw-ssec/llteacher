@@ -240,27 +240,29 @@ export const TOOLS: ToolSet = {
     description:
       "Request a scaffolded hint for the student's CURRENT homework section, when they explicitly ask " +
       "for one in conversation (e.g. 'can I get a hint?', 'give me a hint'). Checks the section's hint " +
-      "budget and records the request; only meaningful inside a homework-section conversation. Takes no " +
-      "arguments -- always call it with an empty object. " +
+      "budget and records the request. Takes no arguments -- always call it with an empty object. " +
       "If the result's status is \"hint_provided\": respond with a scaffolded nudge -- ask a leading " +
       "question or highlight a key concept -- never the full solution. " +
       "If \"budget_exceeded\": tell the student they've used all the hints available for this section, " +
-      "and do not answer the underlying question for them instead. " +
-      "If \"unavailable\": this isn't a homework-section conversation -- there is no hint to give; " +
-      "answer the student's message normally.",
+      "and do not answer the underlying question for them instead.",
     inputSchema: jsonSchema<Record<string, never>>({
       type: "object",
       properties: {},
       additionalProperties: false,
     }),
     execute: async (_input: Record<string, never>, options: ToolCallOptions) => {
-      const ctx = options.experimental_context as HintToolContext | undefined;
-      if (!ctx || !ctx.sectionId) {
-        return { status: "unavailable" as const };
-      }
+      // Structurally withheld from a tutor-kind conversation's tool list
+      // (SECTION_ONLY_TOOL_NAMES / toolsForConversation, below) since the
+      // PR3 final-review cleanup -- ctx.sectionId is therefore guaranteed
+      // non-null whenever the model can actually reach this execute(). The
+      // `HintToolContext` type still carries `sectionId: string | null`
+      // because it's shared with a tutor-kind request's experimental_context
+      // (never read there, since the tool isn't offered), not because this
+      // branch needs to handle null here anymore.
+      const ctx = options.experimental_context as HintToolContext;
       const result = await recordHintRequest(ctx.db, ctx.orgScope, {
         conversationId: ctx.conversationId,
-        sectionId: ctx.sectionId,
+        sectionId: ctx.sectionId as string,
         studentId: ctx.studentId,
         promptTemplateId: ctx.promptTemplateId,
       });
@@ -334,19 +336,25 @@ export const TOOLS: ToolSet = {
   },
 };
 
-/** #168: tool names that must be withheld from a tutor-kind conversation --
- *  there is no section to mark complete without one. Unlike
- *  requestHint (which stays in every conversation's tool list and instead
- *  reports `{ status: "unavailable" }` from inside its own execute() when
- *  there's no sectionId, a prompt-level self-report the model could in
- *  principle ignore) or executeRCode/showDefinition (never gated at all),
- *  this is real, structural gating: the model is never even offered this
- *  tool on a tutor-kind conversation, so "don't call this" isn't a hoped-for
- *  instruction. See toolsForConversation below and its own doc comment for
- *  why this deviates from #28/#80's precedent -- flagged for the PR3 final
- *  review as an inconsistency worth weighing in on, not silently "fixed"
- *  onto the other tools here (out of this task's scope). */
-const SECTION_ONLY_TOOL_NAMES = new Set<keyof typeof TOOLS>(["markSectionComplete"]);
+/** #168, folded together with #80 in the PR3 final-review cleanup: tool
+ *  names that must be withheld from a tutor-kind conversation -- there is no
+ *  section for either of these to act on without one. Both markSectionComplete
+ *  and requestHint are real, structural gating here: the model is never even
+ *  offered either tool on a tutor-kind conversation, so "don't call this"
+ *  isn't a hoped-for prompt instruction the model could ignore.
+ *
+ *  requestHint originally shipped (#80) with a weaker mechanism instead --
+ *  staying in every conversation's tool list and self-reporting
+ *  `{ status: "unavailable" }` from inside its own execute() when there was
+ *  no sectionId. The PR3 final review flagged the resulting three-way
+ *  inconsistency (this structural gate vs. that self-report vs.
+ *  executeRCode/showDefinition's "never gated, and correctly so -- both are
+ *  meaningful on either conversation kind") as worth a human decision rather
+ *  than auto-fixing it. The decision: fold requestHint in here too, since
+ *  toolsForConversation already existed and already gates on the identical
+ *  sectionId signal -- there was no real reason left for a second, weaker
+ *  mechanism to keep gating the same thing. */
+const SECTION_ONLY_TOOL_NAMES = new Set<keyof typeof TOOLS>(["markSectionComplete", "requestHint"]);
 
 /** #168: the actual conditional that makes section-kind-only gating real
  *  rather than cosmetic -- builds a DIFFERENT `tools` object/subset per
@@ -403,8 +411,11 @@ export function toolsForConversation(
 /** #80: the shape threaded into streamText's `experimental_context` option
  *  (chatHandler, below) for the requestHint tool's execute() to read via
  *  its second argument -- see requestHint's own doc comment for why this
- *  can't just be a closure over module-level TOOLS. `sectionId: null` for a
- *  tutor-kind conversation (no section, hence "unavailable" from the tool). */
+ *  can't just be a closure over module-level TOOLS. `sectionId` is still
+ *  typed `string | null` here because this context is built for every
+ *  request regardless of conversation kind (populated with `conv.sectionId`
+ *  as-is), even though requestHint itself is only ever offered, and so only
+ *  ever reads this, when it's non-null (SECTION_ONLY_TOOL_NAMES). */
 interface HintToolContext {
   db: Db;
   orgScope: OrgScope;
@@ -1799,8 +1810,9 @@ export async function chatHandler(c: Context<AppEnv>) {
       // execute() (its second argument's own `experimental_context` field)
       // -- see TOOLS.requestHint's own doc comment for why a static,
       // module-level ToolSet needs this instead of a closure. `sectionId`
-      // is conv.sectionId as-is (null for a tutor-kind conversation, which
-      // is exactly what makes the tool report "unavailable" for one).
+      // is conv.sectionId as-is -- null only for a tutor-kind conversation,
+      // where requestHint isn't in `tools` above at all, so this field is
+      // simply unread on that path rather than driving an in-tool check.
       experimental_context: {
         db,
         orgScope,
