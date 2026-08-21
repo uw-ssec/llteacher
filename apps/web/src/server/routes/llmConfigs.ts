@@ -18,13 +18,24 @@
        for why instructor-supplied credentials are gated behind a secret_ref
        allowlist.
 
-   AUTHORIZATION SHAPE, stated because it is a widening. These routes gate on
-   instructor-of-COURSE and then operate on that course's ORGANIZATION pool,
-   because that is what `llm_configs` is. So an instructor of one course can
-   edit configs other courses in the same org use, and can change the org
-   default. Within one UW organization, course staff are trusted with the
-   shared model pool; if that stops being true the fix is course-scoped
-   configs in the schema, not a narrower filter here.
+   AUTHORIZATION SHAPE -- a widening, and as of #367 a TRACKED GAP rather
+   than an accepted design. These routes gate on instructor-of-COURSE and
+   then operate on that course's ORGANIZATION pool, because that is what
+   `llm_configs` is. So an instructor of one course can edit configs other
+   courses in the same org use, and can change the org default.
+
+   This block previously argued the widening was fine -- "within one UW
+   organization, course staff are trusted with the shared model pool."
+   #363's review rejected that: the authority a course instructor holds
+   should not reach org-level state just because the schema stores it
+   per-org. The fix is an Org Admin role that owns org-level config, with
+   per-course instructors scoped strictly to their own course (#367).
+   Schema-level, so it lands separately rather than inside this PR.
+
+   Nothing here can narrow it in the meantime: the authority being checked
+   and the scope being written are different keys, so a filter would either
+   be a no-op or lock instructors out of the pool entirely. Do not read the
+   absence of a guard as a decision that one is not wanted.
    -------------------------------------------------------------------------- */
 
 import { type Context } from "hono";

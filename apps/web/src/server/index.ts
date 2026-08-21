@@ -209,11 +209,17 @@ app.delete(
 
 // #31/#170: LLM configuration authoring. Instructor-gated on the COURSE,
 // operating on that course's ORGANIZATION pool -- llm_configs is a per-org
-// resource by design, so an instructor of one course can edit configs other
-// courses in the same org use. That widening is deliberate and documented at
-// the top of routes/llmConfigs.ts; it is not something these guards can
-// narrow, because the authority being checked and the scope being written
-// are different keys on purpose.
+// resource, so an instructor of one course can edit configs other courses in
+// the same org use, and can change the org default.
+//
+// #367: that widening is a TRACKED GAP, not an accepted design. It was
+// documented as deliberate when this landed; #363's review rejected that
+// framing -- the fix is an Org Admin role owning org-level config, with
+// per-course instructors scoped to their own course, which is schema-level
+// and so lands as its own change rather than inside a 105-file PR. These
+// guards genuinely cannot narrow it in the meantime (the authority checked
+// and the scope written are different keys), which is why it is filed
+// rather than patched here.
 app.get("/api/courses/:courseId/llm-configs", requireInstructorOf()(listLlmConfigsHandler));
 app.post("/api/courses/:courseId/llm-configs", requireInstructorOf()(createLlmConfigHandler));
 app.get(
