@@ -185,7 +185,11 @@ describe.skipIf(!DATABASE_URL)("submissions repository", () => {
     const grade = await recordGrade(db, unsafeOrgScope(orgBId), {
       submissionId: sub.id,
       gradedByAi: true,
-      score: 0.9,
+      score: 90,
+      // #75 added grades_score_requires_max_chk: a score needs a scale, or
+      // "0.9" is unreadable a term later -- 0.9 out of 1, or 90%? This
+      // fixture used to omit it, which the database now refuses.
+      maxScore: 100,
     });
     expect(grade.gradedByAi).toBe(true);
   });

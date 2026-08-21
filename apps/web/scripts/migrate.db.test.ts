@@ -165,4 +165,59 @@ describe.skipIf(!DATABASE_URL)("scripts/migrate.ts two-stage split (real DB, #34
     },
     60_000,
   );
+
+  it(
+    "0040 backfills llm_configs.name against a POPULATED table before making it NOT NULL",
+    async () => {
+      // #317/#363 merge. 0040 adds llm_configs.name NOT NULL. drizzle-kit
+      // generated a bare `ADD COLUMN "name" text NOT NULL`, which succeeds
+      // against an empty table and fails against any row that already
+      // exists -- Postgres has no value to put there. Every path CI already
+      // exercises hits the empty case (the migrate step runs before the
+      // seed), which is the same blind spot #348 named: "CI never exercises
+      // a POPULATED database." 0040 was hand-edited to the
+      // nullable -> UPDATE -> SET NOT NULL shape; this is what proves it,
+      // and what fails loudly if a future regeneration flattens it back.
+      const dbName = `llteacher_migrate_test_populated_${crypto.randomUUID().replace(/-/g, "")}`;
+      dbNames.push(dbName);
+      const scratchUrl = await createScratchDatabase(adminPool, dbName);
+
+      // Migrate through 0039 -- staging's head, before this branch's 0040.
+      const through0039 = buildFolderThrough("0039_llm_configs_price_per_million_tokens");
+      const pool = new Pool({ connectionString: scratchUrl });
+      const db = drizzle(pool);
+      try {
+        await migrate(db, { migrationsFolder: through0039 });
+        // A config row of the shape 0029/0035 leave behind. No `name`
+        // column exists yet at 0039, which is exactly the point.
+        await db.execute(sql`
+          INSERT INTO organizations (id, slug, name, workos_organization_id)
+          VALUES ('33333333-3333-3333-3333-333333333333', 'populated-org', 'Populated Org', 'org_populated_test')
+        `);
+        await db.execute(sql`
+          INSERT INTO llm_configs (id, organization_id, provider, model_name, temperature, max_completion_tokens, credential_id, is_default, is_active)
+          VALUES ('44444444-4444-4444-4444-444444444444', '33333333-3333-3333-3333-333333333333', 'llmoxie', 'gpt-5.3-codex', 0.7, 1000, NULL, true, true)
+        `);
+      } finally {
+        fs.rmSync(through0039, { recursive: true, force: true });
+        await pool.end();
+      }
+
+      // Applies 0040 on top. Must not throw, and must leave the
+      // pre-existing row named after its own model.
+      await expect(runMigrations(scratchUrl)).resolves.not.toThrow();
+
+      const verifyPool = new Pool({ connectionString: scratchUrl });
+      try {
+        const verifyDb = drizzle(verifyPool);
+        const rows = await verifyDb.execute<{ name: string }>(sql`
+          SELECT name FROM llm_configs WHERE id = '44444444-4444-4444-4444-444444444444'
+        `);
+        expect(rows.rows[0]).toMatchObject({ name: "gpt-5.3-codex" });
+      } finally {
+        await verifyPool.end();
+      }
+    },
+    60_000,
+  );
 });

@@ -43,6 +43,23 @@ const TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "test-key" } as 
 
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
+/* #170: chatHandler resolves the turn's config before streaming. This suite
+   drives the REAL streamText against a fake LanguageModelV2, so the point is
+   the stream's behaviour, not resolution -- stubbed to "this organization has
+   no config yet", which is a real state and the one that keeps every
+   expectation in this file about the platform model and prompt true.
+
+   #98 note: with no config there is no fallback either, so streamWithFallback
+   makes exactly the single attempt this suite was written against. The
+   failover paths are owned by llm/streamWithFallback.test.ts. */
+vi.mock("../repositories/organizations", () => ({
+  getOrgScopeForCourse: async () => "org-1",
+}));
+vi.mock("../repositories/llmConfigs", () => ({
+  resolveLlmConfig: async () => null,
+  resolveFallbackConfig: async () => null,
+}));
+
 /* Only the model-backend factory is faked -- streamText itself, and every
    AI-SDK stream-processing step downstream of doStream, is real. */
 let fakeModel: LanguageModelV2;

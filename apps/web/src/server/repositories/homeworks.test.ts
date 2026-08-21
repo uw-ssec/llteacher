@@ -622,7 +622,7 @@ describe.skipIf(!process.env.DATABASE_URL)("deleteHomework with a persisted llm_
     }).returning();
 
     const [llmConfig] = await db.insert(llmConfigs).values({
-      organizationId: org.id, provider: "openrouter", modelName: "test/model", isDefault: true,
+      organizationId: org.id, name: "Test Config", provider: "openrouter", modelName: "test/model", isDefault: true,
     }).returning();
 
     await recordLlmCallLog(db, {

@@ -3257,7 +3257,8 @@ body {
 
 /* -- Filter chips (tabs above filtered lists) ------------------------------ */
 
-.admin-filter-row {
+.admin-filter-row,
+.list-controls__filters {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
@@ -3287,6 +3288,15 @@ body {
 .admin-filter:focus-visible {
   color: var(--color-text);
   outline: none;
+}
+
+/* The chip is a label wrapping a visually-hidden radio, so the element that
+   actually takes focus is invisible. Without this the whole filter rail is
+   keyboard-navigable with no visible indication of where you are. */
+.admin-filter:has(:focus-visible) {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+  color: var(--color-text);
 }
 
 .admin-filter--active {
@@ -3332,6 +3342,616 @@ body {
 
 .admin-alert strong {
   font-weight: var(--weight-semibold);
+}
+
+/* -- Grading (#75) ---------------------------------------------------------
+   The AI draft is deliberately quieter than the instructor's own form and
+   sits below it. Putting it first would make the instructor's job reviewing
+   a machine's work rather than doing their own -- and the rule this feature
+   rests on is that a grade is in force only when a human wrote it. */
+
+.admin-progress-cell--gradeable {
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  transition: transform 120ms ease-out, box-shadow 120ms ease-out;
+}
+
+.admin-progress-cell--gradeable:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 1px 4px rgba(26, 26, 26, 0.14);
+}
+
+.admin-grade-current {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-lg);
+  color: var(--color-text);
+}
+
+.admin-grade-score {
+  display: flex;
+  align-items: end;
+  gap: var(--space-3);
+}
+
+.admin-grade-score .admin-form-field {
+  max-width: 8rem;
+}
+
+.admin-grade-score__of {
+  padding-block-end: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-lg);
+  color: var(--color-text-muted);
+}
+
+.admin-form-actions--inline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.admin-draft {
+  margin-block: var(--space-6);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  /* Heritage Gold: the AI-voice marker across both apps. A draft is the
+     model speaking, and the console says so the same way the chat does. */
+  border-inline-start: 2px solid var(--color-accent-warm);
+  border-radius: 6px;
+  background-color: var(--color-surface-raised);
+}
+
+.admin-draft__result {
+  margin-block-start: var(--space-3);
+}
+
+.admin-draft__score {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-lg);
+  color: var(--color-text);
+}
+
+.admin-draft__model {
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.admin-draft__rationale {
+  margin: 0 0 var(--space-4);
+  max-width: 68ch;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: 1.6;
+  color: var(--color-text);
+}
+
+.admin-grade-history {
+  margin-block-start: var(--space-6);
+}
+
+/* The test-result region is mounted empty and filled on result, so it needs
+   no layout of its own until there is something in it. */
+.admin-test-result-region:empty {
+  display: none;
+}
+
+.admin-test-result {
+  margin-block-start: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: 6px;
+  border-inline-start: 2px solid var(--color-accent-warm);
+  background-color: var(--color-surface);
+}
+
+.admin-test-result--failed {
+  border-inline-start-color: var(--color-error);
+}
+
+.admin-test-result__eyebrow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.admin-test-result__usage {
+  font-family: var(--font-mono);
+  letter-spacing: 0.06em;
+}
+
+.admin-test-result__body {
+  max-width: 68ch;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  color: var(--color-text);
+}
+
+.admin-export-notice {
+  display: flex;
+  align-items: start;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: 6px;
+  background-color: rgba(190, 140, 50, 0.06);
+}
+
+/* -- Roster (#32) and CSV import (#86) -------------------------------------
+   The roster is the one list in this console that is genuinely long -- a
+   course has hundreds of students where it has three configs and two TAs --
+   so it gets controls the shorter lists deliberately do without. */
+
+.admin-loading {
+  margin: var(--space-5) 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.admin-empty__title {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+}
+
+.admin-empty__body {
+  margin: var(--space-2) 0 0;
+  max-width: 60ch;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+  color: var(--color-text-secondary);
+}
+
+.admin-empty__action {
+  margin-block-start: var(--space-4);
+}
+
+.admin-roster-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  margin-block-end: var(--space-4);
+  padding-block-end: var(--space-3);
+  border-block-end: 1px solid var(--color-border);
+}
+
+.admin-roster-controls__search input {
+  width: min(320px, 60vw);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 5px;
+  background-color: var(--color-bg);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.admin-roster-controls__search input:focus {
+  border-color: var(--color-accent-warm);
+}
+
+.admin-roster-controls__filters {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* Counts live ON the filter, not beside it: an instructor choosing
+   "Invited" wants the number before they click, because "has anyone not
+   signed in?" is the question. */
+.admin-chip {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  background-color: var(--color-bg);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background-color 140ms ease-out, border-color 140ms ease-out, color 140ms ease-out;
+}
+
+.admin-chip:hover {
+  border-color: var(--color-accent-warm);
+  color: var(--color-text);
+}
+
+.admin-chip--selected {
+  border-color: var(--color-accent);
+  background-color: var(--color-accent-faint);
+  color: var(--color-accent);
+}
+
+.admin-roster-row__identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.admin-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 50%;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+}
+
+.admin-roster-cell--role {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.admin-roster-cell--muted {
+  color: var(--color-text-muted);
+}
+
+/* Status is the load-bearing column: "has not signed in yet" and "something
+   went wrong" look identical if the only signal is an empty Last active
+   cell. A word plus a dot, never colour alone. */
+.admin-roster-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.admin-roster-status::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background-color: currentColor;
+}
+
+.admin-roster-status--ok      { color: var(--color-success); }
+.admin-roster-status--pending { color: var(--color-accent-warm); }
+.admin-roster-status--dropped { color: var(--color-text-muted); }
+
+/* Dimmed, not hidden. A removal that leaves no trace is indistinguishable
+   from a person who was never added, and "why is this student gone" is a
+   question this page exists to answer. */
+.admin-roster-row--dropped th,
+.admin-roster-row--dropped td {
+  opacity: 0.55;
+}
+
+.admin-file-input {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.admin-file-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.admin-accession__summary {
+  margin: var(--space-4) 0 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+/* One extra column over the NetID ledger: the spreadsheet line number, so
+   an instructor with the file still open can find the row they must fix. */
+.admin-import-ledger .admin-accession__entry {
+  grid-template-columns: minmax(4.5rem, auto) minmax(10rem, auto) minmax(6rem, auto) minmax(0, 1fr);
+}
+
+.admin-import-line {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .admin-import-ledger .admin-accession__entry {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-1);
+  }
+}
+
+/* -- Accession panel: adding TAs by NetID (#210) ---------------------------
+   The console reads as a card catalog -- mono record ids, ruled rows, warm
+   paper. This is the accession slip in that register: you write down who is
+   joining the record, and every entry comes back stamped with what happened
+   to it.
+
+   The ledger is the load-bearing part. #210 requires a per-NetID outcome
+   because one collective "failed" cannot tell an instructor which three of
+   eight were typos; so entries are a numbered list with the NetID set in the
+   same mono the console reserves for identifiers, and the outcome sits in a
+   fixed column beside it. Scannable straight down the left edge. */
+
+.admin-accession {
+  margin-block-end: var(--space-6);
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  border: 1px solid var(--color-border);
+  /* Leading rule in Heritage Gold, matching .admin-notice: this is an
+     authoring affordance, not a failure, so it never borrows the error red. */
+  border-inline-start: 2px solid var(--color-accent-warm);
+  border-radius: 6px;
+  background-color: var(--color-surface-raised);
+}
+
+.admin-accession--closed {
+  padding: 0;
+  border: 0;
+  background: none;
+  margin-block-end: var(--space-5);
+}
+
+.admin-accession__open {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 5px;
+  background-color: var(--color-bg);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: background-color 140ms ease-out, border-color 140ms ease-out;
+}
+
+.admin-accession__open:hover {
+  background-color: var(--color-surface);
+  border-color: var(--color-accent-warm);
+}
+
+.admin-accession__eyebrow {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.admin-accession__label {
+  display: block;
+  margin-block-end: var(--space-1);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.admin-accession__hint {
+  margin: 0 0 var(--space-3);
+  max-width: 68ch;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+  color: var(--color-text-secondary);
+}
+
+.admin-accession__hint code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  color: var(--color-text);
+}
+
+.admin-accession__field {
+  display: block;
+  width: 100%;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 5px;
+  background-color: var(--color-bg);
+  /* Mono, because the content is identifiers. It also makes a pasted
+     "alovelace@uw.edu" visibly wider than its neighbours before submit. */
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: 1.7;
+  color: var(--color-text);
+  resize: vertical;
+}
+
+.admin-accession__field:focus-within,
+.admin-accession__field:focus {
+  border-color: var(--color-accent-warm);
+}
+
+.admin-accession__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-block-start: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.admin-accession__submit {
+  padding: var(--space-2) var(--space-4);
+  border: 0;
+  border-radius: 5px;
+  background-color: var(--color-accent);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  color: #fff;
+  cursor: pointer;
+  transition: background-color 140ms ease-out;
+}
+
+.admin-accession__submit:hover:not(:disabled) {
+  background-color: var(--color-accent-hover);
+}
+
+.admin-accession__submit:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.admin-accession__cap {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-error);
+}
+
+/* -- Outcome ledger -------------------------------------------------------- */
+
+.admin-accession__ledger {
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  list-style: none;
+  border-block-start: 1px solid var(--color-border);
+}
+
+.admin-accession__entry {
+  display: grid;
+  grid-template-columns: minmax(6.5rem, auto) minmax(7rem, auto) minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: baseline;
+  padding: var(--space-3) 0;
+  border-block-end: 1px solid var(--color-border);
+}
+
+.admin-accession__netid {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+/* A leading marker per outcome rather than a coloured chip: three of the five
+   outcomes are not failures, and chips of equal weight would read as five
+   equal alarms. The glyph is generated content and decorative -- the outcome
+   word beside it carries the meaning, so nothing depends on colour. */
+.admin-accession__outcome {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.admin-accession__outcome::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-inline-end: 0.55em;
+  border-radius: 50%;
+  vertical-align: 0.15em;
+  background-color: currentColor;
+}
+
+.admin-accession__entry--ok    .admin-accession__outcome { color: var(--color-success); }
+.admin-accession__entry--warn  .admin-accession__outcome { color: var(--color-warning); }
+.admin-accession__entry--neutral .admin-accession__outcome { color: var(--color-text-muted); }
+
+.admin-accession__detail {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+@media (max-width: 640px) {
+  .admin-accession__entry {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-1);
+  }
+}
+
+/* -- Degraded-permissions banner (#193) ------------------------------------
+   Page-level, above every view: the condition it reports affects the whole
+   console (nav entries, routing), not one screen. Deliberately quieter than
+   .admin-notice -- nothing has failed and nothing is denied; the console is
+   simply not sure yet, and the recovery is to wait. Heritage Gold rather
+   than red for that reason. */
+
+.admin-banner {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: var(--space-3);
+  margin-block-end: var(--space-5);
+  padding: var(--space-3) var(--space-4);
+  border-radius: 6px;
+  border-inline-start: 2px solid var(--color-warning);
+  background-color: rgba(190, 140, 50, 0.06);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.admin-banner__icon {
+  display: inline-flex;
+  padding-block-start: 1px;
+  color: var(--color-warning);
+}
+
+.admin-banner__body {
+  margin: 0;
+  line-height: 1.55;
+  max-width: 68ch;
+}
+
+.admin-banner__dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: background-color 140ms ease-out, color 140ms ease-out;
+}
+
+.admin-banner__dismiss:hover {
+  background-color: rgba(133, 117, 77, 0.08);
+  color: var(--color-text);
 }
 
 /* -- Submission row (specialized record row for student progress) ---------- */
@@ -3571,6 +4191,42 @@ body {
   outline-offset: 2px;
 }
 
+/* #210: removing a TA revokes access, so the control reads as consequential
+   without shouting -- red on hover and focus rather than at rest, since a
+   permanently red word in every row would make the table look like a list of
+   errors. */
+.admin-link-button--danger {
+  color: var(--color-text-secondary);
+}
+
+.admin-link-button--danger:hover,
+.admin-link-button--danger:focus-visible {
+  color: var(--color-error);
+}
+
+.admin-table__actions {
+  text-align: end;
+  white-space: nowrap;
+}
+
+/* #210: "added by NetID, has not signed in yet". Deliberately quieter than
+   StatusBadge -- it is a fact about an account's lifecycle, not a state of
+   the work, and it sits inside a name rather than in a status column. */
+.admin-pending-mark {
+  display: inline-block;
+  margin-inline-start: 0.5em;
+  padding: 0.1em 0.45em;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  vertical-align: 0.12em;
+}
+
 .admin-submission-row__activity {
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
@@ -3750,6 +4406,277 @@ body {
   color: var(--color-text-muted);
 }
 
+/* -- Import: filling a field from a file ---------------------------------- */
+
+/* Puts the field's label and its alternative input method on one line, so the
+   import reads as belonging to this field rather than floating above the
+   textarea as a page-level action. */
+.admin-form-field__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+/* Deliberately quiet. Typing the prompt is the primary path and importing is
+   the shortcut, so this takes the console's chip vocabulary -- hairline rule,
+   mono small-caps -- rather than button weight, which would make it compete
+   with Save at the bottom of the same form. */
+.prompt-import {
+  display: inline-flex;
+  cursor: pointer;
+}
+
+.prompt-import__face {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0.15rem var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  background: transparent;
+  transition:
+    color 120ms ease-out,
+    border-color 120ms ease-out,
+    background-color 120ms ease-out;
+}
+
+.prompt-import:hover .prompt-import__face {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+  background-color: var(--color-surface);
+}
+
+/* The input is .sr-only, so it holds focus while being invisible. Without
+   this the keyboard ring would be painted somewhere nobody can see and the
+   control would look unfocusable while actually being focused. */
+.prompt-import:focus-within .prompt-import__face {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+/* Sits between the hint and the preview: the result of the import, directly
+   above the preview that now reflects it. */
+.prompt-import__notice {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-normal);
+  color: var(--color-text-muted);
+  padding-inline-start: var(--space-3);
+  border-inline-start: 2px solid var(--color-accent);
+}
+
+/* Colour is not the only signal -- the rule and the wording both carry it,
+   since a rejected file and a loaded one otherwise look identical to anyone
+   who cannot separate the two hues. */
+.prompt-import__notice--error {
+  color: var(--color-error);
+  border-inline-start-color: var(--color-error);
+}
+
+/* == List controls: search / filter / sort ================================
+   Shared by Homeworks, Submissions, and LLM configs so the same task has the
+   same shape on every list. See ListControls.tsx for why each part is
+   optional and why the summary is a live region.
+   ======================================================================== */
+
+.list-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-block-end: var(--space-4);
+}
+
+.list-controls__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+/* -- Search -------------------------------------------------------------- */
+
+.list-controls__search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 18rem;
+  /* Capped so the field does not stretch to the full width of a wide console
+     and read as the page's primary action. It is a way to narrow the list,
+     not the reason the page exists. */
+  max-width: 26rem;
+}
+
+.list-controls__search-icon {
+  position: absolute;
+  inset-inline-start: var(--space-3);
+  display: inline-flex;
+  color: var(--color-text-muted);
+  pointer-events: none;
+}
+
+.list-controls__search-input {
+  width: 100%;
+  padding: 7px var(--space-3) 7px calc(var(--space-3) * 2 + 15px);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  transition: border-color 140ms ease-out, box-shadow 140ms ease-out;
+}
+
+.list-controls__search-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.list-controls__search-input:focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+
+/* Chrome and Safari draw their own clear button on type="search"; hiding it
+   avoids two clear affordances sitting side by side saying the same thing. */
+.list-controls__search-input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
+.list-controls__search-clear {
+  position: absolute;
+  inset-inline-end: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: color 140ms ease-out, background-color 140ms ease-out;
+}
+
+.list-controls__search-clear:hover {
+  color: var(--color-text);
+  background-color: var(--color-bg);
+}
+
+.list-controls__search-clear:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* -- Sort ---------------------------------------------------------------- */
+
+.list-controls__sort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-inline-start: auto;
+}
+
+/* Mono small-caps, matching every other field label in the console. */
+.list-controls__sort-label {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.list-controls__sort-select {
+  padding: 6px var(--space-2);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.list-controls__sort-select:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* -- Result summary ------------------------------------------------------ */
+
+.list-controls__summary {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.03em;
+  color: var(--color-text-muted);
+}
+
+/* -- Empty result state -------------------------------------------------- */
+
+/* Distinct from the list's own "nothing here yet" empty state. Those two get
+   confused constantly, and telling someone to create their first homework
+   when they have twelve and merely mistyped a search is worse than saying
+   nothing at all. */
+.list-empty {
+  padding: var(--space-6) var(--space-5);
+  text-align: center;
+  border: 1px dashed var(--color-border);
+  border-radius: 8px;
+}
+
+.list-empty__title {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+
+.list-empty__body {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.list-empty__action {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.list-empty__action:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 40rem) {
+  .list-controls__search {
+    max-width: none;
+  }
+  .list-controls__sort {
+    margin-inline-start: 0;
+  }
+}
+
 /* -- Group: a ruled fieldset, replacing the browser's default box --------- */
 
 .admin-form-group {
@@ -3873,6 +4800,135 @@ body {
 
 .admin-markdown-preview > :first-child { margin-block-start: 0; }
 .admin-markdown-preview > :last-child  { margin-block-end: 0; }
+
+/* Tailwind's preflight resets headings to inherit size/weight, strips list
+   markers and indentation, and flattens blockquotes and tables. ReactMarkdown
+   was emitting correct semantic elements the whole time and they rendered
+   indistinguishably from plain text -- a preview that previews nothing.
+   Restored here rather than reaching for a prose plugin, because the scale
+   should be this console's type scale, not a generic one.
+
+   Deliberately modest: this is a preview inside a form, subordinate to the
+   textarea above it, so the heading steps are compressed relative to a real
+   document. It should read as formatted without competing with the field. */
+
+.admin-markdown-preview h1,
+.admin-markdown-preview h2,
+.admin-markdown-preview h3,
+.admin-markdown-preview h4 {
+  margin-block: var(--space-4) var(--space-2);
+  font-family: var(--font-sans);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+}
+
+.admin-markdown-preview h1 { font-size: var(--font-size-lg); }
+.admin-markdown-preview h2 { font-size: var(--font-size-base); }
+.admin-markdown-preview h3,
+.admin-markdown-preview h4 {
+  font-size: var(--font-size-sm);
+  /* Below h2 the size scale runs out, so weight and small-caps carry the
+     level instead of shrinking text past readability. */
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-secondary);
+}
+
+.admin-markdown-preview p {
+  margin-block: 0 var(--space-3);
+}
+
+.admin-markdown-preview ul,
+.admin-markdown-preview ol {
+  margin-block: 0 var(--space-3);
+  padding-inline-start: var(--space-5);
+}
+
+.admin-markdown-preview ul { list-style: disc; }
+.admin-markdown-preview ol { list-style: decimal; }
+
+.admin-markdown-preview li {
+  margin-block-end: var(--space-1);
+}
+
+.admin-markdown-preview li::marker {
+  color: var(--color-text-muted);
+}
+
+/* Nested lists step down, matching how an authored problem statement
+   usually nests sub-parts. */
+.admin-markdown-preview li > ul,
+.admin-markdown-preview li > ol {
+  margin-block: var(--space-1) 0;
+}
+
+.admin-markdown-preview li > ul { list-style: circle; }
+
+.admin-markdown-preview strong { font-weight: var(--weight-semibold); }
+.admin-markdown-preview em { font-style: italic; }
+
+/* The console's rule vocabulary: a quiet leading rule rather than a fill. */
+.admin-markdown-preview blockquote {
+  margin: 0 0 var(--space-3);
+  padding-inline-start: var(--space-4);
+  border-inline-start: 2px solid var(--color-border-strong);
+  color: var(--color-text-secondary);
+}
+
+.admin-markdown-preview a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.admin-markdown-preview hr {
+  margin-block: var(--space-4);
+  border: none;
+  border-block-start: 1px solid var(--color-border);
+}
+
+/* Ruled like the record rows, not boxed -- same reasoning as the rest of
+   this console's tabular surfaces. */
+.admin-markdown-preview table {
+  width: 100%;
+  margin-block: 0 var(--space-3);
+  border-collapse: collapse;
+  font-size: var(--font-size-xs);
+}
+
+.admin-markdown-preview th,
+.admin-markdown-preview td {
+  padding: var(--space-2) var(--space-3);
+  border-block-end: 1px solid var(--color-border);
+  text-align: start;
+  vertical-align: top;
+}
+
+.admin-markdown-preview th {
+  font-family: var(--font-mono);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+/* Fenced blocks: distinct from the inline `code` rule below. */
+.admin-markdown-preview pre {
+  margin-block: 0 var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-code-bg);
+  overflow-x: auto;
+}
+
+.admin-markdown-preview pre code {
+  padding: 0;
+  background: none;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-code);
+}
 
 .admin-markdown-preview code {
   font-family: var(--font-mono);
@@ -4345,6 +5401,69 @@ body {
   display: flex;
   justify-content: flex-end;
   gap: var(--space-3);
+}
+
+/* ==========================================================================
+   .admin-scale — a pedagogical value, not a number input.
+
+   Temperature and the token ceiling are the two settings an instructor is
+   least equipped to reason about as raw numbers, and most able to reason
+   about as behaviour. So the track is the control and the figure is a
+   readout: mono, tabular, to the right, deliberately quiet. The anchors
+   below name what each end does to the student's experience rather than
+   describing the parameter ("Consistent"/"Varied", not "low"/"high").
+
+   Heritage Gold on the filled side, because this is the AI's own voice
+   being tuned -- the same reason gold marks the tutor everywhere else in
+   this product rather than the purple chrome.
+   ========================================================================== */
+
+.admin-scale {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.admin-scale__input {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--color-accent-warm);
+  cursor: pointer;
+}
+
+/* Tabular so the readout does not jitter as digits change under the thumb. */
+.admin-scale__value {
+  min-width: 4ch;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+  text-align: end;
+}
+
+.admin-scale__anchors {
+  display: flex;
+  justify-content: space-between;
+  margin-block-start: var(--space-1);
+  /* Same mono small-caps as every other label in this console. */
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+/* An option that exists but is not available yet. Shown rather than hidden
+   so the reader learns the model instead of wondering what is missing --
+   the explanation lives in the label's own second line. */
+.admin-form-check--disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.admin-form-check--disabled .admin-form-check__label {
+  color: var(--color-text-secondary);
 }
 
 /* ==========================================================================

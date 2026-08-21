@@ -143,7 +143,7 @@ describe("HomeworkReadOnlyView (#172 audit)", () => {
   });
 
   it("surfaces a load failure rather than rendering an empty shell", async () => {
-    stub({}, 403);
+    stub({}, 500);
     render(
       <HomeworkReadOnlyView
         courseId="c1"
@@ -153,5 +153,117 @@ describe("HomeworkReadOnlyView (#172 audit)", () => {
       />,
     );
     await waitFor(() => screen.getByRole("alert"));
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #191 (#172 re-audit, USE-027): three load outcomes, not one boolean.
+
+   The failure that mattered: an instructor hides a homework while a TA has
+   the list open. The TA clicks it, the server 404s deliberately, and the
+   console said "Failed to load this homework." with no retry and no reason.
+   The honest reading of that screen is "the console is broken", so the TA
+   files an outage for a system doing exactly what it was told to.
+   -------------------------------------------------------------------------- */
+describe("HomeworkReadOnlyView load states (#191)", () => {
+  function renderView() {
+    render(
+      <HomeworkReadOnlyView
+        courseId="c1"
+        homeworkId="hw-1"
+        onBack={vi.fn()}
+        canViewSolutions={false}
+      />,
+    );
+  }
+
+  for (const status of [403, 404]) {
+    it(`treats ${status} as a permission outcome with no retry`, async () => {
+      stub({}, status);
+      renderView();
+      await waitFor(() => screen.getByText(/not available to you/i));
+      expect(screen.getByText(/withdrawn from release/i)).toBeTruthy();
+      // No Try again: retrying a permission outcome cannot succeed, and a
+      // button that never works reads as a broken console.
+      expect(screen.queryByRole("button", { name: /try again/i })).toBeNull();
+      // Not an alert either -- this is the page's content, not an
+      // interruption. AdminNotice reserves role="alert" for the error tone.
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+  }
+
+  it("treats 5xx as a failure and offers a retry that refetches", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("{}", { status: 500 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ...BASE, sections: [] }), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    renderView();
+
+    const retry = await screen.findByRole("button", { name: /try again/i });
+    expect(screen.getByText(/didn't load/i)).toBeTruthy();
+    retry.click();
+    // The retry is real: the second response renders, so the button
+    // re-issued the request rather than only clearing the error.
+    await waitFor(() => screen.getByText(/Probability/));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports a 200 whose body does not parse as a failure, not a denial", async () => {
+    // Deploy skew, not permissions -- the caller may well be entitled to
+    // this homework, so the retry stays on offer.
+    stub({ nonsense: true });
+    renderView();
+    await waitFor(() => screen.getByText(/didn't load/i));
+    expect(screen.getByRole("button", { name: /try again/i })).toBeTruthy();
+  });
+
+  it("names a timeout as a timeout and offers a retry", async () => {
+    vi.useFakeTimers();
+    // Never settles on its own; only the 15s timeout can end it.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init?: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+          }),
+      ),
+    );
+    renderView();
+    await vi.advanceTimersByTimeAsync(15_000);
+    vi.useRealTimers();
+    await waitFor(() => screen.getByText(/Loading this homework timed out/i));
+    expect(screen.getByRole("button", { name: /try again/i })).toBeTruthy();
+  });
+
+  it("stays silent when the view is torn down mid-flight", async () => {
+    // #202 (MNT-032): the lifecycle abort is a genuine abort on the request,
+    // not a flag read after it settles -- so nothing renders, and nothing
+    // flashes an error on the way out.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init?: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+          }),
+      ),
+    );
+    const view = render(
+      <HomeworkReadOnlyView
+        courseId="c1"
+        homeworkId="hw-1"
+        onBack={vi.fn()}
+        canViewSolutions={false}
+      />,
+    );
+    view.unmount();
+    await Promise.resolve();
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });

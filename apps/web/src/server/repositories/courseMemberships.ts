@@ -2,7 +2,9 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { courseMemberships, users } from "../../db/schema";
 import type { CourseScope } from "./scope";
-import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
+import { IdentityCipher } from "../../lib/crypto/identity-cipher";
+import { emailForNetid, isValidNetid } from "../../lib/netid";
+import { allowedDomainsForCourse, upsertCourseMember } from "./roster";
 
 /** The stored grant on one TA membership. The PATCH echo returns exactly
  *  this -- no identity, because the caller already knows who they edited and
@@ -22,6 +24,11 @@ export interface TaCapabilityGrant {
 export interface CourseTaCapabilities extends TaCapabilityGrant {
   displayName: string;
   email: string;
+  /** #210: true for a TA added by NetID who has never logged in, so the
+   *  console can tell "waiting for them to sign in" apart from "something is
+   *  wrong". Before #210 no path created a pending `ta`, so this was always
+   *  false and the distinction did not exist. */
+  isPending: boolean;
 }
 
 /** Lists the course's non-dropped TA memberships. Course-scoped, never
@@ -43,6 +50,7 @@ export async function listCourseTas(
       userId: courseMemberships.userId,
       displayName: users.displayName,
       email: users.email,
+      isPending: users.isPending,
       canViewSolutions: courseMemberships.canViewSolutions,
       canViewDrafts: courseMemberships.canViewDrafts,
     })
@@ -85,6 +93,7 @@ export async function listCourseTas(
       userId: r.userId,
       displayName: r.displayName ? await cipher.decryptString(r.displayName) : "",
       email: await cipher.decryptString(r.email),
+      isPending: r.isPending,
       canViewSolutions: r.canViewSolutions,
       canViewDrafts: r.canViewDrafts,
     })),
@@ -140,4 +149,170 @@ export async function setTaCapabilities(
       canViewDrafts: courseMemberships.canViewDrafts,
     });
   return updated ?? null;
+}
+
+/* --------------------------------------------------------------------------
+   #210: adding and removing course TAs by NetID.
+
+   Before this, nothing in the product put a TA on a course. The TA
+   permissions page (#172) grants capabilities to TAs who are already
+   enrolled, so for a course with no TAs it was a dead end -- an instructor
+   had no next action anywhere in the console (#192).
+   -------------------------------------------------------------------------- */
+
+/** One entered NetID's outcome. Per-NetID rather than one collective
+ *  pass/fail because bulk entry with a single "failed" is unusable when
+ *  three of eight NetIDs were typos and the instructor cannot tell which.
+ *
+ *  On `added` vs `restored` (#210's second open question): the distinction
+ *  is kept. It tells an authorized instructor whether to expect the person
+ *  to log in for the first time or to already have an account -- which is
+ *  the difference between "waiting on them" and "something is wrong". It
+ *  does leak, to someone who is already course staff adding their own TAs,
+ *  whether a given NetID has ever used LLteacher. That is a deliberate
+ *  trade, recorded here rather than arrived at by accident. */
+export type AddTaStatus =
+  /** No user existed: a pending user and an active `ta` membership. */
+  | "added"
+  /** A dropped membership was restored to `ta`, both grants cleared. */
+  | "restored"
+  /** Already an active TA of this course. No write. */
+  | "already_ta"
+  /** Not a well-formed UW NetID; nothing was created. See lib/netid.ts. */
+  | "invalid_netid"
+  /** Active membership in this course under another role. Refused rather
+   *  than promoted -- see the comment on the branch below. */
+  | "role_conflict";
+
+export interface AddTaResult {
+  netid: string;
+  status: AddTaStatus;
+  membershipId?: string;
+  /** Present for `role_conflict`, so the instructor is told what the person
+   *  already is rather than just that it did not work. */
+  existingRole?: string;
+}
+
+/** Adds TAs to a course by UW NetID, one independent outcome per entry.
+ *
+ *  #86's rule -- manual add, CSV import and NetID entry must be ONE
+ *  provisioning pipeline -- means this is now an adapter rather than a
+ *  second implementation. It does the two things that are genuinely
+ *  NetID-specific (validate the format, derive the address) and hands the
+ *  rest to `upsertCourseMember`, which owns the upsert semantics, the
+ *  capability-flag clearing and the role-conflict rule for every caller.
+ *
+ *  An earlier version of this function duplicated that logic. The duplicate
+ *  was correct on the day it was written, which is exactly the state from
+ *  which two implementations drift.
+ *
+ *  The status vocabulary stays NetID-shaped (`already_ta`, `invalid_netid`)
+ *  because that is what the admin panel renders and what #210 specifies;
+ *  the mapping from the shared vocabulary is the last thing this does. */
+export async function addTasByNetid(
+  db: Db,
+  scope: CourseScope,
+  cipher: IdentityCipher,
+  netids: string[],
+): Promise<AddTaResult[]> {
+  const results: AddTaResult[] = [];
+  // Deduplicated after normalization: pasting a list twice, or with a
+  // trailing blank line, should not produce two rows of results for one
+  // person -- and the second pass would report `already_ta` for a NetID the
+  // first pass had just added, which reads as a contradiction.
+  const seen = new Set<string>();
+
+  // Read once for the whole batch rather than per entry: a 100-NetID paste
+  // would otherwise issue 100 identical queries for a value that cannot
+  // change mid-request.
+  const allowedDomains = await allowedDomainsForCourse(db, scope);
+
+  for (const raw of netids) {
+    const netid = IdentityCipher.normalizeNetid(raw);
+    if (netid === "" || seen.has(netid)) continue;
+    seen.add(netid);
+
+    if (!isValidNetid(netid)) {
+      results.push({ netid, status: "invalid_netid" });
+      continue;
+    }
+
+    const provisioned = await upsertCourseMember(
+      db,
+      scope,
+      cipher,
+      { email: emailForNetid(netid), role: "ta" },
+      allowedDomains,
+    );
+
+    switch (provisioned.status) {
+      case "added":
+      case "restored":
+        results.push({ netid, status: provisioned.status, membershipId: provisioned.membershipId });
+        break;
+      case "already_enrolled":
+        results.push({ netid, status: "already_ta", membershipId: provisioned.membershipId });
+        break;
+      case "role_conflict":
+        results.push({
+          netid,
+          status: "role_conflict",
+          existingRole: provisioned.existingRole,
+        });
+        break;
+      // A NetID that passed isValidNetid always yields a well-formed
+      // `netid@uw.edu`, so these are only reachable if an organization's
+      // allowlist excludes uw.edu -- a real configuration, and one an
+      // instructor should be told about rather than see as a silent no-op.
+      case "invalid_email":
+      case "disallowed_domain":
+        results.push({ netid, status: "invalid_netid" });
+        break;
+    }
+  }
+
+  return results;
+}
+
+/** Removes a TA from a course. Soft: sets dropped_at + dropped_reason and
+ *  never deletes the row, because submissions, grades and audit history
+ *  reference the membership id.
+ *
+ *  Clears both capability flags, for the reason SEC-006 gives and 0027 now
+ *  enforces: `listCourseTas` filters `dropped_at IS NULL`, so a grant left on
+ *  a dropped row is invisible on the only page that can revoke it. (Since
+ *  #207 the database rejects the write that would leave one, so this is the
+ *  statement that keeps the removal legal, not merely tidy.)
+ *
+ *  Returns null when no such active TA membership exists in this course --
+ *  covering "no such id", "belongs to another course", "not a TA" and
+ *  "already removed" indistinguishably, so a probing caller learns nothing.
+ *  Same shape as setTaCapabilities. */
+export async function removeCourseTa(
+  db: Db,
+  scope: CourseScope,
+  membershipId: string,
+): Promise<{ membershipId: string; userId: string } | null> {
+  const [removed] = await db
+    .update(courseMemberships)
+    .set({
+      droppedAt: new Date(),
+      droppedReason: "roster_removal",
+      canViewSolutions: false,
+      canViewDrafts: false,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(courseMemberships.id, membershipId),
+        eq(courseMemberships.courseId, scope),
+        eq(courseMemberships.role, "ta"),
+        isNull(courseMemberships.droppedAt),
+      ),
+    )
+    .returning({
+      membershipId: courseMemberships.id,
+      userId: courseMemberships.userId,
+    });
+  return removed ?? null;
 }

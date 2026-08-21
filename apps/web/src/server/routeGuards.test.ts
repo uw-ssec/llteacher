@@ -63,6 +63,23 @@ const handlers = {
   getSectionAnswer: ok("getSectionAnswer"),
   listCourseTas: ok("listCourseTas"),
   updateTaCapabilities: ok("updateTaCapabilities"),
+  addCourseTas: ok("addCourseTas"),
+  removeCourseTa: ok("removeCourseTa"),
+  listLlmConfigs: ok("listLlmConfigs"),
+  createLlmConfig: ok("createLlmConfig"),
+  getLlmConfig: ok("getLlmConfig"),
+  updateLlmConfig: ok("updateLlmConfig"),
+  deactivateLlmConfig: ok("deactivateLlmConfig"),
+  cloneLlmConfig: ok("cloneLlmConfig"),
+  testLlmConfig: ok("testLlmConfig"),
+  listRoster: ok("listRoster"),
+  addRosterMember: ok("addRosterMember"),
+  importRoster: ok("importRoster"),
+  removeRosterMember: ok("removeRosterMember"),
+  listGrades: ok("listGrades"),
+  saveGrade: ok("saveGrade"),
+  draftGrade: ok("draftGrade"),
+  createExport: ok("createExport"),
 };
 
 vi.mock("./routes/homeworks", () => ({
@@ -82,9 +99,34 @@ vi.mock("./routes/sectionAnswers", () => ({
   getSectionAnswerHandler: (c: Context) => handlers.getSectionAnswer(c),
   submitSectionAnswerHandler: (c: Context) => c.json({}, 200),
 }));
+vi.mock("./routes/grades", () => ({
+  listGradesHandler: (c: Context) => handlers.listGrades(c),
+  saveGradeHandler: (c: Context) => handlers.saveGrade(c),
+  draftGradeHandler: (c: Context) => handlers.draftGrade(c),
+}));
+vi.mock("./routes/exports", () => ({
+  createExportHandler: (c: Context) => handlers.createExport(c),
+}));
+vi.mock("./routes/roster", () => ({
+  listRosterHandler: (c: Context) => handlers.listRoster(c),
+  addRosterMemberHandler: (c: Context) => handlers.addRosterMember(c),
+  importRosterHandler: (c: Context) => handlers.importRoster(c),
+  removeRosterMemberHandler: (c: Context) => handlers.removeRosterMember(c),
+}));
+vi.mock("./routes/llmConfigs", () => ({
+  listLlmConfigsHandler: (c: Context) => handlers.listLlmConfigs(c),
+  createLlmConfigHandler: (c: Context) => handlers.createLlmConfig(c),
+  getLlmConfigHandler: (c: Context) => handlers.getLlmConfig(c),
+  updateLlmConfigHandler: (c: Context) => handlers.updateLlmConfig(c),
+  deactivateLlmConfigHandler: (c: Context) => handlers.deactivateLlmConfig(c),
+  cloneLlmConfigHandler: (c: Context) => handlers.cloneLlmConfig(c),
+  testLlmConfigHandler: (c: Context) => handlers.testLlmConfig(c),
+}));
 vi.mock("./routes/courseMemberships", () => ({
   listCourseTasHandler: (c: Context) => handlers.listCourseTas(c),
   updateTaCapabilitiesHandler: (c: Context) => handlers.updateTaCapabilities(c),
+  addCourseTasHandler: (c: Context) => handlers.addCourseTas(c),
+  removeCourseTaHandler: (c: Context) => handlers.removeCourseTa(c),
 }));
 
 const findMany = vi.fn();
@@ -170,6 +212,63 @@ const ROUTES: { method: string; path: string; handler: HandlerName; admits: Pers
   { method: "GET", path: "/api/courses/course-a/tas", handler: "listCourseTas",
     admits: ["instructor", "admin"] },
   { method: "PATCH", path: `/api/courses/course-a/tas/${HW}/capabilities`, handler: "updateTaCapabilities",
+    admits: ["instructor", "admin"] },
+
+  // #210: putting someone on the course as a TA, and taking them off, are
+  // the same authority as granting -- a TA must not be able to recruit
+  // another TA, nor re-add themselves after removal.
+  { method: "POST", path: "/api/courses/course-a/tas", handler: "addCourseTas",
+    admits: ["instructor", "admin"] },
+  { method: "DELETE", path: `/api/courses/course-a/tas/${HW}`, handler: "removeCourseTa",
+    admits: ["instructor", "admin"] },
+
+  // #31/#170: repointing the organization at a different model, or changing
+  // what the tutor is told it is, is authoring authority of the widest kind
+  // -- it changes what every student in every course in the org talks to. A
+  // TA is a grader and must not reach any of these, read included: the base
+  // prompt is instructional design, not student work.
+  { method: "GET", path: "/api/courses/course-a/llm-configs", handler: "listLlmConfigs",
+    admits: ["instructor", "admin"] },
+  { method: "POST", path: "/api/courses/course-a/llm-configs", handler: "createLlmConfig",
+    admits: ["instructor", "admin"] },
+  { method: "GET", path: `/api/courses/course-a/llm-configs/${HW}`, handler: "getLlmConfig",
+    admits: ["instructor", "admin"] },
+  { method: "PATCH", path: `/api/courses/course-a/llm-configs/${HW}`, handler: "updateLlmConfig",
+    admits: ["instructor", "admin"] },
+  { method: "DELETE", path: `/api/courses/course-a/llm-configs/${HW}`, handler: "deactivateLlmConfig",
+    admits: ["instructor", "admin"] },
+  { method: "POST", path: `/api/courses/course-a/llm-configs/${HW}/clone`, handler: "cloneLlmConfig",
+    admits: ["instructor", "admin"] },
+  { method: "POST", path: `/api/courses/course-a/llm-configs/${HW}/test`, handler: "testLlmConfig",
+    admits: ["instructor", "admin"] },
+
+  // #32/#86: deciding who is in the class is instructor authority. A TA
+  // reads student work -- admitting them here would let a grader enrol
+  // themselves anywhere, or remove the students whose work they grade.
+  { method: "GET", path: "/api/courses/course-a/roster", handler: "listRoster",
+    admits: ["instructor", "admin"] },
+  { method: "POST", path: "/api/courses/course-a/roster", handler: "addRosterMember",
+    admits: ["instructor", "admin"] },
+  { method: "POST", path: "/api/courses/course-a/roster/import", handler: "importRoster",
+    admits: ["instructor", "admin"] },
+  { method: "DELETE", path: `/api/courses/course-a/roster/${HW}`, handler: "removeRosterMember",
+    admits: ["instructor", "admin"] },
+
+  // #75: grading is instructor-tier, deliberately NARROWER than the
+  // submission reads above, which admit a TA. A grade is an education record
+  // a student may dispute; reading their work and grading it are different
+  // authorities. A test that admitted "ta" here would be the mutation this
+  // row exists to catch.
+  { method: "GET", path: `/api/courses/course-a/submissions/${HW}/grades`, handler: "listGrades",
+    admits: ["instructor", "admin"] },
+  { method: "POST", path: `/api/courses/course-a/submissions/${HW}/grades`, handler: "saveGrade",
+    admits: ["instructor", "admin"] },
+  { method: "POST", path: `/api/courses/course-a/submissions/${HW}/grades/draft`, handler: "draftGrade",
+    admits: ["instructor", "admin"] },
+
+  // #91: export. Narrower than reading the same data in the console, because
+  // the artifact leaves the platform's control on download.
+  { method: "POST", path: "/api/courses/course-a/exports", handler: "createExport",
     admits: ["instructor", "admin"] },
 ];
 

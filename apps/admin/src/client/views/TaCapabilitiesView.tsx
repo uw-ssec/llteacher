@@ -19,8 +19,16 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Users, Warning } from "@phosphor-icons/react";
+import { AddTasPanel, type AddTaResult } from "../components/AddTasPanel";
 import { PageHeader } from "../components/PageHeader";
 import { abortAfter } from "../lib/abortAfter";
+
+/** Mirrors MAX_TAS_PER_REQUEST in apps/web's route, so the form states the
+ *  bound it will be held to rather than letting the instructor discover it
+ *  as a 400 after pasting a long list. apps/admin never imports from
+ *  apps/web, so this is the same deliberate duplication as the payload types
+ *  above -- and the route test pins the server's number. */
+const MAX_TAS_PER_REQUEST = 100;
 import type { TaCapabilityField } from "@llteacher/ui";
 
 export interface TaCapabilities {
@@ -28,6 +36,10 @@ export interface TaCapabilities {
   userId: string;
   displayName: string;
   email: string;
+  /** #210: added by NetID, never signed in. An instructor needs to tell
+   *  "waiting for them to log in" apart from "something is wrong" -- before
+   *  #210 nothing created a pending TA, so the distinction did not exist. */
+  isPending: boolean;
   canViewSolutions: boolean;
   canViewDrafts: boolean;
 }
@@ -45,19 +57,31 @@ type CapabilityField = TaCapabilityField;
 /** Column copy names the homework statuses the grant actually covers, in the
  *  instructor's own vocabulary (#172 audit, USE-005). "Unreleased" appears
  *  nowhere in HomeworksView's status labels, so an instructor could not tell
- *  whether a scheduled or hidden homework was included. */
-const CAPABILITY_COLUMNS: { field: CapabilityField; label: string; help: string }[] = [
-  {
-    field: "canViewSolutions",
+ *  whether a scheduled or hidden homework was included.
+ *
+ *  #202 (MNT-028), second half: keyed by capability field and constrained
+ *  with `satisfies Record<CapabilityField, ...>`, so adding or renaming a
+ *  field in @llteacher/ui fails to compile here rather than quietly dropping
+ *  a column from the only surface that grants it. An array of
+ *  `{ field, label, help }` could not do that -- an array stays assignable
+ *  while a member is missing.
+ *
+ *  Declaration order below is the column order, since the columns are
+ *  derived from this object's keys. */
+const CAPABILITY_COPY = {
+  canViewSolutions: {
     label: "Model solutions",
     help: "Can open the Solution on every section of every homework in this course.",
   },
-  {
-    field: "canViewDrafts",
+  canViewDrafts: {
     label: "Unreleased homeworks",
     help: "Can open homeworks in draft, scheduled, or hidden status.",
   },
-];
+} satisfies Record<CapabilityField, { label: string; help: string }>;
+
+const CAPABILITY_COLUMNS: { field: CapabilityField; label: string; help: string }[] = (
+  Object.keys(CAPABILITY_COPY) as CapabilityField[]
+).map((field) => ({ field, ...CAPABILITY_COPY[field] }));
 
 /** Runtime-validated rather than cast (#172 audit). A wrong-shaped row would
  *  otherwise render a checkbox with `checked={undefined}` — React flips it to
@@ -77,6 +101,10 @@ function parseTa(raw: unknown): TaCapabilities | null {
     userId: t.userId,
     displayName: typeof t.displayName === "string" ? t.displayName : "",
     email: typeof t.email === "string" ? t.email : "",
+    // Absent on a pre-#210 server: read as false rather than dropping the
+    // row, matching how AuthProvider degrades a missing field. "Not marked
+    // pending" is the safe reading -- it claims nothing the payload did not.
+    isPending: t.isPending === true,
     canViewSolutions: t.canViewSolutions,
     canViewDrafts: t.canViewDrafts,
   };
@@ -105,8 +133,19 @@ function parseGrant(raw: unknown): TaCapabilityGrant | null {
 
 /** Surfaces the server's own message when it sent one, so a 404 ("this TA
  *  may have been removed") isn't reported as "please try again" — advice
- *  that would never succeed (#172 audit, USE-003). */
-async function errorMessageFor(res: Response): Promise<string> {
+ *  that would never succeed (#172 audit, USE-003).
+ *
+ *  #210: `fallback` names the action that failed. This page now performs two
+ *  different writes against the same TA row, and the capability wording
+ *  ("Could not update that permission") told an instructor whose *removal*
+ *  failed that something else had gone wrong -- pointing them at the wrong
+ *  control to retry. The 404 and 403 branches are shared deliberately: those
+ *  two sentences are about the row and the session, not about which button
+ *  was pressed. */
+async function errorMessageFor(
+  res: Response,
+  fallback = "Could not update that permission.",
+): Promise<string> {
   let serverMessage = "";
   try {
     const body = (await res.json()) as { error?: unknown };
@@ -125,8 +164,8 @@ async function errorMessageFor(res: Response): Promise<string> {
     return serverMessage || "That teaching assistant is no longer in this course.";
   }
   if (res.status === 403) return "Your permissions changed. Reload the console.";
-  if (res.status >= 500) return "Could not update that permission. Please try again.";
-  return serverMessage || "Could not update that permission.";
+  if (res.status >= 500) return `${fallback.replace(/\.$/, "")}. Please try again.`;
+  return serverMessage || fallback;
 }
 
 export function TaCapabilitiesView({
@@ -164,8 +203,24 @@ export function TaCapabilitiesView({
   const savingKey = (membershipId: string, field: CapabilityField) => `${membershipId}:${field}`;
   /** Announced politely so a screen reader learns the save landed; the region
    *  is mounted for the view's lifetime, since conditionally mounting a live
-   *  region is the pattern that silently fails to announce (ACC-004). */
-  const [liveMessage, setLiveMessage] = useState("");
+   *  region is the pattern that silently fails to announce (ACC-004).
+   *
+   *  #204 (ACC-026): carries a monotonic nonce, and the region renders the
+   *  text inside a `key={nonce}` child. Plain `announce(string)` bailed
+   *  out by Object.is on an identical value, so the text node never mutated
+   *  and an unchanged live region announces nothing. Several writers here
+   *  emit fixed strings, so consecutive identical writes are reachable: two
+   *  rows failing with the same generic message announced only the first,
+   *  while the visible error *moved* to the second row. The screen reader
+   *  and the screen then disagreed about which row had failed.
+   *
+   *  The nonce keys a child, never the region itself -- remounting the
+   *  region is the ACC-004 defect. */
+  const [live, setLive] = useState<{ text: string; nonce: number }>({ text: "", nonce: 0 });
+  const announce = useCallback(
+    (text: string) => setLive((prev) => ({ text, nonce: prev.nonce + 1 })),
+    [],
+  );
   const abortRef = useRef<AbortController | null>(null);
   /** #196 (#172 re-audit, ACC-020): focus survives a teardown.
    *
@@ -183,13 +238,18 @@ export function TaCapabilitiesView({
   const load = useCallback(() => {
     setTas(null);
     setLoadError(false);
+    // #204 (ACC-028): the loading and failure states are announced from
+    // here, through the one permanently-mounted region, rather than by
+    // mounting a `role="status"` / `role="alert"` block that already
+    // contains its text.
+    announce("Loading teaching assistants…");
     // NOT setSaveError(null): a 404 on a save calls load() to drop the stale
     // row, and clearing the error here unmounted the only explanation the
     // instructor ever got. The refetched roster no longer contains that TA,
     // so the inline message had nowhere to render either -- the toggle
     // simply reverted with no stated reason (#172 audit, USE-010). The
     // orphan notice below is what keeps it on screen.
-    const { signal, dispose } = abortAfter(15_000, abortRef.current?.signal);
+    const { signal, dispose } = abortAfter(15_000, abortRef.current?.signal ?? null);
     fetch(`/api/courses/${courseId}/tas`, { signal })
       .then((r) => {
         if (!r.ok) throw new Error(`failed: ${r.status}`);
@@ -211,15 +271,21 @@ export function TaCapabilitiesView({
               (a.displayName || a.email).localeCompare(b.displayName || b.email),
             ),
         );
+        announce(
+          rows.length === 1
+            ? "1 teaching assistant loaded."
+            : `${rows.length} teaching assistants loaded.`,
+        );
       })
       .catch((err: unknown) => {
         // An unmount/course-change abort is not a load failure -- reporting
         // it would flash an error banner on the way out.
         if ((err as Error)?.name === "AbortError") return;
         setLoadError(true);
+        announce("Failed to load teaching assistants for this course.");
       })
       .finally(dispose);
-  }, [courseId]);
+  }, [courseId, announce]);
 
   // Runs after the roster re-renders. If the row survived, put focus back on
   // the exact checkbox; if it did not, put it on the notice explaining why,
@@ -245,19 +311,28 @@ export function TaCapabilitiesView({
   const toggle = useCallback(
     async (ta: TaCapabilities, field: CapabilityField) => {
       const key = savingKey(ta.membershipId, field);
-      if (savingIds.has(key)) return;
-      const next = !ta[field];
       const column = CAPABILITY_COLUMNS.find((c) => c.field === field)!;
       const who = ta.displayName || ta.email || ta.userId;
+      // #204 (ACC-024): the re-entry guard was a bare `return`. The control
+      // is deliberately not `disabled` while saving (ACC-002), so the browser
+      // toggles the DOM checkbox on the second press and React then reverts
+      // it -- with nothing announced. A VoiceOver user pressing Space twice
+      // during a slow save heard the toggle, heard nothing about the revert,
+      // and walked away believing the opposite of what is stored.
+      if (savingIds.has(key)) {
+        announce(`Still saving ${column.label} for ${who} — please wait.`);
+        return;
+      }
+      const next = !ta[field];
 
       setSavingIds((prev) => new Set(prev).add(key));
       setSaveError(null);
-      setLiveMessage(`Saving ${column.label} for ${who}…`);
+      announce(`Saving ${column.label} for ${who}…`);
       // Composed, not `abortRef.current?.signal` alone: the lifecycle signal
       // has no timeout, so a PATCH against a hung Worker stayed pending
       // forever with the row stuck on "Saving…" and no way back except a
       // reload (#172 audit, REL-011).
-      const { signal, dispose } = abortAfter(15_000, abortRef.current?.signal);
+      const { signal, dispose } = abortAfter(15_000, abortRef.current?.signal ?? null);
       try {
         const res = await fetch(`/api/courses/${courseId}/tas/${ta.membershipId}/capabilities`, {
           method: "PATCH",
@@ -268,7 +343,12 @@ export function TaCapabilitiesView({
         if (!res.ok) {
           const message = await errorMessageFor(res);
           setSaveError({ membershipId: ta.membershipId, field, message });
-          setLiveMessage(message);
+          // #204 (ACC-025): NOT announced on the 404 path. That path refetches,
+          // the row disappears, and the same string lands in the orphan
+          // notice, which is then focused (#196) -- so a polite write here
+          // made one event produce two announcements, the assertive one able
+          // to clip the polite copy. One message, one channel.
+          if (res.status !== 404) announce(message);
           // A 404 means the row is stale — refetch so it stops being offered.
           if (res.status === 404) {
             // Remember where the user was standing; the refetch is about to
@@ -285,7 +365,7 @@ export function TaCapabilitiesView({
         if (!grant || grant.membershipId !== ta.membershipId) {
           const message = "The server returned an unexpected response. Reload the console.";
           setSaveError({ membershipId: ta.membershipId, field, message });
-          setLiveMessage(message);
+          announce(message);
           return;
         }
         // Identity comes from the row we already have -- the echo carries
@@ -298,7 +378,7 @@ export function TaCapabilitiesView({
         setTas((prev) =>
           prev ? prev.map((t) => (t.membershipId === ta.membershipId ? updated : t)) : prev,
         );
-        setLiveMessage(
+        announce(
           `${column.label} ${updated[field] ? "allowed" : "not allowed"} for ${who}.`,
         );
       } catch (err) {
@@ -312,7 +392,7 @@ export function TaCapabilitiesView({
             ? "That permission change timed out. It may not have been saved — reload to check."
             : "Could not update that permission. Please try again.";
         setSaveError({ membershipId: ta.membershipId, field, message });
-        setLiveMessage(message);
+        announce(message);
       } finally {
         dispose();
         setSavingIds((prev) => {
@@ -322,7 +402,82 @@ export function TaCapabilitiesView({
         });
       }
     },
-    [courseId, load, savingIds],
+    [courseId, load, savingIds, announce],
+  );
+
+  /** #210: POSTs the entered NetIDs and hands the per-entry results back to
+   *  the panel, which renders one line per NetID. Refetches on any success so
+   *  a newly added TA appears in the grant table immediately -- otherwise the
+   *  instructor is told someone was added and cannot then grant them
+   *  anything without a reload. */
+  const addTas = useCallback(
+    async (netids: string[]): Promise<AddTaResult[]> => {
+      const { signal, dispose } = abortAfter(30_000, abortRef.current?.signal ?? null);
+      try {
+        const res = await fetch(`/api/courses/${courseId}/tas`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ netids }),
+          signal,
+        });
+        if (!res.ok) throw new Error(await errorMessageFor(res, "Could not add those TAs."));
+        const body = (await res.json()) as { results?: unknown };
+        const results = Array.isArray(body.results) ? (body.results as AddTaResult[]) : [];
+        if (results.some((r) => r.status === "added" || r.status === "restored")) load();
+        return results;
+      } finally {
+        dispose();
+      }
+    },
+    [courseId, load],
+  );
+
+  /** #210: removal is a soft drop server-side -- the row survives, because
+   *  submissions and audit events reference it -- but from the instructor's
+   *  side it revokes access, so it is confirmed before it is sent. */
+  const removeTa = useCallback(
+    async (ta: TaCapabilities) => {
+      const who = ta.displayName || ta.email || ta.userId;
+      const confirmed = window.confirm(
+        `Remove ${who} from this course?\n\nThey lose access to the submissions dashboard and student answers, and any permissions you granted them are revoked. You can add them again by NetID.`,
+      );
+      if (!confirmed) return;
+
+      setSaveError(null);
+      announce(`Removing ${who}…`);
+      const { signal, dispose } = abortAfter(15_000, abortRef.current?.signal ?? null);
+      try {
+        const res = await fetch(`/api/courses/${courseId}/tas/${ta.membershipId}`, {
+          method: "DELETE",
+          signal,
+        });
+        if (!res.ok) {
+          const message = await errorMessageFor(
+            res,
+            "Could not remove that teaching assistant.",
+          );
+          setSaveError({ membershipId: ta.membershipId, field: "canViewSolutions", message });
+          announce(message);
+          // Same reasoning as the 404 path in `toggle`: the row is stale, so
+          // refetch rather than leaving an action on screen that cannot work.
+          if (res.status === 404) load();
+          return;
+        }
+        announce(`${who} removed from this course.`);
+        load();
+      } catch (err) {
+        if ((err as Error)?.name === "AbortError") return;
+        const message =
+          (err as Error)?.name === "TimeoutError"
+            ? "That removal timed out. Reload to check whether it was applied."
+            : "Could not remove that teaching assistant. Please try again.";
+        setSaveError({ membershipId: ta.membershipId, field: "canViewSolutions", message });
+        announce(message);
+      } finally {
+        dispose();
+      }
+    },
+    [courseId, load, announce],
   );
 
   return (
@@ -337,9 +492,17 @@ export function TaCapabilitiesView({
         subtitle="TAs can always read the submissions dashboard and student answers. Model solutions and unreleased homeworks are granted for this course only."
       />
 
-      {/* Mounted unconditionally so announcements are reliable (ACC-004). */}
+      {/* #204 (ACC-028): the view's ONE announcement channel. Mounted
+          unconditionally so announcements are reliable (ACC-004), and every
+          status string below is written here rather than inserted into the
+          DOM inside a fresh live region -- which is the same pattern ACC-004
+          named, and which the loading and failure blocks were still using.
+
+          The single exception is the orphan notice: it is focus-managed
+          (#196), so a screen reader reads it on focus, and writing it here
+          as well is the double-announcement ACC-025 filed. */}
       <div className="admin-visually-hidden" role="status" aria-live="polite">
-        {liveMessage}
+        <span key={live.nonce}>{live.text}</span>
       </div>
 
       {/* A save error whose row is no longer on screen -- because load() is
@@ -359,7 +522,11 @@ export function TaCapabilitiesView({
       )}
 
       {loadError ? (
-        <div className="admin-alert" role="alert">
+        // #204 (ACC-028): no role here. The block is inserted into the DOM
+        // already containing its text, which is the pattern ACC-004 named --
+        // announcement is unreliable. `load`'s catch writes the same sentence
+        // to the permanent region above, which is reliable.
+        <div className="admin-alert">
           <span className="admin-alert__icon" aria-hidden="true">
             <Warning size={16} weight="regular" />
           </span>
@@ -371,13 +538,35 @@ export function TaCapabilitiesView({
           </span>
         </div>
       ) : !tas ? (
-        <p role="status">Loading teaching assistants…</p>
+        // Likewise: visible text only. `load` announces the loading state.
+        <p>Loading teaching assistants…</p>
       ) : tas.length === 0 ? (
-        <div className="admin-empty">
-          <Users size={22} weight="regular" aria-hidden="true" />
-          <p>No teaching assistants are assigned to this course yet.</p>
-        </div>
+        // #192: this empty state used to be a dead end -- it stated that no
+        // TAs were assigned and stopped, on the one page whose entire purpose
+        // is "give my TA access", with no enrollment surface anywhere in the
+        // console. The instructor's only remaining options were to email a
+        // developer or hand over the answer key out of band, which is exactly
+        // what the per-course grant model exists to prevent. #210 supplies
+        // the missing action, so the empty state now opens with it.
+        <>
+          <AddTasPanel
+            onAdd={addTas}
+            defaultOpen
+            maxPerRequest={MAX_TAS_PER_REQUEST}
+            onAnnounce={announce}
+          />
+          <div className="admin-empty">
+            <Users size={22} weight="regular" aria-hidden="true" />
+            <p>
+              No teaching assistants are assigned to this course yet. Add them by UW NetID
+              above; once they sign in they appear here and you can grant access to model
+              solutions or unreleased homeworks.
+            </p>
+          </div>
+        </>
       ) : (
+        <>
+        <AddTasPanel onAdd={addTas} maxPerRequest={MAX_TAS_PER_REQUEST} onAnnounce={announce} />
         // A real table: rows are TAs, columns are capabilities, so row/column
         // relationships are programmatically determinable and the header is
         // exposed rather than aria-hidden (ACC-005).
@@ -394,6 +583,9 @@ export function TaCapabilitiesView({
                   <span className="admin-table__help">{c.help}</span>
                 </th>
               ))}
+              <th scope="col">
+                <span className="admin-visually-hidden">Remove from course</span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -406,7 +598,17 @@ export function TaCapabilitiesView({
                 <tr key={ta.membershipId} aria-busy={rowSaving || undefined}>
                   <th scope="row">
                     <span className="admin-submission-row__name-label">
-                      {ta.displayName || "(no name on file)"}
+                      {/* A pending TA has no display name yet -- it arrives
+                          from WorkOS at first login -- so the NetID-derived
+                          email is all there is to identify them by. Saying
+                          "(no name on file)" for someone who simply has not
+                          signed in yet reads as a data problem. */}
+                      {ta.displayName || (ta.isPending ? ta.email.split("@")[0] : "(no name on file)")}
+                      {ta.isPending && (
+                        <span className="admin-pending-mark" title="Added by NetID; has not signed in yet">
+                          Invited
+                        </span>
+                      )}
                     </span>
                     <span className="admin-submission-row__name-id">{ta.email}</span>
                   </th>
@@ -470,11 +672,28 @@ export function TaCapabilitiesView({
                     </td>
                     );
                   })}
+                  <td className="admin-table__actions">
+                    <button
+                      type="button"
+                      className="admin-link-button admin-link-button--danger"
+                      /* The row header names the person, but a screen reader
+                         running a controls list reads each name on its own,
+                         where five identical "Remove" buttons are unusable.
+                         #195 (ACC-021)'s rule holds: the accessible name
+                         LEADS with the visible word, so Voice Control and
+                         Dragon still match on what is on screen. */
+                      aria-label={`Remove ${who} from this course`}
+                      onClick={() => removeTa(ta)}
+                    >
+                      Remove
+                    </button>
+                  </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
+        </>
       )}
     </div>
   );

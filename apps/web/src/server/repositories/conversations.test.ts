@@ -107,7 +107,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
 
     const [llmConfigA] = await db
       .insert(llmConfigs)
-      .values({ organizationId: orgAId, provider: "openrouter", modelName: "test/model" })
+      .values({ organizationId: orgAId, name: "Test Config", provider: "openrouter", modelName: "test/model" })
       .returning({ id: llmConfigs.id });
     llmConfigAId = llmConfigA.id;
   });

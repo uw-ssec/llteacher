@@ -43,6 +43,11 @@ export type { SpinnerProps, SpinnerSize } from "./components/Spinner";
 export { EditableTitle } from "./components/EditableTitle";
 export type { EditableTitleProps } from "./components/EditableTitle";
 
+export { ListControls } from "./components/ListControls";
+export type { ListControlsProps, FilterOption, SortOption } from "./components/ListControls";
+export { searchRows, fold } from "./lib/listSearch";
+export type { SearchOptions } from "./lib/listSearch";
+
 export { ErrorBoundary } from "./components/ErrorBoundary";
 export type { ErrorBoundaryProps } from "./components/ErrorBoundary";
 
