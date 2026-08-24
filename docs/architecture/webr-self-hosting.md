@@ -39,6 +39,10 @@ Confirmed against a real, running browser session (not inferred from source, not
 
 One pre-existing bug this verification surfaced (not introduced by this change, never previously verified live): `install.packages()` fails in this WASM build with "This version of R is not set up to install source packages." This is non-fatal — `useWebR.ts`'s `DEFAULT_PACKAGES` loop already wraps each install attempt in its own `try`/`catch` — but it does mean the default `dplyr`/`ggplot2`/`tidyr` packages likely never actually install, silently. Tracked separately (see the follow-up issue linked from `useWebR.ts`'s own doc comment).
 
+## Why this isn't an automated CI check
+
+The existing suite is Node/jsdom-based (Vitest) with no real browser and no network access to download an ~18MB WASM binary per run — both `useWebR.ts`'s own unit tests and CI intentionally mock the module out (see `useWebR.test.ts`'s own doc comment) rather than exercise the real thing. A genuine same-origin-serving + cross-origin-isolation + WASM-init smoke test would need a real, real-browser-driven CI job (Playwright or similar) pointed at a running dev/preview server, which this repo doesn't have today. Until that exists, this is manually verified per release rather than automated: re-run the live-browser check described above (self-host build, open a section chat, confirm R code actually executes) whenever `webr`'s pinned version changes or this file's loading logic changes.
+
 ## Asset size
 
 Confirmed against the real downloaded tarball: 170 files, 46.4 MiB total, largest single file 18 MiB (`R.wasm`). Comfortably inside Cloudflare Workers Static Assets' limits (25 MiB/file, 20k free / 100k paid file count).
