@@ -108,6 +108,32 @@ app.onError((err, c) => {
   return c.json({ error: SERVICE_UNAVAILABLE_MESSAGE }, 503);
 });
 
+// #368 (PR3 final review): cross-origin isolation, so WebR's SharedArrayBuffer
+// channel is available where the browser supports it -- see useWebR.ts's own
+// doc comment for why this is an optimization, not a hard requirement (webR
+// falls back to its PostMessage channel without it, no service worker
+// involved either way). Applied globally, not scoped to the chat routes,
+// because COOP/COEP are page-level properties (the top-level document's
+// headers, not a per-fetch header) -- Hono has no narrower unit to attach
+// them to that would still take effect for the initial HTML response the
+// ASSETS catch-all serves below.
+//
+// Verified safe for the one thing on this domain that could plausibly break
+// under it: WorkOS AuthKit login (routes/auth.ts) is a full top-level
+// redirect (c.redirect) to workos.com and back, not a popup or an iframe --
+// COOP only constrains window.opener/postMessage relationships between open
+// windows, and COEP only constrains subresources this page itself loads
+// (this client has none cross-origin: grepped for external script/font/image
+// URLs, found none besides webR's own now-self-hosted assets). `require-corp`
+// over `credentialless`: nothing here needs to send credentials to a
+// cross-origin subresource, so the stricter, better-supported mode has no
+// downside.
+app.use("*", async (c, next) => {
+  await next();
+  c.res.headers.set("Cross-Origin-Opener-Policy", "same-origin");
+  c.res.headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+});
+
 // Session gate for every /api/* route except /api/auth/*.
 app.use("/api/*", authMiddleware);
 // Resolves course_memberships once per request for authenticated users.

@@ -12,3 +12,8 @@ dist/
 *.log
 .DS_Store
 coverage/
+
+# #368/#369: webR's self-hosted assets, materialized from the pinned
+# node_modules/webr dependency by scripts/copy-webr-assets.mjs (predev/
+# prebuild) -- never committed, same reasoning as node_modules/ itself.
+src/client/public/webr/

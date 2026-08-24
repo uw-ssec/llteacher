@@ -5,11 +5,16 @@ import { renderHook, waitFor, act } from "@testing-library/react";
 /* --------------------------------------------------------------------------
    useWebR — hook unit tests (#28).
 
-   WebR itself is a real ~60MB WASM download from webr.r-wasm.org -- these
-   tests mock the dynamic import (the exact module specifier useWebR.ts
-   imports, see WEBR_MODULE_URL there) rather than exercising the real
-   module, per the issue's own Testing Strategy ("Not worth testing: WebR
-   WASM compilation itself... trust webr.r-wasm.org works").
+   WebR itself is a real ~18MB WASM download (self-hosted, #368/#369 -- see
+   useWebR.ts's own doc comment) -- these tests mock the dynamic import (the
+   exact module specifier useWebR.ts's computeModuleUrl() resolves to at
+   runtime) rather than exercising the real module, per the issue's own
+   Testing Strategy ("Not worth testing: WebR WASM compilation itself...
+   trust the module works"). The mock target is the same-origin URL
+   computeModuleUrl() builds from window.location.origin -- jsdom's default
+   test origin is http://localhost:3000 (verified, not assumed), so that's
+   the literal string vi.doMock needs; if this test environment's configured
+   URL ever changes, this mock target must move with it.
 
    useWebR's init state is a MODULE-LEVEL singleton (by design -- see its
    own doc comment), so every test needs a fresh module instance or it would
@@ -40,11 +45,11 @@ beforeEach(() => {
   evalRVoid.mockClear();
   evalR.mockClear();
   init.mockResolvedValue(undefined);
-  vi.doMock("https://webr.r-wasm.org/latest/webr.mjs", () => ({ WebR: MockWebR }));
+  vi.doMock("http://localhost:3000/webr/webr.js", () => ({ WebR: MockWebR }));
 });
 
 afterEach(() => {
-  vi.doUnmock("https://webr.r-wasm.org/latest/webr.mjs");
+  vi.doUnmock("http://localhost:3000/webr/webr.js");
 });
 
 async function importUseWebR() {
