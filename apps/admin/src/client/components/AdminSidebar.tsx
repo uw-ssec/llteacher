@@ -13,12 +13,20 @@ import {
   CaretDoubleLeft,
   CaretDoubleRight,
   ClipboardText,
+  DownloadSimple,
+  ShieldCheck,
   Sparkle,
   Users,
   Plus,
 } from "@phosphor-icons/react";
 
-export type AdminNavKey = "homeworks" | "submissions" | "llm-configs" | "students";
+export type AdminNavKey =
+  | "homeworks"
+  | "submissions"
+  | "llm-configs"
+  | "students"
+  | "ta-permissions"
+  | "exports";
 
 export type AdminSidebarProps = {
   active: AdminNavKey;
@@ -55,11 +63,19 @@ type NavItem = {
 const NAV_ITEMS: NavItem[] = [
   { key: "homeworks",    label: "Homeworks",   icon: <BookOpen size={15} weight="regular" />,      description: "Course assignments" },
   { key: "submissions",  label: "Submissions", icon: <ClipboardText size={15} weight="regular" />, description: "Student work" },
-  { key: "llm-configs",  label: "LLM configs", icon: <Sparkle size={15} weight="regular" />,       description: "Tutor models" },
-  // #172 audit (USE-004): named for what the page is. "Students / Course
-  // roster" pointed at the one role this page does not list, and was the
-  // only entry point to it.
-  { key: "students",     label: "TA permissions", icon: <Users size={15} weight="regular" />,      description: "Grant solutions and drafts", authorOnly: true },
+  // #31: authorOnly since the configs became real. While this list was
+  // fixture-driven it was harmless static data for a TA to look at; the
+  // routes behind it are requireInstructorOf, so leaving the entry visible
+  // would be a nav item leading to a denial -- the dead-end shape #172
+  // exists to remove.
+  { key: "llm-configs",  label: "LLM configs", icon: <Sparkle size={15} weight="regular" />,       description: "Tutor models", authorOnly: true },
+  // #32: the roster now exists, so "Students" points at the students. Until
+  // it did, #172's audit (USE-004) had to rename this entry to "TA
+  // permissions" because that page was the only thing behind it -- an entry
+  // labelled Students that listed the one role it does not show.
+  { key: "students",     label: "Students",       icon: <Users size={15} weight="regular" />,      description: "Course roster", authorOnly: true },
+  { key: "ta-permissions", label: "TA permissions", icon: <ShieldCheck size={15} weight="regular" />, description: "Grant solutions and drafts", authorOnly: true },
+  { key: "exports",      label: "Export",         icon: <DownloadSimple size={15} weight="regular" />, description: "Records and transcripts", authorOnly: true },
 ];
 
 export function AdminSidebar({

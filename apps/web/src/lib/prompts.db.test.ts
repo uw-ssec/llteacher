@@ -288,7 +288,7 @@ describe.skipIf(!RAW_DATABASE_URL)("getSectionPromptContext (real DB, #326)", ()
       .returning({ id: organizations.id });
     const [config] = await db
       .insert(llmConfigs)
-      .values({ organizationId: orgForConfig[0]!.id, provider: "openrouter", modelName: "override-model" })
+      .values({ organizationId: orgForConfig[0]!.id, name: "Test Config", provider: "openrouter", modelName: "override-model" })
       .returning({ id: llmConfigs.id });
 
     const ctx = await seedSection({ homeworkLlmConfigId: config!.id });

@@ -285,22 +285,8 @@
     {
       "idx": 40,
       "version": "7",
-      "when": 1787209852326,
-      "tag": "0040_cynical_micromax",
-      "breakpoints": true
-    },
-    {
-      "idx": 41,
-      "version": "7",
-      "when": 1787215291761,
-      "tag": "0041_hint_semantics",
-      "breakpoints": true
-    },
-    {
-      "idx": 42,
-      "version": "7",
-      "when": 1787218327367,
-      "tag": "0042_soft_post",
+      "when": 1787170634700,
+      "tag": "0040_llm_config_authoring_ta_capability_grading",
       "breakpoints": true
     }
   ]

@@ -1,1 +1,0 @@
-CREATE INDEX IF NOT EXISTS "conversations_course_kind_updated_idx" ON "conversations" USING btree ("course_id","kind","updated_at");

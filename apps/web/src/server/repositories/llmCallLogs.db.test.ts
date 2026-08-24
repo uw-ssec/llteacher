@@ -46,7 +46,7 @@ describe.skipIf(!DATABASE_URL)("recordLlmCallLog (real DB, #321)", () => {
     await db.insert(courseMemberships).values({ userId, courseId, role: "student" });
     const [cfg] = await db
       .insert(llmConfigs)
-      .values({ organizationId: orgId, provider: "openrouter", modelName: "test/model", isDefault: true })
+      .values({ organizationId: orgId, name: "Test Config", provider: "openrouter", modelName: "test/model", isDefault: true })
       .returning({ id: llmConfigs.id });
     llmConfigId = cfg.id;
     const conv = await createConversation(db, unsafeCourseScope(courseId), {

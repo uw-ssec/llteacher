@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, within } from "@testing-library/react";
 import { HomeworksView, type HomeworkListItemResponse } from "./HomeworksView";
 
 afterEach(cleanup);
@@ -119,8 +119,13 @@ describe("HomeworksView", () => {
       />,
     );
 
-    expect(screen.getByText("hidden")).toBeTruthy();
-    expect(document.querySelector(".admin-status--hidden")).toBeTruthy();
+    // Scoped to the record list: the status filter rail also offers a chip
+    // labelled "hidden", so an unscoped getByText now matches both. Both are
+    // correct on screen -- the badge states this homework's status, the chip
+    // filters to it -- so the test narrows rather than the UI changing.
+    const list = screen.getByRole("region", { name: "Homeworks" });
+    expect(within(list).getByText("hidden")).toBeTruthy();
+    expect(list.querySelector(".admin-status--hidden")).toBeTruthy();
   });
 });
 

@@ -35,8 +35,29 @@ import {
   getInstructorTranscriptHandler,
 } from "./routes/instructor/transcripts";
 import { submitWidgetResponseHandler } from "./routes/progressWidgets";
-import { listCourseTasHandler, updateTaCapabilitiesHandler } from "./routes/courseMemberships";
-import { listLlmConfigsHandler } from "./routes/llmConfigs";
+import {
+  addCourseTasHandler,
+  listCourseTasHandler,
+  removeCourseTaHandler,
+  updateTaCapabilitiesHandler,
+} from "./routes/courseMemberships";
+import {
+  cloneLlmConfigHandler,
+  createLlmConfigHandler,
+  deactivateLlmConfigHandler,
+  getLlmConfigHandler,
+  listLlmConfigsHandler,
+  testLlmConfigHandler,
+  updateLlmConfigHandler,
+} from "./routes/llmConfigs";
+import {
+  addRosterMemberHandler,
+  importRosterHandler,
+  listRosterHandler,
+  removeRosterMemberHandler,
+} from "./routes/roster";
+import { draftGradeHandler, listGradesHandler, saveGradeHandler } from "./routes/grades";
+import { createExportHandler } from "./routes/exports";
 import {
   getCoursePromptTemplateHandler,
   putCoursePromptTemplateHandler,
@@ -104,7 +125,6 @@ app.post("/api/webhooks/workos", workosWebhookHandler);
 app.get("/api/profile", getProfileHandler);
 app.patch("/api/profile", patchProfileHandler);
 app.get("/api/courses/:courseId/homeworks", requireCourseMember()(listHomeworksHandler));
-app.get("/api/courses/:courseId/llm-configs", requireInstructorOf()(listLlmConfigsHandler));
 app.get("/api/courses/:courseId/prompt-template", requireInstructorOf()(getCoursePromptTemplateHandler));
 app.put("/api/courses/:courseId/prompt-template", requireInstructorOf()(putCoursePromptTemplateHandler));
 app.delete("/api/courses/:courseId/prompt-template", requireInstructorOf()(deleteCoursePromptTemplateHandler));
@@ -144,7 +164,7 @@ app.post("/api/conversations/:id/submit", requireRole(["student"])(submitSection
 // requireInstructorOf.
 app.get(
   "/api/courses/:courseId/homeworks/:homeworkId/submissions",
-  requireGraderOf()(getHomeworkSubmissionsHandler),
+  requireGraderOf("gates-unreleased")(getHomeworkSubmissionsHandler),
 );
 // #27: section-conversation lifecycle. requireCourseMember, not
 // requireRole(["student"]) -- an instructor starting one is the teacher-test
@@ -187,7 +207,7 @@ app.get(
 app.patch("/api/sections/:sectionId/answer", requireRole(["student"])(submitSectionAnswerHandler));
 app.get(
   "/api/courses/:courseId/sections/:sectionId/answers/:studentId",
-  requireGraderOf()(getSectionAnswerHandler),
+  requireGraderOf("gates-unreleased")(getSectionAnswerHandler),
 );
 app.patch("/api/widgets/:widgetId/response", requireRole(["student"])(submitWidgetResponseHandler));
 // #80: read-only -- the caller's own hint usage for a section, driving
@@ -205,6 +225,89 @@ app.patch(
   "/api/courses/:courseId/tas/:membershipId/capabilities",
   requireInstructorOf()(updateTaCapabilitiesHandler),
 );
+// #210: putting someone on a course as a TA is authoring-tier authority over
+// who can read student work, so these join the grant routes above rather than
+// the grading reads -- a TA must not be able to recruit another TA or re-add
+// themselves after removal.
+app.post("/api/courses/:courseId/tas", requireInstructorOf()(addCourseTasHandler));
+app.delete(
+  "/api/courses/:courseId/tas/:membershipId",
+  requireInstructorOf()(removeCourseTaHandler),
+);
+
+// #31/#170: LLM configuration authoring. Instructor-gated on the COURSE,
+// operating on that course's ORGANIZATION pool -- llm_configs is a per-org
+// resource, so an instructor of one course can edit configs other courses in
+// the same org use, and can change the org default.
+//
+// #367: that widening is a TRACKED GAP, not an accepted design. It was
+// documented as deliberate when this landed; #363's review rejected that
+// framing -- the fix is an Org Admin role owning org-level config, with
+// per-course instructors scoped to their own course, which is schema-level
+// and so lands as its own change rather than inside a 105-file PR. These
+// guards genuinely cannot narrow it in the meantime (the authority checked
+// and the scope written are different keys), which is why it is filed
+// rather than patched here.
+app.get("/api/courses/:courseId/llm-configs", requireInstructorOf()(listLlmConfigsHandler));
+app.post("/api/courses/:courseId/llm-configs", requireInstructorOf()(createLlmConfigHandler));
+app.get(
+  "/api/courses/:courseId/llm-configs/:configId",
+  requireInstructorOf()(getLlmConfigHandler),
+);
+app.patch(
+  "/api/courses/:courseId/llm-configs/:configId",
+  requireInstructorOf()(updateLlmConfigHandler),
+);
+// DELETE deactivates; it never removes the row. homeworks.llm_config_id
+// references these, and conversations record which config produced them.
+app.delete(
+  "/api/courses/:courseId/llm-configs/:configId",
+  requireInstructorOf()(deactivateLlmConfigHandler),
+);
+app.post(
+  "/api/courses/:courseId/llm-configs/:configId/clone",
+  requireInstructorOf()(cloneLlmConfigHandler),
+);
+app.post(
+  "/api/courses/:courseId/llm-configs/:configId/test",
+  requireInstructorOf()(testLlmConfigHandler),
+);
+
+// #32/#86: the roster. Instructor-only -- a TA reads student work, they do
+// not decide who is in the class. The import shares one provisioning
+// pipeline with manual add and with #210's NetID entry (repositories/
+// roster.ts), which is what stops the three inputs from drifting.
+app.get("/api/courses/:courseId/roster", requireInstructorOf()(listRosterHandler));
+app.post("/api/courses/:courseId/roster", requireInstructorOf()(addRosterMemberHandler));
+app.post("/api/courses/:courseId/roster/import", requireInstructorOf()(importRosterHandler));
+app.delete(
+  "/api/courses/:courseId/roster/:membershipId",
+  requireInstructorOf()(removeRosterMemberHandler),
+);
+
+// #75: grading. Instructor-tier, NOT grader-tier, unlike the submission
+// reads above -- a TA may read a student's work, but a grade is a record the
+// student may dispute and the institution may be asked to defend, so it is
+// attributed to someone with authority over the course. If TA grading is
+// ever wanted it should be a per-course grant like canViewSolutions rather
+// than a widening of these guards.
+app.get(
+  "/api/courses/:courseId/submissions/:submissionId/grades",
+  requireInstructorOf()(listGradesHandler),
+);
+app.post(
+  "/api/courses/:courseId/submissions/:submissionId/grades",
+  requireInstructorOf()(saveGradeHandler),
+);
+app.post(
+  "/api/courses/:courseId/submissions/:submissionId/grades/draft",
+  requireInstructorOf()(draftGradeHandler),
+);
+
+// #91: export. Instructor-tier: the artifact leaves the platform's control
+// the moment it is downloaded, so who may create one is a narrower question
+// than who may read the same data inside the console.
+app.post("/api/courses/:courseId/exports", requireInstructorOf()(createExportHandler));
 
 // #172 audit (CMP-005): an unmatched /api/* path fell through to the SPA
 // catch-all below, which serves index.html with a 200. A client calling a

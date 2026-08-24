@@ -221,6 +221,14 @@ async function ensurePlatformDefaultLLMConfig(db: Db, orgScope: OrgScope): Promi
     .insert(llmConfigs)
     .values({
       organizationId: orgScope,
+      // #317/#363 merge: llm_configs.name arrives NOT NULL in migration
+      // 0040, which backfills every pre-existing row with its own
+      // model_name. Matching that convention here keeps this function's
+      // stated invariant intact -- a freshly auto-provisioned org and a
+      // freshly migrated one land on an identical row, name included --
+      // rather than inventing a second naming scheme for the same config.
+      // An instructor renames it from the console.
+      name: PLATFORM_DEFAULT_MODEL_NAME,
       provider: PLATFORM_DEFAULT_PROVIDER,
       modelName: PLATFORM_DEFAULT_MODEL_NAME,
       isDefault: true,

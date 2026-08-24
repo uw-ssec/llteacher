@@ -242,8 +242,18 @@ async function seed() {
     .insert(schema.llmConfigs)
     .values({
       organizationId: org.id,
+      name: "Socratic Default",
+      // #340/#178: provider+model must match migration 0035's backfill and
+      // ensurePlatformDefaultLLMConfig's constants exactly -- a freshly
+      // seeded org and a freshly migrated one are meant to land on identical
+      // behaviour. Seeding 'anthropic' here would also reintroduce precisely
+      // the legacy-provider row that 0029 exists to UPDATE away.
       provider: "llmoxie",
       modelName: "gpt-5.3-codex",
+      basePrompt:
+        "You are an AI tutor for an introductory statistics course. Guide students " +
+        "through problems using the Socratic method: ask leading questions, build " +
+        "intuition step by step, and never simply state the answer.",
       temperature: 0.7,
       maxCompletionTokens: 1000,
       isDefault: true,

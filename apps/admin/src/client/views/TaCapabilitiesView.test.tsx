@@ -9,6 +9,7 @@ const TA = {
   userId: "u-ta",
   displayName: "Ada Lovelace",
   email: "ada@uw.edu",
+  isPending: false,
   canViewSolutions: false,
   canViewDrafts: false,
 };
@@ -38,7 +39,19 @@ describe("TaCapabilitiesView (#172)", () => {
   it("surfaces a load failure instead of rendering an empty roster", async () => {
     stubFetch(() => new Response(null, { status: 500 }));
     render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
-    await waitFor(() => screen.getByRole("alert"));
+    // #204 (ACC-028): the block itself no longer carries role="alert" -- it
+    // is inserted already containing its text, which does not reliably
+    // announce. It is visible, and the sentence is announced through the
+    // permanently-mounted region instead.
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toMatch(
+        /Failed to load teaching assistants/i,
+      ),
+    );
+    // Visible copy and the announcement, so this covers both channels: the
+    // block on screen plus the one region that actually announces.
+    expect(screen.getAllByText(/Failed to load teaching assistants/i).length).toBe(2);
+    expect(screen.getByRole("button", { name: /retry/i })).toBeTruthy();
   });
 
   it("PATCHes only the toggled capability and applies the server's echoed row", async () => {
@@ -343,5 +356,228 @@ describe("TaCapabilitiesView (#172)", () => {
     await waitFor(() =>
       expect(document.activeElement).toBe(screen.getByLabelText(/Model solutions for/i)),
     );
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #204: how status messages reach assistive technology.
+
+   Five of the six findings grouped into that issue are the same subject, and
+   the shared fix is that this view now has exactly ONE announcement channel:
+   the permanently-mounted polite region. These pin the behaviours that
+   channel exists to produce, not its markup.
+   -------------------------------------------------------------------------- */
+describe("TaCapabilitiesView announcements (#204)", () => {
+  const liveText = () => screen.getByRole("status").textContent ?? "";
+
+  it("announces a discarded toggle press instead of silently reverting (ACC-024)", async () => {
+    // A PATCH that never settles, so the second press lands while the first
+    // is still in flight -- the exact state the re-entry guard covers.
+    let release: (() => void) | undefined;
+    stubFetch((_url, init) => {
+      if (init?.method === "PATCH") {
+        return new Promise<Response>((resolve) => {
+          release = () => resolve(new Response(JSON.stringify(TA), { status: 200 }));
+        }) as unknown as Response;
+      }
+      return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
+    });
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    const box = screen.getAllByRole("checkbox")[0]!;
+    fireEvent.click(box);
+    await waitFor(() => expect(liveText()).toMatch(/Saving/i));
+    fireEvent.click(box);
+    // The control is deliberately not disabled (ACC-002), so the browser
+    // toggles it and React reverts it. Without this the revert was silent.
+    await waitFor(() => expect(liveText()).toMatch(/Still saving .* please wait/i));
+    release?.();
+  });
+
+  it("re-announces an identical message rather than swallowing it (ACC-026)", async () => {
+    // The reachable consecutive-identical write is a user pressing Space
+    // repeatedly during one slow save: the first press announces "Saving…",
+    // and every press after it announces the SAME "Still saving…" sentence.
+    //
+    // Keyed on a monotonic nonce, each write replaces the node carrying the
+    // text, so each press announces. Keyed on the string alone, setState
+    // bailed out by Object.is, the text node never mutated, and an unchanged
+    // live region announces nothing -- so the second and third presses were
+    // silent while the checkbox visibly flickered under the user's finger.
+    let release: (() => void) | undefined;
+    stubFetch((_url, init) => {
+      if (init?.method === "PATCH") {
+        return new Promise<Response>((resolve) => {
+          release = () => resolve(new Response(JSON.stringify(TA), { status: 200 }));
+        }) as unknown as Response;
+      }
+      return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
+    });
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    const region = screen.getByRole("status");
+    const box = screen.getAllByRole("checkbox")[0]!;
+
+    fireEvent.click(box);
+    await waitFor(() => expect(liveText()).toMatch(/Saving/i));
+
+    fireEvent.click(box);
+    await waitFor(() => expect(liveText()).toMatch(/Still saving/i));
+    const afterSecondPress = region.firstElementChild;
+    const secondText = liveText();
+
+    fireEvent.click(box);
+    // Identical sentence, third press. The observable proof that it
+    // announced is that the element carrying the text was REPLACED -- an
+    // unchanged text node produces no announcement at all.
+    await waitFor(() => expect(region.firstElementChild).not.toBe(afterSecondPress));
+    expect(liveText()).toBe(secondText);
+    release?.();
+  });
+
+  it("announces a 404 once, through the focused notice rather than both channels (ACC-025)", async () => {
+    let listCalls = 0;
+    stubFetch((_url, init) => {
+      if (init?.method === "PATCH") {
+        return new Response(JSON.stringify({ error: "That teaching assistant is no longer in this course." }), {
+          status: 404,
+        });
+      }
+      listCalls += 1;
+      // The refetch that follows a 404 no longer contains the row.
+      return new Response(JSON.stringify({ tas: listCalls === 1 ? [TA] : [] }), { status: 200 });
+    });
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    fireEvent.click(screen.getAllByRole("checkbox")[0]!);
+    // The orphan notice carries it, and is focused.
+    await waitFor(() => screen.getByRole("alert"));
+    expect(screen.getByRole("alert").textContent).toMatch(/no longer in this course/i);
+    // The polite region must NOT also carry it: one event, one announcement.
+    expect(liveText()).not.toMatch(/no longer in this course/i);
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #210 / #192: adding and removing TAs from this page.
+
+   #192's defect was the empty state: it stated that no TAs were assigned and
+   stopped, on the one page whose entire purpose is "give my TA access", with
+   no enrollment surface anywhere in the console. The instructor's remaining
+   options were to email a developer or hand over the answer key by other
+   means -- the exact outcome the per-course grant model exists to prevent.
+   -------------------------------------------------------------------------- */
+describe("TaCapabilitiesView roster management (#210, #192)", () => {
+  const PENDING = {
+    membershipId: "m-2",
+    userId: "u-pending",
+    displayName: "",
+    email: "ghopper@uw.edu",
+    isPending: true,
+    canViewSolutions: false,
+    canViewDrafts: false,
+  };
+
+  it("offers the add form in the empty state instead of dead-ending", async () => {
+    stubFetch(() => new Response(JSON.stringify({ tas: [] }), { status: 200 }));
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
+    await waitFor(() => screen.getByText(/No teaching assistants are assigned/i));
+    // Open, not behind another click: on this page the form IS the content.
+    expect(screen.getByLabelText(/UW NetIDs/i)).toBeTruthy();
+    // And the copy names the next step rather than stopping at the fact.
+    expect(screen.getByText(/Add them by UW NetID above/i)).toBeTruthy();
+  });
+
+  it("POSTs the entered NetIDs and refetches so the new TA can be granted", async () => {
+    let listCalls = 0;
+    const fetchMock = stubFetch((_url, init) => {
+      if (init?.method === "POST") {
+        return new Response(
+          JSON.stringify({ results: [{ netid: "ghopper", status: "added", membershipId: "m-2" }] }),
+          { status: 200 },
+        );
+      }
+      listCalls += 1;
+      return new Response(JSON.stringify({ tas: listCalls === 1 ? [] : [PENDING] }), {
+        status: 200,
+      });
+    });
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
+    await waitFor(() => screen.getByLabelText(/UW NetIDs/i));
+
+    fireEvent.change(screen.getByLabelText(/UW NetIDs/i), { target: { value: "ghopper" } });
+    fireEvent.click(screen.getByRole("button", { name: /Add 1 TA/i }));
+
+    // Without the refetch the instructor is told someone was added and then
+    // cannot grant them anything without reloading the page.
+    await waitFor(() => screen.getByText("ghopper@uw.edu"));
+    const post = fetchMock.mock.calls.find((c) => (c[1] as RequestInit)?.method === "POST");
+    expect(JSON.parse(String((post![1] as RequestInit).body))).toEqual({ netids: ["ghopper"] });
+  });
+
+  it("marks a TA who has not signed in yet as invited", async () => {
+    stubFetch(() => new Response(JSON.stringify({ tas: [PENDING] }), { status: 200 }));
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
+    // "waiting for them to log in" vs "something is wrong" is the whole
+    // point; a pending TA has no display name until WorkOS supplies one.
+    await waitFor(() => screen.getByText("Invited"));
+    expect(screen.queryByText("(no name on file)")).toBeNull();
+    expect(screen.getByText("ghopper")).toBeTruthy();
+  });
+
+  it("confirms before removing, and does not call the API when declined", async () => {
+    const fetchMock = stubFetch(() => new Response(JSON.stringify({ tas: [TA] }), { status: 200 }));
+    vi.stubGlobal("confirm", vi.fn(() => false));
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Remove Ada Lovelace/i }));
+    expect(fetchMock.mock.calls.some((c) => (c[1] as RequestInit)?.method === "DELETE")).toBe(
+      false,
+    );
+  });
+
+  it("DELETEs on confirm and drops the row", async () => {
+    let listCalls = 0;
+    const fetchMock = stubFetch((_url, init) => {
+      if (init?.method === "DELETE") {
+        return new Response(JSON.stringify({ membershipId: TA.membershipId }), { status: 200 });
+      }
+      listCalls += 1;
+      return new Response(JSON.stringify({ tas: listCalls === 1 ? [TA] : [] }), { status: 200 });
+    });
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Remove Ada Lovelace/i }));
+    await waitFor(() => expect(screen.queryByText("Ada Lovelace")).toBeNull());
+    const del = fetchMock.mock.calls.find((c) => (c[1] as RequestInit)?.method === "DELETE");
+    expect(String(del![0])).toBe(`/api/courses/c1/tas/${TA.membershipId}`);
+  });
+
+  it("explains a failed removal and leaves the row in place", async () => {
+    stubFetch((_url, init) => {
+      if (init?.method === "DELETE") return new Response(null, { status: 500 });
+      return new Response(JSON.stringify({ tas: [TA] }), { status: 200 });
+    });
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    render(<TaCapabilitiesView courseId="c1" courseTitle="STATS 311" />);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Remove Ada Lovelace/i }));
+    // Named for the action that failed: telling an instructor whose removal
+    // failed "could not update that permission" points them at the wrong
+    // control to retry.
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toMatch(
+        /Could not remove that teaching assistant/i,
+      ),
+    );
+    // The row must not vanish optimistically: they still have access.
+    expect(screen.getByText("Ada Lovelace")).toBeTruthy();
   });
 });

@@ -8,7 +8,9 @@
    live catalog, not static documentation."
    -------------------------------------------------------------------------- */
 
+import { useMemo, useState } from "react";
 import { ArrowRight, CalendarBlank, Folder, Lock } from "@phosphor-icons/react";
+import { ListControls, searchRows } from "@llteacher/ui";
 import { PageHeader } from "../components/PageHeader";
 import { RecordId } from "../components/RecordId";
 import { StatusBadge } from "../components/StatusBadge";
@@ -69,6 +71,18 @@ const STATUS_LABEL: Record<HomeworkStatus, string> = {
   hidden:    "hidden",
 };
 
+type Sort = "due" | "title" | "sections";
+
+const SORT_OPTIONS = [
+  { value: "due", label: "Due date" },
+  { value: "title", label: "Title (A–Z)" },
+  { value: "sections", label: "Most sections" },
+];
+
+/* Lifecycle order, so the chips read the way a homework moves through the
+   quarter rather than however Map happened to see them first. */
+const STATUS_ORDER: HomeworkStatus[] = ["draft", "scheduled", "active", "past_due", "archived", "hidden"];
+
 function formatDueDate(iso: string): string {
   // The real API returns a full ISO datetime (`dueDate.toISOString()`),
   // unlike the fixture's plain YYYY-MM-DD -- parse directly rather than
@@ -86,6 +100,51 @@ export function HomeworksView({
   canViewDrafts,
 }: HomeworksViewProps) {
   const activeCount = homeworks.filter((h) => h.status === "active").length;
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState<"all" | HomeworkStatus>("all");
+  const [sort, setSort] = useState<Sort>("due");
+
+  /* Only offer statuses this list actually contains. A quarter with nothing
+     archived should not show an "Archived 0" chip that can only ever empty
+     the list -- the chip rail describes this course, not the schema. */
+  const statusOptions = useMemo(() => {
+    const present = new Map<HomeworkStatus, number>();
+    for (const h of homeworks) present.set(h.status, (present.get(h.status) ?? 0) + 1);
+    // One status present means the filter can only ever choose between "all"
+    // and "all of them again" -- a control that cannot change the list is
+    // just something else to read past.
+    if (present.size < 2) return null;
+    return [
+      { value: "all", label: "All", count: homeworks.length },
+      ...[...present.entries()]
+        .sort((a, b) => STATUS_ORDER.indexOf(a[0]) - STATUS_ORDER.indexOf(b[0]))
+        // STATUS_LABEL is lowercase because StatusBadge renders it uppercase
+        // in CSS. Here it sits beside "All", so it needs a capital of its own.
+        .map(([s, count]) => ({
+          value: s,
+          label: STATUS_LABEL[s].charAt(0).toUpperCase() + STATUS_LABEL[s].slice(1),
+          count,
+        })),
+    ];
+  }, [homeworks]);
+
+  const visible = useMemo(() => {
+    const byStatus = status === "all" ? homeworks : homeworks.filter((h) => h.status === status);
+    const sorted = [...byStatus].sort((a, b) => {
+      if (sort === "title") return a.title.localeCompare(b.title);
+      if (sort === "sections") return b.sectionCount - a.sectionCount;
+      // Soonest due first: the deadline an instructor is about to face is the
+      // one worth putting at the top of the page.
+      return a.dueDate.localeCompare(b.dueDate);
+    });
+    return searchRows(sorted, query, { fields: (h) => [h.title, h.description] });
+  }, [homeworks, status, sort, query]);
+
+  const noun = homeworks.length === 1 ? "homework" : "homeworks";
+  const summary =
+    visible.length === homeworks.length
+      ? `${homeworks.length} ${noun}`
+      : `Showing ${visible.length} of ${homeworks.length} ${noun}`;
 
   return (
     <div className="admin-view">
@@ -132,15 +191,40 @@ export function HomeworksView({
         </div>
       </div>
 
+      <ListControls
+        search={{
+          value: query,
+          onChange: setQuery,
+          label: "Search homeworks by title or description",
+          placeholder: "Search homeworks…",
+        }}
+        filter={
+          statusOptions
+            ? {
+                value: status,
+                onChange: (v) => setStatus(v as "all" | HomeworkStatus),
+                label: "Filter homeworks by status",
+                options: statusOptions,
+              }
+            : undefined
+        }
+        sort={{ value: sort, onChange: (v) => setSort(v as Sort), label: "Sort", options: SORT_OPTIONS }}
+        summary={summary}
+      />
+
       <section className="admin-record-list" aria-label="Homeworks">
-        {homeworks.map((hw, idx) => (
+        {visible.map((hw, idx) => (
           <article
             key={hw.id}
             className="admin-record-row admin-record-row--enterable"
             style={{ animationDelay: `${idx * 55}ms` }}
           >
             <div className="admin-record-row__id">
-              <RecordId prefix="HW" index={idx + 1} />
+              {/* Numbered from the record's place in the FULL list, not the
+                  rendered one. Indexing by render position meant a record
+                  changed its own ID as soon as a filter hid a row above it,
+                  which makes the badge useless as a way to refer to it. */}
+              <RecordId prefix="HW" index={homeworks.indexOf(hw) + 1} />
             </div>
 
             <div className="admin-record-row__body">
@@ -195,6 +279,39 @@ export function HomeworksView({
             </div>
           </article>
         ))}
+
+        {/* Split by cause, not just by count. "Create your first homework" in
+            front of an instructor who has twelve and mistyped a search is the
+            classic version of this bug. */}
+        {visible.length === 0 && homeworks.length > 0 && (
+          <div className="list-empty">
+            <p className="list-empty__title">
+              {query.trim() ? `No homeworks match “${query.trim()}”` : "No homeworks match this filter"}
+            </p>
+            <p className="list-empty__body">
+              {homeworks.length} {homeworks.length === 1 ? "homework is" : "homeworks are"} in this
+              course.
+            </p>
+            <button
+              type="button"
+              className="list-empty__action"
+              onClick={() => { setQuery(""); setStatus("all"); }}
+            >
+              Clear search and filters
+            </button>
+          </div>
+        )}
+
+        {homeworks.length === 0 && (
+          <div className="admin-empty">
+            <Folder size={22} weight="regular" aria-hidden="true" />
+            <p>
+              {canViewDrafts
+                ? "No homeworks in this course yet."
+                : "No published homeworks in this course yet."}
+            </p>
+          </div>
+        )}
       </section>
     </div>
   );

@@ -11,11 +11,14 @@
    SubmissionCell/ParticipationStatus (Tasks 19-20) -- apps/admin never
    imports from apps/web (the only cross-package import anywhere in
    apps/admin/src is @llteacher/ui), so these are the contract, same
-   convention as lib/fixtures.ts's own header comment.
+   convention SubmissionsView has always followed. (#33 retired
+   lib/fixtures.ts, which this note used to cite as the precedent; the
+   convention itself is unchanged and now lives in api-client.ts's header.)
    -------------------------------------------------------------------------- */
 
 import { useMemo, useState } from "react";
 import { ArrowLeft, ChatCircleDots, ClipboardText, Warning } from "@phosphor-icons/react";
+import { ListControls, searchRows } from "@llteacher/ui";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 
@@ -27,6 +30,9 @@ export interface SubmissionCell {
   conversationCount: number;
   lastActivityAt: string | null;
   hasDeletedConversation: boolean;
+  /** #75: present on a submitted cell, so it can be graded. Null otherwise
+   *  -- there is nothing to grade until a student has submitted. */
+  submissionId: string | null;
 }
 
 export interface StudentSubmissionRow {
@@ -64,9 +70,23 @@ export type SubmissionsViewProps = {
    *  every other optional callback prop pattern in this codebase, e.g.
    *  ConversationView's onRunRCode). */
   onOpenTranscript?: (sectionId: string, studentId: string) => void;
+  /** #75: drill from a submitted cell into grading. Absent for a caller
+   *  that may not grade -- a TA reads this dashboard (#172's requireGraderOf)
+   *  but grading is instructor-tier, so the cells stay non-interactive for
+   *  them rather than offering a route that 403s.
+   *
+   *  Merge note (#366 x #363, both landed a cell-level drill-in the same
+   *  week): a cell offers at most ONE click action, not two competing
+   *  onClick handlers on the same 24x24 button. Grading wins when both are
+   *  possible -- a submitted cell is the one an instructor most needs to
+   *  act on, and #75's own `--gradeable` CSS modifier was already written
+   *  to compose with (not replace) the state class, confirming a single
+   *  combined button was the intended shape rather than two separate
+   *  elements. See the cell-rendering block below for the precedence. */
+  onGrade?: (input: { submissionId: string; studentName: string; sectionTitle: string }) => void;
 };
 
-type Filter = "all" | "active" | "no_interaction";
+type Filter = "all" | ParticipationStatus;
 
 const STATUS_LABEL: Record<ParticipationStatus, string> = {
   active: "active",
@@ -78,8 +98,18 @@ function initialsFor(displayName: string): string {
   return displayName.split(" ").map((p) => p[0]).join("").slice(0, 2).toUpperCase() || "?";
 }
 
-export function SubmissionsView({ data, onBack, onOpenTranscript }: SubmissionsViewProps) {
+type Sort = "name" | "activity" | "progress";
+
+const SORT_OPTIONS = [
+  { value: "name", label: "Name (A–Z)" },
+  { value: "activity", label: "Last activity" },
+  { value: "progress", label: "Least progress first" },
+];
+
+export function SubmissionsView({ data, onBack, onOpenTranscript, onGrade }: SubmissionsViewProps) {
   const [filter, setFilter] = useState<Filter>("all");
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<Sort>("name");
 
   const counts = useMemo(() => ({
     total: data.students.length,
@@ -88,11 +118,36 @@ export function SubmissionsView({ data, onBack, onOpenTranscript }: SubmissionsV
     no_interaction: data.students.filter((r) => r.participationStatus === "no_interaction").length,
   }), [data.students]);
 
-  const filtered = useMemo(() => {
-    if (filter === "all") return data.students;
-    if (filter === "active") return data.students.filter((r) => r.participationStatus === "active");
-    return data.students.filter((r) => r.participationStatus === "no_interaction");
-  }, [data.students, filter]);
+  /* Filter, then sort, then search -- in that order, deliberately. Search
+     ranks its own results by how well they matched, so sorting afterwards
+     would throw that ranking away; running it last lets the chosen sort act
+     as the tiebreak within each rank bucket instead. */
+  const visible = useMemo(() => {
+    const byStatus =
+      filter === "all"
+        ? data.students
+        : data.students.filter((r) => r.participationStatus === filter);
+
+    const sorted = [...byStatus].sort((a, b) => {
+      if (sort === "name") return a.displayName.localeCompare(b.displayName);
+      if (sort === "progress") return a.submissionCount - b.submissionCount;
+      // Most recent first, and students who have never touched it sort last
+      // rather than first -- a null is "no activity ever", not "activity at
+      // the epoch".
+      if (!a.lastActivityAt && !b.lastActivityAt) return 0;
+      if (!a.lastActivityAt) return 1;
+      if (!b.lastActivityAt) return -1;
+      return b.lastActivityAt.localeCompare(a.lastActivityAt);
+    });
+
+    return searchRows(sorted, query, { fields: (r) => [r.displayName, r.email] });
+  }, [data.students, filter, sort, query]);
+
+  const studentNoun = data.students.length === 1 ? "student" : "students";
+  const summary =
+    visible.length === data.students.length
+      ? `${data.students.length} ${studentNoun}`
+      : `Showing ${visible.length} of ${data.students.length} ${studentNoun}`;
 
   return (
     <div className="admin-view">
@@ -153,11 +208,27 @@ export function SubmissionsView({ data, onBack, onOpenTranscript }: SubmissionsV
         </div>
       </div>
 
-      <div className="admin-filter-row" role="tablist" aria-label="Filter students">
-        <FilterChip active={filter === "all"} onClick={() => setFilter("all")} label="All" count={counts.total} />
-        <FilterChip active={filter === "active"} onClick={() => setFilter("active")} label="Active" count={counts.active} />
-        <FilterChip active={filter === "no_interaction"} onClick={() => setFilter("no_interaction")} label="No interaction" count={counts.no_interaction} />
-      </div>
+      <ListControls
+        search={{
+          value: query,
+          onChange: setQuery,
+          label: "Search students by name or email",
+          placeholder: "Search students…",
+        }}
+        filter={{
+          value: filter,
+          onChange: (v) => setFilter(v as Filter),
+          label: "Filter students by participation",
+          options: [
+            { value: "all", label: "All", count: counts.total },
+            { value: "active", label: "Active", count: counts.active },
+            { value: "partial", label: "Partial", count: counts.partial },
+            { value: "no_interaction", label: "No interaction", count: counts.no_interaction },
+          ],
+        }}
+        sort={{ value: sort, onChange: (v) => setSort(v as Sort), label: "Sort", options: SORT_OPTIONS }}
+        summary={summary}
+      />
 
       <section className="admin-record-list" aria-label="Student submissions">
         <header className="admin-submission-row admin-submission-row--head" aria-hidden="true">
@@ -169,7 +240,7 @@ export function SubmissionsView({ data, onBack, onOpenTranscript }: SubmissionsV
           <div className="admin-submission-row__activity">Last activity</div>
         </header>
 
-        {filtered.map((row, idx) => (
+        {visible.map((row, idx) => (
           <article key={row.studentId} className="admin-submission-row admin-record-row--enterable" style={{ animationDelay: `${idx * 40}ms` }}>
             <div className="admin-submission-row__avatar">
               <span aria-hidden="true">{initialsFor(row.displayName)}</span>
@@ -185,6 +256,19 @@ export function SubmissionsView({ data, onBack, onOpenTranscript }: SubmissionsV
                 // the same 3 values the existing admin-progress-cell--* CSS classes
                 // expect (unchanged from the fixture-era shape), so no translation needed.
                 const state = cell?.status ?? "missing";
+                const deletedNote = cell?.hasDeletedConversation
+                  ? " (has a deleted conversation)"
+                  : "";
+                const body = (
+                  <>
+                    {header.order}
+                    {cell?.hasDeletedConversation && <sup aria-hidden="true">†</sup>}
+                  </>
+                );
+                // #75: only a SUBMITTED cell is gradeable, and only for a
+                // caller who may grade -- a TA reads this dashboard but
+                // grading is instructor-tier (#172).
+                const gradeable = Boolean(onGrade) && cell?.status === "submitted" && Boolean(cell.submissionId);
                 // #29/#23: a cell with at least one conversation (submitted,
                 // in progress, or missing-but-with-a-since-deleted attempt --
                 // conversationCount counts soft-deleted rows too, see
@@ -192,19 +276,37 @@ export function SubmissionsView({ data, onBack, onOpenTranscript }: SubmissionsV
                 // section) pair's transcript list. A genuinely untouched
                 // section has nothing to show, so it stays inert.
                 const hasConversations = (cell?.conversationCount ?? 0) > 0;
-                const clickable = Boolean(onOpenTranscript) && hasConversations;
+                const openable = Boolean(onOpenTranscript) && hasConversations;
+                // Merge note (see this component's onGrade prop doc comment):
+                // one button, one click target. Grading wins when a cell is
+                // both gradeable and openable -- it's the action an
+                // instructor most needs from a submitted cell; the
+                // transcript is still reachable from the same submission via
+                // TranscriptListView's own list once #29's other entry
+                // points exist, so nothing here becomes unreachable.
+                const onCellClick = gradeable
+                  ? () =>
+                      onGrade!({
+                        submissionId: cell!.submissionId!,
+                        studentName: row.displayName || row.email,
+                        sectionTitle: header.title,
+                      })
+                  : openable
+                    ? () => onOpenTranscript!(header.id, row.studentId)
+                    : undefined;
+                const ariaAction = gradeable ? " -- grade" : openable ? " -- view transcripts" : "";
+                const titleAction = gradeable ? `Grade ${header.title}` : `${header.title}: ${state}${cell?.hasDeletedConversation ? " -- includes a deleted conversation" : ""}`;
                 return (
                   <button
                     key={header.id}
                     type="button"
-                    className={`admin-progress-cell admin-progress-cell--${state}`}
-                    aria-label={`${header.title}: ${state}${cell?.hasDeletedConversation ? " (has a deleted conversation)" : ""}${clickable ? " -- view transcripts" : ""}`}
-                    title={`${header.title}: ${state}${cell?.hasDeletedConversation ? " -- includes a deleted conversation" : ""}`}
-                    disabled={!clickable}
-                    onClick={clickable ? () => onOpenTranscript!(header.id, row.studentId) : undefined}
+                    className={`admin-progress-cell admin-progress-cell--${state}${gradeable ? " admin-progress-cell--gradeable" : ""}`}
+                    aria-label={gradeable ? `Grade ${row.displayName}, ${header.title}` : `${header.title}: ${state}${deletedNote}${ariaAction}`}
+                    title={titleAction}
+                    disabled={!onCellClick}
+                    onClick={onCellClick}
                   >
-                    {header.order}
-                    {cell?.hasDeletedConversation && <sup aria-hidden="true">†</sup>}
+                    {body}
                   </button>
                 );
               })}
@@ -224,10 +326,42 @@ export function SubmissionsView({ data, onBack, onOpenTranscript }: SubmissionsV
           </article>
         ))}
 
-        {filtered.length === 0 && (
+        {/* Three distinct empty states, because they call for three different
+            actions. Telling an instructor "no students match this filter"
+            when nobody is enrolled sends them hunting through filters that
+            were never the problem -- and the reverse, blaming enrollment for
+            a typo, is worse. */}
+        {visible.length === 0 && data.students.length === 0 && (
           <div className="admin-empty">
             <ClipboardText size={22} weight="regular" aria-hidden="true" />
-            <p>No students match this filter.</p>
+            <p>No students are enrolled in this course yet.</p>
+          </div>
+        )}
+
+        {visible.length === 0 && data.students.length > 0 && query.trim() !== "" && (
+          <div className="list-empty">
+            <p className="list-empty__title">No students match “{query.trim()}”</p>
+            <p className="list-empty__body">
+              {filter === "all"
+                ? "Check the spelling, or search by email instead."
+                : "The filter may be hiding them — this searches only the current filter."}
+            </p>
+            <button type="button" className="list-empty__action" onClick={() => { setQuery(""); setFilter("all"); }}>
+              Clear search and filters
+            </button>
+          </div>
+        )}
+
+        {visible.length === 0 && data.students.length > 0 && query.trim() === "" && (
+          <div className="list-empty">
+            <p className="list-empty__title">No students match this filter</p>
+            <p className="list-empty__body">
+              {data.students.length} {data.students.length === 1 ? "student is" : "students are"}{" "}
+              enrolled, but none are {STATUS_LABEL[filter as ParticipationStatus] ?? filter}.
+            </p>
+            <button type="button" className="list-empty__action" onClick={() => setFilter("all")}>
+              Show all students
+            </button>
           </div>
         )}
       </section>
@@ -235,11 +369,3 @@ export function SubmissionsView({ data, onBack, onOpenTranscript }: SubmissionsV
   );
 }
 
-function FilterChip({ active, onClick, label, count }: { active: boolean; onClick: () => void; label: string; count: number }) {
-  return (
-    <button type="button" className={active ? "admin-filter admin-filter--active" : "admin-filter"} onClick={onClick} role="tab" aria-selected={active}>
-      <span className="admin-filter__label">{label}</span>
-      <span className="admin-filter__count">{count}</span>
-    </button>
-  );
-}

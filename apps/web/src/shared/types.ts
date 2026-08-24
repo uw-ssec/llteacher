@@ -58,6 +58,10 @@ export interface CourseTaCapabilitiesResponse extends TaCapabilityGrantResponse 
    *  answer key needs to identify a person, not a UUID. */
   displayName: string;
   email: string;
+  /** #210: added by NetID, never signed in. Distinguishes "waiting for them"
+   *  from "something is wrong" -- before #210 nothing created a pending TA,
+   *  so this was uniformly false. */
+  isPending: boolean;
 }
 
 export interface CourseTaListResponse {
@@ -70,6 +74,74 @@ export interface TaCapabilitiesBody {
   canViewSolutions?: boolean;
   canViewDrafts?: boolean;
 }
+
+/* -- #210: add / remove course TAs by NetID -------------------------------- */
+
+import type { AddTaResult } from "../server/repositories/courseMemberships";
+
+export type { AddTaResult };
+
+export interface AddCourseTasBody {
+  /** Raw as typed; normalized and validated server-side (lib/netid.ts). */
+  netids: string[];
+}
+
+/** One result per entered NetID. The response is 200 even when every entry
+ *  failed: the request succeeded, and it is the individual NetIDs that did or
+ *  did not resolve. */
+export interface AddCourseTasResponse {
+  results: AddTaResult[];
+}
+
+export interface RemoveCourseTaResponse {
+  membershipId: string;
+}
+
+/* -- #31 / #98 / #170: LLM configuration authoring ------------------------- */
+
+import type { LlmConfigRecord } from "../server/repositories/llmConfigs";
+
+export type { LlmConfigRecord };
+
+export interface LlmConfigListResponse {
+  configs: LlmConfigRecord[];
+}
+
+/** The create/update body. Deliberately has no credential field: the
+ *  platform gateway needs no key from an instructor, and an
+ *  instructor-supplied one requires the secret_ref allowlist (#323) first --
+ *  without it, choosing which binding to read is choosing from an
+ *  environment that holds ENCRYPTION_KEY and SESSION_SECRET. */
+export interface LlmConfigBody {
+  name: string;
+  provider: LlmConfigRecord["provider"];
+  modelName: string;
+  basePrompt: string;
+  temperature: number;
+  maxCompletionTokens: number;
+  fallbackLlmConfigId: string | null;
+  isActive: boolean;
+  isDefault: boolean;
+}
+
+export interface LlmConfigCloneBody {
+  name: string;
+}
+
+export interface LlmConfigTestBody {
+  message: string;
+}
+
+/** The test result is a 200 either way -- a model that refuses is a finding
+ *  the instructor needs to read, not a server fault. `ok` discriminates. */
+export type LlmConfigTestResponse =
+  | {
+      ok: true;
+      text: string;
+      modelName: string;
+      usage: { inputTokens: number | null; outputTokens: number | null };
+    }
+  | { ok: false; modelName: string; error: string };
 
 import type { HomeworkStatus } from "../server/repositories/homeworks";
 import type { SectionStatusType, StudentHomeworkSummary } from "../server/repositories/studentHomeworks";

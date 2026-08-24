@@ -1,10 +1,27 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { HomeworkEditView } from "./HomeworkEditView";
-import type { LLMConfig } from "../lib/fixtures";
+import type { LlmConfigPayload } from "@llteacher/ui/api";
 
-const LLM_CONFIGS: LLMConfig[] = [
-  { id: "cfg-1", recordNumber: 1, name: "Default", modelName: "gpt-4o-mini", basePromptPreview: "", temperature: 0.7, maxCompletionTokens: 1000, isDefault: true, isActive: true, createdAt: "2026-01-01" },
+/* #33: the shared wire contract, so a server field rename breaks this too
+   rather than letting the suite pass against a shape production no longer
+   sees. */
+const LLM_CONFIGS: LlmConfigPayload[] = [
+  {
+    id: "cfg-1",
+    recordNumber: 1,
+    name: "Default",
+    provider: "openrouter",
+    modelName: "gpt-4o-mini",
+    basePrompt: "",
+    temperature: 0.7,
+    maxCompletionTokens: 1000,
+    fallbackLlmConfigId: null,
+    isDefault: true,
+    isActive: true,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  },
 ];
 
 const HOMEWORK = {

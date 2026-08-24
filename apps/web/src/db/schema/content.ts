@@ -75,14 +75,47 @@ export const llmConfigs = pgTable(
     organizationId: uuid("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
+    // #31: the instructor-facing name. Django's llm app keyed its config
+    // list on this, and the admin console's catalog rows have always
+    // displayed one -- it was the last field still coming from fixtures.
+    name: text("name").notNull(),
     provider: llmProviderEnum("provider").notNull(),
     modelName: text("model_name").notNull(),
+    // #31: the tutor's standing instructions -- what it is told it is.
+    //
+    // On the overlap with prompt_templates, which is deliberate and not
+    // duplication: a config answers "which model, speaking how, by default
+    // for this organization". prompt_templates is the SCOPED, VERSIONED
+    // override layer above it -- per course, homework or section, with
+    // compose_with_parent to stack rather than replace, and previous_version_id
+    // so a conversation can pin the wording it started under. Neither
+    // subsumes the other: an org that has written no templates still needs a
+    // working tutor voice, and a homework that overrides the voice still
+    // needs a model to run on. Resolution order is documented on
+    // resolveLlmConfig in repositories/llmConfigs.ts.
+    basePrompt: text("base_prompt").notNull().default(""),
     temperature: doublePrecision("temperature").notNull().default(0.7),
     maxCompletionTokens: integer("max_completion_tokens")
       .notNull()
       .default(1000),
     credentialId: uuid("credential_id").references(
       () => organizationCredentials.id,
+      { onDelete: "set null" },
+    ),
+    // #98: one optional fallback, deliberately not a chain. A provider
+    // outage or a model-specific incident degrades to a backup instead of
+    // failing a student mid-homework. ON DELETE SET NULL rather than
+    // RESTRICT: deleting a config that happens to be someone's fallback
+    // should drop the fallback, not block the delete -- the primary keeps
+    // working, which is the safe direction.
+    //
+    // One level, not N, is the recorded simplicity: an arbitrary chain needs
+    // cycle detection at every hop, makes "which model served this turn"
+    // unbounded in the call log, and answers a failure mode nobody has yet
+    // had. The self-reference check below is the whole of the cycle
+    // problem at depth one.
+    fallbackLlmConfigId: uuid("fallback_llm_config_id").references(
+      (): AnyPgColumn => llmConfigs.id,
       { onDelete: "set null" },
     ),
     // #317 review, #349 (requirement, "move rates to configuration"):
@@ -132,6 +165,23 @@ export const llmConfigs = pgTable(
     check(
       "llm_configs_temperature_range_chk",
       sql`${t.temperature} >= 0 AND ${t.temperature} <= 2`,
+    ),
+    // #31: an inactive config cannot be the org default. The default is what
+    // every course without an explicit choice resolves to, so a deactivated
+    // one is an org-wide outage dressed as a settings change -- and the
+    // partial unique index above would happily hold it there, since it only
+    // constrains how MANY defaults exist, not whether the one is usable.
+    check(
+      "llm_configs_active_required_for_default_chk",
+      sql`NOT (${t.isDefault} AND NOT ${t.isActive})`,
+    ),
+    // #98: a config cannot be its own fallback. At depth one this is the
+    // entire cycle problem -- there is no A -> B -> A to detect, because B
+    // is never consulted for a fallback of its own (see resolveFallback in
+    // repositories/llmConfigs.ts, which reads exactly one hop).
+    check(
+      "llm_configs_fallback_not_self_chk",
+      sql`${t.fallbackLlmConfigId} IS NULL OR ${t.fallbackLlmConfigId} <> ${t.id}`,
     ),
   ],
 );

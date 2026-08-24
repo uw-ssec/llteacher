@@ -234,19 +234,113 @@ If the view needs sidebar selection state, extend `AdminNavKey` and add a `NAV_I
   `null` when the caller was not granted it, so the view shows what the caller
   may see without re-deriving any policy client-side.
 
-## What's not yet built
+## Live Instructor Console (Phase 1)
 
-Scaffolded in the navigation but stubbed:
+M5 turned the console from a fixture-driven shell into a live instructor
+surface. What that means concretely:
 
-- **LLMConfigEditView** — drilling into a config row currently logs. The form view from `llm/config_form.html` (with the OpenAI getting-started help section) is the natural next addition.
-- **Conversation viewer** — drilling from a submission row into a student's chat transcript would close the loop on grading workflows.
+**Shipped.**
 
-Each of these has fixture data ready and a clear path through `App.tsx`'s view state — they're additions, not refactors.
+- **LLM configurations** (#31, #170, #98) — create, edit, clone, deactivate,
+  and a test button that sends one message to the saved configuration and
+  reports the reply with token usage. The org's single default is enforced by
+  a partial unique index; the default cannot be deactivated. Configs may name
+  one fallback for provider outages.
+- **Roster** (#32, #86) — the course's memberships with active / invited /
+  removed status, search, per-status filters, manual removal, and CSV import
+  with a per-row preview that writes nothing until confirmed.
+- **Course TAs** (#210, #192) — added and removed by UW NetID, with a
+  per-NetID outcome for every entry. This resolved the dead end #192 filed
+  against the TA permissions page.
+- **Grading** (#75) — a grade and written feedback per submitted section,
+  reached by clicking a submitted cell on the submissions dashboard, with an
+  optional AI-assisted draft that an instructor must copy in and save
+  themselves.
+- **Export** (#91) — submissions and grades as CSV or JSON, transcripts as
+  JSON, for the whole course or one student.
+- **Typed API client** (#33) — `lib/fixtures.ts` is gone. Every view reads
+  the API through `lib/api-client.ts`, and payload shapes live in
+  `@llteacher/ui/api`, which apps/web's repositories are compile-time checked
+  against in both directions.
+
+**Stubbed for Phase 2**, and deliberately not in M5's scope:
+
+- **Conversation viewer** — drilling from a submission cell into the student's
+  full transcript. The grading panel currently shows the grade and its
+  history but not the conversation itself; the transcript is exportable
+  (#91) in the meantime. Owned by M4 (#29).
+- **Course switcher** (#70) — the console assumes one course
+  (`courses[0]`). Every page names the course it is acting on so a
+  multi-course instructor can see which, but there is no way to change it.
+- **Audit viewer** (#50) — every mutation here writes an audit event; nothing
+  reads them back yet.
+- **Async exports** (#81) — exports are synchronous and refuse rather than
+  truncate past a row bound. See the header of `routes/exports.ts`.
+- **Instructor-supplied credentials** (#323/#332) — the config form shows the
+  custom-provider option disabled with the reason stated, rather than hiding
+  it.
+
+### API endpoints
+
+All under `/api/courses/:courseId/`, all gated by `requireInstructorOf`
+unless noted. The route table is pinned by `server/routeGuards.test.ts`,
+which asserts the exact set of personas each route admits.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `llm-configs` | List the organization's configs |
+| POST | `llm-configs` | Create |
+| GET | `llm-configs/:configId` | One config |
+| PATCH | `llm-configs/:configId` | Update |
+| DELETE | `llm-configs/:configId` | **Deactivate** — never deletes the row |
+| POST | `llm-configs/:configId/clone` | Editable copy, never the default |
+| POST | `llm-configs/:configId/test` | One-shot generation against the saved config |
+| GET | `roster` | Course memberships, including dropped |
+| POST | `roster` | Enrol one person by email |
+| POST | `roster/import` | CSV import; `preview: true` writes nothing |
+| DELETE | `roster/:membershipId` | Soft-remove; refuses instructors |
+| GET | `tas` | TA capability grants |
+| POST | `tas` | Add TAs by NetID, per-NetID results |
+| PATCH | `tas/:membershipId/capabilities` | Grant/revoke solutions or drafts |
+| DELETE | `tas/:membershipId` | Soft-remove a TA, clearing grants |
+| GET | `submissions/:submissionId/grades` | Grade history |
+| POST | `submissions/:submissionId/grades` | Record a grade (always an insert) |
+| POST | `submissions/:submissionId/grades/draft` | AI draft — never in force |
+| POST | `exports` | Build an export artifact |
+| GET | `homeworks/:homeworkId/submissions` | Dashboard matrix (grader-tier) |
+
+**Two authorization shapes are worth stating explicitly**, because they are
+not what a reader would assume:
+
+1. **LLM configs are ORG-scoped while the guard is COURSE-scoped.** The
+   routes check instructor-of-course, then operate on that course's
+   organization pool — so an instructor of one course can edit configs
+   another course in the same org uses, including the org default. That is
+   what `llm_configs` is (a per-organization pool, by schema design), not an
+   oversight. If it stops being acceptable the fix is course-scoped configs
+   in the schema, not a narrower filter in the route.
+
+2. **Grading is narrower than reading.** #172 opened the submissions
+   dashboard and section answers to TAs (`requireGraderOf`). Grading, the
+   roster, configs and export are all `requireInstructorOf`: reading a
+   student's work and recording a grade they may dispute are different
+   authorities.
+
+### The catalog display id
+
+`CFG·001` and `HW·003` are **per-organization ordinals computed at read
+time** from `created_at` ordering, never stored. They are stable for a given
+set of rows (`id` breaks ties on identical timestamps) and are NOT stable
+across deletion — which is acceptable only because configs are deactivated
+rather than deleted. The id is the identity; the ordinal is a label an
+instructor can say out loud. Nothing keys off it.
 
 ## References
 
 - `apps/admin/src/client/App.tsx` — shell + view state machine
-- `apps/admin/src/client/lib/fixtures.ts` — data shapes (the Drizzle contract)
+- `apps/admin/src/client/lib/api-client.ts` — the request layer every view reads through
+- `packages/ui/src/api/types.ts` — the wire contract, checked against apps/web's repositories
+- `apps/admin/src/client/lib/useApiResource.ts` — the shared load lifecycle
 - `packages/ui/src/components/TopNav.tsx` — shared chrome with `admin` prop
 - `packages/ui/styles.css` — admin-namespaced CSS block at the bottom of the file
 - Django models for the data shapes: `apps/{homeworks,llm,accounts,conversations}/src/models.py`
