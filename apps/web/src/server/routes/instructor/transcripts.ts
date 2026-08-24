@@ -138,11 +138,11 @@ export async function listInstructorTranscriptsHandler(c: Context<AppEnv>) {
   });
 }
 
-/** Full transcript reads are one-shot (an instructor reading a student's
- *  record wants the whole thing, not an incrementally-scrolled live chat)
- *  but still bounded -- an unbounded query is the same "OOM on a
- *  pathological conversation" risk the list endpoint's own pagination
- *  exists to avoid, just at a different granularity. Far above
+/** Full transcript reads are one page at a time (an instructor reading a
+ *  student's record wants the whole thing, not an incrementally-scrolled
+ *  live chat) but still bounded per request -- an unbounded query is the
+ *  same "OOM on a pathological conversation" risk the list endpoint's own
+ *  pagination exists to avoid, just at a different granularity. Far above
  *  DEFAULT_MESSAGES_PAGE_SIZE (200, tuned for a live chat's per-scroll
  *  fetch): a single homework section's conversation running past a
  *  thousand messages is not a case this route optimizes for, it's a case
@@ -154,7 +154,23 @@ export async function listInstructorTranscriptsHandler(c: Context<AppEnv>) {
  *  silently show the instructor the wrong end of the transcript.
  *  `hasMore` (mirrors ConversationView's own hasMoreHistory prop) tells
  *  the truth about a transcript this large instead of silently truncating
- *  it -- and is now honest about which end got cut. */
+ *  it -- and is now honest about which end got cut.
+ *
+ *  #371: was one-shot with no way to reach message 1001+ once `hasMore`
+ *  came back true -- the API stated truthfully that more existed and
+ *  offered no request that could reach it. `offset` (validated identically
+ *  to listInstructorTranscriptsHandler's own limit/offset below -- same
+ *  non-negative-integer shape, same 400 on violation) closes that gap.
+ *  Plain integer offset, not a `before`/cursor param: this route already
+ *  does NOT use getSectionConversationMessages's cursor convention (see
+ *  that function's own comment on why, and getSectionConversationMessages
+ *  FromStart's), and the issue asks this to mirror the LIST endpoint below,
+ *  which is offset-based -- one paging convention across both handlers in
+ *  this file rather than two. #91 (bulk transcript export) is a separate,
+ *  already-tracked, larger feature and is deliberately not built here --
+ *  offset paging is the fix for "can a human instructor reach message
+ *  1001+ by clicking Load more", not for "can I download the whole
+ *  academic-integrity case file", which is what #91 is for. */
 const TRANSCRIPT_DETAIL_MESSAGE_LIMIT = 1000;
 
 export async function getInstructorTranscriptHandler(c: Context<AppEnv>) {
@@ -172,6 +188,18 @@ export async function getInstructorTranscriptHandler(c: Context<AppEnv>) {
   // routes/sectionConversations.ts's own notFound() convention).
   if (!isValidUuidParam(conversationId)) {
     return c.json({ error: "Transcript not found" }, 404);
+  }
+
+  // #371: same non-negative-integer validation shape as
+  // listInstructorTranscriptsHandler's own offset param above.
+  const offsetParam = c.req.query("offset");
+  let offset = 0;
+  if (offsetParam !== undefined) {
+    const parsed = Number(offsetParam);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      return c.json({ error: "offset must be a non-negative integer" }, 400);
+    }
+    offset = parsed;
   }
 
   const db = makeDb(c.env.DATABASE_URL);
@@ -205,6 +233,7 @@ export async function getInstructorTranscriptHandler(c: Context<AppEnv>) {
     db,
     conversationId,
     TRANSCRIPT_DETAIL_MESSAGE_LIMIT,
+    offset,
   );
 
   const orgScope = await getOrgScopeForCourse(db, courseId);
@@ -240,5 +269,6 @@ export async function getInstructorTranscriptHandler(c: Context<AppEnv>) {
       createdAt: m.createdAt.toISOString(),
     })),
     hasMore: messages.length === TRANSCRIPT_DETAIL_MESSAGE_LIMIT,
+    offset,
   });
 }

@@ -412,4 +412,59 @@ describe("GET /api/courses/:courseId/instructor/transcripts/:conversationId — 
     );
     expect(res.status).toBe(503);
   });
+
+  // #371: the detail route previously took no offset at all -- these mirror
+  // the list handler's own limit/offset validation tests above.
+  describe("offset paging (#371)", () => {
+    beforeEach(() => {
+      getDetailMock.mockResolvedValue(conversationOwnedBy("student-1"));
+    });
+
+    it("defaults offset to 0 when not supplied", async () => {
+      const res = await buildApp(instructor()).request(
+        `/api/courses/${COURSE}/instructor/transcripts/${CONV}`,
+        {},
+        TEST_ENV,
+      );
+      expect(getMessagesMock).toHaveBeenCalledWith(expect.anything(), CONV, 1000, 0);
+      const body = (await res.json()) as { offset: number };
+      expect(body.offset).toBe(0);
+    });
+
+    it("passes a valid offset through to getSectionConversationMessagesFromStart and echoes it back", async () => {
+      const res = await buildApp(instructor()).request(
+        `/api/courses/${COURSE}/instructor/transcripts/${CONV}?offset=1000`,
+        {},
+        TEST_ENV,
+      );
+      expect(getMessagesMock).toHaveBeenCalledWith(expect.anything(), CONV, 1000, 1000);
+      const body = (await res.json()) as { offset: number };
+      expect(body.offset).toBe(1000);
+    });
+
+    it.each(["-1", "not-a-number", "1.5"])("rejects an invalid offset=%s with 400", async (bad) => {
+      const res = await buildApp(instructor()).request(
+        `/api/courses/${COURSE}/instructor/transcripts/${CONV}?offset=${bad}`,
+        {},
+        TEST_ENV,
+      );
+      expect(res.status).toBe(400);
+      expect(getMessagesMock).not.toHaveBeenCalled();
+      expect(getDetailMock).not.toHaveBeenCalled();
+    });
+
+    it("an offset past the end of the transcript returns an empty page, not an error", async () => {
+      getMessagesMock.mockResolvedValue([]);
+      const res = await buildApp(instructor()).request(
+        `/api/courses/${COURSE}/instructor/transcripts/${CONV}?offset=999999`,
+        {},
+        TEST_ENV,
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { messages: unknown[]; hasMore: boolean; offset: number };
+      expect(body.messages).toEqual([]);
+      expect(body.hasMore).toBe(false);
+      expect(body.offset).toBe(999999);
+    });
+  });
 });

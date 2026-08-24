@@ -33,6 +33,7 @@ function data(overrides: Partial<TranscriptDetailData> = {}): TranscriptDetailDa
       { id: "m2", role: "user", parts: [{ type: "text", text: "What is a p-value?" }], createdAt: "2026-01-01T00:01:00.000Z" },
     ],
     hasMore: false,
+    offset: 0,
     ...overrides,
   };
 }
@@ -43,7 +44,7 @@ function data(overrides: Partial<TranscriptDetailData> = {}): TranscriptDetailDa
  *  reuse (rather than a forked read-only component) actually works. */
 describe("TranscriptDetailView (#29)", () => {
   it("renders the student's name and section/homework breadcrumb", () => {
-    render(<TranscriptDetailView data={data()} onBack={vi.fn()} />);
+    render(<TranscriptDetailView data={data()} onBack={vi.fn()} onLoadMore={vi.fn()} />);
     expect(screen.getByRole("heading", { name: "Ada Lovelace" })).toBeTruthy();
     // Appears twice by design: once in the page subtitle, once in
     // ConversationView's own breadcrumb row -- both read the same string.
@@ -51,7 +52,7 @@ describe("TranscriptDetailView (#29)", () => {
   });
 
   it("renders the full message history: assistant text and student text", () => {
-    render(<TranscriptDetailView data={data()} onBack={vi.fn()} />);
+    render(<TranscriptDetailView data={data()} onBack={vi.fn()} onLoadMore={vi.fn()} />);
     expect(screen.getByText("Hello! How can I help?")).toBeTruthy();
     expect(screen.getByText("What is a p-value?")).toBeTruthy();
   });
@@ -64,7 +65,7 @@ describe("TranscriptDetailView (#29)", () => {
             { id: "sys-1", role: "system", parts: [{ type: "text", text: "Section restarted by student." }], createdAt: "2026-01-01T00:02:00.000Z" },
           ],
         })}
-        onBack={vi.fn()}
+        onBack={vi.fn()} onLoadMore={vi.fn()}
       />,
     );
     expect(screen.getByText("Section restarted by student.")).toBeTruthy();
@@ -83,7 +84,7 @@ describe("TranscriptDetailView (#29)", () => {
             },
           ],
         })}
-        onBack={vi.fn()}
+        onBack={vi.fn()} onLoadMore={vi.fn()}
       />,
     );
     expect(screen.getByText("sum(1:10)")).toBeTruthy();
@@ -94,13 +95,13 @@ describe("TranscriptDetailView (#29)", () => {
   });
 
   it("copy-safe: renders no composer/textbox at all", () => {
-    render(<TranscriptDetailView data={data()} onBack={vi.fn()} />);
+    render(<TranscriptDetailView data={data()} onBack={vi.fn()} onLoadMore={vi.fn()} />);
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.queryByPlaceholderText(/ask, explore/i)).toBeNull();
   });
 
   it("shows 'not submitted' when there's no submission", () => {
-    render(<TranscriptDetailView data={data()} onBack={vi.fn()} />);
+    render(<TranscriptDetailView data={data()} onBack={vi.fn()} onLoadMore={vi.fn()} />);
     expect(screen.getByText(/not submitted/i)).toBeTruthy();
   });
 
@@ -110,7 +111,7 @@ describe("TranscriptDetailView (#29)", () => {
         data={data({
           conversation: { ...BASE_CONVERSATION, submission: { id: "sub-1", submittedAt: "2026-01-03T00:00:00.000Z" } },
         })}
-        onBack={vi.fn()}
+        onBack={vi.fn()} onLoadMore={vi.fn()}
       />,
     );
     expect(screen.getByText(/^submitted$/i)).toBeTruthy();
@@ -119,7 +120,7 @@ describe("TranscriptDetailView (#29)", () => {
 
   it("marks a teacher-test conversation", () => {
     render(
-      <TranscriptDetailView data={data({ conversation: { ...BASE_CONVERSATION, isTeacherTest: true } })} onBack={vi.fn()} />,
+      <TranscriptDetailView data={data({ conversation: { ...BASE_CONVERSATION, isTeacherTest: true } })} onBack={vi.fn()} onLoadMore={vi.fn()} />,
     );
     expect(screen.getByText(/test conversation/i)).toBeTruthy();
   });
@@ -130,7 +131,7 @@ describe("TranscriptDetailView (#29)", () => {
         data={data({
           conversation: { ...BASE_CONVERSATION, isDeleted: true, deletedAt: "2026-01-04T00:00:00.000Z" },
         })}
-        onBack={vi.fn()}
+        onBack={vi.fn()} onLoadMore={vi.fn()}
       />,
     );
     expect(screen.getByText(/deleted/i)).toBeTruthy();
@@ -139,26 +140,57 @@ describe("TranscriptDetailView (#29)", () => {
   });
 
   it("shows a truncation notice when hasMore is true", () => {
-    render(<TranscriptDetailView data={data({ hasMore: true })} onBack={vi.fn()} />);
+    render(<TranscriptDetailView data={data({ hasMore: true })} onBack={vi.fn()} onLoadMore={vi.fn()} />);
     expect(screen.getByText(/continues beyond what.s shown/i)).toBeTruthy();
   });
 
   it("shows no truncation notice when hasMore is false", () => {
-    render(<TranscriptDetailView data={data({ hasMore: false })} onBack={vi.fn()} />);
+    render(<TranscriptDetailView data={data({ hasMore: false })} onBack={vi.fn()} onLoadMore={vi.fn()} />);
     expect(screen.queryByText(/continues beyond what.s shown/i)).toBeNull();
   });
 
   it("calls onBack from the back control", () => {
     const onBack = vi.fn();
-    render(<TranscriptDetailView data={data()} onBack={onBack} />);
+    render(<TranscriptDetailView data={data()} onBack={onBack} onLoadMore={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: /back to transcripts/i }));
     expect(onBack).toHaveBeenCalled();
   });
 
   it("falls back to a placeholder for an unnamed student rather than a blank heading", () => {
     render(
-      <TranscriptDetailView data={data({ conversation: { ...BASE_CONVERSATION, studentName: "" } })} onBack={vi.fn()} />,
+      <TranscriptDetailView data={data({ conversation: { ...BASE_CONVERSATION, studentName: "" } })} onBack={vi.fn()} onLoadMore={vi.fn()} />,
     );
     expect(screen.getByRole("heading", { name: /unnamed student/i })).toBeTruthy();
+  });
+
+  // #371: hasMore was previously received and never rendered as anything
+  // actionable -- these prove the "Load more" affordance actually appears
+  // and actually calls back out to the loader.
+  describe("hasMore paging (#371)", () => {
+    it("shows a 'Load more messages' control when hasMore is true", () => {
+      render(<TranscriptDetailView data={data({ hasMore: true })} onBack={vi.fn()} onLoadMore={vi.fn()} />);
+      expect(screen.getByRole("button", { name: /load more messages/i })).toBeTruthy();
+    });
+
+    it("does not show a 'Load more' control when hasMore is false", () => {
+      render(<TranscriptDetailView data={data({ hasMore: false })} onBack={vi.fn()} onLoadMore={vi.fn()} />);
+      expect(screen.queryByRole("button", { name: /load more messages/i })).toBeNull();
+    });
+
+    it("calls onLoadMore when the control is clicked", () => {
+      const onLoadMore = vi.fn();
+      render(<TranscriptDetailView data={data({ hasMore: true })} onBack={vi.fn()} onLoadMore={onLoadMore} />);
+      fireEvent.click(screen.getByRole("button", { name: /load more messages/i }));
+      expect(onLoadMore).toHaveBeenCalledTimes(1);
+    });
+
+    it("disables the control and shows a loading label while loadingMore is true", () => {
+      render(
+        <TranscriptDetailView data={data({ hasMore: true })} onBack={vi.fn()} onLoadMore={vi.fn()} loadingMore />,
+      );
+      const button = screen.getByRole("button", { name: /loading/i });
+      expect(button).toBeTruthy();
+      expect((button as HTMLButtonElement).disabled).toBe(true);
+    });
   });
 });

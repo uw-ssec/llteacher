@@ -601,11 +601,24 @@ export async function getSectionConversationMessages(
  *  contract is shared with, and already well-tested by, the live tutor and
  *  section chats (#215/#326) -- widening its behavior for one caller risks
  *  the two access patterns drifting into each other by accident. This one
- *  has exactly one job. */
+ *  has exactly one job.
+ *
+ *  #371: `offset` added so a transcript past `limit` messages is actually
+ *  reachable past its first page -- the detail route previously returned
+ *  `hasMore: true` with no request that could ever reach message 1001+.
+ *  Plain integer offset, not `getSectionConversationMessages`'s own `before`
+ *  cursor: this route's own doc comment (routes/instructor/transcripts.ts)
+ *  already explains why it deliberately does not use that cursor
+ *  convention, and the issue asks this paging to mirror the LIST endpoint's
+ *  (listInstructorTranscripts, same file) plain-offset shape instead, so
+ *  the two instructor-transcript routes in this file agree on one
+ *  convention rather than three. Defaults to 0 so every existing caller
+ *  (there is exactly one, before this change) is unaffected. */
 export async function getSectionConversationMessagesFromStart(
   db: Db,
   conversationId: string,
   limit: number,
+  offset = 0,
 ) {
   return db
     .select({
@@ -618,7 +631,8 @@ export async function getSectionConversationMessagesFromStart(
     .from(messages)
     .where(eq(messages.conversationId, conversationId))
     .orderBy(messages.seq)
-    .limit(limit);
+    .limit(limit)
+    .offset(offset);
 }
 
 /** Who may read a given section conversation (#27 access rules, widened to

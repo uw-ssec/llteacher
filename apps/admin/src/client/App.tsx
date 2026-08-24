@@ -14,7 +14,7 @@
    state in a single useState beats a router dependency for now.
    -------------------------------------------------------------------------- */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { TopNav, AUTHOR_ROLES, CONSOLE_ROLES } from "@llteacher/ui";
 import { DegradedRoleBanner } from "./components/DegradedRoleBanner";
 import { AdminSidebar } from "./components/AdminSidebar";
@@ -71,6 +71,14 @@ type View =
   | {
       kind: "transcript-detail";
       conversationId: string;
+      /** #371: how many messages of this conversation have been fetched so
+       *  far (0 on first open). Lives here, not as local useState in the
+       *  loader, for the same reason transcript-list's own `offset` does --
+       *  navigating away (e.g. to check the section) and back preserves how
+       *  far the instructor had paged in. Unlike transcript-list's offset,
+       *  this never moves backward: a transcript is read forward from its
+       *  start, not paged back and forth, so there is no "previous" here. */
+      offset: number;
       /** Exactly the transcript-list state to return to on "back". */
       list: { homeworkId: string; sectionId: string; studentId: string; offset: number };
     }
@@ -394,6 +402,7 @@ export default function App() {
                       setView({
                         kind: "transcript-detail",
                         conversationId,
+                        offset: 0,
                         list: { homeworkId: view.homeworkId, sectionId: view.sectionId, studentId: view.studentId, offset: view.offset },
                       })
                     }
@@ -408,7 +417,9 @@ export default function App() {
                   <TranscriptDetailDataLoader
                     courseId={CURRENT_COURSE_ID}
                     conversationId={view.conversationId}
+                    offset={view.offset}
                     onBack={() => setView({ kind: "transcript-list", ...view.list })}
+                    onChangeOffset={(offset) => setView({ ...view, offset })}
                   />
                 ) : (
                   <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
@@ -698,30 +709,67 @@ function TranscriptListDataLoader({
   );
 }
 
-/** #29: one conversation's read-only transcript. Same loader/view split. */
+/** #29: one conversation's read-only transcript. Same loader/view split.
+ *
+ *  #371: `offset` now lives in view state (App.tsx's own View type, same
+ *  place TranscriptListDataLoader keeps its own), not local useState, so
+ *  paging in survives a navigate-away-and-back. A page fetched at offset>0
+ *  is APPENDED onto the messages already shown rather than replacing them
+ *  -- unlike TranscriptListView's row pager, an instructor "loading more"
+ *  of a transcript wants the conversation to keep growing on screen, not to
+ *  see the earlier messages disappear. `prevConversationId` distinguishes
+ *  that append case from "a different conversation was opened": only the
+ *  latter clears `data` up front, so switching transcripts never flashes
+ *  the previous transcript's messages under the new one's header (same
+ *  every-view-change-clears-first behavior this loader already had, kept
+ *  for a genuinely new conversationId; not applied to a same-conversation
+ *  "load more", so that doesn't blank the screen the reader is mid-way
+ *  through). */
 function TranscriptDetailDataLoader({
   courseId,
   conversationId,
+  offset,
   onBack,
+  onChangeOffset,
 }: {
   courseId: string;
   conversationId: string;
+  offset: number;
   onBack: () => void;
+  onChangeOffset: (offset: number) => void;
 }) {
   const [data, setData] = useState<TranscriptDetailData | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const prevConversationId = useRef<string | undefined>(undefined);
+
   useEffect(() => {
-    setData(null);
+    const isNewConversation = prevConversationId.current !== conversationId;
+    prevConversationId.current = conversationId;
+    if (isNewConversation) setData(null);
     setLoadError(false);
-    fetch(`/api/courses/${courseId}/instructor/transcripts/${conversationId}`)
+    setLoadingMore(offset > 0);
+
+    const params = new URLSearchParams();
+    if (offset > 0) params.set("offset", String(offset));
+    const qs = params.toString();
+    fetch(`/api/courses/${courseId}/instructor/transcripts/${conversationId}${qs ? `?${qs}` : ""}`)
       .then((r) => {
         if (!r.ok) throw new Error("failed");
         return r.json();
       })
-      .then(setData)
-      .catch(() => setLoadError(true));
-  }, [courseId, conversationId, attempt]);
+      .then((json: TranscriptDetailData) => {
+        setData((prev) =>
+          !isNewConversation && offset > 0 && prev
+            ? { ...json, messages: [...prev.messages, ...json.messages] }
+            : json,
+        );
+      })
+      .catch(() => setLoadError(true))
+      .finally(() => setLoadingMore(false));
+  }, [courseId, conversationId, offset, attempt]);
+
   if (loadError)
     return (
       <AdminNotice
@@ -734,7 +782,14 @@ function TranscriptDetailDataLoader({
       />
     );
   if (!data) return null;
-  return <TranscriptDetailView data={data} onBack={onBack} />;
+  return (
+    <TranscriptDetailView
+      data={data}
+      onBack={onBack}
+      onLoadMore={() => onChangeOffset(data.messages.length)}
+      loadingMore={loadingMore}
+    />
+  );
 }
 
 /* #186 (#172 re-audit, USE-026): `body` is explicit and NOT defaulted to the

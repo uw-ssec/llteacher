@@ -61,11 +61,24 @@ export interface TranscriptDetailData {
   conversation: TranscriptConversation;
   messages: TranscriptMessage[];
   hasMore: boolean;
+  /** #371: the offset the server applied to produce `messages` -- echoed
+   *  back so the loader can compute the next page's offset without
+   *  duplicating TRANSCRIPT_DETAIL_MESSAGE_LIMIT client-side. */
+  offset: number;
 }
 
 export type TranscriptDetailViewProps = {
   data: TranscriptDetailData;
   onBack: () => void;
+  /** #371: fetches and appends the next page of messages -- present
+   *  whenever `data.hasMore` is true. Mirrors TranscriptListView's own
+   *  onChangeOffset prop (same offset-paging convention, this route just
+   *  has no "previous page" affordance since a transcript is read forward
+   *  from the start rather than paged back and forth). */
+  onLoadMore: () => void;
+  /** True while a "load more" fetch is in flight -- disables the button
+   *  rather than letting a second click race the first. */
+  loadingMore?: boolean;
 };
 
 function isTextPart(part: unknown): part is { type: "text"; text: string } {
@@ -118,7 +131,7 @@ function buildTranscriptMessageData(messages: TranscriptMessage[]): MessageData[
   });
 }
 
-export function TranscriptDetailView({ data, onBack }: TranscriptDetailViewProps) {
+export function TranscriptDetailView({ data, onBack, onLoadMore, loadingMore = false }: TranscriptDetailViewProps) {
   const { conversation } = data;
   const breadcrumb = `${conversation.homeworkTitle} · ${conversation.sectionTitle}`;
   const messages = buildTranscriptMessageData(data.messages);
@@ -169,10 +182,20 @@ export function TranscriptDetailView({ data, onBack }: TranscriptDetailViewProps
       <ConversationView breadcrumb={breadcrumb} messages={messages} hideComposer />
 
       {data.hasMore && (
-        <p className="admin-record-row__desc">
-          Showing the first {data.messages.length} messages. This conversation continues beyond what's
-          shown here.
-        </p>
+        <div className="admin-record-row__meta" role="group" aria-label="Transcript pagination">
+          <p className="admin-record-row__desc">
+            Showing the first {data.messages.length} messages. This conversation continues beyond what's
+            shown here.
+          </p>
+          <button
+            type="button"
+            className="admin-button admin-button--ghost"
+            onClick={onLoadMore}
+            disabled={loadingMore}
+          >
+            {loadingMore ? "Loading…" : "Load more messages"}
+          </button>
+        </div>
       )}
     </div>
   );
