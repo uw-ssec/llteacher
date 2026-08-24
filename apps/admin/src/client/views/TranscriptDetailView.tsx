@@ -79,6 +79,15 @@ export type TranscriptDetailViewProps = {
   /** True while a "load more" fetch is in flight -- disables the button
    *  rather than letting a second click race the first. */
   loadingMore?: boolean;
+  /** Review follow-up (#366 review): true when the most recent "load more"
+   *  fetch failed. Distinct from a loader-level error boundary -- `data` is
+   *  still the real, valid transcript read so far, so the failure renders
+   *  inline in place of the "Load more" button rather than replacing this
+   *  whole view. */
+  loadMoreError?: boolean;
+  /** Retries the same failed page (same offset, not the next one) -- present
+   *  whenever `loadMoreError` is true. */
+  onRetryLoadMore?: () => void;
 };
 
 function isTextPart(part: unknown): part is { type: "text"; text: string } {
@@ -131,7 +140,14 @@ function buildTranscriptMessageData(messages: TranscriptMessage[]): MessageData[
   });
 }
 
-export function TranscriptDetailView({ data, onBack, onLoadMore, loadingMore = false }: TranscriptDetailViewProps) {
+export function TranscriptDetailView({
+  data,
+  onBack,
+  onLoadMore,
+  loadingMore = false,
+  loadMoreError = false,
+  onRetryLoadMore,
+}: TranscriptDetailViewProps) {
   const { conversation } = data;
   const breadcrumb = `${conversation.homeworkTitle} · ${conversation.sectionTitle}`;
   const messages = buildTranscriptMessageData(data.messages);
@@ -187,14 +203,26 @@ export function TranscriptDetailView({ data, onBack, onLoadMore, loadingMore = f
             Showing the first {data.messages.length} messages. This conversation continues beyond what's
             shown here.
           </p>
-          <button
-            type="button"
-            className="admin-button admin-button--ghost"
-            onClick={onLoadMore}
-            disabled={loadingMore}
-          >
-            {loadingMore ? "Loading…" : "Load more messages"}
-          </button>
+          {loadMoreError ? (
+            /* Review follow-up (#366 review): inline, not a full-page error
+               -- everything above is still a real, valid read of the
+               conversation so far, so a failed page fetch must not hide it. */
+            <div className="admin-alert" role="alert">
+              <span>Couldn't load more messages. Nothing above has changed.</span>
+              <button type="button" className="admin-link-button" onClick={onRetryLoadMore}>
+                Retry
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="admin-button admin-button--ghost"
+              onClick={onLoadMore}
+              disabled={loadingMore}
+            >
+              {loadingMore ? "Loading…" : "Load more messages"}
+            </button>
+          )}
         </div>
       )}
     </div>

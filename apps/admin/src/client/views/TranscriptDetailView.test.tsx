@@ -192,5 +192,40 @@ describe("TranscriptDetailView (#29)", () => {
       expect(button).toBeTruthy();
       expect((button as HTMLButtonElement).disabled).toBe(true);
     });
+
+    // Review follow-up (#366 review): a failed "load more" used to swap the
+    // WHOLE view for a full-page error, hiding the messages already shown.
+    it("shows an inline retry, not a full-page error, when loadMoreError is true", () => {
+      render(
+        <TranscriptDetailView
+          data={data({ hasMore: true })}
+          onBack={vi.fn()}
+          onLoadMore={vi.fn()}
+          loadMoreError
+          onRetryLoadMore={vi.fn()}
+        />,
+      );
+      // The already-loaded transcript is still on screen...
+      expect(screen.getByText("Ada Lovelace")).toBeTruthy();
+      // ...and the normal "Load more" button is replaced by an inline retry.
+      expect(screen.queryByRole("button", { name: "Load more messages" })).toBeNull();
+      expect(screen.getByRole("alert")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    });
+
+    it("calls onRetryLoadMore when the inline retry is clicked", () => {
+      const onRetryLoadMore = vi.fn();
+      render(
+        <TranscriptDetailView
+          data={data({ hasMore: true })}
+          onBack={vi.fn()}
+          onLoadMore={vi.fn()}
+          loadMoreError
+          onRetryLoadMore={onRetryLoadMore}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      expect(onRetryLoadMore).toHaveBeenCalledTimes(1);
+    });
   });
 });

@@ -82,8 +82,22 @@ export type SubmissionsViewProps = {
    *  act on, and #75's own `--gradeable` CSS modifier was already written
    *  to compose with (not replace) the state class, confirming a single
    *  combined button was the intended shape rather than two separate
-   *  elements. See the cell-rendering block below for the precedence. */
-  onGrade?: (input: { submissionId: string; studentName: string; sectionTitle: string }) => void;
+   *  elements. See the cell-rendering block below for the precedence.
+   *
+   *  sectionId/studentId (review follow-up, #366 review): grading winning
+   *  the click originally left an instructor with no way to reach this same
+   *  cell's transcript at all -- GradingPanel never rendered the
+   *  conversation it was scoring. Both ids are already in scope at this
+   *  cell (same values onOpenTranscript above receives), threaded through so
+   *  the caller can wire GradingPanel's own "View transcript" link to the
+   *  same transcript-list destination onOpenTranscript would have reached. */
+  onGrade?: (input: {
+    submissionId: string;
+    studentName: string;
+    sectionTitle: string;
+    sectionId: string;
+    studentId: string;
+  }) => void;
 };
 
 type Filter = "all" | ParticipationStatus;
@@ -280,16 +294,19 @@ export function SubmissionsView({ data, onBack, onOpenTranscript, onGrade }: Sub
                 // Merge note (see this component's onGrade prop doc comment):
                 // one button, one click target. Grading wins when a cell is
                 // both gradeable and openable -- it's the action an
-                // instructor most needs from a submitted cell; the
-                // transcript is still reachable from the same submission via
-                // TranscriptListView's own list once #29's other entry
-                // points exist, so nothing here becomes unreachable.
+                // instructor most needs from a submitted cell. The
+                // transcript stays reachable from GradingPanel's own "View
+                // transcript" link (review follow-up, #366 review) rather
+                // than from this cell directly -- onGrade carries sectionId/
+                // studentId precisely so that link can reach it.
                 const onCellClick = gradeable
                   ? () =>
                       onGrade!({
                         submissionId: cell!.submissionId!,
                         studentName: row.displayName || row.email,
                         sectionTitle: header.title,
+                        sectionId: header.id,
+                        studentId: row.studentId,
                       })
                   : openable
                     ? () => onOpenTranscript!(header.id, row.studentId)

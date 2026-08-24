@@ -67,7 +67,22 @@ type View =
   // point this state is created. `offset` lives here, not as separate
   // useState in the list view, so navigating away and back (e.g. opening a
   // transcript, then going back) preserves which page was showing.
-  | { kind: "transcript-list"; homeworkId: string; sectionId: string; studentId: string; offset: number }
+  | {
+      kind: "transcript-list";
+      homeworkId: string;
+      sectionId: string;
+      studentId: string;
+      offset: number;
+      /** Review follow-up (#366 review): transcript-list is reachable from
+       *  two places now -- a SubmissionsView cell drill-in (undefined here,
+       *  "back" goes to submissions, the original behavior) or a grading
+       *  panel's "View transcript" link (set, "back" returns to that exact
+       *  grade screen instead of losing the instructor's place). Exactly the
+       *  grade-view fields needed to reconstruct that screen, same pattern
+       *  as this view's own `sectionId`/`studentId`/`offset` being carried
+       *  rather than refetched. */
+      returnToGrade?: { submissionId: string; studentName: string; sectionTitle: string };
+    }
   | {
       kind: "transcript-detail";
       conversationId: string;
@@ -79,8 +94,16 @@ type View =
        *  this never moves backward: a transcript is read forward from its
        *  start, not paged back and forth, so there is no "previous" here. */
       offset: number;
-      /** Exactly the transcript-list state to return to on "back". */
-      list: { homeworkId: string; sectionId: string; studentId: string; offset: number };
+      /** Exactly the transcript-list state to return to on "back" --
+       *  including its own `returnToGrade`, so a transcript opened from
+       *  grading still leads back to grading two hops later, not just one. */
+      list: {
+        homeworkId: string;
+        sectionId: string;
+        studentId: string;
+        offset: number;
+        returnToGrade?: { submissionId: string; studentName: string; sectionTitle: string };
+      };
     }
   | { kind: "llm-configs" }
   | { kind: "create-llm-config" }
@@ -92,13 +115,24 @@ type View =
      on. Threaded through the view state rather than refetched, because the
      dashboard the instructor came from already decrypted both -- and a
      second fetch to re-learn a name it just showed would be a query per
-     drill-in for nothing. */
+     drill-in for nothing.
+     sectionId/studentId (review follow-up, #366 review): a submitted cell's
+     onClick used to go straight to transcript-viewing; the merge that made
+     grading win on a gradeable cell removed that path entirely with no
+     replacement (GradingPanel never rendered the conversation), so an
+     instructor grading a submission had no way to read what they were
+     grading. Carried here so GradingPanel's "View transcript" link can
+     reach transcript-list the same way SubmissionsView's own onOpenTranscript
+     always did -- both are known at the SubmissionsView cell that starts
+     this view, same as submissionId/studentName/sectionTitle already are. */
   | {
       kind: "grade";
       homeworkId: string;
       submissionId: string;
       studentName: string;
       sectionTitle: string;
+      sectionId: string;
+      studentId: string;
     };
 
 const NAV_BREADCRUMB: Record<View["kind"], string> = {
@@ -388,7 +422,9 @@ export default function App() {
               )}
 
               {/* #29/#23: per-cell conversation list -> transcript, reached
-                  from a SubmissionsView cell drill-in. */}
+                  from a SubmissionsView cell drill-in or (review follow-up,
+                  #366 review) from a grading panel's "View transcript" link
+                  -- returnToGrade distinguishes the two for "back". */}
               {view.kind === "transcript-list" && (
                 CURRENT_COURSE_ID ? (
                   <TranscriptListDataLoader
@@ -396,14 +432,26 @@ export default function App() {
                     sectionId={view.sectionId}
                     studentId={view.studentId}
                     offset={view.offset}
-                    onBack={() => setView({ kind: "submissions", homeworkId: view.homeworkId })}
+                    onBack={() =>
+                      setView(
+                        view.returnToGrade
+                          ? { kind: "grade", homeworkId: view.homeworkId, sectionId: view.sectionId, studentId: view.studentId, ...view.returnToGrade }
+                          : { kind: "submissions", homeworkId: view.homeworkId },
+                      )
+                    }
                     onChangeOffset={(offset) => setView({ ...view, offset })}
                     onOpenTranscript={(conversationId) =>
                       setView({
                         kind: "transcript-detail",
                         conversationId,
                         offset: 0,
-                        list: { homeworkId: view.homeworkId, sectionId: view.sectionId, studentId: view.studentId, offset: view.offset },
+                        list: {
+                          homeworkId: view.homeworkId,
+                          sectionId: view.sectionId,
+                          studentId: view.studentId,
+                          offset: view.offset,
+                          returnToGrade: view.returnToGrade,
+                        },
                       })
                     }
                   />
@@ -513,6 +561,20 @@ export default function App() {
                     onBack={() =>
                       setView({ kind: "submissions", homeworkId: view.homeworkId })
                     }
+                    onViewTranscript={() =>
+                      setView({
+                        kind: "transcript-list",
+                        homeworkId: view.homeworkId,
+                        sectionId: view.sectionId,
+                        studentId: view.studentId,
+                        offset: 0,
+                        returnToGrade: {
+                          submissionId: view.submissionId,
+                          studentName: view.studentName,
+                          sectionTitle: view.sectionTitle,
+                        },
+                      })
+                    }
                   />
                 ) : (
                   <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
@@ -605,8 +667,17 @@ function SubmissionsDataLoader({
   onBack: () => void;
   onOpenTranscript: (sectionId: string, studentId: string) => void;
   /** #75: absent for a caller who may not grade, so the cells stay
-   *  non-interactive rather than offering a route that 403s. */
-  onGrade?: (input: { submissionId: string; studentName: string; sectionTitle: string }) => void;
+   *  non-interactive rather than offering a route that 403s.
+   *  sectionId/studentId (review follow-up, #366 review): see this same
+   *  field on SubmissionsViewProps's own onGrade -- reaches GradingPanel's
+   *  "View transcript" link via the `grade` View state below. */
+  onGrade?: (input: {
+    submissionId: string;
+    studentName: string;
+    sectionTitle: string;
+    sectionId: string;
+    studentId: string;
+  }) => void;
 }) {
   const [data, setData] = useState<import("./views/SubmissionsView").HomeworkSubmissionsData | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -740,6 +811,15 @@ function TranscriptDetailDataLoader({
 }) {
   const [data, setData] = useState<TranscriptDetailData | null>(null);
   const [loadError, setLoadError] = useState(false);
+  /** Review follow-up (#366 review): a "load more" fetch used to share
+   *  `loadError` with the initial fetch, so a transient failure on page 2+
+   *  swapped the WHOLE view for a full-page error -- hiding a transcript
+   *  the instructor was already reading, not just failing to append the
+   *  next page. Kept separate: `loadError` only fires when there is
+   *  nothing to lose (no data yet, or a freshly opened conversation);
+   *  `loadMoreError` fires when `data` already holds real, still-valid
+   *  content that must stay on screen through the failure. */
+  const [loadMoreError, setLoadMoreError] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const prevConversationId = useRef<string | undefined>(undefined);
@@ -749,6 +829,7 @@ function TranscriptDetailDataLoader({
     prevConversationId.current = conversationId;
     if (isNewConversation) setData(null);
     setLoadError(false);
+    setLoadMoreError(false);
     setLoadingMore(offset > 0);
 
     const params = new URLSearchParams();
@@ -766,7 +847,13 @@ function TranscriptDetailDataLoader({
             : json,
         );
       })
-      .catch(() => setLoadError(true))
+      .catch(() => {
+        // Same condition the append above uses: a load-more on an already-
+        // open conversation has existing content worth preserving; a first
+        // fetch (offset 0, or a just-switched-to conversation) does not.
+        if (!isNewConversation && offset > 0) setLoadMoreError(true);
+        else setLoadError(true);
+      })
       .finally(() => setLoadingMore(false));
   }, [courseId, conversationId, offset, attempt]);
 
@@ -788,6 +875,8 @@ function TranscriptDetailDataLoader({
       onBack={onBack}
       onLoadMore={() => onChangeOffset(data.messages.length)}
       loadingMore={loadingMore}
+      loadMoreError={loadMoreError}
+      onRetryLoadMore={() => setAttempt((n) => n + 1)}
     />
   );
 }
