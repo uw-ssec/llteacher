@@ -64,7 +64,7 @@ describe("SubmissionsView transcript drill-in (#29, closes #23's remaining check
         studentId: "student-1",
         displayName: "Ada Lovelace",
         email: "ada@example.com",
-        sections: [{ sectionId: "s1", status: "in_progress", conversationCount: 1, lastActivityAt: null, hasDeletedConversation: false, ...cell }],
+        sections: [{ sectionId: "s1", status: "in_progress", conversationCount: 1, lastActivityAt: null, hasDeletedConversation: false, submissionId: null, ...cell }],
         totalConversations: 1,
         submissionCount: 0,
         participationStatus: "partial",

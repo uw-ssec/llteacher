@@ -196,13 +196,21 @@ app.post(
 // handler via canReadSectionConversation, same split as every other guarded
 // route above: these guards only answer "is this caller a grader of this
 // course," not "of this specific conversation."
+//
+// #208/#366 merge: "gates-unreleased", not "no-unreleased-content" -- a
+// transcript's own content (the greeting + replay, built from the section as
+// it stood at conversation-start time) is unreleased content once the
+// underlying homework is currently draft/scheduled/hidden, same as the
+// homework's own title elsewhere in this console. Both handlers consult
+// canViewDraftsIn themselves (see their own comments) before returning any
+// row whose homework is currently unreleased.
 app.get(
   "/api/courses/:courseId/instructor/transcripts",
-  requireGraderOf()(listInstructorTranscriptsHandler),
+  requireGraderOf("gates-unreleased")(listInstructorTranscriptsHandler),
 );
 app.get(
   "/api/courses/:courseId/instructor/transcripts/:conversationId",
-  requireGraderOf()(getInstructorTranscriptHandler),
+  requireGraderOf("gates-unreleased")(getInstructorTranscriptHandler),
 );
 app.patch("/api/sections/:sectionId/answer", requireRole(["student"])(submitSectionAnswerHandler));
 app.get(

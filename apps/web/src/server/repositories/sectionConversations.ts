@@ -16,7 +16,7 @@ import { unsafeCourseScope } from "./scope";
 import { runAtomically } from "./atomic";
 import { SubmissionGradedError } from "./submissions";
 import { getOrgScopeForCourse } from "./organizations";
-import { deriveHomeworkStatus, isUnreleased } from "./homeworks";
+import { deriveHomeworkStatus, isUnreleased, type HomeworkStatus } from "./homeworks";
 import { resolvePromptTemplate, sectionGreeting, sectionConversationTitle } from "../../lib/prompts";
 import { DEFAULT_MESSAGES_PAGE_SIZE } from "./conversations";
 import { isUniqueViolation } from "./errors";
@@ -740,6 +740,16 @@ export interface InstructorTranscriptListItem {
   sectionTitle: string;
   homeworkId: string;
   homeworkTitle: string;
+  /** #366 merge (requireGraderOf's now-required release-gate posture,
+   *  #208): the transcript's own section content -- including the greeting
+   *  message, built from section.content at conversation-start time -- is
+   *  itself unreleased content once the underlying homework is
+   *  draft/scheduled/hidden, same as the homework's title. Callers without
+   *  canViewDraftsIn(courseId) must not see this row at all. Computed here
+   *  (deriveHomeworkStatus, repositories/homeworks.ts) rather than exposed
+   *  as raw dueDate/publishedAt/etc. columns, matching listHomeworksForCourse's
+   *  own status-not-columns convention. */
+  homeworkStatus: HomeworkStatus;
   isTeacherTest: boolean;
   isDeleted: boolean;
   messageCount: number;
@@ -824,6 +834,11 @@ export async function listInstructorTranscripts(
       sectionTitle: sections.title,
       homeworkId: homeworks.id,
       homeworkTitle: homeworks.title,
+      homeworkDueDate: homeworks.dueDate,
+      homeworkPublishedAt: homeworks.publishedAt,
+      homeworkReleasedAt: homeworks.releasedAt,
+      homeworkIsHidden: homeworks.isHidden,
+      homeworkExpiresAt: homeworks.expiresAt,
       studentDisplayName: users.displayName,
     })
     // Flat select+join, not db.query...with() -- same reason
@@ -876,6 +891,13 @@ export async function listInstructorTranscripts(
       sectionTitle: row.sectionTitle,
       homeworkId: row.homeworkId,
       homeworkTitle: row.homeworkTitle,
+      homeworkStatus: deriveHomeworkStatus({
+        dueDate: row.homeworkDueDate,
+        publishedAt: row.homeworkPublishedAt,
+        releasedAt: row.homeworkReleasedAt,
+        isHidden: row.homeworkIsHidden,
+        expiresAt: row.homeworkExpiresAt,
+      }),
       isTeacherTest: row.isTeacherTest,
       isDeleted: row.isDeleted,
       messageCount: countByConversation.get(row.id) ?? 0,
@@ -896,6 +918,9 @@ export interface InstructorTranscriptDetail {
   sectionTitle: string;
   homeworkId: string;
   homeworkTitle: string;
+  /** See InstructorTranscriptListItem's own doc comment -- same release-gate
+   *  reasoning applies to the single-conversation read. */
+  homeworkStatus: HomeworkStatus;
   isTeacherTest: boolean;
   isDeleted: boolean;
   deletedAt: Date | null;
@@ -934,6 +959,11 @@ export async function getInstructorTranscriptDetail(
       sectionTitle: sections.title,
       homeworkId: homeworks.id,
       homeworkTitle: homeworks.title,
+      homeworkDueDate: homeworks.dueDate,
+      homeworkPublishedAt: homeworks.publishedAt,
+      homeworkReleasedAt: homeworks.releasedAt,
+      homeworkIsHidden: homeworks.isHidden,
+      homeworkExpiresAt: homeworks.expiresAt,
       studentDisplayName: users.displayName,
       submissionId: submissions.id,
       submissionSubmittedAt: submissions.submittedAt,
@@ -962,6 +992,13 @@ export async function getInstructorTranscriptDetail(
     sectionTitle: row.sectionTitle,
     homeworkId: row.homeworkId,
     homeworkTitle: row.homeworkTitle,
+    homeworkStatus: deriveHomeworkStatus({
+      dueDate: row.homeworkDueDate,
+      publishedAt: row.homeworkPublishedAt,
+      releasedAt: row.homeworkReleasedAt,
+      isHidden: row.homeworkIsHidden,
+      expiresAt: row.homeworkExpiresAt,
+    }),
     isTeacherTest: row.isTeacherTest,
     isDeleted: row.isDeleted,
     deletedAt: row.deletedAt,

@@ -37,6 +37,14 @@ import { releaseGatePostureOf, type ReleaseGatePosture } from "./utils/guards";
 const EXPECTED: Record<string, ReleaseGatePosture> = {
   "GET /api/courses/:courseId/homeworks/:homeworkId/submissions": "gates-unreleased",
   "GET /api/courses/:courseId/sections/:sectionId/answers/:studentId": "gates-unreleased",
+  // #29/#366 merge: a transcript's own content (greeting + replay, built
+  // from the section as it stood at conversation-start time) is unreleased
+  // content once the underlying homework is currently draft/scheduled/
+  // hidden -- both handlers consult canViewDraftsIn themselves before
+  // returning a row whose homework is currently unreleased (see
+  // routes/instructor/transcripts.ts's own comments at each check).
+  "GET /api/courses/:courseId/instructor/transcripts": "gates-unreleased",
+  "GET /api/courses/:courseId/instructor/transcripts/:conversationId": "gates-unreleased",
 };
 
 function graderTierRoutes(): Record<string, ReleaseGatePosture> {

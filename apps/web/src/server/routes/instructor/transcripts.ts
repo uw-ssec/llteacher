@@ -8,6 +8,7 @@ import {
   canReadSectionConversation,
   DEFAULT_TRANSCRIPT_LIST_PAGE_SIZE,
 } from "../../repositories/sectionConversations";
+import { isUnreleased } from "../../repositories/homeworks";
 import { getOrgScopeForCourse } from "../../repositories/organizations";
 import { courseScopeFromAuthContext } from "../../repositories/scope";
 import { loadIdentityCipherKeys } from "../../../lib/secrets-loader";
@@ -90,6 +91,21 @@ export async function listInstructorTranscriptsHandler(c: Context<AppEnv>) {
     offset,
   });
 
+  // #208/#366 merge: a transcript's own content (greeting + replay, built
+  // from the section as it stood at conversation-start time) is unreleased
+  // content once the underlying homework is currently draft/scheduled/
+  // hidden -- same rule listHomeworksHandler already applies to a homework's
+  // mere title. A grader without canViewDraftsIn(courseId) (the default TA
+  // posture) must not see the row at all. Filtered post-query, matching
+  // listHomeworksHandler's own precedent (routes/homeworks.ts) rather than
+  // inventing a SQL-predicate version of deriveHomeworkStatus's multi-column
+  // logic -- `total`/pagination stay keyed to the unfiltered page, same
+  // accepted tradeoff that precedent already makes.
+  const canSeeUnreleased = authContext.canViewDraftsIn(courseId);
+  const visibleItems = canSeeUnreleased
+    ? result.items
+    : result.items.filter((item) => !isUnreleased(item.homeworkStatus));
+
   // FERPA audit -- best-effort, never blocks the response (see
   // recordTranscriptAccess's own doc comment for why this is a real write,
   // not the no-op the issue's own text describes).
@@ -101,7 +117,7 @@ export async function listInstructorTranscriptsHandler(c: Context<AppEnv>) {
   });
 
   return c.json({
-    items: result.items.map((item) => ({
+    items: visibleItems.map((item) => ({
       conversationId: item.conversationId,
       studentId: item.studentId,
       studentName: item.studentName,
@@ -173,6 +189,17 @@ export async function getInstructorTranscriptHandler(c: Context<AppEnv>) {
     { userId: authContext.session.userId, isGrader: authContext.isGraderOf(courseId) },
   );
   if (!allowed) return c.json({ error: "Transcript not found" }, 404);
+
+  // #208/#366 merge: see listInstructorTranscriptsHandler's own comment --
+  // same release gate, applied to the single-conversation read. 404, not
+  // 403, matching this route's existing "shape must never be an existence
+  // oracle" convention (the comment above canReadSectionConversation's own
+  // check) -- a grader without draft rights gets the same response whether
+  // the conversation is missing, another grader's teacher-test, or simply
+  // currently unreleased.
+  if (!authContext.canViewDraftsIn(courseId) && isUnreleased(detail.homeworkStatus)) {
+    return c.json({ error: "Transcript not found" }, 404);
+  }
 
   const messages = await getSectionConversationMessagesFromStart(
     db,
