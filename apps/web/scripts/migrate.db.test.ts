@@ -22,7 +22,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
-import { runMigrations } from "./migrate";
+import { runMigrations, applyMigrationsFolder } from "./migrate";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -216,6 +216,63 @@ describe.skipIf(!DATABASE_URL)("scripts/migrate.ts two-stage split (real DB, #34
         expect(rows.rows[0]).toMatchObject({ name: "gpt-5.3-codex" });
       } finally {
         await verifyPool.end();
+      }
+    },
+    60_000,
+  );
+
+  it(
+    "runs a CREATE INDEX CONCURRENTLY statement outside drizzle's batched transaction (#372)",
+    async () => {
+      // `CREATE INDEX CONCURRENTLY` is a hard Postgres error inside a
+      // transaction block (SQLSTATE 25001) -- and drizzle's own migrate()
+      // batches every pending migration in a folder into exactly one
+      // transaction. Dropping a CONCURRENTLY statement straight into a
+      // migration file and calling drizzle's migrate() on it directly
+      // would fail outright; this proves applyMigrationsFolder's split
+      // (strip it out, run the rest through migrate(), then run the
+      // stripped statement on its own, non-transactionally) actually
+      // lands the index.
+      const dbName = `llteacher_migrate_test_concurrent_${crypto.randomUUID().replace(/-/g, "")}`;
+      dbNames.push(dbName);
+      const scratchUrl = await createScratchDatabase(adminPool, dbName);
+
+      // Real schema through head -- CONCURRENTLY needs a real table/column
+      // to build an index against, same as any hot-table index migration
+      // would in production. "conversations" is the hot table #372 was
+      // filed about.
+      const throughHead = buildFolderThrough("0041_hint_semantics_and_mark_complete");
+      const journalPath = path.join(throughHead, "meta", "_journal.json");
+      const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+        entries: { idx: number; version: string; when: number; tag: string; breakpoints: boolean }[];
+      };
+      const lastEntry = journal.entries[journal.entries.length - 1]!;
+      const tag = "9999_test_concurrent_index";
+      journal.entries.push({
+        idx: journal.entries.length,
+        version: lastEntry.version,
+        when: lastEntry.when + 1,
+        tag,
+        breakpoints: true,
+      });
+      fs.writeFileSync(journalPath, JSON.stringify(journal, null, 2));
+      fs.writeFileSync(
+        path.join(throughHead, `${tag}.sql`),
+        `CREATE INDEX CONCURRENTLY IF NOT EXISTS "conversations_test_concurrent_idx" ON "conversations" USING btree ("id");`,
+      );
+
+      const pool = new Pool({ connectionString: scratchUrl });
+      const db = drizzle(pool);
+      try {
+        await expect(applyMigrationsFolder(pool, db, throughHead)).resolves.not.toThrow();
+
+        const rows = await db.execute<{ indexname: string }>(sql`
+          SELECT indexname FROM pg_indexes WHERE indexname = 'conversations_test_concurrent_idx'
+        `);
+        expect(rows.rows).toHaveLength(1);
+      } finally {
+        fs.rmSync(throughHead, { recursive: true, force: true });
+        await pool.end();
       }
     },
     60_000,

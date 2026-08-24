@@ -51,6 +51,76 @@ become claimable on first real WorkOS login whose email's blind index
 matches (`teacher1@test.com`, etc.) — see `docs/architecture/multi-tenant-data-model.md`
 §3.2 "User identity reconciliation."
 
+## Migrations
+
+Migrations are Drizzle-generated (`npx drizzle-kit generate` from `apps/web`)
+into `src/db/migrations/`, applied via `npm run db:migrate`
+(`scripts/migrate.ts`).
+
+### Numbering convention — PR-open order (#373)
+
+Drizzle numbers migrations sequentially (`NNNN_description.sql`) off
+whatever's on your branch's base at generation time. Two PRs branched from
+the same `staging` head will independently generate the *same* next index
+-- this isn't a mistake in either PR, it's a collision waiting to surface
+at merge time.
+
+**The rule: migration index claims follow PR-open order.** Whichever PR
+opened first keeps the index(es) it generated. A PR that opened later and
+collides on an index already claimed by an earlier-opened, still-open PR
+must renumber its own migrations around it once that earlier PR merges --
+regenerate via `drizzle-kit generate` against the now-current `staging`
+head (or hand-renumber the file, its `meta/<idx>_snapshot.json`, and its
+`meta/_journal.json` entry, keeping the `prevId`/`id` chain intact).
+
+A CI check (`.github/workflows/test.yml`, job `migration-index-collision`)
+fails a PR at push time if it introduces a migration file whose `NNNN`
+prefix already exists on the PR's base branch under a different filename
+-- catching this at open/push time instead of at merge time.
+
+**Precedent:** #317 and #363 collided on `0027`-`0029` first (renumber
+merged as `cc73390`). #363 and #366 collided on `0040` next: #363 opened
+first and claimed `0040_llm_config_authoring_ta_capability_grading`; #366
+opened second, already had three migrations built on the same base
+(`0040_cynical_micromax`, `0041_hint_semantics`, `0042_soft_post`), and
+renumbered all three around #363's real `0040` once #363 merged --
+consolidating into `0041_hint_semantics_and_mark_complete.sql`,
+regenerated via `drizzle-kit generate` and verified against the shared dev
+Neon DB (llteacher#373; renumber commit on the `worktree-m4-conv-chat-pr3`
+branch).
+
+### Hot-table indexes — `CREATE INDEX CONCURRENTLY` (#372)
+
+A plain `CREATE INDEX` takes a `SHARE` lock that blocks writes to the
+indexed table for the duration of the build. On `conversations`,
+`messages`, and `llm_call_logs` -- written on every chat turn -- that's a
+real (if currently small) cost: **`conversations` held 22 rows** as of
+#372's audit, so the one plain-`CREATE INDEX` migration already shipped
+(`conversations_course_kind_updated_idx`, in
+`0041_hint_semantics_and_mark_complete.sql`) was judged not worth
+hand-splitting an already-generated, already-verified migration to fix --
+but the convention is settled now, before the first index on one of these
+tables that actually hurts.
+
+**The rule: every future index migration on `conversations`, `messages`,
+or `llm_call_logs` uses `CREATE INDEX CONCURRENTLY`, and must include `IF
+NOT EXISTS`.** `drizzle-kit generate` does not emit `CONCURRENTLY` on its
+own -- add it by hand to the generated statement before committing the
+migration.
+
+`CREATE INDEX CONCURRENTLY` cannot run inside a transaction block at all
+(a hard Postgres error, not just a lock question), and drizzle's own
+migrator batches every pending migration in a folder into one transaction.
+`scripts/migrate.ts`'s `applyMigrationsFolder()` handles this: it detects
+any `CREATE INDEX CONCURRENTLY` statement in a pending migration, strips
+it out before handing the rest of the file to drizzle's `migrate()`, and
+runs it separately, directly against the pool, after the rest of the
+folder's migrations have committed. This re-runs on every future
+`db:migrate` invocation (it doesn't track "already applied" the way
+drizzle's own migrations table does) -- harmless *only* because of the
+mandatory `IF NOT EXISTS`, which is why that part of the rule isn't
+optional.
+
 ## Phase 0 status
 
 Scaffolding only. Auth, LLM, real routes land in subsequent phases (see `../docs/superpowers/plans/`).
