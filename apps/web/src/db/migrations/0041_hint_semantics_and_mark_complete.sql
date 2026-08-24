@@ -69,4 +69,4 @@ CREATE INDEX IF NOT EXISTS "hint_budgets_org_idx" ON "hint_budgets" USING btree 
 CREATE INDEX IF NOT EXISTS "hint_events_section_student_idx" ON "hint_events" USING btree ("section_id","student_id");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "hint_events_conversation_student_created_idx" ON "hint_events" USING btree ("conversation_id","student_id","created_at");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "hint_events_org_idx" ON "hint_events" USING btree ("organization_id");--> statement-breakpoint
-CREATE INDEX IF NOT EXISTS "conversations_course_kind_updated_idx" ON "conversations" USING btree ("course_id","kind","updated_at");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "conversations_course_kind_updated_idx" ON "conversations" USING btree ("course_id","kind","updated_at");

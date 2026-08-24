@@ -95,14 +95,18 @@ A plain `CREATE INDEX` takes a `SHARE` lock that blocks writes to the
 indexed table for the duration of the build. On `conversations`,
 `messages`, and `llm_call_logs` -- written on every chat turn -- that's a
 real (if currently small) cost: **`conversations` held 22 rows** as of
-#372's audit, so the one plain-`CREATE INDEX` migration already shipped
-(`conversations_course_kind_updated_idx`, in
-`0041_hint_semantics_and_mark_complete.sql`) was judged not worth
-hand-splitting an already-generated, already-verified migration to fix --
-but the convention is settled now, before the first index on one of these
-tables that actually hurts.
+#372's audit.
 
-**The rule: every future index migration on `conversations`, `messages`,
+`conversations_course_kind_updated_idx` (`0041_hint_semantics_and_mark_complete.sql`)
+is the first real example, not just a written rule: it shipped as a plain
+`CREATE INDEX` initially, then was converted to `CREATE INDEX CONCURRENTLY
+IF NOT EXISTS` in the same PR once this convention was settled, and
+re-verified against the shared dev Neon DB (`scripts/migrate.db.test.ts`'s
+"runs a CREATE INDEX CONCURRENTLY statement outside drizzle's batched
+transaction" test copies the real migration files, so it re-validates this
+specific statement, not a synthetic stand-in).
+
+**The rule: every index migration on `conversations`, `messages`,
 or `llm_call_logs` uses `CREATE INDEX CONCURRENTLY`, and must include `IF
 NOT EXISTS`.** `drizzle-kit generate` does not emit `CONCURRENTLY` on its
 own -- add it by hand to the generated statement before committing the
