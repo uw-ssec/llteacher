@@ -1,6 +1,7 @@
 import type { Db } from "../db/client";
 import type { OrgScope } from "../server/repositories/scope";
 import { AUDIT_ACTIONS, auditBestEffort } from "../server/utils/audit";
+import { logServerError } from "../server/utils/errors";
 import type { AuthContext } from "../server/middleware/roles";
 
 /* --------------------------------------------------------------------------
@@ -78,17 +79,39 @@ export interface TranscriptAccessEvent {
  *
  *  `orgScope` is `null` when the caller could not resolve one for this
  *  course (should not happen for a course that already passed the
- *  grader-tier gate, but this is an audit write, not the read itself --
+ *  grader-tier gate -- the row exists and organization_id is NOT NULL in
+ *  the schema -- so a null here means the course was deleted in the gap
+ *  between the auth check and this call, or a bug; either way it's a race,
+ *  not a normal condition). This is an audit write, not the read itself --
  *  degrading to "skip the audit" rather than throwing keeps a resolution
  *  hiccup here from taking down the transcript read it would have
- *  accompanied). auditBestEffort itself never throws either way (it logs
- *  and swallows), matching every other caller's tradeoff. */
+ *  accompanied, and the read already passed a real authorization check, so
+ *  failing it over a disproportionately rare audit-side edge case would be
+ *  a worse outcome than a visible gap in the log. But "skip" must not mean
+ *  "skip silently" (#370): an unreachable-in-theory branch that actually
+ *  fires is exactly the kind of thing that must show up loudly rather than
+ *  vanish, so it's logged via logServerError -- the same
+ *  log-loudly-but-don't-fail tradeoff requireGraderOf's release-gate
+ *  instrumentation makes (server/utils/guards.ts, #208) -- with enough
+ *  context (viewer, course, and the event's own action/conversationId) to
+ *  debug the race or bug later. auditBestEffort itself never throws either
+ *  way (it logs and swallows), matching every other caller's tradeoff. */
 export async function recordTranscriptAccess(
   db: Db,
   orgScope: OrgScope | null,
   event: TranscriptAccessEvent,
 ): Promise<void> {
-  if (!orgScope) return;
+  if (!orgScope) {
+    logServerError(
+      "recordTranscriptAccess",
+      new Error(
+        `No org scope resolved for course ${event.courseId} -- FERPA audit skipped for ` +
+          `viewer ${event.viewerId} (action: ${event.action}` +
+          `${event.conversationId ? `, conversationId: ${event.conversationId}` : ""}) (#370)`,
+      ),
+    );
+    return;
+  }
   const isDetailRead = event.action === "detail" && event.conversationId !== undefined;
   await auditBestEffort(db, [orgScope], {
     actorUserId: event.viewerId,
