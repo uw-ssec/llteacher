@@ -226,15 +226,26 @@ async function seed() {
   const membershipIds: Record<string, string> = {};
   for (const spec of SEED_USERS) {
     const normalizedEmail = IdentityCipher.normalizeEmail(spec.email);
-    const [user] = await db
+    const emailBlindIndex = await cipher.computeBlindIndex(normalizedEmail);
+    // reset()'s user-delete is scoped to isPending=true by design ("an org
+    // being deleted must never delete real user rows") -- so a seed user
+    // that's already been CLAIMED via a real WorkOS login survives --reset
+    // untouched, and inserting a fresh row for the same email blind index
+    // would collide on users_email_blind_index_uq. onConflictDoNothing +
+    // re-select reuses that claimed row's real id instead of erroring, so
+    // --reset stays safe to run again after someone has actually logged in
+    // as a seed account -- the whole point of these being real, testable
+    // WorkOS identities rather than throwaway fixture rows.
+    await db
       .insert(schema.users)
       .values({
         email: await cipher.encryptString(spec.email),
-        emailBlindIndex: await cipher.computeBlindIndex(normalizedEmail),
+        emailBlindIndex,
         displayName: await cipher.encryptString(spec.displayName),
         isPending: true, // claimable on first real WorkOS login
       })
-      .returning();
+      .onConflictDoNothing({ target: schema.users.emailBlindIndex });
+    const [user] = await db.select().from(schema.users).where(eq(schema.users.emailBlindIndex, emailBlindIndex));
     userIds[spec.handle] = user.id;
 
     const [membership] = await db
@@ -311,6 +322,16 @@ async function seed() {
         title: hwSpec.title,
         description: `${hwSpec.title} homework.`,
         dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        // #94: publishedAt/releasedAt both null (the schema's own default)
+        // means "draft" -- deriveHomeworkStatus filters that out of the
+        // student list entirely (repositories/homeworks.ts's
+        // UNRELEASED_STATUSES). This seed exists to exercise the real
+        // student round trip (the conversations/submissions created below
+        // are for exactly that), so publishedAt is set explicitly here;
+        // releasedAt stays null (released immediately on publish, same as
+        // the admin console's own default when an instructor doesn't pick
+        // a future release date).
+        publishedAt: new Date(),
       })
       .returning();
 
