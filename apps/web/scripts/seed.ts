@@ -31,12 +31,23 @@ interface SeedUserSpec {
   role: "instructor" | "student";
 }
 
+// example.com (not test.com): WorkOS's own documented safe-test-domain
+// convention -- "WorkOS accepts these addresses but never sends email to
+// them" (https://workos.com/docs/authkit/environments). A seeded account
+// only becomes usable for real, interactive testing once someone actually
+// signs up through WorkOS's own AuthKit as this exact email (see this
+// file's own module doc comment and README.md's "Seeding a dev dataset"
+// section on the claim-by-blind-index mechanism) -- test.com has no such
+// carve-out, so AuthKit's normal email+password flow tries to send it a
+// real verification email that can never be delivered, permanently
+// blocking sign-up. example.com/.org/.net are the IANA-reserved domains
+// WorkOS explicitly recognizes and skips delivery for instead.
 const SEED_USERS: SeedUserSpec[] = [
-  { handle: "teacher1", email: "teacher1@test.com", displayName: "John Doe", role: "instructor" },
-  { handle: "teacher2", email: "teacher2@test.com", displayName: "Jane Smith", role: "instructor" },
-  { handle: "student1", email: "student1@test.com", displayName: "Alice Johnson", role: "student" },
-  { handle: "student2", email: "student2@test.com", displayName: "Bob Wilson", role: "student" },
-  { handle: "student3", email: "student3@test.com", displayName: "Carol Brown", role: "student" },
+  { handle: "teacher1", email: "teacher1@example.com", displayName: "John Doe", role: "instructor" },
+  { handle: "teacher2", email: "teacher2@example.com", displayName: "Jane Smith", role: "instructor" },
+  { handle: "student1", email: "student1@example.com", displayName: "Alice Johnson", role: "student" },
+  { handle: "student2", email: "student2@example.com", displayName: "Bob Wilson", role: "student" },
+  { handle: "student3", email: "student3@example.com", displayName: "Carol Brown", role: "student" },
 ];
 
 // #317 review, #325: relocated verbatim from lib/prompts.ts's

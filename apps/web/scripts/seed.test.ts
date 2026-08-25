@@ -57,12 +57,12 @@ describe.skipIf(!CAN_SEED)("db:seed script", () => {
     // key-loading path this test exists to cover. CI never sees it (fresh
     // container per run); locally it fails on the second run onward.
     const blindIndex = await cipher.computeBlindIndex(
-      IdentityCipher.normalizeEmail("student1@test.com"),
+      IdentityCipher.normalizeEmail("student1@example.com"),
     );
     const [row] = await db.select().from(users).where(eq(users.emailBlindIndex, blindIndex));
     expect(row).toBeDefined();
     const email = await cipher.decryptString(row.email);
-    expect(email).toBe("student1@test.com");
+    expect(email).toBe("student1@example.com");
   });
 
   it("running without --reset a second time fails with a friendly 'already seeded' message, not a raw pg dump", () => {

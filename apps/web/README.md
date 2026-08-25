@@ -48,8 +48,13 @@ Seeded accounts (Django parity): `teacher1`/`teacher2` (instructors),
 course `STAT 311`. WorkOS owns login in this stack, so these are **pending**
 user rows (`is_pending = true`) — nobody can log in as them directly. They
 become claimable on first real WorkOS login whose email's blind index
-matches (`teacher1@test.com`, etc.) — see `docs/architecture/multi-tenant-data-model.md`
-§3.2 "User identity reconciliation."
+matches (`teacher1@example.com`, etc. — `example.com`, not `test.com`:
+WorkOS accepts the IANA-reserved `example.com`/`.org`/`.net` domains
+without trying to deliver a real verification email, so AuthKit's
+email+password sign-up actually completes; `test.com` has no such
+carve-out and gets stuck on an undeliverable verification step) — see
+`docs/architecture/multi-tenant-data-model.md` §3.2 "User identity
+reconciliation."
 
 ## Migrations
 
