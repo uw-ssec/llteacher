@@ -124,3 +124,99 @@ describe("ErrorBoundary", () => {
     consoleError.mockRestore();
   });
 });
+
+/* --------------------------------------------------------------------------
+   #310: the retry that could not work.
+
+   `reset()` is setState({ error: null }) and nothing else, so it re-renders
+   the SAME subtree with the same upstream state. For the deterministic case
+   this boundary exists for -- a malformed persisted tool part, loaded from
+   the server on every render -- the render throws again immediately, and
+   the same "Try again" button came back. A control certain to fail, saying
+   nothing about it, is worse than no control.
+   -------------------------------------------------------------------------- */
+describe("ErrorBoundary retry policy (#310)", () => {
+  it("offers the retry on a first failure", () => {
+    const spy = suppressConsoleError();
+    render(
+      <ErrorBoundary>
+        <Bomb shouldThrow={true} />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByRole("button", { name: /Try again/ })).toBeTruthy();
+    spy.mockRestore();
+  });
+
+  it("withdraws the retry once it has been taken and the subtree threw again", async () => {
+    const spy = suppressConsoleError();
+    render(
+      <ErrorBoundary>
+        <Bomb shouldThrow={true} />
+      </ErrorBoundary>,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /Try again/ }));
+
+    // Deterministic throw: nothing upstream changed, so it recurs. The
+    // button must not come back offering the same certain failure.
+    expect(screen.queryByRole("button", { name: /Try again/ })).toBeNull();
+    spy.mockRestore();
+  });
+
+  it("tells the student what to do instead of the withdrawn retry", async () => {
+    const spy = suppressConsoleError();
+    render(
+      <ErrorBoundary>
+        <Bomb shouldThrow={true} />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByText(/If trying again doesn't help/)).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: /Try again/ }));
+
+    // Removing the control without replacing the guidance would leave a
+    // dead end, which is the same defect in a different shape.
+    expect(screen.getByText(/Trying again didn't help/)).toBeTruthy();
+    spy.mockRestore();
+  });
+
+  it("keeps the retry available when it actually worked", async () => {
+    const spy = suppressConsoleError();
+    function Harness() {
+      const [broken, setBroken] = useState(true);
+      return (
+        <ErrorBoundary>
+          <Bomb shouldThrow={broken} />
+          <button type="button" onClick={() => setBroken(false)}>
+            fix
+          </button>
+        </ErrorBoundary>
+      );
+    }
+    render(<Harness />);
+    expect(screen.getByRole("button", { name: /Try again/ })).toBeTruthy();
+    spy.mockRestore();
+  });
+
+  it("leaves a caller-supplied fallback's policy entirely to the caller", async () => {
+    const spy = suppressConsoleError();
+    // The contract change is scoped to the DEFAULT fallback -- a custom one
+    // receives `reset` exactly as before and may offer it as often as it
+    // likes.
+    render(
+      <ErrorBoundary
+        fallback={(_error, reset) => (
+          <button type="button" onClick={reset}>
+            custom retry
+          </button>
+        )}
+      >
+        <Bomb shouldThrow={true} />
+      </ErrorBoundary>,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "custom retry" }));
+    expect(screen.getByRole("button", { name: "custom retry" })).toBeTruthy();
+    spy.mockRestore();
+  });
+});
