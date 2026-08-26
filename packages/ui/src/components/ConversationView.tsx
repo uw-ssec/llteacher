@@ -15,8 +15,7 @@ import { Message } from "./Message";
 import { Composer } from "./Composer";
 import { CodeBlock } from "./CodeBlock";
 import { EditableTitle } from "./EditableTitle";
-import { Button } from "./Button";
-import { renderTextWithCode, type RCodeResult } from "../generative";
+import type { RCodeResult } from "../generative";
 
 /** The student-facing copy for a failed turn.
  *
@@ -353,8 +352,8 @@ function renderMessageRow(msg: MessageData, onRunRCode?: (code: string) => Promi
   }
   if (msg.role === "student") {
     return (
-      <Message role="student">
-        {renderTextWithCode(msg.content, { onRun: onRunRCode, keyPrefix: msg.id })}
+      <Message role="student" onRun={onRunRCode}>
+        {msg.content}
       </Message>
     );
   }
@@ -382,7 +381,7 @@ export function ConversationView({
   hintDisabled = false,
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   /* #288: index of the oldest message the model still sees. Undefined when
      there is no window to disclose -- either the caller passed none, or the
@@ -399,9 +398,36 @@ export function ConversationView({
      `error` belongs in the deps: a failed turn does not change `messages`
      (the assistant reply is deliberately not persisted), so without it the
      error row mounts below the fold and nothing scrolls to it, leaving the
-     only recovery control off-screen. */
+     only recovery control off-screen.
+
+     Scrolls THIS container directly rather than calling scrollIntoView() on a
+     bottom sentinel. scrollIntoView walks up the ancestor chain and scrolls
+     every scrollable ancestor it finds -- and `overflow: hidden` still makes
+     an element programmatically scrollable, so it was also scrolling
+     .conversation-column. Measured live: the column sat at scrollTop 1020,
+     which dragged the whole column contents up by ~455px and took the
+     composer with it, further on every streamed delta. Setting scrollTop on
+     the one element that is meant to scroll cannot reach an ancestor. */
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = scrollRef.current;
+    if (!el) return;
+    /* jsdom implements neither scrollTo nor real layout, so the guard keeps
+       the component renderable under test. It is not dead code in the
+       browser -- scrollTo is where the smooth behaviour comes from; the
+       scrollTop assignment is the jump-to-bottom fallback. */
+    if (typeof el.scrollTo === "function") {
+      /* styles.css's blanket prefers-reduced-motion block flattens CSS
+         transitions and animations, but has no effect on a JS-driven
+         ScrollToOptions.behavior -- so the one new motion path in this file
+         has to check for itself. (The scrollIntoView call this replaced had
+         the same gap; it is fixed here rather than carried forward.) */
+      const reduced =
+        typeof matchMedia === "function" &&
+        matchMedia("(prefers-reduced-motion: reduce)").matches;
+      el.scrollTo({ top: el.scrollHeight, behavior: reduced ? "auto" : "smooth" });
+    } else {
+      el.scrollTop = el.scrollHeight;
+    }
   }, [messages, error]);
 
   // #317 review, #327: no deterministic announcement existed for a
@@ -493,7 +519,7 @@ export function ConversationView({
   return (
     <div className="conversation-column">
       {/* Scrollable message area */}
-      <div className="conversation-messages">
+      <div className="conversation-messages" ref={scrollRef}>
         <div className="conversation-inner">
           {/* #317 review, #327: moved OUT of the role="log" region below --
               this row (and the title/hasMoreHistory notice under it) used
@@ -504,14 +530,35 @@ export function ConversationView({
               200 fetched messages. None of this is conversation TURN
               content -- role="log" now wraps only the messages themselves. */}
           <div className="conversation-header-row">
-            <p className="breadcrumb">{breadcrumb}</p>
+            {/* Review finding: Message.tsx shifts markdown `#` to <h2> on the
+                premise that "the conversation column already owns the page's
+                <h1>". True of the tutor chat, FALSE of the section chat, which
+                passes neither `title` nor `onRenameTitle` -- so no <h1> existed
+                and every seeded section (whose content opens with a heading)
+                emitted an <h2> into a document with no <h1>: a heading-order
+                violation for screen-reader navigation.
+
+                Fixed by promoting THIS element rather than adding a visually
+                hidden heading beside it. A hidden duplicate would make an AT
+                announce the same string twice, which is a worse outcome than
+                the bug. On the section surface the breadcrumb genuinely is the
+                page's name ("Section 1: Sample Spaces & Events"), so an <h1>
+                is the honest element; where a real title <h1> already renders
+                below, this stays a <p> and there is still exactly one. The
+                .breadcrumb class carries all the styling either way, so
+                nothing changes visually. */}
+            {title !== undefined && onRenameTitle ? (
+              <p className="breadcrumb">{breadcrumb}</p>
+            ) : (
+              <h1 className="breadcrumb">{breadcrumb}</h1>
+            )}
             {headerActions}
           </div>
 
           {/* #6: conversation header title -- only for surfaces that pass
               one (the homework-section chat has no per-conversation title
               and omits `title` entirely, so nothing renders here for it). */}
-          {title !== undefined && onRenameTitle && (
+          {title !== undefined && onRenameTitle ? (
             <h1 className="conversation-header-title">
               <EditableTitle
                 value={title}
@@ -520,7 +567,7 @@ export function ConversationView({
                 renameLabel="Rename conversation"
               />
             </h1>
-          )}
+          ) : null}
 
           {/* #280: the ceiling made visible instead of silent -- see
               hasMoreHistory's own doc comment above. No message count in
@@ -623,8 +670,8 @@ export function ConversationView({
               }
               if (msg.role === "student") {
                 return (
-                  <Message key={msg.id} role="student">
-                    {renderTextWithCode(msg.content, { onRun: onRunRCode, keyPrefix: msg.id })}
+                  <Message key={msg.id} role="student" onRun={onRunRCode}>
+                    {msg.content}
                   </Message>
                 );
               }
@@ -699,44 +746,7 @@ export function ConversationView({
           </div>
         )}
 
-        {/* Sentinel last, so "scroll to bottom" means the real bottom --
-            below the error row, not above it. */}
-        <div ref={bottomRef} aria-hidden="true" />
       </div>
-
-      {/* #274: a Stop affordance for a turn that's merely slow, not yet
-          timed out (chat.ts's own STREAM_TIMEOUT_MS bounds the server side
-          of this).
-          #317 review, #327: stays MOUNTED whenever the caller tracks a
-          useChat instance to stop (onStop set) -- previously conditional
-          on `isSending` too, so a keyboard user who activated Stop had it
-          unmount out from under their focus the instant `isSending`
-          flipped false, stranding them at document.body with no handoff
-          (same harm Composer.tsx's #270 fix already closed for the
-          composer). `ariaDisabled` (Button.tsx) keeps it focusable and
-          merely refuses activation while nothing is in flight, instead of
-          native `disabled` removing it from the tab order. */}
-      {onStop && (
-        <div className="conversation-stop-row">
-          <Button
-            variant="danger"
-            size="sm"
-            outlined
-            // #317 review, #345: flags the next isSending->false transition
-            // as caused by Stop (see turnCompleteAnnouncement's own effect
-            // above) -- Button.tsx only invokes onClick when the button is
-            // genuinely actionable (not aria-disabled), so this can't set
-            // the flag from a click that didn't actually stop anything.
-            onClick={() => {
-              stoppedRef.current = true;
-              onStop();
-            }}
-            ariaDisabled={!isStopActionable}
-          >
-            Stop
-          </Button>
-        </div>
-      )}
 
       {/* Sticky composer -- #144: disabled while a send is genuinely in
           flight, so Enter mid-stream can't fire a second, overlapping
@@ -756,6 +766,26 @@ export function ConversationView({
           autoFocus={autoFocusComposer}
           onRequestHint={onRequestHint}
           hintDisabled={hintDisabled}
+          /* #274 redesign: Stop moved from its own row above the composer into
+             the composer's own trailing action slot, where it shares one
+             never-unmounted button with Send. Composer.tsx's own comment on
+             that button covers why the shared element is what makes #327's
+             focus guarantee structural. */
+          onStop={
+            onStop
+              ? () => {
+                  // #317 review, #345: flags the next isSending->false
+                  // transition as caused by Stop (see
+                  // turnCompleteAnnouncement's own effect above). Composer
+                  // only invokes this in its Stop identity, which requires
+                  // isStopActionable, so it can't fire from a click that
+                  // didn't actually stop anything.
+                  stoppedRef.current = true;
+                  onStop();
+                }
+              : undefined
+          }
+          isStopActionable={isStopActionable}
         />
       )}
     </div>

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { useNavigate } from "react-router";
-import { Sidebar, TopNav, ConversationView, AlertDialog, Button, renderToolPart, renderTextWithCode, isToolPart, ErrorBoundary } from "@llteacher/ui";
+import { Sidebar, TopNav, ConversationView, AlertDialog, Button, MessageMarkdown, renderToolPart, isToolPart, ErrorBoundary } from "@llteacher/ui";
 import type { SidebarSection, MessageData, RCodeResult } from "@llteacher/ui";
 import { useRExecution } from "./hooks/useRExecution";
 import { useAuth } from "./components/AuthProvider";
@@ -186,7 +186,25 @@ function buildMessageData(
         <>
           {m.parts.map((part, i) => {
             if (part.type === "text") {
-              return renderTextWithCode(part.text, { onRun: onRunRCode, keyPrefix: `text-${m.id}-${i}` });
+              /* Markdown owns its own block structure, so the raw text goes
+                 straight to MessageMarkdown -- wrapping it in a <p> trapped the
+                 markdown inside a block element it needed to own ("\n\n"
+                 collapsed to spaces, a leading "# " came out as a literal
+                 hash).
+
+                 This REPLACES renderTextWithCode at this call site, and
+                 subsumes it: that helper split the text on ```r fences and
+                 rendered everything else as a bare <p>, so a reply could have
+                 a Run button or formatting but never both. MessageMarkdown's
+                 own `pre` override now detects the r fence during markdown
+                 rendering and hands it to the same CodeExecution component,
+                 so `onRun` still reaches it and the prose around it is
+                 finally prose. See MarkdownPre in Message.tsx. */
+              return (
+                <MessageMarkdown key={`text-${m.id}-${i}`} onRun={onRunRCode}>
+                  {part.text}
+                </MessageMarkdown>
+              );
             }
             /* #144: no `part as ToolPart` cast -- useChat isn't given the
                server's tool-input generics, so the AI SDK's UIMessagePart
@@ -746,8 +764,9 @@ export default function App() {
   /* #318: a fresh section (no conversation yet) used to render an empty
      composer until the student's own first message lazily created the
      conversation server-side (chat.ts's resolveConversation) -- the
-     canonical greeting (#27's "Hello! I'm here to help you with Section
-     N...") never appeared until AFTER that first turn, bundled with the
+     canonical greeting (#27's sectionGreeting, which opens on the section's
+     own title and problem statement) never appeared until AFTER that first
+     turn, bundled with the
      model's reply to it. This calls the same start endpoint chatHandler
      already uses internally, eagerly, so the greeting shows the moment the
      student opens the section -- ordinary chat UX. Guarded by
@@ -1459,7 +1478,12 @@ export default function App() {
           <ErrorBoundary key={`tutor-${tutorConversationId}`}>
             <ConversationView
               key={tutorConversationId}
-              breadcrumb="STATS 311 · TUTOR CHAT"
+              /* #327 follow-up: the top nav already spells out
+                 "STATS 311 · AUTUMN 2026 · <homework>" one line above, so
+                 repeating the course code here cost the first line of the
+                 reading column to say nothing new. Only the surface name
+                 is new information. */
+              breadcrumb="TUTOR CHAT"
               title={tutorConversationTitle}
               onRenameTitle={handleRenameTutorConversation}
               messages={tutorMessages}
@@ -1498,7 +1522,12 @@ export default function App() {
                 genuine mid-conversation appends reach an AT as insertions. */}
             <ConversationView
               key={currentSection}
-              breadcrumb={`STATS 311 · ${hwTitle} · Section ${currentSection}${
+              /* #327 follow-up: was `STATS 311 · ${hwTitle} · Section N: ...`,
+                 which repeated both the course code and the homework title
+                 already shown in the top nav directly above -- long enough
+                 that it wrapped to two lines and pushed the transcript down.
+                 The section identity is the only part the nav doesn't say. */
+              breadcrumb={`Section ${currentSection}${
                 currentSectionTitle ? `: ${currentSectionTitle}` : ""
               }`}
               messages={messages}
@@ -1529,7 +1558,19 @@ export default function App() {
                  the affordance to act on. */
               headerActions={
                 conversationId ? (
-                  <Button variant="danger" size="sm" outlined onClick={openRestartDialog}>
+                  /* #248 redesign: `outlined` dropped and .btn--restart added --
+                     the trigger only opens the confirm dialog below, so it sits
+                     quietly in the breadcrumb row's register at rest and takes
+                     on full danger styling on hover/focus. variant="danger" is
+                     kept as the base so the styling degrades safely. See
+                     .btn--restart in packages/ui/styles.css. */
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    className="btn--restart"
+                    leadingIcon="↺"
+                    onClick={openRestartDialog}
+                  >
                     Restart section
                   </Button>
                 ) : undefined

@@ -173,6 +173,33 @@ export interface RenderTextWithCodeOptions {
  *  text) and `<CodeExecution>` (runnable code) nodes in original order.
  *  Returns a single-element array (`[<p>{text}</p>]`) when no fence is
  *  present, matching how a plain text part rendered before this existed. */
+/** The fence split on its own, with no opinion about how the non-code parts
+ *  should render. renderTextWithCode below turns the text segments into <p>;
+ *  the student's own turn (Message.tsx) needs them kept verbatim in a
+ *  pre-wrap span instead, because a student typing "5 * 3 * 2" must get their
+ *  asterisks back, and .trim()/<p> would also drop the line breaks they
+ *  deliberately typed. One splitter, two presentations. */
+export type RCodeSegment = { type: "text" | "code"; value: string };
+
+export function splitRCodeSegments(text: string): RCodeSegment[] {
+  const segments: RCodeSegment[] = [];
+  let lastIndex = 0;
+  R_FENCE_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = R_FENCE_RE.exec(text)) !== null) {
+    const [fullMatch, code] = match;
+    if (match.index > lastIndex) {
+      segments.push({ type: "text", value: text.slice(lastIndex, match.index) });
+    }
+    segments.push({ type: "code", value: (code ?? "").replace(/\r?\n$/, "") });
+    lastIndex = match.index + fullMatch.length;
+  }
+  if (lastIndex < text.length) {
+    segments.push({ type: "text", value: text.slice(lastIndex) });
+  }
+  return segments;
+}
+
 export function renderTextWithCode(text: string, options: RenderTextWithCodeOptions): ReactNode[] {
   const nodes: ReactNode[] = [];
   let lastIndex = 0;
