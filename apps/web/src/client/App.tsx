@@ -468,26 +468,24 @@ export default function App() {
      student's text back to the composer (ConversationView's `restoredDraft`)
      and, by being non-null, suppresses the error row's regenerate button
      (there is no server-side turn to regenerate). A fresh object per failure
-     so the same text failing twice restores twice. */
-  const [sectionSendFailure, setSectionSendFailure] = useState<{ text: string } | null>(null);
+     so the same text failing twice restores twice.
+
+     #96 fix-round: `section` records WHICH section's composer these words
+     belong in, and the render site below only passes the failure through
+     when it still matches the section on screen. That gate has to happen
+     during render, not in an effect: both ConversationViews are keyed
+     (`key={currentSection}` / `key={tutorConversationId}`), so a switch
+     REMOUNTS the child -- resetting its draft and the `lastRestoredDraftRef`
+     that makes a restore fire only once -- and React runs the freshly-mounted
+     child's effects BEFORE the parent's. An effect that nulls this on switch
+     therefore always loses the race: the child has already written the
+     previous section's failed text into the new section's empty composer,
+     one Enter away from sending it into a different graded conversation.
+     The `[currentSection]` reset further down is still kept, for the separate
+     reason that leaving a section should discard its restored draft exactly
+     the way the keyed remount already discards a typed one. */
+  const [sectionSendFailure, setSectionSendFailure] = useState<{ text: string; section: number } | null>(null);
   const prevChatStatusRef = useRef(chatStatus);
-  useEffect(() => {
-    const previous = prevChatStatusRef.current;
-    prevChatStatusRef.current = chatStatus;
-    // Only the moment a turn FAILS, not every render while it stays failed.
-    if (chatStatus !== "error" || previous === "error") return;
-    if (sectionSendAcceptedRef.current) return; // response half: the question is persisted, leave it on screen
-    const last = aiMessages[aiMessages.length - 1];
-    // Defensive: a send-half failure never gets far enough for the SDK to
-    // append an assistant message, so the tail is the student's own message.
-    if (last?.role !== "user") return;
-    setSectionSendFailure({ text: studentTextOf(last) });
-    // The bubble is dropped, not merely marked: it was never persisted, so
-    // leaving it would show a message that a reload makes vanish -- the
-    // client-side twin of the truncated assistant row #268 stops the server
-    // from writing.
-    setSectionMessages(aiMessages.slice(0, -1));
-  }, [chatStatus, aiMessages, setSectionMessages]);
 
   const {
     sections,
@@ -566,10 +564,16 @@ export default function App() {
   });
 
   /* #96: the tutor chat's own half of the send-failure recovery above --
-     same reasoning, this instance's messages. Also cleared whenever the
-     selected conversation changes, since a stale restore from a different
-     conversation must not land in the new one's composer. */
-  const [tutorSendFailure, setTutorSendFailure] = useState<{ text: string } | null>(null);
+     same reasoning, this instance's messages.
+     #96 fix-round: stamped with `conversationId` and gated at the render site
+     for exactly the reason the section surface is (this ConversationView is
+     keyed `key={tutorConversationId}`, so it remounts on every conversation
+     switch and its mount effects beat the reset below). Without the gate, a
+     failed send in one tutor conversation reappears in the next one's
+     composer. */
+  const [tutorSendFailure, setTutorSendFailure] = useState<
+    { text: string; conversationId: string | undefined } | null
+  >(null);
   useEffect(() => {
     setTutorSendFailure(null);
   }, [tutorConversationId]);
@@ -581,9 +585,9 @@ export default function App() {
     if (tutorSendAcceptedRef.current) return;
     const last = tutorAiMessages[tutorAiMessages.length - 1];
     if (last?.role !== "user") return;
-    setTutorSendFailure({ text: studentTextOf(last) });
+    setTutorSendFailure({ text: studentTextOf(last), conversationId: tutorConversationId });
     setTutorMessages(tutorAiMessages.slice(0, -1));
-  }, [tutorChatStatus, tutorAiMessages, setTutorMessages]);
+  }, [tutorChatStatus, tutorAiMessages, setTutorMessages, tutorConversationId]);
 
   // #317 review, #352: same reasoning as sectionStoppedMessageId above.
   // Also reset on tutorConversationId change (switching conversations, or
@@ -810,6 +814,38 @@ export default function App() {
   const currentSectionRef = useRef(currentSection);
   useEffect(() => {
     currentSectionRef.current = currentSection;
+  }, [currentSection]);
+
+  /* #96: detects a send-half failure on the section chat and hands the
+     student's words back (see sectionSendFailure's own doc comment above for
+     the whole contract). Lives here, not beside its state, only because it
+     needs `currentSection` -- which is declared just above -- to stamp the
+     failure with the section those words belong to. */
+  useEffect(() => {
+    const previous = prevChatStatusRef.current;
+    prevChatStatusRef.current = chatStatus;
+    // Only the moment a turn FAILS, not every render while it stays failed.
+    if (chatStatus !== "error" || previous === "error") return;
+    if (sectionSendAcceptedRef.current) return; // response half: the question is persisted, leave it on screen
+    const last = aiMessages[aiMessages.length - 1];
+    // Defensive: a send-half failure never gets far enough for the SDK to
+    // append an assistant message, so the tail is the student's own message.
+    if (last?.role !== "user") return;
+    setSectionSendFailure({ text: studentTextOf(last), section: currentSection });
+    // The bubble is dropped, not merely marked: it was never persisted, so
+    // leaving it would show a message that a reload makes vanish -- the
+    // client-side twin of the truncated assistant row #268 stops the server
+    // from writing.
+    setSectionMessages(aiMessages.slice(0, -1));
+  }, [chatStatus, aiMessages, setSectionMessages, currentSection]);
+
+  /* #96 fix-round: leaving a section discards its restored draft, exactly
+     the way the keyed remount already discards a typed one. This is the
+     housekeeping half only -- the render-site `section` gate is what
+     actually prevents the cross-section leak, because this effect runs
+     AFTER the newly-mounted child's own effects (see sectionSendFailure). */
+  useEffect(() => {
+    setSectionSendFailure(null);
   }, [currentSection]);
 
   /* #252: tracks whichever section-conversation load was requested most
@@ -1602,8 +1638,13 @@ export default function App() {
               error={tutorChatErrorRow}
               /* #96: a send that never reached the server hands the
                  student's text back here rather than stranding it in a
-                 bubble the server never stored. */
-              restoredDraft={tutorSendFailure}
+                 bubble the server never stored. Gated on the failure's own
+                 conversation: this view is keyed, so it remounts (fresh
+                 draft, fresh restore-once ref) on every switch and would
+                 otherwise re-apply the previous conversation's failed text. */
+              restoredDraft={
+                tutorSendFailure?.conversationId === tutorConversationId ? tutorSendFailure : null
+              }
               autoFocusComposer={tutorConversationId === justCreatedTutorConversationId}
               hasMoreHistory={tutorHistoryHasMore}
               onStop={handleStopTutorChat}
@@ -1645,8 +1686,11 @@ export default function App() {
                  ConversationView's own isStopActionable comment above. */
               isStopActionable={chatStatus === "submitted" || chatStatus === "streaming"}
               error={sectionChatErrorRow}
-              /* #96: see the tutor ConversationView's own comment above. */
-              restoredDraft={sectionSendFailure}
+              /* #96: see the tutor ConversationView's own comment above --
+                 same keyed-remount hazard, gated on the section the failed
+                 words were typed into so they can never surface in a
+                 different section's graded conversation. */
+              restoredDraft={sectionSendFailure?.section === currentSection ? sectionSendFailure : null}
               hasMoreHistory={sectionHistoryHasMore}
               onStop={handleStopSectionChat}
               /* #248: only once there's an active conversation to restart --

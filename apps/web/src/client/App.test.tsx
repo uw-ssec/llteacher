@@ -1173,6 +1173,9 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
         if (url.startsWith("/api/conversations?")) {
           return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
         }
+        if (url.endsWith("/hints")) {
+          return new Response(JSON.stringify({ used: 0, limit: null }), { status: 200 });
+        }
         if (url.includes("/messages") && messagesFor) return messagesFor();
         if (url === "/api/chat") return chatFetch(input, init);
         throw new Error(`unexpected fetch to ${url}`);
@@ -1282,6 +1285,58 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
     // The hint's own text must not have landed on top of the student's draft.
     await waitFor(() => expect(composer.value).toBe("my own half-written question"));
     expect(composer.value).not.toContain("Give me a hint for this section");
+  });
+
+  it("clears the restored draft on a section switch, so one section's failed text can never be sent into another's conversation", async () => {
+    /* Fix-round regression guard. The section ConversationView is keyed
+       `key={currentSection}`, so switching sections REMOUNTS it -- resetting
+       both its draft and the `lastRestoredDraftRef` that makes a restore fire
+       only once. A `sectionSendFailure` left over from section 1 therefore
+       looked brand-new to section 2's fresh mount, and the restore effect
+       wrote section 1's failed text into section 2's empty composer: one
+       Enter away from sending it into a different graded conversation.
+
+       This is NOT the same as an ordinary unsent draft surviving a switch --
+       the keyed remount deliberately discards a typed draft. Only the restore
+       path could carry text across sections, which is why only it needs the
+       explicit `[currentSection]` reset (the tutor surface's equivalent is
+       keyed on `[tutorConversationId]`). */
+    const twoSections = {
+      homeworks: [
+        {
+          ...HOMEWORK_FIXTURE.homeworks[0],
+          sections: [
+            { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+            { id: "s2", title: "Sec 2", order: 2, status: "not_started", conversationId: "sec-conv-2" },
+          ],
+        },
+      ],
+    };
+    stubFetch(
+      // Every send fails before reaching the server.
+      async () => new Response("gateway timeout", { status: 504 }),
+      twoSections,
+      () => new Response(JSON.stringify([]), { status: 200 }),
+    );
+
+    renderApp();
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "section one's own question{Enter}");
+
+    await screen.findByRole("alert");
+    // Precondition: the restore genuinely happened in section 1, so a pass
+    // below can't come from the restore never firing at all.
+    await waitFor(() => expect(composer.value).toBe("section one's own question"));
+
+    await user.click(screen.getByRole("button", { name: /Sec 2/ }));
+    await screen.findByText(/Section 2: Sec 2/);
+
+    // Section 2's composer is a fresh mount. It must be empty.
+    const sectionTwoComposer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    await waitFor(() => expect(sectionTwoComposer.value).toBe(""));
+    expect(sectionTwoComposer.value).not.toContain("section one");
   });
 
   it("keeps the question on screen for a RESPONSE-half failure, and does not pre-fill the composer", async () => {
