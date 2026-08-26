@@ -1833,7 +1833,7 @@ body {
 
   /* AI message — no fill, no border. Pure text. */
   .message--ai {
-    /* #327: was a flat --space-8. The turn's trailing gap is now SHARED with
+    /* #397: was a flat --space-8. The turn's trailing gap is now SHARED with
        .message__actions below it (--space-1 margin + a 1.125rem reserved
        row), so tutor-turn-to-next-speaker still lands at ~38px -- close to
        the 32px this carried alone, with the copy affordance carved out of
@@ -1842,7 +1842,7 @@ body {
     position: relative;
   }
 
-  /* #327: turn grouping. Every message carried the same --space-8 no matter
+  /* #397: turn grouping. Every message carried the same --space-8 no matter
      who was speaking, so a tutor answer split across three turns read as
      three unrelated statements and a speaker change read exactly like a
      continuation. Consecutive turns from the SAME speaker now close up; a
@@ -1876,19 +1876,75 @@ body {
   }
 
   /* -------------------------------------------------------------------------
-     #327: per-turn actions — copy-to-clipboard on the tutor's turns.
+     #397: per-turn actions — copy-to-clipboard on the tutor's turns.
      There were no hover affordances on a rendered turn at all; a student
      wanting the worked steps in their notes had to hand-select them out of
      the transcript.
      ------------------------------------------------------------------------- */
+  /* -------------------------------------------------------------------------
+     .day-divider (#397) — a day boundary in the transcript.
+
+     A tutoring conversation spans sittings, and until now Monday's question
+     and Wednesday's answer ran together with nothing between them. The rule
+     separates; the pill names the day.
+
+     The pill is the ONE place this file allows a filled rounded shape, and it
+     earns it: a label sitting ON a line has to mask the line behind it, and a
+     background is how that is done. Everything else stays in the
+     system-message register the design already uses for non-turn content
+     ("submitted at 11:34") -- mono, small-caps, muted, no shadow, no border.
+     The rules either side are pseudo-elements, so there is no presentational
+     markup for assistive tech to skip past.
+
+     Deliberately NOT animated. Every other new motion in this file marks an
+     EVENT (a press, a copy, a control arriving); a day boundary is standing
+     context, and a hydrated transcript can hold several at once. Animating
+     them would put five things in motion on load to say nothing.
+     ------------------------------------------------------------------------- */
+  .day-divider {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    /* Owns the space between two turns rather than adding to it:
+       --space-8 matches a turn's own bottom rhythm. */
+    margin-block: var(--space-8);
+  }
+
+  .day-divider::before,
+  .day-divider::after {
+    content: "";
+    flex: 1;
+    border-block-start: 1px solid var(--color-border);
+  }
+
+  .day-divider__pill {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    font-variant: small-caps;
+    /* #296: #64605A on the paper ground = 5.97:1, over 1.4.3's 4.5:1. */
+    color: var(--color-text-muted);
+    background-color: var(--color-surface-raised);
+    border-radius: 999px;
+    padding: var(--space-1) var(--space-3);
+    white-space: nowrap;
+  }
+
   .message__actions {
     display: flex;
     align-items: center;
     /* Height is reserved UNCONDITIONALLY. The button inside only changes
        opacity, so hovering a turn -- or tabbing into it -- cannot reflow a
        transcript the student is part-way through reading. */
-    min-block-size: 24px;   /* must equal .message__copy's block-size below */
+    min-block-size: 24px;   /* must equal .message__action's block-size below */
     margin-block-start: var(--space-1);
+    /* This row had NO gap. The agent's copy button and time ended up flush
+       (0px) while the student's overlapped by 4px, purely from where each
+       box happened to land -- the spacing was accidental in both directions.
+       One explicit value, so both speakers read identically. */
+    gap: var(--space-2);
   }
 
   /* No border, no fill, no radius, no shadow. This product's vocabulary for
@@ -1898,7 +1954,7 @@ body {
      of the 1.4.11 question outright: there is no component boundary to
      measure, so --color-border-strong -- 1.48:1 against --color-bg, i.e.
      failing the 3:1 a boundary owes -- is never even a candidate. */
-  .message__copy {
+  .message__action {
     appearance: none;
     background: none;
     border: none;
@@ -1912,7 +1968,11 @@ body {
     justify-content: center;
     inline-size: 24px;
     block-size: 24px;
-    margin-inline-start: -4px;   /* optical: align the GLYPH to the text margin */
+    /* Optical outdent lives on the row variants below, not here: the 24px box
+       is wider than its 15px glyph, so whichever control sits ON the margin
+       needs pulling out by the difference -- and which control that is
+       depends on which edge the turn is aligned to. Applied blanket, this
+       -4px pulled the student's copy button INTO the timestamp beside it. */
     /* #64605A on the #FAFAF7 ground = 5.97:1. As a non-text graphic this only
        owes 1.4.11's 3:1, so it clears with room. Dark theme rides the same
        token (#95958D on #1A1A1A = 5.77:1 -- see the token's own #296 note). */
@@ -1928,18 +1988,102 @@ body {
 
   /* Revealed on pointer hover AND on keyboard focus anywhere in the turn --
      :focus-within is the half that makes Tab actually surface it. */
-  .message--ai:hover .message__copy,
-  .message--ai:focus-within .message__copy,
-  .message__copy:focus-visible {
+  .message--ai:hover .message__action,
+  .message--ai:focus-within .message__action,
+  .message--student:hover .message__action,
+  .message--student:focus-within .message__action,
+  .message__action:focus-visible {
     opacity: 1;
   }
 
-  .message__copy:hover {
+  .message__action:hover {
     color: var(--color-accent);   /* #32006e on #FAFAF7 = 14.8:1 */
   }
 
   /* The glyph swap (Copy -> Check / WarningCircle) is the non-colour cue WCAG
      1.4.1 asks for, so colour here is reinforcement rather than the signal. */
+  /* WEIGHT. Press is fast (90ms, ease-in), release slower with a slight
+     overshoot -- that asymmetry is what a physical key does, and it is why
+     this reads as "pressed" rather than "toggled". */
+  .message__action:active {
+    transform: scale(0.86);
+    transition-duration: 90ms;
+    transition-timing-function: cubic-bezier(0.4, 0, 1, 1);
+  }
+
+  /* THE TRANSITION EXPLAINS ITSELF. The glyph is keyed on copyState in
+     Message.tsx, so React mounts a new node per state and this replays on
+     every copy. A half-turn on the Y axis reads as the same control turning
+     over to show a new face -- state changed, not control replaced -- and the
+     scale overshoot lands it with weight. */
+  @keyframes llteacher-glyph-turn {
+    from { transform: rotateY(-90deg) scale(0.7); opacity: 0; }
+    60%  { transform: rotateY(0deg) scale(1.12);  opacity: 1; }
+    to   { transform: rotateY(0deg) scale(1);     opacity: 1; }
+  }
+
+  .message__action svg {
+    animation: llteacher-glyph-turn 260ms cubic-bezier(0.34, 1.3, 0.64, 1) both;
+  }
+
+  /* REVEAL RISES: the row arrives from under the turn it belongs to rather
+     than materialising on top of it. Transform only -- no layout property is
+     animated, so it cannot reflow a transcript mid-read. */
+  .message__action {
+    transform: translateY(3px);
+  }
+
+  .message--ai:hover .message__action,
+  .message--ai:focus-within .message__action,
+  .message--student:hover .message__action,
+  .message--student:focus-within .message__action,
+  .message__action:focus-visible {
+    transform: translateY(0);
+  }
+
+  /* The revert glyph winds backwards on approach: the DIRECTION of the motion
+     is the meaning of the control, the same device .btn--restart uses. */
+  .message__revert:hover svg,
+  .message__revert:focus-visible svg {
+    animation: none;   /* the entry turn would fight the wind-back */
+    transform: rotate(-150deg);
+    transition: transform 320ms cubic-bezier(0.34, 1.06, 0.64, 1);
+  }
+
+  /* The time is information, not an affordance: it neither hides with the
+     controls nor moves with them. */
+  .message__time {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.06em;
+    font-variant: small-caps;
+    /* #296: #64605A on the paper ground = 5.97:1, over 1.4.3's 4.5:1. */
+    color: var(--color-text-muted);
+    line-height: 24px;   /* centres against the 24px controls beside it */
+    flex-shrink: 0;
+  }
+
+  /* The tutor's turn is flush LEFT, so the first control sits on the margin. */
+  .message__actions > .message__action:first-child {
+    margin-inline-start: -4px;
+  }
+
+  /* The student's turn is flush RIGHT, so it is the LAST control that sits on
+     the margin instead -- and the first one must not be outdented, or it
+     collides with the time beside it. The column's align-items already does
+     the right-aligning; this only lines its own children up. */
+  .message__actions--student {
+    justify-content: flex-end;
+  }
+
+  .message__actions--student > .message__action:first-child {
+    margin-inline-start: 0;
+  }
+
+  .message__actions--student > .message__copy {
+    margin-inline-end: -4px;
+  }
+
   .message__copy--copied {
     color: var(--color-success);
   }
@@ -1962,7 +2106,7 @@ body {
 
   /* Touch: no hover exists to reveal it with, so it simply stays on. */
   @media (hover: none) {
-    .message__copy {
+    .message__action {
       opacity: 1;
     }
   }
@@ -1996,7 +2140,17 @@ body {
   /* Student message — right-aligned bubble with distinctive corner radius */
   .message--student {
     display: flex;
-    justify-content: flex-end;
+    /* Column, not row. This was `justify-content: flex-end` on a ROW, which
+       right-aligned the single bubble correctly -- but the moment the turn
+       gained a second child (the #397 meta row) that child laid out BESIDE
+       the bubble instead of under it. Measured: bubble right edge and meta
+       row left edge both at x=1283, same vertical band.
+
+       As a column, `align-items: flex-end` does the right-aligning that
+       justify-content used to do, and both children stack in source order:
+       bubble, then its time and controls beneath it. */
+    flex-direction: column;
+    align-items: flex-end;
     margin-block-end: var(--space-6);
   }
 
@@ -2022,7 +2176,7 @@ body {
     font-size: var(--font-size-base);
     line-height: var(--leading-body);
     color: var(--color-text);
-    /* #327: the student's own line breaks survive being sent. Their text is
+    /* #397: the student's own line breaks survive being sent. Their text is
        deliberately NOT markdown-rendered (Message.tsx explains why -- an
        emphasis parser silently eats the asterisks out of "5 * 3 * 2"), so
        pre-wrap is the whole of the fix: a multi-line question kept its shape
@@ -2047,7 +2201,7 @@ body {
   }
 
   /* -------------------------------------------------------------------------
-     #327: markdown + math INSIDE a tutor turn.
+     #397: markdown + math INSIDE a tutor turn.
 
      Nothing here is new visual vocabulary -- it is the same set of decisions
      .admin-markdown-preview already makes for instructor-authored section
@@ -2477,6 +2631,8 @@ body {
     display: flex;
     justify-content: flex-end;
     margin-block-end: var(--space-2);
+  }
+
   /* Wins over the :focus-within rule above: the composer keeps focus while a
      turn streams, so without this the hint would stay lit advertising an Enter
      that is suppressed. Opacity only -- the element keeps its box so the row
@@ -2611,6 +2767,19 @@ body {
   }
 
   @media (prefers-reduced-motion: reduce) {
+    /* Each state is also a distinct GLYPH and colour, so removing the motion
+       removes nothing a user needs -- which is the test for whether an
+       animation was informative or merely decorative. */
+    .message__action,
+    .message__action:active,
+    .message__action svg,
+    .message__revert:hover svg,
+    .message__revert:focus-visible svg {
+      animation: none;
+      transform: none;
+      transition: none;
+    }
+
     .composer-action {
       transition: none;
     }
@@ -2749,7 +2918,7 @@ body {
 
      WCAG 1.4.1 at rest: the action is named in words ("Restart section") and
      marked with the ↺ glyph, so nothing here is carried by colour alone -- the
-     same requirement .btn--danger's underline was added (#327) to satisfy for
+     same requirement .btn--danger's underline was added (#397) to satisfy for
      the dialog's two side-by-side buttons, met by different means.
      WCAG 1.4.3 at rest: --color-text-secondary #6B6760 measures 5.38:1 against
      the paper column (--color-bg #FAFAF7), clearing 4.5:1 for this 12px label.
@@ -5650,10 +5819,10 @@ body {
   border-block-start: 1px solid var(--color-border);
 }
 
-/* `.btn--danger` has no rule anywhere in this stylesheet (#327), so every
+/* `.btn--danger` has no rule anywhere in this stylesheet (#397), so every
    destructive control falls back to plain secondary text -- here that put
    "Remove section" in the same visual register as a label. Scoped to the
-   authoring form on purpose: defining the shared variant is #327's job, and
+   authoring form on purpose: defining the shared variant is #397's job, and
    #317 adds new danger controls that would collide with it. */
 .admin-form-record__remove {
   align-self: flex-start;

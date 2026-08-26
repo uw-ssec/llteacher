@@ -10,7 +10,7 @@
    The breadcrumb string is passed as a prop.
    -------------------------------------------------------------------------- */
 
-import React, { useRef, useEffect, useState } from "react";
+import { Fragment, useRef, useEffect, useState } from "react";
 import { Message } from "./Message";
 import { Composer } from "./Composer";
 import { CodeBlock } from "./CodeBlock";
@@ -189,24 +189,93 @@ export interface AIMessageData {
   role: "ai";
   content: React.ReactNode;
   isStreaming?: boolean;
+  /** #397: ISO 8601 from the message row. The server has always returned this
+   *  (routes/sectionConversations.ts) -- the client was dropping it. Absent
+   *  for a turn still streaming, which renders no time rather than a made-up
+   *  one. */
+  createdAt?: string;
 }
 
 export interface StudentMessageData {
   id: string;
   role: "student";
   content: string;
+  createdAt?: string;
 }
 
 export interface SystemMessageData {
   id: string;
   role: "system";
   content: string;
+  /** System markers ("submitted at 11:34") happen at a time like any other
+   *  turn, so they can legitimately open a new day in the transcript. The
+   *  Message component renders no meta row for them; this is only used for
+   *  day grouping. */
+  createdAt?: string;
 }
 
 export type MessageData =
   | AIMessageData
   | StudentMessageData
   | SystemMessageData;
+
+/* -- Day separators ---------------------------------------------------------
+
+   A tutoring conversation can span days -- a student opens a section on
+   Monday, comes back Wednesday -- and until now the transcript ran those
+   together, so the reply above a question could be two days older than it
+   looked. The per-turn time (#397) makes that visible turn by turn; this
+   makes the DAY boundary visible as a boundary.
+
+   Local time throughout, deliberately: the student's own calendar day is
+   what "Wednesday" means to them. Comparing toDateString() gets local
+   midnight boundaries without pulling in a date library.
+   -------------------------------------------------------------------------- */
+
+const DAY_MS = 86_400_000;
+
+function startOfLocalDay(d: Date): number {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
+/** "Today" / "Yesterday" / a weekday name while it is still unambiguous /
+ *  an explicit date once it is not.
+ *
+ *  The weekday form is only used within the last 6 days. Say "Wednesday" any
+ *  longer than that and it starts meaning two different Wednesdays, which is
+ *  worse than no label -- so past a week it becomes a real date, and past a
+ *  year it carries the year too. */
+export function formatDayLabel(iso: string, now: Date = new Date()): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+
+  const daysApart = Math.round((startOfLocalDay(now) - startOfLocalDay(d)) / DAY_MS);
+  if (daysApart === 0) return "Today";
+  if (daysApart === 1) return "Yesterday";
+  if (daysApart > 1 && daysApart < 7) {
+    return d.toLocaleDateString(undefined, { weekday: "long" });
+  }
+  return d.toLocaleDateString(undefined, {
+    month: "long",
+    day: "numeric",
+    ...(d.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),
+  });
+}
+
+function DayDivider({ label }: { label: string }) {
+  /* role="separator" with an accessible name, rather than a bare decorative
+     rule: the day IS information, and a separator is announced sparsely
+     enough not to become noise inside the role="log" region it sits in. The
+     rules either side are drawn by CSS pseudo-elements, so there is no
+     presentational markup to hide from AT. */
+  return (
+    <div className="day-divider" role="separator" aria-label={label}>
+      <span className="day-divider__pill" aria-hidden="true">
+        {label}
+      </span>
+    </div>
+  );
+}
 
 /* -- Props ----------------------------------------------------------------- */
 
@@ -284,6 +353,14 @@ export interface ConversationViewProps {
    *  "Restart section" button. `undefined` renders nothing, so surfaces
    *  with no header action (the tutor chat) are unaffected. */
   headerActions?: React.ReactNode;
+  /** #397: "revert the conversation to this message", offered on the
+   *  student's turns. UNWIRED BY DESIGN: no endpoint exists for it yet.
+   *  Truncating a conversation is not a client-side edit -- it has to delete
+   *  persisted rows, and past a submission it carries #128's voiding
+   *  semantics exactly as restartSectionConversation does. Until a caller can
+   *  actually pass a handler, the affordance does not render at all, because
+   *  a button that cannot act is worse than an absent one. */
+  onRevertToMessage?: (messageId: string) => void;
   /** #274: the owning `useChat` instance's own `stop()` -- rendered as a
    *  "Stop" affordance next to the composer while `isSending` is true.
    *  `undefined` renders nothing (matches every other optional-callback
@@ -342,17 +419,26 @@ export interface ConversationViewProps {
  *  than duplicating them -- a fourth copy is how the boundary row would
  *  quietly stop matching the others. Takes no `key`: the caller owns it,
  *  since the boundary case wraps this in a Fragment that holds the key. */
-function renderMessageRow(msg: MessageData, onRunRCode?: (code: string) => Promise<RCodeResult>) {
+function renderMessageRow(
+  msg: MessageData,
+  onRunRCode?: (code: string) => Promise<RCodeResult>,
+  onRevertToMessage?: (messageId: string) => void,
+) {
   if (msg.role === "ai") {
     return (
-      <Message role="ai" isStreaming={msg.isStreaming}>
+      <Message role="ai" isStreaming={msg.isStreaming} createdAt={msg.createdAt}>
         {msg.content}
       </Message>
     );
   }
   if (msg.role === "student") {
     return (
-      <Message role="student" onRun={onRunRCode}>
+      <Message
+        role="student"
+        createdAt={msg.createdAt}
+        onRun={onRunRCode}
+        onRevert={onRevertToMessage ? () => onRevertToMessage(msg.id) : undefined}
+      >
         {msg.content}
       </Message>
     );
@@ -379,6 +465,7 @@ export function ConversationView({
   hideComposer = false,
   onRequestHint,
   hintDisabled = false,
+  onRevertToMessage,
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -627,19 +714,25 @@ export function ConversationView({
               during an ACTIVE conversation reach an AT as insertions. */}
           <div className="conversation-log" role="log" aria-live="polite" aria-relevant="additions">
             {messages.map((msg, index) => {
-              /* #288: the boundary is rendered as a sibling ABOVE the
-                 message it marks, from inside this same map so it cannot
-                 drift from the index it describes.
+              /* Two independent separators can precede a turn, and they mean
+                 different things: the DAY divider says when this was written,
+                 the #288 context boundary says what the tutor can still see.
+                 Both can land on the same message, so they are computed
+                 independently and rendered day-first (the broader frame)
+                 rather than one being made a special case of the other. */
+
+              /* #288: the boundary is rendered as a sibling ABOVE the message
+                 it marks, from inside this same map so it cannot drift from
+                 the index it describes.
 
                  role="separator" with a label, not a styled div: for a
                  screen-reader user scrolling the transcript this is
-                 meaningful structure, not decoration -- it is the only
-                 thing distinguishing "the tutor cannot see that" from "the
-                 tutor ignored me". It sits inside the role="log" region
-                 because it is part of the transcript's structure, and it
-                 renders at mount for an already-long conversation rather
-                 than appearing mid-stream, so it is not announced as an
-                 insertion. */
+                 meaningful structure, not decoration -- it is the only thing
+                 distinguishing "the tutor cannot see that" from "the tutor
+                 ignored me". It sits inside the role="log" region because it
+                 is part of the transcript's structure, and it renders at
+                 mount for an already-long conversation rather than appearing
+                 mid-stream, so it is not announced as an insertion. */
               const boundary =
                 index === contextBoundaryIndex ? (
                   <div
@@ -653,32 +746,41 @@ export function ConversationView({
                     </span>
                   </div>
                 ) : null;
-              if (boundary) {
-                return (
-                  <React.Fragment key={msg.id}>
-                    {boundary}
-                    {renderMessageRow(msg, onRunRCode)}
-                  </React.Fragment>
-                );
-              }
-              if (msg.role === "ai") {
-                return (
-                  <Message key={msg.id} role="ai" isStreaming={msg.isStreaming}>
-                    {msg.content}
-                  </Message>
-                );
-              }
-              if (msg.role === "student") {
-                return (
-                  <Message key={msg.id} role="student" onRun={onRunRCode}>
-                    {msg.content}
-                  </Message>
-                );
-              }
+
+              /* #397: emitted when this turn's local calendar day differs from
+                 the last DATED turn's -- including before the first, so a
+                 transcript opened days later says so at the top rather than
+                 only between groups.
+
+                 Turns with no createdAt (a live stream, or a message just
+                 sent, neither of which has a persisted row yet) inherit the
+                 current day rather than breaking the run: an undated turn is
+                 always "now", so it cannot be the thing that starts a day. */
+              const dayLabel = (() => {
+                if (!msg.createdAt) return null;
+                const prevDated = messages
+                  .slice(0, index)
+                  .reverse()
+                  .find((m) => m.createdAt);
+                if (
+                  prevDated?.createdAt &&
+                  new Date(prevDated.createdAt).toDateString() ===
+                    new Date(msg.createdAt).toDateString()
+                ) {
+                  return null;
+                }
+                const label = formatDayLabel(msg.createdAt);
+                return label === "" ? null : label;
+              })();
+
+              const row = renderMessageRow(msg, onRunRCode, onRevertToMessage);
+              if (!boundary && !dayLabel) return <Fragment key={msg.id}>{row}</Fragment>;
               return (
-                <Message key={msg.id} role="system">
-                  {msg.content}
-                </Message>
+                <Fragment key={msg.id}>
+                  {dayLabel ? <DayDivider label={dayLabel} /> : null}
+                  {boundary}
+                  {row}
+                </Fragment>
               );
             })}
           </div>

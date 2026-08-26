@@ -10,13 +10,13 @@ import {
   VOICE_CONSTRAINTS,
 } from "./prompts";
 
-describe("sectionGreeting (#305, #354)", () => {
+describe("sectionGreeting (#305, #397)", () => {
   it("matches the canonical greeting string exactly", () => {
     // Still pinned as a literal rather than rebuilt from the same template
     // the implementation uses -- a test that constructs the expected value
     // the same way the code does cannot detect the template changing.
     //
-    // #354: this literal used to be the verbatim Django string from
+    // #397: this literal used to be the verbatim Django string from
     // ConversationService._create_initial_message (services.py:626). That
     // parity was deliberately broken; see sectionGreeting's own doc comment.
     // Three sibling test files pin the same literal and were updated with
@@ -27,7 +27,7 @@ describe("sectionGreeting (#305, #354)", () => {
     );
   });
 
-  it("carries no assistant boilerplate and no emoji or em dash (#354)", () => {
+  it("carries no assistant boilerplate and no emoji or em dash (#397)", () => {
     // The greeting is the first thing a student reads in every section, so
     // it is held to the same register VOICE_CONSTRAINTS imposes on the
     // model's own turns. Asserted on a greeting whose section content is
@@ -40,7 +40,7 @@ describe("sectionGreeting (#305, #354)", () => {
     expect(greeting).not.toMatch(/\p{Extended_Pictographic}/u);
   });
 
-  it("opens on the section itself, not on the tutor introducing itself (#354)", () => {
+  it("opens on the section itself, not on the tutor introducing itself (#397)", () => {
     const greeting = sectionGreeting({ order: 4, title: "Sampling", content: "Draw ten cards." });
     /* Opens on the section's CONTENT. Review finding: it used to open on a
        repeated "Section 4: Sampling" heading, which the breadcrumb directly
@@ -69,7 +69,7 @@ describe("assembleSystemPrompt", () => {
     expect(result).toBe(`Be a helpful tutor.\n\n${TUTOR_GUARDRAIL}\n\n${VOICE_CONSTRAINTS}`);
   });
 
-  it("appends VOICE_CONSTRAINTS for a REAL template too, not just the default fallback (#354)", () => {
+  it("appends VOICE_CONSTRAINTS for a REAL template too, not just the default fallback (#397)", () => {
     // The regression this guards: the observed emoji/em-dash output came
     // from a conversation running a seeded org template, so a voice
     // constraint gated on isDefaultPrompt (the way TUTOR_GUARDRAIL is)
@@ -79,7 +79,7 @@ describe("assembleSystemPrompt", () => {
     expect(real).not.toContain(TUTOR_GUARDRAIL);
   });
 
-  it("puts VOICE_CONSTRAINTS last, after the section content and the guardrail (#354)", () => {
+  it("puts VOICE_CONSTRAINTS last, after the section content and the guardrail (#397)", () => {
     // Last = nearest to the conversation, and after any template persona
     // text it is meant to narrow.
     const result = assembleSystemPrompt(
@@ -92,7 +92,7 @@ describe("assembleSystemPrompt", () => {
     expect(result.indexOf(VOICE_CONSTRAINTS)).toBeGreaterThan(result.indexOf("</section_content>"));
   });
 
-  it("VOICE_CONSTRAINTS names each banned tell concretely, not as vague guidance (#354)", () => {
+  it("VOICE_CONSTRAINTS names each banned tell concretely, not as vague guidance (#397)", () => {
     // A model complies with a listed forbidden string and ignores an
     // adjective, so this asserts the constraint keeps naming the specific
     // artifacts that were actually observed in production output.
@@ -107,14 +107,14 @@ describe("assembleSystemPrompt", () => {
     }
   });
 
-  it("VOICE_CONSTRAINTS does not itself contain an emoji (#354)", () => {
+  it("VOICE_CONSTRAINTS does not itself contain an emoji (#397)", () => {
     // It quotes the banned openers verbatim but describes the banned emoji
     // in words, so the prohibition never smuggles an example of the thing
     // it forbids into the model's context.
     expect(VOICE_CONSTRAINTS).not.toMatch(/\p{Extended_Pictographic}/u);
   });
 
-  it("leaves the pedagogy instructions untouched -- voice constraint only (#354)", () => {
+  it("leaves the pedagogy instructions untouched -- voice constraint only (#397)", () => {
     // VOICE_CONSTRAINTS must not restate or contradict teaching behaviour;
     // that is TUTOR_GUARDRAIL's and the template's job.
     expect(VOICE_CONSTRAINTS).not.toContain("Socratic");

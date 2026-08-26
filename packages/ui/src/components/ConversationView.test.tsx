@@ -4,7 +4,7 @@ import { render, screen, cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConversationView } from "./ConversationView";
 import type { MessageData } from "./ConversationView";
-import { readErrorMessage } from "./ConversationView";
+import { readErrorMessage, formatDayLabel } from "./ConversationView";
 
 beforeEach(() => {
   // jsdom doesn't implement these two DOM APIs Composer/ConversationView
@@ -639,5 +639,78 @@ describe("ConversationView context window disclosure (#288)", () => {
     expect(screen.getByText("message 44")).toBeTruthy();
     // 45 messages + 1 boundary
     expect(log.children.length).toBe(46);
+  });
+});
+
+/* #397: a tutoring conversation spans sittings. Before this, Monday's question
+   and Wednesday's answer ran together with nothing between them. */
+describe("ConversationView day separators (#397)", () => {
+  const at = (iso: string) => iso;
+
+  it("labels today, yesterday, a weekday inside the week, then a real date", () => {
+    const now = new Date("2026-08-26T12:00:00");            // a Wednesday
+    expect(formatDayLabel(at("2026-08-26T09:00:00"), now)).toBe("Today");
+    expect(formatDayLabel(at("2026-08-25T09:00:00"), now)).toBe("Yesterday");
+    // 4 days back is still unambiguous as a weekday.
+    expect(formatDayLabel(at("2026-08-22T09:00:00"), now)).toBe("Saturday");
+    /* 7 days back is NOT: "Wednesday" would name two different Wednesdays,
+       which is worse than no label -- so it becomes an explicit date. */
+    expect(formatDayLabel(at("2026-08-19T09:00:00"), now)).not.toMatch(/day$/);
+    expect(formatDayLabel(at("2026-08-19T09:00:00"), now)).toMatch(/19/);
+    // A different year carries the year; the same year does not.
+    expect(formatDayLabel(at("2025-08-19T09:00:00"), now)).toMatch(/2025/);
+    expect(formatDayLabel(at("2026-01-05T09:00:00"), now)).not.toMatch(/2026/);
+  });
+
+  it("returns empty for an unparseable date rather than 'Invalid Date'", () => {
+    expect(formatDayLabel("not-a-date")).toBe("");
+  });
+
+  it("separates two calendar days and does not separate within one", () => {
+    render(
+      <ConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[
+          { id: "a", role: "student", content: "mon q", createdAt: "2026-08-24T09:00:00" },
+          { id: "b", role: "ai", content: "mon a", createdAt: "2026-08-24T09:01:00" },
+          { id: "c", role: "student", content: "wed q", createdAt: "2026-08-26T09:00:00" },
+        ]}
+      />,
+    );
+    const seps = screen.getAllByRole("separator");
+    // One before the first turn (a transcript opened days later says so at
+    // the top), one at the boundary -- not one per message.
+    expect(seps).toHaveLength(2);
+    expect(seps[1]!.getAttribute("aria-label")).toBeTruthy();
+  });
+
+  it("does not let an undated turn break a day run", () => {
+    /* A streaming reply, or a message the student has only just sent, has no
+       persisted row and so no createdAt. It is always "now", so it must not
+       be the thing that opens a new day. */
+    render(
+      <ConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[
+          { id: "a", role: "student", content: "q", createdAt: "2026-08-26T09:00:00" },
+          { id: "b", role: "ai", content: "streaming", isStreaming: true },
+          { id: "c", role: "student", content: "q2", createdAt: "2026-08-26T09:05:00" },
+        ]}
+      />,
+    );
+    expect(screen.getAllByRole("separator")).toHaveLength(1);
+  });
+
+  it("renders no separator at all when nothing is dated", () => {
+    render(
+      <ConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[{ id: "a", role: "student", content: "q" }]}
+      />,
+    );
+    expect(screen.queryByRole("separator")).toBeNull();
   });
 });

@@ -176,6 +176,17 @@ function buildMessageData(
      that decision). */
   onRunRCode?: (code: string) => Promise<RCodeResult>,
 ): MessageData[] {
+  /* #397: the persisted row's timestamp, riding on UIMessage.metadata (set in
+     fetchConversationHistory). A turn the student has only just sent, or one
+     still streaming, has no persisted row yet and therefore no time -- the
+     transcript renders none rather than stamping Date.now(), which would show
+     a time the server never recorded and would drift from the row once it
+     lands. */
+  const turnCreatedAt = (m: UIMessage): string | undefined => {
+    const meta = m.metadata as { createdAt?: unknown } | undefined;
+    return typeof meta?.createdAt === "string" ? meta.createdAt : undefined;
+  };
+
   const messages: MessageData[] = aiMessages.map((m, idx) => {
     const isLast = idx === aiMessages.length - 1;
     const isStreaming = isLast && chatStatus === "streaming";
@@ -228,6 +239,7 @@ function buildMessageData(
         id: m.id,
         role: "ai" as const,
         content,
+        createdAt: turnCreatedAt(m),
         // A stopped turn is definitionally done, even if this happened to
         // still be the last message and chatStatus hasn't settled out of
         // "streaming" yet by the render that first sees it.
@@ -244,6 +256,7 @@ function buildMessageData(
         id: m.id,
         role: "student" as const,
         content: text,
+        createdAt: turnCreatedAt(m),
       };
     }
 
@@ -659,7 +672,16 @@ export default function App() {
     if (!res.ok) throw new Error(`failed to load conversation history: ${res.status}`);
     const rows = (await res.json()) as ConversationMessageResponse[];
     return {
-      messages: rows.map((r) => ({ id: r.id, role: r.role, parts: r.parts as UIMessage["parts"] })),
+      /* #397: createdAt was being dropped here. The server has always sent it
+         per message (routes/sectionConversations.ts), and the transcript now
+         shows a per-turn time, so it rides along on the UIMessage metadata
+         rather than needing a second fetch. */
+      messages: rows.map((r) => ({
+        id: r.id,
+        role: r.role,
+        parts: r.parts as UIMessage["parts"],
+        metadata: { createdAt: r.createdAt },
+      })),
       hasMore: rows.length === MESSAGES_HISTORY_LIMIT,
     };
   };
@@ -1478,7 +1500,7 @@ export default function App() {
           <ErrorBoundary key={`tutor-${tutorConversationId}`}>
             <ConversationView
               key={tutorConversationId}
-              /* #327 follow-up: the top nav already spells out
+              /* #397: the top nav already spells out
                  "STATS 311 · AUTUMN 2026 · <homework>" one line above, so
                  repeating the course code here cost the first line of the
                  reading column to say nothing new. Only the surface name
@@ -1522,7 +1544,7 @@ export default function App() {
                 genuine mid-conversation appends reach an AT as insertions. */}
             <ConversationView
               key={currentSection}
-              /* #327 follow-up: was `STATS 311 · ${hwTitle} · Section N: ...`,
+              /* #397: was `STATS 311 · ${hwTitle} · Section N: ...`,
                  which repeated both the course code and the homework title
                  already shown in the top nav directly above -- long enough
                  that it wrapped to two lines and pushed the transcript down.
