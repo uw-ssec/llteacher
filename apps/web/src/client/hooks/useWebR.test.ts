@@ -25,6 +25,8 @@ import { renderHook, waitFor, act } from "@testing-library/react";
 
 const evalRVoid = vi.fn().mockResolvedValue(undefined);
 const evalR = vi.fn().mockResolvedValue(undefined);
+const evalRBoolean = vi.fn().mockResolvedValue(true);
+const installPackages = vi.fn().mockResolvedValue(undefined);
 const init = vi.fn().mockResolvedValue(undefined);
 let webRCtorCalls = 0;
 
@@ -32,6 +34,8 @@ class MockWebR {
   init = init;
   evalRVoid = evalRVoid;
   evalR = evalR;
+  evalRBoolean = evalRBoolean;
+  installPackages = installPackages;
   Shelter = class {};
   constructor() {
     webRCtorCalls += 1;
@@ -44,7 +48,12 @@ beforeEach(() => {
   init.mockClear();
   evalRVoid.mockClear();
   evalR.mockClear();
+  evalRBoolean.mockClear();
+  installPackages.mockClear();
   init.mockResolvedValue(undefined);
+  // Default: every package resolves, i.e. a healthy install (#374).
+  evalRBoolean.mockResolvedValue(true);
+  installPackages.mockResolvedValue(undefined);
   vi.doMock("http://localhost:3000/webr/webr.js", () => ({ WebR: MockWebR }));
 });
 
@@ -152,6 +161,101 @@ describe("useWebR", () => {
 
     expect(webRCtorCalls).toBe(1);
     expect(init).toHaveBeenCalledTimes(1);
+  });
+
+  /* ---- #374: WASM-binary package installation -------------------------
+     The bug this covers was not a crash but a silence: init used to run R's
+     own `install.packages()`, which cannot work on a build with no compiler
+     toolchain, and swallowed the resulting error per-package. Every test
+     here asserts on something that was true-but-invisible before. */
+
+  it("installs DEFAULT_PACKAGES through webR's binary installer, not R's source install.packages()", async () => {
+    const useWebR = await importUseWebR();
+    const { result } = renderHook(() => useWebR());
+    await act(async () => {
+      await result.current.ensureReady();
+    });
+
+    expect(installPackages).toHaveBeenCalledTimes(1);
+    expect(installPackages).toHaveBeenCalledWith(
+      ["ggplot2", "dplyr", "tidyr"],
+      expect.objectContaining({ repos: "https://repo.r-wasm.org", quiet: true }),
+    );
+    // The regression itself: nothing may reach R's source installer, which
+    // errors with "not set up to install source packages" on this build.
+    const evaluated = [...evalR.mock.calls, ...evalRVoid.mock.calls, ...evalRBoolean.mock.calls]
+      .map((call) => String(call[0]))
+      .join("\n");
+    expect(evaluated).not.toContain("install.packages");
+  });
+
+  it("verifies each package against R itself and reports none missing when all resolve", async () => {
+    const useWebR = await importUseWebR();
+    const { result } = renderHook(() => useWebR());
+    await act(async () => {
+      await result.current.ensureReady();
+    });
+
+    expect(evalRBoolean).toHaveBeenCalledWith('isTRUE(requireNamespace("ggplot2", quietly = TRUE))');
+    expect(evalRBoolean).toHaveBeenCalledWith('isTRUE(requireNamespace("dplyr", quietly = TRUE))');
+    expect(evalRBoolean).toHaveBeenCalledWith('isTRUE(requireNamespace("tidyr", quietly = TRUE))');
+    expect(result.current.missingPackages).toEqual([]);
+  });
+
+  it("reports a package that does not resolve as missing instead of failing silently", async () => {
+    evalRBoolean.mockImplementation((code: string) => Promise.resolve(!code.includes("dplyr")));
+    const useWebR = await importUseWebR();
+    const { result } = renderHook(() => useWebR());
+    await act(async () => {
+      await result.current.ensureReady();
+    });
+
+    expect(result.current.status).toBe("ready");
+    expect(result.current.missingPackages).toEqual(["dplyr"]);
+  });
+
+  it("stays usable when the package repo is unreachable, reporting every package missing", async () => {
+    installPackages.mockRejectedValueOnce(new Error("repo unreachable"));
+    evalRBoolean.mockResolvedValue(false);
+    const useWebR = await importUseWebR();
+    const { result } = renderHook(() => useWebR());
+    await act(async () => {
+      await result.current.ensureReady();
+    });
+
+    // Best-effort is preserved: R itself still works.
+    expect(result.current.status).toBe("ready");
+    expect(result.current.error).toBeUndefined();
+    expect(result.current.missingPackages).toEqual(["ggplot2", "dplyr", "tidyr"]);
+  });
+
+  it("treats a probe that throws as missing rather than letting it fail init", async () => {
+    evalRBoolean.mockRejectedValue(new Error("R process gone"));
+    const useWebR = await importUseWebR();
+    const { result } = renderHook(() => useWebR());
+    await act(async () => {
+      await result.current.ensureReady();
+    });
+
+    expect(result.current.status).toBe("ready");
+    expect(result.current.missingPackages).toEqual(["ggplot2", "dplyr", "tidyr"]);
+  });
+
+  it("does not report stale missing packages after an init that failed outright", async () => {
+    // A failed init learned nothing about package availability -- claiming
+    // "dplyr is missing" would be a guess dressed up as a verified fact.
+    init.mockRejectedValueOnce(new Error("wasm fetch failed"));
+    const useWebR = await importUseWebR();
+    const { result } = renderHook(() => useWebR());
+
+    await act(async () => {
+      await expect(result.current.ensureReady()).rejects.toThrow();
+    });
+
+    expect(result.current.status).toBe("error");
+    expect(result.current.missingPackages).toEqual([]);
+    // ...and the probe never ran, because init never got that far.
+    expect(evalRBoolean).not.toHaveBeenCalled();
   });
 
   it("a hook instance mounted after another already completed init starts out ready", async () => {

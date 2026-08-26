@@ -35,9 +35,42 @@ Confirmed directly against the installed package (`node_modules/webr/dist/webR/w
 
 ## Live verification
 
-Confirmed against a real, running browser session (not inferred from source, not left to the necessarily-mocked unit tests to catch): `crossOriginIsolated === true`, a same-origin `import()` of `webr.js`, `WebR` construction, `init()`, `evalR("1 + 1") -> 2`, setting `webr::canvas` as the graphics device, a real `Shelter` + `captureR()` round trip capturing `stdout`/`message`/`warning` output, and `shelter.purge()`.
+Confirmed against a real, running browser session (not inferred from source, not left to the necessarily-mocked unit tests to catch): a same-origin `import()` of `webr.js`, `WebR` construction, `init()`, `evalR("1 + 1") -> 2`, setting `webr::canvas` as the graphics device, a real `Shelter` + `captureR()` round trip capturing `stdout`/`message`/`warning` output, and `shelter.purge()`.
 
-One pre-existing bug this verification surfaced (not introduced by this change, never previously verified live): `install.packages()` fails in this WASM build with "This version of R is not set up to install source packages." This is non-fatal — `useWebR.ts`'s `DEFAULT_PACKAGES` loop already wraps each install attempt in its own `try`/`catch` — but it does mean the default `dplyr`/`ggplot2`/`tidyr` packages likely never actually install, silently. Tracked separately (see the follow-up issue linked from `useWebR.ts`'s own doc comment).
+Re-run for the #374 fix, this time driving the **real `useWebR`/`useRExecution` hooks** rather than a hand-written replica of their init sequence (mount them in a throwaway component against the dev server; the harness is not committed). Confirmed end to end: `status: "ready"`, `missingPackages: []`, all three packages installing in ~3.5s, then a single student-style run producing correct `dplyr` `group_by`/`summarise` output, a correct `tidyr::pivot_wider`, one captured `ggplot2` image, readable `message()`/`warning()` text, and a following `stop()` still resolving to `status: "error"`. Both channel paths are exercised in practice — this run was **not** cross-origin-isolated and took webR's `PostMessage` fallback, which is itself worth knowing works.
+
+## Package installation (#374)
+
+`DEFAULT_PACKAGES` (`ggplot2`, `dplyr`, `tidyr`) were originally installed by evaluating R's own `install.packages()`. Live verification showed that fails outright on this build:
+
+```
+Error in `install.packages("dplyr", quiet = TRUE)`: This version of R is not set up to install source packages
+```
+
+That is not a misconfiguration to work around — it is correct. R's stock installer builds packages from source, and there is no C/C++/Fortran toolchain inside the WASM R process to build them with. Because the old loop caught each failure per-package, this was **silent**: the feature shipped with none of the three packages ever available to students, and nothing said so.
+
+**The fix.** webR maintains a separate repository of packages *pre-compiled to WASM* and its own installer to fetch them — `WebR#installPackages` (JS) / `webr::install()` (R). It resolves dependencies and mounts each package as an Emscripten filesystem image rather than compiling anything:
+
+```ts
+await webR.installPackages(DEFAULT_PACKAGES, { repos: WEBR_REPO_URL, quiet: true });
+```
+
+Verified live: all three install in ~3.5s and `library()` works for each. Versions come from the repo's `contrib/4.6` index (`R_VERSION` is 4.6.0 for `webr@0.6.0`) — ggplot2 4.0.3, dplyr 1.2.1, tidyr 1.3.2 at time of writing.
+
+**Why the repo is not self-hosted.** `WEBR_REPO_URL` is left at webR's own default, `https://repo.r-wasm.org`, unlike the runtime itself. #369's objection was to third-party *JavaScript* executing in this authenticated origin; this is a different risk class — R packages fetched as data and run inside the sandboxed WASM R process, never in the page's JS realm. The mirror is also far too large to vendor (the `contrib` index alone is ~4.7MB; the packages behind it are orders of magnitude larger). It serves `access-control-allow-origin: *`, which is what lets these fetches succeed under the `require-corp` COEP header above. The constant is named rather than left implicit so pointing it at a mirror later is a one-line change.
+
+**No longer silent.** After installing, init asks R itself which packages actually resolve (`requireNamespace`, the same question `library()` will ask) and exposes the answer as `useWebR().missingPackages`, logging a warning for anything missing. A repo outage still degrades gracefully — R stays usable — but it can no longer degrade *invisibly*, which was the actual defect behind #374.
+
+## Rendering R conditions (`message()` / `warning()`)
+
+A captured `message`/`warning`/`error` item's `data` is an RObject **proxy** over an R list, verified live to carry exactly `names() === ["message", "call"]`. Two traps:
+
+- The proxy's `toString()` resolves to a *type description* — literally `"[object RObject:list]"` — not the message text. It is non-empty and isn't `"[object Object]"`, so a naive truthy-and-not-`[object Object]` guard accepts it as real content.
+- `toJs()` is not an escape hatch: it throws `"This R object cannot be converted to JS"`, because the sibling `call` element is an R language object with no JS equivalent.
+
+The readable text is the `message` element: `await data.get("message")`, then `toString()` on that (and strip the trailing newline R appends). `useRExecution.ts`'s `stringifyConditionData` does this, falling back to the proxy's own `toString()` and then to a generic label.
+
+This was latent until #374 was fixed. With the default packages finally installing, every `library()` call emits its attach messages for the first time, so what used to be a rare path (a student's own `message()`/`warning()`) is now on every run — the first live run after the #374 fix printed three `[object RObject:list]` lines above the student's output. Unit-test stubs of the form `{ toString: async () => "..." }` pass either way, which is exactly why this survived: the tests modelled a shape the real runtime never produces. The regression tests now model the real proxy shape instead.
 
 ## Upgrading the pinned version
 
