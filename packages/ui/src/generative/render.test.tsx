@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach } from "vitest";
 import { render, cleanup } from "@testing-library/react";
-import { renderToolPart, parseShowDefinitionInput, isToolPart, type ToolPart } from "./render";
+import { renderToolPart, parseShowDefinitionInput, parseExecuteRCodeInput, isToolPart, type ToolPart } from "./render";
 
 afterEach(cleanup);
 
@@ -46,6 +46,41 @@ describe("parseShowDefinitionInput", () => {
 
   it("returns null when term is an empty string", () => {
     expect(parseShowDefinitionInput({ term: "", body: "b" })).toBeNull();
+  });
+});
+
+/* #28: same deny-by-default posture as parseShowDefinitionInput above --
+   a tool-executeRCode part's `input` is model-generated JSON too. */
+describe("parseExecuteRCodeInput", () => {
+  it("parses a valid code string with no showSource", () => {
+    expect(parseExecuteRCodeInput({ code: "sum(1:10)" })).toEqual({ code: "sum(1:10)", showSource: undefined });
+  });
+
+  it("parses showSource when present as a boolean", () => {
+    expect(parseExecuteRCodeInput({ code: "1 + 1", showSource: false })).toEqual({ code: "1 + 1", showSource: false });
+  });
+
+  it("returns null while args are still streaming and no code has arrived yet", () => {
+    expect(parseExecuteRCodeInput({})).toBeNull();
+    expect(parseExecuteRCodeInput(undefined)).toBeNull();
+  });
+
+  it("returns null when code is an empty string", () => {
+    expect(parseExecuteRCodeInput({ code: "" })).toBeNull();
+  });
+
+  it("returns null when code is not a string", () => {
+    expect(parseExecuteRCodeInput({ code: 42 })).toBeNull();
+    expect(parseExecuteRCodeInput({ code: ["not", "a", "string"] })).toBeNull();
+  });
+
+  it("returns null when showSource is present but not a boolean", () => {
+    expect(parseExecuteRCodeInput({ code: "1+1", showSource: "yes" })).toBeNull();
+  });
+
+  it("returns null when input is not an object", () => {
+    expect(parseExecuteRCodeInput("sum(1:10)")).toBeNull();
+    expect(parseExecuteRCodeInput(null)).toBeNull();
   });
 });
 
@@ -103,5 +138,66 @@ describe("renderToolPart", () => {
   it("returns null while args are still streaming and no term has arrived yet", () => {
     const part: ToolPart = { type: "tool-showDefinition", state: "input-streaming", input: {} };
     expect(renderToolPart(part, "k")).toBeNull();
+  });
+
+  /* #28 */
+  it("renders a CodeExecution for valid executeRCode input", () => {
+    const part: ToolPart = {
+      type: "tool-executeRCode",
+      state: "output-available",
+      input: { code: "sum(1:10)" },
+    };
+    const { getByText } = render(<>{renderToolPart(part, "k")}</>);
+    expect(getByText("sum(1:10)")).toBeTruthy();
+  });
+
+  it("threads onRunRCode from handlers into the rendered CodeExecution's Run button", () => {
+    const part: ToolPart = {
+      type: "tool-executeRCode",
+      state: "output-available",
+      input: { code: "1 + 1" },
+    };
+    const onRunRCode = () => Promise.resolve({ status: "success" as const, output: "2", executionTimeMs: 1 });
+    const { getByRole } = render(<>{renderToolPart(part, "k", { onRunRCode })}</>);
+    expect(getByRole("button", { name: /run/i })).toBeTruthy();
+  });
+
+  it("shows no Run affordance when no handlers are passed (graceful degradation)", () => {
+    const part: ToolPart = {
+      type: "tool-executeRCode",
+      state: "output-available",
+      input: { code: "1 + 1" },
+    };
+    const { queryByRole } = render(<>{renderToolPart(part, "k")}</>);
+    expect(queryByRole("button")).toBeNull();
+  });
+
+  it("returns null for executeRCode while args are still streaming and no code has arrived yet", () => {
+    const part: ToolPart = { type: "tool-executeRCode", state: "input-streaming", input: {} };
+    expect(renderToolPart(part, "k")).toBeNull();
+  });
+
+  /* #168: markSectionComplete is a zero-argument tool -- there is no
+     model-generated `input` to validate the way showDefinition/executeRCode
+     above need to, so the renderer only branches on `part.type`/`state`. */
+  it("renders a SectionCompleteSuggestion for a resolved markSectionComplete tool call", () => {
+    const part: ToolPart = {
+      type: "tool-markSectionComplete",
+      state: "output-available",
+      input: {},
+    };
+    const { getByLabelText } = render(<>{renderToolPart(part, "k")}</>);
+    expect(getByLabelText("Section complete suggestion")).toBeTruthy();
+  });
+
+  it("still renders the SectionCompleteSuggestion while input-streaming (zero-argument tool, nothing to wait for)", () => {
+    const part: ToolPart = { type: "tool-markSectionComplete", state: "input-streaming", input: {} };
+    expect(renderToolPart(part, "k")).not.toBeNull();
+  });
+
+  it("renders no interactive controls -- the suggestion is informational only, never an auto-submit affordance", () => {
+    const part: ToolPart = { type: "tool-markSectionComplete", state: "output-available", input: {} };
+    const { queryByRole } = render(<>{renderToolPart(part, "k")}</>);
+    expect(queryByRole("button")).toBeNull();
   });
 });

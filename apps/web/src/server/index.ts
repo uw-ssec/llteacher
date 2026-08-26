@@ -29,6 +29,11 @@ import {
   restartSectionConversationHandler,
 } from "./routes/sectionConversations";
 import { submitSectionAnswerHandler, getSectionAnswerHandler } from "./routes/sectionAnswers";
+import { getSectionHintsHandler } from "./routes/hints";
+import {
+  listInstructorTranscriptsHandler,
+  getInstructorTranscriptHandler,
+} from "./routes/instructor/transcripts";
 import { submitWidgetResponseHandler } from "./routes/progressWidgets";
 import {
   addCourseTasHandler,
@@ -103,6 +108,32 @@ app.onError((err, c) => {
   return c.json({ error: SERVICE_UNAVAILABLE_MESSAGE }, 503);
 });
 
+// #368 (PR3 final review): cross-origin isolation, so WebR's SharedArrayBuffer
+// channel is available where the browser supports it -- see useWebR.ts's own
+// doc comment for why this is an optimization, not a hard requirement (webR
+// falls back to its PostMessage channel without it, no service worker
+// involved either way). Applied globally, not scoped to the chat routes,
+// because COOP/COEP are page-level properties (the top-level document's
+// headers, not a per-fetch header) -- Hono has no narrower unit to attach
+// them to that would still take effect for the initial HTML response the
+// ASSETS catch-all serves below.
+//
+// Verified safe for the one thing on this domain that could plausibly break
+// under it: WorkOS AuthKit login (routes/auth.ts) is a full top-level
+// redirect (c.redirect) to workos.com and back, not a popup or an iframe --
+// COOP only constrains window.opener/postMessage relationships between open
+// windows, and COEP only constrains subresources this page itself loads
+// (this client has none cross-origin: grepped for external script/font/image
+// URLs, found none besides webR's own now-self-hosted assets). `require-corp`
+// over `credentialless`: nothing here needs to send credentials to a
+// cross-origin subresource, so the stricter, better-supported mode has no
+// downside.
+app.use("*", async (c, next) => {
+  await next();
+  c.res.headers.set("Cross-Origin-Opener-Policy", "same-origin");
+  c.res.headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+});
+
 // Session gate for every /api/* route except /api/auth/*.
 app.use("/api/*", authMiddleware);
 // Resolves course_memberships once per request for authenticated users.
@@ -165,9 +196,9 @@ app.get(
 // requireRole(["student"]) -- an instructor starting one is the teacher-test
 // case the isTeacherTest column exists for, and the handlers derive that from
 // the caller's own course role. Per-conversation ownership and the
-// instructor-can't-read-another-instructor's-test rule are enforced inside
-// the handlers (canReadSectionConversation), not by these guards, which only
-// answer "is this caller in this course."
+// grader-can't-read-another-grader's-test rule (#246: grader tier, not just
+// instructor) are enforced inside the handlers (canReadSectionConversation),
+// not by these guards, which only answer "is this caller in this course."
 app.post(
   "/api/courses/:courseId/sections/:sectionId/conversations",
   requireCourseMember()(startSectionConversationHandler),
@@ -184,12 +215,43 @@ app.post(
   "/api/courses/:courseId/conversations/:conversationId/restart",
   requireCourseMember()(restartSectionConversationHandler),
 );
+// #29: instructor transcript viewer. Same grader tier as the submissions
+// dashboard it drills in from (requireGraderOf) -- #246's own resolution for
+// exactly this pairing. Per-conversation exclusions (a grader may not open
+// another grader's teacher-test conversation) are enforced inside the detail
+// handler via canReadSectionConversation, same split as every other guarded
+// route above: these guards only answer "is this caller a grader of this
+// course," not "of this specific conversation."
+//
+// #208/#366 merge: "gates-unreleased", not "no-unreleased-content" -- a
+// transcript's own content (the greeting + replay, built from the section as
+// it stood at conversation-start time) is unreleased content once the
+// underlying homework is currently draft/scheduled/hidden, same as the
+// homework's own title elsewhere in this console. Both handlers consult
+// canViewDraftsIn themselves (see their own comments) before returning any
+// row whose homework is currently unreleased.
+app.get(
+  "/api/courses/:courseId/instructor/transcripts",
+  requireGraderOf("gates-unreleased")(listInstructorTranscriptsHandler),
+);
+app.get(
+  "/api/courses/:courseId/instructor/transcripts/:conversationId",
+  requireGraderOf("gates-unreleased")(getInstructorTranscriptHandler),
+);
 app.patch("/api/sections/:sectionId/answer", requireRole(["student"])(submitSectionAnswerHandler));
 app.get(
   "/api/courses/:courseId/sections/:sectionId/answers/:studentId",
   requireGraderOf("gates-unreleased")(getSectionAnswerHandler),
 );
 app.patch("/api/widgets/:widgetId/response", requireRole(["student"])(submitWidgetResponseHandler));
+// #80: read-only -- the caller's own hint usage for a section, driving
+// Sidebar's real hintCount. requireCourseMember, not requireRole(["student"]),
+// matching the section-conversation routes above: an instructor/TA teacher-
+// testing a section still needs a real count for their own conversation.
+app.get(
+  "/api/courses/:courseId/sections/:sectionId/hints",
+  requireCourseMember()(getSectionHintsHandler),
+);
 // #172: granting a capability is authoring-tier -- a TA must not be able to
 // widen their own or another TA's access, so these stay requireInstructorOf.
 app.get("/api/courses/:courseId/tas", requireInstructorOf()(listCourseTasHandler));

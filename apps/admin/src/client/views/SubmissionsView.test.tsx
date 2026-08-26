@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import { SubmissionsView, type HomeworkSubmissionsData } from "./SubmissionsView";
 
 afterEach(cleanup);
@@ -51,5 +51,122 @@ describe("SubmissionsView missing-section warnings", () => {
     render(<SubmissionsView data={data} onBack={vi.fn()} />);
     expect(screen.getByText(/students haven't started "Section 1"/)).toBeTruthy();
     expect(screen.getByText(/students haven't started "Section 2"/)).toBeTruthy();
+  });
+});
+
+/** #29/#23: the submission-matrix cell -> transcript-list drill-in. */
+describe("SubmissionsView transcript drill-in (#29, closes #23's remaining checkbox)", () => {
+  const dataWithOneCell = (cell: Partial<HomeworkSubmissionsData["students"][number]["sections"][number]>): HomeworkSubmissionsData => ({
+    ...BASE_DATA,
+    sectionHeaders: [{ id: "s1", order: 1, title: "Section 1" }],
+    students: [
+      {
+        studentId: "student-1",
+        displayName: "Ada Lovelace",
+        email: "ada@example.com",
+        sections: [{ sectionId: "s1", status: "in_progress", conversationCount: 1, lastActivityAt: null, hasDeletedConversation: false, submissionId: null, ...cell }],
+        totalConversations: 1,
+        submissionCount: 0,
+        participationStatus: "partial",
+        lastActivityAt: null,
+      },
+    ],
+  });
+
+  it("clicking a cell with conversations calls onOpenTranscript with (sectionId, studentId)", () => {
+    const onOpenTranscript = vi.fn();
+    render(<SubmissionsView data={dataWithOneCell({})} onBack={vi.fn()} onOpenTranscript={onOpenTranscript} />);
+    fireEvent.click(screen.getByRole("button", { name: /Section 1: in_progress -- view transcripts/i }));
+    expect(onOpenTranscript).toHaveBeenCalledWith("s1", "student-1");
+  });
+
+  it("a cell with no conversations at all is not clickable", () => {
+    const onOpenTranscript = vi.fn();
+    render(
+      <SubmissionsView
+        data={dataWithOneCell({ status: "missing", conversationCount: 0 })}
+        onBack={vi.fn()}
+        onOpenTranscript={onOpenTranscript}
+      />,
+    );
+    const cell = screen.getByRole("button", { name: /Section 1: missing/i }) as HTMLButtonElement;
+    expect(cell.disabled).toBe(true);
+    fireEvent.click(cell);
+    expect(onOpenTranscript).not.toHaveBeenCalled();
+  });
+
+  it("without onOpenTranscript wired up, every cell stays inert (no crash, no-op)", () => {
+    render(<SubmissionsView data={dataWithOneCell({})} onBack={vi.fn()} />);
+    const cell = screen.getByRole("button", { name: /Section 1: in_progress/i }) as HTMLButtonElement;
+    expect(cell.disabled).toBe(true);
+  });
+});
+
+describe("SubmissionsView grade drill-in (#75, merge precedence review follow-up)", () => {
+  const dataWithSubmittedCell = (): HomeworkSubmissionsData => ({
+    ...BASE_DATA,
+    sectionHeaders: [{ id: "s1", order: 1, title: "Section 1" }],
+    students: [
+      {
+        studentId: "student-1",
+        displayName: "Ada Lovelace",
+        email: "ada@example.com",
+        sections: [
+          {
+            sectionId: "s1",
+            status: "submitted",
+            conversationCount: 1,
+            lastActivityAt: null,
+            hasDeletedConversation: false,
+            submissionId: "sub-1",
+          },
+        ],
+        totalConversations: 1,
+        submissionCount: 1,
+        participationStatus: "active",
+        lastActivityAt: null,
+      },
+    ],
+  });
+
+  it("a gradeable cell calls onGrade with sectionId/studentId, not onOpenTranscript", () => {
+    const onGrade = vi.fn();
+    const onOpenTranscript = vi.fn();
+    render(
+      <SubmissionsView
+        data={dataWithSubmittedCell()}
+        onBack={vi.fn()}
+        onOpenTranscript={onOpenTranscript}
+        onGrade={onGrade}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Grade Ada Lovelace, Section 1" }));
+    expect(onGrade).toHaveBeenCalledWith({
+      submissionId: "sub-1",
+      studentName: "Ada Lovelace",
+      sectionTitle: "Section 1",
+      sectionId: "s1",
+      studentId: "student-1",
+    });
+    // #366 review: onGrade carries sectionId/studentId precisely so
+    // GradingPanel's own "View transcript" link can still reach this same
+    // transcript -- confirming the caller (SubmissionsView, not the click
+    // handler itself) is the only place that decides which action a
+    // gradeable cell takes.
+    expect(onOpenTranscript).not.toHaveBeenCalled();
+  });
+
+  it("a submitted cell falls back to onOpenTranscript when the caller cannot grade (TA)", () => {
+    const onOpenTranscript = vi.fn();
+    render(
+      <SubmissionsView
+        data={dataWithSubmittedCell()}
+        onBack={vi.fn()}
+        onOpenTranscript={onOpenTranscript}
+        // onGrade absent -- e.g. a TA reading this dashboard, #172.
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Section 1: submitted -- view transcripts/i }));
+    expect(onOpenTranscript).toHaveBeenCalledWith("s1", "student-1");
   });
 });

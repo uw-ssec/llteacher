@@ -133,15 +133,28 @@ const devApiProxy: Plugin = {
   },
 };
 
+/* #368 (PR3 final review): matches server/index.ts's own COOP/COEP
+   middleware -- see that file's comment for the full reasoning. Needed here
+   too because dev mode serves the page and static assets directly through
+   Vite's own server, not through the Hono app (only /api/* goes through
+   devApiProxy above); in production everything -- including these same
+   headers -- goes through the one Hono app instead. */
+const CROSS_ORIGIN_ISOLATION_HEADERS = {
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Cross-Origin-Embedder-Policy": "require-corp",
+};
+
 export default defineConfig({
   root: "src/client",
   server: {
     port: 2311,
     strictPort: true,
+    headers: CROSS_ORIGIN_ISOLATION_HEADERS,
   },
   preview: {
     port: 2311,
     strictPort: true,
+    headers: CROSS_ORIGIN_ISOLATION_HEADERS,
   },
   build: {
     outDir: "../../dist/client",

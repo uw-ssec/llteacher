@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, lt } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import {
   conversations,
@@ -9,16 +9,18 @@ import {
   courseMemberships,
   submissions,
   grades,
+  users,
 } from "../../db/schema";
 import type { CourseScope, OrgScope } from "./scope";
 import { unsafeCourseScope } from "./scope";
 import { runAtomically } from "./atomic";
 import { SubmissionGradedError } from "./submissions";
 import { getOrgScopeForCourse } from "./organizations";
-import { deriveHomeworkStatus, isUnreleased } from "./homeworks";
+import { deriveHomeworkStatus, isUnreleased, type HomeworkStatus } from "./homeworks";
 import { resolvePromptTemplate, sectionGreeting, sectionConversationTitle } from "../../lib/prompts";
 import { DEFAULT_MESSAGES_PAGE_SIZE } from "./conversations";
 import { isUniqueViolation } from "./errors";
+import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
 
 /* --------------------------------------------------------------------------
    Section-conversation lifecycle (#27), kept in its own module rather than
@@ -578,23 +580,88 @@ export async function getSectionConversationMessages(
   return rows.reverse();
 }
 
-/** Who may read a given section conversation (#27 access rules).
+/** The conversation's transcript from its actual beginning, capped
+ *  defensively at `limit` -- deliberately NOT the same query as
+ *  getSectionConversationMessages above, which always fetches the TAIL
+ *  page (most-recent-`limit`, optionally paging further back via
+ *  `before`) and is right for that: it's what a live chat reload wants.
+ *
+ *  #29 review: the instructor transcript detail route originally called
+ *  getSectionConversationMessages(db, id, { limit: 1000 }) with no cursor,
+ *  which -- for a conversation with more than 1000 messages -- silently
+ *  returned the most RECENT 1000, not the first 1000, while
+ *  TranscriptDetailView labelled it "Showing the first N messages." Wrong
+ *  end of the conversation, wrong label. A FERPA transcript read should
+ *  show the conversation from where it began (the opening exchange is
+ *  often the more consequential part of an academic record), not its most
+ *  recent slice.
+ *
+ *  A new, narrowly-scoped function rather than a new mode on
+ *  getSectionConversationMessages: that function's `before`-cursor
+ *  contract is shared with, and already well-tested by, the live tutor and
+ *  section chats (#215/#326) -- widening its behavior for one caller risks
+ *  the two access patterns drifting into each other by accident. This one
+ *  has exactly one job.
+ *
+ *  #371: `offset` added so a transcript past `limit` messages is actually
+ *  reachable past its first page -- the detail route previously returned
+ *  `hasMore: true` with no request that could ever reach message 1001+.
+ *  Plain integer offset, not `getSectionConversationMessages`'s own `before`
+ *  cursor: this route's own doc comment (routes/instructor/transcripts.ts)
+ *  already explains why it deliberately does not use that cursor
+ *  convention, and the issue asks this paging to mirror the LIST endpoint's
+ *  (listInstructorTranscripts, same file) plain-offset shape instead, so
+ *  the two instructor-transcript routes in this file agree on one
+ *  convention rather than three. Defaults to 0 so every existing caller
+ *  (there is exactly one, before this change) is unaffected. */
+export async function getSectionConversationMessagesFromStart(
+  db: Db,
+  conversationId: string,
+  limit: number,
+  offset = 0,
+) {
+  return db
+    .select({
+      id: messages.id,
+      role: messages.role,
+      parts: messages.parts,
+      createdAt: messages.createdAt,
+      seq: messages.seq,
+    })
+    .from(messages)
+    .where(eq(messages.conversationId, conversationId))
+    .orderBy(messages.seq)
+    .limit(limit)
+    .offset(offset);
+}
+
+/** Who may read a given section conversation (#27 access rules, widened to
+ *  grader tier by #246).
  *
  *  Django parity, made explicit:
  *   - the owner always may;
- *   - an instructor of the course may read a *student's* conversation;
- *   - an instructor may NOT read another instructor's test conversation --
- *     someone else's scratch work trying out prompts is not course records.
- *     Their own remains readable, which the owner clause already covers.
+ *   - a grader of the course (#172's GRADER_ROLES: instructor, admin, ta)
+ *     may read a *student's* conversation;
+ *   - a grader may NOT read another grader's test conversation -- someone
+ *     else's scratch work trying out prompts is not course records. Their
+ *     own remains readable, which the owner clause already covers.
+ *
+ *  #246: originally gated on isInstructorOf (AUTHOR_ROLES: instructor/admin
+ *  only), while the submissions dashboard this feeds into is gated on
+ *  requireGraderOf (GRADER_ROLES, which also admits ta) -- a TA could see a
+ *  submission in the matrix and then 403 opening the transcript behind it.
+ *  Widened to consume isGraderOf's result so the two surfaces share one
+ *  tier; the checks themselves (ownership, teacher-test exclusion) are
+ *  unchanged, only who is entitled to reach them.
  *
  *  Pure function over already-fetched values so the rule is testable on its
  *  own and cannot silently diverge between the read route and the list route. */
 export function canReadSectionConversation(
   conversation: { ownerUserId: string; isTeacherTest: boolean },
-  viewer: { userId: string; isInstructor: boolean },
+  viewer: { userId: string; isGrader: boolean },
 ): boolean {
   if (conversation.ownerUserId === viewer.userId) return true;
-  if (!viewer.isInstructor) return false;
+  if (!viewer.isGrader) return false;
   return !conversation.isTeacherTest;
 }
 
@@ -630,4 +697,327 @@ export function canWriteSectionConversation(
 export function isStudentInCourse(memberships: { courseId: string; role: string }[], courseId: string): boolean {
   const membership = memberships.find((m) => m.courseId === courseId);
   return membership?.role === "student";
+}
+
+/* --------------------------------------------------------------------------
+   Instructor transcript viewer (#29).
+
+   Two read queries feeding routes/instructor/transcripts.ts's list and
+   detail handlers. Both are course-scoped (CourseScope, same as every other
+   function in this file) and both deliberately do NOT filter isDeleted --
+   see listInstructorTranscripts' own comment for why soft-deleted
+   conversations stay visible (flagged) here even though #27's student-facing
+   list filters them out. That is a different rule for a different reader,
+   not a relaxation of this one.
+   -------------------------------------------------------------------------- */
+
+export const DEFAULT_TRANSCRIPT_LIST_PAGE_SIZE = 50;
+
+/** Longest a list row's preview of the conversation's last message may be --
+ *  matches the issue's own "first 100 chars of last message" spec. */
+const TRANSCRIPT_SNIPPET_MAX_CHARS = 100;
+
+/** Pulls the plain-text preview out of a message's `parts` (the AI SDK's
+ *  UIMessage.parts shape -- see the `messages` table's own doc comment).
+ *  Joins every text part (a message is occasionally more than one, e.g. text
+ *  either side of a tool call) and ignores tool/other part types entirely --
+ *  a snippet showing raw tool-call JSON would be useless as a list preview.
+ *  `null` for a message with no text part at all (e.g. a bare tool call),
+ *  which the caller renders as no snippet rather than an empty string. */
+function transcriptSnippet(parts: unknown): string | null {
+  if (!Array.isArray(parts)) return null;
+  const text = parts
+    .filter(
+      (p): p is { type: "text"; text: string } =>
+        typeof p === "object" &&
+        p !== null &&
+        (p as { type?: unknown }).type === "text" &&
+        typeof (p as { text?: unknown }).text === "string",
+    )
+    .map((p) => p.text)
+    .join(" ")
+    .trim();
+  if (!text) return null;
+  return text.length > TRANSCRIPT_SNIPPET_MAX_CHARS
+    ? `${text.slice(0, TRANSCRIPT_SNIPPET_MAX_CHARS)}…`
+    : text;
+}
+
+export interface InstructorTranscriptListItem {
+  conversationId: string;
+  studentId: string;
+  /** Decrypted server-side, same as getHomeworkSubmissionsMatrix's roster --
+   *  "" when the user has no displayName set, matching that function's own
+   *  fallback rather than inventing a different one for this list. */
+  studentName: string;
+  sectionId: string;
+  sectionTitle: string;
+  homeworkId: string;
+  homeworkTitle: string;
+  /** #366 merge (requireGraderOf's now-required release-gate posture,
+   *  #208): the transcript's own section content -- including the greeting
+   *  message, built from section.content at conversation-start time -- is
+   *  itself unreleased content once the underlying homework is
+   *  draft/scheduled/hidden, same as the homework's title. Callers without
+   *  canViewDraftsIn(courseId) must not see this row at all. Computed here
+   *  (deriveHomeworkStatus, repositories/homeworks.ts) rather than exposed
+   *  as raw dueDate/publishedAt/etc. columns, matching listHomeworksForCourse's
+   *  own status-not-columns convention. */
+  homeworkStatus: HomeworkStatus;
+  isTeacherTest: boolean;
+  isDeleted: boolean;
+  messageCount: number;
+  lastMessageSnippet: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface InstructorTranscriptListFilters {
+  sectionId?: string;
+  studentId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface InstructorTranscriptListResult {
+  items: InstructorTranscriptListItem[];
+  total: number;
+}
+
+/** Every section conversation the viewer may see in this course, newest
+ *  activity first, limit/offset-paginated per the issue's own
+ *  TranscriptListQuery shape (not the cursor-based convention
+ *  routes/conversations.ts uses elsewhere -- the issue's Testing Strategy
+ *  explicitly exercises `offset`, and a course-scoped instructor roster view
+ *  has no "infinite scroll" shape that would want a cursor).
+ *
+ *  Access, restated as a SQL predicate rather than filtered in memory: the
+ *  viewer's OWN conversations always qualify; everyone else's qualify unless
+ *  isTeacherTest -- the exact rule canReadSectionConversation enforces
+ *  per-row for the detail read (#246), applied here at the query level so
+ *  the list and the detail route can never disagree about which rows exist
+ *  to page through. sectionId/studentId only ever narrow this set further,
+ *  never widen it.
+ *
+ *  Four queries total, none per-row (no N+1): the page of conversations
+ *  (joined to sections/homeworks/users so student name and section/homework
+ *  titles come back in the same round trip as the rows themselves), a COUNT
+ *  for `total`, and two small batched lookups -- message count and last-
+ *  message snippet -- scoped to just this page's conversation ids via
+ *  `IN (...)`, not the whole course. All four are served by existing indexes
+ *  (conversations_course_kind_updated_idx for the default unfiltered/sorted
+ *  case, conversations_section_idx / conversations_owner_kind_course_idx for
+ *  the two optional filters, messages_conversation_seq_idx for both message
+ *  lookups) -- see this repository's own index comments in
+ *  db/schema/runtime.ts. Could not be benchmarked against a real
+ *  >1000-row Postgres in the session that wrote this (no DATABASE_URL
+ *  available) -- see sectionConversations.db.test.ts's own perf test, which
+ *  runs wherever DATABASE_URL is set, and this task's report for what that
+ *  leaves unverified. */
+export async function listInstructorTranscripts(
+  db: Db,
+  scope: CourseScope,
+  cipher: IdentityCipher,
+  viewerId: string,
+  filters: InstructorTranscriptListFilters,
+): Promise<InstructorTranscriptListResult> {
+  const limit = filters.limit ?? DEFAULT_TRANSCRIPT_LIST_PAGE_SIZE;
+  const offset = filters.offset ?? 0;
+
+  const conditions = [
+    eq(conversations.courseId, scope),
+    eq(conversations.kind, "section"),
+    or(eq(conversations.ownerUserId, viewerId), eq(conversations.isTeacherTest, false))!,
+  ];
+  if (filters.sectionId) conditions.push(eq(conversations.sectionId, filters.sectionId));
+  if (filters.studentId) conditions.push(eq(conversations.ownerUserId, filters.studentId));
+  const where = and(...conditions)!;
+
+  const [totalRow] = await db.select({ total: sql<number>`count(*)::int` }).from(conversations).where(where);
+  const total = totalRow?.total ?? 0;
+
+  const rows = await db
+    .select({
+      id: conversations.id,
+      ownerUserId: conversations.ownerUserId,
+      isTeacherTest: conversations.isTeacherTest,
+      isDeleted: conversations.isDeleted,
+      createdAt: conversations.createdAt,
+      updatedAt: conversations.updatedAt,
+      sectionId: sections.id,
+      sectionTitle: sections.title,
+      homeworkId: homeworks.id,
+      homeworkTitle: homeworks.title,
+      homeworkDueDate: homeworks.dueDate,
+      homeworkPublishedAt: homeworks.publishedAt,
+      homeworkReleasedAt: homeworks.releasedAt,
+      homeworkIsHidden: homeworks.isHidden,
+      homeworkExpiresAt: homeworks.expiresAt,
+      studentDisplayName: users.displayName,
+    })
+    // Flat select+join, not db.query...with() -- same reason
+    // getHomeworkSubmissionsMatrix's own comment gives: the relational query
+    // builder resolves a nested `with` via a lateral JSON join, which mangles
+    // an encrypted bytea column (users.displayName) on its way through.
+    .from(conversations)
+    .innerJoin(sections, eq(conversations.sectionId, sections.id))
+    .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
+    .innerJoin(users, eq(conversations.ownerUserId, users.id))
+    .where(where)
+    .orderBy(desc(conversations.updatedAt))
+    .limit(limit)
+    .offset(offset);
+
+  const conversationIds = rows.map((r) => r.id);
+
+  const counts = conversationIds.length
+    ? await db
+        .select({ conversationId: messages.conversationId, count: sql<number>`count(*)::int` })
+        .from(messages)
+        .where(inArray(messages.conversationId, conversationIds))
+        .groupBy(messages.conversationId)
+    : [];
+  const countByConversation = new Map(counts.map((c) => [c.conversationId, c.count]));
+
+  // DISTINCT ON (conversation_id) ... ORDER BY conversation_id, seq DESC --
+  // one row per conversation (its newest message), served by
+  // messages_conversation_seq_idx (conversation_id, seq) rather than pulling
+  // every message for every conversation on this page and reducing in JS.
+  const lastMessages = conversationIds.length
+    ? await db
+        .selectDistinctOn([messages.conversationId], {
+          conversationId: messages.conversationId,
+          parts: messages.parts,
+        })
+        .from(messages)
+        .where(inArray(messages.conversationId, conversationIds))
+        .orderBy(messages.conversationId, desc(messages.seq))
+    : [];
+  const snippetByConversation = new Map(lastMessages.map((m) => [m.conversationId, transcriptSnippet(m.parts)]));
+
+  const items: InstructorTranscriptListItem[] = [];
+  for (const row of rows) {
+    items.push({
+      conversationId: row.id,
+      studentId: row.ownerUserId,
+      studentName: row.studentDisplayName ? await cipher.decryptString(row.studentDisplayName) : "",
+      sectionId: row.sectionId,
+      sectionTitle: row.sectionTitle,
+      homeworkId: row.homeworkId,
+      homeworkTitle: row.homeworkTitle,
+      homeworkStatus: deriveHomeworkStatus({
+        dueDate: row.homeworkDueDate,
+        publishedAt: row.homeworkPublishedAt,
+        releasedAt: row.homeworkReleasedAt,
+        isHidden: row.homeworkIsHidden,
+        expiresAt: row.homeworkExpiresAt,
+      }),
+      isTeacherTest: row.isTeacherTest,
+      isDeleted: row.isDeleted,
+      messageCount: countByConversation.get(row.id) ?? 0,
+      lastMessageSnippet: snippetByConversation.get(row.id) ?? null,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    });
+  }
+
+  return { items, total };
+}
+
+export interface InstructorTranscriptDetail {
+  conversationId: string;
+  ownerUserId: string;
+  studentName: string;
+  sectionId: string;
+  sectionTitle: string;
+  homeworkId: string;
+  homeworkTitle: string;
+  /** See InstructorTranscriptListItem's own doc comment -- same release-gate
+   *  reasoning applies to the single-conversation read. */
+  homeworkStatus: HomeworkStatus;
+  isTeacherTest: boolean;
+  isDeleted: boolean;
+  deletedAt: Date | null;
+  submission: { id: string; submittedAt: Date } | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** One conversation's transcript header data (everything the detail route
+ *  needs besides the messages themselves, which the route fetches
+ *  separately via the existing getSectionConversationMessages -- no reason
+ *  to duplicate that function's own pagination/ordering here).
+ *
+ *  Returns soft-deleted rows too, same as getSectionConversationById --
+ *  callers decide visibility (the route applies canReadSectionConversation,
+ *  #246's own access rule, unchanged and reused rather than re-derived).
+ *  `undefined` only for "no such row in this course scope" -- access is the
+ *  caller's job, not this function's, matching getSectionConversationById's
+ *  own split. */
+export async function getInstructorTranscriptDetail(
+  db: Db,
+  scope: CourseScope,
+  cipher: IdentityCipher,
+  conversationId: string,
+): Promise<InstructorTranscriptDetail | undefined> {
+  const [row] = await db
+    .select({
+      id: conversations.id,
+      ownerUserId: conversations.ownerUserId,
+      isTeacherTest: conversations.isTeacherTest,
+      isDeleted: conversations.isDeleted,
+      deletedAt: conversations.deletedAt,
+      createdAt: conversations.createdAt,
+      updatedAt: conversations.updatedAt,
+      sectionId: sections.id,
+      sectionTitle: sections.title,
+      homeworkId: homeworks.id,
+      homeworkTitle: homeworks.title,
+      homeworkDueDate: homeworks.dueDate,
+      homeworkPublishedAt: homeworks.publishedAt,
+      homeworkReleasedAt: homeworks.releasedAt,
+      homeworkIsHidden: homeworks.isHidden,
+      homeworkExpiresAt: homeworks.expiresAt,
+      studentDisplayName: users.displayName,
+      submissionId: submissions.id,
+      submissionSubmittedAt: submissions.submittedAt,
+    })
+    .from(conversations)
+    .innerJoin(sections, eq(conversations.sectionId, sections.id))
+    .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
+    .innerJoin(users, eq(conversations.ownerUserId, users.id))
+    // submissions.conversationId is UNIQUE (schema), so this can add at most
+    // one row per conversation -- no fan-out to guard against.
+    .leftJoin(submissions, eq(submissions.conversationId, conversations.id))
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        eq(conversations.courseId, scope),
+        eq(conversations.kind, "section"),
+      ),
+    );
+  if (!row) return undefined;
+
+  return {
+    conversationId: row.id,
+    ownerUserId: row.ownerUserId,
+    studentName: row.studentDisplayName ? await cipher.decryptString(row.studentDisplayName) : "",
+    sectionId: row.sectionId,
+    sectionTitle: row.sectionTitle,
+    homeworkId: row.homeworkId,
+    homeworkTitle: row.homeworkTitle,
+    homeworkStatus: deriveHomeworkStatus({
+      dueDate: row.homeworkDueDate,
+      publishedAt: row.homeworkPublishedAt,
+      releasedAt: row.homeworkReleasedAt,
+      isHidden: row.homeworkIsHidden,
+      expiresAt: row.homeworkExpiresAt,
+    }),
+    isTeacherTest: row.isTeacherTest,
+    isDeleted: row.isDeleted,
+    deletedAt: row.deletedAt,
+    submission: row.submissionId ? { id: row.submissionId, submittedAt: row.submissionSubmittedAt! } : null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }

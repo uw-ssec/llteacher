@@ -3,5 +3,9 @@
 
 export { DefinitionCard } from "./DefinitionCard";
 export type { DefinitionCardProps } from "./DefinitionCard";
-export { renderToolPart, parseShowDefinitionInput, isToolPart } from "./render";
-export type { ToolPart } from "./render";
+export { renderToolPart, parseShowDefinitionInput, parseExecuteRCodeInput, isToolPart } from "./render";
+export type { ToolPart, ToolPartHandlers } from "./render";
+export { CodeExecution, renderTextWithCode } from "./renderers/CodeExecution";
+export type { CodeExecutionProps, RCodeResult, RenderTextWithCodeOptions } from "./renderers/CodeExecution";
+export { SectionCompleteSuggestion } from "./renderers/SectionCompleteSuggestion";
+export type { SectionCompleteSuggestionProps } from "./renderers/SectionCompleteSuggestion";

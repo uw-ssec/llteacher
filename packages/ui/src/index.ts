@@ -56,8 +56,25 @@ export type { AlertDialogProps } from "./components/AlertDialog";
 
 /* -- Generative-UI surfaces (rendered inline inside AI messages) ----------- */
 
-export { DefinitionCard, renderToolPart, parseShowDefinitionInput, isToolPart } from "./generative";
-export type { DefinitionCardProps, ToolPart } from "./generative";
+export {
+  DefinitionCard,
+  renderToolPart,
+  parseShowDefinitionInput,
+  parseExecuteRCodeInput,
+  isToolPart,
+  CodeExecution,
+  renderTextWithCode,
+  SectionCompleteSuggestion,
+} from "./generative";
+export type {
+  DefinitionCardProps,
+  ToolPart,
+  ToolPartHandlers,
+  CodeExecutionProps,
+  RCodeResult,
+  RenderTextWithCodeOptions,
+  SectionCompleteSuggestionProps,
+} from "./generative";
 
 /* -- Auth session -----------------------------------------------------------
    Shared session-fetch-on-mount + login/logout for apps/web and apps/admin.

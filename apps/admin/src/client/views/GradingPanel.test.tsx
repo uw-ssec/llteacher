@@ -285,4 +285,33 @@ describe("GradingPanel audit fixes", () => {
     fireEvent.change(screen.getByLabelText("Feedback"), { target: { value: "Revised." } });
     expect(screen.getByRole("button", { name: /Save a new grade/i })).toBeTruthy();
   });
+
+  // Review follow-up (#366 review): grading winning a gradeable cell's click
+  // removed the only path an instructor had to this submission's transcript,
+  // and this panel never renders the conversation itself -- "View
+  // transcript" is the replacement path.
+  it("offers a View transcript action that calls onViewTranscript (#366 review)", async () => {
+    stub(() => gradesResponse([]));
+    const onViewTranscript = vi.fn();
+    render(
+      <GradingPanel
+        courseId="c1"
+        submissionId="s-1"
+        studentName="Ada Lovelace"
+        sectionTitle="Section 2 · p-values"
+        onBack={vi.fn()}
+        onViewTranscript={onViewTranscript}
+      />,
+    );
+    await waitFor(() => screen.getByRole("button", { name: "View transcript" }));
+    fireEvent.click(screen.getByRole("button", { name: "View transcript" }));
+    expect(onViewTranscript).toHaveBeenCalledTimes(1);
+  });
+
+  it("omits the View transcript action when onViewTranscript isn't supplied", async () => {
+    stub(() => gradesResponse([]));
+    renderPanel();
+    await waitFor(() => screen.getByRole("status"));
+    expect(screen.queryByRole("button", { name: "View transcript" })).toBeNull();
+  });
 });

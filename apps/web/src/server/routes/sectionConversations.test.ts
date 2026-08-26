@@ -96,6 +96,13 @@ function instructor(userId = "instructor-1") {
   });
 }
 
+function ta(userId = "ta-1") {
+  return fakeAuthContext({
+    session: { userId } as AuthContext["session"],
+    memberships: [fakeMembership({ courseId: COURSE, role: "ta", userId })],
+  });
+}
+
 beforeEach(() => {
   startMock.mockReset();
   restartMock.mockReset();
@@ -335,6 +342,32 @@ describe("GET /api/courses/:courseId/conversations/:conversationId — access ma
       TEST_ENV,
     );
     expect(res.status).toBe(200);
+  });
+
+  // #246: this endpoint fed by requireGraderOf's submissions dashboard was
+  // still gated on isInstructorOf, so a TA could see a submission in the
+  // matrix and 403 opening the transcript behind it. Not mocked at this
+  // layer (see the file-level comment above buildApp's vi.mock), so this
+  // proves the real authContext.isGraderOf wiring, not just the pure
+  // function's own table test in sectionConversations.access.test.ts.
+  it("#246: lets a TA read a student's conversation", async () => {
+    getByIdMock.mockResolvedValue(conversationOwnedBy("student-1"));
+    const res = await buildApp(ta("ta-1")).request(
+      `/api/courses/${COURSE}/conversations/${CONV}`,
+      {},
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("#246: hides an instructor's test conversation from a TA", async () => {
+    getByIdMock.mockResolvedValue(conversationOwnedBy("instructor-1", true));
+    const res = await buildApp(ta("ta-1")).request(
+      `/api/courses/${COURSE}/conversations/${CONV}`,
+      {},
+      TEST_ENV,
+    );
+    expect(res.status).toBe(404);
   });
 
   // #317 review, #351 (requirement 1): same gate as

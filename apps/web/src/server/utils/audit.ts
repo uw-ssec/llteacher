@@ -40,6 +40,18 @@ export const AUDIT_ACTIONS = {
    *  widens or narrows one person's access to student work and answer keys
    *  -- the kind of change #50's audit viewer exists to make reviewable. */
   TA_CAPABILITIES_UPDATED: "membership.ta_capabilities_updated",
+  /** #29: FERPA -- reading a student's own conversation transcript is
+   *  student-record access. target_type "conversation", target_id the
+   *  conversation being read. */
+  TRANSCRIPT_VIEWED: "conversation.transcript_viewed",
+  /** #29: browsing the instructor transcript list is also student-record
+   *  access (it returns per-student names, section/homework titles, and
+   *  message previews), even though no single conversation was opened.
+   *  target_type "course", target_id the course whose roster was browsed --
+   *  see AUDIT_ACTIONS' own module comment for why a new target_type value
+   *  is added here rather than reusing "user"/"conversation" for a
+   *  course-level event. */
+  TRANSCRIPT_LIST_VIEWED: "course.transcript_list_viewed",
   /** #210: a TA was put on a course, or restored to it after removal. Audited
    *  because it hands someone access to every student's work in that course
    *  -- the membership is the access, and the capability grant on top of it

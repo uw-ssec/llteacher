@@ -77,6 +77,13 @@ export interface ResolvedLLMConfig {
    *  column's own doc comment for why a half-known rate isn't used). */
   pricePerMillionInputTokens: number | null;
   pricePerMillionOutputTokens: number | null;
+  /** #168: per-config override of the markSectionComplete stopping-rule
+   *  wording -- see llm_configs.markCompleteInstruction's own doc comment
+   *  (db/schema/content.ts). Null (the common case) means "use
+   *  lib/prompts.ts's DEFAULT_MARK_COMPLETE_INSTRUCTION" -- chat.ts's own
+   *  call site does that `?? DEFAULT_MARK_COMPLETE_INSTRUCTION` fallback,
+   *  not this module, so this stays a plain passthrough of the column. */
+  markCompleteInstruction: string | null;
 }
 
 const LLM_CONFIG_COLUMNS = {
@@ -87,6 +94,7 @@ const LLM_CONFIG_COLUMNS = {
   maxCompletionTokens: llmConfigs.maxCompletionTokens,
   pricePerMillionInputTokens: llmConfigs.pricePerMillionInputTokens,
   pricePerMillionOutputTokens: llmConfigs.pricePerMillionOutputTokens,
+  markCompleteInstruction: llmConfigs.markCompleteInstruction,
   credentialId: llmConfigs.credentialId,
 } as const;
 

@@ -14,47 +14,75 @@ const OTHER_STUDENT_CONV = { ownerUserId: "student-2", isTeacherTest: false };
 const MY_TEST_CONV = { ownerUserId: "instructor-1", isTeacherTest: true };
 const OTHER_INSTRUCTOR_TEST_CONV = { ownerUserId: "instructor-2", isTeacherTest: true };
 
-describe("canReadSectionConversation (#27)", () => {
+describe("canReadSectionConversation (#27, widened to grader tier by #246)", () => {
   const cases: Array<{
     name: string;
     conversation: { ownerUserId: string; isTeacherTest: boolean };
-    viewer: { userId: string; isInstructor: boolean };
+    viewer: { userId: string; isGrader: boolean };
     expected: boolean;
   }> = [
     {
       name: "owner reads their own",
       conversation: STUDENT_CONV,
-      viewer: { userId: "student-1", isInstructor: false },
+      viewer: { userId: "student-1", isGrader: false },
       expected: true,
     },
     {
       name: "student cannot read another student's",
       conversation: OTHER_STUDENT_CONV,
-      viewer: { userId: "student-1", isInstructor: false },
+      viewer: { userId: "student-1", isGrader: false },
       expected: false,
     },
     {
       name: "instructor reads a student's",
       conversation: STUDENT_CONV,
-      viewer: { userId: "instructor-1", isInstructor: true },
+      viewer: { userId: "instructor-1", isGrader: true },
       expected: true,
     },
     {
       name: "instructor reads their own test conversation",
       conversation: MY_TEST_CONV,
-      viewer: { userId: "instructor-1", isInstructor: true },
+      viewer: { userId: "instructor-1", isGrader: true },
       expected: true,
     },
     {
       name: "instructor cannot read another instructor's test conversation",
       conversation: OTHER_INSTRUCTOR_TEST_CONV,
-      viewer: { userId: "instructor-1", isInstructor: true },
+      viewer: { userId: "instructor-1", isGrader: true },
       expected: false,
     },
     {
       name: "student cannot read an instructor's test conversation",
       conversation: OTHER_INSTRUCTOR_TEST_CONV,
-      viewer: { userId: "student-1", isInstructor: false },
+      viewer: { userId: "student-1", isGrader: false },
+      expected: false,
+    },
+    {
+      // #246: the tier this task adds -- a TA of the course is a grader
+      // (GRADER_ROLES) and must be able to open the transcript behind a
+      // submission the requireGraderOf-gated dashboard already shows them.
+      name: "TA reads a student's non-teacher-test conversation",
+      conversation: STUDENT_CONV,
+      viewer: { userId: "ta-1", isGrader: true },
+      expected: true,
+    },
+    {
+      // A TA of a *different* course is not a grader of this course --
+      // isGraderOf is course-scoped, so this is what authContext.isGraderOf
+      // resolves to for that caller and this conversation's course.
+      name: "TA of a different course cannot read",
+      conversation: STUDENT_CONV,
+      viewer: { userId: "ta-of-other-course", isGrader: false },
+      expected: false,
+    },
+    {
+      // Same exclusion the instructor cases above pin: grader tier widens
+      // *who* may read, not *what* a teacher-test conversation hides. A TA
+      // gets no more access to another grader's scratch work than an
+      // instructor does.
+      name: "TA cannot read another instructor's teacher-test conversation",
+      conversation: OTHER_INSTRUCTOR_TEST_CONV,
+      viewer: { userId: "ta-1", isGrader: true },
       expected: false,
     },
   ];
@@ -73,7 +101,7 @@ describe("canWriteSectionConversation (#27)", () => {
     // Read access is not write access: an instructor who could append turns
     // to a student's transcript would make the submitted record no longer
     // the student's own work.
-    expect(canReadSectionConversation(STUDENT_CONV, { userId: "instructor-1", isInstructor: true })).toBe(
+    expect(canReadSectionConversation(STUDENT_CONV, { userId: "instructor-1", isGrader: true })).toBe(
       true,
     );
     expect(canWriteSectionConversation(STUDENT_CONV, { userId: "instructor-1" })).toBe(false);

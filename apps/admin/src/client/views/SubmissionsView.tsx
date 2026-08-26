@@ -62,11 +62,42 @@ export interface HomeworkSubmissionsData {
 export type SubmissionsViewProps = {
   data: HomeworkSubmissionsData;
   onBack: () => void;
+  /** #29/#23: drill-in from a submission-matrix cell to that (student,
+   *  section) pair's conversation list (TranscriptListView) -- the
+   *  "per-cell conversation list -> transcript" route #29's own issue text
+   *  describes. Optional so this view keeps working, cell un-clickable,
+   *  for any caller that hasn't wired the transcript viewer up (matches
+   *  every other optional callback prop pattern in this codebase, e.g.
+   *  ConversationView's onRunRCode). */
+  onOpenTranscript?: (sectionId: string, studentId: string) => void;
   /** #75: drill from a submitted cell into grading. Absent for a caller
    *  that may not grade -- a TA reads this dashboard (#172's requireGraderOf)
    *  but grading is instructor-tier, so the cells stay non-interactive for
-   *  them rather than offering a route that 403s. */
-  onGrade?: (input: { submissionId: string; studentName: string; sectionTitle: string }) => void;
+   *  them rather than offering a route that 403s.
+   *
+   *  Merge note (#366 x #363, both landed a cell-level drill-in the same
+   *  week): a cell offers at most ONE click action, not two competing
+   *  onClick handlers on the same 24x24 button. Grading wins when both are
+   *  possible -- a submitted cell is the one an instructor most needs to
+   *  act on, and #75's own `--gradeable` CSS modifier was already written
+   *  to compose with (not replace) the state class, confirming a single
+   *  combined button was the intended shape rather than two separate
+   *  elements. See the cell-rendering block below for the precedence.
+   *
+   *  sectionId/studentId (review follow-up, #366 review): grading winning
+   *  the click originally left an instructor with no way to reach this same
+   *  cell's transcript at all -- GradingPanel never rendered the
+   *  conversation it was scoring. Both ids are already in scope at this
+   *  cell (same values onOpenTranscript above receives), threaded through so
+   *  the caller can wire GradingPanel's own "View transcript" link to the
+   *  same transcript-list destination onOpenTranscript would have reached. */
+  onGrade?: (input: {
+    submissionId: string;
+    studentName: string;
+    sectionTitle: string;
+    sectionId: string;
+    studentId: string;
+  }) => void;
 };
 
 type Filter = "all" | ParticipationStatus;
@@ -89,7 +120,7 @@ const SORT_OPTIONS = [
   { value: "progress", label: "Least progress first" },
 ];
 
-export function SubmissionsView({ data, onBack, onGrade }: SubmissionsViewProps) {
+export function SubmissionsView({ data, onBack, onOpenTranscript, onGrade }: SubmissionsViewProps) {
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<Sort>("name");
@@ -249,40 +280,51 @@ export function SubmissionsView({ data, onBack, onGrade }: SubmissionsViewProps)
                   </>
                 );
                 // #75: only a SUBMITTED cell is gradeable, and only for a
-                // caller who may grade. Everything else stays a span --
-                // rendering a button that opens a panel with nothing in it,
-                // or one whose save always 403s, is the dead-end shape #172
-                // exists to remove.
-                const gradeable = onGrade && cell?.status === "submitted" && cell.submissionId;
-                if (gradeable) {
-                  return (
-                    <button
-                      key={header.id}
-                      type="button"
-                      className={`admin-progress-cell admin-progress-cell--${state} admin-progress-cell--gradeable`}
-                      aria-label={`Grade ${row.displayName}, ${header.title}`}
-                      title={`Grade ${header.title}`}
-                      onClick={() =>
-                        onGrade({
-                          submissionId: cell.submissionId!,
-                          studentName: row.displayName || row.email,
-                          sectionTitle: header.title,
-                        })
-                      }
-                    >
-                      {body}
-                    </button>
-                  );
-                }
+                // caller who may grade -- a TA reads this dashboard but
+                // grading is instructor-tier (#172).
+                const gradeable = Boolean(onGrade) && cell?.status === "submitted" && Boolean(cell.submissionId);
+                // #29/#23: a cell with at least one conversation (submitted,
+                // in progress, or missing-but-with-a-since-deleted attempt --
+                // conversationCount counts soft-deleted rows too, see
+                // getHomeworkSubmissionsMatrix) drills into that (student,
+                // section) pair's transcript list. A genuinely untouched
+                // section has nothing to show, so it stays inert.
+                const hasConversations = (cell?.conversationCount ?? 0) > 0;
+                const openable = Boolean(onOpenTranscript) && hasConversations;
+                // Merge note (see this component's onGrade prop doc comment):
+                // one button, one click target. Grading wins when a cell is
+                // both gradeable and openable -- it's the action an
+                // instructor most needs from a submitted cell. The
+                // transcript stays reachable from GradingPanel's own "View
+                // transcript" link (review follow-up, #366 review) rather
+                // than from this cell directly -- onGrade carries sectionId/
+                // studentId precisely so that link can reach it.
+                const onCellClick = gradeable
+                  ? () =>
+                      onGrade!({
+                        submissionId: cell!.submissionId!,
+                        studentName: row.displayName || row.email,
+                        sectionTitle: header.title,
+                        sectionId: header.id,
+                        studentId: row.studentId,
+                      })
+                  : openable
+                    ? () => onOpenTranscript!(header.id, row.studentId)
+                    : undefined;
+                const ariaAction = gradeable ? " -- grade" : openable ? " -- view transcripts" : "";
+                const titleAction = gradeable ? `Grade ${header.title}` : `${header.title}: ${state}${cell?.hasDeletedConversation ? " -- includes a deleted conversation" : ""}`;
                 return (
-                  <span
+                  <button
                     key={header.id}
-                    className={`admin-progress-cell admin-progress-cell--${state}`}
-                    aria-label={`${header.title}: ${state}${deletedNote}`}
-                    title={`${header.title}: ${state}${cell?.hasDeletedConversation ? " -- includes a deleted conversation" : ""}`}
+                    type="button"
+                    className={`admin-progress-cell admin-progress-cell--${state}${gradeable ? " admin-progress-cell--gradeable" : ""}`}
+                    aria-label={gradeable ? `Grade ${row.displayName}, ${header.title}` : `${header.title}: ${state}${deletedNote}${ariaAction}`}
+                    title={titleAction}
+                    disabled={!onCellClick}
+                    onClick={onCellClick}
                   >
                     {body}
-                  </span>
+                  </button>
                 );
               })}
             </div>

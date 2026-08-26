@@ -38,12 +38,24 @@
    -------------------------------------------------------------------------- */
 
 import { useRef, useEffect, useState } from "react";
+import { Lightbulb } from "@phosphor-icons/react";
+import { Button } from "./Button";
 
 /** #308: matches MAX_TEXT_PART_LENGTH in apps/web/src/server/routes/chat.ts
  *  -- the server refuses a text part longer than this, so capping input
  *  here keeps a normal user from ever composing a message the send would
  *  just reject. */
 const DEFAULT_MAX_LENGTH = 8_000;
+
+/** #80 Pitfalls: "Double-submit on UI button ... network retry or user
+ *  rapid-click sends duplicates." This is the CLIENT-side half -- a rapid
+ *  second click within this window is silently suppressed before
+ *  `onRequestHint` is even called, so a mashed button never fires two
+ *  requests in the first place. The SERVER-side half (recordHintRequest,
+ *  apps/web/src/server/repositories/hints.ts) has its own, longer 2s
+ *  idempotency window for the cases this can't catch -- a genuine network
+ *  retry after this click already returned, or two separate tabs. */
+const HINT_DOUBLE_SUBMIT_SUPPRESS_MS = 1_000;
 
 export interface ComposerProps {
   value: string;
@@ -61,6 +73,20 @@ export interface ComposerProps {
   /** #308: caps how many characters the textarea accepts, matching the
    *  server's own per-text-part limit. */
   maxLength?: number;
+  /** #80: renders a "Give me a hint" affordance above the composer when
+   *  set -- omitted entirely for a surface with no hint concept (e.g. the
+   *  free-standing tutor chat), the same degrade-to-nothing convention
+   *  every other optional callback on this component already follows
+   *  (history, autoFocus, ...). Calling it sends the hint request through
+   *  the SAME send pipeline as a typed message (see App.tsx's
+   *  handleSendMessage) -- this button is a convenience trigger, not a
+   *  second code path, so nothing here talks to the server directly. */
+  onRequestHint?: () => void;
+  /** True once the section's hint budget is exhausted (server-driven --
+   *  see App.tsx's hint-count state) or a hint request is already in
+   *  flight. Disables the button without hiding it, so the affordance
+   *  itself stays visible/explorable. */
+  hintDisabled?: boolean;
 }
 
 /* Cursor is on the first visual line iff there's no newline before it and no
@@ -84,8 +110,22 @@ export function Composer({
   history,
   autoFocus = false,
   maxLength = DEFAULT_MAX_LENGTH,
+  onRequestHint,
+  hintDisabled = false,
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  /* #80: client-side double-submit suppression -- see
+     HINT_DOUBLE_SUBMIT_SUPPRESS_MS's own doc comment above. A ref (not
+     state): this is a pure timing guard with nothing to render off of, so
+     there's no reason to pay for a re-render on every click. */
+  const lastHintRequestAtRef = useRef(0);
+  const handleRequestHintClick = () => {
+    const now = Date.now();
+    if (now - lastHintRequestAtRef.current < HINT_DOUBLE_SUBMIT_SUPPRESS_MS) return;
+    lastHintRequestAtRef.current = now;
+    onRequestHint?.();
+  };
 
   // #235: run once on mount only (empty deps) -- a later autoFocus prop
   // change must not steal focus back from wherever the user has since
@@ -181,6 +221,28 @@ export function Composer({
   return (
     <div className="composer-zone">
       <div className="composer-inner">
+        {/* #80: "Give me a hint" -- omitted entirely (not merely hidden)
+            when the surface has no hint concept (App.tsx only passes
+            onRequestHint for the homework-section chat, never the
+            free-standing tutor chat), same convention hideComposer already
+            uses one level up (ConversationView.tsx). Placed above the
+            input, not inside composer-body, so it reads as an action ON
+            the conversation rather than part of the text-entry row itself. */}
+        {onRequestHint && (
+          <div className="composer-hint-request">
+            <Button
+              type="button"
+              size="sm"
+              outlined
+              leadingIcon={<Lightbulb size={14} weight="regular" />}
+              onClick={handleRequestHintClick}
+              ariaDisabled={hintDisabled || disabled}
+              aria-label={hintDisabled ? "Give me a hint (no hints remaining for this section)" : "Give me a hint"}
+            >
+              Give me a hint
+            </Button>
+          </div>
+        )}
         <div className="composer-wrap">
           <div className="composer-body">
             {/* The textarea — single input mode. Code goes in markdown fences.

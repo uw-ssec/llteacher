@@ -40,12 +40,21 @@ export function GradingPanel({
   studentName,
   sectionTitle,
   onBack,
+  onViewTranscript,
 }: {
   courseId: string;
   submissionId: string;
   studentName: string;
   sectionTitle: string;
   onBack: () => void;
+  /** Review follow-up (#366 review): the merge that made grading win a
+   *  gradeable cell's click removed the only way an instructor had to open
+   *  this submission's transcript -- this screen never rendered the
+   *  conversation itself (the AI draft reads it server-side, but that is
+   *  not the same as an instructor being able to read it while grading).
+   *  Optional only because it's absent in tests that don't exercise
+   *  navigation; App.tsx always supplies it in the real app. */
+  onViewTranscript?: () => void;
 }) {
   const [score, setScore] = useState("");
   const [maxScore, setMaxScore] = useState(String(DEFAULT_MAX_SCORE));
@@ -194,11 +203,18 @@ export function GradingPanel({
         title={studentName}
         subtitle={sectionTitle}
         actions={
-          current ? (
-            <span className="admin-grade-current">
-              {current.score === null ? "Feedback only" : `${current.score} / ${current.maxScore}`}
-            </span>
-          ) : undefined
+          <>
+            {onViewTranscript && (
+              <button type="button" className="admin-button admin-button--ghost" onClick={onViewTranscript}>
+                View transcript
+              </button>
+            )}
+            {current && (
+              <span className="admin-grade-current">
+                {current.score === null ? "Feedback only" : `${current.score} / ${current.maxScore}`}
+              </span>
+            )}
+          </>
         }
       />
 

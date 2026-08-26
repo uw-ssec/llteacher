@@ -4,13 +4,16 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "predev": "npm run copy-webr-assets",
     "dev": "vite",
+    "prebuild": "npm run copy-webr-assets",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "deploy": "npm run db:migrate && wrangler deploy",
     "typecheck": "tsc -b",
     "test": "vitest run",
     "test:watch": "vitest",
+    "copy-webr-assets": "node scripts/copy-webr-assets.mjs",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx scripts/migrate.ts",
     "db:studio": "drizzle-kit studio",
@@ -29,6 +32,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router": "^7.0.0",
+    "webr": "0.6.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

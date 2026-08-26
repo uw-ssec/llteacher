@@ -14,15 +14,23 @@
    migration 0035, not openrouter.
 
    Converts the resolved history to model messages, calls streamText with
-   one display tool (showDefinition), and streams the response back in the
-   UI message stream format that the client's useChat hook understands.
+   this route's tool catalog (TOOLS, below), and streams the response back
+   in the UI message stream format that the client's useChat hook
+   understands.
 
-   The model can produce either:
-     · plain markdown text   — rendered as paragraphs in the AI message
-     · showDefinition tool   — rendered as a <DefinitionCard /> component
-
-   This is the minimum-viable Generative UI loop. Adding more tools is a
-   matter of: define the Zod schema here + ship a renderer in packages/ui.
+   The model can produce plain markdown text, and/or call any of:
+     · showDefinition      — a display tool; renders a <DefinitionCard />
+     · executeRCode        — a display tool; renders a runnable R snippet
+                              the student executes client-side via WebR (#28)
+     · requestHint         — a side-effecting tool; records a hint request
+                              via the same ledger the "Give me a hint" button
+                              uses (#80), for a student who asks in plain
+                              conversation instead
+     · markSectionComplete — a display tool; suggests (never auto-submits)
+                              that the student may be ready to move on (#168)
+   See TOOLS' own doc comment (below) for each tool's exact shape and the
+   reasoning behind it, and toolsForConversation for which of these a given
+   turn is actually offered.
 
    Persistence (#3): every turn writes to the DB so a conversation survives a
    reload --
@@ -56,6 +64,7 @@ import {
   type UIMessage,
   type UIMessageStreamWriter,
   type ToolSet,
+  type ToolCallOptions,
 } from "ai";
 import { z } from "zod";
 import { makeDb } from "../../db/client";
@@ -82,11 +91,14 @@ import {
 } from "../repositories/sectionConversations";
 import { courseScopeFromAuthContext, unsafeCourseScope, unsafeOrgScope, type OrgScope } from "../repositories/scope";
 import { IdempotencyKeyConflictError } from "../repositories/errors";
+import { recordHintRequest } from "../repositories/hints";
 import { getOrgScopeAndLlmConfigForCourse } from "../repositories/organizations";
 import { logServerError } from "../utils/errors";
 import {
   assembleSystemPrompt,
   DEFAULT_SYSTEM_PROMPT,
+  DEFAULT_MARK_COMPLETE_INSTRUCTION,
+  HINT_INSTRUCTION,
   getPinnedPromptTemplateContent,
   getSectionPromptContext,
   resolvePromptTemplate,
@@ -114,7 +126,7 @@ import type { AppEnv } from "../context";
    model sees an assistant message with an unanswered tool call and either
    refuses or emits nothing). The sentinel also lets the model continue with
    follow-up text in the same turn via stopWhen below. */
-const TOOLS: ToolSet = {
+export const TOOLS: ToolSet = {
   showDefinition: {
     description:
       "Render a formal definition card for a named statistical concept. " +
@@ -141,7 +153,277 @@ const TOOLS: ToolSet = {
       term,
     }),
   },
+  /* #28: R execution is entirely client-side (WebR/WASM in the browser --
+     see apps/web/src/client/hooks/useWebR.ts, useRExecution.ts) -- this
+     Worker never runs R itself (the issue's own non-goal: "no server-side
+     code execution"). executeRCode is a DISPLAY tool exactly like
+     showDefinition above: the model supplies `code` (and optionally
+     `showSource`) as its input, this execute() returns a sentinel that
+     satisfies the tool-call contract (a tool call with no result poisons
+     the next turn's history, see this catalog's own doc comment) without
+     claiming the code actually ran here, and the CLIENT (packages/ui's
+     CodeExecution renderer, dispatched by render.tsx's tool-executeRCode
+     case) is what lets the student actually run it via the shared WebR
+     singleton and renders the real result. `status: "displayed"` (not
+     "executed") is deliberate -- an "executed" sentinel from THIS
+     execute() would misstate that the server ran the code, when nothing
+     has run yet. */
+  executeRCode: {
+    description:
+      "Show the student a runnable R code snippet they can execute themselves in the browser. " +
+      "Use when demonstrating a technique or inviting hands-on practice with the student's own data. " +
+      "Args: code (the R source to show); showSource (whether to display the code itself " +
+      "alongside any result once run -- default true).",
+    inputSchema: jsonSchema<{ code: string; showSource?: boolean }>({
+      type: "object",
+      properties: {
+        code: {
+          type: "string",
+          description: "R source code, e.g. 'mean(c(1, 2, 3))'",
+        },
+        showSource: {
+          type: "boolean",
+          description: "Whether to display the code itself alongside any result. Defaults to true.",
+        },
+      },
+      required: ["code"],
+      additionalProperties: false,
+    }),
+    execute: async ({ code }: { code: string; showSource?: boolean }) => ({
+      status: "displayed" as const,
+      code,
+    }),
+  },
+  /* #80: unlike showDefinition/executeRCode above -- pure, side-effect-free
+     display tools whose execute() only ever returns a sentinel -- requestHint
+     has a genuine server-side side effect: recording a hintEvents row and
+     checking the section's hint budget (recordHintRequest,
+     repositories/hints.ts). That's the deviation from the display-tool shape
+     this catalog otherwise follows, and it needs request-scoped context (db,
+     org scope, conversationId/sectionId/studentId/promptTemplateId) that a
+     static, module-level ToolSet has no way to close over. Threaded in via
+     streamText's own `experimental_context` option (see chatHandler's
+     streamText call below) -- the AI SDK's designed mechanism for exactly
+     this -- rather than rebuilding TOOLS from scratch on every request.
+
+     This is deliberately NOT the primary hint-request path. That's
+     chatHandler's own `isHintRequest` envelope flag (ChatRequestBody's own
+     doc comment): checked and deterministically granted/denied server-side
+     BEFORE the model is ever called, which is what "Give me a hint"
+     (Composer.tsx) actually triggers. The reason the envelope flag is
+     primary is NOT that a tool call can't shape the model's own output --
+     it genuinely can, via prepareStep below (ai@5.0.195's PrepareStepResult
+     supports a per-step `system` override, confirmed in
+     @ai-sdk/provider-utils' own type -- see prepareStep's doc comment for
+     how this tool actually uses that). The reason is issue #80's own
+     explicit preference (requirement 1): "an explicit student action...
+     is the recommended model -- deterministic and countable -- vs.
+     heuristic classification of tutor replies (fragile; avoid)." A tool
+     call is still the MODEL deciding whether/when to invoke it -- even
+     with prepareStep available to react to that decision, the decision
+     itself remains non-deterministic in exactly the way the issue asks to
+     avoid, unlike a server-side gate that runs unconditionally on every
+     hint-flagged request regardless of what the model would have chosen.
+
+     This tool exists as a secondary, best-effort path for a student who
+     types something like "can I get a hint?" in plain conversation instead
+     of clicking the button -- it calls the exact SAME recordHintRequest
+     function the envelope path uses, so both paths write to one canonical
+     event ledger with identical budget/idempotency semantics; neither can
+     grant a hint the other wouldn't also count. prepareStep (below) is what
+     makes this path's scaffolding actually reliable rather than merely
+     hoped-for from this tool's own description text: when this tool grants
+     a hint in one step, prepareStep injects the same HINT_INSTRUCTION the
+     envelope path uses into the system prompt for the model's NEXT step,
+     within the same streamText call. */
+  requestHint: {
+    description:
+      "Request a scaffolded hint for the student's CURRENT homework section, when they explicitly ask " +
+      "for one in conversation (e.g. 'can I get a hint?', 'give me a hint'). Checks the section's hint " +
+      "budget and records the request. Takes no arguments -- always call it with an empty object. " +
+      "If the result's status is \"hint_provided\": respond with a scaffolded nudge -- ask a leading " +
+      "question or highlight a key concept -- never the full solution. " +
+      "If \"budget_exceeded\": tell the student they've used all the hints available for this section, " +
+      "and do not answer the underlying question for them instead.",
+    inputSchema: jsonSchema<Record<string, never>>({
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    }),
+    execute: async (_input: Record<string, never>, options: ToolCallOptions) => {
+      // Structurally withheld from a tutor-kind conversation's tool list
+      // (SECTION_ONLY_TOOL_NAMES / toolsForConversation, below) since the
+      // PR3 final-review cleanup -- ctx.sectionId is therefore guaranteed
+      // non-null whenever the model can actually reach this execute(). The
+      // `HintToolContext` type still carries `sectionId: string | null`
+      // because it's shared with a tutor-kind request's experimental_context
+      // (never read there, since the tool isn't offered), not because this
+      // branch needs to handle null here anymore.
+      const ctx = options.experimental_context as HintToolContext;
+      const result = await recordHintRequest(ctx.db, ctx.orgScope, {
+        conversationId: ctx.conversationId,
+        sectionId: ctx.sectionId as string,
+        studentId: ctx.studentId,
+        promptTemplateId: ctx.promptTemplateId,
+      });
+      return { status: result.status, remainingHints: result.remainingHints };
+    },
+  },
+  /* #168: the tutor stopping rule -- a zero-argument tool the model calls
+     once it judges the student has demonstrated understanding of the
+     CURRENT section. The issue's own explicit design guidance (Implementation
+     Notes): no confidence/reasoning parameter -- the model signals only
+     THAT the section is complete, never a rubric or score, which keeps the
+     judgement cheap and avoids inventing assessment data this app has
+     nowhere real to put. Deliberately NOT gated behind a jsonSchema like
+     requestHint's Record<string, never> input either -- same shape,
+     matching that precedent exactly.
+
+     Unlike showDefinition/executeRCode/requestHint above, this tool's own
+     description text does NOT carry the pedagogy for WHEN to call it
+     ("unblock early, don't be pedantic," the issue's own Context section
+     paraphrasing the reference implementation) -- that wording is tunable
+     per LLM config (the issue's own explicit requirement) and lives
+     instead in the system prompt, assembled by lib/prompts.ts's
+     assembleSystemPrompt from resolvedLLMConfig.markCompleteInstruction
+     (falling back to DEFAULT_MARK_COMPLETE_INSTRUCTION) -- see
+     chatHandler's own systemPrompt assembly below. A description baked
+     into this static, module-level TOOLS catalog could never vary per
+     config the way a per-request system-prompt string can.
+
+     A pure display tool, same shape as showDefinition/executeRCode (see
+     this catalog's own doc comment) -- execute() has no side effect and
+     no DB write of its own. It does NOT submit the section (that stays
+     the student's own explicit action via the existing Submit button,
+     #22) and does NOT lock or end the conversation (issue requirements:
+     "surfaced... as a suggestion, not an automatic irreversible submit";
+     "students can keep working after the tool fires"). The client renders
+     a suggestion card (packages/ui's SectionCompleteSuggestion, dispatched
+     by render.tsx's tool-markSectionComplete case) that nudges the student
+     toward the existing Submit action without ever triggering it itself.
+
+     "Invocation is persisted against the conversation, with the message
+     that triggered it" (issue requirement) falls out of the SAME
+     message-persistence path every other tool call in this catalog
+     already goes through (onFinish -> finalizeAssistantTurn, replayed via
+     replayPersistedPart) -- no bespoke persistence mechanism needed: the
+     assistant message carrying this tool call is written to `messages`
+     like any other, in sequence right after the user message that
+     prompted it, so a later evaluation harness (#89, out of scope here)
+     can already query for it by scanning messages.parts for
+     tool-markSectionComplete.
+
+     Tenancy/rate-limiting (#143, issue's own "Interaction with #143"
+     note): this execute() runs inside the same streamText call, inside
+     the same already-authenticated (authMiddleware), tenancy-bound
+     (courseScopeFromAuthContext / getOwnedConversationOrNull), rate-limited
+     (reserveRateLimitSlot, checked before this handler ever reaches
+     streamText) request handler every other tool in this catalog runs
+     inside -- there is no separate/unauthenticated code path for it to
+     need hardening of its own. */
+  markSectionComplete: {
+    description:
+      "Mark this homework section as complete once you judge the student has demonstrated understanding. " +
+      "Takes no arguments -- always call it with an empty object. Calling it only surfaces a suggestion to " +
+      "the student that they may be ready to move on; it does not submit anything on their behalf and does " +
+      "not end the conversation, so the student can keep asking questions afterward.",
+    inputSchema: jsonSchema<Record<string, never>>({
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    }),
+    execute: async (_input: Record<string, never>) => ({ status: "suggested" as const }),
+  },
 };
+
+/** #168, folded together with #80 in the PR3 final-review cleanup: tool
+ *  names that must be withheld from a tutor-kind conversation -- there is no
+ *  section for either of these to act on without one. Both markSectionComplete
+ *  and requestHint are real, structural gating here: the model is never even
+ *  offered either tool on a tutor-kind conversation, so "don't call this"
+ *  isn't a hoped-for prompt instruction the model could ignore.
+ *
+ *  requestHint originally shipped (#80) with a weaker mechanism instead --
+ *  staying in every conversation's tool list and self-reporting
+ *  `{ status: "unavailable" }` from inside its own execute() when there was
+ *  no sectionId. The PR3 final review flagged the resulting three-way
+ *  inconsistency (this structural gate vs. that self-report vs.
+ *  executeRCode/showDefinition's "never gated, and correctly so -- both are
+ *  meaningful on either conversation kind") as worth a human decision rather
+ *  than auto-fixing it. The decision: fold requestHint in here too, since
+ *  toolsForConversation already existed and already gates on the identical
+ *  sectionId signal -- there was no real reason left for a second, weaker
+ *  mechanism to keep gating the same thing. */
+const SECTION_ONLY_TOOL_NAMES = new Set<keyof typeof TOOLS>(["markSectionComplete", "requestHint"]);
+
+/** #168: the actual conditional that makes section-kind-only gating real
+ *  rather than cosmetic -- builds a DIFFERENT `tools` object/subset per
+ *  request, passed to streamText's own `tools` option (chatHandler, below),
+ *  instead of always passing the full static TOOLS catalog the way every
+ *  tool before this one did. `sectionId` is `conv.sectionId` as-is: null
+ *  for a tutor-kind conversation, non-null for a section-kind one -- the
+ *  same signal HintToolContext.sectionId already uses, and the same
+ *  invariant the DB enforces structurally (conversations_kind_section_chk,
+ *  db/schema/runtime.ts: kind='section' <=> section_id IS NOT NULL), so
+ *  this doesn't need conv.kind itself (resolveConversation's own return
+ *  type doesn't carry it) to gate correctly. Exported so this exact
+ *  conditional -- not just TOOLS.markSectionComplete's own shape -- is
+ *  unit-testable without going through the full HTTP handler.
+ *
+ *  Final-review fix wave, #80 finding (hint double-grant): `options.
+ *  withholdRequestHint` is the second, independent axis this function now
+ *  gates on -- passed `true` by chatHandler exactly when isHintGranted is
+ *  true for THIS turn (the envelope's isHintRequest flag already granted a
+ *  hint via recordHintRequest before streamText is ever called). Without
+ *  this, requestHint stayed in the model's tool list on a hint-granted turn
+ *  even though a grant already happened: the tool's own description ("call
+ *  this when they explicitly ask... in conversation") plus this turn's
+ *  hint-primed system prompt and its fixed user message (App.tsx's
+ *  HINT_REQUEST_MESSAGE, "Give me a hint for this section, please.")
+ *  maximally prime the model to call it too, recording a SECOND hintEvents
+ *  row for one button click -- corrupting the exact metric #80 exists to
+ *  define. The only other dedup (recordHintRequest's 2-second idempotency
+ *  window, repositories/hints.ts) can't be relied on here: a tool call from
+ *  the model necessarily happens AFTER the envelope grant's own provider
+ *  round-trip, which routinely exceeds 2 seconds. Deliberately reusing this
+ *  same function (rather than a second, separate gating mechanism at the
+ *  streamText call site) so there remains exactly one place that decides
+ *  which tools a turn is offered -- not two. Omitting `options` (or passing
+ *  `withholdRequestHint: false`) leaves requestHint's normal availability
+ *  untouched, matching every call site from before this fix. */
+export function toolsForConversation(
+  sectionId: string | null,
+  options?: { withholdRequestHint?: boolean },
+): ToolSet {
+  const withheldNames = new Set<keyof typeof TOOLS>();
+  if (!sectionId) {
+    for (const name of SECTION_ONLY_TOOL_NAMES) withheldNames.add(name);
+  }
+  if (options?.withholdRequestHint) {
+    withheldNames.add("requestHint");
+  }
+  if (withheldNames.size === 0) return TOOLS;
+  return Object.fromEntries(
+    Object.entries(TOOLS).filter(([name]) => !withheldNames.has(name as keyof typeof TOOLS)),
+  );
+}
+
+/** #80: the shape threaded into streamText's `experimental_context` option
+ *  (chatHandler, below) for the requestHint tool's execute() to read via
+ *  its second argument -- see requestHint's own doc comment for why this
+ *  can't just be a closure over module-level TOOLS. `sectionId` is still
+ *  typed `string | null` here because this context is built for every
+ *  request regardless of conversation kind (populated with `conv.sectionId`
+ *  as-is), even though requestHint itself is only ever offered, and so only
+ *  ever reads this, when it's non-null (SECTION_ONLY_TOOL_NAMES). */
+interface HintToolContext {
+  db: Db;
+  orgScope: OrgScope;
+  conversationId: string;
+  sectionId: string | null;
+  studentId: string;
+  promptTemplateId: string | null;
+}
 
 interface ChatRequestBody {
   messages: UIMessage[];
@@ -169,6 +451,16 @@ interface ChatRequestBody {
   // conversations.ts), which throws TenancyMismatchError -> 404 on a
   // mismatch, the same mapping every other tenancy check in this app uses.
   sectionId?: string;
+  // #80: set by the "Give me a hint" trigger (Composer.tsx) -- a REQUEST to
+  // treat this turn as a hint, not a claim that it IS one. chatHandler
+  // independently, deterministically decides that via recordHintRequest
+  // (repositories/hints.ts) before the model is ever called; a client that
+  // sets this to true gets budget-checked and either granted (a real event
+  // is recorded and the prompt is scaffolded) or denied (no event, no model
+  // call) -- the flag itself grants nothing. Ignored (silently, not an
+  // error) for a tutor-kind conversation or one with no sectionId: hints
+  // are a section concept only.
+  isHintRequest?: boolean;
 }
 
 // Validates only the shape chatHandler actually depends on (id, role, and
@@ -288,6 +580,8 @@ const chatEnvelopeSchema = z.object({
   courseId: z.string().uuid().optional(),
   kind: z.enum(["section", "tutor"]).optional(),
   sectionId: z.string().uuid().optional(),
+  // #80: see ChatRequestBody.isHintRequest's own doc comment.
+  isHintRequest: z.boolean().optional(),
 });
 
 // In ai@5.0.195, a provider failure (e.g. a 429) arrives as an `error`
@@ -384,11 +678,14 @@ function hasRenderableContent(parts: unknown): boolean {
 
 // Replays an already-persisted assistant message's `parts` (jsonb, so typed
 // unknown at the DB boundary) as UIMessageChunk writes -- used only by the
-// "already answered" retry path below, never by a fresh model turn. Only
-// handles the two part shapes this app's own TOOLS catalog can actually
-// produce (plain text, and a completed showDefinition tool call/result) --
-// anything else is dropped rather than guessed at, so an unrecognized part
-// shape fails safe instead of throwing mid-replay.
+// "already answered" retry path below, never by a fresh model turn. Handles
+// plain text and any completed tool-* call/result generically (#28: this
+// was "the two part shapes this app's own TOOLS catalog can actually
+// produce" back when showDefinition was the only tool; the `part.type.
+// startsWith("tool-")` branch below was already generic over the tool
+// name even then, so adding executeRCode -- or any future tool -- needs no
+// change here) -- anything else is dropped rather than guessed at, so an
+// unrecognized part shape fails safe instead of throwing mid-replay.
 function replayPersistedPart(part: { type: string } & Record<string, unknown>, writer: UIMessageStreamWriter) {
   if (part.type === "text" && typeof part.text === "string") {
     const id = crypto.randomUUID();
@@ -1060,7 +1357,12 @@ export async function chatHandler(c: Context<AppEnv>) {
   if (sectionPromptContext?.isUnreleased && !authContext.canViewDraftsIn(conv.courseId)) {
     return c.json({ error: "Section not found", code: "not_found" }, 404);
   }
-  const systemPrompt = assembleSystemPrompt(resolvedSystemPromptContent, sectionPromptContext ?? undefined, isDefaultPrompt);
+  // #80: systemPrompt assembly moved below, past the replay/idempotency
+  // check -- see the isHintRequest handling right after it for why: a
+  // "replay" (the model already answered; the client just never received
+  // it, #3 requirement 6) must NOT grant a second hint for the same
+  // original request, so the grant/deny decision has to happen AFTER
+  // classifyTurn has ruled that out, not before.
 
   // #26: model/provider, resolved per-request from the homework's
   // llm_config_id override (if this is a section conversation) or the org's
@@ -1233,6 +1535,79 @@ export async function chatHandler(c: Context<AppEnv>) {
     });
     return replayResponse(conv.id, lastMessage!.parts);
   }
+
+  // #80: deterministic hint grant/deny -- the primary, tested hint-request
+  // path (see ChatRequestBody.isHintRequest's own doc comment; the
+  // requestHint TOOLS entry above is a secondary, model-mediated path that
+  // shares this same recordHintRequest call). Runs here -- past the replay
+  // check above, under the turn lock already acquired, before any model
+  // call -- so: (1) a "replay" retry of an already-answered turn can never
+  // grant a second hint for the same original request; (2) concurrent sends
+  // on this SAME conversation are serialized by the lock, same as every
+  // other per-turn side effect on this route (recordHintRequest's own doc
+  // comment names the one race this does NOT close -- a different
+  // conversation/tab for the same student+section -- as an accepted
+  // simplification, not a security boundary). A budget-exceeded request
+  // short-circuits here with no model call: cheap, deterministic, and
+  // independently testable (chat.test.ts) without mocking streamText.
+  let isHintGranted = false;
+  if (envelopeParsed.data.isHintRequest === true && conv.sectionId) {
+    // Matches the getLastMessages call above and the appendMessage call
+    // below: any throw between lock acquisition and the streamText try
+    // block must release the lock itself before propagating, or a
+    // transient failure here leaves the conversation "processing" for the
+    // full LOCK_STALE_MS with nothing else to release it.
+    let hintResult: Awaited<ReturnType<typeof recordHintRequest>>;
+    try {
+      hintResult = await recordHintRequest(db, orgScope, {
+        conversationId: conv.id,
+        sectionId: conv.sectionId,
+        studentId: authContext.session.userId,
+        promptTemplateId: conv.promptTemplateId,
+      });
+    } catch (err) {
+      await releaseConversationTurnLock(db, conv.id).catch(() => {});
+      throw err;
+    }
+    if (hintResult.status === "budget_exceeded") {
+      await releaseConversationTurnLock(db, conv.id).catch((err) => {
+        logServerError("chatHandler.releaseLock.hintBudgetExceeded", err);
+      });
+      return c.json(
+        {
+          error: "You've used all the hints available for this section.",
+          code: "hint_budget_exceeded",
+          remainingHints: 0,
+        },
+        429,
+      );
+    }
+    isHintGranted = true;
+  }
+  // #80: assembled here (not at this route's earlier prompt-resolution
+  // point) so isHintGranted above is known first -- see prompts.ts's own
+  // assembleSystemPrompt doc comment for HINT_INSTRUCTION's placement/
+  // trust rationale (this flag is never taken from the client at face
+  // value; recordHintRequest above is what actually decided it).
+  // #168: only assembled for a section-kind conversation -- markSectionComplete
+  // is withheld entirely from the model's tool list on a tutor-kind one
+  // (toolsForConversation, this file's own TOOLS catalog, below), so
+  // instructing the model about a tool it was never offered would be dead
+  // prompt text. `resolvedLLMConfig.markCompleteInstruction` is the
+  // per-config override (#168's own "tunable per LLM config, not
+  // hardcoded" requirement); DEFAULT_MARK_COMPLETE_INSTRUCTION is the
+  // fallback for every config that hasn't set one (the common case today).
+  const markCompleteInstruction = conv.sectionId
+    ? (resolvedLLMConfig.markCompleteInstruction ?? DEFAULT_MARK_COMPLETE_INSTRUCTION)
+    : undefined;
+  const systemPrompt = assembleSystemPrompt(
+    resolvedSystemPromptContent,
+    sectionPromptContext ?? undefined,
+    isDefaultPrompt,
+    isHintGranted,
+    markCompleteInstruction,
+  );
+
   // #317 review, #326: "skip-insert" means `recentMessages[0]` already IS
   // the inbound message (that's classifyTurn's own definition of this
   // case) -- persistedHistory starts as `recentMessages` unmodified and
@@ -1417,7 +1792,65 @@ export async function chatHandler(c: Context<AppEnv>) {
       // attacks"). This makes a role:"system" element a hard model-input
       // refusal even if some future change to that schema let one through.
       allowSystemInMessages: false,
-      tools: TOOLS,
+      // #168: section-kind-only tools (markSectionComplete) withheld
+      // entirely for a tutor-kind conversation -- see toolsForConversation's
+      // own doc comment (this file's TOOLS catalog, above) for why this is
+      // real gating, not a prompt instruction alone.
+      //
+      // Final-review fix wave, #80 finding (hint double-grant): also
+      // withholds requestHint for this exact turn when isHintGranted is
+      // true -- the envelope path (above) already recorded a hintEvents row
+      // for this turn before streamText was ever reached, so the model has
+      // no legitimate reason to call requestHint again this turn. See
+      // toolsForConversation's own doc comment for the full mechanism/
+      // rationale, and its `withholdRequestHint` option's doc comment for
+      // why the double-grant was possible without this.
+      tools: toolsForConversation(conv.sectionId, { withholdRequestHint: isHintGranted }),
+      // #80: threads request-scoped context into the requestHint tool's
+      // execute() (its second argument's own `experimental_context` field)
+      // -- see TOOLS.requestHint's own doc comment for why a static,
+      // module-level ToolSet needs this instead of a closure. `sectionId`
+      // is conv.sectionId as-is -- null only for a tutor-kind conversation,
+      // where requestHint isn't in `tools` above at all, so this field is
+      // simply unread on that path rather than driving an in-tool check.
+      experimental_context: {
+        db,
+        orgScope,
+        conversationId: conv.id,
+        sectionId: conv.sectionId,
+        studentId: authContext.session.userId,
+        promptTemplateId: conv.promptTemplateId,
+      } satisfies HintToolContext,
+      // #80: strengthens TOOLS.requestHint's secondary path (see its own
+      // doc comment above) -- when the model calls requestHint and it
+      // grants a hint in one step, this injects the same HINT_INSTRUCTION
+      // the primary isHintRequest envelope path uses into the system
+      // prompt for the model's NEXT step, via ai@5.0.195's real per-step
+      // `system` override (PrepareStepResult.system,
+      // @ai-sdk/provider-utils -- confirmed present in the pinned
+      // version's own .d.ts, not assumed). Returning undefined (steps[0],
+      // or any step that didn't just get a granted requestHint result)
+      // leaves the outer `system` above untouched for that step. Guarded
+      // against double-injection: a turn where the ENVELOPE path already
+      // granted (isHintGranted above, so `systemPrompt` already ends in
+      // HINT_INSTRUCTION) skips this -- not a scenario recordHintRequest's
+      // own idempotency window is expected to produce in practice, but the
+      // guard is free either way. Loosely typed (TOOLS itself is declared
+      // `: ToolSet`, so streamText's TOOLS generic can't narrow `steps`'
+      // tool-result shape any further than this file's other tool-facing
+      // code already accepts, e.g. requestHint's own execute() cast).
+      prepareStep: ({ steps }) => {
+        const lastStep = steps[steps.length - 1];
+        const grantedHint = lastStep?.toolResults?.some(
+          (r) =>
+            (r as { toolName?: string }).toolName === "requestHint" &&
+            (r as { output?: { status?: string } }).output?.status === "hint_provided",
+        );
+        if (grantedHint && !systemPrompt.includes(HINT_INSTRUCTION)) {
+          return { system: `${systemPrompt}\n\n${HINT_INSTRUCTION}` };
+        }
+        return undefined;
+      },
       temperature: resolvedLLMConfig.temperature,
       maxOutputTokens: resolvedLLMConfig.maxCompletionTokens,
       // #317 review, #349: see SUPPORTS_REASONING_EFFORT_NONE's own doc

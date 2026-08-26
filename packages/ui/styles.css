@@ -1962,6 +1962,86 @@ body {
   }
 
   /* -------------------------------------------------------------------------
+     .code-execution — a runnable code block (#28): wraps .code-block with a
+     Run affordance, a distinctly-styled error zone (separate from the plain
+     .code-block__output slot, which only ever shows a success result), and
+     captured plots.
+     ------------------------------------------------------------------------- */
+  .code-execution {
+    margin-block: var(--space-5);
+  }
+
+  .code-execution__run {
+    margin-block-start: var(--space-2);
+    padding: var(--space-1) var(--space-3);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.04em;
+    color: var(--color-text);
+    background: transparent;
+    border: 1px solid var(--color-border);
+    cursor: pointer;
+  }
+
+  .code-execution__run:hover:not(:disabled) {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
+
+  .code-execution__run:disabled {
+    color: var(--color-text-muted);
+    cursor: default;
+  }
+
+  .code-execution__unavailable {
+    margin-block-start: var(--space-2);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+  }
+
+  .code-execution__error {
+    margin-block-start: var(--space-2);
+    background-color: var(--color-code-output-bg);
+    border-inline-start: 3px solid var(--color-error);
+  }
+
+  .code-execution__error-label {
+    display: block;
+    padding: var(--space-1) var(--space-3);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-error);
+    font-variant: small-caps;
+  }
+
+  .code-execution__error-pre {
+    margin: 0;
+    padding: var(--space-2) var(--space-4);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-sm);
+    line-height: var(--leading-code);
+    color: var(--color-text-secondary);
+    white-space: pre-wrap;
+    overflow-x: auto;
+  }
+
+  .code-execution__plots {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    margin-block-start: var(--space-2);
+  }
+
+  .code-execution__plot {
+    max-width: 100%;
+    height: auto;
+    border: 1px solid var(--color-border);
+  }
+
+  /* -------------------------------------------------------------------------
      .composer — the sticky compose input at the bottom
      ------------------------------------------------------------------------- */
   .composer-zone {
@@ -2051,6 +2131,15 @@ body {
 
   .composer-wrap:focus-within .composer-hint {
     opacity: 1;
+  }
+
+  /* #80: "Give me a hint" row -- sits above .composer-wrap, right-aligned
+     so it reads as a small action on the conversation rather than part of
+     the text-entry surface itself. */
+  .composer-hint-request {
+    display: flex;
+    justify-content: flex-end;
+    margin-block-end: var(--space-2);
   }
 
   /* -------------------------------------------------------------------------
@@ -2280,6 +2369,41 @@ body {
     animation: none;
     stroke-dashoffset: 0;
   }
+}
+
+/* SectionCompleteSuggestion (#168) — the tutor stopping-rule suggestion.
+   A quiet, success-toned card, deliberately with no button of its own (see
+   the component's own doc comment for why): --color-success carries the
+   "you're in good shape" signal without borrowing the Heritage Gold accent
+   DefinitionCard/CodeExecution use for "the model produced structured
+   output" — this is closer in register to the existing submitted-status
+   badges (.admin-status--submitted) than to a generative-display card. */
+.section-complete-suggestion {
+  margin-block: var(--space-6);
+  padding: var(--space-4) var(--space-6);
+  background-color: rgba(43, 138, 62, 0.06);
+  border-inline-start: 3px solid var(--color-success);
+  border-radius: 8px;
+  transition: opacity 240ms ease-out;
+}
+
+.section-complete-suggestion--partial {
+  opacity: 0.5;
+}
+
+.section-complete-suggestion__title {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  font-weight: var(--weight-semibold);
+  color: var(--color-success);
+  margin-block-end: var(--space-1);
+}
+
+.section-complete-suggestion__body {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--leading-body);
+  color: var(--color-text);
 }
 
 .streaming-dot {
@@ -4040,6 +4164,20 @@ body {
   font-size: 10.5px;
   font-weight: var(--weight-medium);
   font-variant-numeric: tabular-nums;
+  /* #29: this became a <button> (drill-in to that cell's transcript list)
+     rather than a plain <span> -- resets the browser's default button
+     padding/cursor so the per-state background/border rules above still
+     produce the exact same 24x24 chip they always have. */
+  padding: 0;
+  cursor: default;
+}
+
+.admin-progress-cell:not(:disabled) {
+  cursor: pointer;
+}
+
+.admin-progress-cell:disabled {
+  opacity: 0.55;
 }
 
 .admin-progress-cell--missing {

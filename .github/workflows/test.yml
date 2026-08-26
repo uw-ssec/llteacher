@@ -19,6 +19,56 @@ permissions:
   contents: read
 
 jobs:
+  # #373: two PRs branched off the same staging head can independently
+  # generate the same next migration index (drizzle numbers sequentially
+  # off whatever's on the branch at generate time) -- not a defect in
+  # either PR, but a collision that otherwise only surfaces at merge time
+  # (see apps/web/README.md's "Migrations" section for the #317/#363 and
+  # #363/#366 precedents and the PR-open-order convention this enforces).
+  # Only meaningful for pull_request events -- a push to llteacher01 has no
+  # "base" to diff against.
+  migration-index-collision:
+    name: check migration index collisions
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 5
+
+    steps:
+      # fetch-depth: 0 -- unlike the `web` job below, this one needs the
+      # PR's base commit to diff against, not just the head tree. The
+      # default shallow checkout (depth 1) only has HEAD.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Check for colliding migration indices
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          MIGRATIONS_DIR="apps/web/src/db/migrations"
+
+          base_files=$(git ls-tree -r --name-only "$BASE_SHA" -- "$MIGRATIONS_DIR" | grep -E '/[0-9]{4}_.*\.sql$' || true)
+          head_files=$(git ls-tree -r --name-only "$HEAD_SHA" -- "$MIGRATIONS_DIR" | grep -E '/[0-9]{4}_.*\.sql$' || true)
+
+          fail=0
+          while IFS= read -r head_file; do
+            [ -z "$head_file" ] && continue
+            idx=$(basename "$head_file" | grep -oE '^[0-9]{4}')
+            base_match=$(printf '%s\n' "$base_files" | grep -E "/${idx}_.*\.sql\$" || true)
+            if [ -n "$base_match" ] && [ "$base_match" != "$head_file" ]; then
+              echo "::error::Migration index $idx collides with the base branch: base has '$base_match', this PR adds '$head_file'. Renumber your migration(s) -- see apps/web/README.md#migrations (PR-open-order convention: whichever PR opened first keeps the index)."
+              fail=1
+            fi
+          done <<< "$head_files"
+
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+          echo "No migration index collisions against $BASE_SHA."
+
   web:
     name: apps/web — typecheck, migrate, test
     runs-on: ubuntu-latest

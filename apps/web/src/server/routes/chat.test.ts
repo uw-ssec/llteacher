@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import { chatHandler, classifyTurn } from "./chat";
+import { chatHandler, classifyTurn, TOOLS, toolsForConversation } from "./chat";
 import type { AuthContext } from "../middleware/roles";
 import { fakeAuthContext as buildFakeAuthContext, fakeMembership } from "../testing/authContext";
 import {
@@ -9,6 +9,7 @@ import {
   SectionNotInteractiveError,
 } from "../repositories/sectionConversations";
 import { IdempotencyKeyConflictError } from "../repositories/errors";
+import { HINT_INSTRUCTION, DEFAULT_MARK_COMPLETE_INSTRUCTION } from "../../lib/prompts";
 import type { AppEnv } from "../context";
 
 // Route test (mock db, mock the repository layer, mock streamText) -- per
@@ -179,6 +180,18 @@ vi.mock("../../lib/llm-config", async (importOriginal) => {
   };
 });
 
+// #80: hint grant/deny -- mocked so the isHintRequest envelope-wiring tests
+// below (describe("POST /api/chat -- isHintRequest (#80)")) assert
+// chatHandler's OWN wiring (does it call recordHintRequest with the right
+// args, does budget_exceeded short-circuit before streamText, does a grant
+// flow into the real assembleSystemPrompt's output) without re-testing
+// recordHintRequest's own budget/idempotency logic -- that's covered by the
+// real-DB repository suite, repositories/hints.test.ts.
+const recordHintRequestMock = vi.fn();
+vi.mock("../repositories/hints", () => ({
+  recordHintRequest: (...args: unknown[]) => recordHintRequestMock(...args),
+}));
+
 function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
   return buildFakeAuthContext({
     memberships: [fakeMembership({ courseId: "55555555-5555-5555-5555-555555555555", role: "student" })],
@@ -200,7 +213,14 @@ const userUiMessage = { id: "client-1", role: "user", parts: [{ type: "text", te
 
 function postChat(
   app: Hono<AppEnv>,
-  payload: { messages: unknown[]; conversationId?: string; courseId?: string; kind?: string; sectionId?: string },
+  payload: {
+    messages: unknown[];
+    conversationId?: string;
+    courseId?: string;
+    kind?: string;
+    sectionId?: string;
+    isHintRequest?: boolean;
+  },
 ) {
   return app.request(
     "/api/chat",
@@ -245,6 +265,35 @@ describe("classifyTurn", () => {
 
   it("inserts on a brand-new conversation with no prior messages at all", () => {
     expect(classifyTurn(undefined, undefined, "client-1")).toBe("insert");
+  });
+});
+
+// #28: executeRCode is a display tool exactly like showDefinition -- a
+// server-side execute() that returns a sentinel (never real R output; this
+// Worker never runs R, see TOOLS.executeRCode's own doc comment) so the
+// model's tool call always resolves and the conversation can continue in
+// the same turn (stopWhen: stepCountIs(5) below). The actual execution
+// happens client-side (packages/ui's CodeExecution renderer, wired to
+// apps/web's useRExecution hook) -- out of reach for a route-level test,
+// per the issue's own Testing Strategy ("mock chat.ts and test that
+// executeRCode is in TOOLS... verify the execute handler's own contract").
+describe("TOOLS.executeRCode", () => {
+  it("is registered in the tool catalog streamText is called with", () => {
+    expect(TOOLS.executeRCode).toBeDefined();
+  });
+
+  it("requires `code` and rejects unknown properties in its input schema", () => {
+    const schema = (TOOLS.executeRCode!.inputSchema as { jsonSchema: Record<string, unknown> }).jsonSchema;
+    expect(schema.required).toEqual(["code"]);
+    expect(schema.additionalProperties).toBe(false);
+    expect((schema.properties as Record<string, unknown>).code).toBeDefined();
+    expect((schema.properties as Record<string, unknown>).showSource).toBeDefined();
+  });
+
+  it("execute() resolves to a sentinel (never a fabricated RCodeResult) so the model's tool call is never left unanswered", async () => {
+    const execute = TOOLS.executeRCode!.execute as (input: { code: string; showSource?: boolean }) => Promise<unknown>;
+    const result = await execute({ code: "sum(1:10)" });
+    expect(result).toEqual({ status: "displayed", code: "sum(1:10)" });
   });
 });
 
@@ -2112,6 +2161,508 @@ describe("POST /api/chat", () => {
 
       expect(res.status).toBe(200);
       expect(pinConversationPromptTemplateMock).not.toHaveBeenCalled();
+    });
+  });
+
+  // #80: the primary, deterministic hint-request path -- see
+  // ChatRequestBody.isHintRequest's own doc comment (chat.ts) for why this
+  // is tested independently of TOOLS.requestHint below (a secondary,
+  // model-mediated path). recordHintRequest itself is mocked here (its own
+  // budget/idempotency logic is covered by the real-DB suite,
+  // repositories/hints.test.ts) -- these tests assert chatHandler's WIRING:
+  // does it call recordHintRequest with the right args, does a denial
+  // short-circuit before any model call, does a grant actually reach the
+  // assembled system prompt streamText receives.
+  describe("isHintRequest (#80)", () => {
+    const SECTION_CONV = {
+      id: "22222222-2222-2222-2222-222222222222",
+      ownerUserId: "u1",
+      courseId: "55555555-5555-5555-5555-555555555555",
+      sectionId: "11111111-1111-1111-1111-111111111111",
+      organizationId: "org-a",
+      courseLlmConfigId: null,
+      promptTemplateId: null,
+    };
+
+    beforeEach(() => {
+      recordHintRequestMock.mockReset();
+      getOwnedConversationOrNullMock.mockResolvedValue(SECTION_CONV);
+      getLastMessagesMock.mockResolvedValue([]);
+    });
+
+    it("grants: calls recordHintRequest with conversation/section/student, and the streamed system prompt is scaffolded", async () => {
+      recordHintRequestMock.mockResolvedValue({ status: "hint_provided", remainingHints: 2, deduped: false });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+        isHintRequest: true,
+      });
+
+      expect(res.status).toBe(200);
+      expect(recordHintRequestMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "org-a",
+        {
+          conversationId: SECTION_CONV.id,
+          sectionId: SECTION_CONV.sectionId,
+          studentId: "u1",
+          promptTemplateId: null,
+        },
+      );
+      // assembleSystemPrompt is REAL in these tests (see the #25 mock's own
+      // doc comment) -- this asserts the actual composed prompt streamText
+      // received, not a second mock of the injection.
+      expect(streamTextMock).toHaveBeenCalled();
+      const call = streamTextMock.mock.calls[0]![0] as { system: string };
+      expect(call.system).toContain(HINT_INSTRUCTION);
+    });
+
+    // Final-review fix wave, finding 1 (hint double-grant, #80): the
+    // envelope path above already recorded exactly one hintEvents row for
+    // this turn (the assertion just above) -- if the model were ALSO
+    // offered requestHint for the same turn, its own description ("call
+    // this when they explicitly ask... in conversation") plus this turn's
+    // hint-primed system prompt and fixed user message
+    // ("Give me a hint for this section, please.", App.tsx) would prime it
+    // to call the tool too, recording a SECOND row for one button click.
+    // This is the actual regression test for that bug: streamText's tools
+    // must not include requestHint on a turn that just granted via the
+    // envelope.
+    it("withholds requestHint from streamText's tools on a turn that just granted via the envelope (prevents a double hintEvents write)", async () => {
+      recordHintRequestMock.mockResolvedValue({ status: "hint_provided", remainingHints: 2, deduped: false });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+        isHintRequest: true,
+      });
+
+      expect(res.status).toBe(200);
+      expect(recordHintRequestMock).toHaveBeenCalledTimes(1);
+      const call = streamTextMock.mock.calls[0]![0] as { tools: Record<string, unknown> };
+      expect(call.tools.requestHint).toBeUndefined();
+      // Every other tool stays available -- only requestHint is withheld,
+      // and only for this one turn.
+      expect(call.tools.showDefinition).toBeDefined();
+      expect(call.tools.executeRCode).toBeDefined();
+    });
+
+    it("does not grant, and does not scaffold, an ordinary turn (isHintRequest omitted)", async () => {
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+      });
+
+      expect(res.status).toBe(200);
+      expect(recordHintRequestMock).not.toHaveBeenCalled();
+      const call = streamTextMock.mock.calls[0]![0] as { system: string; tools: Record<string, unknown> };
+      expect(call.system).not.toContain(HINT_INSTRUCTION);
+      // No grant happened this turn -- requestHint stays available so the
+      // secondary, model-mediated path (TOOLS.requestHint) still works for
+      // a student who asks in plain conversation instead of the button.
+      expect(call.tools.requestHint).toBeDefined();
+    });
+
+    it("budget_exceeded: short-circuits with 429 before any model call, and releases the turn lock", async () => {
+      recordHintRequestMock.mockResolvedValue({ status: "budget_exceeded", remainingHints: 0, deduped: false });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+        isHintRequest: true,
+      });
+
+      expect(res.status).toBe(429);
+      const body = (await res.json()) as { code: string; remainingHints: number };
+      expect(body.code).toBe("hint_budget_exceeded");
+      expect(body.remainingHints).toBe(0);
+      expect(streamTextMock).not.toHaveBeenCalled();
+      expect(releaseConversationTurnLockMock).toHaveBeenCalledWith(expect.anything(), SECTION_CONV.id);
+    });
+
+    it("ignores isHintRequest for a tutor-kind conversation (no sectionId) -- no grant/deny decision is made", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ ...SECTION_CONV, sectionId: null });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+        isHintRequest: true,
+      });
+
+      expect(res.status).toBe(200);
+      expect(recordHintRequestMock).not.toHaveBeenCalled();
+    });
+
+    // #80: a "replay" (the model already answered this exact turn; the
+    // client just never received the response, #3 requirement 6) must NOT
+    // grant a second hint for the same original request -- see the
+    // isHintRequest handling's own doc comment in chat.ts for why this is
+    // placed after the replay check, not before.
+    it("does not call recordHintRequest again when the turn replays an already-answered response", async () => {
+      getLastMessagesMock.mockResolvedValue([
+        { id: "asst-1", role: "assistant", parts: [{ type: "text", text: "already answered" }], clientMessageId: null },
+        { id: "user-1", role: "user", parts: [{ type: "text", text: "hi there" }], clientMessageId: "client-1" },
+      ]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+        isHintRequest: true,
+      });
+
+      expect(res.status).toBe(200);
+      expect(recordHintRequestMock).not.toHaveBeenCalled();
+      expect(streamTextMock).not.toHaveBeenCalled();
+    });
+
+    it("a deduped grant (idempotent double-submit) still scaffolds the prompt exactly like a fresh grant", async () => {
+      recordHintRequestMock.mockResolvedValue({ status: "hint_provided", remainingHints: 1, deduped: true });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+        isHintRequest: true,
+      });
+
+      expect(res.status).toBe(200);
+      const call = streamTextMock.mock.calls[0]![0] as { system: string };
+      expect(call.system).toContain(HINT_INSTRUCTION);
+    });
+
+    // #80, review follow-up: prepareStep is what makes TOOLS.requestHint's
+    // secondary path actually reliable (not just hopeful tool-description
+    // text) -- confirms the REAL mechanism (ai@5.0.195's PrepareStepResult.
+    // system override), not the "system prompts can't be changed mid-turn"
+    // claim this test replaces. This is an ordinary, non-hint turn --
+    // prepareStep fires regardless of isHintRequest, purely off whether the
+    // model itself called requestHint and got a grant.
+    it("prepareStep injects HINT_INSTRUCTION for the model's next step when requestHint (the tool) granted a hint in the prior step", async () => {
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+      });
+      expect(res.status).toBe(200);
+
+      const call = streamTextMock.mock.calls[0]![0] as {
+        system: string;
+        prepareStep: (args: { steps: unknown[] }) => { system?: string } | undefined;
+      };
+      // Baseline: this turn's OWN system prompt (no hint granted yet) does
+      // not already contain the instruction -- otherwise the test below
+      // couldn't tell an injection apart from it already being there.
+      expect(call.system).not.toContain(HINT_INSTRUCTION);
+
+      const stepWithGrantedHint = {
+        toolResults: [{ toolName: "requestHint", output: { status: "hint_provided", remainingHints: 2 } }],
+      };
+      const result = call.prepareStep({ steps: [stepWithGrantedHint] });
+      expect(result?.system).toContain(HINT_INSTRUCTION);
+      expect(result?.system).toContain(call.system); // the base prompt is preserved, not replaced
+
+      // A step where the model called requestHint but was DENIED must not
+      // inject the scaffolding instruction -- there's no hint to scaffold.
+      const stepWithDeniedHint = {
+        toolResults: [{ toolName: "requestHint", output: { status: "budget_exceeded", remainingHints: 0 } }],
+      };
+      expect(call.prepareStep({ steps: [stepWithDeniedHint] })).toBeUndefined();
+
+      // A step with no requestHint call at all (e.g. showDefinition, or no
+      // tool call) is untouched -- prepareStep only reacts to a granted hint.
+      const stepWithUnrelatedTool = { toolResults: [{ toolName: "showDefinition", output: { status: "displayed" } }] };
+      expect(call.prepareStep({ steps: [stepWithUnrelatedTool] })).toBeUndefined();
+    });
+  });
+
+  // #168: end-to-end wiring through chatHandler itself -- confirms the tool
+  // streamText actually receives (not just what toolsForConversation returns
+  // in isolation), the config-tunable system-prompt wording, and the issue's
+  // own "persisted, doesn't lock the conversation" requirements. Nested
+  // inside "POST /api/chat" (not a sibling top-level describe, unlike
+  // TOOLS.markSectionComplete/toolsForConversation below) specifically so
+  // these tests inherit this describe's own beforeEach mock resets
+  // (getOwnedConversationOrNullMock, resolveLLMConfigMock, etc.) --
+  // matching "isHintRequest (#80)" directly above, the nearest precedent
+  // for a nested describe that drives full postChat() requests.
+  describe("markSectionComplete kind-gating & prompt wiring (#168)", () => {
+    const SECTION_CONV = {
+      id: "22222222-2222-2222-2222-222222222222",
+      ownerUserId: "u1",
+      courseId: "55555555-5555-5555-5555-555555555555",
+      sectionId: "11111111-1111-1111-1111-111111111111",
+      organizationId: "org-a",
+      courseLlmConfigId: null,
+      promptTemplateId: null,
+    };
+    const TUTOR_CONV = { ...SECTION_CONV, sectionId: null };
+
+    beforeEach(() => {
+      getLastMessagesMock.mockResolvedValue([]);
+    });
+
+    it("streamText receives markSectionComplete in its tools for a section-kind conversation", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(SECTION_CONV);
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+      });
+      expect(res.status).toBe(200);
+      const call = streamTextMock.mock.calls[0]![0] as { tools: Record<string, unknown> };
+      expect(call.tools.markSectionComplete).toBeDefined();
+    });
+
+    it("streamText does NOT receive markSectionComplete or requestHint for a tutor-kind conversation, while showDefinition/executeRCode remain present", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(TUTOR_CONV);
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: TUTOR_CONV.id,
+      });
+      expect(res.status).toBe(200);
+      const call = streamTextMock.mock.calls[0]![0] as { tools: Record<string, unknown> };
+      expect(call.tools.markSectionComplete).toBeUndefined();
+      expect(call.tools.requestHint).toBeUndefined();
+      expect(call.tools.showDefinition).toBeDefined();
+      expect(call.tools.executeRCode).toBeDefined();
+    });
+
+    it("assembles the default stopping-rule instruction into the system prompt for a section-kind conversation", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(SECTION_CONV);
+      resolveLLMConfigMock.mockResolvedValueOnce({
+        id: "llm-config-1",
+        provider: "openrouter",
+        modelName: "test/model",
+        temperature: 0.7,
+        maxCompletionTokens: 1000,
+        credentialId: null,
+        markCompleteInstruction: null,
+      });
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+      });
+
+      const call = streamTextMock.mock.calls[0]![0] as { system: string };
+      expect(call.system).toContain(DEFAULT_MARK_COMPLETE_INSTRUCTION);
+    });
+
+    it("uses the LLM config's own override wording instead of the default when set (issue requirement: tunable per LLM config, not hardcoded)", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(SECTION_CONV);
+      resolveLLMConfigMock.mockResolvedValueOnce({
+        id: "llm-config-1",
+        provider: "openrouter",
+        modelName: "test/model",
+        temperature: 0.7,
+        maxCompletionTokens: 1000,
+        credentialId: null,
+        markCompleteInstruction: "CUSTOM STOPPING RULE TEXT FOR THIS ORG",
+      });
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+      });
+
+      const call = streamTextMock.mock.calls[0]![0] as { system: string };
+      expect(call.system).toContain("CUSTOM STOPPING RULE TEXT FOR THIS ORG");
+      expect(call.system).not.toContain(DEFAULT_MARK_COMPLETE_INSTRUCTION);
+    });
+
+    it("does not add the stopping-rule instruction to a tutor-kind conversation's system prompt (nothing to instruct the model about a tool it was never offered)", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(TUTOR_CONV);
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: TUTOR_CONV.id,
+      });
+
+      const call = streamTextMock.mock.calls[0]![0] as { system: string };
+      expect(call.system).not.toContain(DEFAULT_MARK_COMPLETE_INSTRUCTION);
+    });
+
+    // Issue requirements verified together: "Invocation is persisted against
+    // the conversation, with the message that triggered it" and "Students
+    // can keep working after the tool fires -- it must not lock the
+    // conversation." A turn whose response includes a resolved
+    // tool-markSectionComplete part persists via the SAME finalizeAssistantTurn
+    // path every other tool call in this catalog already uses (no bespoke
+    // persistence mechanism), and a second, ordinary message on the same
+    // conversation right afterward still succeeds -- proving the tool firing
+    // left nothing locked or otherwise unusable.
+    it("persists a markSectionComplete tool call as part of the assistant message, and the conversation stays usable for a follow-up turn", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue(SECTION_CONV);
+
+      const res1 = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: SECTION_CONV.id,
+      });
+      expect(res1.status).toBe(200);
+      expect(capturedOnFinish).toBeDefined();
+
+      const toolPart = {
+        type: "tool-markSectionComplete",
+        toolCallId: "call-1",
+        state: "output-available",
+        input: {},
+        output: { status: "suggested" },
+      };
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [toolPart] },
+        finishReason: "tool-calls",
+      });
+
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledTimes(1);
+      const [, , assistantMessage] = finalizeAssistantTurnMock.mock.calls[0]! as [
+        unknown,
+        unknown,
+        { id: string; parts: unknown[] } | null,
+        Record<string, unknown>,
+      ];
+      expect(assistantMessage).not.toBeNull();
+      expect(assistantMessage!.parts).toEqual([toolPart]);
+
+      // Follow-up turn on the SAME conversation: the lock must be
+      // re-acquirable and this new message must reach the model, not be
+      // blocked/409'd by anything the tool call left behind.
+      streamTextMock.mockClear();
+      getLastMessagesMock.mockResolvedValue([
+        { id: "resp-1", role: "assistant", parts: [toolPart], clientMessageId: null },
+        { id: "user-1", role: "user", parts: [{ type: "text", text: "hi there" }], clientMessageId: "client-1" },
+      ]);
+      const res2 = await postChat(buildApp(fakeAuthContext()), {
+        messages: [{ id: "client-2", role: "user", parts: [{ type: "text", text: "one more question" }] }],
+        conversationId: SECTION_CONV.id,
+      });
+
+      expect(res2.status).toBe(200);
+      expect(streamTextMock).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+// #80: requestHint -- the secondary, model-mediated hint path (see
+// TOOLS.requestHint's own doc comment for why it's secondary, and
+// isHintRequest's tests above for the primary one). Same testing posture as
+// TOOLS.executeRCode above: schema shape + execute()'s own contract, not a
+// full model round-trip.
+describe("TOOLS.requestHint (#80)", () => {
+  it("is registered in the tool catalog streamText is called with", () => {
+    expect(TOOLS.requestHint).toBeDefined();
+  });
+
+  it("takes no arguments -- an empty object schema, rejecting unknown properties", () => {
+    const schema = (TOOLS.requestHint!.inputSchema as { jsonSchema: Record<string, unknown> }).jsonSchema;
+    expect(schema.properties).toEqual({});
+    expect(schema.additionalProperties).toBe(false);
+  });
+
+  it("delegates to recordHintRequest with the threaded context, for a real section conversation", async () => {
+    recordHintRequestMock.mockReset().mockResolvedValue({ status: "hint_provided", remainingHints: 4, deduped: false });
+    const execute = TOOLS.requestHint!.execute as (
+      input: Record<string, never>,
+      options: { experimental_context?: unknown },
+    ) => Promise<unknown>;
+    const fakeDb = {};
+    const result = await execute(
+      {},
+      {
+        experimental_context: {
+          db: fakeDb,
+          orgScope: "org-a",
+          conversationId: "conv-1",
+          sectionId: "sec-1",
+          studentId: "u1",
+          promptTemplateId: "tpl-1",
+        },
+      },
+    );
+    expect(recordHintRequestMock).toHaveBeenCalledWith(fakeDb, "org-a", {
+      conversationId: "conv-1",
+      sectionId: "sec-1",
+      studentId: "u1",
+      promptTemplateId: "tpl-1",
+    });
+    expect(result).toEqual({ status: "hint_provided", remainingHints: 4 });
+  });
+});
+
+// #168: markSectionComplete -- the tutor stopping-rule tool. Same testing
+// posture as TOOLS.executeRCode/TOOLS.requestHint above: schema shape +
+// execute()'s own contract, not a full model round-trip.
+describe("TOOLS.markSectionComplete (#168)", () => {
+  it("is registered in the tool catalog streamText is called with", () => {
+    expect(TOOLS.markSectionComplete).toBeDefined();
+  });
+
+  it("takes no arguments -- an empty object schema, rejecting unknown properties (no confidence/reasoning parameter, per the issue's own explicit design guidance)", () => {
+    const schema = (TOOLS.markSectionComplete!.inputSchema as { jsonSchema: Record<string, unknown> }).jsonSchema;
+    expect(schema.properties).toEqual({});
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.required ?? []).toEqual([]);
+  });
+
+  it("execute() resolves to a sentinel -- no DB write, no submission side effect (a pure display tool, like showDefinition/executeRCode)", async () => {
+    const execute = TOOLS.markSectionComplete!.execute as (input: Record<string, never>) => Promise<unknown>;
+    const result = await execute({});
+    expect(result).toEqual({ status: "suggested" });
+  });
+});
+
+// #168: toolsForConversation is the actual mechanism that makes
+// section-kind-only gating real -- a genuinely different `tools`
+// object/subset per request, not just TOOLS.markSectionComplete's own
+// shape above (which alone would say nothing about whether the model ever
+// sees it on a tutor-kind conversation).
+describe("toolsForConversation (#168)", () => {
+  it("includes markSectionComplete and requestHint for a section-kind conversation (non-null sectionId)", () => {
+    const tools = toolsForConversation("section-1");
+    expect(tools.markSectionComplete).toBeDefined();
+    expect(tools.requestHint).toBeDefined();
+  });
+
+  it("withholds both markSectionComplete and requestHint entirely for a tutor-kind conversation (null sectionId) -- not merely a hopeful prompt instruction", () => {
+    const tools = toolsForConversation(null);
+    expect(tools.markSectionComplete).toBeUndefined();
+    expect(tools.requestHint).toBeUndefined();
+    expect(Object.keys(tools)).not.toContain("markSectionComplete");
+    expect(Object.keys(tools)).not.toContain("requestHint");
+  });
+
+  it("never withholds showDefinition/executeRCode, regardless of kind -- both are meaningful on either conversation kind", () => {
+    for (const sectionId of ["section-1", null]) {
+      const tools = toolsForConversation(sectionId);
+      expect(tools.showDefinition).toBeDefined();
+      expect(tools.executeRCode).toBeDefined();
+    }
+  });
+
+  // Final-review fix wave, finding 1 (hint double-grant, #80): the second,
+  // independent gating axis this function grew to fix the bug -- see this
+  // function's own doc comment (chat.ts) for the full rationale.
+  describe("withholdRequestHint option (#80 finding: hint double-grant)", () => {
+    it("omits requestHint when withholdRequestHint is true, for a section-kind conversation", () => {
+      const tools = toolsForConversation("section-1", { withholdRequestHint: true });
+      expect(tools.requestHint).toBeUndefined();
+      expect(Object.keys(tools)).not.toContain("requestHint");
+    });
+
+    it("leaves every other tool untouched when withholding requestHint", () => {
+      const tools = toolsForConversation("section-1", { withholdRequestHint: true });
+      expect(tools.showDefinition).toBeDefined();
+      expect(tools.executeRCode).toBeDefined();
+      expect(tools.markSectionComplete).toBeDefined();
+    });
+
+    it("keeps requestHint when withholdRequestHint is false or omitted", () => {
+      expect(toolsForConversation("section-1", { withholdRequestHint: false }).requestHint).toBeDefined();
+      expect(toolsForConversation("section-1").requestHint).toBeDefined();
+    });
+
+    it("composes with the existing tutor-kind gating -- both markSectionComplete AND requestHint can be withheld on the same call", () => {
+      const tools = toolsForConversation(null, { withholdRequestHint: true });
+      expect(tools.markSectionComplete).toBeUndefined();
+      expect(tools.requestHint).toBeUndefined();
+      expect(tools.showDefinition).toBeDefined();
     });
   });
 });

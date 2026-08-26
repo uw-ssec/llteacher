@@ -16,6 +16,7 @@ import { Composer } from "./Composer";
 import { CodeBlock } from "./CodeBlock";
 import { EditableTitle } from "./EditableTitle";
 import { Button } from "./Button";
+import { renderTextWithCode, type RCodeResult } from "../generative";
 
 /** The student-facing copy for a failed turn.
  *
@@ -286,6 +287,35 @@ export interface ConversationViewProps {
    *  component's original (conflated) behavior for any caller that
    *  doesn't pass it. */
   isStopActionable?: boolean;
+  /** #28: bound to the app layer's own useRExecution().run -- lets a
+   *  student's own message render an R-fenced code block (see
+   *  renderTextWithCode's doc comment for why detection happens on the
+   *  raw string here, not upstream: StudentMessageData.content stays a
+   *  plain string because the composer's history-recall feature needs the
+   *  literal text back, not a React tree) as a runnable CodeExecution card
+   *  instead of inert text. `undefined` degrades to a read-only code block
+   *  with no Run affordance -- matches CodeExecution's own graceful
+   *  degradation when a caller hasn't wired R execution up at all. */
+  onRunRCode?: (code: string) => Promise<RCodeResult>;
+  /** #29: omits the Composer entirely rather than merely disabling it.
+   *  Every other prop on this component already degrades to a static,
+   *  useChat-free render when omitted (onSendMessage/isSending/onStop/etc.
+   *  are all optional) -- but the Composer's own textarea always rendered
+   *  regardless, which is a visible edit affordance even at
+   *  isSending=true/readOnly (the instructor transcript viewer's own
+   *  "copy-safe: no edit affordances" requirement, which a merely-disabled
+   *  textbox does not satisfy). Defaults to false, so every existing caller
+   *  (the student-facing section/tutor chats) is byte-for-byte unaffected --
+   *  this is an additive opt-in, not a behavior change to the component's
+   *  default shape. */
+  hideComposer?: boolean;
+  /** #80: forwarded straight to Composer -- see its own doc comment.
+   *  `undefined` renders no hint affordance at all, matching every other
+   *  optional prop's degrade-to-nothing convention on this component. */
+  onRequestHint?: () => void;
+  /** Forwarded straight to Composer's own `hintDisabled` -- see its doc
+   *  comment. Ignored when `onRequestHint` is unset. */
+  hintDisabled?: boolean;
 }
 
 /* -- Component ------------------------------------------------------------- */
@@ -304,6 +334,10 @@ export function ConversationView({
   headerActions,
   onStop,
   isStopActionable = isSending,
+  onRunRCode,
+  hideComposer = false,
+  onRequestHint,
+  hintDisabled = false,
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -503,7 +537,7 @@ export function ConversationView({
               if (msg.role === "student") {
                 return (
                   <Message key={msg.id} role="student">
-                    {msg.content}
+                    {renderTextWithCode(msg.content, { onRun: onRunRCode, keyPrefix: msg.id })}
                   </Message>
                 );
               }
@@ -620,15 +654,23 @@ export function ConversationView({
       {/* Sticky composer -- #144: disabled while a send is genuinely in
           flight, so Enter mid-stream can't fire a second, overlapping
           send (see isSending's doc comment above for why "error" is
-          deliberately excluded). */}
-      <Composer
-        value={draft}
-        onChange={setDraft}
-        onSubmit={handleSubmit}
-        disabled={isSending}
-        history={composerHistory}
-        autoFocus={autoFocusComposer}
-      />
+          deliberately excluded).
+
+          #29: omitted entirely when hideComposer -- see that prop's own
+          doc comment for why a merely-disabled textarea isn't good enough
+          for a copy-safe, no-edit-affordances surface. */}
+      {!hideComposer && (
+        <Composer
+          value={draft}
+          onChange={setDraft}
+          onSubmit={handleSubmit}
+          disabled={isSending}
+          history={composerHistory}
+          autoFocus={autoFocusComposer}
+          onRequestHint={onRequestHint}
+          hintDisabled={hintDisabled}
+        />
+      )}
     </div>
   );
 }

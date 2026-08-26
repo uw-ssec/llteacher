@@ -31,12 +31,23 @@ interface SeedUserSpec {
   role: "instructor" | "student";
 }
 
+// example.com (not test.com): WorkOS's own documented safe-test-domain
+// convention -- "WorkOS accepts these addresses but never sends email to
+// them" (https://workos.com/docs/authkit/environments). A seeded account
+// only becomes usable for real, interactive testing once someone actually
+// signs up through WorkOS's own AuthKit as this exact email (see this
+// file's own module doc comment and README.md's "Seeding a dev dataset"
+// section on the claim-by-blind-index mechanism) -- test.com has no such
+// carve-out, so AuthKit's normal email+password flow tries to send it a
+// real verification email that can never be delivered, permanently
+// blocking sign-up. example.com/.org/.net are the IANA-reserved domains
+// WorkOS explicitly recognizes and skips delivery for instead.
 const SEED_USERS: SeedUserSpec[] = [
-  { handle: "teacher1", email: "teacher1@test.com", displayName: "John Doe", role: "instructor" },
-  { handle: "teacher2", email: "teacher2@test.com", displayName: "Jane Smith", role: "instructor" },
-  { handle: "student1", email: "student1@test.com", displayName: "Alice Johnson", role: "student" },
-  { handle: "student2", email: "student2@test.com", displayName: "Bob Wilson", role: "student" },
-  { handle: "student3", email: "student3@test.com", displayName: "Carol Brown", role: "student" },
+  { handle: "teacher1", email: "teacher1@example.com", displayName: "John Doe", role: "instructor" },
+  { handle: "teacher2", email: "teacher2@example.com", displayName: "Jane Smith", role: "instructor" },
+  { handle: "student1", email: "student1@example.com", displayName: "Alice Johnson", role: "student" },
+  { handle: "student2", email: "student2@example.com", displayName: "Bob Wilson", role: "student" },
+  { handle: "student3", email: "student3@example.com", displayName: "Carol Brown", role: "student" },
 ];
 
 // #317 review, #325: relocated verbatim from lib/prompts.ts's
@@ -215,15 +226,26 @@ async function seed() {
   const membershipIds: Record<string, string> = {};
   for (const spec of SEED_USERS) {
     const normalizedEmail = IdentityCipher.normalizeEmail(spec.email);
-    const [user] = await db
+    const emailBlindIndex = await cipher.computeBlindIndex(normalizedEmail);
+    // reset()'s user-delete is scoped to isPending=true by design ("an org
+    // being deleted must never delete real user rows") -- so a seed user
+    // that's already been CLAIMED via a real WorkOS login survives --reset
+    // untouched, and inserting a fresh row for the same email blind index
+    // would collide on users_email_blind_index_uq. onConflictDoNothing +
+    // re-select reuses that claimed row's real id instead of erroring, so
+    // --reset stays safe to run again after someone has actually logged in
+    // as a seed account -- the whole point of these being real, testable
+    // WorkOS identities rather than throwaway fixture rows.
+    await db
       .insert(schema.users)
       .values({
         email: await cipher.encryptString(spec.email),
-        emailBlindIndex: await cipher.computeBlindIndex(normalizedEmail),
+        emailBlindIndex,
         displayName: await cipher.encryptString(spec.displayName),
         isPending: true, // claimable on first real WorkOS login
       })
-      .returning();
+      .onConflictDoNothing({ target: schema.users.emailBlindIndex });
+    const [user] = await db.select().from(schema.users).where(eq(schema.users.emailBlindIndex, emailBlindIndex));
     userIds[spec.handle] = user.id;
 
     const [membership] = await db
@@ -300,6 +322,16 @@ async function seed() {
         title: hwSpec.title,
         description: `${hwSpec.title} homework.`,
         dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        // #94: publishedAt/releasedAt both null (the schema's own default)
+        // means "draft" -- deriveHomeworkStatus filters that out of the
+        // student list entirely (repositories/homeworks.ts's
+        // UNRELEASED_STATUSES). This seed exists to exercise the real
+        // student round trip (the conversations/submissions created below
+        // are for exactly that), so publishedAt is set explicitly here;
+        // releasedAt stays null (released immediately on publish, same as
+        // the admin console's own default when an instructor doesn't pick
+        // a future release date).
+        publishedAt: new Date(),
       })
       .returning();
 
