@@ -283,7 +283,12 @@ describe("GradingPanel audit fixes", () => {
 
     // Editing anything unlocks it again: a regrade is a supported act.
     fireEvent.change(screen.getByLabelText("Feedback"), { target: { value: "Revised." } });
-    expect(screen.getByRole("button", { name: /Save a new grade/i })).toBeTruthy();
+    // waitFor, not a bare get: "Save a new grade" needs BOTH local edit state
+    // and `current`, which only exists once the post-save GET refetch lands.
+    // The "Saved" wait above tracks `savedSnapshot` -- set synchronously when
+    // the POST resolves -- so it does not imply the refetch has flushed. A
+    // synchronous assertion here passed locally and raced on CI.
+    await waitFor(() => expect(screen.getByRole("button", { name: /Save a new grade/i })).toBeTruthy());
   });
 
   // Review follow-up (#366 review): grading winning a gradeable cell's click
