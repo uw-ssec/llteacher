@@ -123,7 +123,6 @@ const devApiProxy: Plugin = {
         }
         res.end();
       } catch (err) {
-        // eslint-disable-next-line no-console
         console.error("[dev-api-proxy] error:", err);
         res.statusCode = 500;
         res.setHeader("Content-Type", "application/json");

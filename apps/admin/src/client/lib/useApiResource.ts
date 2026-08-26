@@ -72,7 +72,6 @@ export function useApiResource<T>(
 
   // The caller passes a fresh closure every render; `deps` is what actually
   // decides when to refetch, exactly as useEffect's own contract works.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   const run = useCallback(load, deps);
 
   // Read through a ref so a caller can pass inline closures for these

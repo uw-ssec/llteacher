@@ -666,7 +666,6 @@ export default function App() {
       setTutorHistoryHasMore(history.hasMore);
       selectTutorConversation(id, history.messages);
     } catch (err) {
-      // eslint-disable-next-line no-console
       console.error("[App] tutor conversation history fetch failed", err);
       if (latestTutorSelectionRef.current !== id) return; // superseded while in flight -- discard
       setTutorHydrationError({
@@ -789,7 +788,6 @@ export default function App() {
         prev.map((s) => (s.number === sectionNumber ? { ...s, status: "current" as const } : s)),
       );
     } catch (err) {
-      // eslint-disable-next-line no-console
       console.error("[App] failed to eagerly start section conversation", err);
       // Left as the empty state loadSectionConversation already set -- not
       // surfaced as sectionHydrationError (which disables the composer):
@@ -819,7 +817,6 @@ export default function App() {
       setSectionMessages(history.messages);
       setSectionHistoryHasMore(history.hasMore);
     } catch (err) {
-      // eslint-disable-next-line no-console
       console.error("[App] section conversation history fetch failed", err);
       if (latestSectionConversationRef.current !== targetConversationId) return; // superseded -- discard
       setSectionHydrationError({
@@ -848,7 +845,6 @@ export default function App() {
           setSectionHistoryHasMore(history.hasMore);
         }
       } catch (err) {
-        // eslint-disable-next-line no-console
         console.error("[App] failed to hydrate section greeting after creation", err);
       }
     })();
@@ -900,7 +896,6 @@ export default function App() {
         setHintLimit(data.limit);
       })
       .catch((err) => {
-        // eslint-disable-next-line no-console
         console.error("[App] failed to load hint count", err);
       });
   }, [courseId, currentSectionId]);
@@ -1249,7 +1244,6 @@ export default function App() {
       setJustSubmittedSection(sectionNumber);
       setTimeout(() => setJustSubmittedSection(null), 800);
     } catch (err) {
-      // eslint-disable-next-line no-console
       console.error("[App] section submit failed", err);
     }
   };
@@ -1310,7 +1304,6 @@ export default function App() {
       await loadSectionConversation(sectionNumber, result.conversation.id);
       setRestartDialogOpen(false);
     } catch (err) {
-      // eslint-disable-next-line no-console
       console.error("[App] section restart failed", err);
       setRestartError("Something went wrong restarting this section. Please try again.");
     } finally {

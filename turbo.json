@@ -28,9 +28,6 @@
       "outputs": ["coverage/**"],
       "env": ["DATABASE_URL", "ENCRYPTION_KEY", "BLIND_INDEX_KEY"]
     },
-    "lint": {
-      "outputs": []
-    },
     "clean": {
       "cache": false
     }

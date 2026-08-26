@@ -130,7 +130,6 @@ export function Composer({
   // #235: run once on mount only (empty deps) -- a later autoFocus prop
   // change must not steal focus back from wherever the user has since
   // moved it.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (autoFocus) textareaRef.current?.focus();
   }, []);

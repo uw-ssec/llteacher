@@ -100,7 +100,6 @@ export const { AuthProvider, useAuth } = createAuthProvider<{
     if (raw?.role != null) {
       const parsed = parseCourseRole(raw.role);
       if (!parsed) {
-        // eslint-disable-next-line no-console
         console.warn(`[AuthProvider] /api/profile returned an unrecognized role: ${String(raw.role)}`);
       }
       role = parsed;
@@ -110,7 +109,6 @@ export const { AuthProvider, useAuth } = createAuthProvider<{
       .map((c) => parseCourse(c, role))
       .filter((c): c is CourseOption => c !== null);
     if (courses.length !== rawCourses.length) {
-      // eslint-disable-next-line no-console
       console.warn(
         `[AuthProvider] /api/profile returned ${rawCourses.length - courses.length} malformed course entr(ies); dropped`,
       );

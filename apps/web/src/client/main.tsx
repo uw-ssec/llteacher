@@ -17,7 +17,6 @@ import "@llteacher/ui/styles.css";
    filed about. */
 function RouteErrorBoundary() {
   const error = useRouteError();
-  // eslint-disable-next-line no-console
   console.error("[RouteErrorBoundary] caught a route render error", error);
   // #298: this component only ever mounts as a route's errorElement -- so
   // mounting itself IS "the error just appeared," unlike ErrorBoundary
