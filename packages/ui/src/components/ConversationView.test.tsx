@@ -629,3 +629,193 @@ describe("ConversationView scroll behaviour (#278)", () => {
     expect(written).toEqual([]);
   });
 });
+
+/* --------------------------------------------------------------------------
+   #288: disclosing the tutor's context window.
+
+   The tutor forwards only a trailing window to the model while this
+   component renders the full fetched history. Before this, nothing on
+   screen distinguished "the tutor cannot see that turn" from "the tutor
+   ignored me" -- chat.ts's own comment called the silent drop "a graceful
+   degradation (the student can still reference them in the visible UI
+   transcript)", and that parenthetical was exactly the bug.
+   -------------------------------------------------------------------------- */
+describe("ConversationView context window disclosure (#288)", () => {
+  const msgs = (n: number): MessageData[] =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `m${i}`,
+      role: (i % 2 === 0 ? "student" : "ai") as "student" | "ai",
+      content: `message ${i}`,
+    }));
+
+  const boundary = () => document.querySelector(".conversation-context-boundary");
+
+  it("draws no boundary when every message on screen is inside the window", () => {
+    render(
+      <ConversationView breadcrumb="b" messages={msgs(10)} onSendMessage={() => {}} contextWindowSize={40} />,
+    );
+    expect(boundary()).toBeNull();
+  });
+
+  it("draws no boundary at exactly the window size -- nothing has been dropped yet", () => {
+    render(
+      <ConversationView breadcrumb="b" messages={msgs(40)} onSendMessage={() => {}} contextWindowSize={40} />,
+    );
+    expect(boundary()).toBeNull();
+  });
+
+  it("draws the boundary once the transcript outgrows the window", () => {
+    render(
+      <ConversationView breadcrumb="b" messages={msgs(41)} onSendMessage={() => {}} contextWindowSize={40} />,
+    );
+    expect(boundary()).not.toBeNull();
+    expect(screen.getByText(/memory starts here/i)).toBeTruthy();
+  });
+
+  it("places the boundary immediately above the oldest message still in context", () => {
+    // 45 messages, window 40 -> the model sees m5..m44, so the line belongs
+    // directly above m5. Asserting on POSITION, not just presence: a
+    // boundary drawn in the wrong place is worse than none, because it
+    // states a specific and false claim about what the tutor read.
+    const { container } = render(
+      <ConversationView breadcrumb="b" messages={msgs(45)} onSendMessage={() => {}} contextWindowSize={40} />,
+    );
+    const log = container.querySelector(".conversation-log")!;
+    const children = Array.from(log.children);
+    const boundaryIndex = children.findIndex((el) => el.classList.contains("conversation-context-boundary"));
+    expect(boundaryIndex).toBeGreaterThanOrEqual(0);
+
+    // Everything before the line is out of context; the first thing after
+    // it is the oldest message the tutor can see.
+    const after = children[boundaryIndex + 1];
+    expect(after?.textContent).toContain("message 5");
+    const before = children[boundaryIndex - 1];
+    expect(before?.textContent).toContain("message 4");
+  });
+
+  it("exposes the boundary as a labelled separator, not decoration", () => {
+    render(
+      <ConversationView breadcrumb="b" messages={msgs(41)} onSendMessage={() => {}} contextWindowSize={40} />,
+    );
+    const sep = screen.getByRole("separator", { name: /what the tutor can see/i });
+    expect(sep).toBeTruthy();
+  });
+
+  it("draws nothing when no window is declared -- a read-only transcript forgets nothing", () => {
+    // The instructor transcript viewer renders history with no model behind
+    // it; claiming a memory boundary there would be false.
+    render(<ConversationView breadcrumb="b" messages={msgs(500)} onSendMessage={() => {}} />);
+    expect(boundary()).toBeNull();
+  });
+
+  it("still renders every message, in order, alongside the boundary", () => {
+    // The disclosure must not become a truncation: the student keeps their
+    // whole transcript, they are just told which part the tutor shares.
+    const { container } = render(
+      <ConversationView breadcrumb="b" messages={msgs(45)} onSendMessage={() => {}} contextWindowSize={40} />,
+    );
+    const log = container.querySelector(".conversation-log")!;
+    expect(screen.getByText("message 0")).toBeTruthy();
+    expect(screen.getByText("message 44")).toBeTruthy();
+    // 45 messages + 1 boundary
+    expect(log.children.length).toBe(46);
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #387: completion must not override a reader's scroll position.
+
+   The follow-during-streaming effect correctly leaves a scrolled-up student
+   alone. `isSending` was then a dependency of the length-keyed scroll
+   effect, so the true->false transition at stream end scrolled to the
+   bottom unconditionally -- undoing that protection at the one moment the
+   student was most likely to still be reading.
+   -------------------------------------------------------------------------- */
+describe("ConversationView completion scroll (#387)", () => {
+  const msg = (id: string, content: string): MessageData => ({ id, role: "ai", content });
+
+  function setReducedMotion(reduce: boolean) {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: reduce && query === "(prefers-reduced-motion: reduce)",
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+  }
+
+  /** jsdom reports 0 for every layout metric, so isNearBottom() is
+   *  vacuously true by default. Overriding these is the only way to model a
+   *  student who has scrolled away from the bottom. */
+  function placeViewport(el: HTMLElement, { scrollTop, scrollHeight, clientHeight }: Record<string, number>) {
+    Object.defineProperty(el, "scrollTop", { get: () => scrollTop, set: () => {}, configurable: true });
+    Object.defineProperty(el, "scrollHeight", { get: () => scrollHeight, configurable: true });
+    Object.defineProperty(el, "clientHeight", { get: () => clientHeight, configurable: true });
+  }
+
+  beforeEach(() => setReducedMotion(false));
+
+  it("leaves a scrolled-up reader where they are when the turn completes", () => {
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollSpy;
+    const messages = [msg("m1", "a"), msg("m2", "b")];
+    const { container, rerender } = render(
+      <ConversationView breadcrumb="b" messages={messages} onSendMessage={() => {}} isSending={true} />,
+    );
+    const scroller = container.querySelector(".conversation-messages") as HTMLElement;
+    // Far from the bottom: a deliberate scroll up to reread an earlier turn.
+    placeViewport(scroller, { scrollTop: 0, scrollHeight: 5000, clientHeight: 500 });
+    scrollSpy.mockClear();
+
+    // Turn finishes. Same messages -- the reply was already rendered.
+    rerender(
+      <ConversationView breadcrumb="b" messages={messages} onSendMessage={() => {}} isSending={false} />,
+    );
+
+    expect(scrollSpy).not.toHaveBeenCalled();
+  });
+
+  it("still settles at the bottom for a reader who never left it", () => {
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollSpy;
+    const messages = [msg("m1", "a"), msg("m2", "b")];
+    const { container, rerender } = render(
+      <ConversationView breadcrumb="b" messages={messages} onSendMessage={() => {}} isSending={true} />,
+    );
+    const scroller = container.querySelector(".conversation-messages") as HTMLElement;
+    placeViewport(scroller, { scrollTop: 4500, scrollHeight: 5000, clientHeight: 500 });
+    scrollSpy.mockClear();
+
+    rerender(
+      <ConversationView breadcrumb="b" messages={messages} onSendMessage={() => {}} isSending={false} />,
+    );
+
+    expect(scrollSpy).toHaveBeenCalled();
+  });
+
+  it("still scrolls a scrolled-up reader for a genuinely new message", () => {
+    // The unconditional triggers are deliberately kept: new content the
+    // student has not seen, and the error row that carries the only
+    // recovery control, must both reach the viewport.
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollSpy;
+    const { container, rerender } = render(
+      <ConversationView breadcrumb="b" messages={[msg("m1", "a")]} onSendMessage={() => {}} />,
+    );
+    const scroller = container.querySelector(".conversation-messages") as HTMLElement;
+    placeViewport(scroller, { scrollTop: 0, scrollHeight: 5000, clientHeight: 500 });
+    scrollSpy.mockClear();
+
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[msg("m1", "a"), msg("m2", "b")]}
+        onSendMessage={() => {}}
+      />,
+    );
+
+    expect(scrollSpy).toHaveBeenCalled();
+  });
+});
