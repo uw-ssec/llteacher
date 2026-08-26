@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { useState } from "react";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ErrorBoundary } from "./ErrorBoundary";
 
@@ -180,21 +180,41 @@ describe("ErrorBoundary retry policy (#310)", () => {
     spy.mockRestore();
   });
 
-  it("keeps the retry available when it actually worked", async () => {
+  it("gives a later, unrelated error its own retry after an earlier one recovered (#396)", async () => {
+    /* The previous version of this test rendered a harness with a `fix`
+       button and never clicked it -- it asserted the retry exists on a
+       FIRST failure, which the test above already covers, and never
+       performed a successful retry at all. Its name claimed a scenario its
+       body did not execute, which is why #396 survived a test written
+       specifically around this behaviour.
+
+       This one runs the whole cycle: throw, retry, recover, throw again. */
     const spy = suppressConsoleError();
+    let setBrokenExternal!: (v: boolean) => void;
     function Harness() {
       const [broken, setBroken] = useState(true);
+      setBrokenExternal = setBroken;
       return (
         <ErrorBoundary>
           <Bomb shouldThrow={broken} />
-          <button type="button" onClick={() => setBroken(false)}>
-            fix
-          </button>
         </ErrorBoundary>
       );
     }
     render(<Harness />);
     expect(screen.getByRole("button", { name: /Try again/ })).toBeTruthy();
+
+    // Make the retry succeed, then take it.
+    act(() => setBrokenExternal(false));
+    await userEvent.click(screen.getByRole("button", { name: /Try again/ }));
+    expect(screen.getByText("fine")).toBeTruthy();
+
+    // A later, independent failure.
+    act(() => setBrokenExternal(true));
+
+    // It must get its own first retry -- the earlier successful one is not
+    // evidence that trying again cannot work.
+    expect(screen.getByRole("button", { name: /Try again/ })).toBeTruthy();
+    expect(screen.getByText(/If trying again doesn't help/)).toBeTruthy();
     spy.mockRestore();
   });
 

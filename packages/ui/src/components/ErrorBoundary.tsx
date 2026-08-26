@@ -87,6 +87,25 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     if (!prevState.error && this.state.error && !this.props.fallback) {
       this.fallbackRef.current?.focus();
     }
+
+    /* #396: a retry that WORKED must not count against the next, unrelated
+       error. `reset` sets `retried`, and componentDidCatch only cleared it
+       when the retry failed -- so after any successful recovery the flag
+       stayed true for the boundary's lifetime, and the next error was
+       classified as a failed retry before the student had tried anything.
+       Its fallback appeared with no retry button and copy saying trying
+       again had not helped.
+
+       That inverts the fix: #386 exists to stop offering a retry that
+       cannot work, and this withheld one that would.
+
+       The error-to-success edge is the signal. A retry that throws again
+       never commits it -- React re-enters the error state instead -- so the
+       failed-retry classification still works. */
+    if (prevState.error && !this.state.error) {
+      this.retried = false;
+      if (this.state.retryFailed) this.setState({ retryFailed: false });
+    }
   }
 
   /** Clears the caught error and lets `children` render fresh. This does
