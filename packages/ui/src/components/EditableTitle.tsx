@@ -181,7 +181,11 @@ export function EditableTitle({
      negative now that the native clamp is gone -- that is the point: an
      over-long paste is visible and refused on save instead of silently
      truncated into something the student did not write. */
-  const remaining = maxLength - pendingValue.length;
+  /* #395: the TRIMMED length, matching what commitSave validates. Counting
+     the raw draft meant a 10-character title followed by three spaces read
+     "3 over" in red and then saved successfully -- guidance contradicting
+     the rule it exists to describe. */
+  const remaining = maxLength - pendingValue.trim().length;
   const showCounter = remaining <= COUNTER_VISIBLE_WITHIN;
 
   const commitSave = async () => {
@@ -328,9 +332,15 @@ export function EditableTitle({
           takes the hint route the composer already established for its own
           Enter binding. aria-hidden because the same information reaches
           assistive tech through the input's own label and behaviour;
-          announcing keycaps on focus would be noise. */}
+          announcing keycaps on focus would be noise.
+
+          #394: the first version of this said only "enter ↵ · esc to
+          cancel" -- disclosing the two bindings a user could already guess
+          and omitting the one #310 actually named as surprising. Clicking
+          away commits, which is not what most editors do, so it is the
+          binding that most needs saying. */}
       <span className="editable-title__hint" aria-hidden="true">
-        enter ↵ · esc to cancel
+        enter ↵ or click away saves · esc cancels
       </span>
       {showCounter && (
         <span

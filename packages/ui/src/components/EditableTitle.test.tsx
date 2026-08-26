@@ -366,9 +366,36 @@ describe("EditableTitle limit and keybinding disclosure (#310)", () => {
   it("discloses the keybindings, including that blur saves", async () => {
     render(<EditableTitle value="Original" onSave={vi.fn()} />);
     await userEvent.click(screen.getByRole("button", { name: "Rename: Original" }));
-    // Enter saves, Escape cancels, blur also saves -- three conventions
-    // that had no discoverable surface at all.
+    // Enter saves, Escape cancels, blur ALSO saves. #394: the first version
+    // of this test asserted only the first two -- the two a user could
+    // already guess -- so it passed against a hint that omitted the one
+    // #310 named as surprising. Clicking away committing a half-edited
+    // title is the binding that most needs saying, so it is asserted first.
+    expect(screen.getByText(/click away/i)).toBeTruthy();
     expect(screen.getByText(/enter/i)).toBeTruthy();
-    expect(screen.getByText(/esc to cancel/i)).toBeTruthy();
+    expect(screen.getByText(/esc/i)).toBeTruthy();
+  });
+
+  it("counts the trimmed value, matching what validation enforces (#395)", async () => {
+    render(<EditableTitle value="Original" onSave={vi.fn()} maxLength={10} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Original" }));
+    const input = screen.getByLabelText("Edit title") as HTMLInputElement;
+    await userEvent.clear(input);
+    // Exactly at the limit, plus trailing whitespace that trim() removes.
+    await userEvent.type(input, "0123456789   ");
+    // Previously read "3 over" in red and then saved successfully.
+    expect(screen.queryByText(/over$/)).toBeNull();
+    expect(screen.getByText("0 left")).toBeTruthy();
+  });
+
+  it("still refuses a title that is over the limit after trimming (#395)", async () => {
+    const onSave = vi.fn();
+    render(<EditableTitle value="Original" onSave={onSave} maxLength={10} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Original" }));
+    const input = screen.getByLabelText("Edit title") as HTMLInputElement;
+    await userEvent.clear(input);
+    await userEvent.type(input, "  0123456789abc  {Enter}");
+    expect(onSave).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert").textContent).toMatch(/10 characters or fewer/i);
   });
 });
