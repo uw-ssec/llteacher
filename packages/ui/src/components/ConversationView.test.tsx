@@ -283,8 +283,10 @@ describe("ConversationView headerActions (#248)", () => {
 });
 
 /* #274: a Stop affordance for a turn that's merely slow, not yet timed out
-   server-side -- only visible while a send is genuinely outstanding AND the
-   caller actually tracks a useChat instance to stop. */
+   server-side -- only presented while a send is genuinely outstanding AND the
+   caller actually tracks a useChat instance to stop. Since the #274 redesign
+   it is the Stop identity of the composer's trailing action button, whose
+   Send identity is covered here too. */
 describe("ConversationView Stop control (#274)", () => {
   it("renders nothing when onStop is omitted, even while isSending", () => {
     render(<ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={true} />);
@@ -294,25 +296,60 @@ describe("ConversationView Stop control (#274)", () => {
   // #317 review, #327: Stop used to unmount the instant isSending flipped
   // false -- a keyboard user who just activated it had focus dropped to
   // document.body with nothing to restore it (the exact harm #270 already
-  // fixed for the composer). It now stays mounted whenever onStop is set,
-  // merely aria-disabled while nothing is in flight, so focus survives.
-  it("stays mounted (aria-disabled, not removed) when onStop is set but isSending is false", () => {
-    render(
+  // fixed for the composer). #327 patched that by keeping a dedicated Stop
+  // button permanently mounted and merely aria-disabled.
+  //
+  // #274 redesign makes the same guarantee structural instead: Stop and Send
+  // are two identities of ONE never-unmounted button in the composer, so the
+  // focused node survives the transition by construction rather than by a
+  // disabled-state workaround. Asserting on node identity tests the actual
+  // guarantee -- that the element the user is focused on is not destroyed --
+  // which the old "is it still present and aria-disabled" check only proxied.
+  it("keeps the very same button element across the streaming boundary, renaming Stop to Send", () => {
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={true} onStop={() => {}} />,
+    );
+    const during = screen.getByRole("button", { name: "Stop" });
+
+    rerender(
       <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={false} onStop={() => {}} />,
     );
-    const stopButton = screen.getByRole("button", { name: "Stop" }) as HTMLButtonElement;
-    expect(stopButton.disabled).toBe(false);
-    expect(stopButton.getAttribute("aria-disabled")).toBe("true");
+    const after = screen.getByRole("button", { name: "Send" });
+
+    expect(after).toBe(during);
+    expect((after as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("does not call onStop when clicked while aria-disabled (isSending false)", async () => {
+  it("does not call onStop when the trailing action is clicked with nothing in flight", async () => {
     const onStop = vi.fn();
     render(
       <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} isSending={false} onStop={onStop} />,
     );
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "Stop" }));
+    // Not in its Stop identity at all here -- there is nothing to stop.
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Send" }));
     expect(onStop).not.toHaveBeenCalled();
+  });
+
+  // #274 redesign: submission used to be Enter-only, so pointer and touch
+  // users had no way to send a message at all. The trailing action closes
+  // that gap, and shares submitDraft() with the Enter path so the two can
+  // never drift on trimming or history-slot reset.
+  it("sends the trimmed draft when the trailing Send action is clicked", async () => {
+    const onSendMessage = vi.fn();
+    render(<ConversationView breadcrumb="b" messages={[]} onSendMessage={onSendMessage} />);
+    const user = userEvent.setup();
+
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send.getAttribute("aria-disabled")).toBe("true");
+    await user.click(send);
+    expect(onSendMessage).not.toHaveBeenCalled();
+
+    await user.type(screen.getByLabelText("Message input"), "  what is a sample space?  ");
+    expect(send.getAttribute("aria-disabled")).toBeNull();
+    await user.click(send);
+    expect(onSendMessage).toHaveBeenCalledWith("what is a sample space?");
   });
 
   it("renders Stop, not aria-disabled, and calls onStop when clicked, while isSending is true", async () => {

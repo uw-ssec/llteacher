@@ -146,6 +146,43 @@ export default defineConfig({
   build: {
     outDir: "../../dist/client",
     emptyOutDir: true,
+    /* Client-environment ONLY. `build.rollupOptions` at this level is Vite 6's
+       default for EVERY environment, and manualChunks is invalid in an SSR or
+       Worker build -- Rollup hard-fails with either "cannot be included in
+       manualChunks because it is resolved as an external module" or "not
+       supported for output.inlineDynamicImports", depending on whether deps
+       are externalised. It happens to be harmless today only because
+       @cloudflare/vite-plugin never discovers wrangler.jsonc (Vite `root` is
+       src/client) so no worker environment is built, and the real Worker is
+       bundled by `wrangler deploy` outside Vite entirely. The comment at the
+       top of this file states the intent to remove the dev proxy once the
+       Cloudflare plugin handles /api/* end-to-end -- at that moment a
+       top-level manualChunks would break the build with an error naming
+       neither this file nor the client build. Scoped now, while the reason is
+       still written down. */
+  },
+  environments: {
+    client: {
+      build: {
+        rollupOptions: {
+          output: {
+            /* KaTeX is ~290 kB and changes only on dependency upgrade, whereas
+               app code changes every deploy. Left in the main chunk, every
+               deploy invalidates it for every returning student; split out, it
+               is fetched once and cached.
+
+               It stays a STATIC import rather than a lazy one on purpose: the
+               transcript hydrates persisted history on first paint, so lazily
+               loaded KaTeX would render raw \(...\) for a frame -- reproducing
+               the exact bug this was added to fix. Chunking gets the caching
+               win without that flash. */
+            manualChunks: {
+              katex: ["katex", "rehype-katex"],
+            },
+          },
+        },
+      },
+    },
   },
   plugins: [devApiProxy, react(), tailwindcss(), cloudflare()],
 });

@@ -135,10 +135,12 @@
   --radius-lg:   12px;
 
   /* Student message bubble — distinctive asymmetric radius */
-  --radius-msg-student-tl: 16px;
-  --radius-msg-student-tr: 16px;
-  --radius-msg-student-br: 4px;   /* the "pointing" corner */
-  --radius-msg-student-bl: 16px;
+  /* Stepped down from 16px. The asymmetric "pointing" corner is the
+     signature and is untouched; only the pillow comes off the other three. */
+  --radius-msg-student-tl: 10px;
+  --radius-msg-student-tr: 10px;
+  --radius-msg-student-br: 3px;   /* the "pointing" corner */
+  --radius-msg-student-bl: 10px;
 
   /* --------------------------------------------------------------------------
      Layout
@@ -629,7 +631,10 @@ body {
   .sidebar--collapsed .section-item__number,
   .sidebar--collapsed .section-item__title,
   .sidebar--collapsed .hint-history-row__label,
-  .sidebar--collapsed .submit-action__body,
+  /* __body was the removed two-line wrapper; the label is now the direct
+     child, so the collapsed rail has to hide that instead or it renders the
+     full "Submit Section N" text in a 1-icon-wide column. */
+  .sidebar--collapsed .submit-action__label,
   .sidebar--collapsed .sidebar__worker {
     display: none;
   }
@@ -813,7 +818,10 @@ body {
        is already this button's text color (14.76:1) and clears 3:1 as a
        border too, so the dashed rest-state boundary is now actually
        identifiable as a button. */
-    border: 1px dashed var(--color-accent);
+    /* Solid, not dashed. A dashed rounded rectangle is the generic
+       "add new item" placeholder shape; the border colour and its #296
+       contrast rationale above are unchanged, only the stroke style. */
+    border: 1px solid var(--color-accent);
     border-radius: var(--radius-sm);
     color: var(--color-accent);
     font-size: var(--font-size-sm);
@@ -842,19 +850,17 @@ body {
     color: var(--color-error);
   }
 
+  /* Was a centred flex column holding a decorative icon above a centred
+     caption -- the stock empty-state shape. Now one quiet left-aligned line
+     that sits in the same column as the list rows it stands in for, so the
+     rail's left edge stays unbroken whether or not there are conversations. */
   .tutor-sidebar__empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-6) var(--space-2);
-    color: var(--color-text-muted);
-    font-size: var(--font-size-sm);
-    text-align: center;
-  }
-
-  .tutor-sidebar__empty p {
     margin: 0;
+    padding: var(--space-2) var(--space-1) var(--space-4);
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+    line-height: var(--leading-normal);
+    text-wrap: pretty;
   }
 
   .tutor-sidebar__list {
@@ -1314,7 +1320,10 @@ body {
      ------------------------------------------------------------------------- */
   .submit-action {
     display: flex;
-    align-items: flex-start;
+    /* flex-start was carrying the removed two-line body; a single-line label
+       centres against its icon, which also retires the icon's optical-
+       alignment nudge below. */
+    align-items: center;
     gap: 0.4em;
     width: 100%;
     font-family: var(--font-sans);
@@ -1350,7 +1359,6 @@ body {
     display: inline-block;
     flex-shrink: 0;
     color: var(--raw-gold-print);    /* Husky Gold print at rest */
-    margin-block-start: 0.1em;       /* optical alignment to label baseline */
     transition: transform 140ms ease-out, color 140ms ease-out;
   }
 
@@ -1359,30 +1367,8 @@ body {
     color: #FFFFFF;
   }
 
-  /* Two-line typographic body inside the button */
-  .submit-action__body {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2em;
-  }
-
   .submit-action__label {
     line-height: var(--leading-tight);
-  }
-
-  .submit-action__meta {
-    font-family: var(--font-mono);
-    font-size: var(--font-size-xs);   /* 12px */
-    font-weight: var(--weight-normal);
-    font-variant: small-caps;
-    letter-spacing: 0.06em;
-    color: #8B73B5;                   /* faint lavender — same as worker colophon */
-    line-height: 1;
-    transition: color 140ms ease-out;
-  }
-
-  .submit-action:hover .submit-action__meta {
-    color: rgba(255, 255, 255, 0.65);   /* soften the meta line on hover */
   }
 
   /* -------------------------------------------------------------------------
@@ -1393,7 +1379,12 @@ body {
     flex: 1;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    /* `clip`, not `hidden`. An overflow:hidden box is still a scroll
+       container, so anything that programmatically scrolls a descendant into
+       view can scroll THIS box too and slide the composer off its own
+       layout. overflow:clip is not scrollable at all, which makes that class
+       of bug unrepresentable rather than merely fixed at one call site. */
+    overflow: clip;
     /* Entrance fade on load */
     animation: conversation-enter 240ms ease-out both;
   }
@@ -1428,6 +1419,11 @@ body {
     color: var(--color-text-muted);
     font-variant: small-caps;
     margin: 0;
+    /* #248 redesign: flex items default to min-width:auto, so the breadcrumb
+       refused to shrink below its content and pushed .btn--restart into
+       wrapping instead of wrapping itself. It is the element that can afford
+       a second line here; the one-line action is not. */
+    min-width: 0;
   }
 
   /* #248: wraps .breadcrumb + an optional header action (e.g. "Restart
@@ -1669,18 +1665,6 @@ body {
   }
 
   /* -------------------------------------------------------------------------
-     .conversation-stop-row — #274: a Stop affordance above the composer
-     while a turn is genuinely outstanding, so a merely-slow (not yet timed
-     out) response has an escape hatch beyond a full page reload.
-     ------------------------------------------------------------------------- */
-  .conversation-stop-row {
-    display: flex;
-    justify-content: flex-end;
-    padding-inline: var(--space-4);
-    margin-block-start: var(--space-2);
-  }
-
-  /* -------------------------------------------------------------------------
      .error-boundary-fallback — #144: shown in place of a chat column that
      threw during render, instead of white-screening the whole app. See
      packages/ui/src/components/ErrorBoundary.tsx.
@@ -1822,8 +1806,138 @@ body {
 
   /* AI message — no fill, no border. Pure text. */
   .message--ai {
-    margin-block-end: var(--space-8);
+    /* #327: was a flat --space-8. The turn's trailing gap is now SHARED with
+       .message__actions below it (--space-1 margin + a 1.125rem reserved
+       row), so tutor-turn-to-next-speaker still lands at ~38px -- close to
+       the 32px this carried alone, with the copy affordance carved out of
+       the existing rhythm rather than added on top of it. */
+    margin-block-end: var(--space-4);
     position: relative;
+  }
+
+  /* #327: turn grouping. Every message carried the same --space-8 no matter
+     who was speaking, so a tutor answer split across three turns read as
+     three unrelated statements and a speaker change read exactly like a
+     continuation. Consecutive turns from the SAME speaker now close up; a
+     speaker change keeps the full gap. That difference is the entire
+     grouping signal -- deliberately no timestamps, since no timestamp data
+     reaches this component and a rendered one would be invented.
+
+     Expressed with :has() rather than a prop threaded through
+     ConversationView: sibling adjacency is a purely presentational fact
+     about two boxes, CSS can see it directly, and keeping it here means the
+     conversation component goes on owning only conversation semantics. */
+  /* The shared-gap reasoning above holds only when .message__actions is
+     actually rendered, and Message.tsx renders it only when the turn has
+     copyable source text. A turn made purely of a CodeBlock or a generative
+     tool card -- and every streamed turn's first frame -- has no actions row,
+     so the carved-out --space-4 was never restored and the gap silently
+     halved. Restore the full rhythm for those turns.
+
+     Ordered BEFORE the adjacency rules below (equal specificity, later wins)
+     so consecutive same-speaker turns still close up regardless. */
+  .message--ai:not(:has(.message__actions)) {
+    margin-block-end: var(--space-8);
+  }
+
+  .message--ai:has(+ .message--ai) {
+    margin-block-end: 0;
+  }
+
+  .message--student:has(+ .message--student) {
+    margin-block-end: var(--space-2);
+  }
+
+  /* -------------------------------------------------------------------------
+     #327: per-turn actions — copy-to-clipboard on the tutor's turns.
+     There were no hover affordances on a rendered turn at all; a student
+     wanting the worked steps in their notes had to hand-select them out of
+     the transcript.
+     ------------------------------------------------------------------------- */
+  .message__actions {
+    display: flex;
+    align-items: center;
+    /* Height is reserved UNCONDITIONALLY. The button inside only changes
+       opacity, so hovering a turn -- or tabbing into it -- cannot reflow a
+       transcript the student is part-way through reading. */
+    min-block-size: 24px;   /* must equal .message__copy's block-size below */
+    margin-block-start: var(--space-1);
+  }
+
+  /* No border, no fill, no radius, no shadow. This product's vocabulary for
+     a quiet secondary action is a mono small-caps label (cf.
+     .code-block__lang), and a bordered pill here would be precisely the card
+     chrome the rest of this file exists to avoid. Borderless also disposes
+     of the 1.4.11 question outright: there is no component boundary to
+     measure, so --color-border-strong -- 1.48:1 against --color-bg, i.e.
+     failing the 3:1 a boundary owes -- is never even a candidate. */
+  .message__copy {
+    appearance: none;
+    background: none;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    /* Icon-only now, so the type properties the text label needed are gone.
+       24x24 is WCAG 2.5.8's minimum target, carrying a 15px glyph -- the box
+       is bigger than the mark, which is the point. */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    inline-size: 24px;
+    block-size: 24px;
+    margin-inline-start: -4px;   /* optical: align the GLYPH to the text margin */
+    /* #64605A on the #FAFAF7 ground = 5.97:1. As a non-text graphic this only
+       owes 1.4.11's 3:1, so it clears with room. Dark theme rides the same
+       token (#95958D on #1A1A1A = 5.77:1 -- see the token's own #296 note). */
+    color: var(--color-text-muted);
+    cursor: pointer;
+    /* Opacity, not display/mount: an opacity-0 button is still in the tab
+       order, which is what makes this reachable without a pointer at all.
+       The reduced-motion block further down already flattens this
+       transition to 0.01ms via its blanket rule. */
+    opacity: 0;
+    transition: opacity 140ms ease-out, color 140ms ease-out;
+  }
+
+  /* Revealed on pointer hover AND on keyboard focus anywhere in the turn --
+     :focus-within is the half that makes Tab actually surface it. */
+  .message--ai:hover .message__copy,
+  .message--ai:focus-within .message__copy,
+  .message__copy:focus-visible {
+    opacity: 1;
+  }
+
+  .message__copy:hover {
+    color: var(--color-accent);   /* #32006e on #FAFAF7 = 14.8:1 */
+  }
+
+  /* The glyph swap (Copy -> Check / WarningCircle) is the non-colour cue WCAG
+     1.4.1 asks for, so colour here is reinforcement rather than the signal. */
+  .message__copy--copied {
+    color: var(--color-success);
+  }
+
+  .message__copy--failed {
+    color: var(--color-error);
+  }
+
+  /* Both feedback states pin themselves visible: the clipboard write resolves
+     asynchronously and the pointer has often already left the turn by then. */
+  .message__copy--copied {
+    opacity: 1;
+    color: var(--color-accent);   /* 14.8:1 */
+  }
+
+  .message__copy--failed {
+    opacity: 1;
+    color: var(--color-error);    /* #C92A2A on #FAFAF7 = 5.22:1 */
+  }
+
+  /* Touch: no hover exists to reveal it with, so it simply stays on. */
+  @media (hover: none) {
+    .message__copy {
+      opacity: 1;
+    }
   }
 
   .message__ai-body {
@@ -1860,7 +1974,16 @@ body {
   }
 
   .message__student-bubble {
-    background-color: var(--color-surface);
+    /* Was --color-surface (#F2EFE9), which measures 1.097:1 against the page
+       ground -- the bubble was effectively invisible and carried none of the
+       speaker distinction it exists for. --color-accent-faint is the lavender
+       wash, so the student's turn now picks up the purple that is already the
+       student's own chrome throughout the app, against the Heritage Gold that
+       marks the tutor's voice. The hue shift is what makes it read; the
+       hairline below gives it an actual edge, since a lavender this pale is
+       still only ~1.13:1 on luminance alone. */
+    background-color: var(--color-accent-faint);
+    border: 1px solid color-mix(in srgb, var(--color-accent) 14%, transparent);
     border-radius:
       var(--radius-msg-student-tl)
       var(--radius-msg-student-tr)
@@ -1872,6 +1995,13 @@ body {
     font-size: var(--font-size-base);
     line-height: var(--leading-body);
     color: var(--color-text);
+    /* #327: the student's own line breaks survive being sent. Their text is
+       deliberately NOT markdown-rendered (Message.tsx explains why -- an
+       emphasis parser silently eats the asterisks out of "5 * 3 * 2"), so
+       pre-wrap is the whole of the fix: a multi-line question kept its shape
+       in the composer and lost it the instant it landed in the transcript. */
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
   }
 
   /* System message — centered, very small, muted, small caps */
@@ -1887,6 +2017,183 @@ body {
     text-transform: uppercase;
     color: var(--color-text-muted);
     font-variant: small-caps;
+  }
+
+  /* -------------------------------------------------------------------------
+     #327: markdown + math INSIDE a tutor turn.
+
+     Nothing here is new visual vocabulary -- it is the same set of decisions
+     .admin-markdown-preview already makes for instructor-authored section
+     content (quiet leading rule instead of a filled blockquote, ruled tables
+     instead of boxed ones, muted list markers), re-stated at body size for
+     the reading column. Two markdown surfaces in one product that disagree
+     about what a blockquote looks like is a bug in itself: an instructor
+     writes the problem statement in the console and the tutor quotes it
+     straight back into the transcript.
+
+     Fenced code is NOT styled here -- it routes into the existing CodeBlock
+     component (see Message.tsx's `pre` override), so it keeps the hairline
+     top/bottom rules and the mono language label it has everywhere else.
+     ------------------------------------------------------------------------- */
+
+  .message__ai-body {
+    /* An un-spaced URL or a long variable name from a model reply would
+       otherwise widen the turn past the reading measure. */
+    overflow-wrap: break-word;
+  }
+
+  /* Block elements bring their own margins; the turn must not inherit a
+     leading or trailing one, or the grouping rhythm above stops being the
+     thing that sets the gaps. */
+  .message__ai-body > :first-child { margin-block-start: 0; }
+  .message__ai-body > :last-child  { margin-block-end: 0; }
+
+  /* Headings are shifted down a level in the markup (Message.tsx: `#`
+     becomes an <h2>, since ConversationView already owns the page's <h1>),
+     so these classes carry the AUTHORED level, not the tag. */
+  .md-h {
+    margin-block: var(--space-5) var(--space-2);
+    font-family: var(--font-sans);
+    font-weight: var(--weight-semibold);
+    line-height: var(--leading-tight);
+    color: var(--color-text);
+  }
+
+  .md-h--1 {
+    font-size: var(--font-size-lg);
+    /* The hairline is decorative -- it separates prose from prose and
+       identifies no control or state, so 1.4.11's 3:1 is not in play and
+       --color-border is the right weight for it. */
+    padding-block-end: var(--space-2);
+    border-block-end: 1px solid var(--color-border);
+  }
+
+  .md-h--2 { font-size: 1.125rem; }
+  .md-h--3,
+  .md-h--4,
+  .md-h--5,
+  .md-h--6 { font-size: var(--font-size-base); }
+
+  .message__ai-body ul,
+  .message__ai-body ol {
+    margin-block: var(--space-3);
+    padding-inline-start: var(--space-6);
+  }
+
+  .message__ai-body ul { list-style: disc; }
+  .message__ai-body ol { list-style: decimal; }
+
+  .message__ai-body li { margin-block-end: var(--space-1); }
+  .message__ai-body li::marker { color: var(--color-text-muted); }
+
+  /* Nested levels step down and tighten -- a tutor's sub-steps under a step. */
+  .message__ai-body li > ul,
+  .message__ai-body li > ol {
+    margin-block: var(--space-1) 0;
+  }
+
+  .message__ai-body li > ul { list-style: circle; }
+
+  /* A LOOSE list (blank lines between items) wraps each item's text in <p>,
+     which would otherwise pick up the --space-4 paragraph rhythm above and
+     make every bullet read as its own section. */
+  .message__ai-body li p { margin: 0; }
+  .message__ai-body li p + p { margin-block-start: var(--space-2); }
+
+  .message__ai-body blockquote {
+    margin-block: var(--space-4);
+    margin-inline: 0;
+    padding-inline-start: var(--space-4);
+    /* --color-accent, not --color-border-strong. The rule is decorative, so
+       1.4.11 does not bite either way, but this file's established
+       substitution for a border that has to be perceptible is the accent --
+       --color-border-strong measures 1.48:1 against --color-bg. */
+    border-inline-start: 2px solid var(--color-accent);
+    color: var(--color-text-secondary);   /* #6B6760 on #FAFAF7 = 5.38:1 */
+  }
+
+  .message__ai-body hr {
+    margin-block: var(--space-5);
+    border: none;
+    border-block-start: 1px solid var(--color-border);
+  }
+
+  .message__ai-body strong { font-weight: var(--weight-semibold); }
+  .message__ai-body em     { font-style: italic; }
+  .message__ai-body del    { text-decoration: line-through; }
+
+  /* Inline code only. Block code never reaches this rule -- Message.tsx's
+     `pre` override consumes the block-level <code> and renders CodeBlock
+     instead, so there is no double treatment to unpick. */
+  .md-code {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    background-color: var(--color-code-bg);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+
+  .md-link {
+    color: var(--color-accent);   /* 14.8:1 on --color-bg */
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .md-link:hover { color: var(--color-accent-hover); }
+
+  /* GFM tables — ruled, never boxed. */
+  .message__ai-body table {
+    width: 100%;
+    margin-block: var(--space-4);
+    border-collapse: collapse;
+    font-size: var(--font-size-sm);
+  }
+
+  .message__ai-body th,
+  .message__ai-body td {
+    padding: var(--space-2) var(--space-3);
+    border-block-end: 1px solid var(--color-border);
+    text-align: start;
+    vertical-align: top;
+  }
+
+  .message__ai-body th {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    font-weight: var(--weight-medium);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);   /* 5.97:1 on --color-bg */
+  }
+
+  /* -- KaTeX ---------------------------------------------------------------
+     The stylesheet and its font faces are bundled locally (imported from
+     Message.tsx so Vite rebases the url()s into the app's own /assets) --
+     the deploy target has to serve every byte itself, so a CDN link is not
+     an option. Only the fit into this column is tuned here.
+     ------------------------------------------------------------------------ */
+
+  /* KaTeX ships at 1.21em, which reads visibly larger than the 16px prose it
+     sits inside; 1.05em puts notation and sentence at the same optical size. */
+  .message__ai-body .katex { font-size: 1.05em; }
+
+  /* A display equation is routinely wider than the 720px reading measure.
+     Scroll the equation, not the conversation column -- an overflowing
+     derivation otherwise drags the whole transcript sideways. */
+  .message__ai-body .katex-display {
+    margin-block: var(--space-4);
+    padding-block: var(--space-1);
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  /* rehype-katex forces throwOnError off and renders malformed source as an
+     error node instead. Make that legible AS source rather than letting it
+     inherit the paragraph and read like part of the tutor's sentence.
+     Colour is KaTeX's own inline errorColor (#C92A2A, 5.22:1 on the ground). */
+  .message__ai-body .katex-error {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-sm);
   }
 
   /* -------------------------------------------------------------------------
@@ -1983,10 +2290,13 @@ body {
   .composer-wrap {
     position: relative;
     background-color: var(--color-surface-raised);
-    border-radius: 14px;
+    /* 14px read as a soft bubble against the square-cornered reading column
+       above it. 10px keeps the input friendly without rounding it into
+       chat-app furniture. */
+    border-radius: 10px;
     /* 1.5px transparent border reserves layout space so focus doesn't shift */
     border: 1.5px solid transparent;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
     -webkit-tap-highlight-color: transparent;
     transition:
       border-color 180ms ease-out,
@@ -1995,14 +2305,14 @@ body {
 
   .composer-wrap:hover:not(:focus-within) {
     /* Subtle "this is available" signal without yet committing to focus */
-    box-shadow: 0 1px 5px rgba(0, 0, 0, 0.08);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.07);
   }
 
   .composer-wrap:focus-within {
     border-color: var(--color-accent-warm);     /* Heritage Gold — AI is listening */
-    box-shadow:
-      0 0 0 4px rgba(133, 117, 77, 0.07),       /* soft warm halo */
-      0 2px 8px rgba(0, 0, 0, 0.04);            /* slight depth lift */
+    /* One tight halo, not a halo plus a drop shadow. Two stacked shadows on
+       a focus state is where "soft" turns into "fuzzy". */
+    box-shadow: 0 0 0 3px rgba(133, 117, 77, 0.10);
   }
 
   .composer-body {
@@ -2051,6 +2361,149 @@ body {
 
   .composer-wrap:focus-within .composer-hint {
     opacity: 1;
+  }
+
+  /* Wins over the :focus-within rule above: the composer keeps focus while a
+     turn streams, so without this the hint would stay lit advertising an Enter
+     that is suppressed. Opacity only -- the element keeps its box so the row
+     does not reflow when streaming starts or stops. See Composer.tsx. */
+  .composer-wrap:focus-within .composer-hint--suppressed,
+  .composer-hint--suppressed {
+    opacity: 0;
+  }
+
+  /* -------------------------------------------------------------------------
+     .composer-action — the composer's trailing Send/Stop control (#274
+     redesign). Replaces both the Enter-only send (which gave pointer and
+     touch users no send path at all) and .conversation-stop-row, the
+     red-outlined Stop that floated above the composer in the transcript's
+     right margin, detached from the input it acts on.
+
+     It is ONE button that changes identity, never two that swap: pressing
+     Stop morphs the element the user is focused on rather than unmounting it,
+     which is #327's focus guarantee made structural. See Composer.tsx.
+
+     Sits inside .composer-body, which is already
+     `display:flex; align-items:flex-end`, so the button stays pinned to the
+     bottom-right corner as the textarea grows -- the same corner the
+     "enter ↵" hint occupies while composing.
+     ------------------------------------------------------------------------- */
+  .composer-action {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    /* 32px: comfortably over WCAG 2.5.8's 24px minimum target, and the
+       spacing exception is not needed since nothing sits within 24px of it. */
+    inline-size: 32px;
+    block-size: 32px;
+    border-radius: 999px;
+    /* Heritage Gold at rest, matching .composer-wrap:focus-within's border and
+       the gold caret -- the trailing action reads as part of the same
+       "the AI is listening" vocabulary rather than as new chrome. Gold
+       measures 4.08:1 on the composer surface it actually sits on (--color-surface-raised; the often-quoted 4.32:1 is against the page ground), over 1.4.11's 3:1 for a
+       component boundary (it is never a text colour here, which is the
+       threshold it would not clear). */
+    border: 1px solid var(--color-accent-warm);
+    background-color: transparent;
+    color: var(--color-accent-warm);
+    cursor: pointer;
+    padding: 0;
+    transition: background-color 160ms ease-out, border-color 160ms ease-out,
+      color 160ms ease-out, transform 160ms cubic-bezier(0.34, 1.06, 0.64, 1);
+  }
+
+  .composer-action__glyph {
+    font-size: var(--font-size-sm);
+    line-height: 1;
+  }
+
+  /* Fills as soon as there is something to send, not on hover. A hairline gold
+     ring on a light surface reads as a ghost at rest; every modern composer
+     lights its send control the moment the draft is non-empty, and that state
+     change is the affordance. The design system's "never a vivid filled pill"
+     rule is about saturated brand fills -- this is the warm-metal fill the
+     sidebar Submit button already establishes, at the one moment this control
+     genuinely is the primary action on screen. */
+  .composer-action:not([aria-disabled="true"]) {
+    background-color: var(--color-accent-warm);
+    border-color: var(--color-accent-warm);
+    color: var(--color-bg);
+  }
+
+  .composer-action:not([aria-disabled="true"]):hover,
+  .composer-action:not([aria-disabled="true"]):focus-visible {
+    background-color: var(--color-accent-warm-hover);
+    border-color: var(--color-accent-warm-hover);
+  }
+
+  .composer-action:not([aria-disabled="true"]):active {
+    transform: scale(0.94);
+  }
+
+  /* Empty draft: present, focusable, announced -- just not actionable. Native
+     `disabled` would drop it from the tab order the moment the draft empties,
+     which is the #270/#327 harm the textarea beside it already avoids. */
+  .composer-action[aria-disabled="true"] {
+    /* Deliberately NOT `opacity`. Opacity composites the element's own
+       outline along with its box, so the global :focus-visible ring
+       (--color-accent, 1.5px) was being painted at 40% -- measured 2.53:1
+       light / 2.45:1 dark against the composer surface, under WCAG 1.4.11's
+       3:1 for a focus indicator.
+
+       That fires in exactly the moment #270/#327 exist to protect: a
+       keyboard user presses Stop mid-stream, isSending flips false, the
+       button morphs to Send, and an empty draft puts aria-disabled on the
+       control they are still focused on. Dimming the border and glyph
+       explicitly leaves the focus ring at full contrast. */
+    border-color: color-mix(in srgb, var(--color-accent-warm) 45%, transparent);
+    color: var(--color-text-muted);
+    cursor: default;
+  }
+
+  /* Stop identity: solid and unmistakable, but Husky Purple rather than
+     --color-text. #1A1A1A read as a black puck dropped on warm paper --
+     the one pure-neutral object in a palette that has no other one. Purple
+     is the app's own chrome colour, so the running state looks like the
+     product rather than like a foreign control, and it stays clearly
+     distinct from the gold the Send identity fills with on hover.
+
+     Still not --color-error: stopping your own turn discards nothing and is
+     repeatable, so it is a routine control and should not spend the
+     palette's only alarm colour. */
+  .composer-action--stop,
+  .composer-action--stop:hover,
+  .composer-action--stop:focus-visible {
+    background-color: var(--color-accent);
+    border-color: var(--color-accent);
+    color: var(--color-bg);
+  }
+
+  .composer-action--stop:hover,
+  .composer-action--stop:focus-visible {
+    background-color: var(--color-accent-hover);
+    border-color: var(--color-accent-hover);
+  }
+
+  /* 11px in a 32px button — the proportion modern composers land on. As a
+     drawn box this is the actual rendered size, unlike the glyph it replaced.
+     currentColor inherits --color-bg from the rule above, so the mark stays
+     paper-coloured against the purple in both themes. */
+  .composer-action__stop-mark {
+    inline-size: 11px;
+    block-size: 11px;
+    border-radius: 2px;
+    background-color: currentColor;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .composer-action {
+      transition: none;
+    }
+
+    .composer-action:not([aria-disabled="true"]):active {
+      transform: none;
+    }
   }
 
   /* -------------------------------------------------------------------------
@@ -2158,6 +2611,103 @@ body {
   .btn[aria-disabled="true"] {
     opacity: 0.4;
     pointer-events: none;
+  }
+
+  /* -------------------------------------------------------------------------
+     .btn--restart — the section chat's "Restart section" trigger (#248).
+
+     Was `variant="danger" outlined`, which put a red-bordered, red-underlined
+     box at the top-right of the paper column: the highest-contrast element on
+     the whole reading surface, outranking both the .breadcrumb it sits beside
+     and the tutor's opening turn. That inverts the hierarchy -- a rarely-used
+     escape hatch read as the page's primary action -- and the fixed box wrapped
+     "Restart / section" onto two lines, which forced .breadcrumb to wrap too.
+
+     The trigger only OPENS the confirm dialog; nothing destructive happens on
+     click. Full danger weight belongs on that dialog's Confirm (AlertDialog,
+     deliberately unchanged), not on the thing that summons it. So this keeps
+     variant="danger" as the base -- if this rule ever fails to load the button
+     degrades to exactly today's styling -- and quiets only the REST state,
+     dropping it into .breadcrumb's own mono/uppercase/small-caps register so it
+     reads as that row's peer. Hover, focus-visible and active restore the full
+     --color-error + underline treatment, so the destructive cue is back the
+     moment a student actually engages with the control.
+
+     WCAG 1.4.1 at rest: the action is named in words ("Restart section") and
+     marked with the ↺ glyph, so nothing here is carried by colour alone -- the
+     same requirement .btn--danger's underline was added (#327) to satisfy for
+     the dialog's two side-by-side buttons, met by different means.
+     WCAG 1.4.3 at rest: --color-text-secondary #6B6760 measures 5.38:1 against
+     the paper column (--color-bg #FAFAF7), clearing 4.5:1 for this 12px label.
+     ------------------------------------------------------------------------- */
+  .btn--danger.btn--restart {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    font-weight: var(--weight-normal);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    font-variant: small-caps;
+    color: var(--color-text-secondary);
+    text-decoration: none;
+    /* Never wrap: a two-line action box is what pushed .breadcrumb onto a
+       second line in the first place. */
+    white-space: nowrap;
+    flex-shrink: 0;
+    padding: var(--space-1) var(--space-2);
+    /* Pulls the quiet label back flush with the column's right edge -- the
+       padding above is hover-target area, not visible inset. */
+    margin-inline-end: calc(var(--space-2) * -1);
+    border-radius: var(--radius-sm);
+    transition: color 140ms ease-out, background-color 140ms ease-out;
+  }
+
+  .btn--danger.btn--restart:hover,
+  .btn--danger.btn--restart:focus-visible {
+    color: var(--color-error);
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+    background-color: var(--color-surface-raised);
+  }
+
+  /* The ↺ glyph winds back a third of a turn on approach -- a mechanical hint
+     at what the action does, on the one element in the row that can afford
+     motion without disturbing the reading column. */
+  .btn--restart span[aria-hidden="true"] {
+    display: inline-block;
+    transition: transform 260ms cubic-bezier(0.34, 1.06, 0.64, 1);
+  }
+
+  .btn--restart:hover span[aria-hidden="true"],
+  .btn--restart:focus-visible span[aria-hidden="true"] {
+    transform: rotate(-120deg);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .btn--restart span[aria-hidden="true"],
+    .btn--restart:hover span[aria-hidden="true"],
+    .btn--restart:focus-visible span[aria-hidden="true"] {
+      transition: none;
+      transform: none;
+    }
+
+    .btn--danger.btn--restart {
+      transition: none;
+    }
+  }
+
+  /* Remote images are not rendered (Message.tsx replaces <img> with its alt
+     text): model output is prompt-injectable and an <img src> fires a request
+     from the student's browser on render, which is an exfiltration beacon and
+     an IP disclosure, with no CSP anywhere in the repo to fall back on. The
+     alt text is shown rather than dropped so nothing vanishes silently, in the
+     muted register the transcript already uses for metadata about a turn. */
+  .md-image-alt {
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.04em;
+    /* #296: 5.97:1 on the paper ground, clearing 1.4.3's 4.5:1. */
+    color: var(--color-text-muted);
   }
 
   /* -------------------------------------------------------------------------
@@ -2345,26 +2895,6 @@ body {
 .section-item__indicator--just-submitted {
   animation: llteacher-submit-success 700ms ease-out;
   border-radius: 50%;
-}
-
-/* ==========================================================================
-   Submit affordance — quiet breathing of the "READY TO TURN IN" meta line.
-   Long, gentle cycle so it draws the eye without competing with content.
-   ========================================================================== */
-
-@keyframes llteacher-meta-breathe {
-  0%, 100% { opacity: 0.55; }
-  50%      { opacity: 0.95; }
-}
-
-/* Selector specificity must beat the in-layer rule; we keep this unlayered. */
-.submit-action .submit-action__meta {
-  animation: llteacher-meta-breathe 3.6s ease-in-out infinite;
-}
-
-/* Pause the breathing on hover so the hover color shift reads cleanly. */
-.submit-action:hover .submit-action__meta {
-  animation-play-state: paused;
 }
 
 /* ==========================================================================

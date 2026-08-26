@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CaretDoubleLeft, CaretDoubleRight, ChatCircleDots, Plus } from "@phosphor-icons/react";
+import { CaretDoubleLeft, CaretDoubleRight, Plus } from "@phosphor-icons/react";
 import { ConversationListItem } from "../components/ConversationListItem";
 import type { ConversationListItemResponse } from "../../shared/types";
 
@@ -160,11 +160,14 @@ export function TutorConversationsList({
         </p>
       )}
 
+      {/* Was a centred ChatCircleDots icon stacked over a centred "No
+          conversations yet" caption -- the stock empty-state shape, and the
+          decorative icon restated the "New conversation" button directly
+          above it. One quiet left-aligned line in the rail's own mono label
+          register instead, saying the one thing the button does not: where
+          these conversations come from. */}
       {!loadError && !loading && conversations.length === 0 && (
-        <div className="tutor-sidebar__empty">
-          <ChatCircleDots size={20} weight="regular" aria-hidden="true" />
-          <p>No conversations yet</p>
-        </div>
+        <p className="tutor-sidebar__empty">Start one to ask about anything outside a section.</p>
       )}
 
       {/* #295: list-style: none strips list semantics in Safari/VoiceOver
