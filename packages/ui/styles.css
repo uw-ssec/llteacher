@@ -1470,6 +1470,33 @@ body {
     padding-block: var(--space-6);
   }
 
+  /* #288: the line above the oldest message the tutor can still see.
+     Deliberately legible rather than subtle -- it is the only thing telling
+     a student that an earlier turn they can read is not something the tutor
+     can, and mistaking that for the tutor ignoring them is the whole
+     failure this discloses. */
+  .conversation-context-boundary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin: var(--space-5) 0 var(--space-4);
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+    line-height: 1.5;
+  }
+
+  .conversation-context-boundary::before,
+  .conversation-context-boundary::after {
+    content: "";
+    flex: 1 1 0;
+    border-block-start: 1px dashed var(--color-border);
+  }
+
+  .conversation-context-boundary span {
+    flex: 0 1 42ch;
+    text-align: center;
+  }
+
   .conversation-inner {
     max-width: var(--conversation-max);
     margin-inline: auto;

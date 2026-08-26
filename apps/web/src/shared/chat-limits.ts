@@ -1,0 +1,27 @@
+/* --------------------------------------------------------------------------
+   Bounds that BOTH the server and the client have to agree on.
+
+   Separate from shared/types.ts because that module is types-only -- every
+   one of its imports is `import type` and erases, so it costs the client
+   bundle nothing. These are runtime values, and the point of them living
+   here is that a number the server enforces and the client describes must
+   be one number, not two that happen to match today (#288).
+   -------------------------------------------------------------------------- */
+
+/** How many trailing messages of a conversation the model actually sees on
+ *  a given turn. Enforced in server/routes/chat.ts; disclosed to the student
+ *  by ConversationView's context-boundary divider.
+ *
+ *  #288: the client used to render the full fetched history with nothing
+ *  marking this line, so a student could scroll up, read turn 3, reference
+ *  it, and get an answer as if it had never happened -- indistinguishable
+ *  from the tutor simply being obtuse. chat.ts's own comment called the
+ *  silent drop "a graceful degradation (the student can still reference
+ *  them in the visible UI transcript)", and that parenthetical was exactly
+ *  the bug: the student can reference them and the tutor cannot see them.
+ *
+ *  A token-budget window would be more correct than a message count -- 40
+ *  messages of pasted data still overflows a context (#88 tracks that) --
+ *  but the disclosure is the user-facing half and holds whichever bound is
+ *  used. */
+export const MAX_HISTORY_MESSAGES = 40;
