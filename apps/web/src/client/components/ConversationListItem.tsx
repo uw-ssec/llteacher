@@ -111,7 +111,22 @@ export function ConversationListItem({
           onActivateValue={onSelect}
           activateLabel={`Select conversation: ${title}`}
           activateDescribedBy={metaId}
-          isActive={isSelected || isPending}
+          /* #389: `isActive` becomes aria-current, and aria-current marks
+             THE current item -- not a set of candidates. Passing
+             `isSelected || isPending` meant that during every switch both
+             the old row (still selected, since tutorConversationId is not
+             reassigned until the fetch resolves) and the new row (pending)
+             claimed it at once, for the whole duration of the fetch.
+
+             A screen-reader user got two current conversations while the
+             live region correctly announced that one of them was still
+             loading -- a structural signal contradicting the spoken one, in
+             the very feature added to make this surface legible.
+
+             `isSelected` only. The pending row still reads as selected
+             visually and carries aria-busy, which is the honest pair:
+             "this is loading", not "this is current". */
+          isActive={isSelected}
         />
         <span className="tutor-conversation-item__meta" id={metaId}>
           <span className="tutor-conversation-item__time">{formatUpdatedAt(updatedAt)}</span>

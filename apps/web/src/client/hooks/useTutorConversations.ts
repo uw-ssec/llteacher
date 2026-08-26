@@ -91,6 +91,15 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
   const conversationsRef = useRef(conversations);
   conversationsRef.current = conversations;
 
+  /* #388: the course scope as of the latest render. `refetch` is a
+     useCallback keyed on courseId, so the `courseId` its body closes over is
+     frozen at creation -- comparing a response against THAT would compare a
+     value with itself and always agree. Every late-arriving response has to
+     be checked against what the hook is scoped to NOW, which is what this
+     ref carries. */
+  const courseIdRef = useRef(courseId);
+  courseIdRef.current = courseId;
+
   const refetch = useCallback(() => {
     if (!courseId) {
       // Not a fetch error -- there's simply no course to scope the query
@@ -116,12 +125,17 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
       return;
     }
     setLoading(true);
+    // #388: the course this particular request belongs to. Every setter
+    // below checks it, so a response arriving after a course switch cannot
+    // write into the new course's state.
+    const requestedCourseId = courseId;
     fetch(`/api/conversations?courseId=${encodeURIComponent(courseId)}&kind=tutor`)
       .then((r) => {
         if (!r.ok) throw new Error(`failed to load tutor conversations: ${r.status}`);
         return r.json() as Promise<ConversationListResponse>;
       })
       .then((data) => {
+        if (requestedCourseId !== courseIdRef.current) return;
         // #281: the route returns { items, nextCursor } instead of a bare
         // array. #280: `nextCursor` is now surfaced as `hasMore` -- this
         // hook still only ever fetches one page (an actual load-more
@@ -132,21 +146,41 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
         setLoadError(false);
       })
       .catch((err: unknown) => {
-        // #310: the list is deliberately NOT cleared. This used to
-        // setConversations([]), and since refetch only runs from an effect
-        // keyed on [refetch] -- which changes only with courseId -- a single
-        // 502 during a deploy emptied the rail for the rest of the session.
-        // The student's conversations looked deleted. Keeping the last known
+        // #310: the list is deliberately NOT cleared on a same-course
+        // failure. This used to setConversations([]), so a single 502 during
+        // a deploy emptied the rail for the rest of the session and the
+        // student's conversations looked deleted. Keeping the last known
         // good list means a transient failure degrades to "possibly stale"
-        // rather than "apparently destroyed", and `loadError` gives the list
-        // what it needs to offer a retry.
+        // rather than "apparently destroyed".
+        //
+        // #388: but only for the SAME course. `refetch` is keyed on
+        // courseId and the effect below is keyed on `[refetch]`, so it also
+        // re-runs on a course switch -- and retaining across that showed the
+        // PREVIOUS course's conversations, selectable, while the rest of the
+        // UI had moved on. Rows from another course are not stale, they are
+        // wrong, and the "may be out of date" notice understates that. The
+        // guard is the courseId this request was issued for, captured above,
+        // not the current one: a slow request for course A resolving after a
+        // switch to B must not clear B's list either.
         console.error("[useTutorConversations.refetch]", err);
+        if (requestedCourseId !== courseIdRef.current) return;
         setLoadError(true);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (requestedCourseId === courseIdRef.current) setLoading(false);
+      });
   }, [courseId]);
 
   useEffect(() => {
+    /* #388: drop the previous course's rows BEFORE the new request starts.
+       Retaining across a failure is right for a same-course refresh and
+       wrong here -- without this, a course switch whose fetch is slow (or
+       fails) leaves the old course's conversations on screen and
+       selectable. `loadError` is cleared too: an error belonging to the
+       previous scope says nothing about this one. */
+    setConversations([]);
+    setHasMore(false);
+    setLoadError(false);
     refetch();
   }, [refetch]);
 

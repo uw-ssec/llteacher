@@ -287,6 +287,22 @@ describe("TutorConversationsList load failure (#310)", () => {
 });
 
 describe("TutorConversationsList selection feedback (#290)", () => {
+  it("does not mark a pending row aria-current -- only the settled one is current (#389)", () => {
+    renderList({
+      conversations: [CONV_A, { ...CONV_A, id: "conv-b", title: "Chat B" }],
+      selectedConversationId: CONV_A.id,
+      pendingConversationId: "conv-b",
+    });
+    // aria-current marks THE current item. Two at once contradicts the live
+    // region, which correctly says one of them is still loading.
+    expect(document.querySelectorAll('[aria-current="true"]').length).toBe(1);
+    // ...and it is the one actually on screen, not the one loading.
+    expect(document.querySelector('[aria-current="true"]')?.textContent).toContain(CONV_A.title);
+    // The pending row still reads as busy -- the click is still visibly
+    // registered, which is what #290 was for.
+    expect(document.querySelector('[aria-busy="true"]')).not.toBeNull();
+  });
+
   it("marks the pending row busy and selected while its history is in flight", () => {
     renderList({
       conversations: [CONV_A],

@@ -419,4 +419,78 @@ describe("useTutorConversations", () => {
       expect(result.current.conversations).toEqual([CONV_A]);
     });
   });
+
+  /* ------------------------------------------------------------------------
+     #388: retention must not cross a course boundary.
+     ---------------------------------------------------------------------- */
+  describe("course-scoped retention (#388)", () => {
+    it("drops the previous course's rows on a switch, even before the new fetch resolves", async () => {
+      let resolveSecond!: (r: Response) => void;
+      let call = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          call += 1;
+          if (call === 1) return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
+          return new Promise<Response>((r) => (resolveSecond = r));
+        }),
+      );
+      const { result, rerender } = renderHook(({ id }) => useTutorConversations(id), {
+        initialProps: { id: "course-a" },
+      });
+      await waitFor(() => expect(result.current.conversations).toEqual([CONV_A]));
+
+      rerender({ id: "course-b" });
+
+      // Course A's rows must not be on screen, or selectable, while the UI
+      // is scoped to course B.
+      expect(result.current.conversations).toEqual([]);
+      resolveSecond(new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 }));
+    });
+
+    it("does not retain the previous course's rows when the new course's fetch fails", async () => {
+      let call = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          call += 1;
+          if (call === 1) return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
+          return new Response("boom", { status: 502 });
+        }),
+      );
+      const { result, rerender } = renderHook(({ id }) => useTutorConversations(id), {
+        initialProps: { id: "course-a" },
+      });
+      await waitFor(() => expect(result.current.conversations).toEqual([CONV_A]));
+
+      rerender({ id: "course-b" });
+      await waitFor(() => expect(result.current.loadError).toBe(true));
+
+      // Rows from another course are not stale, they are wrong -- the
+      // "may be out of date" retention rule does not apply across scopes.
+      expect(result.current.conversations).toEqual([]);
+    });
+
+    it("still retains rows when a refresh of the SAME course fails", async () => {
+      let call = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          call += 1;
+          if (call === 1) return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
+          return new Response("boom", { status: 502 });
+        }),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toEqual([CONV_A]));
+
+      act(() => {
+        result.current.refetch();
+      });
+      await waitFor(() => expect(result.current.loadError).toBe(true));
+
+      // #310's original fix must survive #388's narrowing.
+      expect(result.current.conversations).toEqual([CONV_A]);
+    });
+  });
 });
