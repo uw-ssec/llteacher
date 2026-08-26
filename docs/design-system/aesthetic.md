@@ -229,7 +229,7 @@ Nothing else moves. No per-message entrance animations. No scale transforms. No 
 A single line at the top of the conversation column in mono small-caps:
 
 ```
-STATS 311 · HW 3 · Section 3 P-VALUES
+Section 3: P-Values
 ```
 
 Font: Geist Mono, 12px, `letter-spacing: 0.1em`, `text-transform: uppercase`, muted color.

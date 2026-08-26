@@ -154,7 +154,12 @@ export function Sidebar({
           </span>
         </button>
 
-        {/* Submit affordance — bordered button with two-line typography */}
+        {/* Submit affordance — single-line bordered button.
+            The second line used to read "READY TO TURN IN" in faint small-caps.
+            It was aria-hidden, so it carried nothing for assistive tech, and it
+            told a sighted student nothing the button label did not already say
+            -- decorative filler under a real label, which also forced the
+            two-line body and the optical-alignment fudge on the icon. */}
         <button
           className="submit-action"
           type="button"
@@ -164,10 +169,7 @@ export function Sidebar({
           <span className="submit-action__arrow" aria-hidden="true">
             <PaperPlaneTilt size={14} weight="regular" />
           </span>
-          <span className="submit-action__body">
-            <span className="submit-action__label">Submit Section {currentSection}</span>
-            <span className="submit-action__meta" aria-hidden="true">READY TO TURN IN</span>
-          </span>
+          <span className="submit-action__label">Submit Section {currentSection}</span>
         </button>
       </div>
 

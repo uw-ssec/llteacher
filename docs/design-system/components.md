@@ -84,7 +84,7 @@ The main column. Renders breadcrumb + message list + composer.
 
 ```tsx
 <ConversationView
-  breadcrumb="STATS 311 · HW 3 · Section 3 P-VALUES"
+  breadcrumb="Section 3: P-Values"
   messages={messages}
   onSendMessage={(text) => { /* ... */ }}
 />
