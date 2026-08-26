@@ -320,6 +320,27 @@ export interface ConversationViewProps {
 
 /* -- Component ------------------------------------------------------------- */
 
+/** #278: JS-initiated scrolling is invisible to the design system's global
+ *  CSS motion rule (styles.css's `prefers-reduced-motion` block), so it is
+ *  the one motion path that escapes the user's stated preference unless it
+ *  is checked here. Read per call rather than cached: the preference can be
+ *  toggled mid-session, and this is a cheap lookup next to the layout the
+ *  caller is about to force. Guarded for non-browser/jsdom hosts where
+ *  matchMedia may be absent. */
+function prefersReducedMotion(): boolean {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    : false;
+}
+
+/** Within a message's height of the bottom. Not an exact equality check:
+ *  fractional device-pixel scroll offsets mean `scrollTop + clientHeight`
+ *  rarely equals `scrollHeight` precisely even when visually pinned. */
+const FOLLOW_THRESHOLD_PX = 120;
+function isNearBottom(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_THRESHOLD_PX;
+}
+
 export function ConversationView({
   breadcrumb,
   title,
@@ -341,15 +362,51 @@ export function ConversationView({
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   /* Scroll to bottom when new messages arrive -- and when a turn fails.
      `error` belongs in the deps: a failed turn does not change `messages`
      (the assistant reply is deliberately not persisted), so without it the
      error row mounts below the fold and nothing scrolls to it, leaving the
-     only recovery control off-screen. */
+     only recovery control off-screen.
+
+     #278: keyed on `messages.length`, NOT `messages`. The array identity is
+     brand new on every parent render, so this effect used to run once per
+     streamed token rather than once per new message -- a synchronous layout
+     of a subtree holding up to 200 hydrated message nodes, tens of times a
+     second, each call restarting a smooth-scroll animation the browser then
+     never got to finish. Length changes exactly when a message is actually
+     added, which is what the comment above always claimed.
+
+     `isSending` is in the deps for the turn's other end: the assistant's
+     reply arrives as a message (length changes) but the transition back to
+     idle can also reveal trailing UI, and it is the cheap signal for "this
+     turn is over, settle at the bottom". */
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, error]);
+    bottomRef.current?.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth" });
+  }, [messages.length, isSending, error]);
+
+  /* #278: follow the reply as it streams, without queueing an animation.
+     A growing assistant message makes the thread taller without adding a
+     message, so the length-keyed effect above deliberately does not fire --
+     and the student would watch the reply grow past the bottom of the
+     viewport. Assigning `scrollTop` directly is the one form of follow that
+     schedules no smooth-scroll for the next assignment to interrupt, which
+     is what made the original per-token `scrollIntoView` pathological.
+
+     Skipped entirely under prefers-reduced-motion: a >5s reply otherwise
+     means >5s of continuous automatic movement, and this is a JS-initiated
+     scroll, so the design system's global CSS motion rule cannot reach it.
+
+     Only follows a student already AT the bottom -- scrolling up during a
+     long reply is a deliberate act (re-reading an earlier turn), and
+     yanking them back down would make that impossible. */
+  useEffect(() => {
+    if (!isSending || prefersReducedMotion()) return;
+    const el = scrollRef.current;
+    if (!el || !isNearBottom(el)) return;
+    el.scrollTop = el.scrollHeight;
+  });
 
   // #317 review, #327: no deterministic announcement existed for a
   // streamed reply *finishing* -- the start is announced (Message.tsx's
@@ -440,7 +497,7 @@ export function ConversationView({
   return (
     <div className="conversation-column">
       {/* Scrollable message area */}
-      <div className="conversation-messages">
+      <div className="conversation-messages" ref={scrollRef}>
         <div className="conversation-inner">
           {/* #317 review, #327: moved OUT of the role="log" region below --
               this row (and the title/hasMoreHistory notice under it) used

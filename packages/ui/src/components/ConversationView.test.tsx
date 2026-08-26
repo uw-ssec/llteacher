@@ -511,3 +511,118 @@ describe("ConversationView onRequestHint (#80)", () => {
     expect(screen.queryByRole("button", { name: /give me a hint/i })).toBeNull();
   });
 });
+
+/* --------------------------------------------------------------------------
+   #278: the scroll effect used to key on the `messages` PROP, a brand-new
+   array on every parent render, so it ran once per streamed token rather
+   than once per new message -- forcing a synchronous layout of a subtree
+   holding up to 200 hydrated nodes and restarting a smooth-scroll animation
+   the browser never got to finish. These pin the dependency, not the effect
+   body: each one fails if `messages.length` reverts to `messages`.
+   -------------------------------------------------------------------------- */
+describe("ConversationView scroll behaviour (#278)", () => {
+  const msg = (id: string, content: string) => ({
+    id,
+    role: "assistant" as const,
+    content,
+  });
+
+  function setReducedMotion(reduce: boolean) {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: reduce && query === "(prefers-reduced-motion: reduce)",
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+  }
+
+  beforeEach(() => setReducedMotion(false));
+
+  it("does not re-scroll when the same messages arrive as a new array identity", () => {
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollSpy;
+    const first = [msg("m1", "hello")];
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={first} onSendMessage={() => {}} />,
+    );
+    const afterMount = scrollSpy.mock.calls.length;
+
+    // Exactly what a parent re-render did on every streamed chunk: same
+    // content, different array identity.
+    rerender(
+      <ConversationView breadcrumb="b" messages={[msg("m1", "hello")]} onSendMessage={() => {}} />,
+    );
+
+    expect(scrollSpy.mock.calls.length).toBe(afterMount);
+  });
+
+  it("does re-scroll when a message is genuinely added", () => {
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollSpy;
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[msg("m1", "hello")]} onSendMessage={() => {}} />,
+    );
+    const afterMount = scrollSpy.mock.calls.length;
+
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[msg("m1", "hello"), msg("m2", "there")]}
+        onSendMessage={() => {}}
+      />,
+    );
+
+    expect(scrollSpy.mock.calls.length).toBeGreaterThan(afterMount);
+  });
+
+  it("uses smooth scrolling by default", () => {
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollSpy;
+    render(<ConversationView breadcrumb="b" messages={[msg("m1", "a")]} onSendMessage={() => {}} />);
+    expect(scrollSpy).toHaveBeenCalledWith({ behavior: "smooth" });
+  });
+
+  it("honours prefers-reduced-motion, which the global CSS rule cannot reach for a JS scroll", () => {
+    setReducedMotion(true);
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollSpy;
+    render(<ConversationView breadcrumb="b" messages={[msg("m1", "a")]} onSendMessage={() => {}} />);
+    expect(scrollSpy).toHaveBeenCalledWith({ behavior: "auto" });
+    expect(scrollSpy).not.toHaveBeenCalledWith({ behavior: "smooth" });
+  });
+
+  it("does not follow a streaming reply when reduced motion is set", () => {
+    setReducedMotion(true);
+    const { container, rerender } = render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[msg("m1", "partial")]}
+        onSendMessage={() => {}}
+        isSending={true}
+      />,
+    );
+    const scroller = container.querySelector(".conversation-messages") as HTMLElement;
+    // jsdom reports 0 for every layout metric, so isNearBottom() is
+    // vacuously true -- any scrollTop write would be observable here.
+    const written: number[] = [];
+    Object.defineProperty(scroller, "scrollTop", {
+      get: () => 0,
+      set: (v: number) => written.push(v),
+      configurable: true,
+    });
+
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[msg("m1", "partial and then some")]}
+        onSendMessage={() => {}}
+        isSending={true}
+      />,
+    );
+
+    expect(written).toEqual([]);
+  });
+});
