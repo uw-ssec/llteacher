@@ -54,7 +54,11 @@ import {
 import { getOrgScopeForCourse } from "../repositories/organizations";
 import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
 import { logServerError } from "../utils/errors";
-import { getOpenRouter } from "../../lib/ai";
+import {
+  buildProviderClient,
+  getResolvedLLMConfigById,
+  resolveApiKey,
+} from "../../lib/llm-config";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { OrgScope } from "../repositories/scope";
@@ -432,9 +436,38 @@ export async function testLlmConfigHandler(c: Context<AppEnv>) {
   const config = await getLlmConfig(db, ctx.scope, configId);
   if (!config) return c.json({ error: "That configuration no longer exists." }, 404);
 
-  const apiKey = c.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    logServerError("testLlmConfigHandler", new Error("OPENROUTER_API_KEY is not configured"));
+  /* #365: resolve the provider and credential the SAME way the chat path
+     does, instead of hardcoding OpenRouter.
+
+     This handler used to call getOpenRouter(c.env.OPENROUTER_API_KEY)
+     unconditionally, whatever the config said. So pressing Test on an org
+     whose default is llmoxie/gpt-5.3-codex (every org after migration 0035)
+     sent that model to OpenRouter under an OpenRouter key -- wrong provider,
+     wrong credential. The result was not a broken button but a lying one:
+     whatever came back said nothing about whether the configuration under
+     test actually works, which is the button's entire purpose. A pass could
+     mean OpenRouter happens to front a same-named model; a failure looked
+     like a bad model id rather than a misdirected request.
+
+     resolveApiKey prefers the config's own credential row and falls back to
+     the provider's env binding, so a config with an explicit credential is
+     now tested with that credential rather than the deployment-wide key. */
+  const resolvedConfig = await getResolvedLLMConfigById(db, ctx.scope, configId);
+  if (!resolvedConfig) return c.json({ error: "That configuration no longer exists." }, 404);
+
+  let providerClient: ReturnType<typeof buildProviderClient>;
+  try {
+    const apiKey = await resolveApiKey(c.env, db, ctx.scope, resolvedConfig);
+    providerClient = buildProviderClient(resolvedConfig.provider, apiKey, {
+      llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL,
+    });
+  } catch (err) {
+    // Both failure modes are an operator problem, not something the
+    // instructor pressing Test can act on -- a missing/stale credential and
+    // an unsupported provider are equally "this deployment cannot reach that
+    // model". 503, with the specifics logged rather than returned: the
+    // messages name secret bindings.
+    logServerError("testLlmConfigHandler", err);
     return c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503);
   }
 
@@ -442,7 +475,7 @@ export async function testLlmConfigHandler(c: Context<AppEnv>) {
   const timer = setTimeout(() => controller.abort(), TEST_SEND_TIMEOUT_MS);
   try {
     const result = await generateText({
-      model: getOpenRouter(apiKey)(config.modelName),
+      model: providerClient(config.modelName),
       // The config's own prompt is what is under test. An empty one is a
       // legitimate state (the column defaults to ''), and sending no system
       // message is the honest representation of it.

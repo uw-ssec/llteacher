@@ -42,6 +42,22 @@ const CONFIG = {
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
 
+/** #365: what getResolvedLLMConfigById returns -- the provider/credential
+ *  shape, deliberately NOT the admin-console record shape. Defaults to
+ *  llmoxie, which is the case the old hardcoded-OpenRouter code got wrong
+ *  (every org's default after migration 0035). */
+const RESOLVED_CONFIG = {
+  id: CONFIG_ID,
+  provider: "llmoxie" as const,
+  modelName: CONFIG.modelName,
+  temperature: CONFIG.temperature,
+  maxCompletionTokens: CONFIG.maxCompletionTokens,
+  credentialId: null,
+  pricePerMillionInputTokens: null,
+  pricePerMillionOutputTokens: null,
+  markCompleteInstruction: null,
+};
+
 const listMock = vi.fn();
 const getMock = vi.fn();
 const createMock = vi.fn();
@@ -69,7 +85,22 @@ vi.mock("../utils/audit", async (importOriginal) => ({
 }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 vi.mock("ai", () => ({ generateText: (...a: unknown[]) => generateTextMock(...a) }));
-vi.mock("../../lib/ai", () => ({ getOpenRouter: () => (model: string) => ({ model }) }));
+/* #365: the handler no longer reaches for getOpenRouter directly -- it
+   resolves a provider client the same way the chat path does. These mocks
+   record WHICH provider and key it resolved with, which is the whole point
+   of the fix: the old code produced a plausible-looking result while
+   talking to the wrong provider. `importOriginal` keeps every other export
+   real so nothing else in this module is silently stubbed out. */
+const resolveApiKeyMock = vi.fn();
+const buildProviderClientMock = vi.fn();
+const getResolvedConfigMock = vi.fn();
+
+vi.mock("../../lib/llm-config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/llm-config")>()),
+  getResolvedLLMConfigById: (...a: unknown[]) => getResolvedConfigMock(...a),
+  resolveApiKey: (...a: unknown[]) => resolveApiKeyMock(...a),
+  buildProviderClient: (...a: unknown[]) => buildProviderClientMock(...a),
+}));
 
 function buildApp(authContext: AuthContext | undefined) {
   const app = new Hono<AppEnv>();
@@ -124,6 +155,9 @@ beforeEach(() => {
   generateTextMock
     .mockReset()
     .mockResolvedValue({ text: "Hello.", usage: { inputTokens: 12, outputTokens: 3 } });
+  getResolvedConfigMock.mockReset().mockResolvedValue(RESOLVED_CONFIG);
+  resolveApiKeyMock.mockReset().mockResolvedValue("resolved-key");
+  buildProviderClientMock.mockReset().mockImplementation(() => (model: string) => ({ model }));
 });
 
 describe("LLM config authorization (#31)", () => {
@@ -368,13 +402,67 @@ describe("POST test (#31)", () => {
     expect(generateTextMock).not.toHaveBeenCalled();
   });
 
-  it("503s with an actionable sentence when the gateway key is missing", async () => {
-    const res = await buildApp(instructorOfA()).request(
-      url(`/${CONFIG_ID}/test`),
-      json("POST", { message: "hi" }),
-      { DATABASE_URL: "ignored" } as Env,
-    );
+  it("503s with an actionable sentence when no credential can be resolved", async () => {
+    // #365: the missing-key check moved from "is OPENROUTER_API_KEY set" to
+    // "can resolveApiKey produce a credential for THIS config's provider",
+    // which is the question that was actually being asked all along.
+    resolveApiKeyMock.mockRejectedValue(new Error('Secret "LLMOXIE_API_KEY" is not set in this environment'));
+    const res = await test({ message: "hi" });
     expect(res.status).toBe(503);
+    expect(generateTextMock).not.toHaveBeenCalled();
+    // The message names a secret binding -- it must not reach the instructor.
+    expect(JSON.stringify(await res.json())).not.toMatch(/LLMOXIE_API_KEY/);
+  });
+
+  /* ---- #365: provider resolution -------------------------------------
+     The bug was not a crash. testLlmConfigHandler called
+     getOpenRouter(c.env.OPENROUTER_API_KEY) whatever the config said, so
+     Test on an llmoxie config -- every org's default after migration 0035 --
+     sent that model to OpenRouter under an OpenRouter key. It reported
+     something, and that something said nothing about the configuration
+     under test, which is the button's entire purpose. */
+
+  it("resolves the provider the config actually specifies, not OpenRouter", async () => {
+    await test({ message: "hi" });
+    expect(buildProviderClientMock).toHaveBeenCalledTimes(1);
+    expect(buildProviderClientMock.mock.calls[0]![0]).toBe("llmoxie");
+  });
+
+  it("uses the credential resolveApiKey produced, not the deployment-wide OpenRouter key", async () => {
+    await test({ message: "hi" });
+    expect(resolveApiKeyMock).toHaveBeenCalledTimes(1);
+    expect(buildProviderClientMock.mock.calls[0]![1]).toBe("resolved-key");
+    expect(buildProviderClientMock.mock.calls[0]![1]).not.toBe("sk-test");
+  });
+
+  it("scopes the resolution lookup to the caller's own org", async () => {
+    await test({ message: "hi" });
+    // A config id alone must not be enough to resolve another org's
+    // credential -- the org scope is part of the query, as it is for the
+    // record read above it.
+    expect(getResolvedConfigMock.mock.calls[0]![1]).toBe("org-1");
+    expect(getResolvedConfigMock.mock.calls[0]![2]).toBe(CONFIG_ID);
+  });
+
+  it("still routes an openrouter config to openrouter", async () => {
+    getResolvedConfigMock.mockResolvedValue({ ...RESOLVED_CONFIG, provider: "openrouter" });
+    await test({ message: "hi" });
+    expect(buildProviderClientMock.mock.calls[0]![0]).toBe("openrouter");
+  });
+
+  it("503s rather than guessing when the provider is one this deployment cannot build", async () => {
+    buildProviderClientMock.mockImplementation(() => {
+      throw new Error("Unsupported LLM provider: anthropic");
+    });
+    const res = await test({ message: "hi" });
+    expect(res.status).toBe(503);
+    expect(generateTextMock).not.toHaveBeenCalled();
+  });
+
+  it("404s when the config vanished between the record read and the resolution read", async () => {
+    getResolvedConfigMock.mockResolvedValue(null);
+    const res = await test({ message: "hi" });
+    expect(res.status).toBe(404);
     expect(generateTextMock).not.toHaveBeenCalled();
   });
 
