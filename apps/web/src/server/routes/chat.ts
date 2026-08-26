@@ -1695,7 +1695,16 @@ export async function chatHandler(c: Context<AppEnv>) {
       // see. Best-effort: a stuck lock still self-heals via LOCK_STALE_MS.
       await releaseConversationTurnLock(db, conv.id).catch(() => {});
       if (err instanceof IdempotencyKeyConflictError) {
-        return c.json({ error: err.message, code: "in_progress" }, 409);
+        // #266: `duplicate_message`, NOT the `in_progress` the route's other
+        // two 409s use. Those two mean "a turn is genuinely in flight, try
+        // again shortly" and readErrorMessage (packages/ui) renders them
+        // retryable. This one is permanent: the id in this request already
+        // identifies DIFFERENT stored content, so an identical re-send is
+        // refused identically every time. Sharing the code offered a retry
+        // that could not succeed and told the student a message that was
+        // REFUSED was "already on its way" -- the same conflation
+        // section_closed was carved out of in_progress to fix.
+        return c.json({ error: err.message, code: "duplicate_message" }, 409);
       }
       throw err;
     }

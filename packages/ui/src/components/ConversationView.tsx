@@ -46,6 +46,7 @@ export type StoppedReason =
   | "not_found"
   | "denied"
   | "in_progress"
+  | "duplicate_message"
   | "section_closed"
   | "tutor_stopped"
   | "unavailable"
@@ -137,6 +138,23 @@ export function readErrorMessage(raw: string): StoppedCopy {
         label: "Already sending",
         message: "That message is already on its way. Give it a moment before sending again.",
         retryable: true,
+      };
+    case "duplicate_message":
+      /* #266: the third 409 on this route, and distinct from in_progress for
+         the same reason section_closed is -- the server refused this send
+         because its message id already identifies DIFFERENT stored text, so
+         re-sending the identical id and body 409s identically forever.
+         Sharing in_progress's code told the student their message was
+         "already on its way" when it had in fact been rejected and never
+         persisted -- the precise silent-drop this issue exists to end, just
+         relocated from the transcript to the error copy. Says plainly that
+         nothing was sent, and points at the one action that does work
+         (compose it again, which mints a fresh id). */
+      return {
+        label: "Message not sent",
+        message:
+          "That message wasn't sent — it clashed with an earlier one. Nothing was lost from the conversation. Type it again to send it.",
+        retryable: false,
       };
     case "section_closed":
       /* Distinct from in_progress on purpose: both are 409s, but this one is

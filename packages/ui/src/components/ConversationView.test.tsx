@@ -344,10 +344,38 @@ describe("readErrorMessage", () => {
   });
 
   it("does not offer retry when retrying provably cannot succeed", () => {
-    for (const code of ["unauthorized", "history_too_long", "not_found", "denied", "unavailable"]) {
+    for (const code of [
+      "unauthorized",
+      "history_too_long",
+      "not_found",
+      "denied",
+      "unavailable",
+      "duplicate_message",
+    ]) {
       const r = readErrorMessage(JSON.stringify({ error: "x", code }));
       expect(r.retryable).toBe(false);
     }
+  });
+
+  /* #266: a reused clientMessageId carrying DIFFERENT content is refused
+     with a 409, and that refusal is permanent -- the same id with the same
+     different content fails identically forever. It used to share
+     in_progress's code, so the student was told their message was "already
+     on its way" (it was not; it was rejected and never persisted) and
+     handed a Retry that could not succeed. Same defect, and same fix, as
+     the section_closed carve-out above it. */
+  it("treats a duplicate-message conflict as permanent, not as a send still in flight", () => {
+    const dup = readErrorMessage(
+      JSON.stringify({ error: "A message with this clientMessageId already exists with different content", code: "duplicate_message" }),
+    );
+    const inFlight = readErrorMessage(JSON.stringify({ error: "x", code: "in_progress" }));
+    expect(dup.retryable).toBe(false);
+    expect(inFlight.retryable).toBe(true);
+    expect(dup.label).not.toBe(inFlight.label);
+    expect(dup.message).not.toMatch(/on its way/i);
+    /* The student must be told their message did not land -- the whole
+       point of #266 is that it silently did not. */
+    expect(dup.message).toMatch(/wasn't sent|not sent|didn't send/i);
   });
 
   // #317 review, #344: "unavailable" is a server misconfiguration (a

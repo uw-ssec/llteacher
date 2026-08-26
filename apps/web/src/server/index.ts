@@ -95,8 +95,14 @@ app.onError((err, c) => {
   // for different content than the row already stored under it -- the
   // request is well-formed and the caller is who they say they are, the id
   // just collides. 409, not a silent 200 that discards the new message.
+  //
+  // Carries the same `code` chatHandler's own local catch (routes/chat.ts)
+  // returns, so the two paths are indistinguishable to readErrorMessage
+  // (packages/ui) -- a body with no `code` at all falls into its `default`
+  // branch, which is both retryable and worded as a model failure ("The
+  // tutor didn't finish answering"), neither of which is true here.
   if (err instanceof IdempotencyKeyConflictError) {
-    return c.json({ error: err.message }, 409);
+    return c.json({ error: err.message, code: "duplicate_message" }, 409);
   }
   // #317 review, code-review follow-up: same 409 treatment as
   // IdempotencyKeyConflictError above -- a well-formed request that lost a

@@ -1525,6 +1525,40 @@ describe("POST /api/chat", () => {
 
       expect(res.status).toBe(409);
       expect(streamTextMock).not.toHaveBeenCalled();
+      // #266's actual defect is the ORPHAN, not the status code: the
+      // refused turn must leave no assistant row behind either.
+      // finalizeAssistantTurn is the only path that persists one
+      // (conversations.ts) -- asserting on it, not just on the HTTP
+      // status, is what proves the transcript stayed consistent.
+      expect(finalizeAssistantTurnMock).not.toHaveBeenCalled();
+      // ...and the lock this turn took must not stay held, or the student's
+      // NEXT (well-formed) send 409s too until LOCK_STALE_MS expires.
+      expect(releaseConversationTurnLockMock).toHaveBeenCalledWith(expect.anything(), "22222222-2222-2222-2222-222222222222");
+    });
+
+    // #266: the 409 body's `code` drives readErrorMessage (packages/ui),
+    // which decides whether the student is offered a Retry button. A
+    // content mismatch on a reused clientMessageId is PERMANENT -- the
+    // same id carrying the same different content 409s identically every
+    // time -- so it must not share "in_progress" ("Already sending",
+    // retryable), which would hand the student a retry that can never
+    // succeed and tell them a message that was actually REFUSED is "on its
+    // way". Exactly the conflation the section_closed case (ConversationView.tsx)
+    // was already carved out of in_progress to fix.
+    it("labels the conflict with its own non-retryable code, not the retryable in_progress one", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      appendMessageMock.mockRejectedValueOnce(
+        new IdempotencyKeyConflictError("A message with this clientMessageId already exists with different content"),
+      );
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "duplicate_message" });
     });
 
     it("still persists a genuinely new user message even when the conversation has prior messages", async () => {
