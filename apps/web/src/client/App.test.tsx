@@ -2391,3 +2391,109 @@ describe("App hint state (#80)", () => {
     expect(chatCalls).toHaveLength(1);
   });
 });
+
+/* --------------------------------------------------------------------------
+   #392: deleting a conversation whose history is still loading.
+
+   `tutorConversationId` is only assigned once a history fetch resolves, so a
+   conversation that has been clicked but not yet opened fails an
+   `id === tutorConversationId` test. Deleting it left
+   latestTutorSelectionRef pointing at the deleted id, and the in-flight
+   fetch's own staleness check then PASSED -- opening a conversation that had
+   just been deleted.
+   -------------------------------------------------------------------------- */
+describe("App delete during a pending selection (#392)", () => {
+  const HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
+      },
+    ],
+  };
+  const CONV_B = {
+    id: "conv-b",
+    kind: "tutor",
+    title: "Chat B",
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-02T00:00:00.000Z",
+    messageCount: 2,
+  };
+
+  it("does not open a deleted conversation when its in-flight history lands", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+    };
+    HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
+      this.removeAttribute("open");
+      this.dispatchEvent(new Event("close"));
+    };
+
+    let releaseHistory!: (r: Response) => void;
+    const historyPromise = new Promise<Response>((r) => (releaseHistory = r));
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [CONV_B], nextCursor: null }), { status: 200 });
+        }
+        if (url === "/api/conversations/conv-b" && init?.method === "DELETE") {
+          return new Response(null, { status: 204 });
+        }
+        if (url.startsWith("/api/conversations/conv-b/messages")) return historyPromise;
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // Select conversation B -- its history request hangs, so selection is
+    // pending and tutorConversationId is still undefined.
+    const row = await screen.findByRole("button", { name: `Select conversation: ${CONV_B.title}` });
+    await userEvent.click(row);
+
+    // Delete it while that fetch is still in flight.
+    await userEvent.click(screen.getByRole("button", { name: `Delete conversation: ${CONV_B.title}` }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(screen.queryByText(CONV_B.title)).toBeNull());
+
+    // Now let the history land. Before the fix, the staleness guard passed
+    // and the deleted conversation opened.
+    releaseHistory(new Response(JSON.stringify([]), { status: 200 }));
+
+    // The distinguishing signal is which SURFACE is mounted, not the title:
+    // the title is looked up from the rail list, and the deleted row is
+    // already gone from it, so no title renders whether the conversation
+    // opened or not. "STATS 311 · TUTOR CHAT" is the tutor column's own
+    // breadcrumb and appears only while a tutor conversation is active.
+    await waitFor(() => expect(screen.queryByText(CONV_B.title)).toBeNull());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByText(/TUTOR CHAT/)).toBeNull();
+    // ...and the section chat is still the surface on screen.
+    expect(screen.getAllByText(/Section 1/).length).toBeGreaterThan(0);
+  });
+});

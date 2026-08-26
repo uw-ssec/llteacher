@@ -688,19 +688,36 @@ export default function App() {
      this surface's own default when no tutor conversation is active. */
   const handleDeleteTutorConversation = async (id: string): Promise<boolean> => {
     const ok = await deleteTutorConversationRow(id);
-    if (ok && id === tutorConversationId) {
-      // Same clear the section-switch path does (see handleSelectSection),
-      // minus the section selection: the ref first so a history fetch still
-      // in flight for this id is discarded by its own staleness guard
-      // rather than resurrecting the surface after we left it.
+    if (!ok) return false;
+
+    /* #392: the ref is invalidated whenever the deleted conversation is the
+       one being SELECTED, not only when it is the one displayed.
+
+       `tutorConversationId` is not assigned until a history fetch resolves
+       (#290's whole subject -- selection is asynchronous), so a conversation
+       that was clicked and is still loading fails an `id ===
+       tutorConversationId` test. Deleting it therefore left
+       latestTutorSelectionRef pointing at the deleted id, and when its fetch
+       landed the staleness check `latestTutorSelectionRef.current !== id`
+       PASSED -- opening the conversation that had just been deleted, and
+       leaving the next send aimed at a soft-deleted row.
+
+       The comment that used to sit here claimed exactly this protection.
+       The condition guarding it did not deliver it. */
+    if (latestTutorSelectionRef.current === id) {
       latestTutorSelectionRef.current = undefined;
+    }
+
+    // Only the DISPLAYED conversation needs the surface torn down; a
+    // pending-only delete has no transcript on screen to clear.
+    if (id === tutorConversationId) {
       setTutorConversationId(undefined);
       setTutorInitialMessages([]);
       setJustCreatedTutorConversationId(undefined);
       setTutorHydrationError(null);
       setTutorHistoryHasMore(false);
     }
-    return ok;
+    return true;
   };
 
   /* #4: TutorConversationsList's "New conversation" button -- lifted here
