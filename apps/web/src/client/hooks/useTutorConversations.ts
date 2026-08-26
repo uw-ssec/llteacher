@@ -193,12 +193,36 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
 
   const bumpConversation = useCallback((id: string) => {
     setConversations((prev) => {
+      const index = prev.findIndex((c) => c.id === id);
+      if (index === -1) return prev;
+
       const now = new Date().toISOString();
       const next = prev.map((c) => (c.id === id ? { ...c, messageCount: c.messageCount + 1, updatedAt: now } : c));
-      // Matches listConversationsForOwner's desc(updatedAt) server-side
-      // ordering -- without this, the bumped row's count/timestamp update
-      // but it stays in its old list position until the next full refetch.
-      return next.slice().sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+
+      /* #310: two problems with re-sorting here, both fixed by not doing it
+         in the usual case.
+
+         The rail re-sorted the WHOLE list on every completed turn. Almost
+         always a no-op -- the conversation being talked to is already at
+         the top, because talking to it is what put it there -- but it
+         reordered rows underneath a student who might be reading them.
+
+         And the comparator mixed sources: this optimistic `now` is the
+         CLIENT's clock, while every other row's updatedAt came from the
+         server. A client running even slightly behind produced a row that
+         sorted below conversations it had just overtaken, so a turn could
+         push the active conversation DOWN the list.
+
+         Moving the bumped row to the front directly sidesteps both: it is
+         what desc(updatedAt) would have produced anyway (this row was just
+         touched, so it is the most recently updated by definition), it
+         leaves every other row's relative order exactly as the server sent
+         it, and it never compares a client timestamp against a server one.
+         When the row is already first -- the overwhelmingly common case --
+         nothing moves at all. */
+      if (index === 0) return next;
+      const bumped = next[index]!;
+      return [bumped, ...next.slice(0, index), ...next.slice(index + 1)];
     });
   }, []);
 

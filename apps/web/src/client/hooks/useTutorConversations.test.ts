@@ -354,4 +354,89 @@ describe("useTutorConversations", () => {
       expect(result.current.conversations).toEqual([CONV_A]);
     });
   });
+
+  /* ------------------------------------------------------------------------
+     #310: bump ordering.
+     ---------------------------------------------------------------------- */
+  describe("bumpConversation ordering (#310)", () => {
+    const rows = (updatedAts: string[]) => ({
+      items: updatedAts.map((updatedAt, i) => ({
+        ...CONV_A,
+        id: `conv-${i}`,
+        title: `Chat ${i}`,
+        updatedAt,
+      })),
+      nextCursor: null,
+    });
+
+    it("does not reorder anything when the bumped row is already first", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          new Response(
+            JSON.stringify(rows(["2026-08-03T00:00:00.000Z", "2026-08-02T00:00:00.000Z", "2026-08-01T00:00:00.000Z"])),
+            { status: 200 },
+          ),
+        ),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toHaveLength(3));
+      const before = result.current.conversations;
+
+      act(() => {
+        result.current.bumpConversation("conv-0");
+      });
+
+      // The overwhelmingly common case: you are talking to the conversation
+      // that is already at the top. Rows must not shuffle under a student
+      // who might be reading them.
+      expect(result.current.conversations.map((c) => c.id)).toEqual(before.map((c) => c.id));
+      expect(result.current.conversations[0]!.messageCount).toBe(before[0]!.messageCount + 1);
+    });
+
+    it("moves a bumped row to the front without disturbing the rest", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          new Response(
+            JSON.stringify(rows(["2026-08-03T00:00:00.000Z", "2026-08-02T00:00:00.000Z", "2026-08-01T00:00:00.000Z"])),
+            { status: 200 },
+          ),
+        ),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toHaveLength(3));
+
+      act(() => {
+        result.current.bumpConversation("conv-2");
+      });
+
+      expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-2", "conv-0", "conv-1"]);
+    });
+
+    it("still promotes the bumped row when the client clock is behind the server's", async () => {
+      // The defect this replaces: the old comparator sorted the optimistic
+      // CLIENT timestamp against SERVER timestamps. These rows are stamped
+      // far in the future relative to the test's own clock, so a
+      // date-comparing sort would leave the bumped row at the bottom -- a
+      // completed turn pushing the active conversation DOWN the rail.
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          new Response(
+            JSON.stringify(rows(["2099-01-03T00:00:00.000Z", "2099-01-02T00:00:00.000Z", "2099-01-01T00:00:00.000Z"])),
+            { status: 200 },
+          ),
+        ),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toHaveLength(3));
+
+      act(() => {
+        result.current.bumpConversation("conv-2");
+      });
+
+      expect(result.current.conversations[0]!.id).toBe("conv-2");
+    });
+  });
 });

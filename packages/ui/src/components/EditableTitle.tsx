@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { PencilSimple } from "@phosphor-icons/react";
 
 /* --------------------------------------------------------------------------
@@ -98,6 +98,10 @@ export interface EditableTitleProps {
   isActive?: boolean;
 }
 
+/** #310: how close to `maxLength` the input gets before the counter shows.
+ *  Small enough that a normal title never sees it. */
+const COUNTER_VISIBLE_WITHIN = 20;
+
 export function EditableTitle({
   value,
   onSave,
@@ -111,6 +115,7 @@ export function EditableTitle({
   activateDescribedBy,
   isActive,
 }: EditableTitleProps) {
+  const counterId = useId();
   const [isEditing, setIsEditing] = useState(false);
   const [pendingValue, setPendingValue] = useState(value);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -169,6 +174,15 @@ export function EditableTitle({
     setPendingValue(value);
     setLocalError(null);
   };
+
+  /* #310: how much room is left, and whether to say so. Silent until the
+     last 20 characters so it is not noise on a three-word title, then
+     present before the limit bites rather than after. `remaining` can go
+     negative now that the native clamp is gone -- that is the point: an
+     over-long paste is visible and refused on save instead of silently
+     truncated into something the student did not write. */
+  const remaining = maxLength - pendingValue.length;
+  const showCounter = remaining <= COUNTER_VISIBLE_WITHIN;
 
   const commitSave = async () => {
     const trimmed = pendingValue.trim();
@@ -287,10 +301,50 @@ export function EditableTitle({
         onBlur={handleBlur}
         onKeyDown={handleKeyDown}
         onClick={(e) => e.stopPropagation()}
-        maxLength={maxLength}
         aria-label="Edit title"
+        aria-describedby={showCounter ? counterId : undefined}
         disabled={isSubmitting}
       />
+      {/* #310: the native `maxLength` attribute is gone. It clamped typing
+          AND pasting with no signal whatsoever -- the input simply stopped
+          accepting characters, which reads as a broken field rather than a
+          limit. It also made this component's own "Title must be N
+          characters or fewer" branch unreachable: EditableTitle.test.tsx
+          had to call input.removeAttribute("maxlength") to test it, which
+          is a test proving the production path was dead.
+
+          Replaced by a counter that appears only near the limit (silent
+          until it is nearly relevant, then present before it bites) with
+          the existing validation branch left to refuse an over-long title
+          on save -- now genuinely reachable. Pasting a 400-character title
+          is now visible and explained rather than silently truncated to
+          100, which would have saved something the student did not
+          write. */}
+      {/* #310: rename mode bound Enter to save, Escape to cancel, AND blur to
+          save -- three keyboard conventions with no discoverable surface at
+          all. Blur-saves in particular is silent and surprising: clicking
+          away from a half-edited title committed it. The rail is 220px, too
+          narrow for explicit check/x buttons beside a text field, so this
+          takes the hint route the composer already established for its own
+          Enter binding. aria-hidden because the same information reaches
+          assistive tech through the input's own label and behaviour;
+          announcing keycaps on focus would be noise. */}
+      <span className="editable-title__hint" aria-hidden="true">
+        enter ↵ · esc to cancel
+      </span>
+      {showCounter && (
+        <span
+          id={counterId}
+          className={
+            remaining < 0 ? "editable-title__counter editable-title__counter--over" : "editable-title__counter"
+          }
+          // Not role="status": this updates on every keystroke, and an
+          // assertive-ish live region firing per character is unusable.
+          // aria-describedby on the input carries it on demand instead.
+        >
+          {remaining >= 0 ? `${remaining} left` : `${-remaining} over`}
+        </span>
+      )}
       {displayError && (
         <span className="editable-title__error" role="alert">
           {displayError}
