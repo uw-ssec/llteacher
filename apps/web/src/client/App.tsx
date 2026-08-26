@@ -10,6 +10,7 @@ import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
 import { TutorConversationsList } from "./views/TutorConversationsList";
 import { useTutorConversations } from "./hooks/useTutorConversations";
 import type { ConversationMessageResponse, StudentHomeworkListResponse, HintCountResponse } from "../shared/types";
+import { MAX_HISTORY_MESSAGES } from "../shared/chat-limits";
 
 /* ==========================================================================
    LLTeacher v2 — Chat-with-syllabus shell
@@ -1505,6 +1506,7 @@ export default function App() {
               error={tutorChatErrorRow}
               autoFocusComposer={tutorConversationId === justCreatedTutorConversationId}
               hasMoreHistory={tutorHistoryHasMore}
+              contextWindowSize={MAX_HISTORY_MESSAGES}
               onStop={handleStopTutorChat}
             />
           </ErrorBoundary>
@@ -1545,6 +1547,7 @@ export default function App() {
               isStopActionable={chatStatus === "submitted" || chatStatus === "streaming"}
               error={sectionChatErrorRow}
               hasMoreHistory={sectionHistoryHasMore}
+              contextWindowSize={MAX_HISTORY_MESSAGES}
               onStop={handleStopSectionChat}
               /* #248: only once there's an active conversation to restart --
                  a section the student hasn't started yet has nothing for
