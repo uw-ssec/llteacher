@@ -276,6 +276,45 @@ function prepareSendMessagesRequest({
   return { body: { ...body, messages: messages.slice(-1) } };
 }
 
+/* #96: the plain text a student actually typed, recovered from the UIMessage
+   useChat optimistically appended for it. Used only on the send-failure path
+   below, to hand those words back to the composer before dropping the bubble
+   the server never stored. Tool/file parts are ignored: a student message is
+   text parts only (see handleSendMessage's `sendMessage({ text })`). */
+function studentTextOf(message: UIMessage): string {
+  return message.parts
+    .filter((p): p is { type: "text"; text: string } => p.type === "text")
+    .map((p) => p.text)
+    .join("");
+}
+
+/* #96 (interrupted-stream resilience, and the two-tabs non-goal).
+   ---------------------------------------------------------------
+   A turn can fail in two places, and the recovery differs:
+
+     send half     -- the request never reached the server, or the server
+                      refused it (any non-2xx: rate limit, closed section,
+                      duplicate id, lost wifi). Nothing was persisted. The
+                      student's words are handed back to the composer and the
+                      un-persisted bubble is dropped, so what's on screen
+                      matches what a reload would show.
+     response half -- the server accepted the send (2xx), so the user message
+                      IS persisted, but the model turn didn't finish. #268's
+                      onFinish gate means the truncated reply is deliberately
+                      NOT persisted, so a reload shows the question with no
+                      answer; the in-session recovery is regenerate, which
+                      re-sends the same clientMessageId and so is deduped by
+                      the server's own idempotency check rather than
+                      double-writing the question.
+
+   Two tabs on one conversation is last-writer-wins with the persisted
+   transcript as truth on reload -- an explicit v1 non-goal, not an oversight:
+   there is no realtime sync, no cross-tab channel, and no attempt to merge.
+   The server's per-conversation turn lock (chat.ts) already prevents the only
+   outcome that would corrupt anything -- two interleaved turns writing into
+   one conversation -- by 409ing the second tab's overlapping send; each tab
+   otherwise just shows its own stale view until it reloads. */
+
 /* ==========================================================================
    App — the root component
 
@@ -297,6 +336,18 @@ export default function App() {
      history on mount, is conversation-lifecycle scope (#27), not this task. */
   const [conversationId, setConversationId] = useState<string | undefined>(undefined);
 
+  /* #96: false from the moment a fresh send is dispatched until the server
+     answers 2xx for it. A 2xx on /api/chat is exactly the point at which the
+     student's own message is durably persisted -- chatHandler appends the
+     user row (or resolves it to an already-persisted one) BEFORE it opens the
+     stream, so every non-2xx, and every fetch that throws outright, means the
+     turn does not exist server-side at all.
+     Deliberately NOT reset by `regenerate`: once a send has been accepted, the
+     user row stays persisted no matter how many later regenerate attempts
+     fail, so a failed regenerate is always a response-half failure. See
+     TurnFailureStage (packages/ui) for what each half implies. */
+  const sectionSendAcceptedRef = useRef(true);
+
   /* Wraps fetch to read the x-conversation-id response header before handing
      the (untouched) Response back to useChat's own stream parsing --
      DefaultChatTransport otherwise has no way to surface response headers
@@ -308,9 +359,13 @@ export default function App() {
      were on that first render forever. currentSectionRef/sectionMetaByOrderRef
      (declared below, kept current via their own effects) are how this
      stays correct across every later render without recreating the
-     transport. */
+     transport.
+
+     #96: it also records whether the server ACCEPTED this send -- see
+     sectionSendAcceptedRef above. */
   const chatFetch: typeof fetch = async (input, init) => {
     const res = await fetch(input, init);
+    if (res.ok) sectionSendAcceptedRef.current = true;
     const newConversationId = res.headers.get("x-conversation-id");
     if (newConversationId) {
       setConversationId(newConversationId);
@@ -409,6 +464,31 @@ export default function App() {
     stopChat();
   };
 
+  /* #96: set when the LAST failure was a send-half failure -- carries the
+     student's text back to the composer (ConversationView's `restoredDraft`)
+     and, by being non-null, suppresses the error row's regenerate button
+     (there is no server-side turn to regenerate). A fresh object per failure
+     so the same text failing twice restores twice. */
+  const [sectionSendFailure, setSectionSendFailure] = useState<{ text: string } | null>(null);
+  const prevChatStatusRef = useRef(chatStatus);
+  useEffect(() => {
+    const previous = prevChatStatusRef.current;
+    prevChatStatusRef.current = chatStatus;
+    // Only the moment a turn FAILS, not every render while it stays failed.
+    if (chatStatus !== "error" || previous === "error") return;
+    if (sectionSendAcceptedRef.current) return; // response half: the question is persisted, leave it on screen
+    const last = aiMessages[aiMessages.length - 1];
+    // Defensive: a send-half failure never gets far enough for the SDK to
+    // append an assistant message, so the tail is the student's own message.
+    if (last?.role !== "user") return;
+    setSectionSendFailure({ text: studentTextOf(last) });
+    // The bubble is dropped, not merely marked: it was never persisted, so
+    // leaving it would show a message that a reload makes vanish -- the
+    // client-side twin of the truncated assistant row #268 stops the server
+    // from writing.
+    setSectionMessages(aiMessages.slice(0, -1));
+  }, [chatStatus, aiMessages, setSectionMessages]);
+
   const {
     sections,
     setSections,
@@ -458,12 +538,20 @@ export default function App() {
      `messages: tutorInitialMessages` -- selectTutorConversation below
      always updates both together in the same event handler (batched into
      one render), so the freshly fetched history is already in state by the
-     time `id` changes and useChat recreates its Chat instance off it. Plain
-     `fetch` (not the section chat's chatFetch wrapper): that wrapper writes
-     into the *section* chat's conversationId state, which would corrupt it
-     if reused here. */
+     time `id` changes and useChat recreates its Chat instance off it. Not
+     the section chat's chatFetch wrapper: that wrapper writes into the
+     *section* chat's conversationId state, which would corrupt it if reused
+     here -- tutorChatFetch below does only the half that IS shared (#96's
+     send-accepted classification). */
+  const tutorSendAcceptedRef = useRef(true);
+  const tutorChatFetch: typeof fetch = async (input, init) => {
+    const res = await fetch(input, init);
+    if (res.ok) tutorSendAcceptedRef.current = true;
+    return res;
+  };
   const {
     messages: tutorAiMessages,
+    setMessages: setTutorMessages,
     sendMessage: sendTutorMessage,
     status: tutorChatStatus,
     error: tutorChatError,
@@ -474,8 +562,28 @@ export default function App() {
   } = useChat({
     id: tutorConversationId,
     messages: tutorInitialMessages,
-    transport: new DefaultChatTransport({ api: "/api/chat", prepareSendMessagesRequest }),
+    transport: new DefaultChatTransport({ api: "/api/chat", fetch: tutorChatFetch, prepareSendMessagesRequest }),
   });
+
+  /* #96: the tutor chat's own half of the send-failure recovery above --
+     same reasoning, this instance's messages. Also cleared whenever the
+     selected conversation changes, since a stale restore from a different
+     conversation must not land in the new one's composer. */
+  const [tutorSendFailure, setTutorSendFailure] = useState<{ text: string } | null>(null);
+  useEffect(() => {
+    setTutorSendFailure(null);
+  }, [tutorConversationId]);
+  const prevTutorStatusForFailureRef = useRef(tutorChatStatus);
+  useEffect(() => {
+    const previous = prevTutorStatusForFailureRef.current;
+    prevTutorStatusForFailureRef.current = tutorChatStatus;
+    if (tutorChatStatus !== "error" || previous === "error") return;
+    if (tutorSendAcceptedRef.current) return;
+    const last = tutorAiMessages[tutorAiMessages.length - 1];
+    if (last?.role !== "user") return;
+    setTutorSendFailure({ text: studentTextOf(last) });
+    setTutorMessages(tutorAiMessages.slice(0, -1));
+  }, [tutorChatStatus, tutorAiMessages, setTutorMessages]);
 
   // #317 review, #352: same reasoning as sectionStoppedMessageId above.
   // Also reset on tutorConversationId change (switching conversations, or
@@ -994,17 +1102,27 @@ export default function App() {
   // it's the more fundamental problem (the composer is disabled either way
   // while it's set, see isSending below), and regenerateChat's retry
   // wouldn't even be reachable in a useful state without history loaded.
+  // #96: `stage` splits the one error row into the two cases that need
+  // different recoveries. A send-half failure (sectionSendFailure set) omits
+  // `onRetry` entirely -- regenerate would re-request a turn the server never
+  // accepted, and the student's text is already back in the composer, so
+  // Enter is the retry. A response-half failure keeps the existing
+  // regenerate, which re-sends the same clientMessageId and is therefore
+  // deduped server-side rather than double-writing the question.
   const sectionChatErrorRow =
     sectionHydrationError ??
     (chatStatus === "error"
       ? {
           message: chatError?.message || "Something went wrong. Please try again.",
-          onRetry: () =>
-            regenerateChat({
-              body: conversationId
-                ? { conversationId }
-                : { courseId, kind: "section" as const, sectionId: sectionMetaByOrder.get(currentSection)?.id },
-            }),
+          stage: sectionSendFailure ? ("send" as const) : ("response" as const),
+          onRetry: sectionSendFailure
+            ? undefined
+            : () =>
+                regenerateChat({
+                  body: conversationId
+                    ? { conversationId }
+                    : { courseId, kind: "section" as const, sectionId: sectionMetaByOrder.get(currentSection)?.id },
+                }),
         }
       : null);
   const tutorChatErrorRow =
@@ -1012,8 +1130,11 @@ export default function App() {
     (tutorChatStatus === "error"
       ? {
           message: tutorChatError?.message || "Something went wrong. Please try again.",
-          onRetry: () =>
-            regenerateTutorChat({ body: tutorConversationId ? { conversationId: tutorConversationId } : {} }),
+          stage: tutorSendFailure ? ("send" as const) : ("response" as const),
+          onRetry: tutorSendFailure
+            ? undefined
+            : () =>
+                regenerateTutorChat({ body: tutorConversationId ? { conversationId: tutorConversationId } : {} }),
         }
       : null);
 
@@ -1078,6 +1199,11 @@ export default function App() {
        unconditional per-message increment (every send used to bump
        hintCount regardless of whether anything hint-shaped happened). */
     if (options?.isHintRequest) hintRequestPendingRef.current = true;
+    // #96: a fresh send is un-accepted until the server answers 2xx for it,
+    // and clears any previous send-failure (its text is either being re-sent
+    // right now or was deliberately replaced by the student).
+    sectionSendAcceptedRef.current = false;
+    setSectionSendFailure(null);
     sendMessage(
       { text },
       {
@@ -1116,6 +1242,9 @@ export default function App() {
   const handleSendTutorMessage = (text: string) => {
     if (!tutorConversationId) return;
     if (tutorChatStatus === "submitted" || tutorChatStatus === "streaming") return;
+    // #96: see handleSendMessage above.
+    tutorSendAcceptedRef.current = false;
+    setTutorSendFailure(null);
     sendTutorMessage({ text }, { body: { conversationId: tutorConversationId } });
     // #317 review, #352: same reasoning as handleSendMessage above.
     setTutorStoppedMessageId(null);
@@ -1471,6 +1600,10 @@ export default function App() {
                  composer is merely disabled for an unrelated reason. */
               isStopActionable={tutorChatStatus === "submitted" || tutorChatStatus === "streaming"}
               error={tutorChatErrorRow}
+              /* #96: a send that never reached the server hands the
+                 student's text back here rather than stranding it in a
+                 bubble the server never stored. */
+              restoredDraft={tutorSendFailure}
               autoFocusComposer={tutorConversationId === justCreatedTutorConversationId}
               hasMoreHistory={tutorHistoryHasMore}
               onStop={handleStopTutorChat}
@@ -1512,6 +1645,8 @@ export default function App() {
                  ConversationView's own isStopActionable comment above. */
               isStopActionable={chatStatus === "submitted" || chatStatus === "streaming"}
               error={sectionChatErrorRow}
+              /* #96: see the tutor ConversationView's own comment above. */
+              restoredDraft={sectionSendFailure}
               hasMoreHistory={sectionHistoryHasMore}
               onStop={handleStopSectionChat}
               /* #248: only once there's an active conversation to restart --

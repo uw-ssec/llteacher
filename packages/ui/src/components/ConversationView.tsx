@@ -76,7 +76,40 @@ function clampDetail(raw: string): string | undefined {
     : trimmed;
 }
 
-export function readErrorMessage(raw: string): StoppedCopy {
+/** #96 (send-failure UX): which HALF of a turn failed.
+ *
+ *  "send" — the request never reached the server, or the server refused it
+ *  outright (any non-2xx). Nothing about this turn was persisted: no user
+ *  row, no assistant row. The student's own text is the thing at risk, and
+ *  the caller is expected to have put it back in the composer (see
+ *  `restoredDraft`), so the copy must say "not sent" and must NOT offer a
+ *  regenerate-style retry against a turn the server never heard of.
+ *
+ *  "response" — the server accepted the send (2xx) and therefore persisted
+ *  the student's message, but the model turn didn't complete (an in-stream
+ *  `error` chunk, a dropped connection mid-stream, a server timeout). The
+ *  student's message IS in the transcript and will still be there on reload;
+ *  only the reply is missing, so the right recovery is regenerate.
+ *
+ *  These were conflated before: every failed turn rendered the same row with
+ *  the same regenerate retry, which for a refused send meant the student's
+ *  text sat in the transcript as a bubble the server had never stored (it
+ *  vanished on reload) while the copy told them to retype it by hand. */
+export type TurnFailureStage = "send" | "response";
+
+export function readErrorMessage(raw: string, stage: TurnFailureStage = "response"): StoppedCopy {
+  const copy = classifyStoppedTurn(raw, stage);
+  /* #96: a refused/undelivered send is never retryable through the error
+     row, whatever its code says in the response-failure case. The turn does
+     not exist server-side, so there is nothing to regenerate -- the caller
+     has put the student's text back in the composer instead, and Enter is
+     the retry. Applied centrally so no individual case below can drift out
+     of step with that (rate_limited's "retryable: true" is correct for a
+     response-half failure and wrong for this one). */
+  return stage === "send" ? { ...copy, retryable: false } : copy;
+}
+
+function classifyStoppedTurn(raw: string, stage: TurnFailureStage): StoppedCopy {
   /* Defensive: the SDK stores whatever was thrown, typed `unknown`. A
      non-Error throw yields `undefined` here, and `.trim()` on it would raise
      inside the render body -- escalating a recoverable failed turn into a
@@ -149,11 +182,13 @@ export function readErrorMessage(raw: string): StoppedCopy {
          persisted -- the precise silent-drop this issue exists to end, just
          relocated from the transcript to the error copy. Says plainly that
          nothing was sent, and points at the one action that does work
-         (compose it again, which mints a fresh id). */
+         (compose it again, which mints a fresh id -- #96 puts the text
+         itself back in the composer, so that's one keystroke, not a
+         retype). */
       return {
         label: "Message not sent",
         message:
-          "That message wasn't sent — it clashed with an earlier one. Nothing was lost from the conversation. Type it again to send it.",
+          "That message wasn't sent — it clashed with an earlier one. Nothing was lost from the conversation: it's back in the box below, ready to send again.",
         retryable: false,
       };
     case "section_closed":
@@ -189,6 +224,25 @@ export function readErrorMessage(raw: string): StoppedCopy {
         retryable: false,
       };
     default:
+      /* #96: an unrecognized failure means very different things depending
+         on which half of the turn died, and the previous single sentence
+         ("The tutor didn't finish answering") was only ever true for the
+         response half. A send that never reached the server -- a dropped
+         wifi connection, a WebKit "Load failed", a gateway page in front of
+         the Worker -- did not fail to ANSWER; it failed to ARRIVE, and the
+         student's own words are what needs accounting for. */
+      if (stage === "send") {
+        return {
+          label: "Not sent",
+          message:
+            "Your message didn't reach the tutor, so nothing was added to this conversation. It's back in the box below — check your connection and send it again.",
+          detail: clampDetail(serverError ?? trimmed),
+          /* The composer holds the text: pressing Enter is the retry. A
+             regenerate-style button here would re-request a turn the server
+             never received. */
+          retryable: false,
+        };
+      }
       /* Everything unrecognized -- a provider string, a gateway HTML page, a
          WebKit "Load failed", a body whose shape we do not know. The student
          gets a sentence; the machine's words go to the detail line only. */
@@ -268,8 +322,24 @@ export interface ConversationViewProps {
    *  "error") so a failed/rate-limited stream doesn't just silently
    *  disappear. Rendered as an inline row below the messages with a Retry
    *  action; `onRetry` should call that `useChat` instance's own
-   *  `regenerate()`. `null`/`undefined` renders nothing. */
-  error?: { message: string; onRetry: () => void } | null;
+   *  `regenerate()`. `null`/`undefined` renders nothing.
+   *
+   *  #96: `stage` says which half of the turn failed (see TurnFailureStage)
+   *  and defaults to "response", the only case that existed before. `onRetry`
+   *  is optional because a "send"-stage failure has nothing to regenerate --
+   *  omit it and no Retry button renders, since the student's text has been
+   *  handed back to the composer via `restoredDraft` instead. */
+  error?: { message: string; onRetry?: () => void; stage?: TurnFailureStage } | null;
+  /** #96 (send-failure UX): text to put back into the composer after a send
+   *  that never reached the server, so the student's words survive a dropped
+   *  connection or a refused request instead of being stranded in a
+   *  transcript bubble the server never stored.
+   *
+   *  Restored once per object identity -- pass a NEW object per failure (the
+   *  same text failing twice must restore twice) and `null` the rest of the
+   *  time. Never overwrites a non-empty draft: if the student has already
+   *  started typing something else, their current words win. */
+  restoredDraft?: { text: string } | null;
   /** #235: focuses the composer once on mount -- pass true for the one
    *  render right after a brand-new conversation was created and switched
    *  to, so a keyboard user lands in the composer without an extra Tab. */
@@ -347,6 +417,7 @@ export function ConversationView({
   onSendMessage,
   isSending = false,
   error = null,
+  restoredDraft = null,
   autoFocusComposer = false,
   hasMoreHistory = false,
   headerActions,
@@ -444,6 +515,18 @@ export function ConversationView({
     setDraft("");
   };
 
+  /* #96: hand a failed-to-send message back to the composer. Keyed on object
+     identity rather than on the text, so the same message failing twice in a
+     row restores both times -- a value-keyed effect would see no change and
+     silently swallow the second failure, which is exactly the "my words just
+     disappeared" complaint this exists to prevent. */
+  const lastRestoredDraftRef = useRef<{ text: string } | null>(null);
+  useEffect(() => {
+    if (!restoredDraft || restoredDraft === lastRestoredDraftRef.current) return;
+    lastRestoredDraftRef.current = restoredDraft;
+    setDraft((current) => (current.trim() ? current : restoredDraft.text));
+  }, [restoredDraft]);
+
   /* Composer history: the student's most recent 10 sent messages, oldest→newest.
      Derived from the conversation messages already in props — no separate store. */
   const composerHistory = messages
@@ -453,7 +536,7 @@ export function ConversationView({
 
   /* Hoisted rather than computed inside JSX: the previous inline IIFE
      existed only to bind locals, and foreclosed memoising or extracting. */
-  const errorCopy = error ? readErrorMessage(error.message) : null;
+  const errorCopy = error ? readErrorMessage(error.message, error.stage ?? "response") : null;
 
   return (
     <div className="conversation-column">
@@ -605,7 +688,12 @@ export function ConversationView({
               {/* Before the detail, not after. A gateway error body pushed the
                   only recovery control arbitrarily far down a thread that does
                   not auto-scroll on error. */}
-              {errorCopy.retryable && (
+              {/* #96: `onRetry` is optional now -- a send-stage failure has
+                  no server-side turn to regenerate, so the caller omits it
+                  and the student recovers from the composer instead
+                  (readErrorMessage already forces retryable false there;
+                  this second condition keeps the two from ever disagreeing). */}
+              {errorCopy.retryable && error.onRetry && (
                 <button
                   type="button"
                   className="conversation-error-row__retry"

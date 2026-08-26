@@ -1461,6 +1461,83 @@ describe("POST /api/chat", () => {
     });
   });
 
+  /* #96 requirement 4: two tabs on one conversation. The v1 contract is
+     last-writer-wins with the persisted transcript as truth on reload, and
+     the explicit NON-GOALS are realtime sync and any cross-tab merge (see
+     chat.ts's own "Resilience & concurrency" header). What must NOT be
+     possible is the one outcome that corrupts the transcript: two turns
+     interleaving their writes into the same conversation. These assert the
+     contract holds through the machinery that already exists (the turn lock
+     and the clientMessageId idempotency check) rather than adding new
+     mechanism for it -- the point is that it is verified, not assumed. */
+  describe("#96 two tabs on one conversation (last-writer-wins, no realtime sync)", () => {
+    it("refuses the second tab's overlapping send instead of interleaving it into the transcript", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      // Tab A is mid-turn, so it holds the lock; tab B arrives with its own,
+      // genuinely different message.
+      acquireConversationTurnLockMock.mockResolvedValue(false);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [{ id: "client-tab-b", role: "user", parts: [{ type: "text", text: "the other tab's question" }] }],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: "Another message for this conversation is still being processed. Please wait a moment and try again.",
+        code: "in_progress",
+      });
+      // The transcript is untouched by the refused tab -- no user row, no
+      // assistant row, no model call. Tab B is told to wait, which is what
+      // makes "last writer wins" a serialization rather than a race.
+      expect(appendMessageMock).not.toHaveBeenCalled();
+      expect(streamTextMock).not.toHaveBeenCalled();
+      expect(finalizeAssistantTurnMock).not.toHaveBeenCalled();
+    });
+
+    it("appends the second tab's message after the first tab's completed turn rather than replacing it", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      // Tab A's turn has finished and is persisted. Tab B, which has been
+      // sitting on a stale view all along, now sends. Last writer wins: its
+      // message is appended to the SAME conversation, not merged, not
+      // rejected, and not written over tab A's turn.
+      getLastMessagesMock.mockResolvedValue([
+        { role: "assistant", parts: [{ type: "text", text: "tab A's answer" }], clientMessageId: null },
+        { role: "user", parts: [{ type: "text", text: "tab A's question" }], clientMessageId: "client-tab-a" },
+      ]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [{ id: "client-tab-b", role: "user", parts: [{ type: "text", text: "the other tab's question" }] }],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(200);
+      expect(appendMessageMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+        {
+          role: "user",
+          parts: [{ type: "text", text: "the other tab's question" }],
+          clientMessageId: "client-tab-b",
+        },
+        expect.anything(),
+      );
+      // A genuine model call: tab B's message is a new turn, not a replay of
+      // tab A's (which a content- or position-keyed idempotency check could
+      // have mistaken it for).
+      expect(streamTextMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe("#213 idempotency keyed on clientMessageId, not content", () => {
     it("does not double-write the user message on a retry before it was answered (same clientMessageId)", async () => {
       getOwnedConversationOrNullMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });

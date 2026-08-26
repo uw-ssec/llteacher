@@ -91,6 +91,39 @@ function chatStreamResponse(conversationId: string, replyText: string) {
   });
 }
 
+/* #96/#268: a fault-injecting response for the RESPONSE half of a turn --
+   the server accepted the send (2xx, so chatHandler has already persisted the
+   student's message) and streamed real content, and THEN the model died
+   mid-generation. ai@5.0.195 delivers that as an in-stream `error` chunk, not
+   a rejected request, carrying whatever chat.ts's
+   toUIMessageStreamResponse.onError returned -- the same `{error, code}`
+   envelope readErrorMessage (packages/ui) classifies by `code`.
+
+   Note what is deliberately absent: no `finish` chunk and no `text-end`. That
+   is the wire shape #268's server-side fix keys off (finishReason "error", a
+   text part still `state:"streaming"`), so the truncated reply is never
+   persisted and a reload shows the question with no answer. */
+function interruptedChatStreamResponse(conversationId: string, partialText: string) {
+  const chunks = [
+    { type: "start" },
+    { type: "start-step" },
+    { type: "text-start", id: "t1" },
+    { type: "text-delta", id: "t1", delta: partialText },
+    {
+      type: "error",
+      errorText: JSON.stringify({
+        error: "The tutor stopped partway through. Nothing you wrote was lost.",
+        code: "tutor_stopped",
+      }),
+    },
+  ];
+  const body = chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/event-stream", "x-conversation-id": conversationId },
+  });
+}
+
 // #3 follow-up fix: conversationId must flow into every /api/chat request
 // after the first, not just be captured and then dropped. This renders the
 // real App (real useChat + DefaultChatTransport, not a mocked hook) against
@@ -861,10 +894,15 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
     stubHomeworkFetch(async () => {
       chatCallCount += 1;
       if (chatCallCount === 1) {
-        // HttpChatTransport throws `new Error(await response.text())` for a
-        // non-ok response -- this is the exact path a failed/rate-limited
-        // /api/chat request takes in production.
-        return new Response("rate limited", { status: 429 });
+        // #96: a RESPONSE-half failure specifically -- the send was accepted
+        // (2xx), so the student's message is persisted and regenerate is the
+        // correct recovery. (This test used to inject a 429, which #96
+        // reclassified as a SEND-half failure: nothing persisted, no
+        // regenerate offered, text handed back to the composer instead. That
+        // case now has its own tests below; this one keeps #144's original
+        // subject -- a failed turn must surface and Retry must recover it --
+        // with the fault shape that still matches it.)
+        return interruptedChatStreamResponse("conv-1", "A p-value is the probability of");
       }
       return new Response(
         [
@@ -897,7 +935,13 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
     // resolve into a visible, retryable error row -- not just vanish, which
     // was #144's actual complaint.
     expect(await screen.findByRole("alert")).toBeTruthy();
-    expect(await screen.findByText("rate limited")).toBeTruthy();
+    expect(
+      await screen.findByText("The tutor stopped partway through. Nothing you wrote was lost."),
+    ).toBeTruthy();
+    // #96: a response-half failure must NOT hand the text back to the
+    // composer -- the server persisted that message, so re-typing it would
+    // send it twice.
+    expect(composer.value).toBe("");
     // PR-1 whole-branch review (Important): the composer must stay USABLE
     // in the "error" state, not locked -- only a genuinely in-flight
     // request ("submitted"/"streaming") disables it. The section chat's
@@ -920,7 +964,10 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
     let chatCallCount = 0;
     stubHomeworkFetch(async () => {
       chatCallCount += 1;
-      if (chatCallCount === 1) return new Response("rate limited", { status: 429 });
+      // Response-half again, so the composer starts empty for the "type a
+      // genuinely different message" step below (#96 pre-fills it on a
+      // send-half failure -- covered separately).
+      if (chatCallCount === 1) return interruptedChatStreamResponse("conv-1", "half an answer");
       return new Response(
         [
           `data: ${JSON.stringify({ type: "start" })}\n\n`,
@@ -1020,7 +1067,10 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
     let chatCallCount = 0;
     stubTutorFetch(async () => {
       chatCallCount += 1;
-      if (chatCallCount === 1) return new Response("tutor stream failed", { status: 500 });
+      // #96: a RESPONSE-half failure (2xx, then the model died mid-stream) --
+      // see the section chat's equivalent test above for why this replaced a
+      // bare non-2xx here.
+      if (chatCallCount === 1) return interruptedChatStreamResponse("tutor-conv-1", "Well, a p-value");
       return new Response(
         [
           `data: ${JSON.stringify({ type: "start" })}\n\n`,
@@ -1052,7 +1102,9 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
     await user.type(composer, "tutor question{Enter}");
 
     expect(await screen.findByRole("alert")).toBeTruthy();
-    expect(await screen.findByText("tutor stream failed")).toBeTruthy();
+    expect(
+      await screen.findByText("The tutor stopped partway through. Nothing you wrote was lost."),
+    ).toBeTruthy();
     // PR-1 whole-branch review (Important): same "error" != "disabled" fix
     // as the section chat above, applied to the tutor chat's independent
     // useChat instance too.
@@ -1063,6 +1115,240 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
     await screen.findByText("tutor recovered");
     expect(chatCallCount).toBe(2);
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+/* #96 (streaming resilience), driven through a fault-injecting mock
+   transport -- the real App, the real useChat/DefaultChatTransport, and a
+   stubbed `fetch` that fails in a specific, chosen place.
+
+   The whole point of these tests is the SPLIT that #96 requirement 3 asks
+   for, which the client did not make before: every failed turn used to
+   render one error row with one regenerate retry, regardless of whether the
+   server had ever heard of the turn.
+
+     send half     -- the fetch threw, or the server answered non-2xx.
+                      chatHandler persists the student's message BEFORE it
+                      opens the stream, so nothing at all was written. The
+                      un-persisted bubble must leave the transcript (a reload
+                      would drop it anyway) and the words must come back in
+                      the composer.
+     response half -- 2xx, so the question IS persisted; only the reply died.
+                      The bubble stays, the composer stays empty, and Retry
+                      regenerates (covered by the #144 blocks above, which
+                      now inject exactly this shape).
+
+   Requirement 1 as amended by the controller ruling on #268 vs #96: there is
+   no partial persist and no resume-from-checkpoint. An interrupted turn
+   leaves the question with no answer, which is what the reload test below
+   asserts against the transcript the server actually returns. */
+describe("App streaming resilience: send-half vs response-half failures (#96)", () => {
+  const HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
+      },
+    ],
+  };
+
+  function stubFetch(chatFetch: typeof fetch, homeworks: unknown = HOMEWORK_FIXTURE, messagesFor?: () => Response) {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(homeworks), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url.includes("/messages") && messagesFor) return messagesFor();
+        if (url === "/api/chat") return chatFetch(input, init);
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+  }
+
+  function renderApp() {
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  it("hands the student's words back to the composer, and drops the un-persisted bubble, when the request never reaches the server", async () => {
+    let chatCallCount = 0;
+    stubFetch(async () => {
+      chatCallCount += 1;
+      // A dropped connection: `fetch` itself rejects, so the Worker never
+      // saw this request and nothing was persisted for it.
+      if (chatCallCount === 1) throw new TypeError("Load failed");
+      return chatStreamResponse("conv-1", "a real reply at last");
+    });
+
+    renderApp();
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "why is my p-value 0.03?{Enter}");
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    // The copy names the right failure: not "the tutor didn't answer" (it was
+    // never asked), but "your message didn't arrive".
+    expect(await screen.findByText(/didn't reach the tutor/)).toBeTruthy();
+
+    // The requirement itself: the student's text is not lost.
+    await waitFor(() => expect(composer.value).toBe("why is my p-value 0.03?"));
+
+    // ...and it is no longer sitting in the transcript as a message the
+    // server never stored. Before this, the bubble stayed on screen and then
+    // silently vanished on the next reload.
+    expect(screen.queryByText("why is my p-value 0.03?", { selector: "p, div, span" })).toBeNull();
+
+    // No regenerate affordance: there is no server-side turn to regenerate.
+    // The composer IS the retry.
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+
+    // And that retry works: Enter on the restored text re-sends it.
+    await user.type(composer, "{Enter}");
+    await screen.findByText("a real reply at last");
+    expect(chatCallCount).toBe(2);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("restores the text for a server-REFUSED send too (a non-2xx never persists anything either)", async () => {
+    let chatCallCount = 0;
+    stubFetch(async () => {
+      chatCallCount += 1;
+      if (chatCallCount === 1) {
+        // #266's duplicate_message 409: the server refused this send
+        // outright. Nothing persisted, and re-sending the same id can never
+        // succeed -- so the text must come back for a fresh send.
+        return new Response(
+          JSON.stringify({ error: "A message with this clientMessageId already exists", code: "duplicate_message" }),
+          { status: 409 },
+        );
+      }
+      return chatStreamResponse("conv-1", "accepted on the second try");
+    });
+
+    renderApp();
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "does this clash?{Enter}");
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(await screen.findByText(/it's back in the box below/)).toBeTruthy();
+    await waitFor(() => expect(composer.value).toBe("does this clash?"));
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+
+    await user.type(composer, "{Enter}");
+    await screen.findByText("accepted on the second try");
+    expect(chatCallCount).toBe(2);
+  });
+
+  it("does not clobber a draft the student is already holding when the failed send came from elsewhere", async () => {
+    /* The reachable version of the "don't overwrite" guard: #80's hint
+       button sends its own fixed message through the same pipeline while the
+       composer may already hold the student's own half-written question. If
+       that hint send is refused, restoring it would overwrite words the
+       student never sent and never wants replaced. */
+    stubFetch(async () => new Response("gateway timeout", { status: 504 }));
+
+    renderApp();
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "my own half-written question");
+
+    await user.click(screen.getByRole("button", { name: "Give me a hint" }));
+    await screen.findByRole("alert");
+
+    // The hint's own text must not have landed on top of the student's draft.
+    await waitFor(() => expect(composer.value).toBe("my own half-written question"));
+    expect(composer.value).not.toContain("Give me a hint for this section");
+  });
+
+  it("keeps the question on screen for a RESPONSE-half failure, and does not pre-fill the composer", async () => {
+    stubFetch(async () => interruptedChatStreamResponse("conv-1", "A p-value is the probability of"));
+
+    renderApp();
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "explain p-values{Enter}");
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    // The server accepted and persisted this question, so it stays in the
+    // transcript -- and must NOT be handed back to the composer, or the
+    // student would send it a second time.
+    expect(await screen.findByText("explain p-values")).toBeTruthy();
+    expect(composer.value).toBe("");
+    // Regenerate IS the right recovery here: it re-sends the same
+    // clientMessageId, which the server's idempotency check dedupes rather
+    // than double-writing the question.
+    expect(await screen.findByRole("button", { name: "Try again" })).toBeTruthy();
+  });
+
+  it("shows the question with no assistant reply on reload after an interrupted turn, and lets the student send again", async () => {
+    /* Requirement 1 as amended: no partial persist, no resume endpoint. The
+       transcript the server returns after an interrupted turn is exactly the
+       user row (#268's onFinish gate refuses the truncated reply -- proved
+       server-side in chat.errorChunk.integration.test.ts), and this is the
+       client half: that transcript renders faithfully, and the plain composer
+       is the "try again" affordance from it. */
+    const hydrated = {
+      homeworks: [
+        {
+          ...HOMEWORK_FIXTURE.homeworks[0],
+          sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
+        },
+      ],
+    };
+    let chatCallCount = 0;
+    stubFetch(
+      async () => {
+        chatCallCount += 1;
+        return chatStreamResponse("sec-conv-1", "the answer, this time in full");
+      },
+      hydrated,
+      () =>
+        new Response(
+          // Only the question. No assistant row at all -- not a partial one
+          // flagged "interrupted", which is what #96's superseded original
+          // design would have written here.
+          JSON.stringify([{ id: "m1", role: "user", parts: [{ type: "text", text: "what does 0.03 mean?" }] }]),
+          { status: 200 },
+        ),
+    );
+
+    renderApp();
+
+    expect(await screen.findByText("what does 0.03 mean?")).toBeTruthy();
+    // Nothing half-written is replayed as if it were an answer.
+    expect(screen.queryByText(/A p-value is the probability of/)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "what does 0.03 mean?{Enter}");
+    await screen.findByText("the answer, this time in full");
+    expect(chatCallCount).toBe(1);
   });
 });
 

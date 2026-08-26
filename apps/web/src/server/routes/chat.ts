@@ -46,6 +46,32 @@
      4. return the conversationId to the client via the x-conversation-id
         response header, so it can send it back on the next turn
 
+   Resilience & concurrency (#96): the contract every failure mode here is
+   held to, and the two non-goals that are deliberate rather than missing.
+     · Duplicate sends are deduped on the client-minted `clientMessageId`
+       (never on content -- see classifyTurn and #213), so a double-fired
+       send, a fetch-layer retry, or a duplicated tab resolves to the SAME
+       turn: the completed reply is replayed if the winner already finished,
+       and the loser is told to wait (409 `in_progress`) if it hasn't. The
+       per-conversation turn lock is what makes that the common path rather
+       than the race path.
+     · An interrupted turn persists NOTHING for the assistant half (#268's
+       onFinish gate), so the transcript after a drop is the student's
+       question with no reply -- never a truncated answer, and never a
+       "partial, flagged interrupted" row. Recovery is a plain re-ask or the
+       client's regenerate (same clientMessageId, so it dedupes here rather
+       than double-writing the question). NON-GOAL: there is no stream
+       checkpoint, no resume endpoint, and no partial-content store. #30's
+       streaming invariant ("verify either message is completely saved or
+       partially saved messages don't appear in transcript") is upheld by
+       refusing the write, not by recording and replaying progress.
+     · Two tabs on one conversation is last-writer-wins, with the persisted
+       transcript as truth on reload. NON-GOAL for v1: no realtime sync, no
+       cross-tab channel, no merge. The lock already prevents the only
+       corrupting outcome (two interleaved turns writing into one
+       conversation); a second tab otherwise just holds a stale view until it
+       reloads.
+
    System prompt: resolved per-conversation (#25, lib/prompts.ts) from the
    conversation's pinned prompt_templates row + section context, never
    hardcoded. Model/provider/params are resolved per-conversation too (#26,

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConversationView } from "./ConversationView";
 import { readErrorMessage } from "./ConversationView";
@@ -108,6 +108,88 @@ describe("ConversationView error row (#144)", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Try again" }));
     expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+});
+
+/* #96: the send-half of a failed turn. A refused/undelivered send persisted
+   nothing, so there is no turn to regenerate and the student's own words are
+   what needs rescuing -- the caller omits onRetry and passes the text back
+   through restoredDraft instead. */
+describe("ConversationView send-failure recovery (#96)", () => {
+  it("renders no Retry button when the error carries no onRetry", () => {
+    render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: "Load failed", stage: "send" }}
+      />,
+    );
+    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it("puts a restored draft back into the composer", () => {
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} />,
+    );
+    const composer = screen.getByLabelText("Message input") as HTMLTextAreaElement;
+    expect(composer.value).toBe("");
+
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        restoredDraft={{ text: "why is my p-value 0.03?" }}
+      />,
+    );
+    expect((screen.getByLabelText("Message input") as HTMLTextAreaElement).value).toBe(
+      "why is my p-value 0.03?",
+    );
+  });
+
+  it("restores the SAME text twice when it fails twice (keyed on identity, not value)", async () => {
+    const onSendMessage = vi.fn();
+    const firstFailure = { text: "same question" };
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={onSendMessage} restoredDraft={firstFailure} />,
+    );
+    const composer = screen.getByLabelText("Message input") as HTMLTextAreaElement;
+    expect(composer.value).toBe("same question");
+
+    // The student sends it again (composer clears), and it fails again with
+    // identical text. A value-keyed effect would see no change and silently
+    // swallow the second restore -- the "my words vanished" bug twice over.
+    const user = userEvent.setup();
+    await user.type(composer, "{Enter}");
+    expect(onSendMessage).toHaveBeenCalledWith("same question");
+    expect(composer.value).toBe("");
+
+    rerender(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={onSendMessage} restoredDraft={{ text: "same question" }} />,
+    );
+    expect((screen.getByLabelText("Message input") as HTMLTextAreaElement).value).toBe("same question");
+  });
+
+  it("never overwrites a draft the student has already started", () => {
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} />,
+    );
+    const composer = screen.getByLabelText("Message input") as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "words I am still writing" } });
+
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        restoredDraft={{ text: "something that failed to send" }}
+      />,
+    );
+    expect((screen.getByLabelText("Message input") as HTMLTextAreaElement).value).toBe(
+      "words I am still writing",
+    );
   });
 });
 
@@ -454,6 +536,33 @@ describe("readErrorMessage", () => {
       expect(r.label).toBe("No response");
       expect(r.message).toMatch(/didn't finish answering/i);
     }
+  });
+
+  /* #96: the same raw string means two different things depending on which
+     half of the turn died, and the single pre-#96 sentence ("the tutor didn't
+     finish answering") was only ever true for one of them. */
+  describe("failure stage (#96)", () => {
+    it("defaults to the response half, preserving every pre-#96 caller's copy", () => {
+      expect(readErrorMessage("Load failed")).toEqual(readErrorMessage("Load failed", "response"));
+    });
+
+    it("says the message never arrived, not that the tutor didn't answer, for a send-half failure", () => {
+      const sent = readErrorMessage("Load failed", "send");
+      expect(sent.label).toBe("Not sent");
+      expect(sent.message).toMatch(/didn't reach the tutor/i);
+      expect(sent.message).not.toMatch(/didn't finish answering/i);
+      // The machine's words still go to the detail line, same as before.
+      expect(sent.detail).toBe("Load failed");
+    });
+
+    it("never offers a retry on the send half, even for a code the response half treats as retryable", () => {
+      const raw = JSON.stringify({ error: "too fast", code: "rate_limited" });
+      // Same input, same classification -- only the recovery differs: there
+      // is no server-side turn to regenerate, so the row must not offer one.
+      expect(readErrorMessage(raw, "response").retryable).toBe(true);
+      expect(readErrorMessage(raw, "send").retryable).toBe(false);
+      expect(readErrorMessage(raw, "send").label).toBe("Slow down");
+    });
   });
 });
 
