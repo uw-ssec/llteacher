@@ -290,6 +290,34 @@ function readEnvSecret(env: Env, bindingName: string): string | undefined {
  *  is set, else the provider's conventional fallback env var above. Reads
  *  the key into a local variable only, at the moment of use -- callers must
  *  not log or persist it (see chat.ts's call site). */
+/** Loads ONE config by id, scoped to the org, in the `ResolvedLLMConfig`
+ *  shape `resolveApiKey`/`buildProviderClient` take (#365).
+ *
+ *  Distinct from repositories/llmConfigs.ts's `getLlmConfig`, which returns
+ *  the admin-console `LlmConfigRecord` -- that shape is the wire contract
+ *  apps/admin reads (its `_RecordMatchesWire` guard enforces both
+ *  directions), and it deliberately carries no `credentialId`: which secret
+ *  backs a config is not something the console renders, and adding it there
+ *  to serve this call site would push a server-only field into the public
+ *  payload.
+ *
+ *  Reuses LLM_CONFIG_COLUMNS so this can never drift from what
+ *  `resolveLLMConfig` returns on the chat path -- the whole point of #365
+ *  is that the Test button and the chat path resolve a provider the same
+ *  way, and two hand-maintained column lists would be exactly how that
+ *  stops being true again. */
+export async function getResolvedLLMConfigById(
+  db: Db,
+  orgScope: OrgScope,
+  id: string,
+): Promise<ResolvedLLMConfig | null> {
+  const [row] = await db
+    .select(LLM_CONFIG_COLUMNS)
+    .from(llmConfigs)
+    .where(and(eq(llmConfigs.id, id), eq(llmConfigs.organizationId, orgScope)));
+  return row ?? null;
+}
+
 export async function resolveApiKey(
   env: Env,
   db: Db,
