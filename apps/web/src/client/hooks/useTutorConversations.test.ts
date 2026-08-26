@@ -354,4 +354,79 @@ describe("useTutorConversations", () => {
       expect(result.current.conversations).toEqual([CONV_A]);
     });
   });
+
+  /* ------------------------------------------------------------------------
+     #289: deletion.
+     ---------------------------------------------------------------------- */
+  describe("deleteConversation (#289)", () => {
+    const twoRows = () => ({ items: [CONV_A, { ...CONV_A, id: "conv-b", title: "Chat B" }], nextCursor: null });
+
+    it("removes the row only after the server confirms", async () => {
+      let resolveDelete!: (r: Response) => void;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init?: RequestInit) => {
+          if (init?.method === "DELETE") return new Promise<Response>((r) => (resolveDelete = r));
+          return new Response(JSON.stringify(twoRows()), { status: 200 });
+        }),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toHaveLength(2));
+
+      let done!: Promise<boolean>;
+      act(() => {
+        done = result.current.deleteConversation("conv-a");
+      });
+      // Not optimistic, deliberately: deletion is the one action here a
+      // student cannot undo from the UI, so a row that vanishes and then
+      // reappears on the next load is worse than a half-second delay.
+      expect(result.current.conversations).toHaveLength(2);
+
+      await act(async () => {
+        resolveDelete(new Response(null, { status: 204 }));
+        await done;
+      });
+      expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-b"]);
+    });
+
+    it("keeps the row and reports failure when the server refuses", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init?: RequestInit) => {
+          if (init?.method === "DELETE") return new Response("no", { status: 500 });
+          return new Response(JSON.stringify(twoRows()), { status: 200 });
+        }),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toHaveLength(2));
+
+      let ok!: boolean;
+      await act(async () => {
+        ok = await result.current.deleteConversation("conv-a");
+      });
+      expect(ok).toBe(false);
+      expect(result.current.conversations).toHaveLength(2);
+    });
+
+    it("treats a 404 as done -- deleted in another tab is still deleted", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init?: RequestInit) => {
+          if (init?.method === "DELETE") return new Response("gone", { status: 404 });
+          return new Response(JSON.stringify(twoRows()), { status: 200 });
+        }),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toHaveLength(2));
+
+      let ok!: boolean;
+      await act(async () => {
+        ok = await result.current.deleteConversation("conv-a");
+      });
+      // Keeping the row on screen because someone deleted it elsewhere would
+      // be the wrong reading of "failed".
+      expect(ok).toBe(true);
+      expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-b"]);
+    });
+  });
 });

@@ -558,6 +558,7 @@ export default function App() {
     loadError: tutorConversationsLoadError,
     hasMore: tutorConversationsHasMore,
     createConversation: createTutorConversationRow,
+    deleteConversation: deleteTutorConversationRow,
     renameConversation: renameTutorConversationRow,
     bumpConversation: bumpTutorConversation,
   } = useTutorConversations(courseId);
@@ -676,6 +677,29 @@ export default function App() {
       setTutorHistoryHasMore(false);
       selectTutorConversation(id, []);
     }
+  };
+
+  /* #289: deleting the conversation currently on screen has to move the
+     student off it. The rail row disappears either way, but leaving the
+     chat column pointed at a deleted id would keep its transcript rendered
+     with no row selected -- and the next send would post to a conversation
+     the server has soft-deleted. Falls back to the section chat, which is
+     this surface's own default when no tutor conversation is active. */
+  const handleDeleteTutorConversation = async (id: string): Promise<boolean> => {
+    const ok = await deleteTutorConversationRow(id);
+    if (ok && id === tutorConversationId) {
+      // Same clear the section-switch path does (see handleSelectSection),
+      // minus the section selection: the ref first so a history fetch still
+      // in flight for this id is discarded by its own staleness guard
+      // rather than resurrecting the surface after we left it.
+      latestTutorSelectionRef.current = undefined;
+      setTutorConversationId(undefined);
+      setTutorInitialMessages([]);
+      setJustCreatedTutorConversationId(undefined);
+      setTutorHydrationError(null);
+      setTutorHistoryHasMore(false);
+    }
+    return ok;
   };
 
   /* #4: TutorConversationsList's "New conversation" button -- lifted here
@@ -1434,6 +1458,7 @@ export default function App() {
           onSelectConversation={handleSelectExistingTutorConversation}
           onCreateConversation={handleCreateTutorConversation}
           onRenameConversation={renameTutorConversationRow}
+          onDeleteConversation={handleDeleteTutorConversation}
           isCollapsed={isTutorSidebarCollapsed}
           onToggleCollapse={() => setIsTutorSidebarCollapsed((c) => !c)}
         />

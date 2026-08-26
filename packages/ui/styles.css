@@ -945,6 +945,39 @@ body {
     pointer-events: auto;
   }
 
+  /* #289: delete affordance, sibling to the rename pencil. Revealed on
+     row hover/focus-within like the pencil is, but ALWAYS in the focus
+     order and never display:none -- a keyboard or screen-reader user has
+     no hover to trigger, and #297's finding on the pencil (a 12px target,
+     half WCAG 2.5.8's minimum) is not worth repeating here. */
+  .tutor-conversation-item__delete {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    inline-size: 24px;
+    block-size: 24px;
+    padding: 0;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    opacity: 0;
+    transition:
+      opacity 120ms ease-out,
+      color 120ms ease-out;
+  }
+
+  .tutor-conversation-item:hover .tutor-conversation-item__delete,
+  .tutor-conversation-item__delete:focus-visible {
+    opacity: 1;
+  }
+
+  .tutor-conversation-item__delete:hover,
+  .tutor-conversation-item__delete:focus-visible {
+    color: var(--color-error);
+  }
+
   .tutor-conversation-item__meta {
     display: flex;
     align-items: center;

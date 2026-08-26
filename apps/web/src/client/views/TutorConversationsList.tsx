@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { CaretDoubleLeft, CaretDoubleRight, ChatCircleDots, Plus } from "@phosphor-icons/react";
+import { AlertDialog } from "@llteacher/ui";
 import { ConversationListItem } from "../components/ConversationListItem";
 import type { ConversationListItemResponse } from "../../shared/types";
 
@@ -55,6 +56,10 @@ export interface TutorConversationsListProps {
    *  conversation (useTutorConversations' own renameConversation does) or
    *  to nothing; this component only awaits it. */
   onRenameConversation: (id: string, title: string) => Promise<unknown>;
+  /** #289: soft-deletes a conversation. Returns whether it succeeded, so
+   *  this component can surface a failure itself the same way it does for
+   *  create. Omitted hides the delete affordance entirely. */
+  onDeleteConversation?: (id: string) => Promise<boolean>;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
 }
@@ -70,6 +75,7 @@ export function TutorConversationsList({
   onSelectConversation,
   onCreateConversation,
   onRenameConversation,
+  onDeleteConversation,
   isCollapsed,
   onToggleCollapse,
 }: TutorConversationsListProps) {
@@ -88,6 +94,31 @@ export function TutorConversationsList({
       setLiveMessage("Conversation created");
     } else {
       setCreateError("Couldn't create a new conversation. Please try again.");
+    }
+  };
+
+  /* #289: the row awaiting confirmation, if any. Deletion is soft
+     server-side but irreversible from this UI -- there is no undo and no
+     trash view -- so it is confirmed rather than done on one click, and the
+     dialog names the conversation so a mis-clicked row is caught before it
+     matters, not after. */
+  const [pendingDelete, setPendingDelete] = useState<ConversationListItemResponse | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const confirmDelete = async () => {
+    if (!pendingDelete || !onDeleteConversation) return;
+    setDeleting(true);
+    const ok = await onDeleteConversation(pendingDelete.id);
+    setDeleting(false);
+    if (ok) {
+      setLiveMessage(`Deleted ${pendingDelete.title}`);
+      setDeleteError(null);
+      setPendingDelete(null);
+    } else {
+      // Dialog stays open: the row is still there, and closing it would
+      // leave the student unsure whether the delete happened.
+      setDeleteError("Couldn't delete that conversation. Please try again.");
     }
   };
 
@@ -183,6 +214,7 @@ export function TutorConversationsList({
                 await onRenameConversation(conv.id, title);
                 setLiveMessage(`Renamed to ${title}`);
               }}
+              onRequestDelete={onDeleteConversation ? () => setPendingDelete(conv) : undefined}
             />
           ))}
         </ul>
@@ -194,6 +226,35 @@ export function TutorConversationsList({
           have exactly 50 conversations"). Static text, not a live region:
           it's present at initial render, not something that appears mid-
           interaction and needs to interrupt anything. */}
+      {pendingDelete && (
+        <AlertDialog
+          open
+          title="Delete this conversation?"
+          description={
+            deleteError ? (
+              <>
+                <p>{deleteError}</p>
+                <p>&ldquo;{pendingDelete.title}&rdquo; has not been deleted.</p>
+              </>
+            ) : (
+              <>
+                <p>
+                  &ldquo;{pendingDelete.title}&rdquo; and its messages will no longer appear here. This
+                  can&rsquo;t be undone from the app.
+                </p>
+              </>
+            )
+          }
+          confirmLabel="Delete"
+          onConfirm={() => void confirmDelete()}
+          onCancel={() => {
+            setPendingDelete(null);
+            setDeleteError(null);
+          }}
+          confirming={deleting}
+        />
+      )}
+
       {!loadError && hasMore && (
         <p className="tutor-sidebar__more-notice">
           Showing your most recent {conversations.length} conversations. Older ones aren't shown yet.

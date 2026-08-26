@@ -1,3 +1,4 @@
+import { Trash } from "@phosphor-icons/react";
 import { EditableTitle } from "@llteacher/ui";
 import type { ConversationListItemResponse } from "../../shared/types";
 
@@ -40,6 +41,11 @@ export interface ConversationListItemProps {
    *  teacher viewing a student's conversation) can pass false without any
    *  change here. */
   isEditable?: boolean;
+  /** #289: when provided, a delete affordance renders beside the rename
+   *  pencil. The caller owns confirmation -- this only asks. Omitted
+   *  renders nothing, so a non-owner surface stays read-only by default,
+   *  matching `isEditable`'s reasoning. */
+  onRequestDelete?: () => void;
 }
 
 /** "3:45 PM" for today, "Jan 5" otherwise -- short enough for a 240px-ish
@@ -68,6 +74,7 @@ export function ConversationListItem({
   onSelect,
   onRename,
   isEditable = true,
+  onRequestDelete,
 }: ConversationListItemProps) {
   const { id, title, updatedAt, messageCount } = conversation;
   // #233: the row keeps a short, stable accessible name ("Select
@@ -98,6 +105,24 @@ export function ConversationListItem({
           activateDescribedBy={metaId}
           isActive={isSelected}
         />
+        {/* #289: DELETE /api/conversations/:id shipped ownership-checked,
+            404-on-not-owned and FK-safe, and no client code called it --
+            from the student's side the rail was append-only. A real
+            <button> sibling to the rename pencil, not nested in anything:
+            the row is a plain div since #295's redesign precisely so
+            adjacent controls stay individually exposed to assistive tech.
+            The accessible name carries the title because "Delete" alone is
+            indistinguishable between rows in a list. */}
+        {onRequestDelete && (
+          <button
+            type="button"
+            className="tutor-conversation-item__delete"
+            onClick={onRequestDelete}
+            aria-label={`Delete conversation: ${title}`}
+          >
+            <Trash size={13} weight="regular" aria-hidden="true" />
+          </button>
+        )}
         <span className="tutor-conversation-item__meta" id={metaId}>
           <span className="tutor-conversation-item__time">{formatUpdatedAt(updatedAt)}</span>
           {/* #233: visible text plus a visually-hidden expansion, not
