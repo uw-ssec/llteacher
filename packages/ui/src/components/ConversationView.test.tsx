@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConversationView } from "./ConversationView";
+import type { MessageData } from "./ConversationView";
 import { readErrorMessage } from "./ConversationView";
 
 beforeEach(() => {
@@ -521,9 +522,11 @@ describe("ConversationView onRequestHint (#80)", () => {
    body: each one fails if `messages.length` reverts to `messages`.
    -------------------------------------------------------------------------- */
 describe("ConversationView scroll behaviour (#278)", () => {
-  const msg = (id: string, content: string) => ({
+  // "ai", not "assistant" -- MessageData's own role union (AIMessageData),
+  // which is the design system's vocabulary rather than the wire format's.
+  const msg = (id: string, content: string): MessageData => ({
     id,
-    role: "assistant" as const,
+    role: "ai",
     content,
   });
 
