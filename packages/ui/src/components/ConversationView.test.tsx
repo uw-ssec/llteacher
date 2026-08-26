@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConversationView } from "./ConversationView";
+import type { MessageData } from "./ConversationView";
 import { readErrorMessage } from "./ConversationView";
 
 beforeEach(() => {
@@ -509,5 +510,97 @@ describe("ConversationView onRequestHint (#80)", () => {
       <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} onRequestHint={() => {}} hideComposer />,
     );
     expect(screen.queryByRole("button", { name: /give me a hint/i })).toBeNull();
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #288: disclosing the tutor's context window.
+
+   The tutor forwards only a trailing window to the model while this
+   component renders the full fetched history. Before this, nothing on
+   screen distinguished "the tutor cannot see that turn" from "the tutor
+   ignored me" -- chat.ts's own comment called the silent drop "a graceful
+   degradation (the student can still reference them in the visible UI
+   transcript)", and that parenthetical was exactly the bug.
+   -------------------------------------------------------------------------- */
+describe("ConversationView context window disclosure (#288)", () => {
+  const msgs = (n: number): MessageData[] =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `m${i}`,
+      role: (i % 2 === 0 ? "student" : "ai") as "student" | "ai",
+      content: `message ${i}`,
+    }));
+
+  const boundary = () => document.querySelector(".conversation-context-boundary");
+
+  it("draws no boundary when every message on screen is inside the window", () => {
+    render(
+      <ConversationView breadcrumb="b" messages={msgs(10)} onSendMessage={() => {}} contextWindowSize={40} />,
+    );
+    expect(boundary()).toBeNull();
+  });
+
+  it("draws no boundary at exactly the window size -- nothing has been dropped yet", () => {
+    render(
+      <ConversationView breadcrumb="b" messages={msgs(40)} onSendMessage={() => {}} contextWindowSize={40} />,
+    );
+    expect(boundary()).toBeNull();
+  });
+
+  it("draws the boundary once the transcript outgrows the window", () => {
+    render(
+      <ConversationView breadcrumb="b" messages={msgs(41)} onSendMessage={() => {}} contextWindowSize={40} />,
+    );
+    expect(boundary()).not.toBeNull();
+    expect(screen.getByText(/memory starts here/i)).toBeTruthy();
+  });
+
+  it("places the boundary immediately above the oldest message still in context", () => {
+    // 45 messages, window 40 -> the model sees m5..m44, so the line belongs
+    // directly above m5. Asserting on POSITION, not just presence: a
+    // boundary drawn in the wrong place is worse than none, because it
+    // states a specific and false claim about what the tutor read.
+    const { container } = render(
+      <ConversationView breadcrumb="b" messages={msgs(45)} onSendMessage={() => {}} contextWindowSize={40} />,
+    );
+    const log = container.querySelector(".conversation-log")!;
+    const children = Array.from(log.children);
+    const boundaryIndex = children.findIndex((el) => el.classList.contains("conversation-context-boundary"));
+    expect(boundaryIndex).toBeGreaterThanOrEqual(0);
+
+    // Everything before the line is out of context; the first thing after
+    // it is the oldest message the tutor can see.
+    const after = children[boundaryIndex + 1];
+    expect(after?.textContent).toContain("message 5");
+    const before = children[boundaryIndex - 1];
+    expect(before?.textContent).toContain("message 4");
+  });
+
+  it("exposes the boundary as a labelled separator, not decoration", () => {
+    render(
+      <ConversationView breadcrumb="b" messages={msgs(41)} onSendMessage={() => {}} contextWindowSize={40} />,
+    );
+    const sep = screen.getByRole("separator", { name: /what the tutor can see/i });
+    expect(sep).toBeTruthy();
+  });
+
+  it("draws nothing when no window is declared -- a read-only transcript forgets nothing", () => {
+    // The instructor transcript viewer renders history with no model behind
+    // it; claiming a memory boundary there would be false.
+    render(<ConversationView breadcrumb="b" messages={msgs(500)} onSendMessage={() => {}} />);
+    expect(boundary()).toBeNull();
+  });
+
+  it("still renders every message, in order, alongside the boundary", () => {
+    // The disclosure must not become a truncation: the student keeps their
+    // whole transcript, they are just told which part the tutor shares.
+    const { container } = render(
+      <ConversationView breadcrumb="b" messages={msgs(45)} onSendMessage={() => {}} contextWindowSize={40} />,
+    );
+    const log = container.querySelector(".conversation-log")!;
+    expect(screen.getByText("message 0")).toBeTruthy();
+    expect(screen.getByText("message 44")).toBeTruthy();
+    // 45 messages + 1 boundary
+    expect(log.children.length).toBe(46);
   });
 });

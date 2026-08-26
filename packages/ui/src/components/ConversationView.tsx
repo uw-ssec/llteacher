@@ -10,7 +10,7 @@
    The breadcrumb string is passed as a prop.
    -------------------------------------------------------------------------- */
 
-import { useRef, useEffect, useState } from "react";
+import React, { useRef, useEffect, useState } from "react";
 import { Message } from "./Message";
 import { Composer } from "./Composer";
 import { CodeBlock } from "./CodeBlock";
@@ -262,6 +262,24 @@ export interface ConversationViewProps {
    *  than silent (a conversation with exactly 200 messages is otherwise
    *  indistinguishable from one truncated at 200). */
   hasMoreHistory?: boolean;
+  /** #288: how many trailing messages the model actually sees on a turn.
+   *  When the transcript is longer than this, a divider is rendered above
+   *  the oldest message still inside the window.
+   *
+   *  The tutor forwards only a trailing window while this component renders
+   *  the full history it fetched, so a student could scroll up, read turn 3,
+   *  reference it, and get an answer as if it had never happened -- with
+   *  nothing on screen distinguishing "the tutor cannot see that" from "the
+   *  tutor is being obtuse". 40 messages is 20 turns, and a persisted,
+   *  semester-spanning tutor conversation is the whole point of the rail.
+   *
+   *  Passed in rather than hardcoded here: the number the server enforces
+   *  and the line this component draws must be one number. Callers source
+   *  it from `shared/chat-limits.ts`, which is also what chat.ts trims by.
+   *  Omitted (the default) renders no divider -- correct for surfaces with
+   *  no model behind them, e.g. the instructor transcript viewer, where
+   *  nothing is "forgotten" because nothing is being sent. */
+  contextWindowSize?: number;
   /** #248: optional slot rendered alongside the breadcrumb for
    *  surface-specific header actions -- e.g. the homework-section chat's
    *  "Restart section" button. `undefined` renders nothing, so surfaces
@@ -320,6 +338,29 @@ export interface ConversationViewProps {
 
 /* -- Component ------------------------------------------------------------- */
 
+/** #288: one message row. Extracted so the boundary branch inside the map
+ *  renders a row identically to the three inline branches below it rather
+ *  than duplicating them -- a fourth copy is how the boundary row would
+ *  quietly stop matching the others. Takes no `key`: the caller owns it,
+ *  since the boundary case wraps this in a Fragment that holds the key. */
+function renderMessageRow(msg: MessageData, onRunRCode?: (code: string) => Promise<RCodeResult>) {
+  if (msg.role === "ai") {
+    return (
+      <Message role="ai" isStreaming={msg.isStreaming}>
+        {msg.content}
+      </Message>
+    );
+  }
+  if (msg.role === "student") {
+    return (
+      <Message role="student">
+        {renderTextWithCode(msg.content, { onRun: onRunRCode, keyPrefix: msg.id })}
+      </Message>
+    );
+  }
+  return <Message role="system">{msg.content}</Message>;
+}
+
 export function ConversationView({
   breadcrumb,
   title,
@@ -331,6 +372,7 @@ export function ConversationView({
   error = null,
   autoFocusComposer = false,
   hasMoreHistory = false,
+  contextWindowSize,
   headerActions,
   onStop,
   isStopActionable = isSending,
@@ -341,6 +383,17 @@ export function ConversationView({
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  /* #288: index of the oldest message the model still sees. Undefined when
+     there is no window to disclose -- either the caller passed none, or the
+     transcript is short enough that everything on screen is in context, in
+     which case a divider would claim a boundary that isn't there. Strictly
+     greater-than: a transcript of exactly the window size is entirely
+     visible to the model. */
+  const contextBoundaryIndex =
+    contextWindowSize !== undefined && messages.length > contextWindowSize
+      ? messages.length - contextWindowSize
+      : undefined;
 
   /* Scroll to bottom when new messages arrive -- and when a turn fails.
      `error` belongs in the deps: a failed turn does not change `messages`
@@ -526,7 +579,41 @@ export function ConversationView({
               retroactively announce; only genuinely incremental appends
               during an ACTIVE conversation reach an AT as insertions. */}
           <div className="conversation-log" role="log" aria-live="polite" aria-relevant="additions">
-            {messages.map((msg) => {
+            {messages.map((msg, index) => {
+              /* #288: the boundary is rendered as a sibling ABOVE the
+                 message it marks, from inside this same map so it cannot
+                 drift from the index it describes.
+
+                 role="separator" with a label, not a styled div: for a
+                 screen-reader user scrolling the transcript this is
+                 meaningful structure, not decoration -- it is the only
+                 thing distinguishing "the tutor cannot see that" from "the
+                 tutor ignored me". It sits inside the role="log" region
+                 because it is part of the transcript's structure, and it
+                 renders at mount for an already-long conversation rather
+                 than appearing mid-stream, so it is not announced as an
+                 insertion. */
+              const boundary =
+                index === contextBoundaryIndex ? (
+                  <div
+                    className="conversation-context-boundary"
+                    role="separator"
+                    aria-label="Start of what the tutor can see"
+                  >
+                    <span>
+                      The tutor&rsquo;s memory starts here &mdash; messages above this line aren&rsquo;t part
+                      of what it sees. Re-state anything from earlier you want it to use.
+                    </span>
+                  </div>
+                ) : null;
+              if (boundary) {
+                return (
+                  <React.Fragment key={msg.id}>
+                    {boundary}
+                    {renderMessageRow(msg, onRunRCode)}
+                  </React.Fragment>
+                );
+              }
               if (msg.role === "ai") {
                 return (
                   <Message key={msg.id} role="ai" isStreaming={msg.isStreaming}>
