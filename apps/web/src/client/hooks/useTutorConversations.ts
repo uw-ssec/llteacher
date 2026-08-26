@@ -21,6 +21,17 @@ import type { ConversationListItemResponse, ConversationListResponse, Conversati
 export interface UseTutorConversationsResult {
   conversations: ConversationListItemResponse[];
   loading: boolean;
+  /** #293: true whenever there is no `courseId` to scope a query to -- the
+   *  homework fetch that supplies it has not resolved, or the student is
+   *  enrolled in no course at all. Distinct from `loading` because this
+   *  hook cannot tell those two apart, and one of them never resolves.
+   *
+   *  Callers MUST gate the empty state on this being false. "not loading,
+   *  no error, zero rows" was previously reachable before courseId ever
+   *  arrived, so a returning student with eight conversations was told "No
+   *  conversations yet" for one round-trip on every page load -- the first
+   *  impression each time being that their work was gone. */
+  awaitingCourseContext: boolean;
   /** True only when a fetch to a *known* courseId failed (network error or
    *  non-2xx) -- never true just because courseId hasn't loaded yet. */
   loadError: boolean;
@@ -84,6 +95,20 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     if (!courseId) {
       // Not a fetch error -- there's simply no course to scope the query
       // to yet (homework list still loading, or the student has none).
+      //
+      // #293: this resolves `loading` to false, as it always did -- but the
+      // empty state is no longer reachable from here, because
+      // `awaitingCourseContext` is true whenever courseId is absent and the
+      // list gates its empty state on that.
+      //
+      // Holding `loading` true instead was the other option the issue
+      // offered, and it is wrong: courseId is undefined both while the
+      // homework fetch is in flight AND permanently, for a student enrolled
+      // in no course at all. That second case would spin forever. The flag
+      // separates "the list is unknown" from "there is no course to list
+      // for", which is the distinction the UI actually needs -- in both
+      // no-courseId cases the honest thing to show is the disabled New
+      // conversation button and its reason, never "No conversations yet".
       setConversations([]);
       setLoadError(false);
       setHasMore(false);
@@ -106,9 +131,16 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
         setHasMore(data.nextCursor !== null);
         setLoadError(false);
       })
-      .catch(() => {
-        setConversations([]);
-        setHasMore(false);
+      .catch((err: unknown) => {
+        // #310: the list is deliberately NOT cleared. This used to
+        // setConversations([]), and since refetch only runs from an effect
+        // keyed on [refetch] -- which changes only with courseId -- a single
+        // 502 during a deploy emptied the rail for the rest of the session.
+        // The student's conversations looked deleted. Keeping the last known
+        // good list means a transient failure degrades to "possibly stale"
+        // rather than "apparently destroyed", and `loadError` gives the list
+        // what it needs to offer a retry.
+        console.error("[useTutorConversations.refetch]", err);
         setLoadError(true);
       })
       .finally(() => setLoading(false));
@@ -138,7 +170,11 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
         // most recently updated) without an extra round-trip.
         setConversations((prev) => [withCount, ...prev]);
         return withCount;
-      } catch {
+      } catch (err: unknown) {
+        // #310: was a bare `catch { return null; }`. The student does see
+        // the failure, but nobody debugging one did -- unlike the rename and
+        // list paths, which already log. Fails open with null as before.
+        console.error("[useTutorConversations.createConversation]", err);
         return null;
       }
     },
@@ -202,5 +238,15 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     });
   }, []);
 
-  return { conversations, loading, loadError, hasMore, refetch, createConversation, renameConversation, bumpConversation };
+  return {
+    conversations,
+    loading,
+    awaitingCourseContext: courseId === undefined,
+    loadError,
+    hasMore,
+    refetch,
+    createConversation,
+    renameConversation,
+    bumpConversation,
+  };
 }

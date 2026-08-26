@@ -516,6 +516,14 @@ export default function App() {
     undefined,
   );
 
+  /* #290: the conversation whose history is currently being fetched, if any.
+     Exists purely so the rail can show that the click registered -- the row
+     renders selected and aria-busy while this is set. Deliberately NOT used
+     to move focus into the chat column: a student clicking through the rail
+     is browsing, and a focus jump would fight that. The announcement below
+     is the right affordance. */
+  const [pendingTutorSelectionId, setPendingTutorSelectionId] = useState<string | undefined>(undefined);
+
   // #276: set when a tutor conversation's history fetch fails -- rendered
   // through ConversationView's existing error row (see tutorChatErrorRow
   // below) with a Retry that re-runs the fetch, and disables the composer
@@ -555,8 +563,10 @@ export default function App() {
   const {
     conversations: tutorConversations,
     loading: tutorConversationsLoading,
+    awaitingCourseContext: tutorConversationsAwaitingCourse,
     loadError: tutorConversationsLoadError,
     hasMore: tutorConversationsHasMore,
+    refetch: refetchTutorConversations,
     createConversation: createTutorConversationRow,
     renameConversation: renameTutorConversationRow,
     bumpConversation: bumpTutorConversation,
@@ -657,7 +667,24 @@ export default function App() {
   // isSending below) until Retry succeeds.
   const handleSelectExistingTutorConversation = async (id: string) => {
     if (id === tutorConversationId) return;
+    // #290: a repeat click on a row that is already loading is now a genuine
+    // no-op. The guard above only ruled out re-selecting the ALREADY-ACTIVE
+    // conversation, so clicking an unresponsive row again -- the natural
+    // response to no feedback -- fired a second identical fetch. The
+    // stale-response guard below discarded the loser correctly, so this was
+    // never a correctness bug; it was wasted work that the feedback gap made
+    // likely to happen.
+    if (id === pendingTutorSelectionId) return;
     latestTutorSelectionRef.current = id;
+    // #290: set SYNCHRONOUSLY, before the await. Nothing on screen used to
+    // change between the click and the response landing -- no row highlight,
+    // no aria-current move, no chat-column change -- because every visible
+    // piece of state derives from `tutorConversationId`, which is not
+    // assigned until `selectTutorConversation` runs. For a conversation at
+    // the 200-message cap that is a multi-hundred-millisecond to
+    // multi-second dead zone in which the UI is indistinguishable from
+    // broken.
+    setPendingTutorSelectionId(id);
     setJustCreatedTutorConversationId(undefined);
     try {
       const history = await fetchConversationHistory(id);
@@ -675,6 +702,11 @@ export default function App() {
       });
       setTutorHistoryHasMore(false);
       selectTutorConversation(id, []);
+    } finally {
+      // Cleared in BOTH branches, and only by the request that is still the
+      // current one -- a superseded fetch resolving late must not clear the
+      // pending marker belonging to the selection that replaced it.
+      if (latestTutorSelectionRef.current === id) setPendingTutorSelectionId(undefined);
     }
   };
 
@@ -1428,9 +1460,12 @@ export default function App() {
           courseContextLoading={homeworkLoading}
           conversations={tutorConversations}
           loading={tutorConversationsLoading}
+          awaitingCourseContext={tutorConversationsAwaitingCourse}
           loadError={tutorConversationsLoadError}
+          onRetryLoad={refetchTutorConversations}
           hasMore={tutorConversationsHasMore}
           selectedConversationId={tutorConversationId}
+          pendingConversationId={pendingTutorSelectionId}
           onSelectConversation={handleSelectExistingTutorConversation}
           onCreateConversation={handleCreateTutorConversation}
           onRenameConversation={renameTutorConversationRow}

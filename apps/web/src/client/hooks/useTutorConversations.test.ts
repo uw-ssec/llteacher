@@ -354,4 +354,69 @@ describe("useTutorConversations", () => {
       expect(result.current.conversations).toEqual([CONV_A]);
     });
   });
+
+  /* ------------------------------------------------------------------------
+     #293 / #310 -- what the hook reports when things are missing or fail.
+     ---------------------------------------------------------------------- */
+  describe("course context and failure handling (#293, #310)", () => {
+    it("reports awaitingCourseContext while there is no courseId to scope a query to", async () => {
+      vi.stubGlobal("fetch", vi.fn());
+      const { result } = renderHook(() => useTutorConversations(undefined));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      // #293: this is the state the rail used to render "No conversations
+      // yet" from. The flag is what lets the list tell it apart from a
+      // genuinely empty list.
+      expect(result.current.awaitingCourseContext).toBe(true);
+      expect(result.current.conversations).toEqual([]);
+      expect(result.current.loadError).toBe(false);
+    });
+
+    it("resolves loading even with no courseId, so a student in no course does not spin forever", async () => {
+      vi.stubGlobal("fetch", vi.fn());
+      const { result } = renderHook(() => useTutorConversations(undefined));
+      // courseId is undefined both while the homework fetch is in flight AND
+      // permanently for a student enrolled in nothing -- holding `loading`
+      // true to suppress the empty state would never resolve in that second
+      // case. The flag above carries that distinction instead.
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.awaitingCourseContext).toBe(true);
+    });
+
+    it("clears awaitingCourseContext once a courseId arrives", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 })),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.awaitingCourseContext).toBe(false);
+    });
+
+    it("keeps the last known good list when a refresh fails, instead of emptying the rail", async () => {
+      let call = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          call += 1;
+          if (call === 1) {
+            return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
+          }
+          return new Response("boom", { status: 502 });
+        }),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toEqual([CONV_A]));
+
+      // #310: refetch used to setConversations([]) on failure, and refetch
+      // only re-runs when courseId changes -- so one 502 during a deploy
+      // emptied the rail for the rest of the session and the student's
+      // conversations looked deleted.
+      act(() => {
+        result.current.refetch();
+      });
+      await waitFor(() => expect(result.current.loadError).toBe(true));
+      expect(result.current.conversations).toEqual([CONV_A]);
+    });
+  });
 });

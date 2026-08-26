@@ -37,7 +37,17 @@ export interface TutorConversationsListProps {
   courseContextLoading: boolean;
   conversations: ConversationListItemResponse[];
   loading: boolean;
+  /** #293: true whenever there is no `courseId` yet -- either the homework
+   *  fetch is in flight or the student is in no course at all. Gates the
+   *  empty state: "not loading, no error, zero rows" used to be reachable
+   *  before course context existed, so a returning student was told "No
+   *  conversations yet" for a round-trip on every page load. */
+  awaitingCourseContext: boolean;
   loadError: boolean;
+  /** #310: retries a failed list load. The rail no longer clears itself on
+   *  a failed fetch, so this is offered alongside whatever was last loaded
+   *  rather than next to an empty list. */
+  onRetryLoad: () => void;
   /** #280: true when the server has more conversations than this list
    *  fetched (the list route pages at 50, no load-more is wired yet) --
    *  renders a visible note below the list so the page ceiling is visible
@@ -45,6 +55,8 @@ export interface TutorConversationsListProps {
    *  "I have exactly N conversations"). */
   hasMore: boolean;
   selectedConversationId: string | undefined;
+  /** #290: the row whose history is being fetched right now, if any. */
+  pendingConversationId?: string | undefined;
   /** Fired when an existing row is clicked. */
   onSelectConversation: (conversationId: string) => void;
   /** Creates a new conversation (and, on success, selects/switches to it --
@@ -64,9 +76,12 @@ export function TutorConversationsList({
   courseContextLoading,
   conversations,
   loading,
+  awaitingCourseContext,
   loadError,
+  onRetryLoad,
   hasMore,
   selectedConversationId,
+  pendingConversationId,
   onSelectConversation,
   onCreateConversation,
   onRenameConversation,
@@ -91,6 +106,25 @@ export function TutorConversationsList({
     }
   };
 
+  /* #290: selection -- the rail's primary action -- was the one thing the
+     #235 live region did not cover. It announced create, rename and
+     list-loading, so a screen-reader user activating a row heard nothing
+     for several seconds and was never told the transcript had changed,
+     even though both ErrorBoundary and ConversationView are keyed on the
+     id and the entire chat column unmounts and remounts underneath them.
+
+     Derived rather than stored: `pendingConversationId` and
+     `selectedConversationId` already carry everything needed, and a
+     separate piece of state would just be a second source of truth to keep
+     in step with them. */
+  const pendingTitle = conversations.find((c) => c.id === pendingConversationId)?.title;
+  const selectedTitle = conversations.find((c) => c.id === selectedConversationId)?.title;
+  const selectionMessage = pendingConversationId
+    ? `Loading conversation${pendingTitle ? ` ${pendingTitle}` : ""}…`
+    : selectedTitle
+      ? `Opened ${selectedTitle}`
+      : undefined;
+
   const disabledReasonId = "tutor-sidebar-new-btn-reason";
   const disabledReason = courseContextLoading
     ? "Loading course information…"
@@ -105,7 +139,7 @@ export function TutorConversationsList({
           visually hidden, doesn't duplicate what role="alert" already
           announces for the two error states below. */}
       <div aria-live="polite" className="sr-only">
-        {loading ? "Loading conversations…" : liveMessage}
+        {loading ? "Loading conversations…" : (selectionMessage ?? liveMessage)}
       </div>
 
       <div className="tutor-sidebar__top">
@@ -136,11 +170,18 @@ export function TutorConversationsList({
       </button>
       {/* #232: explains WHY the button is disabled instead of leaving it a
           silent dead end -- distinct message for "still loading" vs
-          "nothing to scope to," visually hidden (the title attribute above
-          is the sighted-mouse-user affordance) but reachable via
-          aria-describedby either way. */}
+          "nothing to scope to."
+
+          #293: now VISIBLE. #232 delivered this reason through `title`
+          (hover only -- never fires on touch) and an `sr-only` paragraph
+          (assistive tech only), so no sighted student on a tablet, or one
+          who simply clicks without hovering, ever saw it: the button did
+          nothing and said nothing. The copy and the two-way distinction
+          were already right; only the visibility was wrong. `title` stays
+          for the mouse-hover affordance and aria-describedby still points
+          here, so nothing that worked before stops working. */}
       {!courseId && (
-        <p id={disabledReasonId} className="sr-only">
+        <p id={disabledReasonId} className="tutor-sidebar__disabled-reason">
           {disabledReason}
         </p>
       )}
@@ -151,16 +192,31 @@ export function TutorConversationsList({
         </p>
       )}
 
-      {/* Only a genuinely-empty API response ([]) gets the empty state --
-          while a fetch is in flight (loading, and nothing loaded yet), show
-          nothing rather than an empty state that would flash then vanish. */}
+      {/* #310: a failed load no longer empties the rail, so this sits above
+          whatever was last loaded. The copy says "couldn't refresh" rather
+          than "couldn't load" precisely because the rows below it may still
+          be there and still be usable -- just possibly stale. */}
       {loadError && (
-        <p className="tutor-sidebar__error" role="alert">
-          Couldn't load conversations.
-        </p>
+        <div className="tutor-sidebar__error" role="alert">
+          <p>
+            {conversations.length > 0
+              ? "Couldn't refresh conversations. These may be out of date."
+              : "Couldn't load conversations."}
+          </p>
+          <button type="button" className="tutor-sidebar__retry" onClick={onRetryLoad}>
+            Try again
+          </button>
+        </div>
       )}
 
-      {!loadError && !loading && conversations.length === 0 && (
+      {/* Only a genuinely-empty API response ([]) gets the empty state.
+          #293: `awaitingCourseContext` is the gate that makes that true.
+          While a fetch is in flight, or before courseId has arrived at all,
+          show nothing rather than an empty state that flashes then vanishes
+          -- reading, for that round-trip, as "your conversations are gone."
+          When there is genuinely no course, the disabled-reason text above
+          is the right message, not this one. */}
+      {!loadError && !loading && !awaitingCourseContext && conversations.length === 0 && (
         <div className="tutor-sidebar__empty">
           <ChatCircleDots size={20} weight="regular" aria-hidden="true" />
           <p>No conversations yet</p>
@@ -178,6 +234,7 @@ export function TutorConversationsList({
               key={conv.id}
               conversation={conv}
               isSelected={conv.id === selectedConversationId}
+              isPending={conv.id === pendingConversationId}
               onSelect={() => onSelectConversation(conv.id)}
               onRename={async (title) => {
                 await onRenameConversation(conv.id, title);

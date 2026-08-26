@@ -842,6 +842,41 @@ body {
     color: var(--color-error);
   }
 
+  .tutor-sidebar__error p {
+    margin: 0 0 var(--space-2);
+  }
+
+  /* #310: retry for a failed list load. The rail keeps its last known good
+     rows on failure, so this sits above them rather than beside an empty
+     list. */
+  .tutor-sidebar__retry {
+    /* Matches the sibling "New conversation" button's treatment rather than
+       inventing a second button idiom for the same 220px rail. */
+    border: 1px solid var(--color-accent);
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--color-accent);
+    font-size: var(--font-size-sm);
+    padding: var(--space-1) var(--space-2);
+    cursor: pointer;
+    transition: background-color 120ms ease-out;
+  }
+
+  .tutor-sidebar__retry:hover {
+    background-color: var(--color-accent-faint);
+  }
+
+  /* #293: the disabled "New conversation" reason, now visible. It was
+     previously delivered only through `title` (hover, never on touch) and
+     an sr-only paragraph, so a sighted student on a tablet saw a button
+     that did nothing and said nothing. */
+  .tutor-sidebar__disabled-reason {
+    margin: var(--space-1) 0 0;
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+    line-height: 1.4;
+  }
+
   .tutor-sidebar__empty {
     display: flex;
     flex-direction: column;
@@ -912,6 +947,32 @@ body {
 
   .tutor-conversation-item--selected {
     background-color: var(--color-accent-faint);
+  }
+
+  /* #290: a row whose history is still being fetched. Reads as selected
+     (the rule above also applies) with a subdued treatment so the click
+     registers instantly while still being distinguishable from a settled
+     selection. Motion is opt-out: the pulse is suppressed under
+     prefers-reduced-motion, leaving the static dimming as the cue. */
+  .tutor-conversation-item--pending {
+    opacity: 0.72;
+    animation: tutor-conversation-item-pulse 1.2s ease-in-out infinite;
+  }
+
+  @keyframes tutor-conversation-item-pulse {
+    0%,
+    100% {
+      opacity: 0.72;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tutor-conversation-item--pending {
+      animation: none;
+    }
   }
 
   .tutor-conversation-item__title {
