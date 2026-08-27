@@ -344,6 +344,39 @@ export function sectionConversationTitle(section: { order: number; title: string
   return `Section ${section.order}: ${section.title}`;
 }
 
+/** #305: the prompt-shaped copy a section-conversation write needs, supplied
+ *  BY THE CALLER rather than reached for by the repository itself.
+ *
+ *  The issue asks for "a `greeting: string` parameter resolved by the
+ *  caller". A plain string is not reachable here: both writers
+ *  (startSectionConversation, restartSectionConversation, repositories/
+ *  sectionConversations.ts) read `sections.order/title/content` themselves,
+ *  inside the same course-scoped join that enforces membership, the #317
+ *  release gate, and the non_interactive refusal -- so no caller holds those
+ *  values before the call, and having each of the three call sites re-read
+ *  them would put back exactly the redundant round-trips #279 just removed.
+ *
+ *  Injecting the FORMATTERS gets the requirement's actual goal -- the
+ *  repository owns no persona-bearing English, and "which greeting does this
+ *  tenant use" is now a decision the signature can express -- without that
+ *  cost. Tenant #2 passes a different object here; nothing in the repository
+ *  layer changes, which is the whole point (a repository resolving org
+ *  config would be the same layering violation in a new place). */
+export interface SectionConversationPrompts {
+  greeting: (section: { order: number; title: string; content: string }) => string;
+  title: (section: { order: number; title: string }) => string;
+}
+
+/** The built-in (Django-parity) copy every caller passes today. Named and
+ *  exported so a call site reads as an explicit choice of wording, not as
+ *  the absence of one -- there is deliberately no default value on the
+ *  repository's own parameter, which would let the repository quietly own
+ *  this text again. */
+export const SECTION_CONVERSATION_PROMPTS: SectionConversationPrompts = {
+  greeting: sectionGreeting,
+  title: sectionConversationTitle,
+};
+
 /** Pure composition: template content + (optional) section context +
  *  (conditionally) the tutor guardrail -> one system-prompt string. No db
  *  access, no I/O -- the whole point of extracting this from
@@ -389,7 +422,8 @@ export function sectionConversationTitle(section: { order: number; title: string
  *  never interpolated from any caller-supplied string). chat.ts sets this
  *  true only after recordHintRequest (repositories/hints.ts) has already
  *  deterministically granted the request server-side -- never from a
- *  client-supplied flag taken at face value. */
+ *  client-supplied flag taken at face value.
+ */
 export function assembleSystemPrompt(
   templateContent: string,
   section?: PromptSectionContext,

@@ -128,6 +128,7 @@ import {
   getPinnedPromptTemplateContent,
   getSectionPromptContext,
   resolvePromptTemplate,
+  SECTION_CONVERSATION_PROMPTS,
 } from "../../lib/prompts";
 import {
   resolveLLMConfig,
@@ -1071,6 +1072,12 @@ async function resolveConversation(
         // not who isInstructorOf's AUTHOR_ROLES tier means.
         isTeacherTest: !isStudentInCourse(authContext.memberships, courseId),
         canViewDrafts: authContext.canViewDraftsIn(courseId),
+        // #305: the repository no longer owns the greeting/title wording --
+        // every caller states which copy it wants. Same constant
+        // startSectionConversationHandler passes, so the conversation this
+        // handler mints on a first turn is byte-identical to one started
+        // through #27's own route (#259's whole point).
+        prompts: SECTION_CONVERSATION_PROMPTS,
       });
       return {
         conv: {

@@ -21,6 +21,7 @@ import type { Db } from "../../db/client";
 import { unsafeOrgScope } from "./scope";
 import { createSubmission } from "./submissions";
 import { restartSectionConversation } from "./sectionConversations";
+import { SECTION_CONVERSATION_PROMPTS } from "../../lib/prompts";
 import {
   organizations,
   courses,
@@ -211,6 +212,7 @@ describe.skipIf(!RAW_DATABASE_URL)("submissions uniqueness (real DB, #128)", () 
       convA,
       userId,
       true,
+      SECTION_CONVERSATION_PROMPTS,
     );
     expect(voidedSubmission).not.toBeNull();
 

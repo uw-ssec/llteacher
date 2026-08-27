@@ -9,7 +9,11 @@ import {
   SectionNotInteractiveError,
 } from "../repositories/sectionConversations";
 import { IdempotencyKeyConflictError } from "../repositories/errors";
-import { HINT_INSTRUCTION, DEFAULT_MARK_COMPLETE_INSTRUCTION } from "../../lib/prompts";
+import {
+  HINT_INSTRUCTION,
+  DEFAULT_MARK_COMPLETE_INSTRUCTION,
+  SECTION_CONVERSATION_PROMPTS,
+} from "../../lib/prompts";
 import type { AppEnv } from "../context";
 
 // Route test (mock db, mock the repository layer, mock streamText) -- per
@@ -977,7 +981,14 @@ describe("POST /api/chat", () => {
         // #317 review, blocking finding #4: a plain student membership has
         // no canViewDrafts grant.
         canViewDrafts: false,
+        // #305: the greeting/title wording is now the caller's to supply --
+        // asserted by identity against the shared constant (not a structural
+        // match) because #259's whole point is that a first turn through
+        // chat.ts mints the SAME conversation #27's own start route does; a
+        // second, look-alike prompts object here would silently break that.
+        prompts: SECTION_CONVERSATION_PROMPTS,
       });
+      expect((input as { prompts: unknown }).prompts).toBe(SECTION_CONVERSATION_PROMPTS);
     });
 
     it("#259: derives isTeacherTest=true for a non-student course role", async () => {

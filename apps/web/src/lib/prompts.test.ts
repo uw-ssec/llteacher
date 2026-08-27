@@ -7,6 +7,7 @@ import {
   HINT_INSTRUCTION,
   sectionGreeting,
   sectionConversationTitle,
+  SECTION_CONVERSATION_PROMPTS,
 } from "./prompts";
 
 describe("sectionGreeting (#305)", () => {
@@ -25,6 +26,29 @@ describe("sectionGreeting (#305)", () => {
 describe("sectionConversationTitle (#305)", () => {
   it("formats as 'Section N: Title'", () => {
     expect(sectionConversationTitle({ order: 3, title: "P-Values" })).toBe("Section 3: P-Values");
+  });
+});
+
+describe("SECTION_CONVERSATION_PROMPTS (#305)", () => {
+  it("is the built-in copy the repository used to reach for itself", () => {
+    // The bundle repositories/sectionConversations.ts now RECEIVES instead of
+    // importing. Asserted by identity so a future edit that rebuilt this
+    // object out of different formatters would fail here rather than silently
+    // change what every section conversation opens with.
+    expect(SECTION_CONVERSATION_PROMPTS.greeting).toBe(sectionGreeting);
+    expect(SECTION_CONVERSATION_PROMPTS.title).toBe(sectionConversationTitle);
+  });
+
+  it("a second tenant can substitute its own wording without touching the repository layer", () => {
+    // The whole point of the signature change: this object is the seam. If
+    // this ever stops being possible, #305's fix has regressed back into
+    // "the repository decides".
+    const tenantTwo = {
+      greeting: (s: { order: number; title: string; content: string }) => `Bienvenue -- section ${s.order}. ${s.content}`,
+      title: (s: { order: number; title: string }) => `Partie ${s.order} : ${s.title}`,
+    };
+    expect(tenantTwo.greeting({ order: 1, title: "X", content: "Q?" })).toBe("Bienvenue -- section 1. Q?");
+    expect(tenantTwo.title({ order: 1, title: "X" })).toBe("Partie 1 : X");
   });
 });
 

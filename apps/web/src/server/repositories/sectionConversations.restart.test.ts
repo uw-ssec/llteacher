@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { restartSectionConversation } from "./sectionConversations";
 import { SubmissionGradedError } from "./submissions";
 import { unsafeOrgScope } from "./scope";
+import { SECTION_CONVERSATION_PROMPTS } from "../../lib/prompts";
 import type { Db } from "../../db/client";
 
 // #25: both restartSectionConversation and startSectionConversation now
@@ -84,7 +85,7 @@ describe("restartSectionConversation (#27, #128)", () => {
   it("throws when the conversation is absent, deleted, or the wrong kind", async () => {
     const { db, batch } = makeDb([[]]);
 
-    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER, true)).rejects.toThrow(
+    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER, true, SECTION_CONVERSATION_PROMPTS)).rejects.toThrow(
       "Conversation not found or not accessible",
     );
     expect(batch).not.toHaveBeenCalled();
@@ -96,7 +97,7 @@ describe("restartSectionConversation (#27, #128)", () => {
     // collapse them (to avoid leaking existence) rather than being forced to.
     const { db, batch } = makeDb([[{ ...OWNED, ownerUserId: "someone-else" }]]);
 
-    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER, true)).rejects.toThrow(
+    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER, true, SECTION_CONVERSATION_PROMPTS)).rejects.toThrow(
       "Conversation is not owned by requester",
     );
     expect(batch).not.toHaveBeenCalled();
@@ -109,7 +110,7 @@ describe("restartSectionConversation (#27, #128)", () => {
       [{ id: "grade-1" }],
     ]);
 
-    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER, true)).rejects.toBeInstanceOf(
+    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER, true, SECTION_CONVERSATION_PROMPTS)).rejects.toBeInstanceOf(
       SubmissionGradedError,
     );
     // The guard has to run before the atomic group, not alongside it: a
@@ -122,7 +123,7 @@ describe("restartSectionConversation (#27, #128)", () => {
     const submittedAt = new Date();
     const { db, batch } = makeDb([[OWNED], [{ id: "sub-1", submittedAt }], []]);
 
-    const result = await restartSectionConversation(db, SCOPE, CONV, OWNER, true);
+    const result = await restartSectionConversation(db, SCOPE, CONV, OWNER, true, SECTION_CONVERSATION_PROMPTS);
 
     expect(result.voidedSubmission).toEqual({ id: "sub-1", submittedAt });
     expect(batch).toHaveBeenCalledTimes(1);
@@ -139,7 +140,7 @@ describe("restartSectionConversation (#27, #128)", () => {
   it("restarts a conversation that was never submitted", async () => {
     const { db, batch } = makeDb([[OWNED], [], []]);
 
-    const result = await restartSectionConversation(db, SCOPE, CONV, OWNER, true);
+    const result = await restartSectionConversation(db, SCOPE, CONV, OWNER, true, SECTION_CONVERSATION_PROMPTS);
 
     expect(result.voidedSubmission).toBeNull();
     expect(batch.mock.calls[0]![0]).toEqual([
@@ -155,7 +156,7 @@ describe("restartSectionConversation (#27, #128)", () => {
     // throw SubmissionGradedError instead of succeeding.
     const { db } = makeDb([[OWNED], [], [{ id: "grade-1" }]]);
 
-    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER, true)).resolves.toMatchObject({
+    await expect(restartSectionConversation(db, SCOPE, CONV, OWNER, true, SECTION_CONVERSATION_PROMPTS)).resolves.toMatchObject({
       voidedSubmission: null,
     });
   });
@@ -166,7 +167,7 @@ describe("restartSectionConversation (#27, #128)", () => {
     // conversation must stay a test after restarting.
     const { db, inserted } = makeDb([[{ ...OWNED, isTeacherTest: true }], [], []]);
 
-    await restartSectionConversation(db, SCOPE, CONV, OWNER, true);
+    await restartSectionConversation(db, SCOPE, CONV, OWNER, true, SECTION_CONVERSATION_PROMPTS);
 
     const conversation = inserted.find((v) => !v.parts);
     expect(conversation).toMatchObject({ isTeacherTest: true, kind: "section" });
@@ -175,7 +176,7 @@ describe("restartSectionConversation (#27, #128)", () => {
   it("opens the replacement with the Django-parity greeting for its section", async () => {
     const { db, inserted, batch } = makeDb([[OWNED], [], []]);
 
-    const result = await restartSectionConversation(db, SCOPE, CONV, OWNER, true);
+    const result = await restartSectionConversation(db, SCOPE, CONV, OWNER, true, SECTION_CONVERSATION_PROMPTS);
 
     const greeting = inserted.find((v) => v.parts) as { parts: { text: string }[] };
     expect(greeting.parts[0]!.text).toBe(
@@ -225,6 +226,7 @@ describe("startSectionConversation constraint race (#238)", () => {
         ownerUserId: OWNER,
         isTeacherTest: false,
         canViewDrafts: true,
+        prompts: SECTION_CONVERSATION_PROMPTS,
       }),
     ).rejects.toBeInstanceOf(SectionConversationExistsError);
   });
@@ -242,6 +244,7 @@ describe("startSectionConversation constraint race (#238)", () => {
       ownerUserId: OWNER,
       isTeacherTest: false,
       canViewDrafts: true,
+      prompts: SECTION_CONVERSATION_PROMPTS,
     });
     await expect(promise).rejects.toThrow("duplicate key");
     await expect(promise).rejects.not.toBeInstanceOf(SectionConversationExistsError);
