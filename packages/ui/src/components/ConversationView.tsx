@@ -415,10 +415,21 @@ export interface ConversationViewProps {
   /** #280: true when there are older messages than the transcript holds
    *  (the messages route pages at 200). Renders the "Load older messages"
    *  control above the transcript when `onLoadOlderMessages` is also
-   *  given, and the static "older messages aren't shown" notice when it
-   *  isn't -- the notice remains correct, and the only honest thing to
-   *  show, for a surface with no paging wired (the instructor transcript
-   *  viewer, which has its own offset-based control). */
+   *  given, and a static "older messages aren't shown" notice when it
+   *  isn't.
+   *
+   *  That notice branch has NO live consumer today -- both callers (App.tsx's
+   *  tutor and section surfaces) wire the loader. It is kept deliberately,
+   *  as a defensive default rather than a described behaviour: these two
+   *  props are independently optional, so `hasMoreHistory` without a loader
+   *  is reachable by construction of this API, and #280 is specifically a
+   *  bug about a page ceiling being SILENT. Disclosing it is the safe thing
+   *  for this component to do when it is told history is truncated but given
+   *  no way to fetch more.
+   *
+   *  (The instructor transcript viewer, apps/admin's TranscriptDetailView,
+   *  is not that consumer: it never passes `hasMoreHistory` at all and
+   *  renders its own offset-based pagination outside this component.) */
   hasMoreHistory?: boolean;
   /** #280 (requirement 2, transcript half): fetches the page of messages
    *  BEFORE the oldest one showing and prepends it. The caller owns the
@@ -933,8 +944,10 @@ export function ConversationView({
                 )}
               </div>
             ) : (
-              /* No paging wired by this caller -- the ceiling still has to
-                 be visible rather than silent. */
+              /* Defensive default, not a path any current caller takes --
+                 see hasMoreHistory's own doc comment. Told history is
+                 truncated but given no way to fetch more, disclosing the
+                 ceiling beats hiding it. */
               <p className="conversation-history-notice">
                 Showing the most recent messages. Older messages aren't shown yet.
               </p>

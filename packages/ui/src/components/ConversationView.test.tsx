@@ -204,9 +204,14 @@ describe("ConversationView hasMoreHistory (#280)", () => {
     expect(screen.queryByRole("button", { name: /load older messages/i })).toBeNull();
   });
 
-  // The interim notice, kept for a caller with no paging wired (the
-  // instructor transcript viewer has its own offset-based control) -- the
-  // ceiling still has to be visible rather than silent there.
+  /* The defensive default. No current caller reaches this -- both of
+     App.tsx's surfaces wire the loader, and apps/admin's
+     TranscriptDetailView never passes `hasMoreHistory` at all (it renders
+     its own offset-based pagination outside this component). The two props
+     are independently optional though, so the combination is reachable by
+     construction, and #280 is a bug about a ceiling being SILENT -- this
+     pins the safe behaviour so a future caller that sets one without the
+     other cannot silently reintroduce it. */
   it("renders the static notice when hasMoreHistory is true but no loader is given", () => {
     render(<ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} hasMoreHistory={true} />);
     expect(screen.getByText(/older messages aren't shown yet/i)).toBeTruthy();

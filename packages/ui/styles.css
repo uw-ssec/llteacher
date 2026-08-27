@@ -943,12 +943,23 @@ body {
      the originals do -- a long sentence in a 64px column wraps into a tall
      clipped stripe. They were omitted when they were added, which is the
      same mistake as #403/#404: a new sibling that did not inherit the
-     treatment every one of its neighbours already had. */
+     treatment every one of its neighbours already had.
+
+     #280's load-more block is here for exactly that reason too -- it is a
+     full-width bordered button with a sentence of copy, i.e. the very shape
+     this rule exists to suppress. Hiding the wrapper is enough (the button
+     and its error paragraph are inside it), but both are listed so the
+     class can't be moved out from under its parent later and silently
+     reappear. There is nothing to lose at 64px: the rail's rows are hidden
+     here too, so "load older conversations" would be offering to extend a
+     list that isn't rendered. */
   .sidebar--collapsed .tutor-sidebar__label,
   .sidebar--collapsed .tutor-sidebar__new-btn-label,
   .sidebar--collapsed .tutor-sidebar__empty,
   .sidebar--collapsed .tutor-sidebar__disabled-reason,
   .sidebar--collapsed .tutor-sidebar__error,
+  .sidebar--collapsed .tutor-sidebar__more,
+  .sidebar--collapsed .tutor-sidebar__load-more,
   .sidebar--collapsed .tutor-sidebar__list {
     display: none;
   }
