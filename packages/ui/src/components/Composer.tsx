@@ -9,8 +9,10 @@
    - Heritage Gold caret color (the cursor itself carries the AI-voice mark)
    - Branded Husky Purple text selection
    - Placeholder: "Ask, explore, or push back…"
-   - Submit via Enter key (Shift+Enter inserts a newline)
-   - Bottom-right: muted "enter ↵" hint, fades in on focus
+   - Submit via Enter key (Shift+Enter inserts a newline), or the trailing
+     action button
+   - Bottom-right: muted "enter ↵" hint, fades in on focus, then the trailing
+     action button — Send while composing, Stop while a turn streams (#274)
    - Auto-resize via the native `field-sizing: content` CSS property
      with a JS fallback for browsers that don't support it yet.
 
@@ -87,6 +89,16 @@ export interface ComposerProps {
    *  flight. Disables the button without hiding it, so the affordance
    *  itself stays visible/explorable. */
   hintDisabled?: boolean;
+  /** #274 redesign: the streaming Stop handler. When set, the composer's
+   *  trailing action button becomes Stop for as long as `isStopActionable`
+   *  is true, and reverts to Send afterwards -- the SAME button element
+   *  throughout, which is what lets it satisfy #327's requirement that the
+   *  control never unmount out from under a keyboard user's focus. Omitted
+   *  entirely, the button is only ever Send. */
+  onStop?: () => void;
+  /** Whether there is genuinely a turn in flight for `onStop` to stop.
+   *  False leaves the button in its Send identity. */
+  isStopActionable?: boolean;
 }
 
 /* Cursor is on the first visual line iff there's no newline before it and no
@@ -112,6 +124,8 @@ export function Composer({
   maxLength = DEFAULT_MAX_LENGTH,
   onRequestHint,
   hintDisabled = false,
+  onStop,
+  isStopActionable = false,
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -165,16 +179,27 @@ export function Composer({
     ta.style.height = `${ta.scrollHeight}px`;
   }, [value]);
 
+  /* Shared by Enter and by the trailing Send button, so the two paths can
+     never drift on trimming or on history-slot reset. */
+  const canSend = value.trim().length > 0 && !disabled;
+
+  const submitDraft = () => {
+    if (!canSend) return;
+    onSubmit(value.trim());
+    /* Reset history nav so the next message starts on a fresh draft slot */
+    setHistoryIndex(null);
+    setSavedDraft("");
+  };
+
+  /* The trailing button's identity. Stop only while there is genuinely a turn
+     to stop; Send the rest of the time. One element, two identities -- never
+     two elements swapping places. */
+  const stopping = !!onStop && isStopActionable;
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      const trimmed = value.trim();
-      if (trimmed && !disabled) {
-        onSubmit(trimmed);
-        /* Reset history nav so the next message starts on a fresh draft slot */
-        setHistoryIndex(null);
-        setSavedDraft("");
-      }
+      submitDraft();
       return;
     }
 
@@ -275,10 +300,69 @@ export function Composer({
               maxLength={maxLength}
             />
 
-            {/* Enter hint — fades in on focus via CSS */}
-            <span className="composer-hint" aria-hidden="true">
+            {/* Enter hint — fades in on focus via CSS, and fades back out while
+                a turn streams, because Enter-to-send is suppressed then
+                (handleKeyDown's `canSend` guard) and advertising it would be a
+                lie.
+
+                Faded, NOT unmounted. This span is a flex item in
+                .composer-body, so removing it also removes its width and one
+                `gap` from the row, which widens the flex:1 textarea beside it;
+                with `field-sizing: content` a textarea that reflows to a
+                different line count changes the composer's height. Streaming
+                toggles this state, so unmounting the hint made the composer
+                resize mid-generation. Reserving the space keeps the row
+                geometry identical in both states. */}
+            <span
+              className={`composer-hint${stopping ? " composer-hint--suppressed" : ""}`}
+              aria-hidden="true"
+            >
               enter ↵
             </span>
+
+            {/* #274 redesign: the composer's trailing action. Previously the
+                Stop control lived in its own row ABOVE the composer
+                (.conversation-stop-row) and Send did not exist at all --
+                submission was Enter-only, so there was no pointer or touch
+                path to send a message, and the streaming escape hatch floated
+                in the transcript's margin detached from the input it belonged
+                to.
+
+                One button, two identities, never unmounted: Send while
+                composing, Stop while a turn is in flight. That is what makes
+                #327's focus guarantee structural rather than incidental --
+                pressing Stop morphs the button under the user's focus instead
+                of destroying the focused node and mounting a different one.
+
+                aria-disabled (not native `disabled`) for the same #270/#327
+                reason the textarea uses it: an empty draft must not silently
+                drop this button out of the tab order. */}
+            <button
+              type="button"
+              className={`composer-action${stopping ? " composer-action--stop" : ""}`}
+              aria-label={stopping ? "Stop" : "Send"}
+              aria-disabled={!stopping && !canSend ? true : undefined}
+              onClick={() => {
+                if (stopping) {
+                  onStop?.();
+                  return;
+                }
+                submitDraft();
+              }}
+            >
+              {/* The stop mark is a drawn box, not the "■" character: a glyph
+                  renders well inside its em box at whatever size the font
+                  decides, so it came out as a dot in a 32px button. A span with
+                  explicit dimensions is predictable and stays optically
+                  centred. The arrow stays a glyph -- it fills its box. */}
+              {stopping ? (
+                <span className="composer-action__stop-mark" aria-hidden="true" />
+              ) : (
+                <span className="composer-action__glyph" aria-hidden="true">
+                  ↑
+                </span>
+              )}
+            </button>
           </div>
         </div>
       </div>

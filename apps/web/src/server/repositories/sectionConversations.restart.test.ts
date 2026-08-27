@@ -173,14 +173,14 @@ describe("restartSectionConversation (#27, #128)", () => {
     expect(conversation).toMatchObject({ isTeacherTest: true, kind: "section" });
   });
 
-  it("opens the replacement with the Django-parity greeting for its section", async () => {
+  it("opens the replacement with the canonical greeting for its section", async () => {
     const { db, inserted, batch } = makeDb([[OWNED], [], []]);
 
     const result = await restartSectionConversation(db, SCOPE, CONV, OWNER, true, SECTION_CONVERSATION_PROMPTS);
 
     const greeting = inserted.find((v) => v.parts) as { parts: { text: string }[] };
     expect(greeting.parts[0]!.text).toBe(
-      "Hello! I'm here to help you with Section 2: Confidence intervals.\n\nEstimate the mean.\n\nHow can I assist you with this question?",
+      "Estimate the mean.\n\nWhere would you like to start? If you already have an idea, tell me what you're thinking and we'll work from there.",
     );
     expect(result.conversation.title).toBe("Section 2: Confidence intervals");
     expect(batch).toHaveBeenCalledTimes(1);

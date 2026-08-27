@@ -138,7 +138,25 @@ const LLM_CONFIG_COLUMNS = {
  *
  *  Returns null for "no such id" and "belongs to another organization"
  *  indistinguishably; the org predicate is in the same WHERE clause as the id,
- *  so a cross-tenant row cannot be read even to learn that it exists. */
+ *  so a cross-tenant row cannot be read even to learn that it exists.
+ *
+ *  Distinct from repositories/llmConfigs.ts's `getLlmConfig`, which returns
+ *  the admin-console `LlmConfigRecord` -- that shape is the wire contract
+ *  apps/admin reads (its `_RecordMatchesWire` guard enforces both
+ *  directions), and it deliberately carries no `credentialId`: which secret
+ *  backs a config is not something the console renders, and adding it there
+ *  to serve routes/llmConfigs.ts's Test button would push a server-only
+ *  field into the public payload. Reusing LLM_CONFIG_COLUMNS here is also
+ *  what keeps that button from drifting from the chat path -- two
+ *  hand-maintained column lists would be exactly how #365 came back.
+ *
+ *  #390 (staging PR #382's own follow-up): because this one read carries
+ *  provider, credentialId, modelName, basePrompt, temperature AND
+ *  maxCompletionTokens, a caller never has to pair it with a second read of
+ *  the same row, so there is no window in which an admin's edit lands
+ *  between the two and the request runs a hybrid of old and new config. Any
+ *  new by-id call site should take everything it needs from ONE call here
+ *  rather than reaching for `getLlmConfig` alongside it. */
 export async function loadLLMConfigById(
   db: Db,
   orgScope: OrgScope,

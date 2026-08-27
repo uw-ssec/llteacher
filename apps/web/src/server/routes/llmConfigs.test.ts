@@ -46,7 +46,18 @@ const CONFIG = {
 /** #365: what `loadLLMConfigById` (lib/llm-config.ts) returns for the same
  *  row -- the test button reads through that loader now, not the console's
  *  own `getLlmConfig` projection, because it needs `credentialId` to resolve
- *  a key for the config's actual provider. */
+ *  a key for the config's actual provider. Deliberately NOT the
+ *  admin-console record shape.
+ *
+ *  #390/merge note: this ONE row is everything the handler uses -- provider
+ *  and credentialId for the client, modelName/basePrompt/temperature/
+ *  maxCompletionTokens for the generation -- which is why no test here mocks
+ *  a second per-request config read.
+ *
+ *  Mirrors CONFIG's provider so the record and the resolved row describe the
+ *  same config; both provider branches (openrouter, llmoxie -- every org's
+ *  default after migration 0035, and the case the old hardcoded-OpenRouter
+ *  code got wrong) get their own explicit test below. */
 const RESOLVED_CONFIG = {
   id: CONFIG_ID,
   provider: CONFIG.provider as "openrouter" | "llmoxie",
@@ -91,9 +102,14 @@ vi.mock("../utils/audit", async (importOriginal) => ({
 }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 vi.mock("ai", () => ({ generateText: (...a: unknown[]) => generateTextMock(...a) }));
-// #365: the test button resolves its provider client the way chat.ts does.
-// The error classes come from the real module (importOriginal) so the
-// handler's `instanceof` branches are exercised, not stubbed out.
+/* #365: the handler no longer reaches for getOpenRouter directly -- it
+   resolves a provider client the same way the chat path does. These mocks
+   record WHICH provider and key it resolved with, which is the whole point
+   of the fix: the old code produced a plausible-looking result while
+   talking to the wrong provider. `importOriginal` keeps every other export
+   real so nothing else in this module is silently stubbed out -- in
+   particular the error classes, so the handler's `instanceof` branches are
+   exercised rather than stubbed. */
 vi.mock("../../lib/llm-config", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/llm-config")>()),
   loadLLMConfigById: (...a: unknown[]) => loadLlmConfigByIdMock(...a),
@@ -460,6 +476,47 @@ describe("POST test (#31)", () => {
     });
     expect((await test({ message: "hi" })).status).toBe(503);
     expect(generateTextMock).not.toHaveBeenCalled();
+  });
+
+  /* Their-side coverage kept from PR #382: the llmoxie case above is the one
+     the old hardcoded code got wrong, but the openrouter case has to keep
+     working too -- a "fix" that simply flipped the hardcoded provider would
+     pass the test above and fail here. */
+  it("still routes an openrouter config to openrouter", async () => {
+    loadLlmConfigByIdMock.mockResolvedValue({ ...RESOLVED_CONFIG, provider: "openrouter" });
+    await test({ message: "hi" });
+    expect(buildProviderClientMock.mock.calls[0]![0]).toBe("openrouter");
+  });
+
+  it("404s when the config no longer exists, without reaching a provider", async () => {
+    loadLlmConfigByIdMock.mockResolvedValue(null);
+    const res = await test({ message: "hi" });
+    expect(res.status).toBe(404);
+    expect(resolveApiKeyMock).not.toHaveBeenCalled();
+    expect(generateTextMock).not.toHaveBeenCalled();
+  });
+
+  /** #390 (the follow-up staging PR #382 opened against its own fix): that
+   *  implementation paired the console's `getLlmConfig` read with a second
+   *  `getResolvedLLMConfigById` read, and mixed the two -- provider and
+   *  credential from one, model/prompt/temperature from the other. An admin
+   *  saving the config between them produced a request that was a hybrid of
+   *  the old and the new row. This handler reads the row ONCE and takes
+   *  everything from it, which closes that window structurally rather than
+   *  by ordering; this test is what keeps a second read from creeping back. */
+  it("reads the config exactly once, so an edit mid-request cannot split it", async () => {
+    await test({ message: "hi" });
+    expect(loadLlmConfigByIdMock).toHaveBeenCalledTimes(1);
+    // The console's own projection is not consulted by this handler at all.
+    expect(getMock).not.toHaveBeenCalled();
+    // Everything sent to the provider came off that single row.
+    const call = generateTextMock.mock.calls[0]![0];
+    expect(call.model).toMatchObject({ provider: RESOLVED_CONFIG.provider, model: RESOLVED_CONFIG.modelName });
+    expect(call).toMatchObject({
+      system: RESOLVED_CONFIG.basePrompt,
+      temperature: RESOLVED_CONFIG.temperature,
+      maxOutputTokens: RESOLVED_CONFIG.maxCompletionTokens,
+    });
   });
 
   it("audits the test, because it spends money and reaches a provider", async () => {

@@ -5,6 +5,14 @@ import App from "./App";
 import { ProfileView } from "./components/ProfileView";
 import { AuthProvider } from "./components/AuthProvider";
 import "@llteacher/ui/styles.css";
+/* KaTeX's stylesheet, and via its url() references the woff2/woff/ttf faces,
+   resolved out of node_modules and emitted into this app's own /assets by
+   Vite. It lives here rather than in @llteacher/ui/Message.tsx so that
+   apps/admin -- which renders no transcript -- does not ship 1.1 MB of maths
+   fonts it can never use; see Message.tsx's own note. Imported from TS rather
+   than @import-ed so the bundler rebases those font URLs: this deploys to
+   Cloudflare Workers today and AWS later, and must serve every byte itself. */
+import "katex/dist/katex.min.css";
 
 /* #144: route-level errorElement -- defense-in-depth alongside the
    component ErrorBoundary App.tsx wraps around each chat surface. That

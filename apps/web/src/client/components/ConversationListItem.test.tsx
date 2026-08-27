@@ -148,3 +148,43 @@ describe("ConversationListItem", () => {
     });
   });
 });
+
+/* --------------------------------------------------------------------------
+   #403: the delete control belongs in the title's row.
+
+   .tutor-conversation-item is flex-direction: column, so a button placed as
+   its direct child became its own row between the title and the metadata,
+   reserving that height on every conversation even while transparent. jsdom
+   computes no layout, so this asserts STRUCTURE -- which parent the control
+   sits under -- rather than geometry.
+   -------------------------------------------------------------------------- */
+describe("ConversationListItem delete placement (#403)", () => {
+  const CONV = {
+    id: "c1",
+    kind: "tutor" as const,
+    title: "Chat A",
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-02T00:00:00.000Z",
+    messageCount: 3,
+  };
+
+  it("places the delete control in the same row as the title, not as a sibling of the column", () => {
+    const { container } = render(
+      <ConversationListItem
+        conversation={CONV}
+        isSelected={false}
+        onSelect={() => {}}
+        onRename={async () => {}}
+        onRequestDelete={() => {}}
+      />,
+    );
+    const del = container.querySelector(".tutor-conversation-item__delete")!;
+    expect(del).not.toBeNull();
+    // Its parent is the action row, and the title lives in that same row.
+    const row = del.parentElement!;
+    expect(row.classList.contains("tutor-conversation-item__row")).toBe(true);
+    expect(row.querySelector(".tutor-conversation-item__title")).not.toBeNull();
+    // ...and NOT a direct child of the column container.
+    expect(row.parentElement?.classList.contains("tutor-conversation-item")).toBe(true);
+  });
+});

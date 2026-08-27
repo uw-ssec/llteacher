@@ -9,19 +9,48 @@ import {
   sectionConversationTitle,
   SECTION_CONVERSATION_PROMPTS,
   toolUsageParagraph,
+  VOICE_CONSTRAINTS,
 } from "./prompts";
 import { TOOLS, toolsForConversation } from "../server/routes/chat";
 
-describe("sectionGreeting (#305)", () => {
-  it("matches the Django reference string exactly", () => {
-    // Verbatim parity with ConversationService._create_initial_message
-    // (apps/conversations/src/conversations/services.py). Pinned as a literal
-    // rather than rebuilt from the same template the implementation uses --
-    // a test that constructs the expected value the same way the code does
-    // cannot detect the template changing.
+describe("sectionGreeting (#305, #397)", () => {
+  it("matches the canonical greeting string exactly", () => {
+    // Still pinned as a literal rather than rebuilt from the same template
+    // the implementation uses -- a test that constructs the expected value
+    // the same way the code does cannot detect the template changing.
+    //
+    // #397: this literal used to be the verbatim Django string from
+    // ConversationService._create_initial_message (services.py:626). That
+    // parity was deliberately broken; see sectionGreeting's own doc comment.
+    // Three sibling test files pin the same literal and were updated with
+    // this change: sectionConversations.restart.test.ts,
+    // sectionConversations.db.test.ts, and client/App.test.tsx.
     expect(sectionGreeting({ order: 1, title: "Warm-up", content: "What is a mean?" })).toBe(
-      "Hello! I'm here to help you with Section 1: Warm-up.\n\nWhat is a mean?\n\nHow can I assist you with this question?",
+      "What is a mean?\n\nWhere would you like to start? If you already have an idea, tell me what you're thinking and we'll work from there.",
     );
+  });
+
+  it("carries no assistant boilerplate and no emoji or em dash (#397)", () => {
+    // The greeting is the first thing a student reads in every section, so
+    // it is held to the same register VOICE_CONSTRAINTS imposes on the
+    // model's own turns. Asserted on a greeting whose section content is
+    // itself clean, so any hit is the template's fault, not the fixture's.
+    const greeting = sectionGreeting({ order: 4, title: "Sampling", content: "Draw ten cards." });
+    expect(greeting).not.toContain("I'm here to help");
+    expect(greeting).not.toContain("How can I assist");
+    expect(greeting).not.toMatch(/^Hello|^Hi\b|^Nice\b|^Great\b|^Awesome\b/);
+    expect(greeting).not.toContain("\u2014");
+    expect(greeting).not.toMatch(/\p{Extended_Pictographic}/u);
+  });
+
+  it("opens on the section itself, not on the tutor introducing itself (#397)", () => {
+    const greeting = sectionGreeting({ order: 4, title: "Sampling", content: "Draw ten cards." });
+    /* Opens on the section's CONTENT. Review finding: it used to open on a
+       repeated "Section 4: Sampling" heading, which the breadcrumb directly
+       above the transcript already renders verbatim (and which
+       sectionConversationTitle produces a third time). */
+    expect(greeting.startsWith("Draw ten cards.")).toBe(true);
+    expect(greeting).not.toContain("Section 4: Sampling");
   });
 });
 
@@ -106,13 +135,19 @@ describe("toolUsageParagraph (#305 / #230 requirement 3)", () => {
 });
 
 describe("assembleSystemPrompt -- generated tool-usage paragraph (#305 / #230 requirement 3)", () => {
+  /* #397 (merged from staging): VOICE_CONSTRAINTS is now appended to EVERY
+     assembled prompt, unconditionally and last. These two assertions are
+     whole-output equality on purpose -- they are what proves the tool
+     paragraph is appended once and nothing else sneaks in -- so they spell
+     out that trailing block rather than relaxing to `toContain`, which would
+     stop detecting a duplicated or misplaced paragraph. */
   it("appends nothing when no tool names are passed", () => {
-    expect(assembleSystemPrompt("Be a helpful tutor.")).toBe("Be a helpful tutor.");
+    expect(assembleSystemPrompt("Be a helpful tutor.")).toBe(`Be a helpful tutor.\n\n${VOICE_CONSTRAINTS}`);
   });
 
   it("appends the generated paragraph when tool names are passed", () => {
     const result = assembleSystemPrompt("Base.", undefined, false, false, undefined, ["showDefinition"]);
-    expect(result).toBe(`Base.\n\n${toolUsageParagraph(["showDefinition"])}`);
+    expect(result).toBe(`Base.\n\n${toolUsageParagraph(["showDefinition"])}\n\n${VOICE_CONSTRAINTS}`);
   });
 
   it("places the catalog BEFORE markCompleteInstruction -- which is one member's pedagogy and needs its antecedent", () => {
@@ -149,13 +184,86 @@ describe("assembleSystemPrompt -- generated tool-usage paragraph (#305 / #230 re
 describe("assembleSystemPrompt", () => {
   it("omits the tutor guardrail by default -- a real template's own pedagogy is final (#317 review, #325)", () => {
     const result = assembleSystemPrompt("Be a helpful tutor.");
-    expect(result).toBe("Be a helpful tutor.");
+    expect(result).toBe(`Be a helpful tutor.\n\n${VOICE_CONSTRAINTS}`);
     expect(result).not.toContain(TUTOR_GUARDRAIL);
   });
 
   it("appends the tutor guardrail only when isDefaultPrompt is true (#325: code-level fallback only)", () => {
     const result = assembleSystemPrompt("Be a helpful tutor.", undefined, true);
-    expect(result).toBe(`Be a helpful tutor.\n\n${TUTOR_GUARDRAIL}`);
+    expect(result).toBe(`Be a helpful tutor.\n\n${TUTOR_GUARDRAIL}\n\n${VOICE_CONSTRAINTS}`);
+  });
+
+  it("appends VOICE_CONSTRAINTS for a REAL template too, not just the default fallback (#397)", () => {
+    // The regression this guards: the observed emoji/em-dash output came
+    // from a conversation running a seeded org template, so a voice
+    // constraint gated on isDefaultPrompt (the way TUTOR_GUARDRAIL is)
+    // would not have fixed anything in production.
+    const real = assembleSystemPrompt("You are the STATS 311 tutor.");
+    expect(real).toContain(VOICE_CONSTRAINTS);
+    expect(real).not.toContain(TUTOR_GUARDRAIL);
+  });
+
+  it("puts VOICE_CONSTRAINTS last, after the section content and the guardrail (#397)", () => {
+    // Last = nearest to the conversation, and after any template persona
+    // text it is meant to narrow.
+    const result = assembleSystemPrompt(
+      "Base prompt.",
+      { homeworkTitle: "HW 3", sectionTitle: "Section 2", sectionContent: "What is a p-value?" },
+      true,
+    );
+    expect(result.endsWith(VOICE_CONSTRAINTS)).toBe(true);
+    expect(result.indexOf(VOICE_CONSTRAINTS)).toBeGreaterThan(result.indexOf(TUTOR_GUARDRAIL));
+    expect(result.indexOf(VOICE_CONSTRAINTS)).toBeGreaterThan(result.indexOf("</section_content>"));
+  });
+
+  it("VOICE_CONSTRAINTS names each banned tell concretely, not as vague guidance (#397)", () => {
+    // A model complies with a listed forbidden string and ignores an
+    // adjective, so this asserts the constraint keeps naming the specific
+    // artifacts that were actually observed in production output.
+    expect(VOICE_CONSTRAINTS).toContain("emoji");
+    expect(VOICE_CONSTRAINTS).toContain("em dash");
+    expect(VOICE_CONSTRAINTS).toContain("\u2014"); // names the character itself
+    expect(VOICE_CONSTRAINTS).toContain('"Great question"');
+    expect(VOICE_CONSTRAINTS).toContain('"I\'m here to help"');
+    expect(VOICE_CONSTRAINTS).toContain('"How can I assist you"');
+    for (const opener of ["Nice", "Awesome", "Absolutely", "Perfect"]) {
+      expect(VOICE_CONSTRAINTS).toContain(`"${opener}"`);
+    }
+  });
+
+  it("VOICE_CONSTRAINTS does not itself contain an emoji (#397)", () => {
+    // It quotes the banned openers verbatim but describes the banned emoji
+    // in words, so the prohibition never smuggles an example of the thing
+    // it forbids into the model's context.
+    expect(VOICE_CONSTRAINTS).not.toMatch(/\p{Extended_Pictographic}/u);
+  });
+
+  it("leaves the pedagogy instructions untouched -- voice constraint only (#397)", () => {
+    // VOICE_CONSTRAINTS must not restate or contradict teaching behaviour;
+    // that is TUTOR_GUARDRAIL's and the template's job.
+    expect(VOICE_CONSTRAINTS).not.toContain("Socratic");
+    expect(VOICE_CONSTRAINTS).not.toContain("giving away");
+    /* The two checks above are keyword spot-checks: they pass for any
+       pedagogy text that happens to avoid those two words, which is exactly
+       how "say what their answer got right, or ask the next question" got in.
+       These pin the prescribe-teaching-behaviour phrasings directly, since
+       this constant is appended unconditionally and a template cannot
+       override it. */
+    for (const pedagogy of [
+      "ask the next question",
+      "ask a follow-up",
+      "do not give the answer",
+      "guide the student",
+      "step by step",
+    ]) {
+      expect(VOICE_CONSTRAINTS.toLowerCase()).not.toContain(pedagogy);
+    }
+    /* It must not narrow how warm a template is allowed to be, only how that
+       warmth is worded -- the seeded org template says "Be encouraging". */
+    expect(VOICE_CONSTRAINTS).not.toContain("enthusiasm");
+    expect(assembleSystemPrompt(DEFAULT_SYSTEM_PROMPT, undefined, true)).toContain(
+      "Socratic method: ask leading questions",
+    );
   });
 
   it("includes homework title, section title, and section content, all before the guardrail, when isDefaultPrompt is true", () => {
@@ -265,7 +373,18 @@ describe("assembleSystemPrompt", () => {
       You are helping with "HW 3: Probability and Distributions", Section 3: P-Values.
       <section_content>
       Explain, in your own words, what a p-value represents.
-      </section_content>"
+      </section_content>
+
+      Style rules for every message you write. These constrain how you write, not what you teach:
+
+      - Never use emoji. Not as reaction markers, not as decoration, not as bullets. No check marks, no dart boards, no party poppers, no thinking faces. A sentence that would have ended in an emoji should just end.
+      - Never use an em dash (the "—" character), and never open a sentence or clause with one. Do not write "Nice — received." or "Awesome—let's do it." Use a period, a comma, a colon, or two separate sentences.
+      - Never open a turn with a filler affirmation. Banned openers: "Nice", "Great", "Great question", "Good question", "Awesome", "Perfect", "Absolutely", "Excellent", "Love it", "Sure thing", "Of course". Open with the substance instead.
+      - Never write assistant boilerplate about yourself: "I'm here to help", "How can I assist you", "Happy to help", "Feel free to ask", "Let me know if you have any questions", "As an AI".
+      - Do not narrate what you are about to do. No "Let's dive in", "Here's the thing", "Let's break this down", "Great, let's get started". Say the thing itself.
+      - Do not stack exclamation marks. At most one in an entire conversation, and usually none.
+      - Acknowledge a student's answer with information rather than applause. Write "That's the right setup." rather than "Great job!" -- this is about wording, not about whether to encourage.
+      - Write mathematics with LaTeX delimiters: \\( ... \\) for maths inside a sentence, and \\[ ... \\] on their own lines for a displayed equation. Do not use single dollar signs for maths -- a lone $ is read as currency, so "$x$" will show up literally to the student while "the ticket costs $5" stays correct."
     `);
   });
 
@@ -276,7 +395,18 @@ describe("assembleSystemPrompt", () => {
 
       Be warm, curious, and patient. Prefer questions over assertions.
 
-      Respond as an AI tutor helping the student. Guide them without giving away the complete answer."
+      Respond as an AI tutor helping the student. Guide them without giving away the complete answer.
+
+      Style rules for every message you write. These constrain how you write, not what you teach:
+
+      - Never use emoji. Not as reaction markers, not as decoration, not as bullets. No check marks, no dart boards, no party poppers, no thinking faces. A sentence that would have ended in an emoji should just end.
+      - Never use an em dash (the "—" character), and never open a sentence or clause with one. Do not write "Nice — received." or "Awesome—let's do it." Use a period, a comma, a colon, or two separate sentences.
+      - Never open a turn with a filler affirmation. Banned openers: "Nice", "Great", "Great question", "Good question", "Awesome", "Perfect", "Absolutely", "Excellent", "Love it", "Sure thing", "Of course". Open with the substance instead.
+      - Never write assistant boilerplate about yourself: "I'm here to help", "How can I assist you", "Happy to help", "Feel free to ask", "Let me know if you have any questions", "As an AI".
+      - Do not narrate what you are about to do. No "Let's dive in", "Here's the thing", "Let's break this down", "Great, let's get started". Say the thing itself.
+      - Do not stack exclamation marks. At most one in an entire conversation, and usually none.
+      - Acknowledge a student's answer with information rather than applause. Write "That's the right setup." rather than "Great job!" -- this is about wording, not about whether to encourage.
+      - Write mathematics with LaTeX delimiters: \\( ... \\) for maths inside a sentence, and \\[ ... \\] on their own lines for a displayed equation. Do not use single dollar signs for maths -- a lone $ is read as currency, so "$x$" will show up literally to the student while "the ticket costs $5" stays correct."
     `);
   });
 });
@@ -294,7 +424,14 @@ describe("assembleSystemPrompt -- hint requests (#80)", () => {
 
   it("appends HINT_INSTRUCTION only when isHintRequest is true", () => {
     const result = assembleSystemPrompt("Be a helpful tutor.", undefined, false, true);
-    expect(result).toBe(`Be a helpful tutor.\n\n${HINT_INSTRUCTION}`);
+    /* #397 appends VOICE_CONSTRAINTS unconditionally and last, so this can no
+       longer be an equality against the whole prompt. What the test is
+       actually about -- that HINT_INSTRUCTION appears iff isHintRequest, and
+       directly after the template -- is asserted directly instead. */
+    expect(result.startsWith(`Be a helpful tutor.\n\n${HINT_INSTRUCTION}`)).toBe(true);
+    expect(assembleSystemPrompt("Be a helpful tutor.", undefined, false, false)).not.toContain(
+      HINT_INSTRUCTION,
+    );
   });
 
   it("appends HINT_INSTRUCTION AFTER the guardrail, when both fire on the same (default-prompt) turn", () => {
@@ -356,7 +493,12 @@ describe("assembleSystemPrompt -- markSectionComplete stopping-rule wording (#16
 
   it("appends the given markCompleteInstruction verbatim when passed", () => {
     const result = assembleSystemPrompt("Be a helpful tutor.", undefined, false, false, DEFAULT_MARK_COMPLETE_INSTRUCTION);
-    expect(result).toBe(`Be a helpful tutor.\n\n${DEFAULT_MARK_COMPLETE_INSTRUCTION}`);
+    /* Prefix rather than equality: #397 appends VOICE_CONSTRAINTS after
+       everything. "Verbatim" is what this test is about, and a prefix match
+       still proves the instruction is passed through unaltered. */
+    expect(result.startsWith(`Be a helpful tutor.\n\n${DEFAULT_MARK_COMPLETE_INSTRUCTION}`)).toBe(
+      true,
+    );
   });
 
   it("appends a per-config override string exactly as given -- this function does not know about DEFAULT_MARK_COMPLETE_INSTRUCTION at all", () => {

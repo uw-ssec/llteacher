@@ -3,7 +3,10 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "LLteacher shared design system — UW Husky Purple chrome, Heritage Gold AI markers, Geist type system. Consumed by apps/web and apps/admin.",
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "description": "LLteacher shared design system \u2014 UW Husky Purple chrome, Heritage Gold AI markers, Geist type system. Consumed by apps/web and apps/admin.",
   "exports": {
     ".": "./src/index.ts",
     "./styles.css": "./styles.css",
@@ -15,7 +18,12 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@phosphor-icons/react": "^2.1.7"
+    "@phosphor-icons/react": "^2.1.7",
+    "katex": "^0.16.47",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
   },
   "peerDependencies": {
     "react": "^19.2.1",

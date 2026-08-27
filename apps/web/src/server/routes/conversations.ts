@@ -408,7 +408,17 @@ export async function listConversationMessagesHandler(c: Context<AppEnv>) {
   // boundary.
   // #280: seq included so a caller can construct the next `before` (this
   // same query's own cursor param) without a second round-trip.
-  const body: ConversationMessageResponse[] = rows.map((r) => ({ id: r.id, role: r.role, parts: r.parts, seq: r.seq }));
+  /* #397: createdAt was selected by the repository (bare .select()) but
+     dropped here, so the transcript had no way to show a per-turn time
+     without a second round-trip. The sibling section-conversation routes
+     already forwarded it; this one was the outlier. */
+  const body: ConversationMessageResponse[] = rows.map((r) => ({
+    id: r.id,
+    role: r.role,
+    parts: r.parts,
+    seq: r.seq,
+    createdAt: r.createdAt.toISOString(),
+  }));
   return c.json(body);
 }
 

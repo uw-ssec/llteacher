@@ -96,6 +96,7 @@ import { z } from "zod";
 import { makeDb } from "../../db/client";
 import type { Db } from "../../db/client";
 import type { ConversationKind } from "../../db/schema";
+import { MAX_HISTORY_MESSAGES } from "../../shared/chat-limits";
 import {
   createConversation,
   appendMessage,
@@ -815,9 +816,12 @@ function deriveTutorConversationTitle(parts: unknown): string | null {
 // strategy is real, separate work (tracked as #88, context-window
 // management); until it lands, the oldest turns beyond this window are
 // simply not seen by the model on a given turn, which is a graceful
-// degradation (the student can still reference them in the visible UI
-// transcript) rather than a hard failure.
-const MAX_HISTORY_MESSAGES = 40;
+// degradation rather than a hard failure -- and, since #288, one the
+// student can actually see: ConversationView renders a boundary divider
+// above the oldest message still inside this window, so "the tutor did not
+// see that" is legible instead of looking like the tutor ignoring them.
+// The constant itself moved to shared/chat-limits.ts for that reason; the
+// client describes the same number the server enforces.
 
 // #143: bound on the inbound request body itself, checked before any
 // parsing/db work -- distinct from MAX_HISTORY_MESSAGES above (which trims

@@ -453,9 +453,22 @@ export async function testLlmConfigHandler(c: Context<AppEnv>) {
   // Test on the default sent an LLMOxie model id to openrouter.ai under an
   // OpenRouter key -- wrong provider, wrong credential, and an error message
   // ("check the model id") that pointed the instructor at the one thing that
-  // was correct. Resolved through the same `resolveApiKey` +
-  // `buildProviderClient` pair chat.ts uses, so the button now tests what a
-  // student's turn would actually hit.
+  // was correct. The result was not a broken button but a lying one:
+  // whatever came back said nothing about whether the configuration under
+  // test actually works, which is the button's entire purpose -- a pass
+  // could mean OpenRouter happens to front a same-named model, and a failure
+  // looked like a bad model id rather than a misdirected request. Resolved
+  // through the same `resolveApiKey` + `buildProviderClient` pair chat.ts
+  // uses, so the button now tests what a student's turn would actually hit,
+  // with the config's own credential rather than the deployment-wide key
+  // when it has one.
+  //
+  // #390 (staging PR #382's follow-up): everything below reads off the ONE
+  // `loadLLMConfigById` row above -- provider and credentialId for the
+  // client, modelName/basePrompt/temperature/maxCompletionTokens for the
+  // generation. There is deliberately no second `getLlmConfig` read to pair
+  // with it, so an admin editing the config mid-request cannot make this
+  // handler run a hybrid of the old provider and the new model.
   let model: ReturnType<ReturnType<typeof buildProviderClient>>;
   try {
     const apiKey = await resolveApiKey(c.env, db, ctx.scope, config);
