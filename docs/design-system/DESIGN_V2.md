@@ -802,7 +802,7 @@ class ConversationService:
     @staticmethod
     def _create_initial_message(section: Section) -> str:
         """Create initial AI message for a section."""
-        return f"Hello! I'm here to help you with Section {section.order}: {section.title}. What would you like to work on?"
+        return f"{section content}"
 ```
 
 ### 3. Submission Service

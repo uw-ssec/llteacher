@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { CaretDoubleLeft, CaretDoubleRight, ChatCircleDots, Plus } from "@phosphor-icons/react";
+import { useEffect, useRef, useState } from "react";
+import { CaretDoubleLeft, CaretDoubleRight, Plus } from "@phosphor-icons/react";
 import { ConversationListItem } from "../components/ConversationListItem";
 import type { ConversationListItemResponse } from "../../shared/types";
 
@@ -117,13 +117,37 @@ export function TutorConversationsList({
      `selectedConversationId` already carry everything needed, and a
      separate piece of state would just be a second source of truth to keep
      in step with them. */
+  /* #399: selection announcements go through the SAME `liveMessage` state
+     as create and rename, rather than a derived value that shadows it.
+
+     The previous shape was `selectionMessage ?? liveMessage`, and
+     `selectionMessage` was derived from `selectedConversationId` -- so once
+     anything was selected it was permanently `Opened X`, and every
+     subsequent "Conversation created" / "Renamed to X" was masked for the
+     rest of the session. That silently regressed #235's existing feedback
+     inside the PR meant to improve this surface's screen-reader support.
+
+     One piece of state means one ordering: whatever happened most recently
+     is what gets announced, whichever action it came from. */
   const pendingTitle = conversations.find((c) => c.id === pendingConversationId)?.title;
   const selectedTitle = conversations.find((c) => c.id === selectedConversationId)?.title;
-  const selectionMessage = pendingConversationId
-    ? `Loading conversation${pendingTitle ? ` ${pendingTitle}` : ""}…`
-    : selectedTitle
-      ? `Opened ${selectedTitle}`
-      : undefined;
+
+  useEffect(() => {
+    if (pendingConversationId) {
+      setLiveMessage(`Loading conversation${pendingTitle ? ` ${pendingTitle}` : ""}…`);
+    }
+    // Deliberately no `else`: the settled announcement is made by the
+    // effect below, on the transition, not on every render where something
+    // happens to be selected.
+  }, [pendingConversationId, pendingTitle]);
+
+  const previousSelectionRef = useRef(selectedConversationId);
+  useEffect(() => {
+    if (selectedConversationId && selectedConversationId !== previousSelectionRef.current) {
+      setLiveMessage(`Opened ${selectedTitle ?? "conversation"}`);
+    }
+    previousSelectionRef.current = selectedConversationId;
+  }, [selectedConversationId, selectedTitle]);
 
   const disabledReasonId = "tutor-sidebar-new-btn-reason";
   const disabledReason = courseContextLoading
@@ -139,7 +163,7 @@ export function TutorConversationsList({
           visually hidden, doesn't duplicate what role="alert" already
           announces for the two error states below. */}
       <div aria-live="polite" className="sr-only">
-        {loading ? "Loading conversations…" : (selectionMessage ?? liveMessage)}
+        {loading ? "Loading conversations…" : liveMessage}
       </div>
 
       <div className="tutor-sidebar__top">
@@ -203,24 +227,34 @@ export function TutorConversationsList({
               ? "Couldn't refresh conversations. These may be out of date."
               : "Couldn't load conversations."}
           </p>
-          <button type="button" className="tutor-sidebar__retry" onClick={onRetryLoad}>
-            Try again
+          {/* #400: disabled while a load is in flight. `loadError` stays
+              true until the retry resolves, so this button remained live
+              and repeated clicks started concurrent refetches for the same
+              course -- and the hook ordered responses by course id, not by
+              request sequence, so an older response could overwrite a newer
+              list or restore an error a later retry had already cleared. */}
+          <button
+            type="button"
+            className="tutor-sidebar__retry"
+            onClick={onRetryLoad}
+            disabled={loading}
+          >
+            {loading ? "Retrying…" : "Try again"}
           </button>
         </div>
       )}
 
-      {/* Only a genuinely-empty API response ([]) gets the empty state.
-          #293: `awaitingCourseContext` is the gate that makes that true.
-          While a fetch is in flight, or before courseId has arrived at all,
-          show nothing rather than an empty state that flashes then vanishes
-          -- reading, for that round-trip, as "your conversations are gone."
-          When there is genuinely no course, the disabled-reason text above
-          is the right message, not this one. */}
+      {/* Staging's copy (#410's rail pass): one quiet left-aligned line
+          rather than a decorative icon restating the button above it.
+
+          #293 keeps its gate on top of it: `awaitingCourseContext` is what
+          makes "a genuinely-empty API response" true. Before courseId has
+          arrived this state is reachable with a full list on the server, so
+          a returning student was told there was nothing here for one
+          round-trip on every load. The copy changed; the condition it
+          renders under still has to be right. */}
       {!loadError && !loading && !awaitingCourseContext && conversations.length === 0 && (
-        <div className="tutor-sidebar__empty">
-          <ChatCircleDots size={20} weight="regular" aria-hidden="true" />
-          <p>No conversations yet</p>
-        </div>
+        <p className="tutor-sidebar__empty">Start one to ask about anything outside a section.</p>
       )}
 
       {/* #295: list-style: none strips list semantics in Safari/VoiceOver

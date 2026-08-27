@@ -100,6 +100,10 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
   const courseIdRef = useRef(courseId);
   courseIdRef.current = courseId;
 
+  /** #400: monotonically increasing id per fetch this hook issues, so a
+   *  late response can tell whether it is still the newest. */
+  const requestSeqRef = useRef(0);
+
   const refetch = useCallback(() => {
     if (!courseId) {
       // Not a fetch error -- there's simply no course to scope the query
@@ -129,13 +133,19 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     // below checks it, so a response arriving after a course switch cannot
     // write into the new course's state.
     const requestedCourseId = courseId;
+    /* #400: response ordering. Guarding by course id alone lets two
+       same-course requests (two Try again clicks) race, so an older
+       response could overwrite a newer list or restore an error a later one
+       had cleared. Every response checks it is still the newest request
+       issued, not merely the right course. */
+    const requestSeq = ++requestSeqRef.current;
     fetch(`/api/conversations?courseId=${encodeURIComponent(courseId)}&kind=tutor`)
       .then((r) => {
         if (!r.ok) throw new Error(`failed to load tutor conversations: ${r.status}`);
         return r.json() as Promise<ConversationListResponse>;
       })
       .then((data) => {
-        if (requestedCourseId !== courseIdRef.current) return;
+        if (requestedCourseId !== courseIdRef.current || requestSeq !== requestSeqRef.current) return;
         // #281: the route returns { items, nextCursor } instead of a bare
         // array. #280: `nextCursor` is now surfaced as `hasMore` -- this
         // hook still only ever fetches one page (an actual load-more
@@ -163,11 +173,11 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
         // not the current one: a slow request for course A resolving after a
         // switch to B must not clear B's list either.
         console.error("[useTutorConversations.refetch]", err);
-        if (requestedCourseId !== courseIdRef.current) return;
+        if (requestedCourseId !== courseIdRef.current || requestSeq !== requestSeqRef.current) return;
         setLoadError(true);
       })
       .finally(() => {
-        if (requestedCourseId === courseIdRef.current) setLoading(false);
+        if (requestedCourseId === courseIdRef.current && requestSeq === requestSeqRef.current) setLoading(false);
       });
   }, [courseId]);
 

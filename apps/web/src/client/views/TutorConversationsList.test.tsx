@@ -51,25 +51,25 @@ function renderList(overrides: Partial<React.ComponentProps<typeof TutorConversa
 describe("TutorConversationsList", () => {
   it("shows the empty state when there are no conversations", () => {
     renderList();
-    expect(screen.getByText("No conversations yet")).toBeTruthy();
+    expect(screen.getByText(/Start one to ask about anything outside a section\./)).toBeTruthy();
   });
 
   it("renders each conversation it's given", () => {
     renderList({ conversations: [CONV_A] });
     expect(screen.getByText("Chat A")).toBeTruthy();
-    expect(screen.queryByText("No conversations yet")).toBeNull();
+    expect(screen.queryByText(/Start one to ask about anything outside a section\./)).toBeNull();
   });
 
   it("surfaces a distinct error message (not the empty state) on loadError", () => {
     renderList({ loadError: true });
     const alert = screen.getByRole("alert");
     expect(alert.textContent).toMatch(/couldn't load/i);
-    expect(screen.queryByText("No conversations yet")).toBeNull();
+    expect(screen.queryByText(/Start one to ask about anything outside a section\./)).toBeNull();
   });
 
   it("does not show the empty state while still loading", () => {
     renderList({ loading: true, conversations: [] });
-    expect(screen.queryByText("No conversations yet")).toBeNull();
+    expect(screen.queryByText(/Start one to ask about anything outside a section\./)).toBeNull();
   });
 
   // #280: the list route pages at 50 with no load-more wired -- this makes
@@ -241,12 +241,12 @@ describe("TutorConversationsList empty state and course context (#293)", () => {
       loading: false,
       conversations: [],
     });
-    expect(screen.queryByText("No conversations yet")).toBeNull();
+    expect(screen.queryByText(/Start one to ask about/)).toBeNull();
   });
 
   it("still shows the empty state once course context exists and the list is genuinely empty", () => {
     renderList({ awaitingCourseContext: false, loading: false, conversations: [] });
-    expect(screen.getByText("No conversations yet")).toBeTruthy();
+    expect(screen.getByText(/Start one to ask about/)).toBeTruthy();
   });
 
   it("renders the disabled-button reason as visible text, not only sr-only/title", () => {
@@ -352,5 +352,52 @@ describe("TutorConversationsList selection feedback (#290)", () => {
       pendingConversationId: undefined,
     });
     expect(document.querySelector('[aria-busy="true"]')).toBeNull();
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #398 / #399 / #400 -- defects found by a high-effort re-review of the
+   fixes in this PR, not of the original code.
+   -------------------------------------------------------------------------- */
+describe("TutorConversationsList announcements and retry (#399, #400)", () => {
+  it("still announces a rename after a conversation has been selected (#399)", async () => {
+    const onRenameConversation = vi.fn(async () => undefined);
+    renderList({
+      conversations: [CONV_A],
+      selectedConversationId: CONV_A.id,
+      onRenameConversation,
+    });
+
+    // `selectionMessage ?? liveMessage` made "Opened X" permanent once
+    // anything was selected, masking every later action announcement --
+    // a regression of #235 inside the PR meant to improve this surface.
+    await userEvent.click(screen.getByRole("button", { name: `Rename: ${CONV_A.title}` }));
+    const input = screen.getByLabelText("Edit title");
+    await userEvent.clear(input);
+    await userEvent.type(input, "Renamed thing{Enter}");
+
+    expect(await screen.findByText("Renamed to Renamed thing")).toBeTruthy();
+  });
+
+  it("still announces a create after a conversation has been selected (#399)", async () => {
+    renderList({
+      conversations: [CONV_A],
+      selectedConversationId: CONV_A.id,
+      onCreateConversation: vi.fn(async () => true),
+    });
+    await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+    expect(await screen.findByText("Conversation created")).toBeTruthy();
+  });
+
+  it("disables the retry while a load is in flight (#400)", () => {
+    renderList({ loadError: true, loading: true });
+    const retry = screen.getByRole("button", { name: /Retrying/ });
+    expect((retry as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("offers the retry again once the load settles (#400)", () => {
+    renderList({ loadError: true, loading: false });
+    const retry = screen.getByRole("button", { name: "Try again" });
+    expect((retry as HTMLButtonElement).disabled).toBe(false);
   });
 });

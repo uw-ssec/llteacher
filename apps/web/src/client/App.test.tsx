@@ -270,7 +270,7 @@ describe("App tutor-conversations rail (#4)", () => {
     );
 
     expect(await screen.findByText("Tutor Chats")).toBeTruthy();
-    expect(await screen.findByText("No conversations yet")).toBeTruthy();
+    expect(await screen.findByText(/Start one to ask about anything outside a section\./)).toBeTruthy();
     // Data leakage guard (Testing Strategy #1): the fetch must be scoped to
     // this student's actual courseId ("course-a" from HOMEWORK_FIXTURE),
     // never a hardcoded or missing one.
@@ -338,12 +338,12 @@ describe("App tutor-conversations rail (#4)", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByText("No conversations yet");
+    await screen.findByText(/Start one to ask about anything outside a section\./);
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "New conversation" }));
 
     // The chat column switched to the tutor surface (breadcrumb changed).
-    await screen.findByText("STATS 311 · TUTOR CHAT");
+    await screen.findByText("TUTOR CHAT");
 
     const composer = await screen.findByLabelText("Message input");
     await user.type(composer, "hello tutor{Enter}");
@@ -584,11 +584,11 @@ describe("App tutor-conversations rail (#4)", () => {
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
-    await screen.findByText("STATS 311 · TUTOR CHAT");
+    await screen.findByText("TUTOR CHAT");
 
     await user.click(screen.getByRole("button", { name: /Sec 1/ }));
-    await screen.findByText("STATS 311 · HW 3 · Section 1: Sec 1");
-    expect(screen.queryByText("STATS 311 · TUTOR CHAT")).toBeNull();
+    await screen.findByText("Section 1: Sec 1");
+    expect(screen.queryByText("TUTOR CHAT")).toBeNull();
   });
 });
 
@@ -676,7 +676,7 @@ describe("App tutor conversation header rename (#6)", () => {
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
-    await screen.findByText("STATS 311 · TUTOR CHAT");
+    await screen.findByText("TUTOR CHAT");
 
     // The heading itself: dom-accessibility-api computes an ancestor's
     // "name from content" from descendants' visible text, not a nested
@@ -752,7 +752,7 @@ describe("App tutor conversation header rename (#6)", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByText("STATS 311 · HW 3 · Section 1: Sec 1");
+    await screen.findByText("Section 1: Sec 1");
     expect(screen.queryByRole("button", { name: /Rename conversation/ })).toBeNull();
   });
 });
@@ -1046,7 +1046,7 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "New conversation" }));
-    await screen.findByText("STATS 311 · TUTOR CHAT");
+    await screen.findByText("TUTOR CHAT");
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     await user.type(composer, "tutor question{Enter}");
@@ -1357,7 +1357,17 @@ describe("App eager section greeting (#318)", () => {
               id: "sec-conv-new",
               title: "Section 1: Sec 1",
               greetingMessageId: "g1",
-              greetingParts: [{ type: "text", text: "Hello! I'm here to help you with Section 1: Sec 1." }],
+              greetingParts: [
+                {
+                  type: "text",
+                  // Full multi-line shape the server now produces (sectionGreeting).
+                  // It no longer repeats the "Section 1: Sec 1" heading: the
+                  // breadcrumb above the transcript already renders that string
+                  // verbatim, so the greeting opens on the content instead.
+                  text:
+                    "What is a mean?\n\nWhere would you like to start? If you already have an idea, tell me what you're thinking and we'll work from there.",
+                },
+              ],
               promptTemplateId: null,
             }),
             { status: 201 },
@@ -1376,7 +1386,7 @@ describe("App eager section greeting (#318)", () => {
     );
 
     // No message sent yet -- the greeting must already be visible.
-    expect(await screen.findByText("Hello! I'm here to help you with Section 1: Sec 1.")).toBeTruthy();
+    expect(await screen.findByText(/Where would you like to start\?/)).toBeTruthy();
     expect(startCalls).toBe(1);
     // The sidebar dot must reflect the new conversation too, not stay
     // "not_started" until a reload -- SectionItem marks the current section
@@ -1417,7 +1427,7 @@ describe("App eager section greeting (#318)", () => {
 
     const composer = await screen.findByLabelText("Message input");
     expect(composer).toBeTruthy();
-    expect(screen.queryByText(/Hello! I'm here to help you/)).toBeNull();
+    expect(screen.queryByText(/Where would you like to start\?/)).toBeNull();
   });
 
   it("Submit does nothing for a section whose only content is the eager greeting -- no student turn yet", async () => {
@@ -1443,7 +1453,17 @@ describe("App eager section greeting (#318)", () => {
               id: "sec-conv-new",
               title: "Section 1: Sec 1",
               greetingMessageId: "g1",
-              greetingParts: [{ type: "text", text: "Hello! I'm here to help you with Section 1: Sec 1." }],
+              greetingParts: [
+                {
+                  type: "text",
+                  // Full multi-line shape the server now produces (sectionGreeting).
+                  // It no longer repeats the "Section 1: Sec 1" heading: the
+                  // breadcrumb above the transcript already renders that string
+                  // verbatim, so the greeting opens on the content instead.
+                  text:
+                    "What is a mean?\n\nWhere would you like to start? If you already have an idea, tell me what you're thinking and we'll work from there.",
+                },
+              ],
               promptTemplateId: null,
             }),
             { status: 201 },
@@ -1465,7 +1485,7 @@ describe("App eager section greeting (#318)", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByText("Hello! I'm here to help you with Section 1: Sec 1.");
+    await screen.findByText(/Where would you like to start\?/);
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /Submit section 1/i }));
@@ -1768,7 +1788,7 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
     // Switches to the tutor surface (ConversationView only mounts for the
     // currently-selected id, so that's where the error row has to render)
     // but with the retryable error attached, not a silent empty thread.
-    expect(await screen.findByText("STATS 311 · TUTOR CHAT")).toBeTruthy();
+    expect(await screen.findByText("TUTOR CHAT")).toBeTruthy();
     expect(await screen.findByText(/Couldn't load that conversation/i)).toBeTruthy();
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     expect(isComposerDisabled(composer)).toBe(true);
@@ -2114,13 +2134,15 @@ describe("App Stop control (#274)", () => {
     // Stop's whole point: the composer must come back, not stay wedged
     // behind isSending forever.
     //
-    // #317 review, #327: Stop itself now stays MOUNTED once isSending goes
-    // false (aria-disabled, not removed -- see ConversationView.tsx's own
-    // #274/#327 doc comment for why: a keyboard user who just activated it
-    // must not have focus dropped to document.body with nothing to restore
-    // it). The composer re-enabling is the real assertion the old
-    // "Stop unmounts" check stood in for.
-    await waitFor(() => expect(screen.getByRole("button", { name: "Stop" }).getAttribute("aria-disabled")).toBe("true"));
+    // #317 review, #327: the control must not be destroyed once isSending
+    // goes false -- a keyboard user who just activated it must not have focus
+    // dropped to document.body with nothing to restore it. #274 redesign: it
+    // reverts to its Send identity in place (same element, see
+    // ConversationView.test.tsx's node-identity test), so the assertion is
+    // that it is still here and now offers Send rather than a dead Stop.
+    // The composer re-enabling is the real assertion the old "Stop unmounts"
+    // check stood in for.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBe(stopButton));
     expect(composer.getAttribute("aria-disabled")).toBe("false");
   });
 
@@ -2258,8 +2280,11 @@ describe("App Stop control (#274)", () => {
     // not just "Stop was never rendered."
     await waitFor(() => expect(composer.getAttribute("aria-disabled")).toBe("true"));
 
-    const stopButton = screen.getByRole("button", { name: "Stop" });
-    expect(stopButton.getAttribute("aria-disabled")).toBe("true");
+    // #274 redesign: with nothing genuinely in flight the trailing action
+    // never takes on its Stop identity at all, which is a stronger statement
+    // than the old "a Stop button exists but is aria-disabled".
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Send" }).getAttribute("aria-disabled")).toBe("true");
   });
 });
 
@@ -2389,5 +2414,87 @@ describe("App hint state (#80)", () => {
 
     await screen.findByText("reply");
     expect(chatCalls).toHaveLength(1);
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #398: a superseded selection must not leave its row permanently busy.
+
+   The pending marker was cleared only by the request that was still
+   current. When the student navigated away instead of selecting something
+   else, nobody cleared it -- the row stayed aria-busy and the repeat-click
+   guard then refused to reselect it, until reload.
+   -------------------------------------------------------------------------- */
+describe("App superseded tutor selection (#398)", () => {
+  const HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
+      },
+    ],
+  };
+  const CONV_B = {
+    id: "conv-b",
+    kind: "tutor",
+    title: "Chat B",
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-02T00:00:00.000Z",
+    messageCount: 2,
+  };
+
+  it("clears the pending row when the student navigates to a section instead", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    let releaseHistory!: (r: Response) => void;
+    const hanging = new Promise<Response>((r) => (releaseHistory = r));
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [CONV_B], nextCursor: null }), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations/conv-b/messages")) return hanging;
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // Select B -- its history hangs, so the row goes pending.
+    await userEvent.click(await screen.findByRole("button", { name: `Select conversation: ${CONV_B.title}` }));
+    await waitFor(() => expect(document.querySelector('[aria-busy="true"]')).not.toBeNull());
+
+    // Navigate to a homework section instead of picking another conversation.
+    await userEvent.click(screen.getByRole("button", { name: /Sec 1/ }));
+
+    // The abandoned row must not stay busy: if it does, the repeat-click
+    // guard makes it unselectable for the rest of the session.
+    await waitFor(() => expect(document.querySelector('[aria-busy="true"]')).toBeNull());
+
+    releaseHistory(new Response(JSON.stringify([]), { status: 200 }));
   });
 });

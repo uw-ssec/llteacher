@@ -107,6 +107,53 @@ export const DEFAULT_MARK_COMPLETE_INSTRUCTION =
   "small gaps. The goal is to unblock the student as early as possible, never to gatekeep. Calling this tool only " +
   "surfaces a suggestion to the student that they may be ready to move on -- it does not submit anything on their " +
   "behalf and does not end the conversation, so err on the side of calling it rather than withholding it.";
+/** #354: the house voice constraint, appended to EVERY assembled system
+/** #397: the house voice constraint, appended to EVERY assembled system
+ *  prompt (see assembleSystemPrompt below) -- unlike TUTOR_GUARDRAIL above,
+ *  this is NOT gated on `isDefaultPrompt`.
+ *
+ *  Why unconditional, when #325 deliberately stopped forcing the guardrail
+ *  onto real templates: the two constants say different kinds of thing.
+ *  TUTOR_GUARDRAIL is *pedagogy* ("don't give the answer away"), and a
+ *  project can legitimately author a template that wants the opposite, so it
+ *  must be able to have the final word. This constant is *register* -- how
+ *  the tutor's sentences are punctuated and opened -- and no template author
+ *  is trying to opt into emoji reaction-markers or "I'm here to help".
+ *  Gating it on the fallback path would also have missed the actual bug: the
+ *  observed output ("Nice [em dash] received [check-mark emoji] Want to do a
+ *  super quick practice?", "Awesome[em dash]let's do it. [dart emoji] Try
+ *  this: ...") came from a conversation running the seeded ORG template,
+ *  i.e. exactly the path `isDefaultPrompt === false` covers.
+ *
+ *  Written as prohibitions with verbatim counterexamples rather than as
+ *  "sound natural", because models reliably comply with a listed forbidden
+ *  string and reliably ignore an adjective. Nothing here touches teaching
+ *  behaviour: it constrains punctuation, openers, and self-reference only.
+ *
+ *  Appended LAST in assembleSystemPrompt so it is the nearest instruction to
+ *  the conversation itself, and so a template's own (possibly chatty)
+ *  persona text is read before the constraint that narrows it.
+ *
+ *  Review finding: an earlier revision closed with "say what their answer got
+ *  right, OR ASK THE NEXT QUESTION", which is turn-level teaching behaviour --
+ *  exactly the category #325 made overridable when it stopped forcing
+ *  TUTOR_GUARDRAIL onto real templates. Unconditional here, it would have
+ *  denied a reference/lookup-style homework (that issue's own motivating case)
+ *  any way to opt out, and it narrowed the seeded template's "Be encouraging"
+ *  with no recourse. Every rule that remains constrains WORDING only: a
+ *  template is still free to decide how warm to be and whether to ask a
+ *  follow-up. Keep it that way -- anything prescribing what to teach belongs
+ *  in TUTOR_GUARDRAIL, behind the isDefaultPrompt gate. */
+export const VOICE_CONSTRAINTS = `Style rules for every message you write. These constrain how you write, not what you teach:
+
+- Never use emoji. Not as reaction markers, not as decoration, not as bullets. No check marks, no dart boards, no party poppers, no thinking faces. A sentence that would have ended in an emoji should just end.
+- Never use an em dash (the "—" character), and never open a sentence or clause with one. Do not write "Nice — received." or "Awesome—let's do it." Use a period, a comma, a colon, or two separate sentences.
+- Never open a turn with a filler affirmation. Banned openers: "Nice", "Great", "Great question", "Good question", "Awesome", "Perfect", "Absolutely", "Excellent", "Love it", "Sure thing", "Of course". Open with the substance instead.
+- Never write assistant boilerplate about yourself: "I'm here to help", "How can I assist you", "Happy to help", "Feel free to ask", "Let me know if you have any questions", "As an AI".
+- Do not narrate what you are about to do. No "Let's dive in", "Here's the thing", "Let's break this down", "Great, let's get started". Say the thing itself.
+- Do not stack exclamation marks. At most one in an entire conversation, and usually none.
+- Acknowledge a student's answer with information rather than applause. Write "That's the right setup." rather than "Great job!" -- this is about wording, not about whether to encourage.
+- Write mathematics with LaTeX delimiters: \\( ... \\) for maths inside a sentence, and \\[ ... \\] on their own lines for a displayed equation. Do not use single dollar signs for maths -- a lone $ is read as currency, so "$x$" will show up literally to the student while "the ticket costs $5" stays correct.`;
 
 export interface ResolvedPromptTemplate {
   /** Null when nothing was found at any scope (DEFAULT_SYSTEM_PROMPT was
@@ -328,13 +375,40 @@ export async function getSectionPromptContext(
  *  repositories/sectionConversations.ts, which had no business owning prompt
  *  content (a repository module resolving org-facing copy is a layering
  *  violation; the fix is this signature living in the prompt-assembly
- *  module, not a lookup swap). Django parity greeting, verbatim from
- *  ConversationService._create_initial_message
- *  (apps/conversations/src/conversations/services.py). Stored as an
- *  `assistant` message by the caller, matching Django's MESSAGE_TYPE_AI --
- *  the tutor is speaking to the student, so it is not a `system` message. */
+ *  module, not a lookup swap). Stored as an `assistant` message by the
+ *  caller, matching Django's MESSAGE_TYPE_AI -- the tutor is speaking to the
+ *  student, so it is not a `system` message.
+ *
+ *  #397: this used to be verbatim Django parity with
+ *  ConversationService._create_initial_message (apps/conversations/src/
+ *  conversations/services.py:626):
+ *
+ *    "Hello! I'm here to help you with Section N: Title.\n\n{content}\n\n
+ *     How can I assist you with this question?"
+ *
+ *  That string is the single most visible chatbot tell in the product: it is
+ *  the FIRST thing every student reads in every section, and it packs two
+ *  canonical assistant artifacts ("I'm here to help you", "How can I assist
+ *  you") into one message, before the tutor has said anything about the
+ *  actual problem. The parity was deliberately broken here rather than
+ *  preserved: the Django app is the legacy implementation, this is the live
+ *  one, and matching a string is not worth opening every conversation in the
+ *  register VOICE_CONSTRAINTS above spends a whole block suppressing.
+ *
+ *  The replacement inverts the shape. It leads with the section's own
+ *  identity and problem statement (what the student came here to read) and
+ *  closes on an invitation phrased as a real question about the work, not as
+ *  a service-desk formula. `order`/`title` stay in the heading line because
+ *  they orient the student in a multi-section homework; they are content,
+ *  not self-introduction. */
 export function sectionGreeting(section: { order: number; title: string; content: string }): string {
-  return `Hello! I'm here to help you with Section ${section.order}: ${section.title}.\n\n${section.content}\n\nHow can I assist you with this question?`;
+  /* Review finding: this used to repeat `Section N: Title` as its own first
+     line. Since the breadcrumb directly above the transcript now renders
+     exactly that string (App.tsx), and sectionConversationTitle produces it a
+     third time, the greeting was reintroducing the duplication the breadcrumb
+     change had just removed. It opens on the section's actual content
+     instead -- the heading is already on screen twice. */
+  return `${section.content}\n\nWhere would you like to start? If you already have an idea, tell me what you're thinking and we'll work from there.`;
 }
 
 /** #305: the `Section N: Title` conversation-title template, same
@@ -389,7 +463,13 @@ export function sectionConversationTitle(section: { order: number; title: string
  *  never interpolated from any caller-supplied string). chat.ts sets this
  *  true only after recordHintRequest (repositories/hints.ts) has already
  *  deterministically granted the request server-side -- never from a
- *  client-supplied flag taken at face value. */
+ *  client-supplied flag taken at face value.
+ *
+ *  #397: VOICE_CONSTRAINTS is appended unconditionally, after everything
+ *  else. It is the one part of the assembled prompt no template can drop,
+ *  because it governs register rather than pedagogy -- and because the
+ *  emoji/em-dash output this fixes was produced under a real (non-default)
+ *  template, so a conditional append would have left the bug in place. */
 export function assembleSystemPrompt(
   templateContent: string,
   section?: PromptSectionContext,
@@ -411,5 +491,10 @@ export function assembleSystemPrompt(
   if (isDefaultPrompt) parts.push(TUTOR_GUARDRAIL);
   if (markCompleteInstruction) parts.push(markCompleteInstruction);
   if (isHintRequest) parts.push(HINT_INSTRUCTION);
+  // #354: always last, and always present -- see VOICE_CONSTRAINTS' own doc
+  // #397: always last, and always present -- see VOICE_CONSTRAINTS' own doc
+  // comment for why this one is NOT gated on isDefaultPrompt the way the
+  // guardrail above is.
+  parts.push(VOICE_CONSTRAINTS);
   return parts.join("\n\n");
 }
