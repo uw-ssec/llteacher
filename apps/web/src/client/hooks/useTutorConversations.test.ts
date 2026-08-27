@@ -493,4 +493,59 @@ describe("useTutorConversations", () => {
       expect(result.current.conversations).toEqual([CONV_A]);
     });
   });
+
+  /* ------------------------------------------------------------------------
+     Found by a high-effort re-review of THIS PR's own fixes.
+     ---------------------------------------------------------------------- */
+  describe("a retry must not revert local mutations", () => {
+    it("keeps a conversation created while a retry was in flight", async () => {
+      let releaseGet!: (r: Response) => void;
+      let getCount = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init?: RequestInit) => {
+          if (init?.method === "POST") {
+            return new Response(
+              JSON.stringify({ ...CONV_A, id: "conv-new", title: "Brand new" }),
+              { status: 201 },
+            );
+          }
+          getCount += 1;
+          if (getCount === 1) return new Response("boom", { status: 502 });
+          // The retry: its server snapshot predates the POST below.
+          return new Promise<Response>((r) => (releaseGet = r));
+        }),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loadError).toBe(true));
+
+      // Try again -- the New conversation button stays enabled meanwhile.
+      act(() => {
+        result.current.refetch();
+      });
+      await act(async () => {
+        await result.current.createConversation("Brand new");
+      });
+      expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-new"]);
+
+      // Now the retry lands with a snapshot taken BEFORE the create.
+      await act(async () => {
+        releaseGet(new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 }));
+        await new Promise((r) => setTimeout(r, 0));
+      });
+
+      // Replacing the list wholesale would delete the row the student just
+      // watched appear.
+      expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-new"]);
+    });
+
+    it("still accepts a response when nothing changed locally", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 })),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toEqual([CONV_A]));
+    });
+  });
 });

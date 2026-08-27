@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TutorConversationsList } from "./TutorConversationsList";
 import type { ConversationListItemResponse } from "../../shared/types";
@@ -387,6 +387,40 @@ describe("TutorConversationsList announcements and retry (#399, #400)", () => {
     });
     await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
     expect(await screen.findByText("Conversation created")).toBeTruthy();
+  });
+
+  it("does not leave the live region stuck on Loading after a cancelled selection", async () => {
+    // Found re-reviewing #399's own fix: splitting the announcement across
+    // two effects left no writer for "pending ended without opening
+    // anything" -- the student navigates to a homework section and the
+    // region keeps saying "Loading conversation X…" indefinitely.
+    const { rerender } = renderList({
+      conversations: [CONV_A],
+      pendingConversationId: CONV_A.id,
+    });
+    expect(screen.getByText(/Loading conversation/)).toBeTruthy();
+
+    rerender(
+      <TutorConversationsList
+        courseId="course-a"
+        courseContextLoading={false}
+        conversations={[CONV_A]}
+        loading={false}
+        loadError={false}
+        awaitingCourseContext={false}
+        onRetryLoad={() => {}}
+        hasMore={false}
+        selectedConversationId={undefined}
+        pendingConversationId={undefined}
+        onSelectConversation={() => {}}
+        onCreateConversation={async () => true}
+        onRenameConversation={async () => undefined}
+        isCollapsed={false}
+        onToggleCollapse={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(screen.queryByText(/Loading conversation/)).toBeNull());
   });
 
   it("disables the retry while a load is in flight (#400)", () => {

@@ -104,6 +104,18 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
    *  late response can tell whether it is still the newest. */
   const requestSeqRef = useRef(0);
 
+  /** Bumped by every LOCAL mutation (create, rename, delete, bump). A GET
+   *  captured its snapshot server-side before any of these; if one has
+   *  landed since the request was issued, replacing the list wholesale with
+   *  that response silently reverts it.
+   *
+   *  Concretely: after a failed load a student can press Try again and then
+   *  create a conversation -- the New button stays enabled. If the GET's
+   *  snapshot predates the POST but resolves after it, `setConversations`
+   *  removes the row they just created. Renames and message-count bumps
+   *  revert the same way. */
+  const mutationSeqRef = useRef(0);
+
   const refetch = useCallback(() => {
     if (!courseId) {
       // Not a fetch error -- there's simply no course to scope the query
@@ -139,6 +151,7 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
        had cleared. Every response checks it is still the newest request
        issued, not merely the right course. */
     const requestSeq = ++requestSeqRef.current;
+    const mutationSeqAtRequest = mutationSeqRef.current;
     fetch(`/api/conversations?courseId=${encodeURIComponent(courseId)}&kind=tutor`)
       .then((r) => {
         if (!r.ok) throw new Error(`failed to load tutor conversations: ${r.status}`);
@@ -146,12 +159,19 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
       })
       .then((data) => {
         if (requestedCourseId !== courseIdRef.current || requestSeq !== requestSeqRef.current) return;
+        /* A local mutation landed while this was in flight, so the server
+           snapshot is older than what is on screen. Keeping the local list
+           is the conservative choice: it may be missing another device's
+           changes until the next load, but it cannot delete a row the
+           student just created in front of them. `hasMore`/`loadError` are
+           still worth taking -- neither is invalidated by a local edit. */
+        const stale = mutationSeqAtRequest !== mutationSeqRef.current;
+        if (!stale) setConversations(data.items);
         // #281: the route returns { items, nextCursor } instead of a bare
         // array. #280: `nextCursor` is now surfaced as `hasMore` -- this
         // hook still only ever fetches one page (an actual load-more
         // request isn't wired), but a non-null cursor means the ceiling is
         // real and worth showing rather than leaving the ceiling silent.
-        setConversations(data.items);
         setHasMore(data.nextCursor !== null);
         setLoadError(false);
       })
@@ -212,6 +232,7 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
         // Prepended, not re-fetched: matches listConversationsForOwner's
         // desc(updatedAt) ordering (a brand-new conversation is always the
         // most recently updated) without an extra round-trip.
+        mutationSeqRef.current += 1;
         setConversations((prev) => [withCount, ...prev]);
         return withCount;
       } catch (err: unknown) {
@@ -230,6 +251,7 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
 
     // Optimistic update -- applied synchronously, before the PATCH even
     // goes out.
+    mutationSeqRef.current += 1;
     setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c)));
 
     try {
@@ -272,6 +294,7 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
   }, []);
 
   const bumpConversation = useCallback((id: string) => {
+    mutationSeqRef.current += 1;
     setConversations((prev) => {
       const now = new Date().toISOString();
       const next = prev.map((c) => (c.id === id ? { ...c, messageCount: c.messageCount + 1, updatedAt: now } : c));

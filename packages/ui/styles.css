@@ -907,9 +907,20 @@ body {
     gap: var(--space-1);
   }
 
+  /* Everything that is prose or a list is hidden at 64px; only the
+     collapse toggle and the icon-only New button survive.
+
+     The three classes added by this PR (#293's visible disabled reason,
+     #310's load-error block and its retry) belong here for the same reason
+     the originals do -- a long sentence in a 64px column wraps into a tall
+     clipped stripe. They were omitted when they were added, which is the
+     same mistake as #403/#404: a new sibling that did not inherit the
+     treatment every one of its neighbours already had. */
   .sidebar--collapsed .tutor-sidebar__label,
   .sidebar--collapsed .tutor-sidebar__new-btn-label,
   .sidebar--collapsed .tutor-sidebar__empty,
+  .sidebar--collapsed .tutor-sidebar__disabled-reason,
+  .sidebar--collapsed .tutor-sidebar__error,
   .sidebar--collapsed .tutor-sidebar__list {
     display: none;
   }

@@ -132,22 +132,42 @@ export function TutorConversationsList({
   const pendingTitle = conversations.find((c) => c.id === pendingConversationId)?.title;
   const selectedTitle = conversations.find((c) => c.id === selectedConversationId)?.title;
 
-  useEffect(() => {
-    if (pendingConversationId) {
-      setLiveMessage(`Loading conversation${pendingTitle ? ` ${pendingTitle}` : ""}…`);
-    }
-    // Deliberately no `else`: the settled announcement is made by the
-    // effect below, on the transition, not on every render where something
-    // happens to be selected.
-  }, [pendingConversationId, pendingTitle]);
+  /* One effect owning the whole pending -> settled/cancelled transition.
 
+     Splitting it in two left a hole: when a pending selection was CANCELLED
+     (the student navigated to a homework section, so pendingConversationId
+     and selectedConversationId both cleared), neither branch wrote anything
+     and the live region stayed stuck on "Loading conversation X…"
+     indefinitely. The same happened after a successful hydration retry,
+     where the selected id had not changed so the second effect stayed
+     silent. My "deliberately no else" comment was the bug: every exit from
+     pending needs an announcement, not just the one that opens something
+     new. */
+  const previousPendingRef = useRef(pendingConversationId);
   const previousSelectionRef = useRef(selectedConversationId);
   useEffect(() => {
-    if (selectedConversationId && selectedConversationId !== previousSelectionRef.current) {
-      setLiveMessage(`Opened ${selectedTitle ?? "conversation"}`);
-    }
+    const wasPending = previousPendingRef.current;
+    previousPendingRef.current = pendingConversationId;
+    const previousSelection = previousSelectionRef.current;
     previousSelectionRef.current = selectedConversationId;
-  }, [selectedConversationId, selectedTitle]);
+
+    if (pendingConversationId) {
+      setLiveMessage(`Loading conversation${pendingTitle ? ` ${pendingTitle}` : ""}…`);
+      return;
+    }
+
+    if (selectedConversationId && selectedConversationId !== previousSelection) {
+      setLiveMessage(`Opened ${selectedTitle ?? "conversation"}`);
+      return;
+    }
+
+    // Pending ended without opening anything new: cancelled, or a retry
+    // that landed on the conversation already showing. Either way the
+    // "Loading…" line must not persist.
+    if (wasPending) {
+      setLiveMessage(selectedConversationId ? `Opened ${selectedTitle ?? "conversation"}` : "");
+    }
+  }, [pendingConversationId, pendingTitle, selectedConversationId, selectedTitle]);
 
   const disabledReasonId = "tutor-sidebar-new-btn-reason";
   const disabledReason = courseContextLoading
