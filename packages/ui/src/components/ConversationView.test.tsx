@@ -929,3 +929,35 @@ describe("ConversationView day separators (#397)", () => {
     expect(screen.queryByRole("separator")).toBeNull();
   });
 });
+
+/* --------------------------------------------------------------------------
+   #405 follow-on: making the rename hint visible to assistive technology
+   put it inside the heading that wraps EditableTitle, so heading navigation
+   announced the keybindings and character count as part of the conversation
+   title. Naming the heading explicitly isolates it without re-hiding
+   anything.
+   -------------------------------------------------------------------------- */
+describe("ConversationView header title naming", () => {
+  it("names the heading with the conversation title alone, while editing", async () => {
+    render(
+      <ConversationView
+        breadcrumb="b"
+        title="Original title"
+        onRenameTitle={async () => {}}
+        messages={[]}
+        onSendMessage={() => {}}
+      />,
+    );
+
+    const heading = screen.getByRole("heading", { level: 1 });
+    expect(heading.getAttribute("aria-label")).toBe("Original title");
+
+    // Enter rename mode -- the hint and counter now render inside this h1.
+    await userEvent.click(screen.getByRole("button", { name: /Rename conversation/ }));
+    expect(screen.getByText(/click away/i)).toBeTruthy();
+
+    // The heading's name must still be the title, not the title plus its
+    // own editing affordances.
+    expect(screen.getByRole("heading", { level: 1, name: "Original title" })).toBeTruthy();
+  });
+});
