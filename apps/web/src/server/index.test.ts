@@ -111,7 +111,12 @@ describe("app composition", () => {
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error: string };
     expect(body.error).not.toMatch(/ECONNREFUSED/);
-    expect(consoleSpy).toHaveBeenCalledWith(expect.anything(), dbError);
+    // #275: logServerError now emits one JSON line (via console.error)
+    // instead of two separate args -- assert on the parsed payload's
+    // `message` field rather than a literal Error object.
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+    const logged = JSON.parse(consoleSpy.mock.calls[0]![0] as string) as Record<string, unknown>;
+    expect(logged.message).toBe(dbError.message);
 
     consoleSpy.mockRestore();
   });

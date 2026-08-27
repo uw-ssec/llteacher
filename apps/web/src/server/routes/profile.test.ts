@@ -186,7 +186,10 @@ describe("PATCH /api/profile", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { displayName: string };
     expect(body.displayName).toBe("New Name");
-    expect(consoleSpy).toHaveBeenCalledWith(expect.anything(), auditInsertError);
+    // #275: logServerError now emits one JSON line instead of two args.
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+    const logged = JSON.parse(consoleSpy.mock.calls[0]![0] as string) as { message: string };
+    expect(logged.message).toBe(auditInsertError.message);
 
     consoleSpy.mockRestore();
   });

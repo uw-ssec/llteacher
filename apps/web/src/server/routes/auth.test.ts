@@ -308,7 +308,10 @@ describe("GET /callback", () => {
     const body = await res.text();
     expect(body).toMatch(/try again later/i);
     expect(body).not.toMatch(/ECONNREFUSED/);
-    expect(consoleSpy).toHaveBeenCalledWith(expect.anything(), dbError);
+    // #275: logServerError now emits one JSON line instead of two args.
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+    const logged = JSON.parse(consoleSpy.mock.calls[0]![0] as string) as { message: string };
+    expect(logged.message).toBe(dbError.message);
 
     consoleSpy.mockRestore();
     dbInsertImpl = defaultInsertImpl;
@@ -369,7 +372,10 @@ describe("POST /logout", () => {
     expect(res.status).toBe(302);
     const setCookie = res.headers.get("set-cookie") ?? "";
     expect(setCookie).toContain(`${SESSION_COOKIE_NAME}=;`);
-    expect(consoleSpy).toHaveBeenCalledWith(expect.anything(), dbOrgScopesError);
+    // #275: logServerError now emits one JSON line instead of two args.
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+    const logged = JSON.parse(consoleSpy.mock.calls[0]![0] as string) as { message: string };
+    expect(logged.message).toBe(dbOrgScopesError.message);
 
     consoleSpy.mockRestore();
   });

@@ -133,10 +133,10 @@ describe("POST /api/webhooks/workos", () => {
 
     expect(res.status).toBe(401);
     expect(deactivateByWorkosUserId).not.toHaveBeenCalled();
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ message: expect.stringContaining("WORKOS_WEBHOOK_SECRET") }),
-    );
+    // #275: logServerError now emits one JSON line instead of two args.
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+    const logged = JSON.parse(consoleSpy.mock.calls[0]![0] as string) as { message: string };
+    expect(logged.message).toContain("WORKOS_WEBHOOK_SECRET");
 
     consoleSpy.mockRestore();
   });

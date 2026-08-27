@@ -47,13 +47,14 @@ describe("recordTranscriptAccess", () => {
     });
 
     expect(consoleSpy).toHaveBeenCalledTimes(1);
-    const [contextArg, errArg] = consoleSpy.mock.calls[0]!;
-    expect(contextArg).toContain("recordTranscriptAccess");
-    expect(errArg).toBeInstanceOf(Error);
-    expect((errArg as Error).message).toContain("course-1");
-    expect((errArg as Error).message).toContain("viewer-1");
-    expect((errArg as Error).message).toContain("detail");
-    expect((errArg as Error).message).toContain("conversation-1");
+    // #275: logServerError now emits one JSON line (via console.error)
+    // instead of two separate [context, err] args -- parse it back out.
+    const logged = JSON.parse(consoleSpy.mock.calls[0]![0] as string) as { context: string; message: string };
+    expect(logged.context).toContain("recordTranscriptAccess");
+    expect(logged.message).toContain("course-1");
+    expect(logged.message).toContain("viewer-1");
+    expect(logged.message).toContain("detail");
+    expect(logged.message).toContain("conversation-1");
     // The read must not be failed for an audit-resolution hiccup: no write
     // path is invoked at all.
     expect(recordAuditEvent).not.toHaveBeenCalled();
@@ -72,8 +73,8 @@ describe("recordTranscriptAccess", () => {
     });
 
     expect(consoleSpy).toHaveBeenCalledTimes(1);
-    const [, errArg] = consoleSpy.mock.calls[0]!;
-    expect((errArg as Error).message).not.toContain("conversationId");
+    const logged = JSON.parse(consoleSpy.mock.calls[0]![0] as string) as { message: string };
+    expect(logged.message).not.toContain("conversationId");
 
     consoleSpy.mockRestore();
   });

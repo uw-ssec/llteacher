@@ -119,7 +119,7 @@ import { courseScopeFromAuthContext, unsafeCourseScope, unsafeOrgScope, type Org
 import { IdempotencyKeyConflictError } from "../repositories/errors";
 import { recordHintRequest } from "../repositories/hints";
 import { getOrgScopeAndLlmConfigForCourse } from "../repositories/organizations";
-import { logServerError } from "../utils/errors";
+import { logServerError, logServerWarn } from "../utils/errors";
 import {
   assembleSystemPrompt,
   DEFAULT_SYSTEM_PROMPT,
@@ -1914,12 +1914,17 @@ export async function chatHandler(c: Context<AppEnv>) {
       // SDK's own default is a bare console.error with no request context
       // this app could act on -- "zero evidence" was #321's whole complaint.
       onError: ({ error }) => {
-        logServerError(
-          "chatHandler.streamText.onError",
-          new Error(
-            `LLM call failed for conversation ${conv.id}, user ${authContext.session.userId}, provider ${resolvedLLMConfig.provider}, model ${resolvedLLMConfig.modelName}: ${error instanceof Error ? error.message : String(error)}`,
-          ),
-        );
+        // #275: previously folded conversationId/userId/provider/model into
+        // the Error's own message string via template literal -- readable
+        // in a single console line, but not a field a log query can filter
+        // or group on. Passed as structured `extra` context instead (see
+        // logServerError's own doc comment), same data, greppable now.
+        logServerError("chatHandler.streamText.onError", error instanceof Error ? error : new Error(String(error)), {
+          conversationId: conv.id,
+          userId: authContext.session.userId,
+          provider: resolvedLLMConfig.provider,
+          model: resolvedLLMConfig.modelName,
+        });
       },
       // Fires specifically when abortSignal (STREAM_TIMEOUT_MS above)
       // actually trips -- a stuck/hanging upstream that never errored and
@@ -1953,11 +1958,22 @@ export async function chatHandler(c: Context<AppEnv>) {
       // c.json({error, code}) response on this route already uses. A bare
       // string would classify as "unknown" and bury this sentence in the
       // "details for support" disclosure instead of the headline.
+      // #275: `context: "chatHandler.stream"` -- distinct from
+      // streamText's own "chatHandler.streamText.onError" above -- these are
+      // genuinely different failure surfaces even though both handle "a
+      // provider/stream error happened": streamText's onError sees an
+      // in-stream `error` chunk (a provider failure mid-generation), while
+      // THIS onError is the UI-message-stream wrapper's own hook, which can
+      // also fire for a stream-processing failure that never produced an
+      // `error` chunk at all. Kept separate on purpose so an operator can
+      // tell which layer actually failed instead of one context string
+      // conflating both.
       onError: (error) => {
-        logServerError(
-          "chatHandler.toUIMessageStreamResponse.onError",
-          error instanceof Error ? error : new Error(String(error)),
-        );
+        logServerError("chatHandler.stream", error instanceof Error ? error : new Error(String(error)), {
+          conversationId: conv.id,
+          userId: authContext.session.userId,
+          model: resolvedLLMConfig.modelName,
+        });
         return JSON.stringify({
           error: "The tutor stopped partway through. Nothing you wrote was lost.",
           code: "tutor_stopped",
@@ -2017,6 +2033,26 @@ export async function chatHandler(c: Context<AppEnv>) {
         // perceived as tail latency since the SDK awaits onFinish inside
         // the stream's flush) collapse into one db.batch()/transaction.
         const shouldPersist = !isErrorOutcome && hasRenderableContent(responseMessage.parts);
+        // #275: the current equivalent of the old "hasRenderableContent
+        // false -> bare return, nothing logged" branch -- that separate
+        // early return doesn't exist anymore (#268/#342 folded it into this
+        // one shouldPersist gate, above), so this is the single place that
+        // now knows a turn is about to go unpersisted, for either reason
+        // (isErrorOutcome, or a `stop`/`tool-calls` finish that still
+        // produced no renderable content). Warn, not error: nothing threw --
+        // this is the system correctly refusing to write a truncated/blank
+        // row, but an operator debugging "the tutor showed my student an
+        // error" needs to see it happened and why (finishReason/isAborted),
+        // not infer it from a gap in the transcript.
+        if (!shouldPersist) {
+          logServerWarn("chatHandler.onFinish.noRenderableContent", "turn produced no persistable content", {
+            conversationId: conv.id,
+            userId: authContext.session.userId,
+            model: resolvedLLMConfig.modelName,
+            finishReason: finishReason ?? null,
+            isAborted: Boolean(isAborted),
+          });
+        }
         const assistantMessage = shouldPersist
           ? { id: crypto.randomUUID(), parts: responseMessage.parts }
           : null;
@@ -2120,7 +2156,18 @@ export async function chatHandler(c: Context<AppEnv>) {
           // by this failing self-heals via LOCK_STALE_MS, same as any other
           // path that never reaches its own release call (see this
           // function's trade-off note in conversations.ts).
-          logServerError("chatHandler.onFinish.finalizeAssistantTurn", err);
+          //
+          // #275: this used to be the ONE log statement on this whole route
+          // that carried any turn-level identifying context at all -- and
+          // even it carried none: `err` alone, no conversationId/userId/
+          // model. An operator debugging "students say the tutor is weird"
+          // couldn't even grep this one line down to a specific
+          // conversation or model.
+          logServerError("chatHandler.onFinish.finalizeAssistantTurn", err, {
+            conversationId: conv.id,
+            userId: authContext.session.userId,
+            model: resolvedLLMConfig.modelName,
+          });
         }
       },
     });

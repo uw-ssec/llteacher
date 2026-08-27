@@ -1787,10 +1787,74 @@ describe("POST /api/chat", () => {
       await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
       const streamTextArgs = streamTextMock.mock.calls[0]![0] as { onError: (e: { error: unknown }) => void };
       expect(() => streamTextArgs.onError({ error: new Error("upstream rejected the request") })).not.toThrow();
-      expect(errorSpy).toHaveBeenCalledWith(
-        "[chatHandler.streamText.onError]",
-        expect.objectContaining({ message: expect.stringContaining("upstream rejected the request") }),
-      );
+      errorSpy.mockRestore();
+    });
+
+    // #275: a provider error chunk mid-stream (429, 5xx, connection reset)
+    // previously logged nothing at all -- streamText's own onError above
+    // (added by #321) was the FIRST log on this failure path, but it folded
+    // conversationId/userId/provider/model into the Error's own message
+    // string via template literal instead of passing them as structured
+    // fields -- readable in one line, but not filterable/groupable by a log
+    // query. Asserts the actual call-args shape (parses the one JSON line
+    // logServerError now emits), not just "console.error fired."
+    it("logs the streamText provider error with conversationId/userId/provider/model as structured context (#275)", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      const streamTextArgs = streamTextMock.mock.calls[0]![0] as { onError: (e: { error: unknown }) => void };
+      streamTextArgs.onError({ error: new Error("upstream connection reset") });
+
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const logged = JSON.parse(errorSpy.mock.calls[0]![0] as string) as Record<string, unknown>;
+      expect(logged).toMatchObject({
+        level: "error",
+        context: "chatHandler.streamText.onError",
+        message: "upstream connection reset",
+        conversationId: "22222222-2222-2222-2222-222222222222",
+        userId: "u1",
+        provider: "openrouter",
+        model: "test/model",
+      });
+      errorSpy.mockRestore();
+    });
+
+    // #275, "Related" note: the raw provider error string must never reach
+    // the client verbatim (a captured wire example from the issue: `data:
+    // {"type":"error","errorText":"upstream connection reset"}`). The
+    // toUIMessageStreamResponse onError below is the one path that builds
+    // the client-visible payload, and it already returns a fixed, sanitized
+    // envelope regardless of what `error` actually contains -- this asserts
+    // that stays true for a raw provider-shaped error string specifically,
+    // alongside the same structured-logging assertion as the streamText
+    // case above (its own "context" is "chatHandler.stream", not
+    // "chatHandler.streamText.onError" -- these are two different hooks
+    // covering two different failure surfaces, see this route's own doc
+    // comment above the toUIMessageStreamResponse call).
+    it("logs the stream-wrapper error with structured context and never leaks the raw error text to the client (#275)", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      expect(capturedStreamResponseOnError).toBeDefined();
+
+      const rawProviderError = 'upstream connection reset';
+      const clientVisibleMessage = capturedStreamResponseOnError!(new Error(rawProviderError));
+
+      expect(clientVisibleMessage).not.toContain(rawProviderError);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const logged = JSON.parse(errorSpy.mock.calls[0]![0] as string) as Record<string, unknown>;
+      expect(logged).toMatchObject({
+        level: "error",
+        context: "chatHandler.stream",
+        message: rawProviderError,
+        conversationId: "22222222-2222-2222-2222-222222222222",
+        userId: "u1",
+        model: "test/model",
+      });
       errorSpy.mockRestore();
     });
 
@@ -1928,10 +1992,19 @@ describe("POST /api/chat", () => {
         finishReason: "stop",
       });
 
-      expect(errorSpy).toHaveBeenCalledWith(
-        "[chatHandler.onFinish.warnings]",
-        expect.objectContaining({ message: expect.stringContaining("temperature") }),
-      );
+      // #275: logServerError now emits one JSON line (context/message/extra
+      // fields) instead of two separate console.error args -- parse it back
+      // out rather than matching a literal "[context]" prefix string.
+      const warningsCall = errorSpy.mock.calls.find((call) => {
+        try {
+          return (JSON.parse(call[0] as string) as { context?: string }).context === "chatHandler.onFinish.warnings";
+        } catch {
+          return false;
+        }
+      });
+      expect(warningsCall).toBeDefined();
+      const logged = JSON.parse(warningsCall![0] as string) as Record<string, unknown>;
+      expect(logged.message).toContain("temperature");
       errorSpy.mockRestore();
     });
 
@@ -1947,7 +2020,115 @@ describe("POST /api/chat", () => {
         finishReason: "stop",
       });
 
-      expect(errorSpy).not.toHaveBeenCalledWith("[chatHandler.onFinish.warnings]", expect.anything());
+      const warningsCall = errorSpy.mock.calls.find((call) => {
+        try {
+          return (JSON.parse(call[0] as string) as { context?: string }).context === "chatHandler.onFinish.warnings";
+        } catch {
+          return false;
+        }
+      });
+      expect(warningsCall).toBeUndefined();
+      errorSpy.mockRestore();
+    });
+
+    // #275: onFinish's "nothing renderable to persist" path previously
+    // logged nothing at all -- the model producing zero renderable content
+    // on a `stop` finish (not aborted, not a bad finishReason) is exactly
+    // the "model produced nothing" evidence row this issue names, and it's
+    // distinct from the isAborted/bad-finishReason cases (which streamText's
+    // onAbort/onError above already cover). Asserts the actual warn-level
+    // call args -- level, context, and the finishReason/isAborted context
+    // fields -- not just that "something was logged."
+    it("warns with conversationId/userId/model/finishReason when a turn produces no renderable content (#275)", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      // A `stop` finish (a real, terminal completion -- not aborted, not an
+      // error finishReason) whose only part is the step-start marker the AI
+      // SDK always pushes -- hasRenderableContent's own doc comment names
+      // this exact shape as "an error-only/empty turn still has parts:
+      // [{type:'step-start'}], length 1, not 0."
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "step-start" }] },
+        finishReason: "stop",
+      });
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const logged = JSON.parse(warnSpy.mock.calls[0]![0] as string) as Record<string, unknown>;
+      expect(logged).toMatchObject({
+        level: "warn",
+        context: "chatHandler.onFinish.noRenderableContent",
+        conversationId: "22222222-2222-2222-2222-222222222222",
+        userId: "u1",
+        model: "test/model",
+        finishReason: "stop",
+        isAborted: false,
+      });
+      // And the turn genuinely isn't persisted -- the warn is describing a
+      // real refusal, not firing alongside a normal persist.
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+        null,
+        expect.anything(),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("does not warn when the turn produces real renderable content", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "a real answer" }] },
+        finishReason: "stop",
+      });
+
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    // #275: the onFinish persistence-failure catch previously logged `err`
+    // alone -- no conversationId/userId/model -- the ONE existing log on
+    // this whole route the issue's own evidence table names by exact
+    // shortfall ("carrying no conversationId, no userId, no model id").
+    // Asserts the actual structured call args now present.
+    it("logs conversationId/userId/model when finalizeAssistantTurn fails inside onFinish (#275)", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      finalizeAssistantTurnMock.mockRejectedValueOnce(new Error("db unavailable"));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+        finishReason: "stop",
+      });
+
+      const persistFailureCall = errorSpy.mock.calls.find((call) => {
+        try {
+          return (
+            (JSON.parse(call[0] as string) as { context?: string }).context ===
+            "chatHandler.onFinish.finalizeAssistantTurn"
+          );
+        } catch {
+          return false;
+        }
+      });
+      expect(persistFailureCall).toBeDefined();
+      const logged = JSON.parse(persistFailureCall![0] as string) as Record<string, unknown>;
+      expect(logged).toMatchObject({
+        level: "error",
+        context: "chatHandler.onFinish.finalizeAssistantTurn",
+        message: "db unavailable",
+        conversationId: "22222222-2222-2222-2222-222222222222",
+        userId: "u1",
+        model: "test/model",
+      });
       errorSpy.mockRestore();
     });
   });
