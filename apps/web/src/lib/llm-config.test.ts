@@ -21,6 +21,8 @@ const baseConfig: ResolvedLLMConfig = {
   temperature: 0.7,
   maxCompletionTokens: 1000,
   credentialId: null,
+  fallbackLlmConfigId: null,
+  basePrompt: "",
   pricePerMillionInputTokens: null,
   pricePerMillionOutputTokens: null,
   markCompleteInstruction: null,

@@ -21,6 +21,7 @@ import {
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
+import { LLMCredentialMissingError, UnsupportedLLMProviderError } from "../../lib/llm-config";
 
 const TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "sk-test" } as Env;
 const CONFIG_ID = "11111111-2222-4333-8444-555555555555";
@@ -42,6 +43,24 @@ const CONFIG = {
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
 
+/** #365: what `loadLLMConfigById` (lib/llm-config.ts) returns for the same
+ *  row -- the test button reads through that loader now, not the console's
+ *  own `getLlmConfig` projection, because it needs `credentialId` to resolve
+ *  a key for the config's actual provider. */
+const RESOLVED_CONFIG = {
+  id: CONFIG_ID,
+  provider: CONFIG.provider as "openrouter" | "llmoxie",
+  modelName: CONFIG.modelName,
+  temperature: CONFIG.temperature,
+  maxCompletionTokens: CONFIG.maxCompletionTokens,
+  credentialId: null,
+  fallbackLlmConfigId: null,
+  basePrompt: CONFIG.basePrompt,
+  pricePerMillionInputTokens: null,
+  pricePerMillionOutputTokens: null,
+  markCompleteInstruction: null,
+};
+
 const listMock = vi.fn();
 const getMock = vi.fn();
 const createMock = vi.fn();
@@ -51,6 +70,9 @@ const cloneMock = vi.fn();
 const getOrgScopeForCourseMock = vi.fn();
 const auditBestEffortMock = vi.fn();
 const generateTextMock = vi.fn();
+const loadLlmConfigByIdMock = vi.fn();
+const resolveApiKeyMock = vi.fn();
+const buildProviderClientMock = vi.fn();
 
 vi.mock("../repositories/llmConfigs", () => ({
   listLlmConfigsForOrg: (...a: unknown[]) => listMock(...a),
@@ -69,7 +91,15 @@ vi.mock("../utils/audit", async (importOriginal) => ({
 }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 vi.mock("ai", () => ({ generateText: (...a: unknown[]) => generateTextMock(...a) }));
-vi.mock("../../lib/ai", () => ({ getOpenRouter: () => (model: string) => ({ model }) }));
+// #365: the test button resolves its provider client the way chat.ts does.
+// The error classes come from the real module (importOriginal) so the
+// handler's `instanceof` branches are exercised, not stubbed out.
+vi.mock("../../lib/llm-config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/llm-config")>()),
+  loadLLMConfigById: (...a: unknown[]) => loadLlmConfigByIdMock(...a),
+  resolveApiKey: (...a: unknown[]) => resolveApiKeyMock(...a),
+  buildProviderClient: (...a: unknown[]) => buildProviderClientMock(...a),
+}));
 
 function buildApp(authContext: AuthContext | undefined) {
   const app = new Hono<AppEnv>();
@@ -124,6 +154,15 @@ beforeEach(() => {
   generateTextMock
     .mockReset()
     .mockResolvedValue({ text: "Hello.", usage: { inputTokens: 12, outputTokens: 3 } });
+  loadLlmConfigByIdMock.mockReset().mockResolvedValue(RESOLVED_CONFIG);
+  resolveApiKeyMock.mockReset().mockResolvedValue("sk-resolved");
+  buildProviderClientMock
+    .mockReset()
+    .mockImplementation((provider: string, apiKey: string) => (model: string) => ({
+      provider,
+      apiKey,
+      model,
+    }));
 });
 
 describe("LLM config authorization (#31)", () => {
@@ -342,9 +381,41 @@ describe("POST test (#31)", () => {
   it("omits the system message entirely when the config states no prompt", async () => {
     // '' is a legitimate stored state (the column defaults to it); sending an
     // empty system message would be a different test than the one saved.
-    getMock.mockResolvedValue({ ...CONFIG, basePrompt: "" });
+    loadLlmConfigByIdMock.mockResolvedValue({ ...RESOLVED_CONFIG, basePrompt: "" });
     await test({ message: "hi" });
     expect(generateTextMock.mock.calls[0]![0]).not.toHaveProperty("system");
+  });
+
+  /** #365: the button used to hardcode `getOpenRouter(OPENROUTER_API_KEY)`
+   *  whatever the config said. Since migration 0035 every organization's
+   *  default is `llmoxie`/`gpt-5.3-codex`, so Test on the default sent an
+   *  LLMOxie model id to openrouter.ai under an OpenRouter key. */
+  it("builds the client for the config's OWN provider, not OpenRouter", async () => {
+    loadLlmConfigByIdMock.mockResolvedValue({
+      ...RESOLVED_CONFIG,
+      provider: "llmoxie",
+      modelName: "gpt-5.3-codex",
+    });
+    resolveApiKeyMock.mockResolvedValue("sk-llmoxie");
+    await test({ message: "hi" });
+
+    // The credential is resolved from the config itself (its credentialId, or
+    // its provider's own fallback binding) -- never a fixed env var.
+    expect(resolveApiKeyMock.mock.calls[0]![3]).toMatchObject({ provider: "llmoxie" });
+    expect(buildProviderClientMock.mock.calls[0]![0]).toBe("llmoxie");
+    expect(buildProviderClientMock.mock.calls[0]![1]).toBe("sk-llmoxie");
+    expect(generateTextMock.mock.calls[0]![0].model).toMatchObject({
+      provider: "llmoxie",
+      apiKey: "sk-llmoxie",
+      model: "gpt-5.3-codex",
+    });
+  });
+
+  it("reads the config through the loader that carries its credential link", async () => {
+    // `getLlmConfig`'s console projection has no credentialId, so a config
+    // whose org has a linked credential could never have resolved a key.
+    await test({ message: "hi" });
+    expect(loadLlmConfigByIdMock).toHaveBeenCalledWith({}, "org-1", CONFIG_ID, { activeOnly: false });
   });
 
   it("answers 200 with ok:false when the provider refuses, and leaks nothing", async () => {
@@ -368,13 +439,26 @@ describe("POST test (#31)", () => {
     expect(generateTextMock).not.toHaveBeenCalled();
   });
 
-  it("503s with an actionable sentence when the gateway key is missing", async () => {
-    const res = await buildApp(instructorOfA()).request(
-      url(`/${CONFIG_ID}/test`),
-      json("POST", { message: "hi" }),
-      { DATABASE_URL: "ignored" } as Env,
+  it("503s with an actionable sentence when the config's own key is unreachable", async () => {
+    // #365: no longer "OPENROUTER_API_KEY is unset" specifically -- this now
+    // covers every way resolveApiKey can refuse (no credential and no
+    // fallback binding for THIS provider, a stale credentialId, a secret_ref
+    // off the #323 allowlist).
+    resolveApiKeyMock.mockRejectedValue(
+      new LLMCredentialMissingError("fallback env var LLMOXIE_API_KEY is not set"),
     );
+    const res = await test({ message: "hi" });
     expect(res.status).toBe(503);
+    expect(generateTextMock).not.toHaveBeenCalled();
+    // The message names a binding; that is server-log material, not console copy.
+    expect(JSON.stringify(await res.json())).not.toMatch(/LLMOXIE_API_KEY/);
+  });
+
+  it("503s rather than misrouting when the provider has no client factory", async () => {
+    buildProviderClientMock.mockImplementation(() => {
+      throw new UnsupportedLLMProviderError("anthropic");
+    });
+    expect((await test({ message: "hi" })).status).toBe(503);
     expect(generateTextMock).not.toHaveBeenCalled();
   });
 

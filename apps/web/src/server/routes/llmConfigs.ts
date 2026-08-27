@@ -54,7 +54,13 @@ import {
 import { getOrgScopeForCourse } from "../repositories/organizations";
 import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
 import { logServerError } from "../utils/errors";
-import { getOpenRouter } from "../../lib/ai";
+import {
+  loadLLMConfigById,
+  resolveApiKey,
+  buildProviderClient,
+  LLMCredentialMissingError,
+  UnsupportedLLMProviderError,
+} from "../../lib/llm-config";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { OrgScope } from "../repositories/scope";
@@ -429,20 +435,54 @@ export async function testLlmConfigHandler(c: Context<AppEnv>) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
-  const config = await getLlmConfig(db, ctx.scope, configId);
+  // #365: `loadLLMConfigById`, not the console's own `getLlmConfig`. This
+  // handler needs the row's `credentialId` (which the console's wire shape
+  // deliberately does not carry) to resolve a key at all, and reading it
+  // through the same primitive chat.ts's resolution uses keeps the
+  // provider/credential rule in exactly one place. `activeOnly: false`:
+  // testing a retired config before reactivating it is precisely what this
+  // button is for, and it serves no student traffic -- the previous
+  // `getLlmConfig` read didn't filter on isActive either, so this preserves
+  // that behaviour rather than tightening it as a side effect.
+  const config = await loadLLMConfigById(db, ctx.scope, configId, { activeOnly: false });
   if (!config) return c.json({ error: "That configuration no longer exists." }, 404);
 
-  const apiKey = c.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    logServerError("testLlmConfigHandler", new Error("OPENROUTER_API_KEY is not configured"));
-    return c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503);
+  // #365: previously hardcoded `getOpenRouter(c.env.OPENROUTER_API_KEY)`
+  // regardless of what the config actually said. Since migration 0035 every
+  // organization's default config is `llmoxie`/`gpt-5.3-codex`, so pressing
+  // Test on the default sent an LLMOxie model id to openrouter.ai under an
+  // OpenRouter key -- wrong provider, wrong credential, and an error message
+  // ("check the model id") that pointed the instructor at the one thing that
+  // was correct. Resolved through the same `resolveApiKey` +
+  // `buildProviderClient` pair chat.ts uses, so the button now tests what a
+  // student's turn would actually hit.
+  let model: ReturnType<ReturnType<typeof buildProviderClient>>;
+  try {
+    const apiKey = await resolveApiKey(c.env, db, ctx.scope, config);
+    // #333: only consulted for the llmoxie provider; ignored for every other.
+    model = buildProviderClient(config.provider, apiKey, { llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL })(
+      config.modelName,
+    );
+  } catch (err) {
+    if (err instanceof LLMCredentialMissingError || err instanceof UnsupportedLLMProviderError) {
+      // Same 503 + sentence the missing-OPENROUTER_API_KEY branch produced,
+      // now covering every way this config can be unreachable: no credential
+      // and no fallback binding for its provider, a stale/cross-org
+      // credentialId, a secret_ref off the allowlist (#323), or a provider
+      // this deployment has no client factory for (#325). The message stays
+      // deliberately generic -- err.message names bindings and config ids,
+      // which is server-log material, not console copy.
+      logServerError("testLlmConfigHandler", err);
+      return c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503);
+    }
+    throw err;
   }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TEST_SEND_TIMEOUT_MS);
   try {
     const result = await generateText({
-      model: getOpenRouter(apiKey)(config.modelName),
+      model,
       // The config's own prompt is what is under test. An empty one is a
       // legitimate state (the column defaults to ''), and sending no system
       // message is the honest representation of it.
