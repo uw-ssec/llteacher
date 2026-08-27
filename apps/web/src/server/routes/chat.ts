@@ -985,7 +985,7 @@ async function resolveConversation(
   if (envelope.conversationId) {
     // #279: THIS BRANCH MUST STAY READ-ONLY. chatHandler starts it
     // speculatively, BEFORE the rate-limit gate has resolved (the preflight
-    // at chatHandler's `preflightResolution`, ~line 1306 below, gated on
+    // at chatHandler's `preflightResolution` below, gated on
     // this same `conversationId` check; its own comment carries the full
     // argument), precisely because it writes nothing -- that is the entire
     // reason overlapping it with the reservation cannot orphan anything. A
