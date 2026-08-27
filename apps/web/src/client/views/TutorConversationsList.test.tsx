@@ -49,25 +49,25 @@ function renderList(overrides: Partial<React.ComponentProps<typeof TutorConversa
 describe("TutorConversationsList", () => {
   it("shows the empty state when there are no conversations", () => {
     renderList();
-    expect(screen.getByText("No conversations yet")).toBeTruthy();
+    expect(screen.getByText(/Start one to ask about anything outside a section\./)).toBeTruthy();
   });
 
   it("renders each conversation it's given", () => {
     renderList({ conversations: [CONV_A] });
     expect(screen.getByText("Chat A")).toBeTruthy();
-    expect(screen.queryByText("No conversations yet")).toBeNull();
+    expect(screen.queryByText(/Start one to ask about anything outside a section\./)).toBeNull();
   });
 
   it("surfaces a distinct error message (not the empty state) on loadError", () => {
     renderList({ loadError: true });
     const alert = screen.getByRole("alert");
     expect(alert.textContent).toMatch(/couldn't load/i);
-    expect(screen.queryByText("No conversations yet")).toBeNull();
+    expect(screen.queryByText(/Start one to ask about anything outside a section\./)).toBeNull();
   });
 
   it("does not show the empty state while still loading", () => {
     renderList({ loading: true, conversations: [] });
-    expect(screen.queryByText("No conversations yet")).toBeNull();
+    expect(screen.queryByText(/Start one to ask about anything outside a section\./)).toBeNull();
   });
 
   // #280: the list route pages at 50 with no load-more wired -- this makes

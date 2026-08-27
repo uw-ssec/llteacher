@@ -95,34 +95,43 @@ export function ConversationListItem({
             : "tutor-conversation-item"
         }
       >
-        <EditableTitle
-          value={title}
-          onSave={onRename}
-          isEditable={isEditable}
-          className="tutor-conversation-item__title"
-          onActivateValue={onSelect}
-          activateLabel={`Select conversation: ${title}`}
-          activateDescribedBy={metaId}
-          isActive={isSelected}
-        />
-        {/* #289: DELETE /api/conversations/:id shipped ownership-checked,
-            404-on-not-owned and FK-safe, and no client code called it --
-            from the student's side the rail was append-only. A real
-            <button> sibling to the rename pencil, not nested in anything:
-            the row is a plain div since #295's redesign precisely so
-            adjacent controls stay individually exposed to assistive tech.
-            The accessible name carries the title because "Delete" alone is
-            indistinguishable between rows in a list. */}
-        {onRequestDelete && (
-          <button
-            type="button"
-            className="tutor-conversation-item__delete"
-            onClick={onRequestDelete}
-            aria-label={`Delete conversation: ${title}`}
-          >
-            <Trash size={13} weight="regular" aria-hidden="true" />
-          </button>
-        )}
+        {/* #403: title and its action controls share a horizontal row.
+            .tutor-conversation-item is flex-direction: column, so a delete
+            button placed as its direct child became its own row between the
+            title and the metadata -- reserving that height on every
+            conversation even while transparent. The rename pencil never had
+            this problem because it lives inside EditableTitle; the delete
+            control needs the same containment. */}
+        <div className="tutor-conversation-item__row">
+          <EditableTitle
+            value={title}
+            onSave={onRename}
+            isEditable={isEditable}
+            className="tutor-conversation-item__title"
+            onActivateValue={onSelect}
+            activateLabel={`Select conversation: ${title}`}
+            activateDescribedBy={metaId}
+            isActive={isSelected}
+          />
+          {/* #289: DELETE /api/conversations/:id shipped ownership-checked,
+              404-on-not-owned and FK-safe, and no client code called it --
+              from the student's side the rail was append-only. A real
+              <button> sibling to the rename pencil, not nested in anything:
+              the row is a plain div since #295's redesign precisely so
+              adjacent controls stay individually exposed to assistive tech.
+              The accessible name carries the title because "Delete" alone is
+              indistinguishable between rows in a list. */}
+          {onRequestDelete && (
+            <button
+              type="button"
+              className="tutor-conversation-item__delete"
+              onClick={onRequestDelete}
+              aria-label={`Delete conversation: ${title}`}
+            >
+              <Trash size={13} weight="regular" aria-hidden="true" />
+            </button>
+          )}
+        </div>
         <span className="tutor-conversation-item__meta" id={metaId}>
           <span className="tutor-conversation-item__time">{formatUpdatedAt(updatedAt)}</span>
           {/* #233: visible text plus a visually-hidden expansion, not

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CaretDoubleLeft, CaretDoubleRight, ChatCircleDots, Plus } from "@phosphor-icons/react";
+import { CaretDoubleLeft, CaretDoubleRight, Plus } from "@phosphor-icons/react";
 import { AlertDialog } from "@llteacher/ui";
 import { ConversationListItem } from "../components/ConversationListItem";
 import type { ConversationListItemResponse } from "../../shared/types";
@@ -191,11 +191,14 @@ export function TutorConversationsList({
         </p>
       )}
 
+      {/* Was a centred ChatCircleDots icon stacked over a centred "No
+          conversations yet" caption -- the stock empty-state shape, and the
+          decorative icon restated the "New conversation" button directly
+          above it. One quiet left-aligned line in the rail's own mono label
+          register instead, saying the one thing the button does not: where
+          these conversations come from. */}
       {!loadError && !loading && conversations.length === 0 && (
-        <div className="tutor-sidebar__empty">
-          <ChatCircleDots size={20} weight="regular" aria-hidden="true" />
-          <p>No conversations yet</p>
-        </div>
+        <p className="tutor-sidebar__empty">Start one to ask about anything outside a section.</p>
       )}
 
       {/* #295: list-style: none strips list semantics in Safari/VoiceOver
@@ -214,7 +217,16 @@ export function TutorConversationsList({
                 await onRenameConversation(conv.id, title);
                 setLiveMessage(`Renamed to ${title}`);
               }}
-              onRequestDelete={onDeleteConversation ? () => setPendingDelete(conv) : undefined}
+              onRequestDelete={
+                onDeleteConversation
+                  ? () => {
+                      // #402: a failure recorded against a previous row must
+                      // not be shown alongside this one.
+                      setDeleteError(null);
+                      setPendingDelete(conv);
+                    }
+                  : undefined
+              }
             />
           ))}
         </ul>
@@ -248,6 +260,14 @@ export function TutorConversationsList({
           confirmLabel="Delete"
           onConfirm={() => void confirmDelete()}
           onCancel={() => {
+            /* #402: AlertDialog disables its buttons and Escape while
+               `confirming`, but a BACKDROP click still reaches onCancel --
+               which would unmount the dialog mid-request. If the delete then
+               failed, `deleteError` was stored with no dialog visible and
+               could surface later against a different row. Ignoring
+               cancellation while the request is in flight matches what the
+               existing restart dialog does. */
+            if (deleting) return;
             setPendingDelete(null);
             setDeleteError(null);
           }}
