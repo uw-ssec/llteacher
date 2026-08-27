@@ -10,13 +10,12 @@
    The breadcrumb string is passed as a prop.
    -------------------------------------------------------------------------- */
 
-import React, { useRef, useEffect, useState } from "react";
+import { Fragment, useCallback, useRef, useEffect, useState } from "react";
 import { Message } from "./Message";
 import { Composer } from "./Composer";
 import { CodeBlock } from "./CodeBlock";
 import { EditableTitle } from "./EditableTitle";
-import { Button } from "./Button";
-import { renderTextWithCode, type RCodeResult } from "../generative";
+import type { RCodeResult } from "../generative";
 
 /** The student-facing copy for a failed turn.
  *
@@ -190,24 +189,93 @@ export interface AIMessageData {
   role: "ai";
   content: React.ReactNode;
   isStreaming?: boolean;
+  /** #397: ISO 8601 from the message row. The server has always returned this
+   *  (routes/sectionConversations.ts) -- the client was dropping it. Absent
+   *  for a turn still streaming, which renders no time rather than a made-up
+   *  one. */
+  createdAt?: string;
 }
 
 export interface StudentMessageData {
   id: string;
   role: "student";
   content: string;
+  createdAt?: string;
 }
 
 export interface SystemMessageData {
   id: string;
   role: "system";
   content: string;
+  /** System markers ("submitted at 11:34") happen at a time like any other
+   *  turn, so they can legitimately open a new day in the transcript. The
+   *  Message component renders no meta row for them; this is only used for
+   *  day grouping. */
+  createdAt?: string;
 }
 
 export type MessageData =
   | AIMessageData
   | StudentMessageData
   | SystemMessageData;
+
+/* -- Day separators ---------------------------------------------------------
+
+   A tutoring conversation can span days -- a student opens a section on
+   Monday, comes back Wednesday -- and until now the transcript ran those
+   together, so the reply above a question could be two days older than it
+   looked. The per-turn time (#397) makes that visible turn by turn; this
+   makes the DAY boundary visible as a boundary.
+
+   Local time throughout, deliberately: the student's own calendar day is
+   what "Wednesday" means to them. Comparing toDateString() gets local
+   midnight boundaries without pulling in a date library.
+   -------------------------------------------------------------------------- */
+
+const DAY_MS = 86_400_000;
+
+function startOfLocalDay(d: Date): number {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
+/** "Today" / "Yesterday" / a weekday name while it is still unambiguous /
+ *  an explicit date once it is not.
+ *
+ *  The weekday form is only used within the last 6 days. Say "Wednesday" any
+ *  longer than that and it starts meaning two different Wednesdays, which is
+ *  worse than no label -- so past a week it becomes a real date, and past a
+ *  year it carries the year too. */
+export function formatDayLabel(iso: string, now: Date = new Date()): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+
+  const daysApart = Math.round((startOfLocalDay(now) - startOfLocalDay(d)) / DAY_MS);
+  if (daysApart === 0) return "Today";
+  if (daysApart === 1) return "Yesterday";
+  if (daysApart > 1 && daysApart < 7) {
+    return d.toLocaleDateString(undefined, { weekday: "long" });
+  }
+  return d.toLocaleDateString(undefined, {
+    month: "long",
+    day: "numeric",
+    ...(d.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),
+  });
+}
+
+function DayDivider({ label }: { label: string }) {
+  /* role="separator" with an accessible name, rather than a bare decorative
+     rule: the day IS information, and a separator is announced sparsely
+     enough not to become noise inside the role="log" region it sits in. The
+     rules either side are drawn by CSS pseudo-elements, so there is no
+     presentational markup to hide from AT. */
+  return (
+    <div className="day-divider" role="separator" aria-label={label}>
+      <span className="day-divider__pill" aria-hidden="true">
+        {label}
+      </span>
+    </div>
+  );
+}
 
 /* -- Props ----------------------------------------------------------------- */
 
@@ -285,6 +353,14 @@ export interface ConversationViewProps {
    *  "Restart section" button. `undefined` renders nothing, so surfaces
    *  with no header action (the tutor chat) are unaffected. */
   headerActions?: React.ReactNode;
+  /** #397: "revert the conversation to this message", offered on the
+   *  student's turns. UNWIRED BY DESIGN: no endpoint exists for it yet.
+   *  Truncating a conversation is not a client-side edit -- it has to delete
+   *  persisted rows, and past a submission it carries #128's voiding
+   *  semantics exactly as restartSectionConversation does. Until a caller can
+   *  actually pass a handler, the affordance does not render at all, because
+   *  a button that cannot act is worse than an absent one. */
+  onRevertToMessage?: (messageId: string) => void;
   /** #274: the owning `useChat` instance's own `stop()` -- rendered as a
    *  "Stop" affordance next to the composer while `isSending` is true.
    *  `undefined` renders nothing (matches every other optional-callback
@@ -338,23 +414,53 @@ export interface ConversationViewProps {
 
 /* -- Component ------------------------------------------------------------- */
 
+/** #278: JS-initiated scrolling is invisible to the design system's global
+ *  CSS motion rule (styles.css's `prefers-reduced-motion` block), so it is
+ *  the one motion path that escapes the user's stated preference unless it
+ *  is checked here. Read per call rather than cached: the preference can be
+ *  toggled mid-session, and this is a cheap lookup next to the layout the
+ *  caller is about to force. Guarded for non-browser/jsdom hosts where
+ *  matchMedia may be absent. */
+function prefersReducedMotion(): boolean {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    : false;
+}
+
+/** Within a message's height of the bottom. Not an exact equality check:
+ *  fractional device-pixel scroll offsets mean `scrollTop + clientHeight`
+ *  rarely equals `scrollHeight` precisely even when visually pinned. */
+const FOLLOW_THRESHOLD_PX = 120;
+function isNearBottom(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_THRESHOLD_PX;
+}
+
 /** #288: one message row. Extracted so the boundary branch inside the map
  *  renders a row identically to the three inline branches below it rather
  *  than duplicating them -- a fourth copy is how the boundary row would
  *  quietly stop matching the others. Takes no `key`: the caller owns it,
  *  since the boundary case wraps this in a Fragment that holds the key. */
-function renderMessageRow(msg: MessageData, onRunRCode?: (code: string) => Promise<RCodeResult>) {
+function renderMessageRow(
+  msg: MessageData,
+  onRunRCode?: (code: string) => Promise<RCodeResult>,
+  onRevertToMessage?: (messageId: string) => void,
+) {
   if (msg.role === "ai") {
     return (
-      <Message role="ai" isStreaming={msg.isStreaming}>
+      <Message role="ai" isStreaming={msg.isStreaming} createdAt={msg.createdAt}>
         {msg.content}
       </Message>
     );
   }
   if (msg.role === "student") {
     return (
-      <Message role="student">
-        {renderTextWithCode(msg.content, { onRun: onRunRCode, keyPrefix: msg.id })}
+      <Message
+        role="student"
+        createdAt={msg.createdAt}
+        onRun={onRunRCode}
+        onRevert={onRevertToMessage ? () => onRevertToMessage(msg.id) : undefined}
+      >
+        {msg.content}
       </Message>
     );
   }
@@ -380,9 +486,10 @@ export function ConversationView({
   hideComposer = false,
   onRequestHint,
   hintDisabled = false,
+  onRevertToMessage,
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   /* #288: index of the oldest message the model still sees. Undefined when
      there is no window to disclose -- either the caller passed none, or the
@@ -395,14 +502,71 @@ export function ConversationView({
       ? messages.length - contextWindowSize
       : undefined;
 
+  /* #410: one place that knows HOW to reach the bottom, so the three
+     callers (new message, streaming follow, turn completion) cannot drift
+     apart on the container-vs-sentinel question or the reduced-motion
+     check. jsdom implements neither scrollTo nor real layout, hence the
+     capability guard -- not dead code in a browser, where scrollTo is where
+     the smooth behaviour comes from. */
+  const scrollToBottom = useCallback((smooth: boolean) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (typeof el.scrollTo === "function") {
+      el.scrollTo({ top: el.scrollHeight, behavior: smooth && !prefersReducedMotion() ? "smooth" : "auto" });
+    } else {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, []);
+
   /* Scroll to bottom when new messages arrive -- and when a turn fails.
      `error` belongs in the deps: a failed turn does not change `messages`
      (the assistant reply is deliberately not persisted), so without it the
      error row mounts below the fold and nothing scrolls to it, leaving the
-     only recovery control off-screen. */
+     only recovery control off-screen.
+
+     #278: keyed on `messages.length`, NOT `messages`. The array identity is
+     brand new on every parent render, so this used to run once per streamed
+     token rather than once per new message -- a synchronous layout of a
+     subtree holding up to 200 hydrated nodes, tens of times a second.
+     Length changes exactly when a message is actually added.
+
+     #410 (merged in): scrolls THIS container via scrollTo rather than
+     calling scrollIntoView on a bottom sentinel. scrollIntoView walks up
+     the ancestor chain and scrolls every scrollable ancestor it finds --
+     and `overflow: hidden` still makes an element programmatically
+     scrollable -- so it was also scrolling .conversation-column, dragging
+     the composer up by ~455px and further on every delta. That was measured
+     live on staging; this branch's sentinel approach had the same bug and
+     inherits the fix rather than carrying its own version forward.
+
+     A new message or a failed turn scrolls unconditionally: both are
+     content the student has not seen, and the error row carries the only
+     recovery control, so it must not mount below the fold. */
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, error]);
+    scrollToBottom(true);
+  }, [messages.length, error, scrollToBottom]);
+
+  /* #278: follow the reply as it streams, without queueing an animation.
+     A growing assistant message makes the thread taller without adding a
+     message, so the length-keyed effect above deliberately does not fire.
+     Assigning scrollTop directly queues no smooth scroll for the next
+     assignment to interrupt, which is what made the original per-token
+     scrollIntoView pathological.
+
+     Skipped under prefers-reduced-motion: a >5s reply otherwise means >5s
+     of continuous automatic movement, and a JS-driven scroll is invisible
+     to the stylesheet's global motion rule.
+
+     Only follows a student already AT the bottom -- scrolling up during a
+     long reply is deliberate, and yanking them back would make re-reading
+     impossible. #387 gates the completion settle the same way; see the
+     turn-completion effect below, which owns the isSending edge. */
+  useEffect(() => {
+    if (!isSending || prefersReducedMotion()) return;
+    const el = scrollRef.current;
+    if (!el || !isNearBottom(el)) return;
+    el.scrollTop = el.scrollHeight;
+  });
 
   // #317 review, #327: no deterministic announcement existed for a
   // streamed reply *finishing* -- the start is announced (Message.tsx's
@@ -464,6 +628,26 @@ export function ConversationView({
       // alongside it helps nobody.
       // messages unchanged: nothing was actually sent (isSending was true
       // only because of a hydration retry) -- no turn to announce.
+
+      /* #387: settle the view at the bottom when a turn finishes -- but
+         ONLY for a student who never left it.
+
+         `isSending` used to be a dependency of the scroll effect above, so
+         this same transition fired an unconditional scrollIntoView. That
+         defeated the follow effect's own guard one moment after it had
+         done its job: a student who scrolled up mid-reply was left alone
+         for the whole response, then yanked back to the bottom the instant
+         it completed -- the moment they were most likely to still be
+         reading. The follow effect documented "only follows a student
+         already AT the bottom"; the effect above silently broke it.
+
+         Placed here rather than in its own effect because this one already
+         owns the isSending edge; a second ref tracking the same transition
+         would have two effects racing to write it. */
+      const scroller = scrollRef.current;
+      if (scroller && isNearBottom(scroller)) {
+        scrollToBottom(true);
+      }
     }
     wasSendingRef.current = isSending;
     // messages.length, not the whole `messages` array/`error`, is the
@@ -493,7 +677,7 @@ export function ConversationView({
   return (
     <div className="conversation-column">
       {/* Scrollable message area */}
-      <div className="conversation-messages">
+      <div className="conversation-messages" ref={scrollRef}>
         <div className="conversation-inner">
           {/* #317 review, #327: moved OUT of the role="log" region below --
               this row (and the title/hasMoreHistory notice under it) used
@@ -504,14 +688,35 @@ export function ConversationView({
               200 fetched messages. None of this is conversation TURN
               content -- role="log" now wraps only the messages themselves. */}
           <div className="conversation-header-row">
-            <p className="breadcrumb">{breadcrumb}</p>
+            {/* Review finding: Message.tsx shifts markdown `#` to <h2> on the
+                premise that "the conversation column already owns the page's
+                <h1>". True of the tutor chat, FALSE of the section chat, which
+                passes neither `title` nor `onRenameTitle` -- so no <h1> existed
+                and every seeded section (whose content opens with a heading)
+                emitted an <h2> into a document with no <h1>: a heading-order
+                violation for screen-reader navigation.
+
+                Fixed by promoting THIS element rather than adding a visually
+                hidden heading beside it. A hidden duplicate would make an AT
+                announce the same string twice, which is a worse outcome than
+                the bug. On the section surface the breadcrumb genuinely is the
+                page's name ("Section 1: Sample Spaces & Events"), so an <h1>
+                is the honest element; where a real title <h1> already renders
+                below, this stays a <p> and there is still exactly one. The
+                .breadcrumb class carries all the styling either way, so
+                nothing changes visually. */}
+            {title !== undefined && onRenameTitle ? (
+              <p className="breadcrumb">{breadcrumb}</p>
+            ) : (
+              <h1 className="breadcrumb">{breadcrumb}</h1>
+            )}
             {headerActions}
           </div>
 
           {/* #6: conversation header title -- only for surfaces that pass
               one (the homework-section chat has no per-conversation title
               and omits `title` entirely, so nothing renders here for it). */}
-          {title !== undefined && onRenameTitle && (
+          {title !== undefined && onRenameTitle ? (
             <h1 className="conversation-header-title">
               <EditableTitle
                 value={title}
@@ -520,7 +725,7 @@ export function ConversationView({
                 renameLabel="Rename conversation"
               />
             </h1>
-          )}
+          ) : null}
 
           {/* #280: the ceiling made visible instead of silent -- see
               hasMoreHistory's own doc comment above. No message count in
@@ -580,19 +785,25 @@ export function ConversationView({
               during an ACTIVE conversation reach an AT as insertions. */}
           <div className="conversation-log" role="log" aria-live="polite" aria-relevant="additions">
             {messages.map((msg, index) => {
-              /* #288: the boundary is rendered as a sibling ABOVE the
-                 message it marks, from inside this same map so it cannot
-                 drift from the index it describes.
+              /* Two independent separators can precede a turn, and they mean
+                 different things: the DAY divider says when this was written,
+                 the #288 context boundary says what the tutor can still see.
+                 Both can land on the same message, so they are computed
+                 independently and rendered day-first (the broader frame)
+                 rather than one being made a special case of the other. */
+
+              /* #288: the boundary is rendered as a sibling ABOVE the message
+                 it marks, from inside this same map so it cannot drift from
+                 the index it describes.
 
                  role="separator" with a label, not a styled div: for a
                  screen-reader user scrolling the transcript this is
-                 meaningful structure, not decoration -- it is the only
-                 thing distinguishing "the tutor cannot see that" from "the
-                 tutor ignored me". It sits inside the role="log" region
-                 because it is part of the transcript's structure, and it
-                 renders at mount for an already-long conversation rather
-                 than appearing mid-stream, so it is not announced as an
-                 insertion. */
+                 meaningful structure, not decoration -- it is the only thing
+                 distinguishing "the tutor cannot see that" from "the tutor
+                 ignored me". It sits inside the role="log" region because it
+                 is part of the transcript's structure, and it renders at
+                 mount for an already-long conversation rather than appearing
+                 mid-stream, so it is not announced as an insertion. */
               const boundary =
                 index === contextBoundaryIndex ? (
                   <div
@@ -606,32 +817,41 @@ export function ConversationView({
                     </span>
                   </div>
                 ) : null;
-              if (boundary) {
-                return (
-                  <React.Fragment key={msg.id}>
-                    {boundary}
-                    {renderMessageRow(msg, onRunRCode)}
-                  </React.Fragment>
-                );
-              }
-              if (msg.role === "ai") {
-                return (
-                  <Message key={msg.id} role="ai" isStreaming={msg.isStreaming}>
-                    {msg.content}
-                  </Message>
-                );
-              }
-              if (msg.role === "student") {
-                return (
-                  <Message key={msg.id} role="student">
-                    {renderTextWithCode(msg.content, { onRun: onRunRCode, keyPrefix: msg.id })}
-                  </Message>
-                );
-              }
+
+              /* #397: emitted when this turn's local calendar day differs from
+                 the last DATED turn's -- including before the first, so a
+                 transcript opened days later says so at the top rather than
+                 only between groups.
+
+                 Turns with no createdAt (a live stream, or a message just
+                 sent, neither of which has a persisted row yet) inherit the
+                 current day rather than breaking the run: an undated turn is
+                 always "now", so it cannot be the thing that starts a day. */
+              const dayLabel = (() => {
+                if (!msg.createdAt) return null;
+                const prevDated = messages
+                  .slice(0, index)
+                  .reverse()
+                  .find((m) => m.createdAt);
+                if (
+                  prevDated?.createdAt &&
+                  new Date(prevDated.createdAt).toDateString() ===
+                    new Date(msg.createdAt).toDateString()
+                ) {
+                  return null;
+                }
+                const label = formatDayLabel(msg.createdAt);
+                return label === "" ? null : label;
+              })();
+
+              const row = renderMessageRow(msg, onRunRCode, onRevertToMessage);
+              if (!boundary && !dayLabel) return <Fragment key={msg.id}>{row}</Fragment>;
               return (
-                <Message key={msg.id} role="system">
-                  {msg.content}
-                </Message>
+                <Fragment key={msg.id}>
+                  {dayLabel ? <DayDivider label={dayLabel} /> : null}
+                  {boundary}
+                  {row}
+                </Fragment>
               );
             })}
           </div>
@@ -699,44 +919,7 @@ export function ConversationView({
           </div>
         )}
 
-        {/* Sentinel last, so "scroll to bottom" means the real bottom --
-            below the error row, not above it. */}
-        <div ref={bottomRef} aria-hidden="true" />
       </div>
-
-      {/* #274: a Stop affordance for a turn that's merely slow, not yet
-          timed out (chat.ts's own STREAM_TIMEOUT_MS bounds the server side
-          of this).
-          #317 review, #327: stays MOUNTED whenever the caller tracks a
-          useChat instance to stop (onStop set) -- previously conditional
-          on `isSending` too, so a keyboard user who activated Stop had it
-          unmount out from under their focus the instant `isSending`
-          flipped false, stranding them at document.body with no handoff
-          (same harm Composer.tsx's #270 fix already closed for the
-          composer). `ariaDisabled` (Button.tsx) keeps it focusable and
-          merely refuses activation while nothing is in flight, instead of
-          native `disabled` removing it from the tab order. */}
-      {onStop && (
-        <div className="conversation-stop-row">
-          <Button
-            variant="danger"
-            size="sm"
-            outlined
-            // #317 review, #345: flags the next isSending->false transition
-            // as caused by Stop (see turnCompleteAnnouncement's own effect
-            // above) -- Button.tsx only invokes onClick when the button is
-            // genuinely actionable (not aria-disabled), so this can't set
-            // the flag from a click that didn't actually stop anything.
-            onClick={() => {
-              stoppedRef.current = true;
-              onStop();
-            }}
-            ariaDisabled={!isStopActionable}
-          >
-            Stop
-          </Button>
-        </div>
-      )}
 
       {/* Sticky composer -- #144: disabled while a send is genuinely in
           flight, so Enter mid-stream can't fire a second, overlapping
@@ -756,6 +939,26 @@ export function ConversationView({
           autoFocus={autoFocusComposer}
           onRequestHint={onRequestHint}
           hintDisabled={hintDisabled}
+          /* #274 redesign: Stop moved from its own row above the composer into
+             the composer's own trailing action slot, where it shares one
+             never-unmounted button with Send. Composer.tsx's own comment on
+             that button covers why the shared element is what makes #327's
+             focus guarantee structural. */
+          onStop={
+            onStop
+              ? () => {
+                  // #317 review, #345: flags the next isSending->false
+                  // transition as caused by Stop (see
+                  // turnCompleteAnnouncement's own effect above). Composer
+                  // only invokes this in its Stop identity, which requires
+                  // isStopActionable, so it can't fire from a click that
+                  // didn't actually stop anything.
+                  stoppedRef.current = true;
+                  onStop();
+                }
+              : undefined
+          }
+          isStopActionable={isStopActionable}
         />
       )}
     </div>

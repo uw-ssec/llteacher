@@ -561,11 +561,17 @@ describe("GET /api/conversations/:id/messages", () => {
     expect(getMessagesForConversationMock).not.toHaveBeenCalled();
   });
 
-  it("returns the conversation's messages mapped to {id, role, parts}, scoped by the conversation's own courseId", async () => {
+  it("returns the conversation's messages mapped to {id, role, parts, seq, createdAt}, scoped by the conversation's own courseId", async () => {
+    /* #397: createdAt pinned to a literal instant rather than `new Date()` --
+       the transcript now renders a per-turn time from this field, so the test
+       has to assert the exact ISO string that reaches the client, which a
+       moving clock cannot do. */
+    const t1 = new Date("2026-08-26T18:04:00.000Z");
+    const t2 = new Date("2026-08-26T18:05:30.000Z");
     getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
     getMessagesForConversationMock.mockResolvedValue([
-      { id: "m1", conversationId: "22222222-2222-2222-2222-222222222222", role: "user", parts: [{ type: "text", text: "hi" }], createdAt: new Date(), seq: 1 },
-      { id: "m2", conversationId: "22222222-2222-2222-2222-222222222222", role: "assistant", parts: [{ type: "text", text: "hello" }], createdAt: new Date(), seq: 2 },
+      { id: "m1", conversationId: "22222222-2222-2222-2222-222222222222", role: "user", parts: [{ type: "text", text: "hi" }], createdAt: t1, seq: 1 },
+      { id: "m2", conversationId: "22222222-2222-2222-2222-222222222222", role: "assistant", parts: [{ type: "text", text: "hello" }], createdAt: t2, seq: 2 },
     ]);
 
     const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222/messages");
@@ -577,10 +583,13 @@ describe("GET /api/conversations/:id/messages", () => {
       "22222222-2222-2222-2222-222222222222",
       { limit: undefined, before: undefined },
     );
-    // #280: seq is now included in the wire response.
+    // #280: seq is on the wire. #397: so is createdAt -- the row always had
+    // it and the sibling section-conversation routes always sent it; this
+    // route was the outlier that dropped it, leaving the client unable to
+    // show a per-turn time without a second round-trip.
     expect(await res.json()).toEqual([
-      { id: "m1", role: "user", parts: [{ type: "text", text: "hi" }], seq: 1 },
-      { id: "m2", role: "assistant", parts: [{ type: "text", text: "hello" }], seq: 2 },
+      { id: "m1", role: "user", parts: [{ type: "text", text: "hi" }], seq: 1, createdAt: t1.toISOString() },
+      { id: "m2", role: "assistant", parts: [{ type: "text", text: "hello" }], seq: 2, createdAt: t2.toISOString() },
     ]);
   });
 

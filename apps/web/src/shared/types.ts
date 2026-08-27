@@ -207,6 +207,10 @@ export interface ConversationMessageResponse {
    *  from its own response even if it wanted to. Included so a future
    *  caller can page without a second round-trip to look it up. */
   seq: number;
+  /** #397: ISO 8601. The row has always had it and the section-conversation
+   *  routes always sent it; the history route dropped it, so the transcript
+   *  could not show a per-turn time. */
+  createdAt: string;
 }
 
 export interface SectionResponse {

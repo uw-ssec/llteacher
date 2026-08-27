@@ -159,7 +159,7 @@ describe.skipIf(!RAW_DATABASE_URL)("section conversation lifecycle (real DB, #27
     expect(messages[0]!.parts).toEqual([
       {
         type: "text",
-        text: "Hello! I'm here to help you with Section 2: Confidence intervals.\n\nEstimate the mean.\n\nHow can I assist you with this question?",
+        text: "Estimate the mean.\n\nWhere would you like to start? If you already have an idea, tell me what you're thinking and we'll work from there.",
       },
     ]);
   });
