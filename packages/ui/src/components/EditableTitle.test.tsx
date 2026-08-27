@@ -363,6 +363,43 @@ describe("EditableTitle limit and keybinding disclosure (#310)", () => {
     expect(screen.getByText("3 over")).toBeTruthy();
   });
 
+  it("exposes the hint to assistive technology, not just sighted users (#405)", async () => {
+    render(<EditableTitle value="Original" onSave={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Original" }));
+    const input = screen.getByLabelText("Edit title");
+
+    // It was aria-hidden, so the bindings -- blur-to-save above all --
+    // reached nobody who could not see the field. The input's accessible
+    // name is only "Edit title".
+    const hint = screen.getByText(/click away/i);
+    expect(hint.getAttribute("aria-hidden")).toBeNull();
+
+    // ...and it is actually associated with the input.
+    const describedBy = input.getAttribute("aria-describedby") ?? "";
+    expect(describedBy.split(/\s+/)).toContain(hint.id);
+  });
+
+  it("appends the counter to the description only when it is showing (#405)", async () => {
+    // maxLength 100, so the counter is genuinely hidden at first -- it
+    // appears within COUNTER_VISIBLE_WITHIN (20) of the limit. (For a
+    // maxLength at or below that threshold the counter is always visible,
+    // which is the right behaviour for a tight limit but makes it useless
+    // as a test fixture here.)
+    render(<EditableTitle value="Original" onSave={vi.fn()} maxLength={100} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Original" }));
+    const input = screen.getByLabelText("Edit title");
+    const hintOnly = (input.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean);
+    expect(hintOnly.length).toBe(1);
+
+    await userEvent.clear(input);
+    await userEvent.type(input, "x".repeat(85));
+
+    const withCounter = (input.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean);
+    expect(withCounter.length).toBe(2);
+    // The hint still leads -- it is the static guidance, read on focus.
+    expect(withCounter[0]).toBe(hintOnly[0]);
+  });
+
   it("discloses the keybindings, including that blur saves", async () => {
     render(<EditableTitle value="Original" onSave={vi.fn()} />);
     await userEvent.click(screen.getByRole("button", { name: "Rename: Original" }));

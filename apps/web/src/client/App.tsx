@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { useNavigate } from "react-router";
-import { Sidebar, TopNav, ConversationView, AlertDialog, Button, renderToolPart, renderTextWithCode, isToolPart, ErrorBoundary } from "@llteacher/ui";
+import { Sidebar, TopNav, ConversationView, AlertDialog, Button, MessageMarkdown, renderToolPart, isToolPart, ErrorBoundary } from "@llteacher/ui";
 import type { SidebarSection, MessageData, RCodeResult } from "@llteacher/ui";
 import { useRExecution } from "./hooks/useRExecution";
 import { useAuth } from "./components/AuthProvider";
@@ -152,6 +152,12 @@ export function useStudentHomework() {
    chat below (#4 introduced the second consumer; this was inlined in App
    before). See the two useChat call sites for why they're separate Chat
    instances rather than one shared one. */
+/** #277: cap on how often a streamed response re-renders the chat surface,
+ *  in milliseconds. One animation frame at 60Hz -- fast enough that the
+ *  reply still reads as continuously typed, slow enough that the render
+ *  rate is bounded by the display rather than by the model's token rate. */
+const STREAM_THROTTLE_MS = 16;
+
 function buildMessageData(
   aiMessages: UIMessage[],
   chatStatus: ReturnType<typeof useChat>["status"],
@@ -176,6 +182,17 @@ function buildMessageData(
      that decision). */
   onRunRCode?: (code: string) => Promise<RCodeResult>,
 ): MessageData[] {
+  /* #397: the persisted row's timestamp, riding on UIMessage.metadata (set in
+     fetchConversationHistory). A turn the student has only just sent, or one
+     still streaming, has no persisted row yet and therefore no time -- the
+     transcript renders none rather than stamping Date.now(), which would show
+     a time the server never recorded and would drift from the row once it
+     lands. */
+  const turnCreatedAt = (m: UIMessage): string | undefined => {
+    const meta = m.metadata as { createdAt?: unknown } | undefined;
+    return typeof meta?.createdAt === "string" ? meta.createdAt : undefined;
+  };
+
   const messages: MessageData[] = aiMessages.map((m, idx) => {
     const isLast = idx === aiMessages.length - 1;
     const isStreaming = isLast && chatStatus === "streaming";
@@ -186,7 +203,25 @@ function buildMessageData(
         <>
           {m.parts.map((part, i) => {
             if (part.type === "text") {
-              return renderTextWithCode(part.text, { onRun: onRunRCode, keyPrefix: `text-${m.id}-${i}` });
+              /* Markdown owns its own block structure, so the raw text goes
+                 straight to MessageMarkdown -- wrapping it in a <p> trapped the
+                 markdown inside a block element it needed to own ("\n\n"
+                 collapsed to spaces, a leading "# " came out as a literal
+                 hash).
+
+                 This REPLACES renderTextWithCode at this call site, and
+                 subsumes it: that helper split the text on ```r fences and
+                 rendered everything else as a bare <p>, so a reply could have
+                 a Run button or formatting but never both. MessageMarkdown's
+                 own `pre` override now detects the r fence during markdown
+                 rendering and hands it to the same CodeExecution component,
+                 so `onRun` still reaches it and the prose around it is
+                 finally prose. See MarkdownPre in Message.tsx. */
+              return (
+                <MessageMarkdown key={`text-${m.id}-${i}`} onRun={onRunRCode}>
+                  {part.text}
+                </MessageMarkdown>
+              );
             }
             /* #144: no `part as ToolPart` cast -- useChat isn't given the
                server's tool-input generics, so the AI SDK's UIMessagePart
@@ -210,6 +245,7 @@ function buildMessageData(
         id: m.id,
         role: "ai" as const,
         content,
+        createdAt: turnCreatedAt(m),
         // A stopped turn is definitionally done, even if this happened to
         // still be the last message and chatStatus hasn't settled out of
         // "streaming" yet by the render that first sees it.
@@ -226,6 +262,7 @@ function buildMessageData(
         id: m.id,
         role: "student" as const,
         content: text,
+        createdAt: turnCreatedAt(m),
       };
     }
 
@@ -393,6 +430,12 @@ export default function App() {
       fetch: chatFetch,
       prepareSendMessagesRequest,
     }),
+    // #277: the AI SDK's own re-render throttle, previously unused. Without
+    // it useChat re-renders this component once per streamed chunk -- a rate
+    // set by the model's token stream, not by anything the UI needs. At 16ms
+    // the text still reads as continuously typed while the cap holds
+    // re-renders to roughly one animation frame.
+    experimental_throttle: STREAM_THROTTLE_MS,
   });
 
   // #317 review, #352: the id of the assistant message on screen at the
@@ -476,6 +519,8 @@ export default function App() {
     id: tutorConversationId,
     messages: tutorInitialMessages,
     transport: new DefaultChatTransport({ api: "/api/chat", prepareSendMessagesRequest }),
+    // #277: same reasoning as the section instance above.
+    experimental_throttle: STREAM_THROTTLE_MS,
   });
 
   // #317 review, #352: same reasoning as sectionStoppedMessageId above.
@@ -506,6 +551,13 @@ export default function App() {
      async callback without waiting on a re-render. */
   const latestTutorSelectionRef = useRef<string | undefined>(undefined);
 
+  /* Mirrors `tutorConversationId` for reads that happen after an await.
+     State captured in a closure is stale by definition once the handler
+     yields, and both directions of that staleness have produced real bugs
+     here (#401, and the inverse it introduced). */
+  const displayedTutorConversationRef = useRef<string | undefined>(undefined);
+  displayedTutorConversationRef.current = tutorConversationId;
+
   /* #235: which tutor conversation (if any) was just created this session,
      so the chat column can autofocus its composer once on mount -- a
      keyboard user should land where the visual focus implicitly went
@@ -516,6 +568,14 @@ export default function App() {
   const [justCreatedTutorConversationId, setJustCreatedTutorConversationId] = useState<string | undefined>(
     undefined,
   );
+
+  /* #290: the conversation whose history is currently being fetched, if any.
+     Exists purely so the rail can show that the click registered -- the row
+     renders selected and aria-busy while this is set. Deliberately NOT used
+     to move focus into the chat column: a student clicking through the rail
+     is browsing, and a focus jump would fight that. The announcement below
+     is the right affordance. */
+  const [pendingTutorSelectionId, setPendingTutorSelectionId] = useState<string | undefined>(undefined);
 
   // #276: set when a tutor conversation's history fetch fails -- rendered
   // through ConversationView's existing error row (see tutorChatErrorRow
@@ -556,9 +616,12 @@ export default function App() {
   const {
     conversations: tutorConversations,
     loading: tutorConversationsLoading,
+    awaitingCourseContext: tutorConversationsAwaitingCourse,
     loadError: tutorConversationsLoadError,
     hasMore: tutorConversationsHasMore,
+    refetch: refetchTutorConversations,
     createConversation: createTutorConversationRow,
+    deleteConversation: deleteTutorConversationRow,
     renameConversation: renameTutorConversationRow,
     bumpConversation: bumpTutorConversation,
   } = useTutorConversations(courseId);
@@ -583,6 +646,16 @@ export default function App() {
      mark "this is now the latest requested switch." */
   const selectTutorConversation = (id: string, initialMessages: UIMessage[] = []) => {
     latestTutorSelectionRef.current = id;
+    /* #398: reaching here means a conversation is now current, so nothing
+       is pending any more. This is the choke point for every "a different
+       conversation became current" path -- notably creating one while
+       another is still loading, which otherwise left the abandoned row
+       busy and unselectable forever.
+
+       Harmless for the ordinary selection path, which calls this with the
+       id that was pending and would clear the same marker a moment later
+       in its own `finally`. */
+    setPendingTutorSelectionId(undefined);
     setTutorInitialMessages(initialMessages);
     setTutorConversationId(id);
   };
@@ -641,7 +714,16 @@ export default function App() {
     if (!res.ok) throw new Error(`failed to load conversation history: ${res.status}`);
     const rows = (await res.json()) as ConversationMessageResponse[];
     return {
-      messages: rows.map((r) => ({ id: r.id, role: r.role, parts: r.parts as UIMessage["parts"] })),
+      /* #397: createdAt was being dropped here. The server has always sent it
+         per message (routes/sectionConversations.ts), and the transcript now
+         shows a per-turn time, so it rides along on the UIMessage metadata
+         rather than needing a second fetch. */
+      messages: rows.map((r) => ({
+        id: r.id,
+        role: r.role,
+        parts: r.parts as UIMessage["parts"],
+        metadata: { createdAt: r.createdAt },
+      })),
       hasMore: rows.length === MESSAGES_HISTORY_LIMIT,
     };
   };
@@ -658,7 +740,24 @@ export default function App() {
   // isSending below) until Retry succeeds.
   const handleSelectExistingTutorConversation = async (id: string) => {
     if (id === tutorConversationId) return;
+    // #290: a repeat click on a row that is already loading is now a genuine
+    // no-op. The guard above only ruled out re-selecting the ALREADY-ACTIVE
+    // conversation, so clicking an unresponsive row again -- the natural
+    // response to no feedback -- fired a second identical fetch. The
+    // stale-response guard below discarded the loser correctly, so this was
+    // never a correctness bug; it was wasted work that the feedback gap made
+    // likely to happen.
+    if (id === pendingTutorSelectionId) return;
     latestTutorSelectionRef.current = id;
+    // #290: set SYNCHRONOUSLY, before the await. Nothing on screen used to
+    // change between the click and the response landing -- no row highlight,
+    // no aria-current move, no chat-column change -- because every visible
+    // piece of state derives from `tutorConversationId`, which is not
+    // assigned until `selectTutorConversation` runs. For a conversation at
+    // the 200-message cap that is a multi-hundred-millisecond to
+    // multi-second dead zone in which the UI is indistinguishable from
+    // broken.
+    setPendingTutorSelectionId(id);
     setJustCreatedTutorConversationId(undefined);
     try {
       const history = await fetchConversationHistory(id);
@@ -676,7 +775,80 @@ export default function App() {
       });
       setTutorHistoryHasMore(false);
       selectTutorConversation(id, []);
+    } finally {
+      /* #398: clear only when this request is still the current one -- a
+         superseded fetch resolving late must not clear a marker belonging
+         to the selection that replaced it.
+
+         The bug this used to have: when nothing replaced it either (the
+         student navigated to a homework section, or created a conversation,
+         so the ref went to undefined rather than to another id), NOBODY
+         cleared it. The row stayed aria-busy forever, and the repeat-click
+         guard at the top of this function then refused to reselect it --
+         permanently, until reload.
+
+         `setPendingTutorSelectionId(undefined)` moved to the places that
+         supersede a selection, so every path that changes
+         latestTutorSelectionRef also owns the marker. This branch now only
+         handles "my own request finished and I am still current". */
+      if (latestTutorSelectionRef.current === id) setPendingTutorSelectionId(undefined);
     }
+  };
+
+  /* #289: deleting the conversation currently on screen has to move the
+     student off it. The rail row disappears either way, but leaving the
+     chat column pointed at a deleted id would keep its transcript rendered
+     with no row selected -- and the next send would post to a conversation
+     the server has soft-deleted. Falls back to the section chat, which is
+     this surface's own default when no tutor conversation is active. */
+  const handleDeleteTutorConversation = async (id: string): Promise<boolean> => {
+    /* #401: invalidate BEFORE awaiting, not after.
+       #392 fixed the case where the deleted conversation was pending when
+       the delete began. This is the other ordering: if the history request
+       resolves DURING the await, selectTutorConversation sets
+       tutorConversationId to this id -- and the comparison below reads the
+       value captured when this closure was created, which is still the old
+       one. The surface was then never cleared: the row vanished from the
+       rail while its transcript stayed on screen, and the next send
+       targeted a soft-deleted id.
+
+       Clearing the ref first removes the race rather than detecting it: the
+       in-flight fetch's own staleness guard now discards its result, so the
+       conversation can never become current while we are deleting it. */
+    if (latestTutorSelectionRef.current === id) {
+      latestTutorSelectionRef.current = undefined;
+      // #398's pending marker, now that #381 has landed: without this the
+      // deleted row's busy state would outlive the row itself, and #398's
+      // repeat-click guard keys off exactly this value.
+      setPendingTutorSelectionId((pending) => (pending === id ? undefined : pending));
+    }
+
+    const ok = await deleteTutorConversationRow(id);
+    if (!ok) return false;
+
+    /* Only the DISPLAYED conversation needs the surface torn down, and
+       "displayed" has to be evaluated NOW, against a ref.
+
+       Reading `tutorConversationId` from this closure is stale in one
+       direction (a conversation that opened during the await is missed --
+       #401). Capturing `id === tutorConversationId` before the await is
+       stale in the other: if the student had A open, started loading B, then
+       deleted A, that captured `true` would tear down B when the delete
+       finished, dumping them back to the section chat for a conversation
+       that was not deleted.
+
+       A ref mirroring the current value is the only reading that is correct
+       in both directions. The invalidate-before-await above still stands --
+       it removes the pending race rather than detecting it; this handles the
+       separate question of what is on screen when the delete returns. */
+    if (displayedTutorConversationRef.current === id) {
+      setTutorConversationId(undefined);
+      setTutorInitialMessages([]);
+      setJustCreatedTutorConversationId(undefined);
+      setTutorHydrationError(null);
+      setTutorHistoryHasMore(false);
+    }
+    return true;
   };
 
   /* #4: TutorConversationsList's "New conversation" button -- lifted here
@@ -746,8 +918,9 @@ export default function App() {
   /* #318: a fresh section (no conversation yet) used to render an empty
      composer until the student's own first message lazily created the
      conversation server-side (chat.ts's resolveConversation) -- the
-     canonical greeting (#27's "Hello! I'm here to help you with Section
-     N...") never appeared until AFTER that first turn, bundled with the
+     canonical greeting (#27's sectionGreeting, which opens on the section's
+     own title and problem statement) never appeared until AFTER that first
+     turn, bundled with the
      model's reply to it. This calls the same start endpoint chatHandler
      already uses internally, eagerly, so the greeting shows the moment the
      student opens the section -- ordinary chat UX. Guarded by
@@ -1177,8 +1350,24 @@ export default function App() {
      code -- an executeRCode tool call, or a fenced block in its own text --
      runs against; see runRCodeForSection's own doc comment for why that's
      deliberately the non-persisting path. */
-  const messages = buildMessageData(aiMessages, chatStatus, sectionStoppedMessageId, runRCode);
-  const tutorMessages = buildMessageData(tutorAiMessages, tutorChatStatus, tutorStoppedMessageId, runRCode);
+  /* #277: memoized, and each surface independently. These were plain calls,
+     so BOTH lists -- including the one not on screen -- were rebuilt from
+     scratch on every render, and `useChat` re-renders this component on
+     every streamed chunk. The off-screen surface's rebuild was pure waste:
+     its inputs cannot change while the other surface is streaming.
+
+     `runRCode` is stable (useRExecution returns a useCallback whose own dep,
+     useWebR's ensureReady, is itself a []-dep useCallback), so it does not
+     defeat these deps. The remaining inputs are exactly what buildMessageData
+     reads. */
+  const messages = useMemo(
+    () => buildMessageData(aiMessages, chatStatus, sectionStoppedMessageId, runRCode),
+    [aiMessages, chatStatus, sectionStoppedMessageId, runRCode],
+  );
+  const tutorMessages = useMemo(
+    () => buildMessageData(tutorAiMessages, tutorChatStatus, tutorStoppedMessageId, runRCode),
+    [tutorAiMessages, tutorChatStatus, tutorStoppedMessageId, runRCode],
+  );
 
   /* Selecting a homework section always means "I want the section chat" --
      switches back out of the tutor surface if one was showing. Clears
@@ -1204,6 +1393,10 @@ export default function App() {
       sectionMetaByOrder.get(sectionNumber)?.id,
     );
     latestTutorSelectionRef.current = undefined;
+    // #398: this supersedes any in-flight selection, so it owns the pending
+    // marker too -- otherwise the row the student abandoned stays busy and
+    // unselectable for the rest of the session.
+    setPendingTutorSelectionId(undefined);
     setTutorConversationId(undefined);
     setTutorInitialMessages([]);
     setJustCreatedTutorConversationId(undefined);
@@ -1429,12 +1622,16 @@ export default function App() {
           courseContextLoading={homeworkLoading}
           conversations={tutorConversations}
           loading={tutorConversationsLoading}
+          awaitingCourseContext={tutorConversationsAwaitingCourse}
           loadError={tutorConversationsLoadError}
+          onRetryLoad={refetchTutorConversations}
           hasMore={tutorConversationsHasMore}
           selectedConversationId={tutorConversationId}
+          pendingConversationId={pendingTutorSelectionId}
           onSelectConversation={handleSelectExistingTutorConversation}
           onCreateConversation={handleCreateTutorConversation}
           onRenameConversation={renameTutorConversationRow}
+          onDeleteConversation={handleDeleteTutorConversation}
           isCollapsed={isTutorSidebarCollapsed}
           onToggleCollapse={() => setIsTutorSidebarCollapsed((c) => !c)}
         />
@@ -1459,7 +1656,12 @@ export default function App() {
           <ErrorBoundary key={`tutor-${tutorConversationId}`}>
             <ConversationView
               key={tutorConversationId}
-              breadcrumb="STATS 311 · TUTOR CHAT"
+              /* #397: the top nav already spells out
+                 "STATS 311 · AUTUMN 2026 · <homework>" one line above, so
+                 repeating the course code here cost the first line of the
+                 reading column to say nothing new. Only the surface name
+                 is new information. */
+              breadcrumb="TUTOR CHAT"
               title={tutorConversationTitle}
               onRenameTitle={handleRenameTutorConversation}
               messages={tutorMessages}
@@ -1498,7 +1700,12 @@ export default function App() {
                 genuine mid-conversation appends reach an AT as insertions. */}
             <ConversationView
               key={currentSection}
-              breadcrumb={`STATS 311 · ${hwTitle} · Section ${currentSection}${
+              /* #397: was `STATS 311 · ${hwTitle} · Section N: ...`,
+                 which repeated both the course code and the homework title
+                 already shown in the top nav directly above -- long enough
+                 that it wrapped to two lines and pushed the transcript down.
+                 The section identity is the only part the nav doesn't say. */
+              breadcrumb={`Section ${currentSection}${
                 currentSectionTitle ? `: ${currentSectionTitle}` : ""
               }`}
               messages={messages}
@@ -1529,7 +1736,19 @@ export default function App() {
                  the affordance to act on. */
               headerActions={
                 conversationId ? (
-                  <Button variant="danger" size="sm" outlined onClick={openRestartDialog}>
+                  /* #248 redesign: `outlined` dropped and .btn--restart added --
+                     the trigger only opens the confirm dialog below, so it sits
+                     quietly in the breadcrumb row's register at rest and takes
+                     on full danger styling on hover/focus. variant="danger" is
+                     kept as the base so the styling degrades safely. See
+                     .btn--restart in packages/ui/styles.css. */
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    className="btn--restart"
+                    leadingIcon="↺"
+                    onClick={openRestartDialog}
+                  >
                     Restart section
                   </Button>
                 ) : undefined

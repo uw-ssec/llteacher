@@ -116,6 +116,7 @@ export function EditableTitle({
   isActive,
 }: EditableTitleProps) {
   const counterId = useId();
+  const hintId = useId();
   const [isEditing, setIsEditing] = useState(false);
   const [pendingValue, setPendingValue] = useState(value);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -306,7 +307,18 @@ export function EditableTitle({
         onKeyDown={handleKeyDown}
         onClick={(e) => e.stopPropagation()}
         aria-label="Edit title"
-        aria-describedby={showCounter ? counterId : undefined}
+        /* #405: the hint is DESCRIBED, not hidden. It carried
+           aria-hidden="true" and the input's only accessible name is "Edit
+           title", so the keybindings -- including blur-to-save, the whole
+           point of #394 -- reached no screen-reader user at all. My comment
+           justified the hiding by claiming "the same information reaches
+           assistive tech through the input's own label and behaviour",
+           which was simply false.
+
+           Order matters: hint first, then the counter when present.
+           aria-describedby is announced on focus, so the static hint should
+           lead; the counter is appended only when it is close to relevant. */
+        aria-describedby={showCounter ? `${hintId} ${counterId}` : hintId}
         disabled={isSubmitting}
       />
       {/* #310: the native `maxLength` attribute is gone. It clamped typing
@@ -330,16 +342,23 @@ export function EditableTitle({
           away from a half-edited title committed it. The rail is 220px, too
           narrow for explicit check/x buttons beside a text field, so this
           takes the hint route the composer already established for its own
-          Enter binding. aria-hidden because the same information reaches
-          assistive tech through the input's own label and behaviour;
-          announcing keycaps on focus would be noise.
+          Enter binding.
 
-          #394: the first version of this said only "enter ↵ · esc to
-          cancel" -- disclosing the two bindings a user could already guess
-          and omitting the one #310 actually named as surprising. Clicking
-          away commits, which is not what most editors do, so it is the
-          binding that most needs saying. */}
-      <span className="editable-title__hint" aria-hidden="true">
+          #394: the first version said only "enter ↵ · esc to cancel" --
+          disclosing the two bindings a user could already guess and omitting
+          the one #310 named as surprising. Clicking away commits, which is
+          not what most editors do, so it is the binding that most needs
+          saying.
+
+          #405: and it was aria-hidden, which meant none of it reached a
+          screen-reader user -- the input's only accessible name is "Edit
+          title". The justification written here was that "the same
+          information reaches assistive tech through the input's own label
+          and behaviour", which was false as written. It is referenced by
+          aria-describedby now. Blur-to-save is MORE surprising when you
+          cannot see the field, not less, so this is the audience that
+          needed it most. */}
+      <span className="editable-title__hint" id={hintId}>
         enter ↵ or click away saves · esc cancels
       </span>
       {showCounter && (
