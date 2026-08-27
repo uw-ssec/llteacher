@@ -1023,6 +1023,81 @@ body {
     pointer-events: auto;
   }
 
+  /* #403: the row that holds the title and its two action controls. The
+     delete button was previously a direct child of
+     .tutor-conversation-item, which is flex-direction: column -- so it
+     became its OWN row between the title and the metadata line, reserving
+     that height on every conversation even while transparent. It belongs
+     beside the rename pencil, which lives inside .editable-title. */
+  .tutor-conversation-item__row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    width: 100%;
+    min-width: 0;
+  }
+
+  .tutor-conversation-item__row .tutor-conversation-item__title {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  /* #289: delete affordance, sibling to the rename pencil. Same visibility
+     model as .editable-title__pencil-btn -- deliberately, since the two sit
+     together and a student should not have to learn two rules for one row.
+     24px target, clearing WCAG 2.5.8 (#297's finding on the pencil).
+
+     #404: pointer-events follow opacity, and the (hover: none) default
+     below keeps it visible on touch. The first version had neither: it was
+     opacity:0 with pointer-events left alone, so on a tablet the control
+     was invisible AND still hit-testable -- an unseeable destructive
+     target. The pencil had already solved this exactly here; I wrote a
+     second, worse version of the same rule instead of matching it. */
+  .tutor-conversation-item__delete {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    inline-size: 24px;
+    block-size: 24px;
+    padding: 0;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition:
+      opacity 120ms ease-out,
+      color 120ms ease-out;
+  }
+
+  @media (hover: none) {
+    .tutor-conversation-item__delete {
+      opacity: 1;
+      pointer-events: auto;
+    }
+  }
+
+  @media (hover: hover) {
+    .tutor-conversation-item:hover .tutor-conversation-item__delete {
+      opacity: 1;
+      pointer-events: auto;
+    }
+  }
+
+  /* Keyboard focus is never gated on hover capability. */
+  .tutor-conversation-item:focus-within .tutor-conversation-item__delete {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .tutor-conversation-item__delete:hover,
+  .tutor-conversation-item__delete:focus-visible {
+    color: var(--color-error);
+  }
+
   .tutor-conversation-item__meta {
     display: flex;
     align-items: center;

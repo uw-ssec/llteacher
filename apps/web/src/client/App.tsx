@@ -551,6 +551,13 @@ export default function App() {
      async callback without waiting on a re-render. */
   const latestTutorSelectionRef = useRef<string | undefined>(undefined);
 
+  /* Mirrors `tutorConversationId` for reads that happen after an await.
+     State captured in a closure is stale by definition once the handler
+     yields, and both directions of that staleness have produced real bugs
+     here (#401, and the inverse it introduced). */
+  const displayedTutorConversationRef = useRef<string | undefined>(undefined);
+  displayedTutorConversationRef.current = tutorConversationId;
+
   /* #235: which tutor conversation (if any) was just created this session,
      so the chat column can autofocus its composer once on mount -- a
      keyboard user should land where the visual focus implicitly went
@@ -614,6 +621,7 @@ export default function App() {
     hasMore: tutorConversationsHasMore,
     refetch: refetchTutorConversations,
     createConversation: createTutorConversationRow,
+    deleteConversation: deleteTutorConversationRow,
     renameConversation: renameTutorConversationRow,
     bumpConversation: bumpTutorConversation,
   } = useTutorConversations(courseId);
@@ -785,6 +793,62 @@ export default function App() {
          handles "my own request finished and I am still current". */
       if (latestTutorSelectionRef.current === id) setPendingTutorSelectionId(undefined);
     }
+  };
+
+  /* #289: deleting the conversation currently on screen has to move the
+     student off it. The rail row disappears either way, but leaving the
+     chat column pointed at a deleted id would keep its transcript rendered
+     with no row selected -- and the next send would post to a conversation
+     the server has soft-deleted. Falls back to the section chat, which is
+     this surface's own default when no tutor conversation is active. */
+  const handleDeleteTutorConversation = async (id: string): Promise<boolean> => {
+    /* #401: invalidate BEFORE awaiting, not after.
+       #392 fixed the case where the deleted conversation was pending when
+       the delete began. This is the other ordering: if the history request
+       resolves DURING the await, selectTutorConversation sets
+       tutorConversationId to this id -- and the comparison below reads the
+       value captured when this closure was created, which is still the old
+       one. The surface was then never cleared: the row vanished from the
+       rail while its transcript stayed on screen, and the next send
+       targeted a soft-deleted id.
+
+       Clearing the ref first removes the race rather than detecting it: the
+       in-flight fetch's own staleness guard now discards its result, so the
+       conversation can never become current while we are deleting it. */
+    if (latestTutorSelectionRef.current === id) {
+      latestTutorSelectionRef.current = undefined;
+      // #398's pending marker, now that #381 has landed: without this the
+      // deleted row's busy state would outlive the row itself, and #398's
+      // repeat-click guard keys off exactly this value.
+      setPendingTutorSelectionId((pending) => (pending === id ? undefined : pending));
+    }
+
+    const ok = await deleteTutorConversationRow(id);
+    if (!ok) return false;
+
+    /* Only the DISPLAYED conversation needs the surface torn down, and
+       "displayed" has to be evaluated NOW, against a ref.
+
+       Reading `tutorConversationId` from this closure is stale in one
+       direction (a conversation that opened during the await is missed --
+       #401). Capturing `id === tutorConversationId` before the await is
+       stale in the other: if the student had A open, started loading B, then
+       deleted A, that captured `true` would tear down B when the delete
+       finished, dumping them back to the section chat for a conversation
+       that was not deleted.
+
+       A ref mirroring the current value is the only reading that is correct
+       in both directions. The invalidate-before-await above still stands --
+       it removes the pending race rather than detecting it; this handles the
+       separate question of what is on screen when the delete returns. */
+    if (displayedTutorConversationRef.current === id) {
+      setTutorConversationId(undefined);
+      setTutorInitialMessages([]);
+      setJustCreatedTutorConversationId(undefined);
+      setTutorHydrationError(null);
+      setTutorHistoryHasMore(false);
+    }
+    return true;
   };
 
   /* #4: TutorConversationsList's "New conversation" button -- lifted here
@@ -1567,6 +1631,7 @@ export default function App() {
           onSelectConversation={handleSelectExistingTutorConversation}
           onCreateConversation={handleCreateTutorConversation}
           onRenameConversation={renameTutorConversationRow}
+          onDeleteConversation={handleDeleteTutorConversation}
           isCollapsed={isTutorSidebarCollapsed}
           onToggleCollapse={() => setIsTutorSidebarCollapsed((c) => !c)}
         />

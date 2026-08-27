@@ -1,3 +1,4 @@
+import { Trash } from "@phosphor-icons/react";
 import { EditableTitle } from "@llteacher/ui";
 import type { ConversationListItemResponse } from "../../shared/types";
 
@@ -44,6 +45,11 @@ export interface ConversationListItemProps {
    *  teacher viewing a student's conversation) can pass false without any
    *  change here. */
   isEditable?: boolean;
+  /** #289: when provided, a delete affordance renders beside the rename
+   *  pencil. The caller owns confirmation -- this only asks. Omitted
+   *  renders nothing, so a non-owner surface stays read-only by default,
+   *  matching `isEditable`'s reasoning. */
+  onRequestDelete?: () => void;
 }
 
 /** "3:45 PM" for today, "Jan 5" otherwise -- short enough for a 240px-ish
@@ -73,6 +79,7 @@ export function ConversationListItem({
   onSelect,
   onRename,
   isEditable = true,
+  onRequestDelete,
 }: ConversationListItemProps) {
   const { id, title, updatedAt, messageCount } = conversation;
   // #233: the row keeps a short, stable accessible name ("Select
@@ -103,31 +110,43 @@ export function ConversationListItem({
         }
         aria-busy={isPending || undefined}
       >
-        <EditableTitle
-          value={title}
-          onSave={onRename}
-          isEditable={isEditable}
-          className="tutor-conversation-item__title"
-          onActivateValue={onSelect}
-          activateLabel={`Select conversation: ${title}`}
-          activateDescribedBy={metaId}
-          /* #389: `isActive` becomes aria-current, and aria-current marks
-             THE current item -- not a set of candidates. Passing
-             `isSelected || isPending` meant that during every switch both
-             the old row (still selected, since tutorConversationId is not
-             reassigned until the fetch resolves) and the new row (pending)
-             claimed it at once, for the whole duration of the fetch.
-
-             A screen-reader user got two current conversations while the
-             live region correctly announced that one of them was still
-             loading -- a structural signal contradicting the spoken one, in
-             the very feature added to make this surface legible.
-
-             `isSelected` only. The pending row still reads as selected
-             visually and carries aria-busy, which is the honest pair:
-             "this is loading", not "this is current". */
-          isActive={isSelected}
-        />
+        {/* #403: title and its action controls share a horizontal row.
+            .tutor-conversation-item is flex-direction: column, so a delete
+            button placed as its direct child became its own row between the
+            title and the metadata -- reserving that height on every
+            conversation even while transparent. The rename pencil never had
+            this problem because it lives inside EditableTitle; the delete
+            control needs the same containment. */}
+        <div className="tutor-conversation-item__row">
+          <EditableTitle
+            value={title}
+            onSave={onRename}
+            isEditable={isEditable}
+            className="tutor-conversation-item__title"
+            onActivateValue={onSelect}
+            activateLabel={`Select conversation: ${title}`}
+            activateDescribedBy={metaId}
+            isActive={isSelected}
+          />
+          {/* #289: DELETE /api/conversations/:id shipped ownership-checked,
+              404-on-not-owned and FK-safe, and no client code called it --
+              from the student's side the rail was append-only. A real
+              <button> sibling to the rename pencil, not nested in anything:
+              the row is a plain div since #295's redesign precisely so
+              adjacent controls stay individually exposed to assistive tech.
+              The accessible name carries the title because "Delete" alone is
+              indistinguishable between rows in a list. */}
+          {onRequestDelete && (
+            <button
+              type="button"
+              className="tutor-conversation-item__delete"
+              onClick={onRequestDelete}
+              aria-label={`Delete conversation: ${title}`}
+            >
+              <Trash size={13} weight="regular" aria-hidden="true" />
+            </button>
+          )}
+        </div>
         <span className="tutor-conversation-item__meta" id={metaId}>
           <span className="tutor-conversation-item__time">{formatUpdatedAt(updatedAt)}</span>
           {/* #233: visible text plus a visually-hidden expansion, not

@@ -221,6 +221,109 @@ describe("TutorConversationsList", () => {
 });
 
 /* --------------------------------------------------------------------------
+   #289: the delete affordance.
+
+   DELETE /api/conversations/:id shipped ownership-checked, 404-on-not-owned
+   and FK-safe, and no client code called it -- from the student's side the
+   rail was append-only.
+   -------------------------------------------------------------------------- */
+describe("TutorConversationsList delete (#289)", () => {
+  /* jsdom toggles <dialog>.open but does not implement showModal()/close().
+     Same stub the design system's own AlertDialog.test.tsx uses -- copied
+     rather than shared because it patches a global prototype, and a helper
+     imported across package boundaries to do that would be a worse thing to
+     own than four lines. The stubs flip `.open` the way a real browser
+     would, since AlertDialog reads it back before acting. */
+  HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
+    this.setAttribute("open", "");
+  };
+  HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
+    this.removeAttribute("open");
+    this.dispatchEvent(new Event("close"));
+  };
+
+  it("offers no delete affordance when the caller supplies no handler", () => {
+    renderList({ conversations: [CONV_A] });
+    expect(screen.queryByRole("button", { name: /^Delete conversation/ })).toBeNull();
+  });
+
+  it("names the conversation in the control, so rows are distinguishable", () => {
+    renderList({ conversations: [CONV_A], onDeleteConversation: vi.fn(async () => true) });
+    // "Delete" alone is identical across every row in a list.
+    expect(screen.getByRole("button", { name: `Delete conversation: ${CONV_A.title}` })).toBeTruthy();
+  });
+
+  it("confirms before deleting, and does not delete on cancel", async () => {
+    const onDeleteConversation = vi.fn(async () => true);
+    renderList({ conversations: [CONV_A], onDeleteConversation });
+
+    await userEvent.click(screen.getByRole("button", { name: `Delete conversation: ${CONV_A.title}` }));
+    // Deletion is soft server-side but irreversible from this UI -- there is
+    // no undo and no trash view, so one click must not be enough.
+    expect(onDeleteConversation).not.toHaveBeenCalled();
+    expect(screen.getByText(/Delete this conversation\?/)).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onDeleteConversation).not.toHaveBeenCalled();
+  });
+
+  it("deletes on confirm and announces it", async () => {
+    const onDeleteConversation = vi.fn(async () => true);
+    renderList({ conversations: [CONV_A], onDeleteConversation });
+
+    await userEvent.click(screen.getByRole("button", { name: `Delete conversation: ${CONV_A.title}` }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    expect(onDeleteConversation).toHaveBeenCalledWith(CONV_A.id);
+    expect(await screen.findByText(`Deleted ${CONV_A.title}`)).toBeTruthy();
+  });
+
+
+  it("announces a delete failure as an alert, not a silent describedby swap", async () => {
+    // Focus stays inside the open dialog while the request runs, and
+    // swapping the text of an aria-describedby target is not reliably
+    // announced -- the existing restart dialog already uses role="alert"
+    // for its failure, and this now matches it.
+    const onDeleteConversation = vi.fn(async () => false);
+    renderList({ conversations: [CONV_A], onDeleteConversation });
+
+    await userEvent.click(screen.getByRole("button", { name: `Delete conversation: ${CONV_A.title}` }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/Couldn't delete that conversation/);
+  });
+
+  it("closes the dialog rather than unmounting it, so focus can be restored", async () => {
+    const onDeleteConversation = vi.fn(async () => true);
+    renderList({ conversations: [CONV_A], onDeleteConversation });
+
+    await userEvent.click(screen.getByRole("button", { name: `Delete conversation: ${CONV_A.title}` }));
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    // The <dialog> element survives the cancel -- AlertDialog's controlled
+    // close() path needs it mounted to run and hand focus back. Unmounting
+    // an open native dialog drops focus to <body>.
+    const dialog = document.querySelector("dialog");
+    expect(dialog).not.toBeNull();
+    expect(dialog?.hasAttribute("open")).toBe(false);
+  });
+
+  it("keeps the dialog open and says so when the delete fails", async () => {
+    const onDeleteConversation = vi.fn(async () => false);
+    renderList({ conversations: [CONV_A], onDeleteConversation });
+
+    await userEvent.click(screen.getByRole("button", { name: `Delete conversation: ${CONV_A.title}` }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    // Closing on failure would leave the student unsure whether it happened,
+    // and the row is still there.
+    expect(await screen.findByText(/Couldn't delete that conversation/)).toBeTruthy();
+    expect(screen.getByText(/has not been deleted/)).toBeTruthy();
+  });
+});
+
+/* --------------------------------------------------------------------------
    #293 / #310 / #290 -- rail feedback and failure handling.
 
    Each of these pins a state the rail could previously reach and render

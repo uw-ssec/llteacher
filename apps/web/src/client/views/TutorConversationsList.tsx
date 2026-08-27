@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { CaretDoubleLeft, CaretDoubleRight, Plus } from "@phosphor-icons/react";
+import { AlertDialog } from "@llteacher/ui";
 import { ConversationListItem } from "../components/ConversationListItem";
 import type { ConversationListItemResponse } from "../../shared/types";
 
@@ -67,6 +68,10 @@ export interface TutorConversationsListProps {
    *  conversation (useTutorConversations' own renameConversation does) or
    *  to nothing; this component only awaits it. */
   onRenameConversation: (id: string, title: string) => Promise<unknown>;
+  /** #289: soft-deletes a conversation. Returns whether it succeeded, so
+   *  this component can surface a failure itself the same way it does for
+   *  create. Omitted hides the delete affordance entirely. */
+  onDeleteConversation?: (id: string) => Promise<boolean>;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
 }
@@ -85,6 +90,7 @@ export function TutorConversationsList({
   onSelectConversation,
   onCreateConversation,
   onRenameConversation,
+  onDeleteConversation,
   isCollapsed,
   onToggleCollapse,
 }: TutorConversationsListProps) {
@@ -106,6 +112,37 @@ export function TutorConversationsList({
     }
   };
 
+  /* #289: the row awaiting confirmation, if any. Deletion is soft
+     server-side but irreversible from this UI -- there is no undo and no
+     trash view -- so it is confirmed rather than done on one click, and the
+     dialog names the conversation so a mis-clicked row is caught before it
+     matters, not after. */
+  /* Two pieces, deliberately: `deleteTarget` is what the dialog RENDERS and
+     survives the close so its copy does not vanish mid-transition;
+     `deleteOpen` is whether it is showing. Driving the dialog by mounting it
+     meant cancelling removed an open native <dialog> outright, so
+     AlertDialog's controlled dialog.close() never ran and focus dropped to
+     <body> instead of returning to the delete trigger. */
+  const [deleteTarget, setDeleteTarget] = useState<ConversationListItemResponse | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const confirmDelete = async () => {
+    if (!deleteTarget || !onDeleteConversation) return;
+    setDeleting(true);
+    const ok = await onDeleteConversation(deleteTarget.id);
+    setDeleting(false);
+    if (ok) {
+      setLiveMessage(`Deleted ${deleteTarget.title}`);
+      setDeleteError(null);
+      setDeleteOpen(false);
+    } else {
+      // Dialog stays open: the row is still there, and closing it would
+      // leave the student unsure whether the delete happened.
+      setDeleteError("Couldn't delete that conversation. Please try again.");
+    }
+  };
   /* #290: selection -- the rail's primary action -- was the one thing the
      #235 live region did not cover. It announced create, rename and
      list-loading, so a screen-reader user activating a row heard nothing
@@ -294,6 +331,17 @@ export function TutorConversationsList({
                 await onRenameConversation(conv.id, title);
                 setLiveMessage(`Renamed to ${title}`);
               }}
+              onRequestDelete={
+                onDeleteConversation
+                  ? () => {
+                      // #402: a failure recorded against a previous row must
+                      // not be shown alongside this one.
+                      setDeleteError(null);
+                      setDeleteTarget(conv);
+                      setDeleteOpen(true);
+                    }
+                  : undefined
+              }
             />
           ))}
         </ul>
@@ -305,6 +353,58 @@ export function TutorConversationsList({
           have exactly 50 conversations"). Static text, not a live region:
           it's present at initial render, not something that appears mid-
           interaction and needs to interrupt anything. */}
+      {/* Mounted whenever a delete has been requested this session, and
+          driven by `open` rather than by mounting/unmounting.
+
+          Conditionally mounting it meant cancelling REMOVED an open native
+          <dialog> outright, so AlertDialog's controlled dialog.close() path
+          never ran and the browser dropped focus to <body> instead of
+          restoring it to the delete trigger that is still sitting there.
+          Keeping it mounted through an open={false} transition lets that
+          path run. */}
+      {deleteTarget && (
+        <AlertDialog
+          open={deleteOpen}
+          title="Delete this conversation?"
+          description={
+            deleteError ? (
+              <>
+                {/* role="alert": focus stays inside the open dialog while
+                    the request runs, and swapping the text of an
+                    aria-describedby target is not reliably announced. The
+                    existing restart dialog already marks its failure this
+                    way -- matching it rather than inventing a quieter
+                    variant. */}
+                <p role="alert">{deleteError}</p>
+                <p>&ldquo;{deleteTarget.title}&rdquo; has not been deleted.</p>
+              </>
+            ) : (
+              <>
+                <p>
+                  &ldquo;{deleteTarget.title}&rdquo; and its messages will no longer appear here. This
+                  can&rsquo;t be undone from the app.
+                </p>
+              </>
+            )
+          }
+          confirmLabel="Delete"
+          onConfirm={() => void confirmDelete()}
+          onCancel={() => {
+            /* #402: AlertDialog disables its buttons and Escape while
+               `confirming`, but a BACKDROP click still reaches onCancel --
+               which would unmount the dialog mid-request. If the delete then
+               failed, `deleteError` was stored with no dialog visible and
+               could surface later against a different row. Ignoring
+               cancellation while the request is in flight matches what the
+               existing restart dialog does. */
+            if (deleting) return;
+            setDeleteOpen(false);
+            setDeleteError(null);
+          }}
+          confirming={deleting}
+        />
+      )}
+
       {!loadError && hasMore && (
         <p className="tutor-sidebar__more-notice">
           Showing your most recent {conversations.length} conversations. Older ones aren't shown yet.

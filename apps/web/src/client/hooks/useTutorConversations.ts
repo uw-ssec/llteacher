@@ -62,6 +62,17 @@ export interface UseTutorConversationsResult {
    *  and revert its displayed value; a null return would look identical to
    *  "saved successfully with no change." */
   renameConversation: (id: string, title: string) => Promise<ConversationListItemResponse>;
+  /** #289: soft-deletes a conversation and removes its row from the local
+   *  list. Returns whether it succeeded -- false lets the caller surface a
+   *  failure rather than leaving a row that looks deleted but isn't.
+   *
+   *  The row is removed only AFTER the server confirms, not optimistically.
+   *  Deletion is the one action here a student cannot undo from the UI, so
+   *  a row that vanishes and then reappears on the next load is a worse
+   *  outcome than a half-second delay -- the opposite of the tradeoff
+   *  renameConversation makes, where an optimistic update is cheap because
+   *  a failed rename rolls back to a value the student can still see. */
+  deleteConversation: (id: string) => Promise<boolean>;
   /** #216: optimistically bumps a conversation's messageCount and
    *  updatedAt (and re-sorts by updatedAt desc, matching
    *  listConversationsForOwner's server-side ordering) -- called by App.tsx
@@ -246,6 +257,24 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     [courseId],
   );
 
+  const deleteConversation = useCallback(async (id: string): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/conversations/${id}`, { method: "DELETE" });
+      // 404 counts as success here -- the row is gone either way, and
+      // keeping it on screen because someone deleted it in another tab
+      // would be the wrong reading of "failed".
+      if (!res.ok && res.status !== 404) {
+        throw new Error(`failed to delete conversation: ${res.status}`);
+      }
+      mutationSeqRef.current += 1;
+      setConversations((prev) => prev.filter((c) => c.id !== id));
+      return true;
+    } catch (err: unknown) {
+      console.error("[useTutorConversations.deleteConversation]", err);
+      return false;
+    }
+  }, []);
+
   const renameConversation = useCallback(async (id: string, title: string): Promise<ConversationListItemResponse> => {
     const previousRow = conversationsRef.current.find((c) => c.id === id);
 
@@ -313,6 +342,7 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     hasMore,
     refetch,
     createConversation,
+    deleteConversation,
     renameConversation,
     bumpConversation,
   };
