@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup, act } from "@testing-library/react";
+import { render, screen, cleanup, act, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ErrorBoundary } from "./ErrorBoundary";
 
@@ -237,6 +237,80 @@ describe("ErrorBoundary retry policy (#310)", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "custom retry" }));
     expect(screen.getByRole("button", { name: "custom retry" })).toBeTruthy();
+    spy.mockRestore();
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #406 / #407 -- defects in #396's own fix.
+   -------------------------------------------------------------------------- */
+describe("ErrorBoundary retry lifecycle (#406, #407)", () => {
+  it("keeps focus in the fallback when the failed retry button is removed (#406)", async () => {
+    const spy = suppressConsoleError();
+    render(
+      <ErrorBoundary>
+        <Bomb shouldThrow={true} />
+      </ErrorBoundary>,
+    );
+
+    const retry = screen.getByRole("button", { name: /Try again/ });
+    retry.focus();
+    expect(document.activeElement).toBe(retry);
+
+    // Deterministic throw: the retry fails and the button is withdrawn.
+    await userEvent.click(retry);
+    expect(screen.queryByRole("button", { name: /Try again/ })).toBeNull();
+
+    // Removing the focused element without moving focus drops it to <body>
+    // -- exactly what this boundary's #298 work exists to prevent, on the
+    // path a keyboard user is most likely to take.
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(document.querySelector(".error-boundary-fallback"));
+    spy.mockRestore();
+  });
+
+  it("does not clear the retry marker before a commit-phase error can be attributed (#407)", async () => {
+    /* A retried subtree that RENDERS fine and then throws in an effect.
+       componentDidUpdate runs before React delivers that error to
+       componentDidCatch, so clearing the marker synchronously there made
+       the catch see `retried === false` -- and a deterministic commit-phase
+       failure would keep offering a retry forever.
+
+       The render/commit switch is driven from OUTSIDE the boundary: a
+       control rendered inside it is unreachable while the fallback is
+       showing, which is what made the first version of this test exercise
+       an ordinary render failure instead. */
+    const spy = suppressConsoleError();
+    let setMode!: (m: "render" | "commit") => void;
+
+    function CommitBomb({ mode }: { mode: "render" | "commit" }) {
+      useEffect(() => {
+        if (mode === "commit") throw new Error("commit-phase boom");
+      }, [mode]);
+      if (mode === "render") throw new Error("render boom");
+      return <p>rendered</p>;
+    }
+
+    function Harness() {
+      const [mode, setMode_] = useState<"render" | "commit">("render");
+      setMode = setMode_;
+      return (
+        <ErrorBoundary>
+          <CommitBomb mode={mode} />
+        </ErrorBoundary>
+      );
+    }
+
+    render(<Harness />);
+    expect(screen.getByRole("button", { name: /Try again/ })).toBeTruthy();
+
+    // Next attempt gets past render and dies in the effect instead.
+    act(() => setMode("commit"));
+    await userEvent.click(screen.getByRole("button", { name: /Try again/ }));
+
+    // The retry DID fail, just later in the commit. It must still count,
+    // or the boundary offers a retry that is certain to fail forever.
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Try again/ })).toBeNull());
     spy.mockRestore();
   });
 });

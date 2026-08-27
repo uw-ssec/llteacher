@@ -88,6 +88,20 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
       this.fallbackRef.current?.focus();
     }
 
+    /* #406: the retry button owns focus at the moment it is activated. If
+       the render throws again, `retryFailed` becomes true and that button
+       is REMOVED -- and the condition above does not fire, because both the
+       previous and current error are non-null. The browser then drops focus
+       to <body>.
+
+       This boundary's #298 work exists precisely to stop a render error
+       dropping focus to <body>, so the one-retry policy reintroduced the
+       thing it was written to prevent -- on the path a keyboard user is
+       most likely to take, since they had just pressed the button. */
+    if (!prevState.retryFailed && this.state.retryFailed && !this.props.fallback) {
+      this.fallbackRef.current?.focus();
+    }
+
     /* #396: a retry that WORKED must not count against the next, unrelated
        error. `reset` sets `retried`, and componentDidCatch only cleared it
        when the retry failed -- so after any successful recovery the flag
@@ -102,9 +116,34 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
        The error-to-success edge is the signal. A retry that throws again
        never commits it -- React re-enters the error state instead -- so the
        failed-retry classification still works. */
+    /* #396: a retry that WORKED must not count against the next, unrelated
+       error. `reset` sets `retried`, and componentDidCatch only cleared it
+       when the retry failed -- so after any successful recovery the flag
+       stayed true for the boundary's lifetime and the next error was
+       classified as a failed retry before the student had tried anything.
+
+       #407: but this cannot clear SYNCHRONOUSLY here. If the retried
+       subtree renders successfully and then throws in componentDidMount or
+       a layout effect, this runs BEFORE React delivers that commit-phase
+       error to componentDidCatch -- which would then see `retried === false`
+       and never set retryFailed, so a deterministic commit-phase failure
+       would keep offering a retry forever. The previous code had the
+       opposite bug; getting the marker's lifetime right in both directions
+       is the actual requirement.
+
+       Deferring past the commit closes both: a commit-phase error is
+       delivered before this microtask runs, so componentDidCatch still sees
+       the marker, while an ordinary successful retry clears it a tick later
+       with nothing depending on the gap. */
     if (prevState.error && !this.state.error) {
-      this.retried = false;
-      if (this.state.retryFailed) this.setState({ retryFailed: false });
+      queueMicrotask(() => {
+        // Re-check: a commit-phase throw may have re-entered the error
+        // state between scheduling and running, and that retry did fail.
+        if (!this.state.error) {
+          this.retried = false;
+          if (this.state.retryFailed) this.setState({ retryFailed: false });
+        }
+      });
     }
   }
 
