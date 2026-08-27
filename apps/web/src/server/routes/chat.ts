@@ -985,6 +985,20 @@ async function resolveConversation(
   | Response
 > {
   if (envelope.conversationId) {
+    // #279: THIS BRANCH MUST STAY READ-ONLY. chatHandler starts it
+    // speculatively, BEFORE the rate-limit gate has resolved (the preflight
+    // at chatHandler's `preflightResolution`, ~line 1306 below, gated on
+    // this same `conversationId` check; its own comment carries the full
+    // argument), precisely because it writes nothing -- that is the entire
+    // reason overlapping it with the reservation cannot orphan anything. A
+    // write added here (a `lastAccessedAt` touch, a lazy backfill, an
+    // access-audit row) would silently reintroduce the bug that overlap was
+    // designed around: a request that goes on to 429 would still have left
+    // that write behind. If this branch ever needs to write, move the write
+    // below the gate in chatHandler, or drop the preflight -- do not just
+    // add it here. The other two branches below already create rows, which
+    // is why they are deliberately NOT started early.
+    //
     // #217/#222: getOwnedConversationOrNull collapses "doesn't exist",
     // "exists but isn't yours", and "exists, is yours, but soft-deleted"
     // into the same null -> 404, matching routes/conversations.ts's

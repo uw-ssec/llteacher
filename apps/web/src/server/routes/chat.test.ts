@@ -684,6 +684,9 @@ describe("POST /api/chat", () => {
     beforeEach(() => {
       getOwnedConversationOrNullMock.mockResolvedValue(existingConv);
       getLastMessagesMock.mockResolvedValue([]);
+      // Not covered by the outer beforeEach (only the hint-specific blocks
+      // reset it), and the "no write at all" assertion below reads it.
+      recordHintRequestMock.mockReset();
     });
 
     // Requirement 1 (already landed, locked here against regression): the
@@ -785,7 +788,17 @@ describe("POST /api/chat", () => {
     // The 429 must still win the race it is now running: the overlapping
     // read may well have resolved a 404 first, and none of the per-turn
     // work below the gate may start.
-    it("still 429s (not 404s, and with no follow-on work) even though the conversation read ran alongside it", async () => {
+    //
+    // The second half is the real invariant, and it is stronger than "the
+    // later stages didn't run": NOTHING WROTE. The entire justification for
+    // starting the conversation lookup ahead of the rate-limit gate is that
+    // resolveConversation's conversationId branch (chat.ts, see its own
+    // "MUST STAY READ-ONLY" comment) writes nothing -- so a write added
+    // there later, of any shape, must fail here rather than silently
+    // reintroducing the orphaned-row bug the overlap was designed around.
+    // Hence every write-shaped mock in this file is asserted unused, not
+    // just the ones downstream of the gate.
+    it("still 429s (not 404s) and performs no write at all, even though the conversation read ran alongside it", async () => {
       reserveRateLimitSlotMock.mockResolvedValue(21);
       getOwnedConversationOrNullMock.mockResolvedValue(null);
 
@@ -796,10 +809,25 @@ describe("POST /api/chat", () => {
 
       expect(res.status).toBe(429);
       expect(res.headers.get("Retry-After")).toBeTruthy();
-      expect(acquireConversationTurnLockMock).not.toHaveBeenCalled();
+      // Reads that live below the gate: not reached.
       expect(getLastMessagesMock).not.toHaveBeenCalled();
-      expect(appendMessageMock).not.toHaveBeenCalled();
       expect(streamTextMock).not.toHaveBeenCalled();
+      // Every write this route can make, from inside resolveConversation's
+      // read branch or anywhere after it. The reservation itself (an atomic
+      // increment) is the ONLY write a 429'd request is allowed to leave
+      // behind -- that one is deliberate and unconditional (#265).
+      for (const writeMock of [
+        createConversationMock,
+        startSectionConversationMock,
+        appendMessageMock,
+        acquireConversationTurnLockMock,
+        releaseConversationTurnLockMock,
+        pinConversationPromptTemplateMock,
+        finalizeAssistantTurnMock,
+        recordHintRequestMock,
+      ]) {
+        expect(writeMock).not.toHaveBeenCalled();
+      }
     });
 
     // The overlapping read is DISCARDED on the 429 path, so its rejection
