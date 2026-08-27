@@ -26,6 +26,7 @@ function renderList(overrides: Partial<React.ComponentProps<typeof TutorConversa
   const onCreateConversation = vi.fn(async () => true);
   const onRenameConversation = vi.fn(async () => undefined);
   const onToggleCollapse = vi.fn();
+  const onLoadMore = vi.fn();
   const utils = render(
     <TutorConversationsList
       courseId="course-a"
@@ -36,6 +37,9 @@ function renderList(overrides: Partial<React.ComponentProps<typeof TutorConversa
       awaitingCourseContext={false}
       onRetryLoad={() => {}}
       hasMore={false}
+      onLoadMore={onLoadMore}
+      loadingMore={false}
+      loadMoreError={false}
       selectedConversationId={undefined}
       onSelectConversation={onSelectConversation}
       onCreateConversation={onCreateConversation}
@@ -45,7 +49,7 @@ function renderList(overrides: Partial<React.ComponentProps<typeof TutorConversa
       {...overrides}
     />,
   );
-  return { ...utils, onSelectConversation, onCreateConversation, onRenameConversation, onToggleCollapse };
+  return { ...utils, onSelectConversation, onCreateConversation, onRenameConversation, onToggleCollapse, onLoadMore };
 }
 
 describe("TutorConversationsList", () => {
@@ -72,22 +76,42 @@ describe("TutorConversationsList", () => {
     expect(screen.queryByText(/Start one to ask about anything outside a section\./)).toBeNull();
   });
 
-  // #280: the list route pages at 50 with no load-more wired -- this makes
-  // that ceiling visible instead of silent.
-  describe("hasMore notice (#280)", () => {
-    it("shows a notice when hasMore is true", () => {
+  /* #280 (requirement 2): the load-more control that REPLACED the interim
+     "older ones aren't shown yet" notice. `hasMore` now means "there is a
+     next page to ask for", and going false is the honest end state --
+     everything is on screen, so nothing is rendered. */
+  describe("load more (#280)", () => {
+    it("offers the load-more button when hasMore is true", () => {
       renderList({ conversations: [CONV_A], hasMore: true });
-      expect(screen.getByText(/older ones aren't shown yet/i)).toBeTruthy();
+      expect(screen.getByRole("button", { name: /load older conversations/i })).toBeTruthy();
     });
 
-    it("does not show the notice when hasMore is false", () => {
+    it("renders no load-more affordance when hasMore is false", () => {
       renderList({ conversations: [CONV_A], hasMore: false });
-      expect(screen.queryByText(/older ones aren't shown yet/i)).toBeNull();
+      expect(screen.queryByRole("button", { name: /load older conversations/i })).toBeNull();
     });
 
-    it("does not show the notice alongside loadError", () => {
+    it("does not offer load-more alongside loadError (Try again reloads from page 1 instead)", () => {
       renderList({ loadError: true, hasMore: true });
-      expect(screen.queryByText(/older ones aren't shown yet/i)).toBeNull();
+      expect(screen.queryByRole("button", { name: /load older conversations/i })).toBeNull();
+    });
+
+    it("clicking it calls onLoadMore", async () => {
+      const { onLoadMore } = renderList({ conversations: [CONV_A], hasMore: true });
+      await userEvent.click(screen.getByRole("button", { name: /load older conversations/i }));
+      expect(onLoadMore).toHaveBeenCalledTimes(1);
+    });
+
+    it("disables the button while a page is in flight", () => {
+      renderList({ conversations: [CONV_A], hasMore: true, loadingMore: true });
+      const btn = screen.getByRole("button", { name: /loading/i }) as HTMLButtonElement;
+      expect(btn.disabled).toBe(true);
+    });
+
+    it("surfaces a load-more failure without hiding the button (the page is still there to ask for)", () => {
+      renderList({ conversations: [CONV_A], hasMore: true, loadMoreError: true });
+      expect(screen.getByRole("button", { name: /load older conversations/i })).toBeTruthy();
+      expect(screen.getByRole("alert").textContent).toMatch(/load older conversations/i);
     });
   });
 
@@ -179,6 +203,9 @@ describe("TutorConversationsList", () => {
         awaitingCourseContext={false}
         onRetryLoad={() => {}}
         hasMore={false}
+        onLoadMore={() => {}}
+        loadingMore={false}
+        loadMoreError={false}
         selectedConversationId={undefined}
         onSelectConversation={() => {}}
         onCreateConversation={async () => true}
@@ -436,6 +463,9 @@ describe("TutorConversationsList selection feedback (#290)", () => {
         awaitingCourseContext={false}
         onRetryLoad={() => {}}
         hasMore={false}
+        onLoadMore={() => {}}
+        loadingMore={false}
+        loadMoreError={false}
         selectedConversationId={CONV_A.id}
         pendingConversationId={undefined}
         onSelectConversation={() => {}}
@@ -513,6 +543,9 @@ describe("TutorConversationsList announcements and retry (#399, #400)", () => {
         awaitingCourseContext={false}
         onRetryLoad={() => {}}
         hasMore={false}
+        onLoadMore={() => {}}
+        loadingMore={false}
+        loadMoreError={false}
         selectedConversationId={undefined}
         pendingConversationId={undefined}
         onSelectConversation={() => {}}

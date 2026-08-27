@@ -898,6 +898,34 @@ body {
     text-wrap: pretty;
   }
 
+  /* #280: the rail's load-more affordance. Reuses .tutor-sidebar__retry's
+     treatment rather than inventing a third button idiom for this 220px
+     rail -- it is the same "quiet, full-width, accent-outlined" role. */
+  .tutor-sidebar__more {
+    padding: var(--space-2) var(--space-1) var(--space-4);
+  }
+
+  .tutor-sidebar__load-more {
+    width: 100%;
+    border: 1px solid var(--color-accent);
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--color-accent);
+    font-size: var(--font-size-sm);
+    padding: var(--space-1) var(--space-2);
+    cursor: pointer;
+    transition: background-color 120ms ease-out;
+  }
+
+  .tutor-sidebar__load-more:hover:not(:disabled) {
+    background-color: var(--color-accent-faint);
+  }
+
+  .tutor-sidebar__load-more:disabled {
+    opacity: 0.4;
+    cursor: progress;
+  }
+
   .tutor-sidebar__list {
     list-style: none;
     padding: 0;
@@ -1658,6 +1686,49 @@ body {
 
   .conversation-header-title .editable-title__value {
     max-width: 60ch;
+  }
+
+  /* -------------------------------------------------------------------------
+     #280: the "there is more history above" zone, between the header and
+     the first message. Either a static notice (a caller with no paging
+     wired) or the Load older messages control.
+     ------------------------------------------------------------------------- */
+  .conversation-history-notice {
+    margin: 0 0 var(--space-4);
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+  }
+
+  .conversation-history-more {
+    margin: 0 0 var(--space-4);
+  }
+
+  .conversation-history-more__btn {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+    padding: var(--space-1) var(--space-3);
+    cursor: pointer;
+    transition:
+      background-color 120ms ease-out,
+      color 120ms ease-out;
+  }
+
+  .conversation-history-more__btn:hover:not(:disabled) {
+    background-color: var(--color-accent-faint);
+    color: var(--color-accent);
+  }
+
+  .conversation-history-more__btn:disabled {
+    opacity: 0.5;
+    cursor: progress;
+  }
+
+  .conversation-history-more .conversation-history-notice {
+    margin: var(--space-1) 0 0;
+    color: var(--color-error);
   }
 
   /* -------------------------------------------------------------------------
