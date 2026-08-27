@@ -1567,6 +1567,21 @@ export async function chatHandler(c: Context<AppEnv>) {
   // degrades to "this turn has no fallback", which is exactly the behaviour
   // of the overwhelming majority of configs (none has a fallback set) and
   // therefore a path already exercised on every request today.
+  //
+  // EAGER rather than resolved lazily inside the failover, and the cost is
+  // real enough to state: a config that names a fallback pays one extra Neon
+  // read per turn (plus a credential read, only if that fallback row has a
+  // credentialId -- otherwise the key is an env lookup) even on turns where
+  // the primary answers fine. A config that names NO fallback pays nothing
+  // at all: resolveFallbackLLMConfig short-circuits on the null column
+  // without issuing a query, which is every config today.
+  //
+  // Eager wins on the thing that matters more than those reads: an
+  // instructor who configured a fallback believes they have one, and a
+  // fallback whose credential is missing or whose row was retired is a fact
+  // an operator needs BEFORE the primary goes down. Resolving lazily would
+  // surface it for the first time mid-outage, on the one code path that
+  // exists precisely because something is already wrong.
   let fallbackConfig: ResolvedLLMConfig | null = null;
   let fallbackProviderClient: ReturnType<typeof buildProviderClient> | null = null;
   try {
