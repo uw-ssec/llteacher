@@ -27,6 +27,10 @@ import type { ConversationListItemResponse } from "../../shared/types";
 export interface ConversationListItemProps {
   conversation: ConversationListItemResponse;
   isSelected: boolean;
+  /** #290: this row's history fetch is in flight. Rendered as selected (so
+   *  the click visibly registers immediately) plus `aria-busy`, which is
+   *  what tells assistive tech the region is mid-update rather than done. */
+  isPending?: boolean;
   onSelect: () => void;
   /** Persists a rename for this row's conversation. Rejects on failure --
    *  see EditableTitle's doc comment for how that's surfaced inline. */
@@ -65,6 +69,7 @@ function formatUpdatedAt(iso: string): string {
 export function ConversationListItem({
   conversation,
   isSelected,
+  isPending = false,
   onSelect,
   onRename,
   isEditable = true,
@@ -81,12 +86,22 @@ export function ConversationListItem({
   const metaId = `tutor-conversation-item__meta-${id}`;
   return (
     <li className="tutor-conversation-item-wrap">
+      {/* #290: a pending row reads as selected. The click has to produce a
+          visible change at once -- selection state used to derive entirely
+          from the fetched result, so the whole in-flight window looked
+          identical to a dead control, and the natural response (click
+          again) just queued a duplicate fetch. */}
       <div
         className={
-          isSelected
-            ? "tutor-conversation-item tutor-conversation-item--selected"
-            : "tutor-conversation-item"
+          [
+            "tutor-conversation-item",
+            isSelected || isPending ? "tutor-conversation-item--selected" : "",
+            isPending ? "tutor-conversation-item--pending" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")
         }
+        aria-busy={isPending || undefined}
       >
         <EditableTitle
           value={title}
@@ -96,6 +111,21 @@ export function ConversationListItem({
           onActivateValue={onSelect}
           activateLabel={`Select conversation: ${title}`}
           activateDescribedBy={metaId}
+          /* #389: `isActive` becomes aria-current, and aria-current marks
+             THE current item -- not a set of candidates. Passing
+             `isSelected || isPending` meant that during every switch both
+             the old row (still selected, since tutorConversationId is not
+             reassigned until the fetch resolves) and the new row (pending)
+             claimed it at once, for the whole duration of the fetch.
+
+             A screen-reader user got two current conversations while the
+             live region correctly announced that one of them was still
+             loading -- a structural signal contradicting the spoken one, in
+             the very feature added to make this surface legible.
+
+             `isSelected` only. The pending row still reads as selected
+             visually and carries aria-busy, which is the honest pair:
+             "this is loading", not "this is current". */
           isActive={isSelected}
         />
         <span className="tutor-conversation-item__meta" id={metaId}>

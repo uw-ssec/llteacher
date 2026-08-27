@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TutorConversationsList } from "./TutorConversationsList";
 import type { ConversationListItemResponse } from "../../shared/types";
@@ -33,6 +33,8 @@ function renderList(overrides: Partial<React.ComponentProps<typeof TutorConversa
       conversations={[]}
       loading={false}
       loadError={false}
+      awaitingCourseContext={false}
+      onRetryLoad={() => {}}
       hasMore={false}
       selectedConversationId={undefined}
       onSelectConversation={onSelectConversation}
@@ -174,6 +176,8 @@ describe("TutorConversationsList", () => {
         conversations={[]}
         loading={false}
         loadError={false}
+        awaitingCourseContext={false}
+        onRetryLoad={() => {}}
         hasMore={false}
         selectedConversationId={undefined}
         onSelectConversation={() => {}}
@@ -213,5 +217,221 @@ describe("TutorConversationsList", () => {
       expect(await screen.findByRole("button", { name: "Rename: Chat A" })).toBeTruthy();
       expect(screen.getByText("Title already in use")).toBeTruthy();
     });
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #293 / #310 / #290 -- rail feedback and failure handling.
+
+   Each of these pins a state the rail could previously reach and render
+   misleadingly. They are written against the props, not the hook, because
+   this component is presentational (#223) -- the hook's own half of #293 is
+   covered in useTutorConversations.test.ts.
+   -------------------------------------------------------------------------- */
+describe("TutorConversationsList empty state and course context (#293)", () => {
+  it("does not claim 'No conversations yet' before course context has arrived", () => {
+    // The exact state the rail hit on EVERY page load for one round-trip:
+    // not loading, no error, zero rows -- but only because courseId hadn't
+    // resolved. A returning student with eight conversations was told their
+    // work was gone.
+    renderList({
+      courseId: undefined,
+      courseContextLoading: true,
+      awaitingCourseContext: true,
+      loading: false,
+      conversations: [],
+    });
+    expect(screen.queryByText(/Start one to ask about/)).toBeNull();
+  });
+
+  it("still shows the empty state once course context exists and the list is genuinely empty", () => {
+    renderList({ awaitingCourseContext: false, loading: false, conversations: [] });
+    expect(screen.getByText(/Start one to ask about/)).toBeTruthy();
+  });
+
+  it("renders the disabled-button reason as visible text, not only sr-only/title", () => {
+    renderList({ courseId: undefined, courseContextLoading: true, awaitingCourseContext: true });
+    const reason = screen.getByText("Loading course information…");
+    // The regression: this used to carry className="sr-only", so a sighted
+    // student on a tablet -- no hover, so no title tooltip either -- got a
+    // button that did nothing and said nothing.
+    expect(reason.className).not.toContain("sr-only");
+  });
+
+  it("distinguishes 'still loading' from 'no course at all' in that visible reason", () => {
+    renderList({ courseId: undefined, courseContextLoading: false, awaitingCourseContext: true });
+    expect(screen.getByText(/No course selected yet/)).toBeTruthy();
+  });
+});
+
+describe("TutorConversationsList load failure (#310)", () => {
+  it("keeps showing the rows it already had when a refresh fails", () => {
+    renderList({ loadError: true, conversations: [CONV_A] });
+    // The rail no longer clears itself on a failed fetch, so the student's
+    // conversations do not appear deleted by one 502 during a deploy.
+    expect(screen.getByText(CONV_A.title)).toBeTruthy();
+    expect(screen.getByText(/may be out of date/)).toBeTruthy();
+  });
+
+  it("offers a retry that calls back, rather than leaving the rail dead for the session", async () => {
+    const onRetryLoad = vi.fn();
+    renderList({ loadError: true, onRetryLoad });
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRetryLoad).toHaveBeenCalledTimes(1);
+  });
+
+  it("says 'couldn't load' rather than 'out of date' when there is genuinely nothing to show", () => {
+    renderList({ loadError: true, conversations: [] });
+    expect(screen.getByText("Couldn't load conversations.")).toBeTruthy();
+  });
+});
+
+describe("TutorConversationsList selection feedback (#290)", () => {
+  it("does not mark a pending row aria-current -- only the settled one is current (#389)", () => {
+    renderList({
+      conversations: [CONV_A, { ...CONV_A, id: "conv-b", title: "Chat B" }],
+      selectedConversationId: CONV_A.id,
+      pendingConversationId: "conv-b",
+    });
+    // aria-current marks THE current item. Two at once contradicts the live
+    // region, which correctly says one of them is still loading.
+    expect(document.querySelectorAll('[aria-current="true"]').length).toBe(1);
+    // ...and it is the one actually on screen, not the one loading.
+    expect(document.querySelector('[aria-current="true"]')?.textContent).toContain(CONV_A.title);
+    // The pending row still reads as busy -- the click is still visibly
+    // registered, which is what #290 was for.
+    expect(document.querySelector('[aria-busy="true"]')).not.toBeNull();
+  });
+
+  it("marks the pending row busy and selected while its history is in flight", () => {
+    renderList({
+      conversations: [CONV_A],
+      selectedConversationId: undefined,
+      pendingConversationId: CONV_A.id,
+    });
+    // Selection state used to derive entirely from the FETCHED result, so
+    // the whole in-flight window looked identical to a dead control.
+    const busy = document.querySelector('[aria-busy="true"]');
+    expect(busy).not.toBeNull();
+    expect(busy?.className).toContain("tutor-conversation-item--selected");
+  });
+
+  it("announces the in-flight selection, then the opened conversation", () => {
+    const { rerender } = renderList({
+      conversations: [CONV_A],
+      pendingConversationId: CONV_A.id,
+    });
+    expect(screen.getByText(new RegExp(`Loading conversation ${CONV_A.title}`))).toBeTruthy();
+
+    rerender(
+      <TutorConversationsList
+        courseId="course-a"
+        courseContextLoading={false}
+        conversations={[CONV_A]}
+        loading={false}
+        loadError={false}
+        awaitingCourseContext={false}
+        onRetryLoad={() => {}}
+        hasMore={false}
+        selectedConversationId={CONV_A.id}
+        pendingConversationId={undefined}
+        onSelectConversation={() => {}}
+        onCreateConversation={async () => true}
+        onRenameConversation={async () => undefined}
+        isCollapsed={false}
+        onToggleCollapse={() => {}}
+      />,
+    );
+    expect(screen.getByText(`Opened ${CONV_A.title}`)).toBeTruthy();
+  });
+
+  it("leaves a settled selection un-busy", () => {
+    renderList({
+      conversations: [CONV_A],
+      selectedConversationId: CONV_A.id,
+      pendingConversationId: undefined,
+    });
+    expect(document.querySelector('[aria-busy="true"]')).toBeNull();
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #398 / #399 / #400 -- defects found by a high-effort re-review of the
+   fixes in this PR, not of the original code.
+   -------------------------------------------------------------------------- */
+describe("TutorConversationsList announcements and retry (#399, #400)", () => {
+  it("still announces a rename after a conversation has been selected (#399)", async () => {
+    const onRenameConversation = vi.fn(async () => undefined);
+    renderList({
+      conversations: [CONV_A],
+      selectedConversationId: CONV_A.id,
+      onRenameConversation,
+    });
+
+    // `selectionMessage ?? liveMessage` made "Opened X" permanent once
+    // anything was selected, masking every later action announcement --
+    // a regression of #235 inside the PR meant to improve this surface.
+    await userEvent.click(screen.getByRole("button", { name: `Rename: ${CONV_A.title}` }));
+    const input = screen.getByLabelText("Edit title");
+    await userEvent.clear(input);
+    await userEvent.type(input, "Renamed thing{Enter}");
+
+    expect(await screen.findByText("Renamed to Renamed thing")).toBeTruthy();
+  });
+
+  it("still announces a create after a conversation has been selected (#399)", async () => {
+    renderList({
+      conversations: [CONV_A],
+      selectedConversationId: CONV_A.id,
+      onCreateConversation: vi.fn(async () => true),
+    });
+    await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+    expect(await screen.findByText("Conversation created")).toBeTruthy();
+  });
+
+  it("does not leave the live region stuck on Loading after a cancelled selection", async () => {
+    // Found re-reviewing #399's own fix: splitting the announcement across
+    // two effects left no writer for "pending ended without opening
+    // anything" -- the student navigates to a homework section and the
+    // region keeps saying "Loading conversation X…" indefinitely.
+    const { rerender } = renderList({
+      conversations: [CONV_A],
+      pendingConversationId: CONV_A.id,
+    });
+    expect(screen.getByText(/Loading conversation/)).toBeTruthy();
+
+    rerender(
+      <TutorConversationsList
+        courseId="course-a"
+        courseContextLoading={false}
+        conversations={[CONV_A]}
+        loading={false}
+        loadError={false}
+        awaitingCourseContext={false}
+        onRetryLoad={() => {}}
+        hasMore={false}
+        selectedConversationId={undefined}
+        pendingConversationId={undefined}
+        onSelectConversation={() => {}}
+        onCreateConversation={async () => true}
+        onRenameConversation={async () => undefined}
+        isCollapsed={false}
+        onToggleCollapse={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(screen.queryByText(/Loading conversation/)).toBeNull());
+  });
+
+  it("disables the retry while a load is in flight (#400)", () => {
+    renderList({ loadError: true, loading: true });
+    const retry = screen.getByRole("button", { name: /Retrying/ });
+    expect((retry as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("offers the retry again once the load settles (#400)", () => {
+    renderList({ loadError: true, loading: false });
+    const retry = screen.getByRole("button", { name: "Try again" });
+    expect((retry as HTMLButtonElement).disabled).toBe(false);
   });
 });
