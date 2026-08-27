@@ -1,0 +1,31 @@
+-- #281 follow-up (PR review finding): the sub-millisecond half of the
+-- conversation-list cursor bug.
+--
+-- conversations.updated_at is the list cursor's sort key, and every read of
+-- it goes through a JS Date, which cannot represent anything finer than a
+-- millisecond. The column was plain timestamptz (microsecond), and
+-- createConversation inserts without an explicit value -- so a row took
+-- defaultNow()'s real microsecond timestamp and kept it until that
+-- conversation's first message or rename.
+--
+-- A cursor built from such a row was therefore truncated on the way out:
+-- stored .000615, compared as .000. The compound (updated_at, id) cursor
+-- added earlier in #281 cannot rescue that -- the truncated value is
+-- neither strictly less than NOR equal to the stored one, so a sibling
+-- inside the same millisecond matched no branch of the comparison and was
+-- dropped from BOTH pages. That is the exact defect #281 was filed about,
+-- surviving underneath its own fix.
+--
+-- Narrowing the column to millisecond makes Postgres store what the rest of
+-- the stack already assumes, so the round-trip is lossless. No writer
+-- changes: $onUpdate and appendMessage already write millisecond JS Dates;
+-- only defaultNow() was ever finer.
+--
+-- This is a column rewrite, not a backfill script -- Postgres re-writes
+-- existing values as part of the type change, rounding each to the nearest
+-- millisecond. That is the intended outcome (it is the value the
+-- application has always read), and it cannot reorder rows relative to each
+-- other by more than the sub-millisecond noise the cursor could not
+-- represent anyway. Two rows that round to the SAME millisecond become a
+-- genuine tie, which the (updated_at, id) tiebreaker already handles.
+ALTER TABLE "conversations" ALTER COLUMN "updated_at" SET DATA TYPE timestamp (3) with time zone;

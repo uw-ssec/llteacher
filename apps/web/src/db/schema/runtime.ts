@@ -119,7 +119,28 @@ export const conversations = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true })
+    /* #281 follow-up: `precision: 3` (millisecond), not the timestamptz
+       default of microsecond. This column is the conversation-list cursor's
+       sort key, and every read of it goes through a JS `Date` -- which
+       cannot represent anything finer than a millisecond. Left at
+       microsecond, a row inserted by `createConversation` (no explicit
+       value, so `defaultNow()` -- a real microsecond timestamp) was handed
+       to the cursor truncated: stored `.000615`, compared as `.000`. The
+       compound (updatedAt, id) cursor cannot rescue that, because the
+       truncated value is neither strictly less than NOR equal to the stored
+       one, so a sibling inside the same millisecond matched no branch of
+       the comparison and was dropped from BOTH pages -- the exact defect
+       #281 is about, surviving underneath its own fix.
+
+       Scoped to this one column deliberately: it is the only cursor sort
+       key on this table. `createdAt` is never paged on, and the same
+       microsecond/millisecond mismatch elsewhere in the schema is not this
+       issue's to change.
+
+       Changes no writer -- `$onUpdate` and appendMessage already write
+       millisecond `new Date()`s. It makes the column store what the rest of
+       the stack has always assumed. */
+    updatedAt: timestamp("updated_at", { withTimezone: true, precision: 3 })
       .notNull()
       .defaultNow()
       .$onUpdate(() => new Date()),
