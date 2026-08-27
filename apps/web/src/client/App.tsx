@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { useNavigate } from "react-router";
@@ -152,6 +152,12 @@ export function useStudentHomework() {
    chat below (#4 introduced the second consumer; this was inlined in App
    before). See the two useChat call sites for why they're separate Chat
    instances rather than one shared one. */
+/** #277: cap on how often a streamed response re-renders the chat surface,
+ *  in milliseconds. One animation frame at 60Hz -- fast enough that the
+ *  reply still reads as continuously typed, slow enough that the render
+ *  rate is bounded by the display rather than by the model's token rate. */
+const STREAM_THROTTLE_MS = 16;
+
 function buildMessageData(
   aiMessages: UIMessage[],
   chatStatus: ReturnType<typeof useChat>["status"],
@@ -424,6 +430,12 @@ export default function App() {
       fetch: chatFetch,
       prepareSendMessagesRequest,
     }),
+    // #277: the AI SDK's own re-render throttle, previously unused. Without
+    // it useChat re-renders this component once per streamed chunk -- a rate
+    // set by the model's token stream, not by anything the UI needs. At 16ms
+    // the text still reads as continuously typed while the cap holds
+    // re-renders to roughly one animation frame.
+    experimental_throttle: STREAM_THROTTLE_MS,
   });
 
   // #317 review, #352: the id of the assistant message on screen at the
@@ -507,6 +519,8 @@ export default function App() {
     id: tutorConversationId,
     messages: tutorInitialMessages,
     transport: new DefaultChatTransport({ api: "/api/chat", prepareSendMessagesRequest }),
+    // #277: same reasoning as the section instance above.
+    experimental_throttle: STREAM_THROTTLE_MS,
   });
 
   // #317 review, #352: same reasoning as sectionStoppedMessageId above.
@@ -1218,8 +1232,24 @@ export default function App() {
      code -- an executeRCode tool call, or a fenced block in its own text --
      runs against; see runRCodeForSection's own doc comment for why that's
      deliberately the non-persisting path. */
-  const messages = buildMessageData(aiMessages, chatStatus, sectionStoppedMessageId, runRCode);
-  const tutorMessages = buildMessageData(tutorAiMessages, tutorChatStatus, tutorStoppedMessageId, runRCode);
+  /* #277: memoized, and each surface independently. These were plain calls,
+     so BOTH lists -- including the one not on screen -- were rebuilt from
+     scratch on every render, and `useChat` re-renders this component on
+     every streamed chunk. The off-screen surface's rebuild was pure waste:
+     its inputs cannot change while the other surface is streaming.
+
+     `runRCode` is stable (useRExecution returns a useCallback whose own dep,
+     useWebR's ensureReady, is itself a []-dep useCallback), so it does not
+     defeat these deps. The remaining inputs are exactly what buildMessageData
+     reads. */
+  const messages = useMemo(
+    () => buildMessageData(aiMessages, chatStatus, sectionStoppedMessageId, runRCode),
+    [aiMessages, chatStatus, sectionStoppedMessageId, runRCode],
+  );
+  const tutorMessages = useMemo(
+    () => buildMessageData(tutorAiMessages, tutorChatStatus, tutorStoppedMessageId, runRCode),
+    [tutorAiMessages, tutorChatStatus, tutorStoppedMessageId, runRCode],
+  );
 
   /* Selecting a homework section always means "I want the section chat" --
      switches back out of the tutor surface if one was showing. Clears

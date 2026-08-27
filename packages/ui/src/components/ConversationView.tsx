@@ -10,7 +10,7 @@
    The breadcrumb string is passed as a prop.
    -------------------------------------------------------------------------- */
 
-import { Fragment, useRef, useEffect, useState } from "react";
+import { Fragment, useCallback, useRef, useEffect, useState } from "react";
 import { Message } from "./Message";
 import { Composer } from "./Composer";
 import { CodeBlock } from "./CodeBlock";
@@ -414,6 +414,27 @@ export interface ConversationViewProps {
 
 /* -- Component ------------------------------------------------------------- */
 
+/** #278: JS-initiated scrolling is invisible to the design system's global
+ *  CSS motion rule (styles.css's `prefers-reduced-motion` block), so it is
+ *  the one motion path that escapes the user's stated preference unless it
+ *  is checked here. Read per call rather than cached: the preference can be
+ *  toggled mid-session, and this is a cheap lookup next to the layout the
+ *  caller is about to force. Guarded for non-browser/jsdom hosts where
+ *  matchMedia may be absent. */
+function prefersReducedMotion(): boolean {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    : false;
+}
+
+/** Within a message's height of the bottom. Not an exact equality check:
+ *  fractional device-pixel scroll offsets mean `scrollTop + clientHeight`
+ *  rarely equals `scrollHeight` precisely even when visually pinned. */
+const FOLLOW_THRESHOLD_PX = 120;
+function isNearBottom(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_THRESHOLD_PX;
+}
+
 /** #288: one message row. Extracted so the boundary branch inside the map
  *  renders a row identically to the three inline branches below it rather
  *  than duplicating them -- a fourth copy is how the boundary row would
@@ -481,41 +502,71 @@ export function ConversationView({
       ? messages.length - contextWindowSize
       : undefined;
 
+  /* #410: one place that knows HOW to reach the bottom, so the three
+     callers (new message, streaming follow, turn completion) cannot drift
+     apart on the container-vs-sentinel question or the reduced-motion
+     check. jsdom implements neither scrollTo nor real layout, hence the
+     capability guard -- not dead code in a browser, where scrollTo is where
+     the smooth behaviour comes from. */
+  const scrollToBottom = useCallback((smooth: boolean) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (typeof el.scrollTo === "function") {
+      el.scrollTo({ top: el.scrollHeight, behavior: smooth && !prefersReducedMotion() ? "smooth" : "auto" });
+    } else {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, []);
+
   /* Scroll to bottom when new messages arrive -- and when a turn fails.
      `error` belongs in the deps: a failed turn does not change `messages`
      (the assistant reply is deliberately not persisted), so without it the
      error row mounts below the fold and nothing scrolls to it, leaving the
      only recovery control off-screen.
 
-     Scrolls THIS container directly rather than calling scrollIntoView() on a
-     bottom sentinel. scrollIntoView walks up the ancestor chain and scrolls
-     every scrollable ancestor it finds -- and `overflow: hidden` still makes
-     an element programmatically scrollable, so it was also scrolling
-     .conversation-column. Measured live: the column sat at scrollTop 1020,
-     which dragged the whole column contents up by ~455px and took the
-     composer with it, further on every streamed delta. Setting scrollTop on
-     the one element that is meant to scroll cannot reach an ancestor. */
+     #278: keyed on `messages.length`, NOT `messages`. The array identity is
+     brand new on every parent render, so this used to run once per streamed
+     token rather than once per new message -- a synchronous layout of a
+     subtree holding up to 200 hydrated nodes, tens of times a second.
+     Length changes exactly when a message is actually added.
+
+     #410 (merged in): scrolls THIS container via scrollTo rather than
+     calling scrollIntoView on a bottom sentinel. scrollIntoView walks up
+     the ancestor chain and scrolls every scrollable ancestor it finds --
+     and `overflow: hidden` still makes an element programmatically
+     scrollable -- so it was also scrolling .conversation-column, dragging
+     the composer up by ~455px and further on every delta. That was measured
+     live on staging; this branch's sentinel approach had the same bug and
+     inherits the fix rather than carrying its own version forward.
+
+     A new message or a failed turn scrolls unconditionally: both are
+     content the student has not seen, and the error row carries the only
+     recovery control, so it must not mount below the fold. */
   useEffect(() => {
+    scrollToBottom(true);
+  }, [messages.length, error, scrollToBottom]);
+
+  /* #278: follow the reply as it streams, without queueing an animation.
+     A growing assistant message makes the thread taller without adding a
+     message, so the length-keyed effect above deliberately does not fire.
+     Assigning scrollTop directly queues no smooth scroll for the next
+     assignment to interrupt, which is what made the original per-token
+     scrollIntoView pathological.
+
+     Skipped under prefers-reduced-motion: a >5s reply otherwise means >5s
+     of continuous automatic movement, and a JS-driven scroll is invisible
+     to the stylesheet's global motion rule.
+
+     Only follows a student already AT the bottom -- scrolling up during a
+     long reply is deliberate, and yanking them back would make re-reading
+     impossible. #387 gates the completion settle the same way; see the
+     turn-completion effect below, which owns the isSending edge. */
+  useEffect(() => {
+    if (!isSending || prefersReducedMotion()) return;
     const el = scrollRef.current;
-    if (!el) return;
-    /* jsdom implements neither scrollTo nor real layout, so the guard keeps
-       the component renderable under test. It is not dead code in the
-       browser -- scrollTo is where the smooth behaviour comes from; the
-       scrollTop assignment is the jump-to-bottom fallback. */
-    if (typeof el.scrollTo === "function") {
-      /* styles.css's blanket prefers-reduced-motion block flattens CSS
-         transitions and animations, but has no effect on a JS-driven
-         ScrollToOptions.behavior -- so the one new motion path in this file
-         has to check for itself. (The scrollIntoView call this replaced had
-         the same gap; it is fixed here rather than carried forward.) */
-      const reduced =
-        typeof matchMedia === "function" &&
-        matchMedia("(prefers-reduced-motion: reduce)").matches;
-      el.scrollTo({ top: el.scrollHeight, behavior: reduced ? "auto" : "smooth" });
-    } else {
-      el.scrollTop = el.scrollHeight;
-    }
-  }, [messages, error]);
+    if (!el || !isNearBottom(el)) return;
+    el.scrollTop = el.scrollHeight;
+  });
 
   // #317 review, #327: no deterministic announcement existed for a
   // streamed reply *finishing* -- the start is announced (Message.tsx's
@@ -577,6 +628,26 @@ export function ConversationView({
       // alongside it helps nobody.
       // messages unchanged: nothing was actually sent (isSending was true
       // only because of a hydration retry) -- no turn to announce.
+
+      /* #387: settle the view at the bottom when a turn finishes -- but
+         ONLY for a student who never left it.
+
+         `isSending` used to be a dependency of the scroll effect above, so
+         this same transition fired an unconditional scrollIntoView. That
+         defeated the follow effect's own guard one moment after it had
+         done its job: a student who scrolled up mid-reply was left alone
+         for the whole response, then yanked back to the bottom the instant
+         it completed -- the moment they were most likely to still be
+         reading. The follow effect documented "only follows a student
+         already AT the bottom"; the effect above silently broke it.
+
+         Placed here rather than in its own effect because this one already
+         owns the isSending edge; a second ref tracking the same transition
+         would have two effects racing to write it. */
+      const scroller = scrollRef.current;
+      if (scroller && isNearBottom(scroller)) {
+        scrollToBottom(true);
+      }
     }
     wasSendingRef.current = isSending;
     // messages.length, not the whole `messages` array/`error`, is the

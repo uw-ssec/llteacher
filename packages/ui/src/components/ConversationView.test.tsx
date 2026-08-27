@@ -551,6 +551,123 @@ describe("ConversationView onRequestHint (#80)", () => {
 });
 
 /* --------------------------------------------------------------------------
+   #278: the scroll effect used to key on the `messages` PROP, a brand-new
+   array on every parent render, so it ran once per streamed token rather
+   than once per new message -- forcing a synchronous layout of a subtree
+   holding up to 200 hydrated nodes and restarting a smooth-scroll animation
+   the browser never got to finish. These pin the dependency, not the effect
+   body: each one fails if `messages.length` reverts to `messages`.
+   -------------------------------------------------------------------------- */
+describe("ConversationView scroll behaviour (#278)", () => {
+  // "ai", not "assistant" -- MessageData's own role union (AIMessageData),
+  // which is the design system's vocabulary rather than the wire format's.
+  const msg = (id: string, content: string): MessageData => ({
+    id,
+    role: "ai",
+    content,
+  });
+
+  function setReducedMotion(reduce: boolean) {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: reduce && query === "(prefers-reduced-motion: reduce)",
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+  }
+
+  beforeEach(() => setReducedMotion(false));
+
+  it("does not re-scroll when the same messages arrive as a new array identity", () => {
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollTo = scrollSpy as unknown as Element["scrollTo"];
+    const first = [msg("m1", "hello")];
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={first} onSendMessage={() => {}} />,
+    );
+    const afterMount = scrollSpy.mock.calls.length;
+
+    // Exactly what a parent re-render did on every streamed chunk: same
+    // content, different array identity.
+    rerender(
+      <ConversationView breadcrumb="b" messages={[msg("m1", "hello")]} onSendMessage={() => {}} />,
+    );
+
+    expect(scrollSpy.mock.calls.length).toBe(afterMount);
+  });
+
+  it("does re-scroll when a message is genuinely added", () => {
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollTo = scrollSpy as unknown as Element["scrollTo"];
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[msg("m1", "hello")]} onSendMessage={() => {}} />,
+    );
+    const afterMount = scrollSpy.mock.calls.length;
+
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[msg("m1", "hello"), msg("m2", "there")]}
+        onSendMessage={() => {}}
+      />,
+    );
+
+    expect(scrollSpy.mock.calls.length).toBeGreaterThan(afterMount);
+  });
+
+  it("uses smooth scrolling by default", () => {
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollTo = scrollSpy as unknown as Element["scrollTo"];
+    render(<ConversationView breadcrumb="b" messages={[msg("m1", "a")]} onSendMessage={() => {}} />);
+    expect(scrollSpy).toHaveBeenCalledWith(expect.objectContaining({ behavior: "smooth" }));
+  });
+
+  it("honours prefers-reduced-motion, which the global CSS rule cannot reach for a JS scroll", () => {
+    setReducedMotion(true);
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollTo = scrollSpy as unknown as Element["scrollTo"];
+    render(<ConversationView breadcrumb="b" messages={[msg("m1", "a")]} onSendMessage={() => {}} />);
+    expect(scrollSpy).toHaveBeenCalledWith(expect.objectContaining({ behavior: "auto" }));
+    expect(scrollSpy).not.toHaveBeenCalledWith(expect.objectContaining({ behavior: "smooth" }));
+  });
+
+  it("does not follow a streaming reply when reduced motion is set", () => {
+    setReducedMotion(true);
+    const { container, rerender } = render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[msg("m1", "partial")]}
+        onSendMessage={() => {}}
+        isSending={true}
+      />,
+    );
+    const scroller = container.querySelector(".conversation-messages") as HTMLElement;
+    // jsdom reports 0 for every layout metric, so isNearBottom() is
+    // vacuously true -- any scrollTop write would be observable here.
+    const written: number[] = [];
+    Object.defineProperty(scroller, "scrollTop", {
+      get: () => 0,
+      set: (v: number) => written.push(v),
+      configurable: true,
+    });
+
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[msg("m1", "partial and then some")]}
+        onSendMessage={() => {}}
+        isSending={true}
+      />,
+    );
+
+    expect(written).toEqual([]);
+  });
+});
+
+/* --------------------------------------------------------------------------
    #288: disclosing the tutor's context window.
 
    The tutor forwards only a trailing window to the model while this
@@ -639,6 +756,104 @@ describe("ConversationView context window disclosure (#288)", () => {
     expect(screen.getByText("message 44")).toBeTruthy();
     // 45 messages + 1 boundary
     expect(log.children.length).toBe(46);
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #387: completion must not override a reader's scroll position.
+
+   The follow-during-streaming effect correctly leaves a scrolled-up student
+   alone. `isSending` was then a dependency of the length-keyed scroll
+   effect, so the true->false transition at stream end scrolled to the
+   bottom unconditionally -- undoing that protection at the one moment the
+   student was most likely to still be reading.
+   -------------------------------------------------------------------------- */
+describe("ConversationView completion scroll (#387)", () => {
+  const msg = (id: string, content: string): MessageData => ({ id, role: "ai", content });
+
+  function setReducedMotion(reduce: boolean) {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: reduce && query === "(prefers-reduced-motion: reduce)",
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+  }
+
+  /** jsdom reports 0 for every layout metric, so isNearBottom() is
+   *  vacuously true by default. Overriding these is the only way to model a
+   *  student who has scrolled away from the bottom. */
+  function placeViewport(el: HTMLElement, { scrollTop, scrollHeight, clientHeight }: Record<string, number>) {
+    Object.defineProperty(el, "scrollTop", { get: () => scrollTop, set: () => {}, configurable: true });
+    Object.defineProperty(el, "scrollHeight", { get: () => scrollHeight, configurable: true });
+    Object.defineProperty(el, "clientHeight", { get: () => clientHeight, configurable: true });
+  }
+
+  beforeEach(() => setReducedMotion(false));
+
+  it("leaves a scrolled-up reader where they are when the turn completes", () => {
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollTo = scrollSpy as unknown as Element["scrollTo"];
+    const messages = [msg("m1", "a"), msg("m2", "b")];
+    const { container, rerender } = render(
+      <ConversationView breadcrumb="b" messages={messages} onSendMessage={() => {}} isSending={true} />,
+    );
+    const scroller = container.querySelector(".conversation-messages") as HTMLElement;
+    // Far from the bottom: a deliberate scroll up to reread an earlier turn.
+    placeViewport(scroller, { scrollTop: 0, scrollHeight: 5000, clientHeight: 500 });
+    scrollSpy.mockClear();
+
+    // Turn finishes. Same messages -- the reply was already rendered.
+    rerender(
+      <ConversationView breadcrumb="b" messages={messages} onSendMessage={() => {}} isSending={false} />,
+    );
+
+    expect(scrollSpy).not.toHaveBeenCalled();
+  });
+
+  it("still settles at the bottom for a reader who never left it", () => {
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollTo = scrollSpy as unknown as Element["scrollTo"];
+    const messages = [msg("m1", "a"), msg("m2", "b")];
+    const { container, rerender } = render(
+      <ConversationView breadcrumb="b" messages={messages} onSendMessage={() => {}} isSending={true} />,
+    );
+    const scroller = container.querySelector(".conversation-messages") as HTMLElement;
+    placeViewport(scroller, { scrollTop: 4500, scrollHeight: 5000, clientHeight: 500 });
+    scrollSpy.mockClear();
+
+    rerender(
+      <ConversationView breadcrumb="b" messages={messages} onSendMessage={() => {}} isSending={false} />,
+    );
+
+    expect(scrollSpy).toHaveBeenCalled();
+  });
+
+  it("still scrolls a scrolled-up reader for a genuinely new message", () => {
+    // The unconditional triggers are deliberately kept: new content the
+    // student has not seen, and the error row that carries the only
+    // recovery control, must both reach the viewport.
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollTo = scrollSpy as unknown as Element["scrollTo"];
+    const { container, rerender } = render(
+      <ConversationView breadcrumb="b" messages={[msg("m1", "a")]} onSendMessage={() => {}} />,
+    );
+    const scroller = container.querySelector(".conversation-messages") as HTMLElement;
+    placeViewport(scroller, { scrollTop: 0, scrollHeight: 5000, clientHeight: 500 });
+    scrollSpy.mockClear();
+
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[msg("m1", "a"), msg("m2", "b")]}
+        onSendMessage={() => {}}
+      />,
+    );
+
+    expect(scrollSpy).toHaveBeenCalled();
   });
 });
 
