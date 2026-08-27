@@ -40,6 +40,9 @@ export interface StudentHomeworkSummary {
    *  has no course-switching UI yet), so it rides along on the homework
    *  summary it's already fetching rather than a new endpoint. */
   courseId: string;
+  /** #304 (requirement 4): the course's short code (e.g. "STAT 311"), so
+   *  the client has a real course label instead of a hardcoded stand-in. */
+  courseName: string;
   title: string;
   description: string;
   dueDate: string;
@@ -65,7 +68,12 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
 
   const allHomeworks = await db.query.homeworks.findMany({
     where: (h, { inArray: inArrayOp }) => inArrayOp(h.courseId, courseIds),
-    with: { sections: true },
+    // #304 (requirement 4): course.code rides along here so the client can
+    // thread a real courseName instead of deriving course context from the
+    // first homework in the list (or, before this fix, not deriving it at
+    // all -- App.tsx's breadcrumb/TopNav had "STATS 311" hardcoded as a
+    // literal, one character off from the actual seeded course.code).
+    with: { sections: true, course: { columns: { code: true } } },
   });
 
   const visibleHomeworks = allHomeworks.filter((hw) => {
@@ -150,6 +158,7 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
     results.push({
       id: hw.id,
       courseId: hw.courseId,
+      courseName: hw.course.code,
       title: hw.title,
       description: hw.description,
       dueDate: hw.dueDate.toISOString(),

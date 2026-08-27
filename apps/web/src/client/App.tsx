@@ -91,6 +91,11 @@ export function useStudentHomework() {
   // StudentHomeworkSummary.courseId's doc comment), so it's threaded
   // through here rather than added as a second fetch.
   const [courseId, setCourseId] = useState<string | undefined>(undefined);
+  // #304 (requirement 4): threaded from the same homework summary as
+  // courseId above (StudentHomeworkSummary.courseName, the course's real
+  // code) -- previously the TopNav/breadcrumb had "STATS 311" hardcoded as
+  // a literal stand-in instead of deriving it from any server data at all.
+  const [courseName, setCourseName] = useState<string>("");
   const [loading, setLoading] = useState(true);
   // #160: distinct from "loaded, zero homeworks" -- a 401/403/503 must not
   // render as an indistinguishable empty sidebar. r.ok was never checked
@@ -113,6 +118,7 @@ export function useStudentHomework() {
         }
         setHwTitle(hw.title);
         setCourseId(hw.courseId);
+        setCourseName(hw.courseName);
         setSections(
           hw.sections.map((s) => ({
             number: s.order,
@@ -143,7 +149,7 @@ export function useStudentHomework() {
   // above is gone; previously this setter existed only inside this hook,
   // which made it structurally impossible for anything outside the hook to
   // keep the map current after the initial fetch.
-  return { sections, setSections, sectionMetaByOrder, setSectionMetaByOrder, hwTitle, courseId, loading, loadError };
+  return { sections, setSections, sectionMetaByOrder, setSectionMetaByOrder, hwTitle, courseId, courseName, loading, loadError };
 }
 
 /* Translates the AI SDK's UIMessage[] + status into the design system's
@@ -494,6 +500,7 @@ export default function App() {
     setSectionMetaByOrder,
     hwTitle,
     courseId,
+    courseName,
     loading: homeworkLoading,
     loadError,
   } = useStudentHomework();
@@ -1281,7 +1288,14 @@ export default function App() {
     // #96: see handleSendMessage above.
     tutorSendAcceptedRef.current = false;
     setTutorSendFailure(null);
-    sendTutorMessage({ text }, { body: { conversationId: tutorConversationId } });
+    // #304: courseId is now sent on every tutor turn, not only when minting
+    // a new conversation -- chatHandler's conversationId branch doesn't
+    // read it (getOwnedConversationOrNull's own ownership check is what
+    // actually scopes the turn), but sending it keeps this call's body
+    // shape consistent with handleSendMessage's section path above and
+    // gives the server a value to use if that branch's requirements ever
+    // change without another client round of edits.
+    sendTutorMessage({ text }, { body: { conversationId: tutorConversationId, courseId } });
     // #317 review, #352: same reasoning as handleSendMessage above.
     setTutorStoppedMessageId(null);
   };
@@ -1515,7 +1529,10 @@ export default function App() {
     return (
       <div className="page-frame">
         <TopNav
-          course="STATS 311"
+          // #304 (requirement 4): matches homework="" right below -- the
+          // fetch that would have supplied a real courseName failed, so
+          // this is the same honest-empty state, not a hardcoded stand-in.
+          course={courseName}
           term="Autumn 2026"
           homework=""
           userInitials="AC"
@@ -1548,7 +1565,9 @@ export default function App() {
       </a>
       {/* Top nav — UW Husky Purple full-bleed bar */}
       <TopNav
-        course="STATS 311"
+        // #304 (requirement 4): real course code from the homework summary
+        // (StudentHomeworkSummary.courseName), not a hardcoded stand-in.
+        course={courseName}
         term="Autumn 2026"
         homework={hwTitle}
         userInitials="AC"
@@ -1616,7 +1635,9 @@ export default function App() {
           <ErrorBoundary key={`tutor-${tutorConversationId}`}>
             <ConversationView
               key={tutorConversationId}
-              breadcrumb="STATS 311 · TUTOR CHAT"
+              // #304 (requirement 4): real courseName, not a hardcoded
+              // stand-in -- see the TopNav `course` prop above.
+              breadcrumb={`${courseName} · TUTOR CHAT`}
               title={tutorConversationTitle}
               onRenameTitle={handleRenameTutorConversation}
               messages={tutorMessages}
@@ -1663,7 +1684,9 @@ export default function App() {
                 genuine mid-conversation appends reach an AT as insertions. */}
             <ConversationView
               key={currentSection}
-              breadcrumb={`STATS 311 · ${hwTitle} · Section ${currentSection}${
+              // #304 (requirement 4): real courseName, not a hardcoded
+              // stand-in -- see the TopNav `course` prop above.
+              breadcrumb={`${courseName} · ${hwTitle} · Section ${currentSection}${
                 currentSectionTitle ? `: ${currentSectionTitle}` : ""
               }`}
               messages={messages}

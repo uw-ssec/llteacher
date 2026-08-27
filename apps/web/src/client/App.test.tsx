@@ -212,6 +212,7 @@ describe("App tutor-conversations rail (#4)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -315,8 +316,8 @@ describe("App tutor-conversations rail (#4)", () => {
     expect(screen.getByRole("button", { name: /Sec 1/ })).toBeTruthy();
   });
 
-  it("creating a tutor conversation switches the chat column to it, and sends chat turns with its conversationId", async () => {
-    const chatCalls: Array<{ conversationId?: string }> = [];
+  it("creating a tutor conversation switches the chat column to it, and sends chat turns with its conversationId and courseId (#304)", async () => {
+    const chatCalls: Array<{ conversationId?: string; courseId?: string }> = [];
     stubBaseFetch({
       onConversationsPost: () =>
         new Response(
@@ -342,7 +343,7 @@ describe("App tutor-conversations rail (#4)", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input.toString();
         if (url === "/api/chat") {
-          const body = JSON.parse(String(init?.body)) as { conversationId?: string };
+          const body = JSON.parse(String(init?.body)) as { conversationId?: string; courseId?: string };
           chatCalls.push(body);
           const chunks = [
             { type: "start" },
@@ -384,6 +385,11 @@ describe("App tutor-conversations rail (#4)", () => {
 
     expect(chatCalls).toHaveLength(1);
     expect(chatCalls[0]!.conversationId).toBe("tutor-conv-1");
+    // #304: the tutor rail sends the courseId it already holds on every
+    // turn, not only the section path -- previously omitted entirely, so
+    // chatHandler's conversationId branch had no courseId to fall back to
+    // if it ever needed one.
+    expect(chatCalls[0]!.courseId).toBe("course-a");
   });
 
   // #4 fix-round: the core regression test for the code-review finding.
@@ -637,6 +643,7 @@ describe("App tutor conversation header rename (#6)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -1017,6 +1024,7 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -1148,6 +1156,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -1524,6 +1533,7 @@ describe("App section chat resumes with hydrated history (#252)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -1664,6 +1674,7 @@ describe("App eager section greeting (#318)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -1824,6 +1835,7 @@ describe("App section conversationId stays live after mid-session creation (#271
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -2001,6 +2013,7 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -2125,6 +2138,7 @@ describe("App section restart affordance (#248)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -2382,6 +2396,7 @@ describe("App Stop control (#274)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -2613,6 +2628,7 @@ describe("App hint state (#80)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
