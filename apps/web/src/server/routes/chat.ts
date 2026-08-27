@@ -279,9 +279,9 @@ export const TOOLS: ToolSet = {
     }),
     execute: async (_input: Record<string, never>, options: ToolCallOptions) => {
       // Structurally withheld from a tutor-kind conversation's tool list
-      // (SECTION_ONLY_TOOL_NAMES / toolsForConversation, below) since the
-      // PR3 final-review cleanup -- ctx.sectionId is therefore guaranteed
-      // non-null whenever the model can actually reach this execute(). The
+      // (SECTION_ONLY_TOOL_NAMES / toolsForConversation, below), so
+      // ctx.sectionId is guaranteed non-null whenever the model can
+      // actually reach this execute(). The
       // `HintToolContext` type still carries `sectionId: string | null`
       // because it's shared with a tutor-kind request's experimental_context
       // (never read there, since the tool isn't offered), not because this
@@ -363,7 +363,7 @@ export const TOOLS: ToolSet = {
   },
 };
 
-/** #168, folded together with #80 in the PR3 final-review cleanup: tool
+/** #168/#80: tool
  *  names that must be withheld from a tutor-kind conversation -- there is no
  *  section for either of these to act on without one. Both markSectionComplete
  *  and requestHint are real, structural gating here: the model is never even
@@ -397,9 +397,10 @@ const SECTION_ONLY_TOOL_NAMES = new Set<keyof typeof TOOLS>(["markSectionComplet
  *  conditional -- not just TOOLS.markSectionComplete's own shape -- is
  *  unit-testable without going through the full HTTP handler.
  *
- *  Final-review fix wave, #80 finding (hint double-grant): `options.
- *  withholdRequestHint` is the second, independent axis this function now
- *  gates on -- passed `true` by chatHandler exactly when isHintGranted is
+ *  #80 (hint double-grant): `options.withholdRequestHint` is the second,
+ *  independent axis this function gates on -- sectionId decides whether
+ *  requestHint exists at all, this decides whether it is offered on a turn
+ *  that already granted. Passed `true` by chatHandler exactly when isHintGranted is
  *  true for THIS turn (the envelope's isHintRequest flag already granted a
  *  hint via recordHintRequest before streamText is ever called). Without
  *  this, requestHint stayed in the model's tool list on a hint-granted turn
@@ -1932,7 +1933,7 @@ export async function chatHandler(c: Context<AppEnv>) {
       // own doc comment (this file's TOOLS catalog, above) for why this is
       // real gating, not a prompt instruction alone.
       //
-      // Final-review fix wave, #80 finding (hint double-grant): also
+      // #80 (hint double-grant): also
       // withholds requestHint for this exact turn when isHintGranted is
       // true -- the envelope path (above) already recorded a hintEvents row
       // for this turn before streamText was ever reached, so the model has

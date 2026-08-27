@@ -176,21 +176,20 @@ export function useRExecution(): UseRExecutionResult {
           }
           return { status: "error", error: describeError(err), executionTimeMs };
         } finally {
-          // #28 Pitfall "Execution timeout" / final-review fix wave finding
-          // 2: fire-and-forget, NOT awaited. WebR's worker is
-          // single-threaded -- while a spinning evaluation (e.g. `while
-          // (TRUE) {}`) is still occupying it, a purge message queued
-          // behind that same worker never gets processed until the loop
-          // somehow stops, which for a genuine infinite loop is never. This
-          // `finally` block used to `await shelter.purge()`, which meant
-          // run() itself could never settle on the timeout path either --
-          // the `{status:"error", error:"Timeout: ..."}` object constructed
-          // in the catch block above was already built, but the caller
-          // never received it, isRunning never went back to false, and the
-          // UI stayed on "Running…" forever, exactly the hang the 30s
-          // timeout exists to prevent. Not awaiting here lets run() settle
-          // at the 30s mark regardless of whether the underlying worker is
-          // still occupied.
+          // #28 Pitfall "Execution timeout": fire-and-forget, NOT awaited,
+          // and it must stay that way. WebR's worker is single-threaded --
+          // while a spinning evaluation (e.g. `while (TRUE) {}`) is still
+          // occupying it, a purge message queued behind that same worker
+          // never gets processed until the loop somehow stops, which for a
+          // genuine infinite loop is never. Awaiting `shelter.purge()` here
+          // would therefore mean run() itself can never settle on the
+          // timeout path: the `{status:"error", error:"Timeout: ..."}`
+          // object built in the catch block above would already exist, but
+          // the caller would never receive it, isRunning would never go
+          // back to false, and the UI would stay on "Running…" forever --
+          // exactly the hang the 30s timeout exists to prevent. Not
+          // awaiting lets run() settle at the 30s mark regardless of
+          // whether the underlying worker is still occupied.
           //
           // Honest limitation, not full recovery: this does NOT interrupt a
           // genuinely hung evaluation. The webr.mjs module here is loaded

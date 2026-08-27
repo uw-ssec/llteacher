@@ -168,7 +168,7 @@ describe("HomeworkEditView", () => {
   });
 
   it("does not call /publish when saving an already-scheduled homework without touching its release date", async () => {
-    // The scenario the fix wave's I3 correction actually protects against:
+    // The scenario the originalPublishState comparison exists to protect:
     // a homework that already has a real releasedAt must not have it
     // silently re-PATCHed (or cleared) just because an unrelated field
     // changed. Both originalPublishState.releasedAt and the form's
