@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { PencilSimple } from "@phosphor-icons/react";
+import { PencilSimple, X } from "@phosphor-icons/react";
 
 /* --------------------------------------------------------------------------
    EditableTitle — inline click-to-rename primitive (#6).
@@ -243,6 +243,19 @@ export function EditableTitle({
 
   const displayError = localError ?? error;
 
+  /* #291: a failed rename set localError and closed edit mode in the same
+     pass, and nothing ever reset it -- so the message stayed beside the row
+     permanently, with the only escape being to re-open the editor. Worse, the
+     string is the SERVER's (useTutorConversations prefers it), so a rename
+     against a conversation deleted elsewhere left "Conversation not found"
+     parked next to a student's own chat: vocabulary that reads as a system
+     fault for something they did nothing wrong in.
+  
+     Dismissible, and it clears itself the moment the student does anything
+     else with the row -- but it does NOT auto-expire on a timer, because an
+     error that vanishes on its own is one the student may never have read. */
+  const dismissError = () => setLocalError(null);
+
   if (!isEditing) {
     return (
       <span className={`editable-title ${className}`.trim()}>
@@ -256,7 +269,10 @@ export function EditableTitle({
           <button
             type="button"
             className="editable-title__value"
-            onClick={onActivateValue}
+            onClick={() => {
+              dismissError();
+              onActivateValue();
+            }}
             aria-label={activateLabel}
             aria-describedby={activateDescribedBy}
             aria-current={isActive ? "true" : undefined}
@@ -289,6 +305,16 @@ export function EditableTitle({
         {displayError && (
           <span className="editable-title__error" role="alert">
             {displayError}
+            {localError && (
+              <button
+                type="button"
+                className="editable-title__error-dismiss"
+                onClick={dismissError}
+                aria-label="Dismiss rename error"
+              >
+                <X size={11} weight="bold" aria-hidden="true" />
+              </button>
+            )}
           </span>
         )}
       </span>

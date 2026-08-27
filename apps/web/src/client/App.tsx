@@ -5,7 +5,7 @@ import { useNavigate } from "react-router";
 import { Sidebar, TopNav, ConversationView, AlertDialog, Button, MessageMarkdown, renderToolPart, isToolPart, ErrorBoundary } from "@llteacher/ui";
 import type { SidebarSection, MessageData, RCodeResult } from "@llteacher/ui";
 import { useRExecution } from "./hooks/useRExecution";
-import { useAuth } from "./components/AuthProvider";
+import { useAuth, initialsFrom } from "./components/AuthProvider";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
 import { TutorConversationsList } from "./views/TutorConversationsList";
 import { useTutorConversations } from "./hooks/useTutorConversations";
@@ -374,7 +374,12 @@ function studentTextOf(message: UIMessage): string {
 
 export default function App() {
   const { status: workerStatus, loading: workerLoading } = useWorkerStatus();
-  const { isAuthenticated, loading: authLoading, error: authError, login, logout } = useAuth();
+  const { isAuthenticated, loading: authLoading, error: authError, displayName, login, logout } = useAuth();
+  /* #294: real initials for the avatar chip, from the profile this provider
+     already fetches. null when there is no name yet (loading, signed out, or
+     a profile with no displayName), in which case TopNav renders its neutral
+     placeholder rather than letters belonging to nobody. */
+  const userInitials = initialsFrom(displayName);
   const navigate = useNavigate();
 
   /* #3: the server creates a conversation on the first turn and returns its
@@ -1547,12 +1552,37 @@ export default function App() {
      transition deliberately does not bump (no new message was actually
      persisted, see chat.ts's hasRenderableContent-gated onFinish). */
   const prevTutorChatStatusRef = useRef(tutorChatStatus);
+  /* #292: which conversation the in-flight turn actually belongs to.
+     Captured when the turn STARTS, not read when it finishes.
+
+     The bug: this effect read `tutorConversationId` at the moment it observed
+     the status transition. Conversation A is streaming, the student clicks
+     row B -- selectTutorConversation sets the id to B, and the tutor useChat
+     is keyed by `id` so it remounts with a fresh `status: "ready"`. The
+     effect re-runs with both deps changed and credits the turn to B, which
+     received nothing, re-sorting it to the top of the rail. */
+  const inFlightTutorConversationRef = useRef<string | null | undefined>(null);
   useEffect(() => {
     const previousStatus = prevTutorChatStatusRef.current;
     prevTutorChatStatusRef.current = tutorChatStatus;
+    const isInFlight = tutorChatStatus === "submitted" || tutorChatStatus === "streaming";
     const wasInFlight = previousStatus === "submitted" || previousStatus === "streaming";
-    if (tutorConversationId && wasInFlight && tutorChatStatus === "ready") {
-      bumpTutorConversation(tutorConversationId);
+
+    if (isInFlight && !wasInFlight) {
+      // A turn just started: remember whose it is.
+      inFlightTutorConversationRef.current = tutorConversationId;
+      return;
+    }
+
+    if (wasInFlight && tutorChatStatus === "ready") {
+      const owner = inFlightTutorConversationRef.current;
+      inFlightTutorConversationRef.current = null;
+      /* Only credit the conversation the turn was sent to, and only if it is
+         still the one on screen. A remount caused by switching away lands
+         here too, and that transition completed nothing. */
+      if (owner && owner === tutorConversationId) {
+        bumpTutorConversation(owner);
+      }
     }
   }, [tutorChatStatus, tutorConversationId, bumpTutorConversation]);
 
@@ -1918,13 +1948,19 @@ export default function App() {
     return (
       <div className="page-frame">
         <TopNav
-          // #304 (requirement 4): matches homework="" right below -- the
-          // fetch that would have supplied a real courseName failed, so
-          // this is the same honest-empty state, not a hardcoded stand-in.
+          /* #304 (requirement 4): a REAL course code, from the homework
+             summary -- matches homework="" right below, i.e. the fetch that
+             would have supplied it failed, so this is the same honest-empty
+             state rather than a hardcoded stand-in.
+
+             #294: `term` is omitted entirely. #304 found a data source for
+             the course; there is still none for the term, and
+             term="Autumn 2026" asserted one specific term to every student
+             in every course. An absent segment is honest where a
+             confidently wrong one is not. */
           course={courseName}
-          term="Autumn 2026"
           homework=""
-          userInitials="AC"
+          userInitials={userInitials ?? undefined}
           isAuthenticated={isAuthenticated}
           onProfileClick={() => navigate("/profile")}
           onLogout={logout}
@@ -1956,10 +1992,10 @@ export default function App() {
       <TopNav
         // #304 (requirement 4): real course code from the homework summary
         // (StudentHomeworkSummary.courseName), not a hardcoded stand-in.
+        // #294: `term` omitted -- see the loading-state TopNav above.
         course={courseName}
-        term="Autumn 2026"
         homework={hwTitle}
-        userInitials="AC"
+        userInitials={userInitials ?? undefined}
         isAuthenticated={isAuthenticated}
         onProfileClick={() => navigate("/profile")}
         onLogout={logout}

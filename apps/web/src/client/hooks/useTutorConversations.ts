@@ -94,6 +94,12 @@ export interface UseTutorConversationsResult {
   bumpConversation: (id: string) => void;
 }
 
+/** #292: rows written per completed turn -- one `user`, one `assistant`.
+ *  The server counts rows (repositories/conversations.ts's `count(*)`), so an
+ *  optimistic client-side bump has to count the same thing or the rail and a
+ *  reload disagree. */
+const MESSAGES_PER_TURN = 2;
+
 export function useTutorConversations(courseId: string | undefined): UseTutorConversationsResult {
   const [conversations, setConversations] = useState<ConversationListItemResponse[]>([]);
   const [loading, setLoading] = useState(true);
@@ -422,6 +428,16 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     }
   }, []);
 
+  /** #292: a completed turn writes TWO message rows -- the student's and the
+   *  assistant's (chat.ts persists both) -- while the server's own count is
+   *  `count(*)` over those rows. Incrementing by one meant the rail drifted
+   *  further from the truth with every turn: after five turns it showed 5,
+   *  and a reload showed 10.
+   *
+   *  Named rather than inlined so the invariant is stated once, and so the
+   *  test can assert "one turn == MESSAGES_PER_TURN rows" instead of pinning
+   *  the literal it happens to use -- the old test asserted `+ 1`, which
+   *  would have passed just as happily at `+ 3`. */
   const bumpConversation = useCallback((id: string) => {
     mutationSeqRef.current += 1;
     setConversations((prev) => {
@@ -429,7 +445,12 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
       if (index === -1) return prev;
 
       const now = new Date().toISOString();
-      const next = prev.map((c) => (c.id === id ? { ...c, messageCount: c.messageCount + 1, updatedAt: now } : c));
+      const next = prev.map((c) =>
+        // #292: a completed turn writes TWO rows (user + assistant) and the
+        // server counts rows, so bumping by one made five turns read as 5
+        // until a reload showed 10. Named so the invariant is stated once.
+        c.id === id ? { ...c, messageCount: c.messageCount + MESSAGES_PER_TURN, updatedAt: now } : c,
+      );
 
       /* #310: two problems with re-sorting here, both fixed by not doing it
          in the usual case.

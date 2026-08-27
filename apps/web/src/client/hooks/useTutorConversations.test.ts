@@ -384,7 +384,7 @@ describe("useTutorConversations", () => {
       act(() => {
         result.current.bumpConversation("conv-a");
       });
-      expect(result.current.conversations[0]!.messageCount).toBe(CONV_A.messageCount + 1);
+      expect(result.current.conversations[0]!.messageCount).toBe(CONV_A.messageCount + 2);
       expect(result.current.renameConversation).toBe(before);
     });
   });
@@ -400,8 +400,27 @@ describe("useTutorConversations", () => {
         result.current.bumpConversation("conv-a");
       });
 
-      expect(result.current.conversations[0]!.messageCount).toBe(CONV_A.messageCount + 1);
+      /* #292: TWO, because a completed turn writes a user row AND an
+         assistant row, and the server's count is count(*) over those rows.
+         The old assertion was `+ 1` -- it pinned the implementation, not the
+         invariant, so it passed while the rail drifted further from the
+         truth with every turn (5 turns showed 5; a reload showed 10). */
+      expect(result.current.conversations[0]!.messageCount).toBe(CONV_A.messageCount + 2);
       expect(result.current.conversations[0]!.updatedAt).not.toBe(CONV_A.updatedAt);
+    });
+
+    it("stays consistent with a server refetch after several turns (#292)", async () => {
+      /* The real regression was drift, which a single bump cannot show. Three
+         turns must land where count(*) would: six rows. */
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 })));
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      act(() => {
+        result.current.bumpConversation("conv-a");
+        result.current.bumpConversation("conv-a");
+        result.current.bumpConversation("conv-a");
+      });
+      expect(result.current.conversations[0]!.messageCount).toBe(CONV_A.messageCount + 6);
     });
 
     it("re-sorts the bumped conversation to the top, matching the server's updatedAt-desc ordering", async () => {
@@ -741,7 +760,11 @@ describe("useTutorConversations", () => {
       // that is already at the top. Rows must not shuffle under a student
       // who might be reading them.
       expect(result.current.conversations.map((c) => c.id)).toEqual(before.map((c) => c.id));
-      expect(result.current.conversations[0]!.messageCount).toBe(before[0]!.messageCount + 1);
+      /* #292: two rows per completed turn (user + assistant), not one. This
+         assertion pinned `+ 1` because it was written while the off-by-half
+         bug was still present -- #310 was about ORDERING and had no reason
+         to question the count it happened to observe. */
+      expect(result.current.conversations[0]!.messageCount).toBe(before[0]!.messageCount + 2);
     });
 
     it("moves a bumped row to the front without disturbing the rest", async () => {
