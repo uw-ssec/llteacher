@@ -2587,3 +2587,85 @@ describe("App delete during a pending selection (#392)", () => {
     expect(screen.getAllByText(/Section 1/).length).toBeGreaterThan(0);
   });
 });
+
+/* --------------------------------------------------------------------------
+   #398: a superseded selection must not leave its row permanently busy.
+
+   The pending marker was cleared only by the request that was still
+   current. When the student navigated away instead of selecting something
+   else, nobody cleared it -- the row stayed aria-busy and the repeat-click
+   guard then refused to reselect it, until reload.
+   -------------------------------------------------------------------------- */
+describe("App superseded tutor selection (#398)", () => {
+  const HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
+      },
+    ],
+  };
+  const CONV_B = {
+    id: "conv-b",
+    kind: "tutor",
+    title: "Chat B",
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-02T00:00:00.000Z",
+    messageCount: 2,
+  };
+
+  it("clears the pending row when the student navigates to a section instead", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    let releaseHistory!: (r: Response) => void;
+    const hanging = new Promise<Response>((r) => (releaseHistory = r));
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [CONV_B], nextCursor: null }), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations/conv-b/messages")) return hanging;
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // Select B -- its history hangs, so the row goes pending.
+    await userEvent.click(await screen.findByRole("button", { name: `Select conversation: ${CONV_B.title}` }));
+    await waitFor(() => expect(document.querySelector('[aria-busy="true"]')).not.toBeNull());
+
+    // Navigate to a homework section instead of picking another conversation.
+    await userEvent.click(screen.getByRole("button", { name: /Sec 1/ }));
+
+    // The abandoned row must not stay busy: if it does, the repeat-click
+    // guard makes it unselectable for the rest of the session.
+    await waitFor(() => expect(document.querySelector('[aria-busy="true"]')).toBeNull());
+
+    releaseHistory(new Response(JSON.stringify([]), { status: 200 }));
+  });
+});

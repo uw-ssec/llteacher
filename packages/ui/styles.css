@@ -850,6 +850,41 @@ body {
     color: var(--color-error);
   }
 
+  .tutor-sidebar__error p {
+    margin: 0 0 var(--space-2);
+  }
+
+  /* #310: retry for a failed list load. The rail keeps its last known good
+     rows on failure, so this sits above them rather than beside an empty
+     list. */
+  .tutor-sidebar__retry {
+    /* Matches the sibling "New conversation" button's treatment rather than
+       inventing a second button idiom for the same 220px rail. */
+    border: 1px solid var(--color-accent);
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--color-accent);
+    font-size: var(--font-size-sm);
+    padding: var(--space-1) var(--space-2);
+    cursor: pointer;
+    transition: background-color 120ms ease-out;
+  }
+
+  .tutor-sidebar__retry:hover {
+    background-color: var(--color-accent-faint);
+  }
+
+  /* #293: the disabled "New conversation" reason, now visible. It was
+     previously delivered only through `title` (hover, never on touch) and
+     an sr-only paragraph, so a sighted student on a tablet saw a button
+     that did nothing and said nothing. */
+  .tutor-sidebar__disabled-reason {
+    margin: var(--space-1) 0 0;
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+    line-height: 1.4;
+  }
+
   /* Was a centred flex column holding a decorative icon above a centred
      caption -- the stock empty-state shape. Now one quiet left-aligned line
      that sits in the same column as the list rows it stands in for, so the
@@ -872,9 +907,20 @@ body {
     gap: var(--space-1);
   }
 
+  /* Everything that is prose or a list is hidden at 64px; only the
+     collapse toggle and the icon-only New button survive.
+
+     The three classes added by this PR (#293's visible disabled reason,
+     #310's load-error block and its retry) belong here for the same reason
+     the originals do -- a long sentence in a 64px column wraps into a tall
+     clipped stripe. They were omitted when they were added, which is the
+     same mistake as #403/#404: a new sibling that did not inherit the
+     treatment every one of its neighbours already had. */
   .sidebar--collapsed .tutor-sidebar__label,
   .sidebar--collapsed .tutor-sidebar__new-btn-label,
   .sidebar--collapsed .tutor-sidebar__empty,
+  .sidebar--collapsed .tutor-sidebar__disabled-reason,
+  .sidebar--collapsed .tutor-sidebar__error,
   .sidebar--collapsed .tutor-sidebar__list {
     display: none;
   }
@@ -918,6 +964,32 @@ body {
 
   .tutor-conversation-item--selected {
     background-color: var(--color-accent-faint);
+  }
+
+  /* #290: a row whose history is still being fetched. Reads as selected
+     (the rule above also applies) with a subdued treatment so the click
+     registers instantly while still being distinguishable from a settled
+     selection. Motion is opt-out: the pulse is suppressed under
+     prefers-reduced-motion, leaving the static dimming as the cue. */
+  .tutor-conversation-item--pending {
+    opacity: 0.72;
+    animation: tutor-conversation-item-pulse 1.2s ease-in-out infinite;
+  }
+
+  @keyframes tutor-conversation-item-pulse {
+    0%,
+    100% {
+      opacity: 0.72;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tutor-conversation-item--pending {
+      animation: none;
+    }
   }
 
   .tutor-conversation-item__title {

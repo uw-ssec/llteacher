@@ -569,6 +569,14 @@ export default function App() {
     undefined,
   );
 
+  /* #290: the conversation whose history is currently being fetched, if any.
+     Exists purely so the rail can show that the click registered -- the row
+     renders selected and aria-busy while this is set. Deliberately NOT used
+     to move focus into the chat column: a student clicking through the rail
+     is browsing, and a focus jump would fight that. The announcement below
+     is the right affordance. */
+  const [pendingTutorSelectionId, setPendingTutorSelectionId] = useState<string | undefined>(undefined);
+
   // #276: set when a tutor conversation's history fetch fails -- rendered
   // through ConversationView's existing error row (see tutorChatErrorRow
   // below) with a Retry that re-runs the fetch, and disables the composer
@@ -608,8 +616,10 @@ export default function App() {
   const {
     conversations: tutorConversations,
     loading: tutorConversationsLoading,
+    awaitingCourseContext: tutorConversationsAwaitingCourse,
     loadError: tutorConversationsLoadError,
     hasMore: tutorConversationsHasMore,
+    refetch: refetchTutorConversations,
     createConversation: createTutorConversationRow,
     deleteConversation: deleteTutorConversationRow,
     renameConversation: renameTutorConversationRow,
@@ -636,6 +646,16 @@ export default function App() {
      mark "this is now the latest requested switch." */
   const selectTutorConversation = (id: string, initialMessages: UIMessage[] = []) => {
     latestTutorSelectionRef.current = id;
+    /* #398: reaching here means a conversation is now current, so nothing
+       is pending any more. This is the choke point for every "a different
+       conversation became current" path -- notably creating one while
+       another is still loading, which otherwise left the abandoned row
+       busy and unselectable forever.
+
+       Harmless for the ordinary selection path, which calls this with the
+       id that was pending and would clear the same marker a moment later
+       in its own `finally`. */
+    setPendingTutorSelectionId(undefined);
     setTutorInitialMessages(initialMessages);
     setTutorConversationId(id);
   };
@@ -720,7 +740,24 @@ export default function App() {
   // isSending below) until Retry succeeds.
   const handleSelectExistingTutorConversation = async (id: string) => {
     if (id === tutorConversationId) return;
+    // #290: a repeat click on a row that is already loading is now a genuine
+    // no-op. The guard above only ruled out re-selecting the ALREADY-ACTIVE
+    // conversation, so clicking an unresponsive row again -- the natural
+    // response to no feedback -- fired a second identical fetch. The
+    // stale-response guard below discarded the loser correctly, so this was
+    // never a correctness bug; it was wasted work that the feedback gap made
+    // likely to happen.
+    if (id === pendingTutorSelectionId) return;
     latestTutorSelectionRef.current = id;
+    // #290: set SYNCHRONOUSLY, before the await. Nothing on screen used to
+    // change between the click and the response landing -- no row highlight,
+    // no aria-current move, no chat-column change -- because every visible
+    // piece of state derives from `tutorConversationId`, which is not
+    // assigned until `selectTutorConversation` runs. For a conversation at
+    // the 200-message cap that is a multi-hundred-millisecond to
+    // multi-second dead zone in which the UI is indistinguishable from
+    // broken.
+    setPendingTutorSelectionId(id);
     setJustCreatedTutorConversationId(undefined);
     try {
       const history = await fetchConversationHistory(id);
@@ -738,6 +775,23 @@ export default function App() {
       });
       setTutorHistoryHasMore(false);
       selectTutorConversation(id, []);
+    } finally {
+      /* #398: clear only when this request is still the current one -- a
+         superseded fetch resolving late must not clear a marker belonging
+         to the selection that replaced it.
+
+         The bug this used to have: when nothing replaced it either (the
+         student navigated to a homework section, or created a conversation,
+         so the ref went to undefined rather than to another id), NOBODY
+         cleared it. The row stayed aria-busy forever, and the repeat-click
+         guard at the top of this function then refused to reselect it --
+         permanently, until reload.
+
+         `setPendingTutorSelectionId(undefined)` moved to the places that
+         supersede a selection, so every path that changes
+         latestTutorSelectionRef also owns the marker. This branch now only
+         handles "my own request finished and I am still current". */
+      if (latestTutorSelectionRef.current === id) setPendingTutorSelectionId(undefined);
     }
   };
 
@@ -763,9 +817,10 @@ export default function App() {
        conversation can never become current while we are deleting it. */
     if (latestTutorSelectionRef.current === id) {
       latestTutorSelectionRef.current = undefined;
-      // #381 adds a pendingTutorSelectionId marker that must be cleared
-      // here too; that state does not exist on this branch yet and is
-      // added when #381 lands and this merges staging again.
+      // #398's pending marker, now that #381 has landed: without this the
+      // deleted row's busy state would outlive the row itself, and #398's
+      // repeat-click guard keys off exactly this value.
+      setPendingTutorSelectionId((pending) => (pending === id ? undefined : pending));
     }
 
     const ok = await deleteTutorConversationRow(id);
@@ -1338,6 +1393,10 @@ export default function App() {
       sectionMetaByOrder.get(sectionNumber)?.id,
     );
     latestTutorSelectionRef.current = undefined;
+    // #398: this supersedes any in-flight selection, so it owns the pending
+    // marker too -- otherwise the row the student abandoned stays busy and
+    // unselectable for the rest of the session.
+    setPendingTutorSelectionId(undefined);
     setTutorConversationId(undefined);
     setTutorInitialMessages([]);
     setJustCreatedTutorConversationId(undefined);
@@ -1563,9 +1622,12 @@ export default function App() {
           courseContextLoading={homeworkLoading}
           conversations={tutorConversations}
           loading={tutorConversationsLoading}
+          awaitingCourseContext={tutorConversationsAwaitingCourse}
           loadError={tutorConversationsLoadError}
+          onRetryLoad={refetchTutorConversations}
           hasMore={tutorConversationsHasMore}
           selectedConversationId={tutorConversationId}
+          pendingConversationId={pendingTutorSelectionId}
           onSelectConversation={handleSelectExistingTutorConversation}
           onCreateConversation={handleCreateTutorConversation}
           onRenameConversation={renameTutorConversationRow}

@@ -21,6 +21,17 @@ import type { ConversationListItemResponse, ConversationListResponse, Conversati
 export interface UseTutorConversationsResult {
   conversations: ConversationListItemResponse[];
   loading: boolean;
+  /** #293: true whenever there is no `courseId` to scope a query to -- the
+   *  homework fetch that supplies it has not resolved, or the student is
+   *  enrolled in no course at all. Distinct from `loading` because this
+   *  hook cannot tell those two apart, and one of them never resolves.
+   *
+   *  Callers MUST gate the empty state on this being false. "not loading,
+   *  no error, zero rows" was previously reachable before courseId ever
+   *  arrived, so a returning student with eight conversations was told "No
+   *  conversations yet" for one round-trip on every page load -- the first
+   *  impression each time being that their work was gone. */
+  awaitingCourseContext: boolean;
   /** True only when a fetch to a *known* courseId failed (network error or
    *  non-2xx) -- never true just because courseId hasn't loaded yet. */
   loadError: boolean;
@@ -91,10 +102,49 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
   const conversationsRef = useRef(conversations);
   conversationsRef.current = conversations;
 
+  /* #388: the course scope as of the latest render. `refetch` is a
+     useCallback keyed on courseId, so the `courseId` its body closes over is
+     frozen at creation -- comparing a response against THAT would compare a
+     value with itself and always agree. Every late-arriving response has to
+     be checked against what the hook is scoped to NOW, which is what this
+     ref carries. */
+  const courseIdRef = useRef(courseId);
+  courseIdRef.current = courseId;
+
+  /** #400: monotonically increasing id per fetch this hook issues, so a
+   *  late response can tell whether it is still the newest. */
+  const requestSeqRef = useRef(0);
+
+  /** Bumped by every LOCAL mutation (create, rename, delete, bump). A GET
+   *  captured its snapshot server-side before any of these; if one has
+   *  landed since the request was issued, replacing the list wholesale with
+   *  that response silently reverts it.
+   *
+   *  Concretely: after a failed load a student can press Try again and then
+   *  create a conversation -- the New button stays enabled. If the GET's
+   *  snapshot predates the POST but resolves after it, `setConversations`
+   *  removes the row they just created. Renames and message-count bumps
+   *  revert the same way. */
+  const mutationSeqRef = useRef(0);
+
   const refetch = useCallback(() => {
     if (!courseId) {
       // Not a fetch error -- there's simply no course to scope the query
       // to yet (homework list still loading, or the student has none).
+      //
+      // #293: this resolves `loading` to false, as it always did -- but the
+      // empty state is no longer reachable from here, because
+      // `awaitingCourseContext` is true whenever courseId is absent and the
+      // list gates its empty state on that.
+      //
+      // Holding `loading` true instead was the other option the issue
+      // offered, and it is wrong: courseId is undefined both while the
+      // homework fetch is in flight AND permanently, for a student enrolled
+      // in no course at all. That second case would spin forever. The flag
+      // separates "the list is unknown" from "there is no course to list
+      // for", which is the distinction the UI actually needs -- in both
+      // no-courseId cases the honest thing to show is the disabled New
+      // conversation button and its reason, never "No conversations yet".
       setConversations([]);
       setLoadError(false);
       setHasMore(false);
@@ -102,30 +152,76 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
       return;
     }
     setLoading(true);
+    // #388: the course this particular request belongs to. Every setter
+    // below checks it, so a response arriving after a course switch cannot
+    // write into the new course's state.
+    const requestedCourseId = courseId;
+    /* #400: response ordering. Guarding by course id alone lets two
+       same-course requests (two Try again clicks) race, so an older
+       response could overwrite a newer list or restore an error a later one
+       had cleared. Every response checks it is still the newest request
+       issued, not merely the right course. */
+    const requestSeq = ++requestSeqRef.current;
+    const mutationSeqAtRequest = mutationSeqRef.current;
     fetch(`/api/conversations?courseId=${encodeURIComponent(courseId)}&kind=tutor`)
       .then((r) => {
         if (!r.ok) throw new Error(`failed to load tutor conversations: ${r.status}`);
         return r.json() as Promise<ConversationListResponse>;
       })
       .then((data) => {
+        if (requestedCourseId !== courseIdRef.current || requestSeq !== requestSeqRef.current) return;
+        /* A local mutation landed while this was in flight, so the server
+           snapshot is older than what is on screen. Keeping the local list
+           is the conservative choice: it may be missing another device's
+           changes until the next load, but it cannot delete a row the
+           student just created in front of them. `hasMore`/`loadError` are
+           still worth taking -- neither is invalidated by a local edit. */
+        const stale = mutationSeqAtRequest !== mutationSeqRef.current;
+        if (!stale) setConversations(data.items);
         // #281: the route returns { items, nextCursor } instead of a bare
         // array. #280: `nextCursor` is now surfaced as `hasMore` -- this
         // hook still only ever fetches one page (an actual load-more
         // request isn't wired), but a non-null cursor means the ceiling is
         // real and worth showing rather than leaving the ceiling silent.
-        setConversations(data.items);
         setHasMore(data.nextCursor !== null);
         setLoadError(false);
       })
-      .catch(() => {
-        setConversations([]);
-        setHasMore(false);
+      .catch((err: unknown) => {
+        // #310: the list is deliberately NOT cleared on a same-course
+        // failure. This used to setConversations([]), so a single 502 during
+        // a deploy emptied the rail for the rest of the session and the
+        // student's conversations looked deleted. Keeping the last known
+        // good list means a transient failure degrades to "possibly stale"
+        // rather than "apparently destroyed".
+        //
+        // #388: but only for the SAME course. `refetch` is keyed on
+        // courseId and the effect below is keyed on `[refetch]`, so it also
+        // re-runs on a course switch -- and retaining across that showed the
+        // PREVIOUS course's conversations, selectable, while the rest of the
+        // UI had moved on. Rows from another course are not stale, they are
+        // wrong, and the "may be out of date" notice understates that. The
+        // guard is the courseId this request was issued for, captured above,
+        // not the current one: a slow request for course A resolving after a
+        // switch to B must not clear B's list either.
+        console.error("[useTutorConversations.refetch]", err);
+        if (requestedCourseId !== courseIdRef.current || requestSeq !== requestSeqRef.current) return;
         setLoadError(true);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (requestedCourseId === courseIdRef.current && requestSeq === requestSeqRef.current) setLoading(false);
+      });
   }, [courseId]);
 
   useEffect(() => {
+    /* #388: drop the previous course's rows BEFORE the new request starts.
+       Retaining across a failure is right for a same-course refresh and
+       wrong here -- without this, a course switch whose fetch is slow (or
+       fails) leaves the old course's conversations on screen and
+       selectable. `loadError` is cleared too: an error belonging to the
+       previous scope says nothing about this one. */
+    setConversations([]);
+    setHasMore(false);
+    setLoadError(false);
     refetch();
   }, [refetch]);
 
@@ -147,9 +243,14 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
         // Prepended, not re-fetched: matches listConversationsForOwner's
         // desc(updatedAt) ordering (a brand-new conversation is always the
         // most recently updated) without an extra round-trip.
+        mutationSeqRef.current += 1;
         setConversations((prev) => [withCount, ...prev]);
         return withCount;
-      } catch {
+      } catch (err: unknown) {
+        // #310: was a bare `catch { return null; }`. The student does see
+        // the failure, but nobody debugging one did -- unlike the rename and
+        // list paths, which already log. Fails open with null as before.
+        console.error("[useTutorConversations.createConversation]", err);
         return null;
       }
     },
@@ -165,6 +266,7 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
       if (!res.ok && res.status !== 404) {
         throw new Error(`failed to delete conversation: ${res.status}`);
       }
+      mutationSeqRef.current += 1;
       setConversations((prev) => prev.filter((c) => c.id !== id));
       return true;
     } catch (err: unknown) {
@@ -178,6 +280,7 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
 
     // Optimistic update -- applied synchronously, before the PATCH even
     // goes out.
+    mutationSeqRef.current += 1;
     setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c)));
 
     try {
@@ -220,6 +323,7 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
   }, []);
 
   const bumpConversation = useCallback((id: string) => {
+    mutationSeqRef.current += 1;
     setConversations((prev) => {
       const now = new Date().toISOString();
       const next = prev.map((c) => (c.id === id ? { ...c, messageCount: c.messageCount + 1, updatedAt: now } : c));
@@ -230,5 +334,16 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     });
   }, []);
 
-  return { conversations, loading, loadError, hasMore, refetch, createConversation, deleteConversation, renameConversation, bumpConversation };
+  return {
+    conversations,
+    loading,
+    awaitingCourseContext: courseId === undefined,
+    loadError,
+    hasMore,
+    refetch,
+    createConversation,
+    deleteConversation,
+    renameConversation,
+    bumpConversation,
+  };
 }

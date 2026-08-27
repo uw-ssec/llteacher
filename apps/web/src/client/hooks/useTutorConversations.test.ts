@@ -429,4 +429,198 @@ describe("useTutorConversations", () => {
       expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-b"]);
     });
   });
+
+  /* ------------------------------------------------------------------------
+     #293 / #310 -- what the hook reports when things are missing or fail.
+     ---------------------------------------------------------------------- */
+  describe("course context and failure handling (#293, #310)", () => {
+    it("reports awaitingCourseContext while there is no courseId to scope a query to", async () => {
+      vi.stubGlobal("fetch", vi.fn());
+      const { result } = renderHook(() => useTutorConversations(undefined));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      // #293: this is the state the rail used to render "No conversations
+      // yet" from. The flag is what lets the list tell it apart from a
+      // genuinely empty list.
+      expect(result.current.awaitingCourseContext).toBe(true);
+      expect(result.current.conversations).toEqual([]);
+      expect(result.current.loadError).toBe(false);
+    });
+
+    it("resolves loading even with no courseId, so a student in no course does not spin forever", async () => {
+      vi.stubGlobal("fetch", vi.fn());
+      const { result } = renderHook(() => useTutorConversations(undefined));
+      // courseId is undefined both while the homework fetch is in flight AND
+      // permanently for a student enrolled in nothing -- holding `loading`
+      // true to suppress the empty state would never resolve in that second
+      // case. The flag above carries that distinction instead.
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.awaitingCourseContext).toBe(true);
+    });
+
+    it("clears awaitingCourseContext once a courseId arrives", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 })),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.awaitingCourseContext).toBe(false);
+    });
+
+    it("keeps the last known good list when a refresh fails, instead of emptying the rail", async () => {
+      let call = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          call += 1;
+          if (call === 1) {
+            return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
+          }
+          return new Response("boom", { status: 502 });
+        }),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toEqual([CONV_A]));
+
+      // #310: refetch used to setConversations([]) on failure, and refetch
+      // only re-runs when courseId changes -- so one 502 during a deploy
+      // emptied the rail for the rest of the session and the student's
+      // conversations looked deleted.
+      act(() => {
+        result.current.refetch();
+      });
+      await waitFor(() => expect(result.current.loadError).toBe(true));
+      expect(result.current.conversations).toEqual([CONV_A]);
+    });
+  });
+
+  /* ------------------------------------------------------------------------
+     #388: retention must not cross a course boundary.
+     ---------------------------------------------------------------------- */
+  describe("course-scoped retention (#388)", () => {
+    it("drops the previous course's rows on a switch, even before the new fetch resolves", async () => {
+      let resolveSecond!: (r: Response) => void;
+      let call = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          call += 1;
+          if (call === 1) return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
+          return new Promise<Response>((r) => (resolveSecond = r));
+        }),
+      );
+      const { result, rerender } = renderHook(({ id }) => useTutorConversations(id), {
+        initialProps: { id: "course-a" },
+      });
+      await waitFor(() => expect(result.current.conversations).toEqual([CONV_A]));
+
+      rerender({ id: "course-b" });
+
+      // Course A's rows must not be on screen, or selectable, while the UI
+      // is scoped to course B.
+      expect(result.current.conversations).toEqual([]);
+      resolveSecond(new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 }));
+    });
+
+    it("does not retain the previous course's rows when the new course's fetch fails", async () => {
+      let call = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          call += 1;
+          if (call === 1) return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
+          return new Response("boom", { status: 502 });
+        }),
+      );
+      const { result, rerender } = renderHook(({ id }) => useTutorConversations(id), {
+        initialProps: { id: "course-a" },
+      });
+      await waitFor(() => expect(result.current.conversations).toEqual([CONV_A]));
+
+      rerender({ id: "course-b" });
+      await waitFor(() => expect(result.current.loadError).toBe(true));
+
+      // Rows from another course are not stale, they are wrong -- the
+      // "may be out of date" retention rule does not apply across scopes.
+      expect(result.current.conversations).toEqual([]);
+    });
+
+    it("still retains rows when a refresh of the SAME course fails", async () => {
+      let call = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          call += 1;
+          if (call === 1) return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
+          return new Response("boom", { status: 502 });
+        }),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toEqual([CONV_A]));
+
+      act(() => {
+        result.current.refetch();
+      });
+      await waitFor(() => expect(result.current.loadError).toBe(true));
+
+      // #310's original fix must survive #388's narrowing.
+      expect(result.current.conversations).toEqual([CONV_A]);
+    });
+  });
+
+  /* ------------------------------------------------------------------------
+     Found by a high-effort re-review of THIS PR's own fixes.
+     ---------------------------------------------------------------------- */
+  describe("a retry must not revert local mutations", () => {
+    it("keeps a conversation created while a retry was in flight", async () => {
+      let releaseGet!: (r: Response) => void;
+      let getCount = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_url: string, init?: RequestInit) => {
+          if (init?.method === "POST") {
+            return new Response(
+              JSON.stringify({ ...CONV_A, id: "conv-new", title: "Brand new" }),
+              { status: 201 },
+            );
+          }
+          getCount += 1;
+          if (getCount === 1) return new Response("boom", { status: 502 });
+          // The retry: its server snapshot predates the POST below.
+          return new Promise<Response>((r) => (releaseGet = r));
+        }),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loadError).toBe(true));
+
+      // Try again -- the New conversation button stays enabled meanwhile.
+      act(() => {
+        result.current.refetch();
+      });
+      await act(async () => {
+        await result.current.createConversation("Brand new");
+      });
+      expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-new"]);
+
+      // Now the retry lands with a snapshot taken BEFORE the create.
+      await act(async () => {
+        releaseGet(new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 }));
+        await new Promise((r) => setTimeout(r, 0));
+      });
+
+      // Replacing the list wholesale would delete the row the student just
+      // watched appear.
+      expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-new"]);
+    });
+
+    it("still accepts a response when nothing changed locally", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 })),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toEqual([CONV_A]));
+    });
+  });
 });
