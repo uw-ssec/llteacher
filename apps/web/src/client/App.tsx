@@ -551,6 +551,13 @@ export default function App() {
      async callback without waiting on a re-render. */
   const latestTutorSelectionRef = useRef<string | undefined>(undefined);
 
+  /* Mirrors `tutorConversationId` for reads that happen after an await.
+     State captured in a closure is stale by definition once the handler
+     yields, and both directions of that staleness have produced real bugs
+     here (#401, and the inverse it introduced). */
+  const displayedTutorConversationRef = useRef<string | undefined>(undefined);
+  displayedTutorConversationRef.current = tutorConversationId;
+
   /* #235: which tutor conversation (if any) was just created this session,
      so the chat column can autofocus its composer once on mount -- a
      keyboard user should land where the visual focus implicitly went
@@ -754,7 +761,6 @@ export default function App() {
        Clearing the ref first removes the race rather than detecting it: the
        in-flight fetch's own staleness guard now discards its result, so the
        conversation can never become current while we are deleting it. */
-    const wasSelected = id === tutorConversationId;
     if (latestTutorSelectionRef.current === id) {
       latestTutorSelectionRef.current = undefined;
       // #381 adds a pendingTutorSelectionId marker that must be cleared
@@ -765,11 +771,22 @@ export default function App() {
     const ok = await deleteTutorConversationRow(id);
     if (!ok) return false;
 
-    // Only the DISPLAYED conversation needs the surface torn down; a
-    // pending-only delete has no transcript on screen to clear.
-    // `wasSelected` is captured before the await deliberately -- see #401
-    // above; reading tutorConversationId here would read a stale closure.
-    if (wasSelected) {
+    /* Only the DISPLAYED conversation needs the surface torn down, and
+       "displayed" has to be evaluated NOW, against a ref.
+
+       Reading `tutorConversationId` from this closure is stale in one
+       direction (a conversation that opened during the await is missed --
+       #401). Capturing `id === tutorConversationId` before the await is
+       stale in the other: if the student had A open, started loading B, then
+       deleted A, that captured `true` would tear down B when the delete
+       finished, dumping them back to the section chat for a conversation
+       that was not deleted.
+
+       A ref mirroring the current value is the only reading that is correct
+       in both directions. The invalidate-before-await above still stands --
+       it removes the pending race rather than detecting it; this handles the
+       separate question of what is on screen when the delete returns. */
+    if (displayedTutorConversationRef.current === id) {
       setTutorConversationId(undefined);
       setTutorInitialMessages([]);
       setJustCreatedTutorConversationId(undefined);

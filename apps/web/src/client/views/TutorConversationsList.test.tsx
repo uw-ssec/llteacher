@@ -274,6 +274,37 @@ describe("TutorConversationsList delete (#289)", () => {
     expect(await screen.findByText(`Deleted ${CONV_A.title}`)).toBeTruthy();
   });
 
+
+  it("announces a delete failure as an alert, not a silent describedby swap", async () => {
+    // Focus stays inside the open dialog while the request runs, and
+    // swapping the text of an aria-describedby target is not reliably
+    // announced -- the existing restart dialog already uses role="alert"
+    // for its failure, and this now matches it.
+    const onDeleteConversation = vi.fn(async () => false);
+    renderList({ conversations: [CONV_A], onDeleteConversation });
+
+    await userEvent.click(screen.getByRole("button", { name: `Delete conversation: ${CONV_A.title}` }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/Couldn't delete that conversation/);
+  });
+
+  it("closes the dialog rather than unmounting it, so focus can be restored", async () => {
+    const onDeleteConversation = vi.fn(async () => true);
+    renderList({ conversations: [CONV_A], onDeleteConversation });
+
+    await userEvent.click(screen.getByRole("button", { name: `Delete conversation: ${CONV_A.title}` }));
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    // The <dialog> element survives the cancel -- AlertDialog's controlled
+    // close() path needs it mounted to run and hand focus back. Unmounting
+    // an open native dialog drops focus to <body>.
+    const dialog = document.querySelector("dialog");
+    expect(dialog).not.toBeNull();
+    expect(dialog?.hasAttribute("open")).toBe(false);
+  });
+
   it("keeps the dialog open and says so when the delete fails", async () => {
     const onDeleteConversation = vi.fn(async () => false);
     renderList({ conversations: [CONV_A], onDeleteConversation });

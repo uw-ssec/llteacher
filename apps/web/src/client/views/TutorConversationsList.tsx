@@ -102,19 +102,26 @@ export function TutorConversationsList({
      trash view -- so it is confirmed rather than done on one click, and the
      dialog names the conversation so a mis-clicked row is caught before it
      matters, not after. */
-  const [pendingDelete, setPendingDelete] = useState<ConversationListItemResponse | null>(null);
+  /* Two pieces, deliberately: `deleteTarget` is what the dialog RENDERS and
+     survives the close so its copy does not vanish mid-transition;
+     `deleteOpen` is whether it is showing. Driving the dialog by mounting it
+     meant cancelling removed an open native <dialog> outright, so
+     AlertDialog's controlled dialog.close() never ran and focus dropped to
+     <body> instead of returning to the delete trigger. */
+  const [deleteTarget, setDeleteTarget] = useState<ConversationListItemResponse | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const confirmDelete = async () => {
-    if (!pendingDelete || !onDeleteConversation) return;
+    if (!deleteTarget || !onDeleteConversation) return;
     setDeleting(true);
-    const ok = await onDeleteConversation(pendingDelete.id);
+    const ok = await onDeleteConversation(deleteTarget.id);
     setDeleting(false);
     if (ok) {
-      setLiveMessage(`Deleted ${pendingDelete.title}`);
+      setLiveMessage(`Deleted ${deleteTarget.title}`);
       setDeleteError(null);
-      setPendingDelete(null);
+      setDeleteOpen(false);
     } else {
       // Dialog stays open: the row is still there, and closing it would
       // leave the student unsure whether the delete happened.
@@ -223,7 +230,8 @@ export function TutorConversationsList({
                       // #402: a failure recorded against a previous row must
                       // not be shown alongside this one.
                       setDeleteError(null);
-                      setPendingDelete(conv);
+                      setDeleteTarget(conv);
+                      setDeleteOpen(true);
                     }
                   : undefined
               }
@@ -238,20 +246,35 @@ export function TutorConversationsList({
           have exactly 50 conversations"). Static text, not a live region:
           it's present at initial render, not something that appears mid-
           interaction and needs to interrupt anything. */}
-      {pendingDelete && (
+      {/* Mounted whenever a delete has been requested this session, and
+          driven by `open` rather than by mounting/unmounting.
+
+          Conditionally mounting it meant cancelling REMOVED an open native
+          <dialog> outright, so AlertDialog's controlled dialog.close() path
+          never ran and the browser dropped focus to <body> instead of
+          restoring it to the delete trigger that is still sitting there.
+          Keeping it mounted through an open={false} transition lets that
+          path run. */}
+      {deleteTarget && (
         <AlertDialog
-          open
+          open={deleteOpen}
           title="Delete this conversation?"
           description={
             deleteError ? (
               <>
-                <p>{deleteError}</p>
-                <p>&ldquo;{pendingDelete.title}&rdquo; has not been deleted.</p>
+                {/* role="alert": focus stays inside the open dialog while
+                    the request runs, and swapping the text of an
+                    aria-describedby target is not reliably announced. The
+                    existing restart dialog already marks its failure this
+                    way -- matching it rather than inventing a quieter
+                    variant. */}
+                <p role="alert">{deleteError}</p>
+                <p>&ldquo;{deleteTarget.title}&rdquo; has not been deleted.</p>
               </>
             ) : (
               <>
                 <p>
-                  &ldquo;{pendingDelete.title}&rdquo; and its messages will no longer appear here. This
+                  &ldquo;{deleteTarget.title}&rdquo; and its messages will no longer appear here. This
                   can&rsquo;t be undone from the app.
                 </p>
               </>
@@ -268,7 +291,7 @@ export function TutorConversationsList({
                cancellation while the request is in flight matches what the
                existing restart dialog does. */
             if (deleting) return;
-            setPendingDelete(null);
+            setDeleteOpen(false);
             setDeleteError(null);
           }}
           confirming={deleting}
