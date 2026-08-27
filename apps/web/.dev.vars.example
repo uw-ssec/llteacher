@@ -29,3 +29,19 @@ BLIND_INDEX_KEY="base64-encoded-32-byte-key"
 # Webhook signing secret from the WorkOS dashboard's Webhooks/Endpoints
 # page (issue #95) -- not a key you generate yourself.
 WORKOS_WEBHOOK_SECRET="whsec_placeholder"
+
+# --- #343: opt-in degradation when the platform gateway key is missing ------
+# Migration 0035 makes llmoxie every org's default provider with no credential
+# row, so an unset LLMOXIE_API_KEY is a 500 for every student on every turn --
+# and a Worker rollback does not fix it, because the DB rows are already
+# flipped.
+#
+# Set this to a model your OPENROUTER_API_KEY can actually serve and chat
+# degrades to OpenRouter instead of failing, logging loudly each turn. Leave it
+# unset (the default) and behaviour is unchanged: a missing platform credential
+# fails loudly rather than quietly answering from a model nobody chose.
+#
+# There is deliberately no default value -- an LLMoxie catalogue name like
+# `gpt-5.3-codex` is not an OpenRouter slug, so the substitute has to be a
+# deployment decision, not a guess baked into the code.
+# LLM_DEGRADED_FALLBACK_MODEL="vendor/some-model"

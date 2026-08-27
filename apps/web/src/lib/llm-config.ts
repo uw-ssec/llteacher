@@ -373,6 +373,20 @@ const PROVIDER_FALLBACK_ENV_VAR: Partial<Record<LlmProvider, string>> = {
   llmoxie: "LLMOXIE_API_KEY",
 };
 
+/** #343: the same map, exported read-only so an operator-facing error can
+ *  name the exact binding to provision without this module's internals
+ *  leaking further. */
+export const PROVIDER_FALLBACK_ENV_VAR_NAME: Readonly<Partial<Record<LlmProvider, string>>> =
+  PROVIDER_FALLBACK_ENV_VAR;
+
+/** #343: which provider takes over when a platform provider's own credential
+ *  is unavailable. Only llmoxie has one -- openrouter IS the fallback, and a
+ *  cycle would be a hang rather than a degradation. See
+ *  resolveProviderCredential for why this is opt-in on a model binding. */
+const PROVIDER_DEGRADATION: Partial<Record<LlmProvider, { provider: LlmProvider }>> = {
+  llmoxie: { provider: "openrouter" },
+};
+
 /** #317 review, security finding #323: organization_credentials.secretRef
  *  is free-form `text`, entirely DB-controlled -- with no allowlist, it was
  *  used as an unrestricted index into the whole Worker secret environment
@@ -406,6 +420,76 @@ function readEnvSecret(env: Env, bindingName: string): string | undefined {
  *  is set, else the provider's conventional fallback env var above. Reads
  *  the key into a local variable only, at the moment of use -- callers must
  *  not log or persist it (see chat.ts's call site). */
+/** #343: the one documented degradation from the platform gateway.
+ *
+ *  Migration 0035 makes `llmoxie` every org's default provider with no
+ *  credential row, so key resolution goes to LLMOXIE_API_KEY. If that binding
+ *  is missing on a deploy target, resolveApiKey throws and chat.ts returns
+ *  500 -- for every student, in every org, on every turn. Rolling the Worker
+ *  back does not help, because the DB rows are already flipped; recovery
+ *  needs a manual UPDATE. #343 asked for a degradation so a missing platform
+ *  credential is an outage for nobody rather than for everyone.
+ *
+ *  The subtlety that makes this more than a key swap: a provider's key is
+ *  useless against another provider's endpoint, and model IDs are not
+ *  portable either -- 0035's default is `gpt-5.3-codex`, which is an LLMoxie
+ *  catalogue name, not an OpenRouter slug. Handing an OpenRouter key to the
+ *  LLMoxie gateway, or an LLMoxie model name to OpenRouter, both fail worse
+ *  than the honest 500 they replaced. So provider, key and model degrade
+ *  together or not at all.
+ *
+ *  OPT-IN by design: this engages only when an operator has set
+ *  LLM_DEGRADED_FALLBACK_MODEL to a model their OpenRouter account can
+ *  actually serve. There is no default, deliberately -- guessing a slug here
+ *  would trade a loud, diagnosable failure for a silent one against a model
+ *  nobody chose, with its own pricing. Unset, behaviour is exactly as before.
+ */
+export interface ResolvedProviderCredential {
+  provider: LlmProvider;
+  apiKey: string;
+  modelName: string;
+  /** Set only when degradation actually fired -- the provider the config
+   *  asked for. Callers log it; chat.ts also records it on the call log so a
+   *  degraded turn is distinguishable after the fact. */
+  degradedFrom?: LlmProvider;
+}
+
+export async function resolveProviderCredential(
+  env: Env,
+  db: Db,
+  orgScope: OrgScope,
+  config: ResolvedLLMConfig,
+): Promise<ResolvedProviderCredential> {
+  try {
+    const apiKey = await resolveApiKey(env, db, orgScope, config);
+    return { provider: config.provider, apiKey, modelName: config.modelName };
+  } catch (err) {
+    if (!(err instanceof LLMCredentialMissingError)) throw err;
+
+    /* Only the platform-gateway-with-no-credential case degrades. A config
+       with its own credentialId named a specific secret and it is missing or
+       not allowlisted -- that is a misconfiguration of THAT org's own
+       credential, and silently serving it from the platform's OpenRouter key
+       would bill the wrong account and hide the mistake. */
+    const degradation = config.credentialId === null ? PROVIDER_DEGRADATION[config.provider] : undefined;
+    if (!degradation) throw err;
+
+    const fallbackModel = env.LLM_DEGRADED_FALLBACK_MODEL;
+    if (!fallbackModel) throw err;
+
+    const fallbackVar = PROVIDER_FALLBACK_ENV_VAR[degradation.provider];
+    const apiKey = fallbackVar ? readEnvSecret(env, fallbackVar) : undefined;
+    if (!apiKey) throw err;
+
+    return {
+      provider: degradation.provider,
+      apiKey,
+      modelName: fallbackModel,
+      degradedFrom: config.provider,
+    };
+  }
+}
+
 export async function resolveApiKey(
   env: Env,
   db: Db,

@@ -215,6 +215,26 @@ vi.mock("../../lib/llm-config", async (importOriginal) => {
     resolveLLMConfig: (...args: unknown[]) => resolveLLMConfigMock(...args),
     resolveFallbackLLMConfig: (...args: unknown[]) => resolveFallbackLLMConfigMock(...args),
     resolveApiKey: (...args: unknown[]) => resolveApiKeyMock(...args),
+    /* #343: chat.ts resolves provider+key+model together now, so this is the
+       function it actually depends on. Mocking resolveApiKey alone stopped
+       working the moment resolveProviderCredential called it by direct
+       reference rather than through the module export -- the mock replaces
+       the export, not the internal binding.
+    
+       Shaped to delegate to resolveApiKeyMock so every existing test that
+       stubs a key or a rejection keeps working unchanged, and the degraded
+       path is exercised by its own tests against the REAL function in
+       llm-config.test.ts rather than through this stub. */
+    resolveProviderCredential: async (
+      _env: unknown,
+      _db: unknown,
+      _scope: unknown,
+      config: { provider: string; modelName: string },
+    ) => ({
+      provider: config.provider,
+      apiKey: await resolveApiKeyMock(_env, _db, _scope, config),
+      modelName: config.modelName,
+    }),
   };
 });
 

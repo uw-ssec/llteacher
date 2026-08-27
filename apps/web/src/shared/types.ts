@@ -452,6 +452,14 @@ declare global {
        LLMOXIE_DEFAULT_BASE_URL in lib/ai.ts -- see the reasoning there for
        why a generated Azure hostname should not be a compile-time constant. */
     LLMOXIE_BASE_URL?: string;
+    /* #343: opt-in degradation. When the platform gateway's own key
+       (LLMOXIE_API_KEY) is missing, a default config falls back to
+       openrouter using THIS model id -- which must be one the deployment's
+       OpenRouter account can serve, since llmoxie catalogue names like
+       `gpt-5.3-codex` are not OpenRouter slugs. Unset (the default) means no
+       degradation: a missing platform credential still fails loudly rather
+       than silently answering from a model nobody chose. */
+    LLM_DEGRADED_FALLBACK_MODEL?: string;
     ASSETS: Fetcher;
     // Auth (M1): sealed session cookie key + IdentityCipher keys.
     SESSION_SECRET: string;
