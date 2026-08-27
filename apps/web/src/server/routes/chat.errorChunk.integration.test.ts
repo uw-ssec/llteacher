@@ -45,22 +45,15 @@ const TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "test-key" } as 
 
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
-/* #170: chatHandler resolves the turn's config before streaming. This suite
-   drives the REAL streamText against a fake LanguageModelV2, so the point is
-   the stream's behaviour, not resolution -- stubbed to "this organization has
-   no config yet", which is a real state and the one that keeps every
-   expectation in this file about the platform model and prompt true.
-
-   #98 note: with no config there is no fallback either, so streamWithFallback
-   makes exactly the single attempt this suite was written against. The
-   failover paths are owned by llm/streamWithFallback.test.ts. */
-vi.mock("../repositories/organizations", () => ({
-  getOrgScopeForCourse: async () => "org-1",
-}));
-vi.mock("../repositories/llmConfigs", () => ({
-  resolveLlmConfig: async () => null,
-  resolveFallbackConfig: async () => null,
-}));
+/* #364: this file used to carry a `../repositories/llmConfigs` mock stubbing
+   `resolveLlmConfig`/`resolveFallbackConfig`, left behind by the #317/#363
+   merge -- chat.ts imports neither, and `resolveFallbackConfig` no longer
+   exists. Config resolution for this suite is stubbed where chat.ts actually
+   reads it, in the `../../lib/llm-config` mock further down; the failover hop
+   is stubbed to null there too, so streamWithFallback makes exactly the
+   single attempt every expectation in this file was written against. The
+   failover paths themselves are owned by llm/streamWithFallback.test.ts and
+   chat.fallback.integration.test.ts. */
 
 /* Only the model-backend factory is faked -- streamText itself, and every
    AI-SDK stream-processing step downstream of doStream, is real. */
@@ -255,7 +248,15 @@ vi.mock("../../lib/llm-config", async (importOriginal) => {
       temperature: 0.7,
       maxCompletionTokens: 1000,
       credentialId: null,
+      fallbackLlmConfigId: null,
+      basePrompt: "",
+      pricePerMillionInputTokens: null,
+      pricePerMillionOutputTokens: null,
+      markCompleteInstruction: null,
     }),
+    // #364: no fallback configured -- the dominant real configuration, and
+    // the one that keeps this suite a single-attempt test.
+    resolveFallbackLLMConfig: async () => null,
     resolveApiKey: async () => "sk-test-key",
   };
 });

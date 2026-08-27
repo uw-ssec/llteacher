@@ -121,8 +121,33 @@ let mockWarnings: unknown[] | undefined = undefined;
 // (via vi.useFakeTimers, not a real 5s wait) instead of only ever seeing
 // the fast-resolving path.
 let mockHangUsageFetch = false;
+// #364: `fullStream` is what streamWithFallback probes to decide whether the
+// primary committed any content before failing (see that module's header for
+// why it is not `await result.response` -- against ai@5.0.195 that promise
+// settles only after the LAST chunk of the turn, so awaiting it would make
+// time-to-first-token equal whole-turn latency). This default emits a
+// committing chunk, i.e. "the primary answered", which is what every test in
+// this file that isn't specifically about failover assumes. Individual tests
+// override `mockPrimaryStreamChunks` to drive the failover paths.
+let mockPrimaryStreamChunks: { type: string; error?: unknown }[] = [
+  { type: "start" },
+  { type: "text-start" },
+  { type: "text-delta" },
+  { type: "finish" },
+];
+function chunkStream(chunks: { type: string; error?: unknown }[]) {
+  return new ReadableStream({
+    start(controller) {
+      for (const c of chunks) controller.enqueue(c);
+      controller.close();
+    },
+  });
+}
 const streamTextMock = vi.fn((_args: Record<string, unknown>) => {
   return {
+    get fullStream() {
+      return chunkStream(mockPrimaryStreamChunks);
+    },
     totalUsage: mockHangUsageFetch ? new Promise<never>(() => {}) : Promise.resolve(mockUsage),
     response: mockHangUsageFetch ? new Promise<never>(() => {}) : Promise.resolve(mockResponseMeta),
     warnings: mockHangUsageFetch ? new Promise<never>(() => {}) : Promise.resolve(mockWarnings),
@@ -175,11 +200,18 @@ vi.mock("../../lib/prompts", async (importOriginal) => {
 // getOpenRouter(apiKey) call, not a second mock of it.
 const resolveLLMConfigMock = vi.fn();
 const resolveApiKeyMock = vi.fn();
+// #364: the failover hop. Defaults to null ("this config names no fallback")
+// -- the dominant real configuration, and the one under which chatHandler
+// makes exactly the single streamText call every test in this file was
+// written against. The failover paths themselves are owned by
+// chat.fallback.integration.test.ts, which drives the real streamText.
+const resolveFallbackLLMConfigMock = vi.fn();
 vi.mock("../../lib/llm-config", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/llm-config")>();
   return {
     ...actual,
     resolveLLMConfig: (...args: unknown[]) => resolveLLMConfigMock(...args),
+    resolveFallbackLLMConfig: (...args: unknown[]) => resolveFallbackLLMConfigMock(...args),
     resolveApiKey: (...args: unknown[]) => resolveApiKeyMock(...args),
   };
 });
@@ -347,7 +379,19 @@ describe("POST /api/chat", () => {
       temperature: 0.7,
       maxCompletionTokens: 1000,
       credentialId: null,
+      fallbackLlmConfigId: null,
+      basePrompt: "",
+      pricePerMillionInputTokens: null,
+      pricePerMillionOutputTokens: null,
+      markCompleteInstruction: null,
     });
+    resolveFallbackLLMConfigMock.mockReset().mockResolvedValue(null);
+    mockPrimaryStreamChunks = [
+      { type: "start" },
+      { type: "text-start" },
+      { type: "text-delta" },
+      { type: "finish" },
+    ];
     resolveApiKeyMock.mockReset().mockResolvedValue("sk-test-key");
   });
 

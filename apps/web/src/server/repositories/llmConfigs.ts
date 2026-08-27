@@ -437,22 +437,19 @@ export async function resolveLlmConfig(
   return orgDefault ? toRecord(orgDefault) : null;
 }
 
-/** #98: the one configured fallback for a config, or null.
- *
- *  Exactly one hop, never a walk. `fallbackLlmConfigId` on the *fallback* is
- *  not consulted, which is what makes the depth-one design safe without
- *  cycle detection: there is no traversal to loop. The self-reference CHECK
- *  in the schema closes the only remaining degenerate case.
- *
- *  A deactivated fallback resolves to null -- an instructor who retires a
- *  config has said it should not serve traffic, and "except when the primary
- *  is down" is not a thing they said. */
-export async function resolveFallbackConfig(
-  db: Db,
-  scope: OrgScope,
-  config: Pick<LlmConfigRecord, "fallbackLlmConfigId">,
-): Promise<LlmConfigRecord | null> {
-  if (!config.fallbackLlmConfigId) return null;
-  const found = await getLlmConfig(db, scope, config.fallbackLlmConfigId);
-  return found?.isActive ? found : null;
-}
+/* #364: `resolveFallbackConfig` (#98) lived here and became unreferenced when
+   the #317/#363 merge left the failover hop unwired -- its only callers were
+   its own tests. It is gone rather than kept beside the live path: the chat
+   route now resolves its failover hop through `resolveFallbackLLMConfig`
+   (lib/llm-config.ts), which reads the same `fallback_llm_config_id` column
+   under the same one-hop, active-only, org-scoped rule, but returns a
+   `ResolvedLLMConfig` -- the shape `resolveApiKey`/`buildProviderClient`
+   take. That is the whole reason for the move: this module's
+   `LlmConfigRecord` deliberately carries no `credentialId` (it is the admin
+   console's wire shape), so a fallback resolved here could never have had a
+   key resolved for its own provider, which is exactly the defect #364 exists
+   to fix. Its behavioural tests moved with it, to lib/llm-config.test.ts.
+
+   `resolveLlmConfig` (#170) above is NOT dead and stays -- routes/grades.ts's
+   draft-grade path is a live caller, so #364's "remove them if the rewire
+   makes them dead" applies to this one function, not the pair. */

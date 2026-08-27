@@ -132,13 +132,16 @@ import {
 } from "../../lib/prompts";
 import {
   resolveLLMConfig,
+  resolveFallbackLLMConfig,
   resolveApiKey,
   buildProviderClient,
   estimateCostCents,
   LLMConfigNotFoundError,
   LLMCredentialMissingError,
   UnsupportedLLMProviderError,
+  type ResolvedLLMConfig,
 } from "../../lib/llm-config";
+import { streamWithFallback } from "../llm/streamWithFallback";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 
@@ -1551,6 +1554,49 @@ export async function chatHandler(c: Context<AppEnv>) {
     throw err;
   }
 
+  // #364 (requirement 1): the failover hop resolved through the SAME
+  // resolveApiKey + buildProviderClient pair as the primary, against the
+  // FALLBACK CONFIG'S OWN row -- its own provider, its own credential, its
+  // own model. #363's version hardcoded `openrouter()` for both hops, which
+  // since migration 0035 (llmoxie is every organization's default) would
+  // have routed every failover through the wrong provider under the wrong
+  // key. Nothing here assumes the two hops share a provider.
+  //
+  // BEST-EFFORT, deliberately: a fallback that cannot be resolved or keyed
+  // must never fail a turn the primary could have served. Every failure here
+  // degrades to "this turn has no fallback", which is exactly the behaviour
+  // of the overwhelming majority of configs (none has a fallback set) and
+  // therefore a path already exercised on every request today.
+  let fallbackConfig: ResolvedLLMConfig | null = null;
+  let fallbackProviderClient: ReturnType<typeof buildProviderClient> | null = null;
+  try {
+    fallbackConfig = await resolveFallbackLLMConfig(db, orgScope, resolvedLLMConfig);
+    if (fallbackConfig) {
+      const fallbackApiKey = await resolveApiKey(c.env, db, orgScope, fallbackConfig);
+      fallbackProviderClient = buildProviderClient(fallbackConfig.provider, fallbackApiKey, {
+        llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL,
+      });
+    }
+  } catch (err) {
+    // Warn, not error: nothing is broken for this student -- the primary is
+    // about to run normally. But an instructor who configured a fallback
+    // believes they have one, and a silently unusable fallback is a fact an
+    // operator needs before the primary actually goes down. Structured per
+    // #275 so it is countable rather than a prose line.
+    logServerWarn(
+      "chatHandler.fallbackConfig.unusable",
+      "a fallback config is set but could not be resolved or keyed; this turn has no failover",
+      {
+        conversationId: conv.id,
+        primaryLlmConfigId: resolvedLLMConfig.id,
+        fallbackLlmConfigId: resolvedLLMConfig.fallbackLlmConfigId,
+        reason: err instanceof Error ? err.message : String(err),
+      },
+    );
+    fallbackConfig = null;
+    fallbackProviderClient = null;
+  }
+
   // Idempotency (#3, reworked #213) -- two distinct retry shapes, both
   // covered so neither the user row nor the assistant row can be
   // double-written:
@@ -1912,10 +1958,48 @@ export async function chatHandler(c: Context<AppEnv>) {
     // itself rather than this turn's own persistence/setup overhead.
     const turnStartedAt = Date.now();
 
-    const result = streamText({
-      // #26: model/provider/params all come from resolvedLLMConfig now --
-      // homework override or org default, never hardcoded.
-      model: providerClient(resolvedLLMConfig.modelName),
+    // #364: one params builder, used for BOTH hops, so a failover can only
+    // ever differ from the primary in the two things it is supposed to
+    // differ in -- which provider client, and which model id. Everything
+    // else (the system prompt, the history, the tool set, the tool context,
+    // prepareStep, stopWhen, the abort budget) is by construction identical,
+    // rather than identical because two call sites were kept in sync by
+    // hand. That is what makes "the failover answered a different question"
+    // unrepresentable here.
+    //
+    // #364 (requirement 4), the generation parameters, stated because two
+    // readings exist and the choice matters:
+    //
+    //  · `temperature` and `maxOutputTokens` are CARRIED FROM THE PRIMARY,
+    //    not re-read from the fallback's own row. The issue's requirement is
+    //    "a failover must not silently change generation parameters" -- an
+    //    instructor set 0.2 for this homework's turns, and a turn that
+    //    quietly became 0.9 because the backup model's row says so is a
+    //    different answer to the student's question, not a resilient one. A
+    //    failover swaps WHO serves the turn, never WHAT was asked or how
+    //    deterministically it is answered.
+    //  · `providerOptions` IS recomputed per model, from that hop's own
+    //    model id. This is not an exception to the rule above, it is what
+    //    ENFORCES it: `reasoningEffort: "none"` is the escape hatch that
+    //    stops @ai-sdk/openai silently dropping `temperature`, and it only
+    //    exists for the gpt-5.1-5.4 family (see
+    //    SUPPORTS_REASONING_EFFORT_NONE's own doc comment). Copying the
+    //    primary's literal value onto a fallback from a different family
+    //    would both misroute an OpenAI-specific parameter and lose the
+    //    carried temperature -- the same rule applied to a different model
+    //    is what keeps the temperature actually honoured on both hops.
+    //
+    // The SYSTEM PROMPT is likewise the primary's, and does not re-resolve
+    // `markCompleteInstruction` from the fallback's row: the prompt is a
+    // property of the conversation and its section (#25's prompt_templates
+    // resolution), not of whichever model happens to be reachable.
+    const buildTurnParams = (
+      config: ResolvedLLMConfig,
+      client: ReturnType<typeof buildProviderClient>,
+    ): Parameters<typeof streamText>[0] => ({
+      // #26: model/provider/params all come from a resolved config now --
+      // homework override, course override, or org default, never hardcoded.
+      model: client(config.modelName),
       system: systemPrompt,
       // #143: server-authoritative history (modelMessages, from
       // persistedHistory above), not a client-supplied array -- see
@@ -1991,12 +2075,16 @@ export async function chatHandler(c: Context<AppEnv>) {
         }
         return undefined;
       },
+      // #364: the PRIMARY's values on both hops -- see buildTurnParams' own
+      // doc comment for why these are carried rather than re-read.
       temperature: resolvedLLMConfig.temperature,
       maxOutputTokens: resolvedLLMConfig.maxCompletionTokens,
       // #317 review, #349: see SUPPORTS_REASONING_EFFORT_NONE's own doc
       // comment -- this is what actually keeps `temperature` above from
-      // being silently dropped for the gpt-5.1-5.4 family.
-      providerOptions: SUPPORTS_REASONING_EFFORT_NONE.test(resolvedLLMConfig.modelName)
+      // being silently dropped for the gpt-5.1-5.4 family. #364: computed
+      // from THIS hop's own model id, so the carried temperature survives on
+      // a fallback from a different model family too.
+      providerOptions: SUPPORTS_REASONING_EFFORT_NONE.test(config.modelName)
         ? { openai: { reasoningEffort: "none" } }
         : undefined,
       /* Allow up to 5 steps so the model can call a display tool and then
@@ -2024,11 +2112,15 @@ export async function chatHandler(c: Context<AppEnv>) {
         // in a single console line, but not a field a log query can filter
         // or group on. Passed as structured `extra` context instead (see
         // logServerError's own doc comment), same data, greppable now.
+        // #364: `config`, not `resolvedLLMConfig` -- on the fallback hop
+        // this names the model that actually errored, so an operator can
+        // tell "the backup failed too" from "the primary failed" instead of
+        // seeing the primary's name on both lines.
         logServerError("chatHandler.streamText.onError", error instanceof Error ? error : new Error(String(error)), {
           conversationId: conv.id,
           userId: authContext.session.userId,
-          provider: resolvedLLMConfig.provider,
-          model: resolvedLLMConfig.modelName,
+          provider: config.provider,
+          model: config.modelName,
         });
       },
       // Fires specifically when abortSignal (STREAM_TIMEOUT_MS above)
@@ -2040,11 +2132,81 @@ export async function chatHandler(c: Context<AppEnv>) {
         logServerError(
           "chatHandler.streamText.onAbort",
           new Error(
-            `LLM call timed out after ${STREAM_TIMEOUT_MS}ms for conversation ${conv.id}, provider ${resolvedLLMConfig.provider}, model ${resolvedLLMConfig.modelName}`,
+            `LLM call timed out after ${STREAM_TIMEOUT_MS}ms for conversation ${conv.id}, provider ${config.provider}, model ${config.modelName}`,
           ),
         );
       },
     });
+
+    // #98/#364: one hop of provider failover, finally wired in. Both hops are
+    // built by buildTurnParams above, so the fallback honours its own
+    // config's provider and credential (resolved further up) while every
+    // other parameter of the turn is identical to the primary's.
+    //
+    // streamWithFallback never throws: when there is no fallback, when the
+    // primary's failure is not the retryable kind, or when the fallback fails
+    // too, it hands back the corresponding result and everything below runs
+    // on it exactly as it did before this existed. See that module's header
+    // for the boundary it detects and why it is not `await result.response`.
+    const { result, attribution } = await streamWithFallback({
+      primary: buildTurnParams(resolvedLLMConfig, providerClient),
+      fallback:
+        fallbackConfig && fallbackProviderClient
+          ? buildTurnParams(fallbackConfig, fallbackProviderClient)
+          : null,
+      primaryModelName: resolvedLLMConfig.modelName,
+      fallbackModelName: fallbackConfig?.modelName ?? null,
+      logContext: `chatHandler.streamWithFallback conversation=${conv.id}`,
+    });
+
+    // #364 (requirement 3): the config whose provider/model/id the turn's
+    // single llm_call_logs row is written under -- WHOEVER ACTUALLY SERVED
+    // IT. `usedFallback` is the only thing that can select it, and it comes
+    // from the attempt streamWithFallback actually returned, so the row
+    // cannot name the primary for a turn the fallback answered. Its pricing
+    // columns come from the same row too, so cost is estimated against the
+    // model that was really billed.
+    const servingConfig: ResolvedLLMConfig =
+      attribution.usedFallback && fallbackConfig ? fallbackConfig : resolvedLLMConfig;
+
+    // #364 (requirement 5) -- DESIGN DECISION, recorded rather than silently
+    // picked: `usedFallback` is a structured LOG LINE, not a new column.
+    //
+    // Reasoning. The persisted half of the question is already answered by
+    // the requirement above it: llm_call_logs now records the SERVING
+    // provider/model/llm_config_id, so "which model answered this turn" is a
+    // queryable column today, not an inference. What a dedicated column would
+    // add is only the DELTA -- "and it wasn't the one we asked first" -- and
+    // the sole consumer for that is the fallback-rate report (#48), which
+    // does not exist. #275 built structured JSON logging on this route
+    // specifically for chat-failure-path observability, and a rate over these
+    // lines is computable from a log query the day someone wants it. A
+    // migration adding a column to a table whose reporting story is still
+    // unbuilt would be guessing at that report's shape before it has one.
+    //
+    // The upgrade path is deliberately cheap and stated here so it is not
+    // rediscovered: when #48 lands, add `used_fallback boolean not null
+    // default false` (plus, if the report wants it, `primary_llm_config_id`)
+    // to llm_call_logs and pass `attribution.usedFallback` straight through
+    // finalizeAssistantTurn's existing llmLog argument. Nothing about this
+    // decision makes that harder later.
+    //
+    // Warn, not error: the turn SUCCEEDED. This is the system working as
+    // configured. But a rising rate of these means the primary provider is in
+    // trouble, and nothing else in the system would surface that.
+    if (attribution.usedFallback) {
+      logServerWarn("chatHandler.streamWithFallback.usedFallback", "primary provider failed; fallback served the turn", {
+        conversationId: conv.id,
+        userId: authContext.session.userId,
+        primaryLlmConfigId: resolvedLLMConfig.id,
+        primaryProvider: resolvedLLMConfig.provider,
+        primaryModel: resolvedLLMConfig.modelName,
+        servingLlmConfigId: servingConfig.id,
+        servingProvider: servingConfig.provider,
+        servingModel: attribution.servedBy,
+        primaryError: attribution.primaryError ?? null,
+      });
+    }
 
     return result.toUIMessageStreamResponse({
       headers: { "x-conversation-id": conv.id },
@@ -2077,7 +2239,7 @@ export async function chatHandler(c: Context<AppEnv>) {
         logServerError("chatHandler.stream", error instanceof Error ? error : new Error(String(error)), {
           conversationId: conv.id,
           userId: authContext.session.userId,
-          model: resolvedLLMConfig.modelName,
+          model: servingConfig.modelName,
         });
         return JSON.stringify({
           error: "The tutor stopped partway through. Nothing you wrote was lost.",
@@ -2153,7 +2315,7 @@ export async function chatHandler(c: Context<AppEnv>) {
           logServerWarn("chatHandler.onFinish.noRenderableContent", "turn produced no persistable content", {
             conversationId: conv.id,
             userId: authContext.session.userId,
-            model: resolvedLLMConfig.modelName,
+            model: servingConfig.modelName,
             finishReason: finishReason ?? null,
             isAborted: Boolean(isAborted),
           });
@@ -2162,6 +2324,16 @@ export async function chatHandler(c: Context<AppEnv>) {
           ? { id: crypto.randomUUID(), parts: responseMessage.parts }
           : null;
 
+        // #364 (requirement 3): still ONE row per turn after a failover, not
+        // one per attempt. There is exactly one finalizeAssistantTurn call
+        // site pair in this callback and streamWithFallback returns exactly
+        // one result, so a failed-over turn cannot produce a second row --
+        // and `servingConfig` (above) means the one row it does produce names
+        // the provider/model/config that actually answered, never the primary
+        // that didn't. `latencyMs` deliberately still measures from
+        // turnStartedAt, i.e. the whole model-call window including the
+        // failed first attempt: that is what the student actually waited.
+        //
         // #317 review, #321: one llm_call_logs row per turn -- including the
         // error/aborted/no-content cases above, which previously early-
         // returned with nothing written anywhere. This was the operational
@@ -2205,9 +2377,9 @@ export async function chatHandler(c: Context<AppEnv>) {
             );
             await finalizeAssistantTurn(db, conv.id, assistantMessage, {
               organizationId: orgScope,
-              llmConfigId: resolvedLLMConfig.id,
-              provider: resolvedLLMConfig.provider,
-              model: resolvedLLMConfig.modelName,
+              llmConfigId: servingConfig.id,
+              provider: servingConfig.provider,
+              model: servingConfig.modelName,
               providerRequestId: null,
               inputTokens: null,
               outputTokens: null,
@@ -2229,25 +2401,25 @@ export async function chatHandler(c: Context<AppEnv>) {
             logServerError(
               "chatHandler.onFinish.warnings",
               new Error(
-                `streamText warnings for conversation ${conv.id}, model ${resolvedLLMConfig.modelName}: ${JSON.stringify(warnings)}`,
+                `streamText warnings for conversation ${conv.id}, model ${servingConfig.modelName}: ${JSON.stringify(warnings)}`,
               ),
             );
           }
           await finalizeAssistantTurn(db, conv.id, assistantMessage, {
             organizationId: orgScope,
-            llmConfigId: resolvedLLMConfig.id,
-            provider: resolvedLLMConfig.provider,
-            model: resolvedLLMConfig.modelName,
+            llmConfigId: servingConfig.id,
+            provider: servingConfig.provider,
+            model: servingConfig.modelName,
             providerRequestId: response.id ?? null,
             inputTokens: usage.inputTokens ?? null,
             outputTokens: usage.outputTokens ?? null,
             costCents: estimateCostCents(
-              resolvedLLMConfig.modelName,
+              servingConfig.modelName,
               usage.inputTokens ?? null,
               usage.outputTokens ?? null,
               {
-                input: resolvedLLMConfig.pricePerMillionInputTokens,
-                output: resolvedLLMConfig.pricePerMillionOutputTokens,
+                input: servingConfig.pricePerMillionInputTokens,
+                output: servingConfig.pricePerMillionOutputTokens,
               },
             ),
             latencyMs: Date.now() - turnStartedAt,
@@ -2271,7 +2443,7 @@ export async function chatHandler(c: Context<AppEnv>) {
           logServerError("chatHandler.onFinish.finalizeAssistantTurn", err, {
             conversationId: conv.id,
             userId: authContext.session.userId,
-            model: resolvedLLMConfig.modelName,
+            model: servingConfig.modelName,
           });
         }
       },
