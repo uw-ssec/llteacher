@@ -24,8 +24,7 @@
       that, and it fails CLOSED: when it cannot tell, it withholds.
    -------------------------------------------------------------------------- */
 
-import { generateText } from "ai";
-import { getOpenRouter } from "../ai";
+import { generateText, type LanguageModel } from "ai";
 import { logServerError } from "../../server/utils/errors";
 
 export interface DraftInput {
@@ -39,7 +38,17 @@ export interface DraftInput {
   transcript: { role: string; text: string }[];
   maxScore: number;
   modelName: string;
-  apiKey: string;
+  /** #365: the provider client for `modelName`, already built by the caller
+   *  from the resolved config's OWN provider and credential
+   *  (buildProviderClient + resolveApiKey, lib/llm-config.ts). This used to
+   *  be a bare `apiKey: string` that this module fed to `getOpenRouter`
+   *  unconditionally -- so a draft against an org whose config is
+   *  `llmoxie`/`gpt-5.3-codex` (every org's default since migration 0035)
+   *  sent that model id to openrouter.ai under an OpenRouter key. Which
+   *  provider a config names is the caller's knowledge, not this module's;
+   *  taking the built model closes the door on this file ever assuming one
+   *  again. */
+  model: LanguageModel;
   signal?: AbortSignal;
 }
 
@@ -158,7 +167,7 @@ export async function draftGrade(input: DraftInput): Promise<DraftOutput | null>
 
   try {
     const result = await generateText({
-      model: getOpenRouter(input.apiKey)(input.modelName),
+      model: input.model,
       system: systemPrompt(input.maxScore, input.solutionContent !== null),
       messages: [{ role: "user", content: userContent }],
       // Low, because this is an assessment: two instructors pressing the

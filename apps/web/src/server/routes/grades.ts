@@ -34,6 +34,14 @@ import { getOrgScopeForCourse } from "../repositories/organizations";
 import { resolveLlmConfig } from "../repositories/llmConfigs";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import { draftGrade } from "../../lib/services/GradingEvaluator";
+import {
+  loadLLMConfigById,
+  resolveApiKey,
+  buildProviderClient,
+  LLMCredentialMissingError,
+  UnsupportedLLMProviderError,
+} from "../../lib/llm-config";
+import { getOpenRouter } from "../../lib/ai";
 import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
 import { logServerError } from "../utils/errors";
 import { messageTextOf } from "../utils/messageText";
@@ -47,6 +55,12 @@ const MAX_FEEDBACK_CHARS = 20_000;
  *  one. Conventional, and only ever a starting value in a form the
  *  instructor edits before saving. */
 const DEFAULT_MAX_SCORE = 100;
+/** #365: the model a draft falls back to when no `llm_configs` row resolves
+ *  for the course's org at all. Named once, because it is now consulted in
+ *  two places that must not disagree -- the client built for it, and the
+ *  `modelName` recorded on the draft. It IS an OpenRouter model, which is why
+ *  that one branch legitimately reaches for OPENROUTER_API_KEY by name. */
+const DEFAULT_DRAFT_MODEL_NAME = "google/gemma-4-31b-it:free";
 
 async function instructorContext(
   c: Context<AppEnv>,
@@ -197,12 +211,14 @@ export async function draftGradeHandler(c: Context<AppEnv>) {
   const submissionId = submissionIdParam(c);
   if (!submissionId) return c.json({ error: "That submission no longer exists." }, 404);
 
-  const apiKey = c.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    logServerError("draftGradeHandler", new Error("OPENROUTER_API_KEY is not configured"));
-    return c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503);
-  }
-
+  // #365: the up-front `if (!c.env.OPENROUTER_API_KEY) 503` that used to sit
+  // here is gone, for the same reason chat.ts dropped its own (#26): WHICH
+  // key this draft needs depends on the resolved config's provider, which is
+  // not known until that config has been read, below. Gating on OpenRouter's
+  // key specifically refused the whole feature on a deployment whose configs
+  // are all `llmoxie` -- every organization's default since migration 0035 --
+  // and would have sent an LLMOxie model id to openrouter.ai on one that had
+  // both keys set.
   const db = makeDb(c.env.DATABASE_URL);
   const found = await getSubmissionInCourse(db, ctx.scope, submissionId);
   if (!found) return c.json({ error: "That submission no longer exists." }, 404);
@@ -260,6 +276,44 @@ export async function draftGradeHandler(c: Context<AppEnv>) {
     ? await resolveLlmConfig(db, orgScope, { sectionId: context.sectionId })
     : null;
 
+  // #365: build the client from the resolved config's OWN provider and
+  // credential, the same buildProviderClient + resolveApiKey pair chat.ts and
+  // the config-test button use. `resolveLlmConfig` returns the console's
+  // LlmConfigRecord, which deliberately carries no credentialId, so the row
+  // is re-read through `loadLLMConfigById` for the credential-bearing shape
+  // -- one extra read on an explicitly instructor-initiated action, and the
+  // alternative was widening the admin wire contract for a field only the
+  // server needs. `activeOnly: false` because resolveLlmConfig has already
+  // applied its own is_active rule at every tier it walked.
+  const resolvedConfig =
+    orgScope && config ? await loadLLMConfigById(db, orgScope, config.id, { activeOnly: false }) : null;
+
+  let model;
+  try {
+    if (resolvedConfig && orgScope) {
+      const apiKey = await resolveApiKey(c.env, db, orgScope, resolvedConfig);
+      model = buildProviderClient(resolvedConfig.provider, apiKey, {
+        llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL,
+      })(resolvedConfig.modelName);
+    } else {
+      // No org scope, or no config resolvable for it. Unchanged from before:
+      // the historic hardcoded default, which IS an openrouter model and so
+      // legitimately needs an OpenRouter key -- the one case where naming
+      // that binding directly is correct rather than an assumption.
+      if (!c.env.OPENROUTER_API_KEY) {
+        logServerError("draftGradeHandler", new Error("OPENROUTER_API_KEY is not configured"));
+        return c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503);
+      }
+      model = getOpenRouter(c.env.OPENROUTER_API_KEY)(DEFAULT_DRAFT_MODEL_NAME);
+    }
+  } catch (err) {
+    if (err instanceof LLMCredentialMissingError || err instanceof UnsupportedLLMProviderError) {
+      logServerError("draftGradeHandler", err);
+      return c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503);
+    }
+    throw err;
+  }
+
   const draft = await draftGrade({
     sectionContent: context.sectionContent,
     solutionContent: context.solution ?? null,
@@ -267,9 +321,11 @@ export async function draftGradeHandler(c: Context<AppEnv>) {
     maxScore: DEFAULT_MAX_SCORE,
     // The course's own configured model, so a draft is produced by the same
     // model the instructor chose for the course rather than by whatever this
-    // route happened to hardcode.
-    modelName: config?.modelName ?? "google/gemma-4-31b-it:free",
-    apiKey,
+    // route happened to hardcode. #365: `model` is the client built for that
+    // config's own PROVIDER just above -- the model name alone was never
+    // enough, since this used to be handed to getOpenRouter regardless.
+    modelName: resolvedConfig?.modelName ?? DEFAULT_DRAFT_MODEL_NAME,
+    model,
   });
 
   if (!draft) {
