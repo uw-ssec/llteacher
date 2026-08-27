@@ -13,7 +13,15 @@ import { renderHook, act } from "@testing-library/react";
    -------------------------------------------------------------------------- */
 
 const ensureReady = vi.fn();
-const useWebRMock = vi.fn(() => ({ status: "ready" as const, error: undefined, ensureReady }));
+const useWebRMock = vi.fn(() => ({
+  status: "ready" as const,
+  error: undefined,
+  /* #374 review finding: the real useWebR returns this, and
+     useRExecution now reads it to explain a package-related failure to
+     the student. Empty is the healthy case. */
+  missingPackages: [] as string[],
+  ensureReady,
+}));
 
 vi.mock("./useWebR", () => ({
   useWebR: () => useWebRMock(),
@@ -39,7 +47,7 @@ function makeWebR(shelter: ReturnType<typeof makeShelter>) {
 beforeEach(() => {
   ensureReady.mockReset();
   useWebRMock.mockReset();
-  useWebRMock.mockReturnValue({ status: "ready", error: undefined, ensureReady });
+  useWebRMock.mockReturnValue({ status: "ready", error: undefined, missingPackages: [], ensureReady });
 });
 
 async function importUseRExecution() {
@@ -451,5 +459,65 @@ describe("useRExecution", () => {
       await runPromise;
     });
     expect(result.current.isRunning).toBe(false);
+  });
+});
+
+/* #374's root complaint was that install failures are INVISIBLE to a student:
+   R blames their code ("there is no package called 'dplyr'") for what is an
+   environment problem. #379 fixes the install; these pin that if it ever
+   breaks again, the student is told. */
+describe("useRExecution -- missing-package explanation (#374 review finding)", () => {
+  async function runWith(missingPackages: string[] | undefined, stderr: string, code: string) {
+    useWebRMock.mockReturnValue({
+      status: "ready" as const,
+      error: undefined,
+      ...(missingPackages ? { missingPackages } : {}),
+      ensureReady,
+    } as never);
+    /* type:"error", not "stderr" -- processCapture only treats the former as
+       the turn's error text (see the "captures an R error distinctly" test
+       above); stderr is ordinary output a warning also uses. */
+    const shelter = makeShelter(async () => ({
+      output: [{ type: "error", data: { toString: async () => stderr } }],
+    }));
+    ensureReady.mockResolvedValue(makeWebR(shelter));
+    const { useRExecution } = await importUseRExecution();
+    const { result } = renderHook(() => useRExecution());
+    let out!: Awaited<ReturnType<typeof result.current.run>>;
+    await act(async () => {
+      out = await result.current.run(code);
+    });
+    return out;
+  }
+
+  it("explains a missing package when the R error names it", async () => {
+    const out = await runWith(
+      ["dplyr"],
+      "Error in library(dplyr) : there is no package called 'dplyr'",
+      "library(dplyr)",
+    );
+    expect(out.status).toBe("error");
+    expect(out.error).toContain("there is no package called");
+    expect(out.error).toContain("environment problem rather than a mistake in your code");
+  });
+
+  it("explains it when the CODE asked for the package, even if the error does not name it", async () => {
+    const out = await runWith(["ggplot2"], "Error: object 'p' not found", 'library("ggplot2")\np');
+    expect(out.error).toContain("ggplot2");
+  });
+
+  it("stays SILENT when the failure has nothing to do with the missing package", async () => {
+    /* Attaching an irrelevant paragraph to a student's genuine typo is how
+       people learn to stop reading error messages. */
+    const out = await runWith(["dplyr"], "Error: object 'x' not found", "x + 1");
+    expect(out.error).toBe("Error: object 'x' not found");
+  });
+
+  it("does not crash when a caller supplies no missingPackages at all", async () => {
+    // This hook's contract is that it never rejects; an older useWebR shape
+    // must not turn a student's R error into an unhandled TypeError.
+    const out = await runWith(undefined, "Error: boom", "stop('boom')");
+    expect(out.status).toBe("error");
+    expect(out.error).toBe("Error: boom");
   });
 });

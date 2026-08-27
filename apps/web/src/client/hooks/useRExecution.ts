@@ -165,11 +165,51 @@ async function processCapture(captured: WebRCaptureResult): Promise<ProcessedCap
   return { output, error: errorText, images };
 }
 
+/* #374 review finding: `missingPackages` was dead data. useWebR() produced it,
+   useRExecution() dropped it, and App.tsx took only `run` -- so the ONLY
+   externally-observable signal that a package failed to install was a
+   console.warn, invisible to a student. #379 fixes the install itself, but if
+   it ever fails again (repo outage, a package pulled from the WASM repo) the
+   student is left with R's own message, which blames their code:
+
+       Error in library(dplyr) : there is no package called 'dplyr'
+
+   That reads as "you typed something wrong". It is not.
+
+   Appended only when the failure is PLAUSIBLY about a missing package -- the
+   error names one, or the code asked for one. Appending to every error would
+   attach an irrelevant paragraph to a student's genuine typo, which is how
+   people learn to stop reading error messages. */
+function explainMissingPackages(
+  code: string,
+  errorText: string,
+  missing: readonly string[] | undefined,
+): string | null {
+  /* Defensive: this hook's whole contract is that it NEVER rejects -- every
+     failure resolves to status:"error". A caller (or a test double) supplying
+     an older useWebR shape without missingPackages must not turn a student's
+     R error into an unhandled TypeError. */
+  if (!missing || missing.length === 0) return null;
+  const relevant = missing.filter(
+    (pkg) =>
+      errorText.includes(pkg) ||
+      new RegExp(`\\b(?:library|require|requireNamespace)\\s*\\(\\s*["']?${pkg}\\b`).test(code),
+  );
+  if (relevant.length === 0) return null;
+  const list = relevant.join(", ");
+  const isAre = relevant.length === 1 ? "isn't" : "aren't";
+  return `${list} ${isAre} available in this session -- the package failed to load when R started, so this is an environment problem rather than a mistake in your code. Let your instructor know.`;
+}
+
 export interface UseRExecutionResult {
   /** Passed through from useWebR -- lets a caller (e.g. CodeExecution's Run
    *  button) show a loading/error state without needing its own useWebR(). */
   webRStatus: WebRStatus;
   webRError?: string;
+  /** #374 review finding: packages that failed to install, so a caller can
+   *  warn a student BEFORE they run `library(dplyr)` rather than only
+   *  annotating the failure afterwards. Empty in the normal case. */
+  missingPackages: string[];
   isRunning: boolean;
   /** Executes R code against the shared WebR singleton, lazily
    *  initializing it on first call. Never rejects: every failure mode
@@ -181,7 +221,7 @@ export interface UseRExecutionResult {
 }
 
 export function useRExecution(): UseRExecutionResult {
-  const { status: webRStatus, error: webRError, ensureReady } = useWebR();
+  const { status: webRStatus, error: webRError, missingPackages, ensureReady } = useWebR();
   const [isRunning, setIsRunning] = useState(false);
 
   const run = useCallback(
@@ -207,7 +247,14 @@ export function useRExecution(): UseRExecutionResult {
           const { output, error, images } = await processCapture(captured);
           const executionTimeMs = Date.now() - startedAt;
           if (error) {
-            return { status: "error", error, output: output || undefined, executionTimeMs, images: images.length ? images : undefined };
+            const note = explainMissingPackages(code, error, missingPackages);
+            return {
+              status: "error",
+              error: note ? `${error}\n\n${note}` : error,
+              output: output || undefined,
+              executionTimeMs,
+              images: images.length ? images : undefined,
+            };
           }
           return { status: "success", output: output || undefined, executionTimeMs, images: images.length ? images : undefined };
         } catch (err) {
@@ -267,5 +314,9 @@ export function useRExecution(): UseRExecutionResult {
     [ensureReady],
   );
 
-  return { webRStatus, webRError, isRunning, run };
+  /* #374 review finding: `missingPackages` used to stop here. It is returned
+     now so a caller can surface it BEFORE a student runs anything, not only
+     after a failure -- the error annotation above is the floor, not the
+     ceiling. */
+  return { webRStatus, webRError, missingPackages, isRunning, run };
 }
