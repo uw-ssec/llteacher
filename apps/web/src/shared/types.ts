@@ -186,12 +186,12 @@ export interface ConversationListResponse {
   nextCursor: string | null;
 }
 
-/** Wire shape of a row from GET /api/conversations/:id/messages (#4
- *  fix-round -- added so the tutor-conversations rail's chat column can
- *  seed useChat's `messages` on resume, not just so the UI shows history:
- *  chatHandler builds the model's context from convertToModelMessages
- *  (chat.ts) over exactly the client-sent messages array, so without this
- *  the LLM itself loses all prior context on resume, not just the display).
+/** Wire shape of a row from GET /api/conversations/:id/messages (#4 -- what
+ *  the tutor-conversations rail's chat column seeds useChat's `messages`
+ *  with on resume, which is more than a display concern: chatHandler builds
+ *  the model's context from convertToModelMessages (chat.ts) over exactly
+ *  the client-sent messages array, so a client that resumes without this
+ *  loses all prior context in the LLM itself, not just on screen).
  *  `parts` is deliberately typed `unknown`, matching how the DB stores it
  *  (jsonb) and how chat.ts's own replayPersistedPart already treats a
  *  persisted row's parts at this boundary -- the client casts it to

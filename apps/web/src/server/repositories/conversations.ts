@@ -780,13 +780,13 @@ export async function getLastMessages(
     .limit(limit);
 }
 
-// #4 fix-round: backs GET /api/conversations/:id/messages, added after code
-// review caught that selecting an *existing* tutor conversation reset the
-// client's useChat message list to empty with no way to reseed it -- not
-// just a visual gap, chat.ts's chatHandler builds the model's context
-// straight from convertToModelMessages(uiMessages) (the array the CLIENT
-// sends), so an empty client-side history meant the LLM silently lost every
-// prior turn on resume. Same scoping shape as getLastMessages above
+// #4: backs GET /api/conversations/:id/messages -- the read that lets a
+// client reseed its useChat message list when it selects an *existing*
+// conversation. Not just a visual concern: chat.ts's chatHandler builds the
+// model's context straight from convertToModelMessages(uiMessages) (the
+// array the CLIENT sends), so a client-side history that starts empty means
+// the LLM silently loses every prior turn on resume. Same scoping shape as
+// getLastMessages above
 // (courseId match + not-deleted), ascending by `seq` (#221; oldest first --
 // the opposite of getLastMessages' retry-detection order, same underlying
 // tiebreaker).

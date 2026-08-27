@@ -114,7 +114,7 @@ app.onError((err, c) => {
   return c.json({ error: SERVICE_UNAVAILABLE_MESSAGE }, 503);
 });
 
-// #368 (PR3 final review): cross-origin isolation, so WebR's SharedArrayBuffer
+// #368: cross-origin isolation, so WebR's SharedArrayBuffer
 // channel is available where the browser supports it -- see useWebR.ts's own
 // doc comment for why this is an optimization, not a hard requirement (webR
 // falls back to its PostMessage channel without it, no service worker
@@ -185,7 +185,7 @@ app.patch(
 app.get("/api/student/homeworks", requireRole(["student"])(studentHomeworksHandler));
 app.get("/api/conversations", listConversationsHandler);
 app.post("/api/conversations", createConversationHandler);
-// #4 fix-round: message-history hydration for the tutor-conversations rail
+// #4: message-history hydration for the tutor-conversations rail
 // (see conversations.ts's doc comment above listConversationMessagesHandler).
 app.get("/api/conversations/:id/messages", listConversationMessagesHandler);
 app.patch("/api/conversations/:id", updateConversationHandler);

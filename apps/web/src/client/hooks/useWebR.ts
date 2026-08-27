@@ -9,7 +9,7 @@ import { useCallback, useState } from "react";
    useRExecution.ts), install a handful of common packages, and reuse the
    same instance for every subsequent evaluation.
 
-   #368/#369 (PR3 final review, blocking): originally loaded from
+   #368/#369 (blocking): originally loaded from
    https://webr.r-wasm.org/latest/webr.mjs -- a genuinely untested path
    (every test mocks the module out) with two real problems: `latest` means
    what code runs in this authenticated origin can change with no repo

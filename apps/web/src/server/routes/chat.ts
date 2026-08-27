@@ -373,14 +373,14 @@ export const TOOLS: ToolSet = {
  *  requestHint originally shipped (#80) with a weaker mechanism instead --
  *  staying in every conversation's tool list and self-reporting
  *  `{ status: "unavailable" }` from inside its own execute() when there was
- *  no sectionId. The PR3 final review flagged the resulting three-way
- *  inconsistency (this structural gate vs. that self-report vs.
- *  executeRCode/showDefinition's "never gated, and correctly so -- both are
- *  meaningful on either conversation kind") as worth a human decision rather
- *  than auto-fixing it. The decision: fold requestHint in here too, since
- *  toolsForConversation already existed and already gates on the identical
- *  sectionId signal -- there was no real reason left for a second, weaker
- *  mechanism to keep gating the same thing. */
+ *  no sectionId. That left three different answers to one question (this
+ *  structural gate vs. that self-report vs. executeRCode/showDefinition's
+ *  "never gated, and correctly so -- both are meaningful on either
+ *  conversation kind"). requestHint belongs in this set, not in a second,
+ *  weaker mechanism: toolsForConversation already gates on the identical
+ *  sectionId signal, so sectionId-gating has exactly one home. Any future
+ *  section-only tool goes here too rather than self-reporting from inside
+ *  its own execute(). */
 const SECTION_ONLY_TOOL_NAMES = new Set<keyof typeof TOOLS>(["markSectionComplete", "requestHint"]);
 
 /** #168: the actual conditional that makes section-kind-only gating real
@@ -922,20 +922,17 @@ export function classifyTurn(
  *  reading chatHandler's own body to follow -- callers must check
  *  `instanceof Response` before touching `.conv`.
  *
- *  #317 review, #353: this comment used to claim the extraction "leaves
- *  chatHandler's own body a thin 'resolve, then stream' dispatcher" --
- *  measured false the moment it was written, and more so with every #317
- *  review round since (request validation, rate limiting, prompt/config
- *  resolution, the release gate, lock acquisition, history fetch, turn
- *  classification, replay, model-context assembly, the streamText call,
- *  and its three stream callbacks all still live in chatHandler itself).
- *  `classifyTurn` (below) is the other extracted seam; the rest of that
- *  list are real candidates for the same treatment
- *  (`validateChatRequest`, `resolvePromptAndConfig`, `prepareTurn`) but
- *  aren't done -- correcting the claim rather than leaving it stated as
- *  true, per the same review's own reasoning: a doc comment asserting an
- *  architectural property the code doesn't have is worse than no comment
- *  at all. */
+ *  #353: this extraction does NOT make chatHandler a thin "resolve, then
+ *  stream" dispatcher, and no comment here should claim it does. Request
+ *  validation, rate limiting, prompt/config resolution, the release gate,
+ *  lock acquisition, the history fetch, turn classification, replay,
+ *  model-context assembly, the streamText call, and its three stream
+ *  callbacks all still live in chatHandler itself. `classifyTurn` (below)
+ *  is the only other extracted seam; the rest of that list are real
+ *  candidates for the same treatment (`validateChatRequest`,
+ *  `resolvePromptAndConfig`, `prepareTurn`) and are not done. Stated
+ *  plainly because a doc comment asserting an architectural property the
+ *  code does not have is worse than no comment at all. */
 async function resolveConversation(
   c: Context<AppEnv>,
   db: Db,

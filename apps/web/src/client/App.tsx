@@ -476,7 +476,7 @@ export default function App() {
      (there is no server-side turn to regenerate). A fresh object per failure
      so the same text failing twice restores twice.
 
-     #96 fix-round: `section` records WHICH section's composer these words
+     #96: `section` records WHICH section's composer these words
      belong in, and the render site below only passes the failure through
      when it still matches the section on screen. That gate has to happen
      during render, not in an effect: both ConversationViews are keyed
@@ -519,15 +519,15 @@ export default function App() {
      this one nullable id fully determines which surface is active. */
   const [tutorConversationId, setTutorConversationId] = useState<string | undefined>(undefined);
 
-  /* #4 fix-round: seeds the tutor Chat instance's message list whenever
+  /* #4: seeds the tutor Chat instance's message list whenever
      tutorConversationId changes (see selectTutorConversation below) --
      empty for a brand-new conversation, or the persisted history for an
      existing one. This is NOT just cosmetic: chatHandler (chat.ts) builds
      the model's context via convertToModelMessages(uiMessages) over
-     exactly the array the client sends on each turn, so if this stayed
-     empty on resume, the LLM would receive zero prior context and respond
-     as if the conversation were brand new -- a real functional break code
-     review caught, not merely "the UI hasn't caught up visually." */
+     exactly the array the client sends on each turn, so leaving this empty
+     on resume means the LLM receives zero prior context and answers as if
+     the conversation were brand new -- a functional break, not merely "the
+     UI hasn't caught up visually." */
   const [tutorInitialMessages, setTutorInitialMessages] = useState<UIMessage[]>([]);
 
   /* A second, independent Chat instance for tutor conversations -- NOT the
@@ -572,7 +572,7 @@ export default function App() {
 
   /* #96: the tutor chat's own half of the send-failure recovery above --
      same reasoning, this instance's messages.
-     #96 fix-round: stamped with `conversationId` and gated at the render site
+     #96: stamped with `conversationId` and gated at the render site
      for exactly the reason the section surface is (this ConversationView is
      keyed `key={tutorConversationId}`, so it remounts on every conversation
      switch and its mount effects beat the reset below). Without the gate, a
@@ -611,7 +611,7 @@ export default function App() {
     stopTutorChat();
   };
 
-  /* #4 fix-round 2: tracks whichever tutor-surface switch was requested
+  /* #4: tracks whichever tutor-surface switch was requested
      most recently -- a target conversation id, or undefined when the
      student switched away entirely (handleSectionSelect below). Written
      synchronously at the START of every switch (selectTutorConversation,
@@ -688,7 +688,7 @@ export default function App() {
     await renameTutorConversationRow(tutorConversationId, newTitle);
   };
 
-  /* #4 fix-round: the single place that switches the tutor surface to a
+  /* #4: the single place that switches the tutor surface to a
      given conversation, always setting its seed messages in the same
      event-handler pass as its id (React batches both into one commit, so
      useChat's `id` change and its `messages` seed are never torn apart
@@ -705,11 +705,11 @@ export default function App() {
     setTutorConversationId(id);
   };
 
-  /* #4 fix-round: TutorConversationsList's onSelectConversation -- fetches
-     that conversation's persisted history (GET /api/conversations/:id/messages,
-     added this fix-round) before switching the chat column to it, so the
-     LLM's context on the next turn actually includes the prior exchange,
-     not just the UI. A no-op re-fetch guard: re-selecting the
+  /* #4: TutorConversationsList's onSelectConversation -- fetches
+     that conversation's persisted history (GET /api/conversations/:id/messages)
+     before switching the chat column to it, so the LLM's context on the next
+     turn actually includes the prior exchange, not just the UI. A no-op
+     re-fetch guard: re-selecting the
      already-active conversation (e.g. a stray double-click) skips the
      round-trip -- its messages are already showing correctly. Fails open to
      an empty thread (not a thrown error) on a failed fetch, matching this
@@ -717,14 +717,14 @@ export default function App() {
      catch below) -- the student can still send a new message into the
      right conversationId even if history hydration itself failed.
 
-     #4 fix-round 2: stale-response guard. The pre-fetch `id ===
+     #4: stale-response guard. The pre-fetch `id ===
      tutorConversationId` check only rules out re-selecting the conversation
      already showing -- it says nothing about a SECOND selection made while
      THIS fetch is still in flight (student clicks conversation A, then B,
      before A's /messages response lands). Without a post-await recheck,
-     whichever response resolves last would win regardless of click order,
+     whichever response resolves last wins regardless of click order,
      silently reverting the UI to a conversation the student already
-     navigated away from. Fixed by stamping latestTutorSelectionRef.current
+     navigated away from. So: stamp latestTutorSelectionRef.current
      = id synchronously before the fetch starts (so a later call -- to this
      function again, or to selectTutorConversation directly via "New
      conversation," or to undefined via handleSectionSelect -- immediately
@@ -846,7 +846,7 @@ export default function App() {
     setSectionMessages(aiMessages.slice(0, -1));
   }, [chatStatus, aiMessages, setSectionMessages, currentSection]);
 
-  /* #96 fix-round: leaving a section discards its restored draft, exactly
+  /* #96: leaving a section discards its restored draft, exactly
      the way the keyed remount already discards a typed one. This is the
      housekeeping half only -- the render-site `section` gate is what
      actually prevents the cross-section leak, because this effect runs
@@ -1358,7 +1358,7 @@ export default function App() {
      tutorInitialMessages too (not load-bearing -- selectTutorConversation
      always resets it before the next tutor selection anyway -- but avoids
      holding onto a stale conversation's history in memory for no reason).
-     #4 fix-round 2: also marks latestTutorSelectionRef as "nothing tutor
+     #4: also marks latestTutorSelectionRef as "nothing tutor
      selected" -- otherwise a tutor-conversation /messages fetch already in
      flight when the student jumps to a homework section would still match
      its own id on resolve and incorrectly flip the surface back to a
