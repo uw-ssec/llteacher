@@ -1236,6 +1236,66 @@ export async function chatHandler(c: Context<AppEnv>) {
 
   const db = makeDb(c.env.DATABASE_URL);
 
+  const resolveNow = () => resolveConversation(c, db, authContext, envelopeParsed.data, inboundMessage);
+
+  // #279 (requirement 2), scoped deliberately narrower than the issue asks.
+  //
+  // The issue says "run the rate-limit check and conversation resolution
+  // concurrently with Promise.all". Done literally -- wrapping
+  // reserveRateLimitSlot and resolveConversation in one Promise.all -- that
+  // is UNSAFE, and an earlier pass on this route rejected it for exactly
+  // that reason: resolveConversation is not one call, it is a three-way
+  // branch, and two of those branches WRITE. `kind: "section"` runs
+  // startSectionConversation and the tutor fallthrough runs
+  // createConversation (both above in this file), so a request that ends up
+  // 429'd would still have minted a conversation row that nothing goes on
+  // to use or clean up -- a permanent orphan produced by a request the
+  // server told the client it refused.
+  //
+  // What IS safe is the branch the issue's own evidence table actually
+  // names as its "step 2": the `conversationId` branch, which is
+  // getOwnedConversationOrNull -> getConversationById, a single SELECT with
+  // no write anywhere in it (repositories/conversations.ts). Racing THAT
+  // against the reservation can leave nothing behind, because it creates
+  // nothing. So the preflight below is gated on the same `conversationId`
+  // truthiness check resolveConversation itself branches on -- when it's
+  // set, we are provably on the read-only branch; when it isn't, resolution
+  // stays strictly behind the rate-limit gate, exactly as before. This is
+  // also the dominant case: every turn after a conversation's first one
+  // carries a conversationId.
+  //
+  // Three properties make this safe rather than merely convenient:
+  //   1. No data dependency either way. reserveRateLimitSlot takes
+  //      (db, userId, now, windowMs) and resolveConversation takes the
+  //      envelope; neither reads the other's result.
+  //   2. Strictly separate resources. The reservation touches only
+  //      chatRateLimitWindows, keyed (userId, windowStart); the preflight
+  //      touches only conversations/courses. They cannot serialize against
+  //      or deadlock each other.
+  //   3. The 429 still wins. The reservation is awaited FIRST and returns
+  //      before the preflight is ever unwrapped, so a rate-limited request
+  //      returns the same 429 it always did -- it never returns a 404/403
+  //      the preflight happened to resolve first.
+  //
+  // The `.then(ok, err)` wrapper (rather than handing the bare promise
+  // around) is load-bearing: this promise is DISCARDED on the 429 path, so
+  // it must never reject. A bare rejection would surface as an unhandled
+  // rejection, and a Promise.all-style await would let a transient Neon
+  // blip on the read turn a legitimate 429 into a 503. Rejections are
+  // captured here and rethrown below, on the non-429 path only, preserving
+  // today's error behaviour byte for byte.
+  //
+  // Cost of the trade: a request that goes on to 429 now issues one read it
+  // will not use. That is bounded by the rate limiter itself (which has
+  // already charged the request either way) and is a wasted read, never a
+  // wasted write.
+  const preflightResolution = envelopeParsed.data.conversationId
+    ? resolveNow().then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      )
+    : undefined;
+
   // #219/#265: per-user rate limit, checked (and incremented, atomically,
   // in the same statement) before any persistence or model call. 429 +
   // Retry-After, surfaced through useChat's existing #144 error row (its
@@ -1265,7 +1325,20 @@ export async function chatHandler(c: Context<AppEnv>) {
   // #312: conversation resolution extracted to its own function -- see
   // resolveConversation's own doc comment. Early-exit cases (404/403/400/409)
   // come back as a Response to return directly.
-  const resolved = await resolveConversation(c, db, authContext, envelopeParsed.data, inboundMessage);
+  //
+  // #279: on the read-only `conversationId` branch this promise was already
+  // started above and has been running alongside the reservation -- awaiting
+  // it here costs whatever is left of it, not a fresh round-trip. Every
+  // other branch (the two that can CREATE a conversation) still starts here,
+  // after the 429 gate, and is unchanged.
+  let resolved: Awaited<ReturnType<typeof resolveConversation>>;
+  if (preflightResolution) {
+    const settled = await preflightResolution;
+    if (!settled.ok) throw settled.error;
+    resolved = settled.value;
+  } else {
+    resolved = await resolveNow();
+  }
   if (resolved instanceof Response) return resolved;
   const { conv, sectionGreetingParts, sectionGreetingMessageId } = resolved;
 

@@ -660,6 +660,183 @@ describe("POST /api/chat", () => {
     });
   });
 
+  // #279: this issue is about the NUMBER of Neon-HTTP round-trips a single
+  // turn costs, not about what the response says -- every mocked repository
+  // function here is one full HTTPS request in production (neon-http, no
+  // pooling, no pipelining; see db/client.ts), so these tests assert CALL
+  // COUNTS and call ORDER. A regression that reintroduces a redundant
+  // ownership select, or that re-serializes the reservation against the
+  // conversation read, would leave every other test in this file green.
+  describe("#279 DB round-trip budget", () => {
+    const CONV_ID = "22222222-2222-2222-2222-222222222222";
+    const COURSE_ID = "55555555-5555-5555-5555-555555555555";
+    const existingConv = {
+      id: CONV_ID,
+      ownerUserId: "u1",
+      courseId: COURSE_ID,
+      sectionId: null,
+      promptTemplateId: null,
+      isDeleted: false,
+      organizationId: "org-a",
+      courseLlmConfigId: null,
+    };
+
+    beforeEach(() => {
+      getOwnedConversationOrNullMock.mockResolvedValue(existingConv);
+      getLastMessagesMock.mockResolvedValue([]);
+    });
+
+    // Requirement 1 (already landed, locked here against regression): the
+    // ownership select inside getLastMessages/appendMessage is the SAME
+    // query getOwnedConversationOrNull just ran, with binds derived from
+    // its own result -- three copies of it per turn before this flag
+    // existed. The negative half (that omitting the flag still enforces
+    // scope) lives in repositories/conversations.test.ts; this half proves
+    // chatHandler actually passes it at every site it's entitled to.
+    it("spends exactly one round-trip per distinct read/write on a normal turn -- no repeated ownership selects", async () => {
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: CONV_ID,
+      });
+
+      expect(res.status).toBe(200);
+      // One reservation, one ownership read, one lock claim, one history
+      // read, one user-message write. Five, and each exactly once.
+      expect(reserveRateLimitSlotMock).toHaveBeenCalledTimes(1);
+      expect(getOwnedConversationOrNullMock).toHaveBeenCalledTimes(1);
+      expect(acquireConversationTurnLockMock).toHaveBeenCalledTimes(1);
+      expect(getLastMessagesMock).toHaveBeenCalledTimes(1);
+      expect(appendMessageMock).toHaveBeenCalledTimes(1);
+      // ...and the two that COULD have re-verified ownership did not: the
+      // opt-out is passed, so neither pays for assertConversationInScope.
+      expect(getLastMessagesMock.mock.calls[0]![4]).toEqual({ skipOwnershipCheck: true });
+      expect(appendMessageMock.mock.calls[0]![4]).toEqual({ skipOwnershipCheck: true });
+    });
+
+    // Requirement 2, the safe half. The reservation and the conversation
+    // read are independent (different tables, no shared inputs), so on the
+    // read-only conversationId branch they overlap. Proven two ways at
+    // once: the read is INVOKED before the reservation is, and the
+    // reservation cannot even settle until the read has started -- so a
+    // regression back to `await reserve; await resolve` would deadlock this
+    // test rather than quietly passing it.
+    it("starts the conversation read before the rate-limit reservation settles (they overlap)", async () => {
+      const order: string[] = [];
+      let markReadStarted!: () => void;
+      const readStarted = new Promise<void>((resolve) => {
+        markReadStarted = resolve;
+      });
+
+      getOwnedConversationOrNullMock.mockImplementation(async () => {
+        order.push("conversationRead");
+        markReadStarted();
+        return existingConv;
+      });
+      reserveRateLimitSlotMock.mockImplementation(async () => {
+        order.push("rateLimitReservation");
+        await readStarted; // never resolves if resolution is still gated behind this call
+        return 1;
+      });
+
+      const res = await Promise.race([
+        postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], conversationId: CONV_ID }),
+        new Promise<"serialized">((resolve) => setTimeout(() => resolve("serialized"), 2000)),
+      ]);
+
+      expect(res).not.toBe("serialized");
+      expect((res as Response).status).toBe(200);
+      expect(order).toEqual(["conversationRead", "rateLimitReservation"]);
+    });
+
+    // Requirement 2, the half that is deliberately NOT implemented, pinned
+    // here so a later "finish #279" pass can't quietly widen the overlap to
+    // the branches that WRITE. resolveConversation's other two branches
+    // create rows (createConversation / startSectionConversation); racing
+    // either against the reservation would let a 429'd request leave a
+    // conversation behind that nothing ever uses or cleans up.
+    it("never resolves (and so never creates) a conversation when the request is 429'd on the tutor-create path", async () => {
+      reserveRateLimitSlotMock.mockResolvedValue(21);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        courseId: COURSE_ID,
+      });
+
+      expect(res.status).toBe(429);
+      expect(createConversationMock).not.toHaveBeenCalled();
+      expect(startSectionConversationMock).not.toHaveBeenCalled();
+    });
+
+    it("never creates a section conversation when the request is 429'd on the section-create path", async () => {
+      reserveRateLimitSlotMock.mockResolvedValue(21);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        courseId: COURSE_ID,
+        kind: "section",
+        sectionId: "66666666-6666-6666-6666-666666666666",
+      });
+
+      expect(res.status).toBe(429);
+      expect(startSectionConversationMock).not.toHaveBeenCalled();
+      expect(createConversationMock).not.toHaveBeenCalled();
+    });
+
+    // The 429 must still win the race it is now running: the overlapping
+    // read may well have resolved a 404 first, and none of the per-turn
+    // work below the gate may start.
+    it("still 429s (not 404s, and with no follow-on work) even though the conversation read ran alongside it", async () => {
+      reserveRateLimitSlotMock.mockResolvedValue(21);
+      getOwnedConversationOrNullMock.mockResolvedValue(null);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: CONV_ID,
+      });
+
+      expect(res.status).toBe(429);
+      expect(res.headers.get("Retry-After")).toBeTruthy();
+      expect(acquireConversationTurnLockMock).not.toHaveBeenCalled();
+      expect(getLastMessagesMock).not.toHaveBeenCalled();
+      expect(appendMessageMock).not.toHaveBeenCalled();
+      expect(streamTextMock).not.toHaveBeenCalled();
+    });
+
+    // The overlapping read is DISCARDED on the 429 path, so its rejection
+    // must not surface at all -- neither as an unhandled rejection nor by
+    // turning a legitimate 429 into a 503. This is what the .then(ok, err)
+    // wrapper in chat.ts buys over a bare Promise.all.
+    it("a failing conversation read cannot mask the 429 it was racing", async () => {
+      reserveRateLimitSlotMock.mockResolvedValue(21);
+      getOwnedConversationOrNullMock.mockRejectedValue(new Error("neon blip"));
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: CONV_ID,
+      });
+
+      expect(res.status).toBe(429);
+    });
+
+    // ...but on the path that DOES consume the read, the failure still
+    // escapes the handler exactly as it did when the call was awaited
+    // inline -- here into Hono's own error handler (a 500), which in
+    // production is server/index.ts's onError. The capture-and-rethrow
+    // above must not have swallowed it into a "conversation not found".
+    it("still propagates a conversation-read failure on the non-429 path", async () => {
+      getOwnedConversationOrNullMock.mockRejectedValue(new Error("neon blip"));
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: CONV_ID,
+      });
+
+      expect(res.status).toBe(500);
+      expect(acquireConversationTurnLockMock).not.toHaveBeenCalled();
+      expect(streamTextMock).not.toHaveBeenCalled();
+    });
+  });
+
   describe("new conversations (#214/#231)", () => {
     it("creates a new tutor conversation, auto-titled from the first message, when conversationId is omitted", async () => {
       createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
