@@ -72,7 +72,16 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("chat surfaces throttle streamed re-renders (#277)", () => {
-  it("passes experimental_throttle to every useChat instance", async () => {
+  /* Timeout raised from the 5s default. Inherited flake, not a merge
+     regression: this test dynamically imports App (and, transitively, most of
+     the client) inside the test body, so the module transform lands on the
+     clock. Alone it finishes in ~1.6s; in a full parallel `vitest run` it
+     contends with 89 other files and intermittently blows the default
+     deadline. Verified identical on unmodified origin/staging (02f7aad) --
+     passes alone in 1.56s, times out at 5000ms in the full run -- so the
+     deadline is what is wrong, not the assertion. Nothing about what is
+     asserted changes here. */
+  it("passes experimental_throttle to every useChat instance", { timeout: 20_000 }, async () => {
     const { default: App } = await import("./App");
     const { AuthProvider } = await import("./components/AuthProvider");
     render(

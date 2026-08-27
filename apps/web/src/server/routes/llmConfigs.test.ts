@@ -505,18 +505,64 @@ describe("POST test (#31)", () => {
    *  everything from it, which closes that window structurally rather than
    *  by ordering; this test is what keeps a second read from creeping back. */
   it("reads the config exactly once, so an edit mid-request cannot split it", async () => {
+    /* Review finding (I1): the assertions below only discriminate if the two
+       possible sources disagree. RESOLVED_CONFIG mirrors CONFIG field for
+       field, so with the default mocks a handler that pulled model, prompt
+       and generation params off `getLlmConfig` would satisfy every value
+       assertion here -- only the `getMock` call count would have caught it.
+       Staging's own fixture diverged on purpose for exactly this reason.
+       So: make the row the loader returns disagree with CONFIG on EVERY
+       field the handler forwards, and leave getMock on CONFIG. Now each
+       assertion names which read it came from. */
+    const ROW_UNDER_TEST = {
+      ...RESOLVED_CONFIG,
+      provider: "llmoxie" as const,
+      modelName: "gpt-5.3-codex",
+      basePrompt: "ROW-UNDER-TEST",
+      temperature: 0.11,
+      maxCompletionTokens: 222,
+    };
+    loadLlmConfigByIdMock.mockResolvedValue(ROW_UNDER_TEST);
+
     await test({ message: "hi" });
     expect(loadLlmConfigByIdMock).toHaveBeenCalledTimes(1);
     // The console's own projection is not consulted by this handler at all.
     expect(getMock).not.toHaveBeenCalled();
-    // Everything sent to the provider came off that single row.
+
+    // Everything sent to the provider came off that single row -- and none
+    // of it matches CONFIG, so a reintroduced second read fails here.
     const call = generateTextMock.mock.calls[0]![0];
-    expect(call.model).toMatchObject({ provider: RESOLVED_CONFIG.provider, model: RESOLVED_CONFIG.modelName });
+    expect(call.model).toMatchObject({ provider: "llmoxie", model: "gpt-5.3-codex" });
     expect(call).toMatchObject({
-      system: RESOLVED_CONFIG.basePrompt,
-      temperature: RESOLVED_CONFIG.temperature,
-      maxOutputTokens: RESOLVED_CONFIG.maxCompletionTokens,
+      system: "ROW-UNDER-TEST",
+      temperature: 0.11,
+      maxOutputTokens: 222,
     });
+    // The credential is resolved from that same row too, not a re-read one.
+    expect(resolveApiKeyMock.mock.calls[0]![3]).toBe(ROW_UNDER_TEST);
+    // Belt and braces: none of CONFIG's values leaked into the call.
+    expect(call.model.model).not.toBe(CONFIG.modelName);
+    expect(call.system).not.toBe(CONFIG.basePrompt);
+    expect(call.temperature).not.toBe(CONFIG.temperature);
+    expect(call.maxOutputTokens).not.toBe(CONFIG.maxCompletionTokens);
+  });
+
+  /** Review finding (I2): the narrowed catch's negative case. The handler
+   *  turns LLMCredentialMissingError / UnsupportedLLMProviderError into
+   *  "The model gateway is not configured", logged under
+   *  `testLlmConfigHandler`; anything else it rethrows. Both end up 503 in
+   *  production (index.ts's onError catches the rethrow), so the status is
+   *  NOT what the narrowing buys -- what it buys is that an unrelated
+   *  failure keeps its own generic sentence and its own log context instead
+   *  of being reported to the instructor as a gateway misconfiguration they
+   *  would then go and "fix". Staging's version caught everything, so this
+   *  case was indistinguishable from a genuinely missing credential. */
+  it("does not relabel an unrelated failure as a gateway misconfiguration", async () => {
+    resolveApiKeyMock.mockRejectedValue(new Error("connect ECONNREFUSED 10.0.0.1:5432"));
+    const res = await test({ message: "hi" });
+    const body = await res.text();
+    expect(body).not.toMatch(/model gateway is not configured/i);
+    expect(generateTextMock).not.toHaveBeenCalled();
   });
 
   it("audits the test, because it spends money and reaches a provider", async () => {
