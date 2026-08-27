@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { PencilSimple } from "@phosphor-icons/react";
 
 /* --------------------------------------------------------------------------
@@ -98,6 +98,10 @@ export interface EditableTitleProps {
   isActive?: boolean;
 }
 
+/** #310: how close to `maxLength` the input gets before the counter shows.
+ *  Small enough that a normal title never sees it. */
+const COUNTER_VISIBLE_WITHIN = 20;
+
 export function EditableTitle({
   value,
   onSave,
@@ -111,6 +115,8 @@ export function EditableTitle({
   activateDescribedBy,
   isActive,
 }: EditableTitleProps) {
+  const counterId = useId();
+  const hintId = useId();
   const [isEditing, setIsEditing] = useState(false);
   const [pendingValue, setPendingValue] = useState(value);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -169,6 +175,19 @@ export function EditableTitle({
     setPendingValue(value);
     setLocalError(null);
   };
+
+  /* #310: how much room is left, and whether to say so. Silent until the
+     last 20 characters so it is not noise on a three-word title, then
+     present before the limit bites rather than after. `remaining` can go
+     negative now that the native clamp is gone -- that is the point: an
+     over-long paste is visible and refused on save instead of silently
+     truncated into something the student did not write. */
+  /* #395: the TRIMMED length, matching what commitSave validates. Counting
+     the raw draft meant a 10-character title followed by three spaces read
+     "3 over" in red and then saved successfully -- guidance contradicting
+     the rule it exists to describe. */
+  const remaining = maxLength - pendingValue.trim().length;
+  const showCounter = remaining <= COUNTER_VISIBLE_WITHIN;
 
   const commitSave = async () => {
     const trimmed = pendingValue.trim();
@@ -287,10 +306,74 @@ export function EditableTitle({
         onBlur={handleBlur}
         onKeyDown={handleKeyDown}
         onClick={(e) => e.stopPropagation()}
-        maxLength={maxLength}
         aria-label="Edit title"
+        /* #405: the hint is DESCRIBED, not hidden. It carried
+           aria-hidden="true" and the input's only accessible name is "Edit
+           title", so the keybindings -- including blur-to-save, the whole
+           point of #394 -- reached no screen-reader user at all. My comment
+           justified the hiding by claiming "the same information reaches
+           assistive tech through the input's own label and behaviour",
+           which was simply false.
+
+           Order matters: hint first, then the counter when present.
+           aria-describedby is announced on focus, so the static hint should
+           lead; the counter is appended only when it is close to relevant. */
+        aria-describedby={showCounter ? `${hintId} ${counterId}` : hintId}
         disabled={isSubmitting}
       />
+      {/* #310: the native `maxLength` attribute is gone. It clamped typing
+          AND pasting with no signal whatsoever -- the input simply stopped
+          accepting characters, which reads as a broken field rather than a
+          limit. It also made this component's own "Title must be N
+          characters or fewer" branch unreachable: EditableTitle.test.tsx
+          had to call input.removeAttribute("maxlength") to test it, which
+          is a test proving the production path was dead.
+
+          Replaced by a counter that appears only near the limit (silent
+          until it is nearly relevant, then present before it bites) with
+          the existing validation branch left to refuse an over-long title
+          on save -- now genuinely reachable. Pasting a 400-character title
+          is now visible and explained rather than silently truncated to
+          100, which would have saved something the student did not
+          write. */}
+      {/* #310: rename mode bound Enter to save, Escape to cancel, AND blur to
+          save -- three keyboard conventions with no discoverable surface at
+          all. Blur-saves in particular is silent and surprising: clicking
+          away from a half-edited title committed it. The rail is 220px, too
+          narrow for explicit check/x buttons beside a text field, so this
+          takes the hint route the composer already established for its own
+          Enter binding.
+
+          #394: the first version said only "enter ↵ · esc to cancel" --
+          disclosing the two bindings a user could already guess and omitting
+          the one #310 named as surprising. Clicking away commits, which is
+          not what most editors do, so it is the binding that most needs
+          saying.
+
+          #405: and it was aria-hidden, which meant none of it reached a
+          screen-reader user -- the input's only accessible name is "Edit
+          title". The justification written here was that "the same
+          information reaches assistive tech through the input's own label
+          and behaviour", which was false as written. It is referenced by
+          aria-describedby now. Blur-to-save is MORE surprising when you
+          cannot see the field, not less, so this is the audience that
+          needed it most. */}
+      <span className="editable-title__hint" id={hintId}>
+        enter ↵ or click away saves · esc cancels
+      </span>
+      {showCounter && (
+        <span
+          id={counterId}
+          className={
+            remaining < 0 ? "editable-title__counter editable-title__counter--over" : "editable-title__counter"
+          }
+          // Not role="status": this updates on every keystroke, and an
+          // assertive-ish live region firing per character is unusable.
+          // aria-describedby on the input carries it on demand instead.
+        >
+          {remaining >= 0 ? `${remaining} left` : `${-remaining} over`}
+        </span>
+      )}
       {displayError && (
         <span className="editable-title__error" role="alert">
           {displayError}

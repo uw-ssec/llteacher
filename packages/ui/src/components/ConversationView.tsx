@@ -717,7 +717,20 @@ export function ConversationView({
               one (the homework-section chat has no per-conversation title
               and omits `title` entirely, so nothing renders here for it). */}
           {title !== undefined && onRenameTitle ? (
-            <h1 className="conversation-header-title">
+            /* #405 follow-on: the heading is named EXPLICITLY rather than
+               from its contents. EditableTitle renders its keybinding hint
+               and character counter inside this element while editing, and
+               once those stopped being aria-hidden (so a screen-reader user
+               could finally discover blur-to-save) they began participating
+               in the heading's accessible name -- heading navigation
+               announced "Original enter ↵ or click away saves · esc cancels
+               92 left" instead of the conversation's title.
+
+               aria-label isolates the name without hiding anything: the hint
+               stays in the accessibility tree, still referenced by the
+               input's aria-describedby, and the heading still says what the
+               conversation is called. */
+            <h1 className="conversation-header-title" aria-label={title}>
               <EditableTitle
                 value={title}
                 onSave={onRenameTitle}

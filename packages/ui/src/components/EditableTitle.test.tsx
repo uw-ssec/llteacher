@@ -160,10 +160,11 @@ describe("EditableTitle", () => {
     await userEvent.click(screen.getByRole("button", { name: "Rename: Original title" }));
 
     const input = screen.getByLabelText("Edit title") as HTMLInputElement;
-    // maxLength on the input itself would clamp typed keystrokes at the DOM
-    // level -- set the overlong value directly (mirrors, e.g., a paste)
-    // to actually exercise the component's own validation branch.
-    (input as HTMLInputElement).removeAttribute("maxlength");
+    // #310: this used to need `input.removeAttribute("maxlength")` to get
+    // here at all -- the native clamp meant the component's own validation
+    // branch was unreachable in production, and the workaround was the
+    // proof. The attribute is gone now, so typing past the limit is a real
+    // thing a student can do and this is a real path.
     await userEvent.clear(input);
     await userEvent.type(input, "this is way too long{Enter}");
 
@@ -321,5 +322,117 @@ describe("EditableTitle", () => {
       expect(document.activeElement).toBe(pencil);
       expect(screen.getByRole("alert").textContent).toBe("Title already in use");
     });
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #310: the two discoverability defects in rename mode.
+   -------------------------------------------------------------------------- */
+describe("EditableTitle limit and keybinding disclosure (#310)", () => {
+  it("does not clamp typing silently -- the value can exceed the limit", async () => {
+    render(<EditableTitle value="Original" onSave={vi.fn()} maxLength={10} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Original" }));
+    const input = screen.getByLabelText("Edit title") as HTMLInputElement;
+    await userEvent.clear(input);
+    await userEvent.type(input, "far too long to fit");
+    // The native maxLength attribute stopped accepting characters with no
+    // signal, which reads as a broken field. Refusing on save with a
+    // visible reason is the honest version.
+    expect(input.value).toBe("far too long to fit");
+    expect(input.getAttribute("maxlength")).toBeNull();
+  });
+
+  it("stays quiet on a short title and speaks up near the limit", async () => {
+    render(<EditableTitle value="Original" onSave={vi.fn()} maxLength={100} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Original" }));
+    // 8 characters of 100 -- a counter here would be noise.
+    expect(screen.queryByText(/left$/)).toBeNull();
+
+    const input = screen.getByLabelText("Edit title") as HTMLInputElement;
+    await userEvent.clear(input);
+    await userEvent.type(input, "x".repeat(85));
+    expect(screen.getByText("15 left")).toBeTruthy();
+  });
+
+  it("says how far over the limit the student is, rather than truncating", async () => {
+    render(<EditableTitle value="Original" onSave={vi.fn()} maxLength={10} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Original" }));
+    const input = screen.getByLabelText("Edit title") as HTMLInputElement;
+    await userEvent.clear(input);
+    await userEvent.type(input, "x".repeat(13));
+    expect(screen.getByText("3 over")).toBeTruthy();
+  });
+
+  it("exposes the hint to assistive technology, not just sighted users (#405)", async () => {
+    render(<EditableTitle value="Original" onSave={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Original" }));
+    const input = screen.getByLabelText("Edit title");
+
+    // It was aria-hidden, so the bindings -- blur-to-save above all --
+    // reached nobody who could not see the field. The input's accessible
+    // name is only "Edit title".
+    const hint = screen.getByText(/click away/i);
+    expect(hint.getAttribute("aria-hidden")).toBeNull();
+
+    // ...and it is actually associated with the input.
+    const describedBy = input.getAttribute("aria-describedby") ?? "";
+    expect(describedBy.split(/\s+/)).toContain(hint.id);
+  });
+
+  it("appends the counter to the description only when it is showing (#405)", async () => {
+    // maxLength 100, so the counter is genuinely hidden at first -- it
+    // appears within COUNTER_VISIBLE_WITHIN (20) of the limit. (For a
+    // maxLength at or below that threshold the counter is always visible,
+    // which is the right behaviour for a tight limit but makes it useless
+    // as a test fixture here.)
+    render(<EditableTitle value="Original" onSave={vi.fn()} maxLength={100} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Original" }));
+    const input = screen.getByLabelText("Edit title");
+    const hintOnly = (input.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean);
+    expect(hintOnly.length).toBe(1);
+
+    await userEvent.clear(input);
+    await userEvent.type(input, "x".repeat(85));
+
+    const withCounter = (input.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean);
+    expect(withCounter.length).toBe(2);
+    // The hint still leads -- it is the static guidance, read on focus.
+    expect(withCounter[0]).toBe(hintOnly[0]);
+  });
+
+  it("discloses the keybindings, including that blur saves", async () => {
+    render(<EditableTitle value="Original" onSave={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Original" }));
+    // Enter saves, Escape cancels, blur ALSO saves. #394: the first version
+    // of this test asserted only the first two -- the two a user could
+    // already guess -- so it passed against a hint that omitted the one
+    // #310 named as surprising. Clicking away committing a half-edited
+    // title is the binding that most needs saying, so it is asserted first.
+    expect(screen.getByText(/click away/i)).toBeTruthy();
+    expect(screen.getByText(/enter/i)).toBeTruthy();
+    expect(screen.getByText(/esc/i)).toBeTruthy();
+  });
+
+  it("counts the trimmed value, matching what validation enforces (#395)", async () => {
+    render(<EditableTitle value="Original" onSave={vi.fn()} maxLength={10} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Original" }));
+    const input = screen.getByLabelText("Edit title") as HTMLInputElement;
+    await userEvent.clear(input);
+    // Exactly at the limit, plus trailing whitespace that trim() removes.
+    await userEvent.type(input, "0123456789   ");
+    // Previously read "3 over" in red and then saved successfully.
+    expect(screen.queryByText(/over$/)).toBeNull();
+    expect(screen.getByText("0 left")).toBeTruthy();
+  });
+
+  it("still refuses a title that is over the limit after trimming (#395)", async () => {
+    const onSave = vi.fn();
+    render(<EditableTitle value="Original" onSave={onSave} maxLength={10} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Original" }));
+    const input = screen.getByLabelText("Edit title") as HTMLInputElement;
+    await userEvent.clear(input);
+    await userEvent.type(input, "  0123456789abc  {Enter}");
+    expect(onSave).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert").textContent).toMatch(/10 characters or fewer/i);
   });
 });
