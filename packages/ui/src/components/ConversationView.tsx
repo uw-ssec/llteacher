@@ -10,7 +10,7 @@
    The breadcrumb string is passed as a prop.
    -------------------------------------------------------------------------- */
 
-import { Fragment, useCallback, useRef, useEffect, useState } from "react";
+import { Fragment, useCallback, useRef, useEffect, useLayoutEffect, useState } from "react";
 import { Message } from "./Message";
 import { Composer } from "./Composer";
 import { CodeBlock } from "./CodeBlock";
@@ -412,12 +412,25 @@ export interface ConversationViewProps {
    *  render right after a brand-new conversation was created and switched
    *  to, so a keyboard user lands in the composer without an extra Tab. */
   autoFocusComposer?: boolean;
-  /** #280: true when the fetched history came back a full page (the
-   *  messages route pages at 200, no "load older" is wired yet) -- renders
-   *  a static notice above the transcript so the ceiling is visible rather
-   *  than silent (a conversation with exactly 200 messages is otherwise
-   *  indistinguishable from one truncated at 200). */
+  /** #280: true when there are older messages than the transcript holds
+   *  (the messages route pages at 200). Renders the "Load older messages"
+   *  control above the transcript when `onLoadOlderMessages` is also
+   *  given, and the static "older messages aren't shown" notice when it
+   *  isn't -- the notice remains correct, and the only honest thing to
+   *  show, for a surface with no paging wired (the instructor transcript
+   *  viewer, which has its own offset-based control). */
   hasMoreHistory?: boolean;
+  /** #280 (requirement 2, transcript half): fetches the page of messages
+   *  BEFORE the oldest one showing and prepends it. The caller owns the
+   *  cursor (the oldest loaded message's `seq`); this component only owns
+   *  the affordance and the scroll anchoring that keeps the student
+   *  looking at the same message afterwards. */
+  onLoadOlderMessages?: () => void;
+  /** #280: true while `onLoadOlderMessages`' request is in flight. */
+  isLoadingOlderMessages?: boolean;
+  /** #280: true when the last "load older" attempt failed. The control
+   *  stays live -- the page is still there to ask for. */
+  loadOlderMessagesError?: boolean;
   /** #288: how many trailing messages the model actually sees on a turn.
    *  When the transcript is longer than this, a divider is rendered above
    *  the oldest message still inside the window.
@@ -567,6 +580,9 @@ export function ConversationView({
   restoredDraft = null,
   autoFocusComposer = false,
   hasMoreHistory = false,
+  onLoadOlderMessages,
+  isLoadingOlderMessages = false,
+  loadOlderMessagesError = false,
   contextWindowSize,
   headerActions,
   onStop,
@@ -631,7 +647,54 @@ export function ConversationView({
      A new message or a failed turn scrolls unconditionally: both are
      content the student has not seen, and the error row carries the only
      recovery control, so it must not mount below the fold. */
+  /* #280: a "load older" prepend also grows `messages.length`, and the
+     scroll-to-bottom below would then throw the student to the newest
+     message -- the exact opposite of what they just asked for. Two refs
+     cooperate:
+
+     - `pendingScrollAnchorRef` records the scroll geometry at the moment
+       the control was pressed, so the layout effect can restore the same
+       message to the same place once the older page has been inserted
+       ABOVE it (browser scroll anchoring is not reliable enough to lean on,
+       and jsdom has none at all).
+     - `restoredScrollAnchorRef` tells the bottom-scroll effect that this
+       particular length change was a prepend it must not react to. Layout
+       effects all run before passive ones in the same commit, so the flag
+       is always set by the time the effect below reads it. */
+  const pendingScrollAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const restoredScrollAnchorRef = useRef(false);
+
+  const handleLoadOlderMessages = () => {
+    const el = scrollRef.current;
+    if (el) pendingScrollAnchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
+    onLoadOlderMessages?.();
+  };
+
+  useLayoutEffect(() => {
+    const anchor = pendingScrollAnchorRef.current;
+    const el = scrollRef.current;
+    if (!anchor || !el) return;
+    pendingScrollAnchorRef.current = null;
+    restoredScrollAnchorRef.current = true;
+    // The prepended page's own height -- whatever was added above the
+    // message the student was looking at is exactly how far down it moved.
+    el.scrollTop = anchor.scrollTop + (el.scrollHeight - anchor.scrollHeight);
+  }, [messages.length]);
+
+  /* A request that returned no older messages never changes
+     `messages.length`, so the layout effect above never fires and its
+     anchor would sit stale until the next genuine append -- which would
+     then be mistaken for a prepend. Clearing on the in-flight flag going
+     false covers that (and the failure case) without a third signal. */
   useEffect(() => {
+    if (!isLoadingOlderMessages) pendingScrollAnchorRef.current = null;
+  }, [isLoadingOlderMessages]);
+
+  useEffect(() => {
+    if (restoredScrollAnchorRef.current) {
+      restoredScrollAnchorRef.current = false;
+      return;
+    }
     scrollToBottom(true);
   }, [messages.length, error, scrollToBottom]);
 
@@ -846,11 +909,36 @@ export function ConversationView({
               the copy: `messages` here keeps growing as the conversation
               continues after hydration, so a count captured from the
               fetched page would go stale the moment a new turn is sent. */}
-          {hasMoreHistory && (
-            <p className="conversation-history-notice">
-              Showing the most recent messages. Older messages aren't shown yet.
-            </p>
-          )}
+          {hasMoreHistory &&
+            (onLoadOlderMessages ? (
+              /* #280 (requirement 2): the real control. A button rather
+                 than load-on-scroll-to-top: this column's scroll handler is
+                 already carrying the streaming-follow and
+                 scroll-to-bottom behaviours, and a fetch fired by scrolling
+                 up would race both of them. */
+              <div className="conversation-history-more">
+                <button
+                  type="button"
+                  className="conversation-history-more__btn"
+                  onClick={handleLoadOlderMessages}
+                  disabled={isLoadingOlderMessages}
+                  aria-busy={isLoadingOlderMessages}
+                >
+                  {isLoadingOlderMessages ? "Loading…" : "Load older messages"}
+                </button>
+                {loadOlderMessagesError && (
+                  <p className="conversation-history-notice" role="alert">
+                    Couldn&rsquo;t load older messages. Please try again.
+                  </p>
+                )}
+              </div>
+            ) : (
+              /* No paging wired by this caller -- the ceiling still has to
+                 be visible rather than silent. */
+              <p className="conversation-history-notice">
+                Showing the most recent messages. Older messages aren't shown yet.
+              </p>
+            ))}
 
           {/* #300: role="log" is the ARIA role specified for exactly this
               case -- a sequence of items where new ones append at the end

@@ -3036,3 +3036,127 @@ describe("App superseded tutor selection (#398)", () => {
     releaseHistory(new Response(JSON.stringify([]), { status: 200 }));
   });
 });
+
+/* #280 (requirement 2, transcript half). The regression: `limit`/`before`
+   appeared ZERO times in the entire client, so the messages route's 200-row
+   page was a silent hard ceiling -- message 201 and back was unreachable
+   from every surface, including the head of the student's own thread.
+
+   The cursor is a real `seq` taken from a row this same route returned
+   (#280 requirement 1 added `seq` to the wire shape precisely so this is
+   possible without a second round-trip) -- not a reconstructed value. */
+describe("App tutor transcript load-older (#280)", () => {
+  // No sections -- this covers the tutor surface, which is reached by
+  // clicking a rail row rather than by section auto-selection.
+  const TUTOR_ONLY_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        courseName: "STATS 311",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [],
+      },
+    ],
+  };
+  const PAGE_SIZE = 200;
+  // Page 1 is the most recent PAGE_SIZE messages, oldest-first, seq
+  // 201..400. A full page is what makes `hasMoreHistory` true, which is
+  // what renders the control -- so it has to be genuinely full.
+  const PAGE_ONE = Array.from({ length: PAGE_SIZE }, (_, i) => ({
+    id: `m${201 + i}`,
+    role: i % 2 === 0 ? "user" : "assistant",
+    parts: [{ type: "text", text: `recent message ${201 + i}` }],
+    seq: 201 + i,
+    createdAt: "2026-01-02T00:00:00.000Z",
+  }));
+  const OLDER_PAGE = [
+    {
+      id: "m200",
+      role: "assistant" as const,
+      parts: [{ type: "text", text: "the very first thing the tutor said" }],
+      seq: 200,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+  ];
+
+  it("pages back with before=<oldest loaded seq> and PREPENDS the result", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const messagesUrls: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(JSON.stringify(TUTOR_ONLY_FIXTURE), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations?courseId=")) {
+          return new Response(
+            JSON.stringify({
+              items: [
+                { id: "t1", title: "Long tutor chat", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 401 },
+              ],
+              nextCursor: null,
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/conversations/t1/messages")) {
+          messagesUrls.push(url);
+          const isOlderPage = url.includes("before=");
+          return new Response(JSON.stringify(isOlderPage ? OLDER_PAGE : PAGE_ONE), { status: 200 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("Long tutor chat"));
+
+    // A full first page means older messages exist, so the control renders.
+    const loadOlder = await screen.findByRole("button", { name: /load older messages/i });
+    expect(screen.queryByText("the very first thing the tutor said")).toBeNull();
+
+    await user.click(loadOlder);
+
+    await waitFor(() => expect(screen.getByText("the very first thing the tutor said")).toBeTruthy());
+
+    // The cursor is the oldest LOADED message's seq (page 1's head, 201) --
+    // exclusive, so seq 200 is exactly what comes back. Asserting the URL,
+    // not merely "a second call happened": a request without `before` would
+    // re-fetch page 1 and the transcript would still look "loaded".
+    expect(messagesUrls).toEqual([
+      "/api/conversations/t1/messages?limit=200",
+      "/api/conversations/t1/messages?limit=200&before=201",
+    ]);
+
+    // Prepended, not appended: the older message must render ABOVE the
+    // page-1 messages it precedes, or the transcript reads out of order.
+    const oldest = screen.getByText("the very first thing the tutor said");
+    const firstOfPageOne = screen.getByText("recent message 201");
+    expect(oldest.compareDocumentPosition(firstOfPageOne) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // The older page was short (1 < 200), so there is nothing left to ask
+    // for and the control retires rather than offering an empty page.
+    await waitFor(() => expect(screen.queryByRole("button", { name: /load older messages/i })).toBeNull());
+  });
+});

@@ -194,19 +194,126 @@ describe("ConversationView send-failure recovery (#96)", () => {
   });
 });
 
-// #280: the messages route pages at 200 with no "load older" wired -- this
-// makes that ceiling visible instead of silent.
-describe("ConversationView hasMoreHistory notice (#280)", () => {
+// #280: the messages route pages at 200. `hasMoreHistory` means there are
+// older messages than the transcript holds; what is rendered for it depends
+// on whether the caller wired paging.
+describe("ConversationView hasMoreHistory (#280)", () => {
   it("renders nothing extra when hasMoreHistory is omitted/false", () => {
     render(<ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} />);
     expect(screen.queryByText(/older messages aren't shown yet/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /load older messages/i })).toBeNull();
   });
 
-  it("renders a notice above the transcript when hasMoreHistory is true", () => {
-    render(
-      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} hasMoreHistory={true} />,
-    );
+  // The interim notice, kept for a caller with no paging wired (the
+  // instructor transcript viewer has its own offset-based control) -- the
+  // ceiling still has to be visible rather than silent there.
+  it("renders the static notice when hasMoreHistory is true but no loader is given", () => {
+    render(<ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} hasMoreHistory={true} />);
     expect(screen.getByText(/older messages aren't shown yet/i)).toBeTruthy();
+  });
+
+  /* #280 (requirement 2, transcript half): the real control. Before this,
+     `before`/`limit` appeared zero times in the client and message 201+ of
+     a conversation was unreachable from every surface -- and unlike the
+     rail, its head being missing also meant the student could not read the
+     start of their own thread. */
+  describe("load older messages", () => {
+    it("replaces the notice with a button and calls onLoadOlderMessages when clicked", async () => {
+      const onLoadOlderMessages = vi.fn();
+      render(
+        <ConversationView
+          breadcrumb="b"
+          messages={[]}
+          onSendMessage={() => {}}
+          hasMoreHistory={true}
+          onLoadOlderMessages={onLoadOlderMessages}
+        />,
+      );
+      expect(screen.queryByText(/older messages aren't shown yet/i)).toBeNull();
+      await userEvent.click(screen.getByRole("button", { name: /load older messages/i }));
+      expect(onLoadOlderMessages).toHaveBeenCalledTimes(1);
+    });
+
+    it("disables the button while a page is in flight", () => {
+      render(
+        <ConversationView
+          breadcrumb="b"
+          messages={[]}
+          onSendMessage={() => {}}
+          hasMoreHistory={true}
+          onLoadOlderMessages={() => {}}
+          isLoadingOlderMessages={true}
+        />,
+      );
+      expect((screen.getByRole("button", { name: /loading/i }) as HTMLButtonElement).disabled).toBe(true);
+    });
+
+    it("surfaces a failure without removing the control", () => {
+      render(
+        <ConversationView
+          breadcrumb="b"
+          messages={[]}
+          onSendMessage={() => {}}
+          hasMoreHistory={true}
+          onLoadOlderMessages={() => {}}
+          loadOlderMessagesError={true}
+        />,
+      );
+      expect(screen.getByRole("button", { name: /load older messages/i })).toBeTruthy();
+      expect(screen.getByRole("alert").textContent).toMatch(/load older messages/i);
+    });
+
+    /* The prepend must NOT trigger the scroll-to-bottom that every other
+       messages.length change does -- that would throw the student to the
+       newest message, the exact opposite of what they just asked for.
+       jsdom has no layout, so scrollHeight is 0 and the anchor arithmetic
+       is a no-op; what this asserts is the guard itself, i.e. that
+       ConversationView does not scroll on a prepend the way it does on an
+       append. */
+    it("does not scroll to the bottom when older messages are prepended", async () => {
+      const scrollTo = vi.fn();
+      const older: MessageData = { id: "m0", role: "ai" as const, content: "oldest" };
+      const shown: MessageData = { id: "m1", role: "ai" as const, content: "newest" };
+      const { rerender, container } = render(
+        <ConversationView
+          breadcrumb="b"
+          messages={[shown]}
+          onSendMessage={() => {}}
+          hasMoreHistory={true}
+          onLoadOlderMessages={() => {}}
+        />,
+      );
+      const scroller = container.querySelector(".conversation-messages") ?? container.firstElementChild!;
+      (scroller as HTMLElement & { scrollTo: unknown }).scrollTo = scrollTo;
+
+      // The click is what arms the scroll anchor -- a prepend that did not
+      // come from this control is still an ordinary length change.
+      await userEvent.click(screen.getByRole("button", { name: /load older messages/i }));
+      scrollTo.mockClear();
+
+      rerender(
+        <ConversationView
+          breadcrumb="b"
+          messages={[older, shown]}
+          onSendMessage={() => {}}
+          hasMoreHistory={true}
+          onLoadOlderMessages={() => {}}
+        />,
+      );
+      expect(scrollTo).not.toHaveBeenCalled();
+
+      // ...but an ordinary append still scrolls, so the guard is narrow.
+      rerender(
+        <ConversationView
+          breadcrumb="b"
+          messages={[older, shown, { id: "m2", role: "student" as const, content: "new turn" }]}
+          onSendMessage={() => {}}
+          hasMoreHistory={true}
+          onLoadOlderMessages={() => {}}
+        />,
+      );
+      expect(scrollTo).toHaveBeenCalled();
+    });
   });
 });
 

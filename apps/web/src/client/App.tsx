@@ -711,14 +711,25 @@ export default function App() {
     null,
   );
 
-  // #280: true when fetchConversationHistory's page came back full (the
-  // messages route pages at 200, no load-more wired yet -- see that
-  // function's own doc comment) -- the ceiling made visible instead of
-  // silent, mirroring tutorConversationsHasMore's role for the rail list.
-  // One flag per surface since tutor/section hydrate independently and
-  // (rarely, but possibly) their most recent fetches could disagree.
+  /* #280: true when there are older messages than the transcript holds
+     (the messages route pages at 200). One flag per surface since
+     tutor/section hydrate independently and (rarely, but possibly) their
+     most recent fetches could disagree.
+
+     #280 (requirement 2): paired with the `seq` of the oldest message
+     currently loaded -- the cursor `GET .../messages?before=` takes. `seq`
+     is a monotonic bigserial (#221), the same tiebreaker-free-by-
+     construction key the conversation list needed a compound cursor to
+     approximate, so no equivalent of #281's tie problem exists here.
+     Undefined means "nothing loaded to page back from". */
   const [tutorHistoryHasMore, setTutorHistoryHasMore] = useState(false);
   const [sectionHistoryHasMore, setSectionHistoryHasMore] = useState(false);
+  const [tutorOldestSeq, setTutorOldestSeq] = useState<number | undefined>(undefined);
+  const [sectionOldestSeq, setSectionOldestSeq] = useState<number | undefined>(undefined);
+  const [loadingOlderTutorMessages, setLoadingOlderTutorMessages] = useState(false);
+  const [loadingOlderSectionMessages, setLoadingOlderSectionMessages] = useState(false);
+  const [tutorOlderMessagesError, setTutorOlderMessagesError] = useState(false);
+  const [sectionOlderMessagesError, setSectionOlderMessagesError] = useState(false);
 
   /* #4/#6, lifted here per #223: one useTutorConversations instance shared
      by the rail (TutorConversationsList, now presentational -- it takes
@@ -738,6 +749,11 @@ export default function App() {
     awaitingCourseContext: tutorConversationsAwaitingCourse,
     loadError: tutorConversationsLoadError,
     hasMore: tutorConversationsHasMore,
+    // #280 (requirement 2): the rail's real load-more, paging with the
+    // server's own compound cursor (#281).
+    loadingMore: tutorConversationsLoadingMore,
+    loadMoreError: tutorConversationsLoadMoreError,
+    loadMore: loadMoreTutorConversations,
     refetch: refetchTutorConversations,
     createConversation: createTutorConversationRow,
     deleteConversation: deleteTutorConversationRow,
@@ -824,15 +840,28 @@ export default function App() {
   // route's own DEFAULT_MESSAGES_PAGE_SIZE) so this function knows for
   // certain whether a full page means "there might be more" -- a length
   // that happens to equal an unstated server default would be a coincidence
-  // to key off of, not a real signal. Older messages beyond this page
-  // aren't fetched (a real prepend-on-scroll isn't wired yet); `hasMore`
-  // lets the caller show that ceiling instead of leaving it silent.
+  // to key off of, not a real signal.
+  //
+  // #280 (requirement 2): `before` walks further back. It is a `seq`
+  // (#221's monotonic bigserial), taken from a row this same route
+  // returned -- `oldestSeq` below is what the caller feeds back in, so the
+  // cursor is never reconstructed from anything lossier than the column
+  // itself. Rows come back oldest-first, so the head of the array is the
+  // page's own oldest row and therefore the next cursor.
   const MESSAGES_HISTORY_LIMIT = 200;
-  const fetchConversationHistory = async (id: string): Promise<{ messages: UIMessage[]; hasMore: boolean }> => {
-    const res = await fetch(`/api/conversations/${id}/messages?limit=${MESSAGES_HISTORY_LIMIT}`);
+  const fetchConversationHistory = async (
+    id: string,
+    before?: number,
+  ): Promise<{ messages: UIMessage[]; hasMore: boolean; oldestSeq: number | undefined }> => {
+    const res = await fetch(
+      `/api/conversations/${id}/messages?limit=${MESSAGES_HISTORY_LIMIT}${
+        before !== undefined ? `&before=${before}` : ""
+      }`,
+    );
     if (!res.ok) throw new Error(`failed to load conversation history: ${res.status}`);
     const rows = (await res.json()) as ConversationMessageResponse[];
     return {
+      oldestSeq: rows[0]?.seq,
       /* #397: createdAt was being dropped here. The server has always sent it
          per message (routes/sectionConversations.ts), and the transcript now
          shows a per-turn time, so it rides along on the UIMessage metadata
@@ -883,6 +912,8 @@ export default function App() {
       if (latestTutorSelectionRef.current !== id) return; // superseded while in flight -- discard
       setTutorHydrationError(null);
       setTutorHistoryHasMore(history.hasMore);
+      setTutorOldestSeq(history.oldestSeq);
+      setTutorOlderMessagesError(false);
       selectTutorConversation(id, history.messages);
     } catch (err) {
       console.error("[App] tutor conversation history fetch failed", err);
@@ -892,6 +923,7 @@ export default function App() {
         onRetry: () => void handleSelectExistingTutorConversation(id),
       });
       setTutorHistoryHasMore(false);
+      setTutorOldestSeq(undefined);
       selectTutorConversation(id, []);
     } finally {
       /* #398: clear only when this request is still the current one -- a
@@ -910,6 +942,76 @@ export default function App() {
          latestTutorSelectionRef also owns the marker. This branch now only
          handles "my own request finished and I am still current". */
       if (latestTutorSelectionRef.current === id) setPendingTutorSelectionId(undefined);
+    }
+  };
+
+  /* #280 (requirement 2, transcript half): fetch the page of messages
+     BEFORE the oldest one showing and PREPEND it. Prepend, not append:
+     `before` walks backwards through a chronologically-ascending list, so
+     the older page belongs above what is already rendered.
+
+     One handler shape, twice -- the tutor and section surfaces have
+     separate useChat instances, separate cursors, and separate staleness
+     refs, so they share the fetch (fetchConversationHistory) rather than
+     the handler.
+
+     The prepended page is deliberately NOT re-sent to the model: chat.ts
+     trims to a trailing MAX_HISTORY_MESSAGES window anyway (the divider
+     ConversationView draws from `contextWindowSize` says exactly this), so
+     loading older messages is a reading affordance, not a way to widen the
+     model's context. */
+  const handleLoadOlderTutorMessages = async () => {
+    // Not named `conversationId`: that identifier is already this
+    // component's SECTION conversation id.
+    const targetConversationId = tutorConversationId;
+    if (!targetConversationId || tutorOldestSeq === undefined || loadingOlderTutorMessages) return;
+    setLoadingOlderTutorMessages(true);
+    setTutorOlderMessagesError(false);
+    try {
+      const older = await fetchConversationHistory(targetConversationId, tutorOldestSeq);
+      // Same staleness rule as the selection path above: a switch made
+      // while this was in flight must not have another conversation's
+      // messages spliced into it.
+      if (latestTutorSelectionRef.current !== targetConversationId) return;
+      if (older.messages.length === 0) {
+        setTutorHistoryHasMore(false);
+        return;
+      }
+      setTutorMessages((prev) => [...older.messages, ...prev]);
+      setTutorOldestSeq(older.oldestSeq);
+      setTutorHistoryHasMore(older.hasMore);
+    } catch (err) {
+      console.error("[App] tutor older-message fetch failed", err);
+      if (latestTutorSelectionRef.current !== targetConversationId) return;
+      // The cursor is left intact -- the page is still there to ask for,
+      // so the button stays live and retrying is one more click.
+      setTutorOlderMessagesError(true);
+    } finally {
+      setLoadingOlderTutorMessages(false);
+    }
+  };
+
+  const handleLoadOlderSectionMessages = async () => {
+    const targetConversationId = conversationId;
+    if (!targetConversationId || sectionOldestSeq === undefined || loadingOlderSectionMessages) return;
+    setLoadingOlderSectionMessages(true);
+    setSectionOlderMessagesError(false);
+    try {
+      const older = await fetchConversationHistory(targetConversationId, sectionOldestSeq);
+      if (latestSectionConversationRef.current !== targetConversationId) return;
+      if (older.messages.length === 0) {
+        setSectionHistoryHasMore(false);
+        return;
+      }
+      setSectionMessages((prev) => [...older.messages, ...prev]);
+      setSectionOldestSeq(older.oldestSeq);
+      setSectionHistoryHasMore(older.hasMore);
+    } catch (err) {
+      console.error("[App] section older-message fetch failed", err);
+      if (latestSectionConversationRef.current !== targetConversationId) return;
+      setSectionOlderMessagesError(true);
+    } finally {
+      setLoadingOlderSectionMessages(false);
     }
   };
 
@@ -1130,9 +1232,11 @@ export default function App() {
     setConversationId(targetConversationId);
     latestSectionConversationRef.current = targetConversationId;
     setSectionHydrationError(null);
+    setSectionOlderMessagesError(false);
     if (!targetConversationId) {
       setSectionMessages([]);
       setSectionHistoryHasMore(false);
+      setSectionOldestSeq(undefined);
       if (sectionId) void startFreshSectionConversation(sectionNumber, sectionId);
       return;
     }
@@ -1141,6 +1245,7 @@ export default function App() {
       if (latestSectionConversationRef.current !== targetConversationId) return; // superseded -- discard
       setSectionMessages(history.messages);
       setSectionHistoryHasMore(history.hasMore);
+      setSectionOldestSeq(history.oldestSeq);
     } catch (err) {
       console.error("[App] section conversation history fetch failed", err);
       if (latestSectionConversationRef.current !== targetConversationId) return; // superseded -- discard
@@ -1168,6 +1273,7 @@ export default function App() {
         if (latestSectionConversationRef.current === pendingId) {
           setSectionMessages(history.messages);
           setSectionHistoryHasMore(history.hasMore);
+          setSectionOldestSeq(history.oldestSeq);
         }
       } catch (err) {
         console.error("[App] failed to hydrate section greeting after creation", err);
@@ -1803,6 +1909,9 @@ export default function App() {
           loadError={tutorConversationsLoadError}
           onRetryLoad={refetchTutorConversations}
           hasMore={tutorConversationsHasMore}
+          onLoadMore={() => void loadMoreTutorConversations()}
+          loadingMore={tutorConversationsLoadingMore}
+          loadMoreError={tutorConversationsLoadMoreError}
           selectedConversationId={tutorConversationId}
           pendingConversationId={pendingTutorSelectionId}
           onSelectConversation={handleSelectExistingTutorConversation}
@@ -1873,6 +1982,9 @@ export default function App() {
               }
               autoFocusComposer={tutorConversationId === justCreatedTutorConversationId}
               hasMoreHistory={tutorHistoryHasMore}
+              onLoadOlderMessages={() => void handleLoadOlderTutorMessages()}
+              isLoadingOlderMessages={loadingOlderTutorMessages}
+              loadOlderMessagesError={tutorOlderMessagesError}
               contextWindowSize={MAX_HISTORY_MESSAGES}
               onStop={handleStopTutorChat}
             />
@@ -1926,6 +2038,9 @@ export default function App() {
                  different section's graded conversation. */
               restoredDraft={sectionSendFailure?.section === currentSection ? sectionSendFailure : null}
               hasMoreHistory={sectionHistoryHasMore}
+              onLoadOlderMessages={() => void handleLoadOlderSectionMessages()}
+              isLoadingOlderMessages={loadingOlderSectionMessages}
+              loadOlderMessagesError={sectionOlderMessagesError}
               contextWindowSize={MAX_HISTORY_MESSAGES}
               onStop={handleStopSectionChat}
               /* #248: only once there's an active conversation to restart --
