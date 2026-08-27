@@ -2822,17 +2822,15 @@ describe("POST /api/chat", () => {
       expect(call.system).toContain(HINT_INSTRUCTION);
     });
 
-    // Final-review fix wave, finding 1 (hint double-grant, #80): the
-    // envelope path above already recorded exactly one hintEvents row for
-    // this turn (the assertion just above) -- if the model were ALSO
-    // offered requestHint for the same turn, its own description ("call
-    // this when they explicitly ask... in conversation") plus this turn's
-    // hint-primed system prompt and fixed user message
+    // #80 (hint double-grant): the envelope path above already recorded
+    // exactly one hintEvents row for this turn (the assertion just above).
+    // If the model were ALSO offered requestHint for the same turn, its own
+    // description ("call this when they explicitly ask... in conversation")
+    // plus this turn's hint-primed system prompt and fixed user message
     // ("Give me a hint for this section, please.", App.tsx) would prime it
     // to call the tool too, recording a SECOND row for one button click.
-    // This is the actual regression test for that bug: streamText's tools
-    // must not include requestHint on a turn that just granted via the
-    // envelope.
+    // The invariant: streamText's tools must not include requestHint on a
+    // turn that already granted via the envelope.
     it("withholds requestHint from streamText's tools on a turn that just granted via the envelope (prevents a double hintEvents write)", async () => {
       recordHintRequestMock.mockResolvedValue({ status: "hint_provided", remainingHints: 2, deduped: false });
 
@@ -3280,10 +3278,11 @@ describe("toolsForConversation (#168)", () => {
     }
   });
 
-  // Final-review fix wave, finding 1 (hint double-grant, #80): the second,
-  // independent gating axis this function grew to fix the bug -- see this
+  // #80 (hint double-grant): the second, independent gating axis on this
+  // function -- sectionId gates WHETHER requestHint exists at all, this
+  // gates whether it is offered on a turn that already granted. See the
   // function's own doc comment (chat.ts) for the full rationale.
-  describe("withholdRequestHint option (#80 finding: hint double-grant)", () => {
+  describe("withholdRequestHint option (#80: hint double-grant)", () => {
     it("omits requestHint when withholdRequestHint is true, for a section-kind conversation", () => {
       const tools = toolsForConversation("section-1", { withholdRequestHint: true });
       expect(tools.requestHint).toBeUndefined();

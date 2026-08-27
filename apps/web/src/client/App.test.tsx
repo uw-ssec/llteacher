@@ -257,10 +257,10 @@ describe("App tutor-conversations rail (#4)", () => {
             ? extra.onConversationsPost(JSON.parse(String(init.body)))
             : new Response(JSON.stringify({ error: "unexpected POST" }), { status: 500 });
         }
-        // #4 fix-round: history hydration -- defaults to an empty history so
-        // existing tests that don't care about hydration itself (e.g.
-        // "selecting a homework section switches back") don't need to know
-        // about this endpoint's existence.
+        // #4: history hydration -- defaults to an empty history so tests
+        // that don't care about hydration itself (e.g. "selecting a homework
+        // section switches back") don't need to know about this endpoint's
+        // existence.
         // #280: matches with or without a query string -- fetchConversationHistory
         // now requests an explicit `?limit=` param.
         const messagesMatch = url.match(/^\/api\/conversations\/([^/]+)\/messages(?:\?.*)?$/);
@@ -392,14 +392,13 @@ describe("App tutor-conversations rail (#4)", () => {
     expect(chatCalls[0]!.courseId).toBe("course-a");
   });
 
-  // #4 fix-round: the core regression test for the code-review finding.
-  // Selecting an existing tutor conversation must not just *display* its
-  // prior messages -- chat.ts's chatHandler builds the model's context via
-  // convertToModelMessages(uiMessages) over exactly what the client sends,
-  // so the next /api/chat request must actually include the hydrated
-  // history, or the LLM silently forgets the whole prior exchange. This
-  // test fails on the pre-fix code (which hydrated nothing, so `/api/chat`
-  // would receive only the freshly-typed message).
+  // #4: selecting an existing tutor conversation must not just *display*
+  // its prior messages -- chat.ts's chatHandler builds the model's context
+  // via convertToModelMessages(uiMessages) over exactly what the client
+  // sends, so the next /api/chat request must actually carry the hydrated
+  // history, or the LLM silently forgets the whole prior exchange. The
+  // display assertion alone cannot catch that: a hydration that seeds the
+  // transcript but not the outbound request looks correct on screen.
   it("selecting an existing tutor conversation hydrates its history into the chat column AND into the next /api/chat request", async () => {
     const chatCalls: Array<{ conversationId?: string; messages: Array<{ role: string }> }> = [];
     stubBaseFetch({
@@ -487,15 +486,14 @@ describe("App tutor-conversations rail (#4)", () => {
     expect(chatCalls[0]!.messages.map((m) => m.role)).toEqual(["user"]);
   });
 
-  // #4 fix-round 2: the hydration fix above introduced an async gap
-  // (fetch /messages, then apply) that didn't exist when selection was a
-  // synchronous setState. Regression test for the resulting race: select
-  // conversation A, then B before A's /messages response lands, then let
-  // A's response resolve LAST (after B's) -- the exact interleaving a
-  // slower/earlier-started request can produce. Without the
-  // latestTutorSelectionRef guard, A's late response would silently flip
-  // the chat column (and the sidebar's selected-row highlight) back to A
-  // even though B was the student's actual last action.
+  // #4: because hydration is async (fetch /messages, then apply), tutor
+  // selection is racy in a way a synchronous setState was not. Pins the
+  // losing interleaving: select conversation A, then B before A's /messages
+  // response lands, then let A's response resolve LAST (after B's) -- what
+  // a slower or earlier-started request actually produces. Without the
+  // latestTutorSelectionRef guard, A's late response silently flips the
+  // chat column (and the sidebar's selected-row highlight) back to A even
+  // though B was the student's last action.
   it("discards a stale /messages response when a later selection supersedes it before the first resolves", async () => {
     vi.stubGlobal("CSS", { supports: () => true });
     Element.prototype.scrollIntoView = vi.fn();
@@ -949,9 +947,9 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
     // composer -- the server persisted that message, so re-typing it would
     // send it twice.
     expect(composer.value).toBe("");
-    // PR-1 whole-branch review (Important): the composer must stay USABLE
-    // in the "error" state, not locked -- only a genuinely in-flight
-    // request ("submitted"/"streaming") disables it. The section chat's
+    // "error" is not "disabled": the composer must stay USABLE in the error
+    // state -- only a genuinely in-flight request
+    // ("submitted"/"streaming") disables it. The section chat's
     // useChat has no `id` (unlike the tutor chat), so nothing else ever
     // resets it out of an error state; if the composer stayed disabled
     // here too, Retry (which replays the exact request that just failed)
@@ -1113,9 +1111,9 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
     expect(
       await screen.findByText("The tutor stopped partway through. Nothing you wrote was lost."),
     ).toBeTruthy();
-    // PR-1 whole-branch review (Important): same "error" != "disabled" fix
-    // as the section chat above, applied to the tutor chat's independent
-    // useChat instance too.
+    // Same "error" != "disabled" invariant as the section chat above, which
+    // has to hold independently here: the tutor chat is its own useChat
+    // instance, so nothing about the section chat's behavior implies it.
     expect(isComposerDisabled(composer)).toBe(false);
 
     await user.click(screen.getByRole("button", { name: "Try again" }));
@@ -1297,13 +1295,14 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
   });
 
   it("clears the restored draft on a section switch, so one section's failed text can never be sent into another's conversation", async () => {
-    /* Fix-round regression guard. The section ConversationView is keyed
-       `key={currentSection}`, so switching sections REMOUNTS it -- resetting
-       both its draft and the `lastRestoredDraftRef` that makes a restore fire
-       only once. A `sectionSendFailure` left over from section 1 therefore
-       looked brand-new to section 2's fresh mount, and the restore effect
-       wrote section 1's failed text into section 2's empty composer: one
-       Enter away from sending it into a different graded conversation.
+    /* #96: the section ConversationView is keyed `key={currentSection}`, so
+       switching sections REMOUNTS it -- resetting both its draft and the
+       `lastRestoredDraftRef` that makes a restore fire only once. A
+       `sectionSendFailure` left over from section 1 therefore looks
+       brand-new to section 2's fresh mount, and without the reset the
+       restore effect writes section 1's failed text into section 2's empty
+       composer: one Enter away from sending it into a different graded
+       conversation.
 
        This is NOT the same as an ordinary unsent draft surviving a switch --
        the keyed remount deliberately discards a typed draft. Only the restore
@@ -1520,13 +1519,13 @@ describe("App main landmark + skip link (#299)", () => {
   });
 });
 
-// #252: the section chat's own version of the #4 fix-round regression --
-// resuming a section with an existing conversationId set `conversationId`
-// but never hydrated `useChat`'s messages, so the LLM received zero prior
-// context on every reload while the server kept appending to the same,
-// real conversation row. Covers both the requirement's own "assert what
-// the section chat sends after a reload" ask and the visible-transcript
-// side of the same bug.
+// #252: the section chat's own version of the #4 hydration invariant --
+// resuming a section must hydrate `useChat`'s messages, not just set
+// `conversationId`. Setting the id alone leaves the LLM with zero prior
+// context on every reload while the server keeps appending to the same,
+// real conversation row. Covers both what the section chat SENDS after a
+// reload and the visible transcript, since only the first of those catches
+// the silent-context-loss half.
 describe("App section chat resumes with hydrated history (#252)", () => {
   const HOMEWORK_FIXTURE = {
     homeworks: [

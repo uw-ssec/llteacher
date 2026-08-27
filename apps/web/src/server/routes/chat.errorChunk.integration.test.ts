@@ -1,15 +1,17 @@
 /* --------------------------------------------------------------------------
-   Integration test for the PR-1 whole-branch-review Critical finding:
+   Invariant under test: an error-only turn must not persist an assistant
+   row, or Retry (#144) is defeated forever.
 
    In ai@5.0.195, a provider failure (e.g. a 429) arrives mid-stream as an
    `error` chunk, not a stream rejection -- the stream closes NORMALLY, so
-   chat.ts's onFinish still fires. Before this fix, onFinish persisted
-   whatever `responseMessage` it got unconditionally, so a turn that
-   produced no real content still wrote an assistant row -- and
-   chatHandler's idempotency "already answered" replay branch would then
-   treat that row as a complete answer forever, silently defeating the
-   #144 Retry button (every retry replays the same nothing instead of
-   calling the model again).
+   chat.ts's onFinish still fires. An onFinish that persisted whatever
+   `responseMessage` it got unconditionally would write an assistant row for
+   a turn that produced no real content, and chatHandler's idempotency
+   "already answered" replay branch would then treat that row as a complete
+   answer forever: every press of Retry replays the same nothing instead of
+   calling the model again. Nothing about that failure mode is
+   self-announcing, which is why it is pinned here rather than left to the
+   unit suite.
 
    Unlike chat.test.ts (which mocks `streamText` itself, by design, to unit
    test chatHandler's own branching in isolation), THIS file does not mock
@@ -24,10 +26,10 @@
    layer (an in-memory fake, not a real Postgres) are substituted --
    everything AI-SDK-internal in between (stream parsing, UI message chunk
    conversion, the onFinish state accumulator, the replay path's
-   createUIMessageStream/createUIMessageStreamResponse) runs for real. This
-   is the exact seam the review flagged as uncovered: neither #3's nor
-   #144's own suite exercises the real error-chunk path together with the
-   real idempotency/replay branch.
+   createUIMessageStream/createUIMessageStreamResponse) runs for real. That
+   fidelity is the point: the persist-vs-replay interaction only misbehaves
+   when the real error-chunk path and the real idempotency/replay branch run
+   together, so neither #3's nor #144's own mocked suite can catch it.
    -------------------------------------------------------------------------- */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -395,7 +397,7 @@ function slowToolThenPartialTextModel(): LanguageModelV2 {
   };
 }
 
-describe("POST /api/chat -- real error-chunk + real idempotency replay (PR-1 whole-branch review, Critical)", () => {
+describe("POST /api/chat -- an error-only turn must not persist an assistant row, or Retry is defeated forever (#144)", () => {
   beforeEach(() => {
     conversationsStore = new Map();
     messagesStore = [];

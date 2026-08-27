@@ -234,13 +234,13 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     ).rejects.toThrow(TenancyMismatchError);
   });
 
-  // PR-1 whole-branch review (#140): appendMessage previously only wrote to
-  // `messages`, never touching the parent conversation row -- so
-  // listConversationsForOwner's `ORDER BY updatedAt DESC` (#5) never
-  // reflected actual chat activity, only renames (the only other writer of
-  // this row). Real DB test (not the mocked route-level one) specifically
-  // because the fix relies on Postgres's own clock advancing between the
-  // two inserts, which a mock can't meaningfully simulate.
+  // #140: appendMessage must touch the parent conversation row, not just
+  // `messages` -- listConversationsForOwner's `ORDER BY updatedAt DESC` (#5)
+  // is the tutor rail's live-activity ordering, and if only renames move
+  // that column it reflects everything except actual chat. Real DB test (not
+  // the mocked route-level one) specifically because this relies on
+  // Postgres's own clock advancing between the two inserts, which a mock
+  // can't meaningfully simulate.
   it("appendMessage bumps the parent conversation's updatedAt (#140)", async () => {
     const created = await createConversation(db, unsafeCourseScope(courseAId), {
       ownerUserId: userId,
@@ -429,7 +429,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     expect(row.conversationId).toBe(created.id);
   });
 
-  it("getMessagesForConversation (#4 fix-round) returns full history oldest-first", async () => {
+  it("getMessagesForConversation (#4) returns full history oldest-first", async () => {
     const created = await createConversation(db, unsafeCourseScope(courseAId), {
       ownerUserId: userId,
       sectionId: null,
