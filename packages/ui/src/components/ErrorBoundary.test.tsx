@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, act, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ErrorBoundary } from "./ErrorBoundary";
 
@@ -122,5 +122,195 @@ describe("ErrorBoundary", () => {
 
     expect(await screen.findByText("fine")).toBeTruthy();
     consoleError.mockRestore();
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #310: the retry that could not work.
+
+   `reset()` is setState({ error: null }) and nothing else, so it re-renders
+   the SAME subtree with the same upstream state. For the deterministic case
+   this boundary exists for -- a malformed persisted tool part, loaded from
+   the server on every render -- the render throws again immediately, and
+   the same "Try again" button came back. A control certain to fail, saying
+   nothing about it, is worse than no control.
+   -------------------------------------------------------------------------- */
+describe("ErrorBoundary retry policy (#310)", () => {
+  it("offers the retry on a first failure", () => {
+    const spy = suppressConsoleError();
+    render(
+      <ErrorBoundary>
+        <Bomb shouldThrow={true} />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByRole("button", { name: /Try again/ })).toBeTruthy();
+    spy.mockRestore();
+  });
+
+  it("withdraws the retry once it has been taken and the subtree threw again", async () => {
+    const spy = suppressConsoleError();
+    render(
+      <ErrorBoundary>
+        <Bomb shouldThrow={true} />
+      </ErrorBoundary>,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /Try again/ }));
+
+    // Deterministic throw: nothing upstream changed, so it recurs. The
+    // button must not come back offering the same certain failure.
+    expect(screen.queryByRole("button", { name: /Try again/ })).toBeNull();
+    spy.mockRestore();
+  });
+
+  it("tells the student what to do instead of the withdrawn retry", async () => {
+    const spy = suppressConsoleError();
+    render(
+      <ErrorBoundary>
+        <Bomb shouldThrow={true} />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByText(/If trying again doesn't help/)).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: /Try again/ }));
+
+    // Removing the control without replacing the guidance would leave a
+    // dead end, which is the same defect in a different shape.
+    expect(screen.getByText(/Trying again didn't help/)).toBeTruthy();
+    spy.mockRestore();
+  });
+
+  it("gives a later, unrelated error its own retry after an earlier one recovered (#396)", async () => {
+    /* The previous version of this test rendered a harness with a `fix`
+       button and never clicked it -- it asserted the retry exists on a
+       FIRST failure, which the test above already covers, and never
+       performed a successful retry at all. Its name claimed a scenario its
+       body did not execute, which is why #396 survived a test written
+       specifically around this behaviour.
+
+       This one runs the whole cycle: throw, retry, recover, throw again. */
+    const spy = suppressConsoleError();
+    let setBrokenExternal!: (v: boolean) => void;
+    function Harness() {
+      const [broken, setBroken] = useState(true);
+      setBrokenExternal = setBroken;
+      return (
+        <ErrorBoundary>
+          <Bomb shouldThrow={broken} />
+        </ErrorBoundary>
+      );
+    }
+    render(<Harness />);
+    expect(screen.getByRole("button", { name: /Try again/ })).toBeTruthy();
+
+    // Make the retry succeed, then take it.
+    act(() => setBrokenExternal(false));
+    await userEvent.click(screen.getByRole("button", { name: /Try again/ }));
+    expect(screen.getByText("fine")).toBeTruthy();
+
+    // A later, independent failure.
+    act(() => setBrokenExternal(true));
+
+    // It must get its own first retry -- the earlier successful one is not
+    // evidence that trying again cannot work.
+    expect(screen.getByRole("button", { name: /Try again/ })).toBeTruthy();
+    expect(screen.getByText(/If trying again doesn't help/)).toBeTruthy();
+    spy.mockRestore();
+  });
+
+  it("leaves a caller-supplied fallback's policy entirely to the caller", async () => {
+    const spy = suppressConsoleError();
+    // The contract change is scoped to the DEFAULT fallback -- a custom one
+    // receives `reset` exactly as before and may offer it as often as it
+    // likes.
+    render(
+      <ErrorBoundary
+        fallback={(_error, reset) => (
+          <button type="button" onClick={reset}>
+            custom retry
+          </button>
+        )}
+      >
+        <Bomb shouldThrow={true} />
+      </ErrorBoundary>,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "custom retry" }));
+    expect(screen.getByRole("button", { name: "custom retry" })).toBeTruthy();
+    spy.mockRestore();
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #406 / #407 -- defects in #396's own fix.
+   -------------------------------------------------------------------------- */
+describe("ErrorBoundary retry lifecycle (#406, #407)", () => {
+  it("keeps focus in the fallback when the failed retry button is removed (#406)", async () => {
+    const spy = suppressConsoleError();
+    render(
+      <ErrorBoundary>
+        <Bomb shouldThrow={true} />
+      </ErrorBoundary>,
+    );
+
+    const retry = screen.getByRole("button", { name: /Try again/ });
+    retry.focus();
+    expect(document.activeElement).toBe(retry);
+
+    // Deterministic throw: the retry fails and the button is withdrawn.
+    await userEvent.click(retry);
+    expect(screen.queryByRole("button", { name: /Try again/ })).toBeNull();
+
+    // Removing the focused element without moving focus drops it to <body>
+    // -- exactly what this boundary's #298 work exists to prevent, on the
+    // path a keyboard user is most likely to take.
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(document.querySelector(".error-boundary-fallback"));
+    spy.mockRestore();
+  });
+
+  it("does not clear the retry marker before a commit-phase error can be attributed (#407)", async () => {
+    /* A retried subtree that RENDERS fine and then throws in an effect.
+       componentDidUpdate runs before React delivers that error to
+       componentDidCatch, so clearing the marker synchronously there made
+       the catch see `retried === false` -- and a deterministic commit-phase
+       failure would keep offering a retry forever.
+
+       The render/commit switch is driven from OUTSIDE the boundary: a
+       control rendered inside it is unreachable while the fallback is
+       showing, which is what made the first version of this test exercise
+       an ordinary render failure instead. */
+    const spy = suppressConsoleError();
+    let setMode!: (m: "render" | "commit") => void;
+
+    function CommitBomb({ mode }: { mode: "render" | "commit" }) {
+      useEffect(() => {
+        if (mode === "commit") throw new Error("commit-phase boom");
+      }, [mode]);
+      if (mode === "render") throw new Error("render boom");
+      return <p>rendered</p>;
+    }
+
+    function Harness() {
+      const [mode, setMode_] = useState<"render" | "commit">("render");
+      setMode = setMode_;
+      return (
+        <ErrorBoundary>
+          <CommitBomb mode={mode} />
+        </ErrorBoundary>
+      );
+    }
+
+    render(<Harness />);
+    expect(screen.getByRole("button", { name: /Try again/ })).toBeTruthy();
+
+    // Next attempt gets past render and dies in the effect instead.
+    act(() => setMode("commit"));
+    await userEvent.click(screen.getByRole("button", { name: /Try again/ }));
+
+    // The retry DID fail, just later in the commit. It must still count,
+    // or the boundary offers a retry that is certain to fail forever.
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Try again/ })).toBeNull());
+    spy.mockRestore();
   });
 });
