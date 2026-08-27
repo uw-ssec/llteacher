@@ -1720,12 +1720,21 @@ export async function chatHandler(c: Context<AppEnv>) {
   const markCompleteInstruction = conv.sectionId
     ? (resolvedLLMConfig.markCompleteInstruction ?? DEFAULT_MARK_COMPLETE_INSTRUCTION)
     : undefined;
+  // #305 (#230 requirement 3): resolved ONCE, here, and used for two things
+  // -- the generated tool-usage paragraph in the system prompt below, and
+  // streamText's own `tools` option further down. Previously the streamText
+  // call resolved it inline, which is fine while there is one consumer; with
+  // the prompt now describing the catalog, two independent
+  // toolsForConversation calls could describe a different set than the model
+  // was actually offered the moment either call site's arguments drifted.
+  const turnTools = toolsForConversation(conv.sectionId, { withholdRequestHint: isHintGranted });
   const systemPrompt = assembleSystemPrompt(
     resolvedSystemPromptContent,
     sectionPromptContext ?? undefined,
     isDefaultPrompt,
     isHintGranted,
     markCompleteInstruction,
+    Object.keys(turnTools),
   );
 
   // #317 review, #326: "skip-insert" means `recentMessages[0]` already IS
@@ -1934,7 +1943,11 @@ export async function chatHandler(c: Context<AppEnv>) {
       // toolsForConversation's own doc comment for the full mechanism/
       // rationale, and its `withholdRequestHint` option's doc comment for
       // why the double-grant was possible without this.
-      tools: toolsForConversation(conv.sectionId, { withholdRequestHint: isHintGranted }),
+      //
+      // #305: `turnTools`, resolved once above -- the same object whose keys
+      // generated this turn's tool-usage paragraph, so the prompt cannot
+      // describe a catalog the model was not handed.
+      tools: turnTools,
       // #80: threads request-scoped context into the requestHint tool's
       // execute() (its second argument's own `experimental_context` field)
       // -- see TOOLS.requestHint's own doc comment for why a static,

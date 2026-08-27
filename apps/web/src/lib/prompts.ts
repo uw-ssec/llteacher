@@ -377,6 +377,44 @@ export const SECTION_CONVERSATION_PROMPTS: SectionConversationPrompts = {
   title: sectionConversationTitle,
 };
 
+/** #305 (and #230 requirement 3): the system prompt's tool-usage paragraph,
+ *  GENERATED from the names of the tools this turn actually offers rather
+ *  than hand-written alongside them.
+ *
+ *  It was hand-written in two places and had already drifted: the seeded org
+ *  template (scripts/seed.ts's TUTOR_BASE_PROMPT) still said "You have one
+ *  structured rendering tool available: showDefinition" long after
+ *  `executeRCode`, `requestHint` and `markSectionComplete` joined chat.ts's
+ *  TOOLS catalog. chat.ts passes `Object.keys(toolsForConversation(...))` --
+ *  the very object handed to streamText's own `tools` option -- so the
+ *  paragraph describes exactly the tools the model was offered on THIS turn
+ *  (a tutor-kind conversation is not told about section-only tools it was
+ *  structurally denied), and a new entry in TOOLS shows up here with no
+ *  second edit.
+ *
+ *  Names only, not each tool's `description`: the descriptions are already
+ *  delivered to the model as part of the tool schema, so restating them
+ *  here would pay for the same tokens twice. What this paragraph adds is
+ *  the part no individual tool description can state -- the closed-world
+ *  rule (the list is complete; don't invent one) and the default
+ *  (everything else is plain markdown), which is what the hand-written
+ *  version was actually carrying.
+ *
+ *  Takes `string[]`, not the AI SDK's `ToolSet`, to keep this module free of
+ *  an `ai` import -- lib/prompts.ts is otherwise pure text assembly plus
+ *  drizzle. Empty list -> empty string, so a caller with no tools appends
+ *  nothing rather than a paragraph about none. */
+export function toolUsageParagraph(toolNames: readonly string[]): string {
+  if (toolNames.length === 0) return "";
+  const count = toolNames.length === 1 ? "one structured tool" : `${toolNames.length} structured tools`;
+  return (
+    `You have ${count} available: ${toolNames.join(", ")}. ` +
+    "Each tool's own description states when to call it -- follow those, and never call a tool that is not on " +
+    "that list. For everything else (guiding questions, follow-ups, gentle nudges, walking through " +
+    "computations), reply in plain markdown with no tool call."
+  );
+}
+
 /** Pure composition: template content + (optional) section context +
  *  (conditionally) the tutor guardrail -> one system-prompt string. No db
  *  access, no I/O -- the whole point of extracting this from
@@ -423,13 +461,21 @@ export const SECTION_CONVERSATION_PROMPTS: SectionConversationPrompts = {
  *  true only after recordHintRequest (repositories/hints.ts) has already
  *  deterministically granted the request server-side -- never from a
  *  client-supplied flag taken at face value.
- */
+ *
+ *  `toolNames` (#305/#230 requirement 3): appended as toolUsageParagraph's
+ *  generated sentence, placed after TUTOR_GUARDRAIL and before
+ *  markCompleteInstruction -- it introduces the catalog that
+ *  markCompleteInstruction then gives one member's pedagogy for, so it has
+ *  to come first for that instruction to have an antecedent. Omitted (or
+ *  empty) appends nothing, which is what every pure prompt-assembly test
+ *  fixture that isn't about tools wants. */
 export function assembleSystemPrompt(
   templateContent: string,
   section?: PromptSectionContext,
   isDefaultPrompt = false,
   isHintRequest = false,
   markCompleteInstruction?: string,
+  toolNames: readonly string[] = [],
 ): string {
   const parts = [templateContent.trim()];
   if (section) {
@@ -443,6 +489,8 @@ export function assembleSystemPrompt(
     );
   }
   if (isDefaultPrompt) parts.push(TUTOR_GUARDRAIL);
+  const toolUsage = toolUsageParagraph(toolNames);
+  if (toolUsage) parts.push(toolUsage);
   if (markCompleteInstruction) parts.push(markCompleteInstruction);
   if (isHintRequest) parts.push(HINT_INSTRUCTION);
   return parts.join("\n\n");

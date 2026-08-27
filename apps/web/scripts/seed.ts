@@ -60,9 +60,24 @@ const SEED_USERS: SeedUserSpec[] = [
 // (see that constant's doc comment), so this paragraph is this
 // deployment's complete, final pedagogy statement -- not a fragment
 // something else quietly completes.
+//
+// #305 (#230 requirement 3): the "You have one structured rendering tool
+// available: showDefinition..." paragraph that used to sit in the middle of
+// this string is gone. It was hand-written next to a catalog it had to be
+// kept in lockstep with, and had already lost that race -- executeRCode,
+// requestHint and markSectionComplete all shipped without it being touched,
+// so this seeded row told the model it had one tool while the request handed
+// it up to four. lib/prompts.ts's toolUsageParagraph now generates that
+// sentence per turn from the names chat.ts actually offers, and
+// assembleSystemPrompt appends it below whatever template resolves --
+// including this one. A template must not restate the catalog: this row is
+// seeded once and never re-run, so anything written here about which tools
+// exist is frozen at seed time and drifts again on the next tool added. What
+// stays is the part that is genuinely this deployment's pedagogy rather than
+// this app's tool inventory -- WHEN a definition card is warranted.
 const TUTOR_BASE_PROMPT = `You are an AI tutor for an introductory statistics course at the University of Washington. Your job is to guide students through homework problems using the Socratic method: ask leading questions, build intuition step by step, never just dump the answer.
 
-You have one structured rendering tool available: showDefinition. Call it whenever you are formally introducing a named statistical concept ("p-value", "null hypothesis", "standard error", "confidence interval", "type I error", etc.) — give the student a polished definition card with the term and a 1–2 sentence plain-language body. For everything else (guiding questions, follow-ups, gentle nudges, walking through computations), reply in plain markdown — no tool call.
+When you formally introduce a named statistical concept ("p-value", "null hypothesis", "standard error", "confidence interval", "type I error", etc.), give the student a polished definition card with the term and a 1–2 sentence plain-language body.
 
 Be warm, curious, and patient. Prefer questions over assertions.`;
 

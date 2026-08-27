@@ -3084,6 +3084,46 @@ describe("POST /api/chat", () => {
       expect(call.system).not.toContain(DEFAULT_MARK_COMPLETE_INSTRUCTION);
     });
 
+    // #305 (#230 requirement 3). Folded into this describe block rather than
+    // a new one because it shares SECTION_CONV/TUTOR_CONV and asserts the
+    // same streamText call -- the point being that the catalog the prompt
+    // describes and the catalog `tools:` carries are one value, not two.
+    describe("generated tool-usage paragraph (#305)", () => {
+      it("describes exactly the tools streamText was handed, for a section-kind conversation", async () => {
+        getOwnedConversationOrNullMock.mockResolvedValue(SECTION_CONV);
+
+        await postChat(buildApp(fakeAuthContext()), {
+          messages: [userUiMessage],
+          conversationId: SECTION_CONV.id,
+        });
+
+        const call = streamTextMock.mock.calls[0]![0] as { system: string; tools: Record<string, unknown> };
+        const offered = Object.keys(call.tools);
+        expect(offered.length).toBeGreaterThan(1);
+        for (const name of offered) expect(call.system).toContain(name);
+        expect(call.system).toContain(`${offered.length} structured tools available`);
+      });
+
+      it("does not advertise the section-only tools a tutor-kind conversation was structurally denied", async () => {
+        // The failure this forecloses: a hand-written paragraph naming the
+        // full catalog would tell a tutor-kind conversation about
+        // markSectionComplete/requestHint that toolsForConversation withheld,
+        // inviting calls to tools that are not there.
+        getOwnedConversationOrNullMock.mockResolvedValue(TUTOR_CONV);
+
+        await postChat(buildApp(fakeAuthContext()), {
+          messages: [userUiMessage],
+          conversationId: TUTOR_CONV.id,
+        });
+
+        const call = streamTextMock.mock.calls[0]![0] as { system: string; tools: Record<string, unknown> };
+        expect(call.tools.markSectionComplete).toBeUndefined();
+        expect(call.system).not.toContain("markSectionComplete");
+        expect(call.system).not.toContain("requestHint");
+        expect(call.system).toContain("showDefinition");
+      });
+    });
+
     // Issue requirements verified together: "Invocation is persisted against
     // the conversation, with the message that triggered it" and "Students
     // can keep working after the tool fires -- it must not lock the
