@@ -13,6 +13,8 @@ import {
   HINT_INSTRUCTION,
   DEFAULT_MARK_COMPLETE_INSTRUCTION,
   SECTION_CONVERSATION_PROMPTS,
+  TUTOR_GUARDRAIL,
+  VOICE_CONSTRAINTS,
 } from "../../lib/prompts";
 import type { AppEnv } from "../context";
 
@@ -2722,6 +2724,191 @@ describe("POST /api/chat", () => {
     const callArgs = streamTextMock.mock.calls[0]![0] as { messages: Array<{ content?: unknown }> };
     expect(callArgs.messages.length).toBe(40);
     expect(JSON.stringify(callArgs.messages)).not.toContain("the answer is 42");
+  });
+
+  /* #88: the token-aware INNER bound, on top of the MAX_HISTORY_MESSAGES
+     count above. These drive the real lib/context-window.ts (it is not
+     mocked) through the real handler, so they assert the wiring -- that the
+     budget is taken from the config this turn ALREADY resolved -- rather than
+     re-testing the budget arithmetic, which context-window.test.ts owns.
+
+     Fixture shape: 39 persisted rows plus this turn's own inserted user
+     message = 40, exactly as the MAX_HISTORY_MESSAGES test above. Each row's
+     text is sized so a message costs ~212 estimated tokens, which makes the
+     "how many survive a 1,000-token budget" assertions exact rather than
+     approximate. */
+  const budgetRowText = "y".repeat(700);
+  const budgetHistoryRows = () =>
+    Array.from({ length: 39 }, (_, i) => ({
+      id: `hist-${i}`,
+      role: i % 2 === 0 ? "assistant" : "user",
+      parts: [{ type: "text", text: budgetRowText }],
+      clientMessageId: null,
+    }));
+  const baseLlmConfig = {
+    id: "llm-config-1",
+    provider: "openrouter",
+    temperature: 0.7,
+    credentialId: null,
+    fallbackLlmConfigId: null,
+    basePrompt: "",
+    pricePerMillionInputTokens: null,
+    pricePerMillionOutputTokens: null,
+    markCompleteInstruction: null,
+  };
+
+  it("token-budgets the model context: a config with almost no headroom left keeps only the newest turns", async () => {
+    createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+    getLastMessagesMock.mockResolvedValueOnce(budgetHistoryRows());
+    // max_completion_tokens reserved for the answer eats the whole 128K
+    // default window, so the budget floors at MIN_HISTORY_BUDGET_TOKENS
+    // (1,000). This turn's own short question (~13 tokens, always kept) plus
+    // four of the ~212-token rows fit inside that; the other 35 do not.
+    resolveLLMConfigMock.mockResolvedValueOnce({
+      ...baseLlmConfig,
+      modelName: "unlisted/default-window-model",
+      maxCompletionTokens: 127_000,
+    });
+
+    await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+
+    const callArgs = streamTextMock.mock.calls[0]![0] as { messages: unknown[]; system: string };
+    expect(callArgs.messages.length).toBe(5);
+    // The newest turn (this request's own message) is always the last one --
+    // truncation takes from the front, never from the question just asked.
+    expect(JSON.stringify(callArgs.messages[callArgs.messages.length - 1])).toContain("hi there");
+  });
+
+  it("the system prompt survives truncation in full -- it is streamText's own `system`, never a droppable message", async () => {
+    createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+    getLastMessagesMock.mockResolvedValueOnce(budgetHistoryRows());
+    resolveLLMConfigMock.mockResolvedValueOnce({
+      ...baseLlmConfig,
+      modelName: "unlisted/default-window-model",
+      maxCompletionTokens: 127_000,
+    });
+
+    await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+
+    const callArgs = streamTextMock.mock.calls[0]![0] as { messages: unknown[]; system: string };
+    // History WAS truncated on this very call...
+    expect(callArgs.messages.length).toBeLessThan(40);
+    // ...and the prompt is nonetheless intact and complete: the resolved
+    // template plus every guardrail assembleSystemPrompt appends to it.
+    expect(callArgs.system).toContain("test system prompt");
+    expect(callArgs.system).toContain(TUTOR_GUARDRAIL);
+    expect(callArgs.system).toContain(VOICE_CONSTRAINTS);
+    // And it is not smuggled in as a message either.
+    expect(JSON.stringify(callArgs.messages)).not.toContain("test system prompt");
+  });
+
+  it("the window size comes from the RESOLVED model, not a constant: a 262K model keeps history the 128K default drops", async () => {
+    // The same request, the same history, the same max_completion_tokens --
+    // only `llm_configs.model_name` differs. If the window were hardcoded,
+    // these two would keep the same number of messages.
+    createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+
+    getLastMessagesMock.mockResolvedValueOnce(budgetHistoryRows());
+    resolveLLMConfigMock.mockResolvedValueOnce({
+      ...baseLlmConfig,
+      modelName: "unlisted/default-window-model",
+      maxCompletionTokens: 127_000,
+    });
+    await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+    const smallWindowCall = streamTextMock.mock.calls[0]![0] as { messages: unknown[] };
+
+    getLastMessagesMock.mockResolvedValueOnce(budgetHistoryRows());
+    resolveLLMConfigMock.mockResolvedValueOnce({
+      ...baseLlmConfig,
+      modelName: "google/gemma-4-31b-it:free",
+      maxCompletionTokens: 127_000,
+    });
+    await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+    const largeWindowCall = streamTextMock.mock.calls[1]![0] as { messages: unknown[] };
+
+    expect(smallWindowCall.messages.length).toBe(5);
+    expect(largeWindowCall.messages.length).toBe(40);
+  });
+
+  it("budgets for the failover hop's window too, since both hops are handed the same message array (#364)", async () => {
+    // Primary is the 262K model, so on its own the whole history fits (the
+    // test above proves that). Configuring a fallback on the 128K default
+    // tightens the budget for BOTH hops -- a failover fires when the primary
+    // is already down, and overflowing the backup would turn a recoverable
+    // outage into a failed turn.
+    createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+    getLastMessagesMock.mockResolvedValueOnce(budgetHistoryRows());
+    resolveLLMConfigMock.mockResolvedValueOnce({
+      ...baseLlmConfig,
+      modelName: "google/gemma-4-31b-it:free",
+      maxCompletionTokens: 127_000,
+      fallbackLlmConfigId: "llm-config-2",
+    });
+    resolveFallbackLLMConfigMock.mockResolvedValueOnce({
+      ...baseLlmConfig,
+      id: "llm-config-2",
+      modelName: "unlisted/default-window-model",
+      maxCompletionTokens: 127_000,
+    });
+
+    await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+
+    const callArgs = streamTextMock.mock.calls[0]![0] as { messages: unknown[] };
+    expect(callArgs.messages.length).toBe(5);
+  });
+
+  it("logs when the token budget truncates, so the drop is not silent to an operator", async () => {
+    // #288's complaint about the count-based window is precisely that a
+    // silent drop is indistinguishable from the tutor being obtuse. The
+    // student-facing half is the divider; this is the operator-facing half,
+    // for the turns where the TOKEN bound (not the count) is what fired.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+    getLastMessagesMock.mockResolvedValueOnce(budgetHistoryRows());
+    resolveLLMConfigMock.mockResolvedValueOnce({
+      ...baseLlmConfig,
+      modelName: "unlisted/default-window-model",
+      maxCompletionTokens: 127_000,
+    });
+
+    await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+
+    const lines = warnSpy.mock.calls.map((c) => String(c[0]));
+    const truncation = lines.find((l) => l.includes("chatHandler.contextWindow.truncated"));
+    expect(truncation).toBeDefined();
+    // The counts are what make the line actionable -- "it fired" alone does
+    // not tell an operator how much the student lost.
+    expect(JSON.parse(truncation!)).toMatchObject({ level: "warn", droppedCount: 35, keptCount: 5 });
+    warnSpy.mockRestore();
+  });
+
+  it("an ordinary conversation on an ordinary config is not truncated at all", async () => {
+    // Regression guard against the budget being too aggressive: the default
+    // mock config (max_completion_tokens 1,000) plus a full 40-message
+    // transcript must reach the model whole. If this ever fails, students
+    // silently lost conversational memory.
+    createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+    getLastMessagesMock.mockResolvedValueOnce(budgetHistoryRows());
+
+    await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+
+    const callArgs = streamTextMock.mock.calls[0]![0] as { messages: unknown[] };
+    expect(callArgs.messages.length).toBe(40);
   });
 
   it("passes AbortSignal.timeout to streamText so a stuck upstream can't hang the request indefinitely", async () => {

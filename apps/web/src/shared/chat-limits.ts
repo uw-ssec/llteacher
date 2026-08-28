@@ -21,7 +21,15 @@
  *  the bug: the student can reference them and the tutor cannot see them.
  *
  *  A token-budget window would be more correct than a message count -- 40
- *  messages of pasted data still overflows a context (#88 tracks that) --
- *  but the disclosure is the user-facing half and holds whichever bound is
- *  used. */
+ *  messages of pasted data still overflows a context -- so #88 added one:
+ *  lib/context-window.ts, applied server-side on top of this count. The two
+ *  compose in one direction only, and that ordering is what keeps this
+ *  constant honest as the number the client discloses. This count is the
+ *  OUTER bound (it is what the DB read is sized to); the token budget can
+ *  only ever drop MORE. So a message above the divider is certainly not seen
+ *  by the model, which is exactly what the divider claims -- the residual gap
+ *  is that on a pathologically large conversation a few messages just BELOW
+ *  the divider may also have been dropped. #288's own text anticipates this
+ *  ("worth fixing regardless of which bound is used"): under-promising which
+ *  turns survived is the safe direction for a disclosure to be wrong in. */
 export const MAX_HISTORY_MESSAGES = 40;

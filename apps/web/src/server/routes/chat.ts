@@ -97,6 +97,7 @@ import { makeDb } from "../../db/client";
 import type { Db } from "../../db/client";
 import type { ConversationKind } from "../../db/schema";
 import { MAX_HISTORY_MESSAGES } from "../../shared/chat-limits";
+import { resolveHistoryTokenBudget, windowMessagesToTokenBudget } from "../../lib/context-window";
 import {
   createConversation,
   appendMessage,
@@ -820,16 +821,24 @@ function deriveTutorConversationTitle(parts: unknown): string | null {
 // pulled from the server's own persisted history (#143 redesign below), so
 // per-turn token cost is bounded regardless of how long the conversation
 // has run. Decision (documented per the issue's own request): a plain
-// trailing window, dropped silently -- no rolling summary. A summarization
-// strategy is real, separate work (tracked as #88, context-window
-// management); until it lands, the oldest turns beyond this window are
-// simply not seen by the model on a given turn, which is a graceful
-// degradation rather than a hard failure -- and, since #288, one the
-// student can actually see: ConversationView renders a boundary divider
-// above the oldest message still inside this window, so "the tutor did not
-// see that" is legible instead of looking like the tutor ignoring them.
-// The constant itself moved to shared/chat-limits.ts for that reason; the
-// client describes the same number the server enforces.
+// trailing window, dropped silently -- no rolling summary. The oldest turns
+// beyond this window are simply not seen by the model on a given turn, which
+// is a graceful degradation rather than a hard failure -- and, since #288,
+// one the student can actually see: ConversationView renders a boundary
+// divider above the oldest message still inside this window, so "the tutor
+// did not see that" is legible instead of looking like the tutor ignoring
+// them. The constant itself moved to shared/chat-limits.ts for that reason;
+// the client describes the same number the server enforces.
+//
+// #88: this COUNT is now the OUTER of two bounds. A count cannot tell 40
+// turns of "why?" from 40 turns of pasted datasets, so lib/context-window.ts
+// adds a token-aware inner bound, applied in memory further down (see
+// budgetedContextMessages) once the resolved config and the assembled system
+// prompt are both known. That bound can only ever tighten this one, which is
+// what keeps the #288 divider's claim safe: a message above the divider is
+// certainly unseen, and the divider never promises MORE than 40. #88
+// deliberately implements truncation only -- a rolling summary remains real,
+// separate work (its own storage, versioning, logging and leakage story).
 
 // #143: bound on the inbound request body itself, checked before any
 // parsing/db work -- distinct from MAX_HISTORY_MESSAGES above (which trims
@@ -1979,6 +1988,73 @@ export async function chatHandler(c: Context<AppEnv>) {
           ]
         : modelMessages;
 
+    /* #88: the SECOND, token-aware bound on what the model sees.
+       MAX_HISTORY_MESSAGES above is a flat COUNT, applied at the DB read; it
+       cannot tell 40 turns of "why?" from 40 turns each carrying an
+       8,000-character pasted dataset (both well-formed under this route's own
+       MAX_TEXT_PART_LENGTH cap), and the second one overflows the model's
+       real context window -- a hard provider error on a student's turn rather
+       than a graceful forget.
+
+       Applied HERE, and not earlier, because the budget depends on two things
+       that are only both known at this point: the resolved config (the
+       model's window, and the `max_completion_tokens` reserved for the
+       answer) and the fully assembled system prompt. It reads them off the
+       values this handler ALREADY resolved once for this turn -- no second
+       config lookup, no per-message resolution (#30's LLM-config stability
+       invariant).
+
+       Both hops' model names, not just the primary's: buildTurnParams below
+       hands this ONE array to the fallback too, so it has to fit the smaller
+       of the two windows (see resolveHistoryTokenBudget's own doc comment).
+
+       Truncation only -- no rolling summary. See lib/context-window.ts's
+       header for why that is a deliberate scope boundary rather than an
+       omission; the output here is always a contiguous suffix of the input,
+       never anything synthesized. */
+    const budgeted = windowMessagesToTokenBudget(
+      modelContextMessages,
+      resolveHistoryTokenBudget({
+        modelNames: fallbackConfig
+          ? [resolvedLLMConfig.modelName, fallbackConfig.modelName]
+          : [resolvedLLMConfig.modelName],
+        maxCompletionTokens: resolvedLLMConfig.maxCompletionTokens,
+        systemPrompt,
+      }),
+    );
+    if (budgeted.droppedCount > 0) {
+      // Not silent: #288's whole complaint about the count-based window is
+      // that a silent drop is indistinguishable from the tutor being obtuse,
+      // and an operator fielding "the tutor forgot what I said" needs to be
+      // able to see that this bound (rather than the count) is what fired.
+      // warn, not error: dropping the oldest turns of a very long
+      // conversation is this feature working, not failing.
+      logServerWarn(
+        "chatHandler.contextWindow.truncated",
+        "token budget dropped the oldest messages from this turn's model context",
+        {
+          conversationId: conv.id,
+          model: resolvedLLMConfig.modelName,
+          droppedCount: budgeted.droppedCount,
+          keptCount: budgeted.messages.length,
+        },
+      );
+    }
+    if (budgeted.lastMessageExceedsBudget) {
+      // #88's own edge case: one message bigger than the whole budget is
+      // still sent (dropping the question the student just asked would leave
+      // the model answering nothing), so this is the warning the issue asks
+      // for rather than a refusal. MAX_TEXT_PART_LENGTH/MAX_PARTS_PER_MESSAGE
+      // already bound how large a single message can get, so reaching this
+      // needs a genuinely tiny configured window.
+      logServerWarn(
+        "chatHandler.contextWindow.oversizedMessage",
+        "the student's own message exceeds this model's history budget; sending it anyway",
+        { conversationId: conv.id, model: resolvedLLMConfig.modelName },
+      );
+    }
+    const budgetedContextMessages = budgeted.messages;
+
     // #317 review, #321: latency for the llm_call_logs row written in
     // onFinish below -- captured right before the model call actually
     // starts, not at the top of chatHandler, so it reflects the LLM call
@@ -2032,7 +2108,11 @@ export async function chatHandler(c: Context<AppEnv>) {
       // persistedHistory above), not a client-supplied array -- see
       // persistedHistory's own doc comment for the trust-boundary rationale
       // this closes.
-      messages: convertToModelMessages(modelContextMessages),
+      // #88: the token-budgeted suffix of modelContextMessages, not the raw
+      // array -- see its own doc comment above. Still server-authoritative:
+      // windowing only ever DROPS whole messages off the front, so every
+      // element here is still a row this handler itself confirmed or wrote.
+      messages: convertToModelMessages(budgetedContextMessages),
       // #264: belt-and-suspenders alongside historyMessageSchema's role
       // allowlist above -- the SDK warns and proceeds by default (its own
       // words: "a security risk because they may enable prompt injection
