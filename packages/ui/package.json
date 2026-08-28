@@ -11,6 +11,7 @@
     ".": "./src/index.ts",
     "./styles.css": "./styles.css",
     "./auth/courseRole": "./src/auth/courseRole.ts",
+    "./generative/renderableTools": "./src/generative/renderableTools.ts",
     "./api": "./src/api/types.ts"
   },
   "scripts": {

@@ -1,11 +1,15 @@
 /* --------------------------------------------------------------------------
-   Bounds that BOTH the server and the client have to agree on.
+   Bounds on a chat turn that more than one module has to agree on.
 
    Separate from shared/types.ts because that module is types-only -- every
    one of its imports is `import type` and erases, so it costs the client
    bundle nothing. These are runtime values, and the point of them living
-   here is that a number the server enforces and the client describes must
-   be one number, not two that happen to match today (#288).
+   here is that a number one module enforces and another describes or
+   reserves against must be ONE number, not two that happen to match today
+   (#288). Two such pairs live here: MAX_HISTORY_MESSAGES (the server
+   enforces it, the client discloses it) and MAX_TURN_STEPS (the route
+   enforces it, lib/context-window.ts reserves window space for it). This
+   module imports nothing, so either side can depend on it.
    -------------------------------------------------------------------------- */
 
 /** How many trailing messages of a conversation the model actually sees on
@@ -33,3 +37,19 @@
  *  ("worth fixing regardless of which bound is used"): under-promising which
  *  turns survived is the safe direction for a disclosure to be wrong in. */
 export const MAX_HISTORY_MESSAGES = 40;
+
+/** How many model steps ONE turn may run. Passed to streamText as
+ *  `stopWhen: stepCountIs(MAX_TURN_STEPS)` in server/routes/chat.ts, so the
+ *  model can call a display tool and then continue with the follow-up
+ *  Socratic question in the same turn -- without it, streamText stops the
+ *  moment a tool call is emitted.
+ *
+ *  Shared rather than a literal at that one call site because it is also a
+ *  BUDGET input. Each step generates its own completion (assistant text
+ *  and/or tool calls), and every completed step's output is part of the
+ *  context the NEXT step is sent -- so one turn's worst-case generation cost
+ *  against the window is `max_completion_tokens` times this number, not
+ *  once. lib/context-window.ts's resolveHistoryTokenBudget reserves on that
+ *  basis; if this number ever changes, the reservation has to change with
+ *  it, and two copies of a 5 in two files is exactly how it wouldn't. */
+export const MAX_TURN_STEPS = 5;

@@ -16,6 +16,7 @@ import type { ReactNode } from "react";
 import { DefinitionCard } from "./DefinitionCard";
 import { CodeExecution, type RCodeResult } from "./renderers/CodeExecution";
 import { SectionCompleteSuggestion } from "./renderers/SectionCompleteSuggestion";
+import { isRenderableToolPartType } from "./renderableTools";
 
 /* The minimal shape of a tool part we care about. AI SDK v5 emits parts
    with `type: 'tool-<toolName>'` and a state machine on `state`. */
@@ -102,6 +103,12 @@ export interface ToolPartHandlers {
 }
 
 export function renderToolPart(part: ToolPart, key: string, handlers?: ToolPartHandlers): ReactNode {
+  // Final review of #307/#342: the same set the SERVER's persistence/replay
+  // gate consults (chat.ts's hasRenderableContent). Checked here, ahead of
+  // the dispatch, so the set cannot claim a name this function silently
+  // returns null for -- see renderableTools.ts for the blank-bubble bug
+  // that divergence produced.
+  if (!isRenderableToolPartType(part.type)) return null;
   if (part.type === "tool-showDefinition") {
     const input = parseShowDefinitionInput(part.input);
     if (!input) return null;

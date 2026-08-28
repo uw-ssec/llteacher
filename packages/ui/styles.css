@@ -850,6 +850,14 @@ body {
     color: var(--color-error);
   }
 
+  /* Final review: this rule used to target only `.tutor-sidebar__error p`,
+     i.e. the wrapper-plus-nested-paragraph shape the load-failure alert
+     uses. Two of the three error sites put the class directly ON the <p>
+     (the create failure, and the load-more failure under the full-width
+     "Load older conversations" button), so the rule never matched them and
+     they kept the UA's default `margin: 1em 0`. Both shapes are covered
+     rather than picking one, since both are in the markup today. */
+  .tutor-sidebar__error,
   .tutor-sidebar__error p {
     margin: 0 0 var(--space-2);
   }

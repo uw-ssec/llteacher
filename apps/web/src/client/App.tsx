@@ -1083,6 +1083,20 @@ export default function App() {
   const handleCreateTutorConversation = async (): Promise<boolean> => {
     const created = await createTutorConversationRow();
     if (!created) return false;
+    /* Final review: the pagination state belongs to whichever conversation
+       was previously on screen, and a brand-new conversation has no history
+       at all. Without these resets, creating one while a >200-message
+       conversation was open left "Load older messages" (and a stale
+       older-page error) rendered against a conversation seconds old --
+       UI asserting persistence that does not exist -- and clicking it sent
+       the OLD conversation's cursor at the NEW conversation's endpoint.
+       Same three resets handleSelectExistingTutorConversation already does;
+       they live here rather than inside selectTutorConversation because
+       that function's other caller sets its own (real, fetched) values in
+       the same batch. */
+    setTutorHistoryHasMore(false);
+    setTutorOldestSeq(undefined);
+    setTutorOlderMessagesError(false);
     selectTutorConversation(created.id);
     setJustCreatedTutorConversationId(created.id);
     return true;
@@ -1258,6 +1272,18 @@ export default function App() {
         message: "Couldn't load this section's conversation. Please try again.",
         onRetry: () => void loadSectionConversation(sectionNumber, targetConversationId, sectionId),
       });
+      /* Final review: the tutor surface's own failure path clears its
+         cursor (handleSelectExistingTutorConversation's catch above); this
+         one did not, which was an asymmetry rather than a decision. #276
+         deliberately LEAVES the previous section's transcript on screen when
+         hydration fails, while conversationId/latestSectionConversationRef
+         have already moved to the new section -- so a surviving
+         hasMore/oldestSeq made "Load older messages" pass the staleness
+         guard (which checks the NEW section, correctly) and prepend the NEW
+         section's messages onto the OLD section's still-rendered transcript.
+         No cursor, no button, no splice. */
+      setSectionHistoryHasMore(false);
+      setSectionOldestSeq(undefined);
     }
   };
 

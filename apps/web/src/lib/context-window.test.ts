@@ -14,6 +14,7 @@ import {
   type BudgetableMessage,
 } from "./context-window";
 import { assembleSystemPrompt, DEFAULT_SYSTEM_PROMPT } from "./prompts";
+import { MAX_TURN_STEPS } from "../shared/chat-limits";
 
 /** A message whose estimated cost is a known, exact number of tokens, so the
  *  boundary tests below can be stated in tokens rather than in "about this
@@ -125,7 +126,45 @@ describe("resolveHistoryTokenBudget (#88 requirement 1: budget math)", () => {
       maxCompletionTokens: 4_000,
       systemPrompt: sys,
     });
-    expect(budget).toBe(262_144 - 4_000 - estimateTextTokens(sys) - TOOL_AND_FRAMING_RESERVE_TOKENS);
+    expect(budget).toBe(
+      262_144 - 4_000 * MAX_TURN_STEPS - estimateTextTokens(sys) - TOOL_AND_FRAMING_RESERVE_TOKENS,
+    );
+  });
+
+  it("reserves for EVERY step of the turn, not just the first (final review)", () => {
+    // chat.ts runs a turn as `stopWhen: stepCountIs(MAX_TURN_STEPS)`, and each
+    // step's completion is part of the context the next step is sent. A budget
+    // that reserved x1 would leave the step-5 request over the window.
+    //
+    // Stated as an exact multiple rather than "less than x1 would be", so a
+    // silent regression to x1 -- or to any other multiplier -- fails here.
+    const oneStepWorth = 3_000;
+    const budget = resolveHistoryTokenBudget({
+      modelNames: ["google/gemma-4-31b-it:free"],
+      maxCompletionTokens: oneStepWorth,
+      systemPrompt: sys,
+    });
+    const naiveSingleStepBudget =
+      262_144 - oneStepWorth - estimateTextTokens(sys) - TOOL_AND_FRAMING_RESERVE_TOKENS;
+    expect(naiveSingleStepBudget - budget).toBe(oneStepWorth * (MAX_TURN_STEPS - 1));
+    expect(MAX_TURN_STEPS).toBeGreaterThan(1);
+  });
+
+  it("leaves the LAST step's whole request inside the window (final review)", () => {
+    // The property the multiplier exists for, stated end to end: what the
+    // provider is sent on step MAX_TURN_STEPS is the system prompt, the tool
+    // schemas, a full budget's worth of history, and every earlier step's
+    // completion -- plus room to generate this step's own. All of it must fit.
+    const modelName = "google/gemma-4-31b-it:free";
+    const maxCompletionTokens = 8_000;
+    const systemPrompt = assembleSystemPrompt(DEFAULT_SYSTEM_PROMPT, undefined, true);
+    const budget = resolveHistoryTokenBudget({ modelNames: [modelName], maxCompletionTokens, systemPrompt });
+    const worstCaseRequest =
+      estimateTextTokens(systemPrompt) +
+      TOOL_AND_FRAMING_RESERVE_TOKENS +
+      budget +
+      maxCompletionTokens * MAX_TURN_STEPS;
+    expect(worstCaseRequest).toBeLessThanOrEqual(MODEL_CONTEXT_WINDOW_TOKENS[modelName]!);
   });
 
   it("shrinks as the system prompt grows -- the prompt is charged, not assumed free", () => {
@@ -142,7 +181,7 @@ describe("resolveHistoryTokenBudget (#88 requirement 1: budget math)", () => {
   it("shrinks as max_completion_tokens grows -- headroom for the answer is real headroom", () => {
     const a = resolveHistoryTokenBudget({ modelNames: ["m"], maxCompletionTokens: 1_000, systemPrompt: sys });
     const b = resolveHistoryTokenBudget({ modelNames: ["m"], maxCompletionTokens: 9_000, systemPrompt: sys });
-    expect(a - b).toBe(8_000);
+    expect(a - b).toBe(8_000 * MAX_TURN_STEPS);
   });
 
   it("uses the SMALLEST window across the hops that could serve the turn (#364 failover)", () => {
@@ -162,7 +201,10 @@ describe("resolveHistoryTokenBudget (#88 requirement 1: budget math)", () => {
     });
     expect(withSmallerFallback).toBeLessThan(primaryOnly);
     expect(withSmallerFallback).toBe(
-      DEFAULT_CONTEXT_WINDOW_TOKENS - 1_000 - estimateTextTokens(sys) - TOOL_AND_FRAMING_RESERVE_TOKENS,
+      DEFAULT_CONTEXT_WINDOW_TOKENS -
+        1_000 * MAX_TURN_STEPS -
+        estimateTextTokens(sys) -
+        TOOL_AND_FRAMING_RESERVE_TOKENS,
     );
   });
 
@@ -171,7 +213,12 @@ describe("resolveHistoryTokenBudget (#88 requirement 1: budget math)", () => {
     // direction this module must never fail in, so the empty case is pinned.
     expect(
       resolveHistoryTokenBudget({ modelNames: [], maxCompletionTokens: 1_000, systemPrompt: sys }),
-    ).toBe(DEFAULT_CONTEXT_WINDOW_TOKENS - 1_000 - estimateTextTokens(sys) - TOOL_AND_FRAMING_RESERVE_TOKENS);
+    ).toBe(
+      DEFAULT_CONTEXT_WINDOW_TOKENS -
+        1_000 * MAX_TURN_STEPS -
+        estimateTextTokens(sys) -
+        TOOL_AND_FRAMING_RESERVE_TOKENS,
+    );
   });
 
   it("floors at MIN_HISTORY_BUDGET_TOKENS rather than returning zero or negative", () => {

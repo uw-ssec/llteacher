@@ -3159,4 +3159,293 @@ describe("App tutor transcript load-older (#280)", () => {
     // for and the control retires rather than offering an empty page.
     await waitFor(() => expect(screen.queryByRole("button", { name: /load older messages/i })).toBeNull());
   });
+
+  it("a newly created conversation starts with no history affordance, not the previous conversation's cursor", async () => {
+    /* Final review: "New conversation" went through selectTutorConversation,
+       which sets the id and the seed messages but owns none of the pagination
+       state -- so the hasMore/oldestSeq belonging to the conversation that was
+       previously open survived into a conversation seconds old. The UI then
+       claimed history exists for a thread that has none, and clicking the
+       button sent the OLD conversation's cursor at the NEW conversation's
+       endpoint. */
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const messagesUrls: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(JSON.stringify(TUTOR_ONLY_FIXTURE), { status: 200 });
+        }
+        if (url === "/api/conversations" && init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              id: "t2",
+              kind: "tutor",
+              title: "New conversation",
+              createdAt: "2026-01-03T00:00:00.000Z",
+              updatedAt: "2026-01-03T00:00:00.000Z",
+            }),
+            { status: 201 },
+          );
+        }
+        if (url.startsWith("/api/conversations?courseId=")) {
+          return new Response(
+            JSON.stringify({
+              items: [
+                { id: "t1", title: "Long tutor chat", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 401 },
+              ],
+              nextCursor: null,
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/conversations/t1/messages")) {
+          messagesUrls.push(url);
+          return new Response(JSON.stringify(url.includes("before=") ? OLDER_PAGE : PAGE_ONE), { status: 200 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("Long tutor chat"));
+    // t1 is at the page cap, so it legitimately offers older history.
+    expect(await screen.findByRole("button", { name: /load older messages/i })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: /new conversation/i }));
+
+    // The brand-new, empty conversation must not inherit t1's claim that
+    // there is more history to load.
+    await waitFor(() => expect(screen.queryByRole("button", { name: /load older messages/i })).toBeNull());
+    // And in particular t1's cursor was never fired at t2's endpoint.
+    expect(messagesUrls).toEqual(["/api/conversations/t1/messages?limit=200"]);
+  });
+});
+
+/* Final review: the SECTION surface's half of #280 had no App-level test at
+   all -- only the tutor surface above did. The two surfaces run separate
+   useChat instances, separate cursors and separate staleness refs (they share
+   only fetchConversationHistory), so the tutor test proves nothing about this
+   one. The gap is what let the section surface keep a stale cursor across a
+   failed hydration; the second test here is that specific defect. */
+describe("App section transcript load-older", () => {
+  const PAGE_SIZE = 200;
+  const homeworkFixture = (sections: unknown[]) => ({
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        courseName: "STATS 311",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections,
+      },
+    ],
+  });
+  // Full page => hasMore, which is what renders the control. seq 201..400.
+  const pageOne = (label: string) =>
+    Array.from({ length: PAGE_SIZE }, (_, i) => ({
+      id: `${label}-m${201 + i}`,
+      role: i % 2 === 0 ? "user" : "assistant",
+      parts: [{ type: "text", text: `${label} recent message ${201 + i}` }],
+      seq: 201 + i,
+      createdAt: "2026-01-02T00:00:00.000Z",
+    }));
+
+  it("pages back with before=<oldest loaded seq> and PREPENDS the result", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const messagesUrls: string[] = [];
+    const olderPage = [
+      {
+        id: "s1-m200",
+        role: "assistant" as const,
+        parts: [{ type: "text", text: "the very first thing this section said" }],
+        seq: 200,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(
+            JSON.stringify(
+              homeworkFixture([{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }]),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url.endsWith("/hints")) {
+          return new Response(JSON.stringify({ count: 0, limit: null, remaining: null }), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
+          messagesUrls.push(url);
+          return new Response(JSON.stringify(url.includes("before=") ? olderPage : pageOne("s1")), { status: 200 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // Sec 1 auto-selects on mount and hydrates a full page, so older
+    // messages exist and the control renders.
+    const loadOlder = await screen.findByRole("button", { name: /load older messages/i });
+    expect(screen.queryByText("the very first thing this section said")).toBeNull();
+
+    const user = userEvent.setup();
+    await user.click(loadOlder);
+
+    await waitFor(() => expect(screen.getByText("the very first thing this section said")).toBeTruthy());
+
+    // The cursor is the oldest LOADED seq (page 1's head, 201), exclusive.
+    // Asserting the URL, not just "a second call happened": a request without
+    // `before` would re-fetch page 1 and still look "loaded".
+    expect(messagesUrls).toEqual([
+      "/api/conversations/sec-conv-1/messages?limit=200",
+      "/api/conversations/sec-conv-1/messages?limit=200&before=201",
+    ]);
+
+    // Prepended, not appended -- or the transcript reads out of order.
+    const oldest = screen.getByText("the very first thing this section said");
+    const firstOfPageOne = screen.getByText("s1 recent message 201");
+    expect(oldest.compareDocumentPosition(firstOfPageOne) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // Short older page (1 < 200) -- nothing left to ask for, control retires.
+    await waitFor(() => expect(screen.queryByRole("button", { name: /load older messages/i })).toBeNull());
+  });
+
+  it("drops the pagination cursor when a section switch fails to hydrate, so load-older can't splice the new section's history into the old one's transcript", async () => {
+    /* The defect: #276 deliberately leaves the PREVIOUS section's messages on
+       screen when hydration fails (failing closed beats blanking the
+       transcript), while `conversationId` and latestSectionConversationRef
+       have already moved to the NEW section. The failure path cleared
+       sectionHydrationError's sibling state but not the cursor, so
+       `hasMoreHistory` stayed true from sec 1 and "Load older messages" was
+       still offered -- and clicking it PASSED the staleness guard (which
+       correctly checks the new section) and prepended sec 2's older page onto
+       sec 1's still-rendered transcript. The tutor surface's own failure path
+       has always cleared its cursor; this was the asymmetry. */
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const messagesUrls: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(
+            JSON.stringify(
+              homeworkFixture([
+                { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+                { id: "s2", title: "Sec 2", order: 2, status: "in_progress", conversationId: "sec-conv-2" },
+              ]),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url.endsWith("/hints")) {
+          return new Response(JSON.stringify({ count: 0, limit: null, remaining: null }), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
+          messagesUrls.push(url);
+          return new Response(JSON.stringify(pageOne("s1")), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations/sec-conv-2/messages")) {
+          messagesUrls.push(url);
+          // Sec 2's hydration fails. Its older-page request, if the buggy
+          // build ever makes one, would succeed and be the visible splice.
+          if (url.includes("before=")) {
+            return new Response(
+              JSON.stringify([
+                {
+                  id: "s2-m200",
+                  role: "assistant",
+                  parts: [{ type: "text", text: "SEC 2 OLDER MESSAGE" }],
+                  seq: 200,
+                  createdAt: "2026-01-01T00:00:00.000Z",
+                },
+              ]),
+              { status: 200 },
+            );
+          }
+          return new Response(JSON.stringify({ error: "server unavailable" }), { status: 503 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // Sec 1 hydrates a full page -- cursor set, control offered.
+    expect(await screen.findByRole("button", { name: /load older messages/i })).toBeTruthy();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Sec 2/ }));
+
+    expect(await screen.findByText(/Couldn't load this section's conversation/i)).toBeTruthy();
+    // #276's behaviour, unchanged: sec 1's transcript is still on screen
+    // rather than blanked. That is precisely what makes a stale cursor
+    // dangerous, so the test asserts it rather than assuming it.
+    expect(screen.getByText("s1 recent message 201")).toBeTruthy();
+
+    // No cursor => no affordance. Before the fix this button was still
+    // rendered (sec 1's `hasMore` survived the failure).
+    await waitFor(() => expect(screen.queryByRole("button", { name: /load older messages/i })).toBeNull());
+
+    // And nothing ever asked sec 2 for a page it would have spliced in.
+    expect(messagesUrls.some((u) => u.includes("before="))).toBe(false);
+    expect(screen.queryByText("SEC 2 OLDER MESSAGE")).toBeNull();
+  });
 });

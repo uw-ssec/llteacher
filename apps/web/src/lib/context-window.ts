@@ -42,6 +42,8 @@
    conversation is on.
    -------------------------------------------------------------------------- */
 
+import { MAX_TURN_STEPS } from "../shared/chat-limits";
+
 /** Characters per token, for the estimator below.
  *
  *  A CHARACTER HEURISTIC, NOT A REAL TOKENIZER -- the fallback #88's own text
@@ -69,14 +71,21 @@ export const ESTIMATED_CHARS_PER_TOKEN = 3.5;
  *  when each one really costs a handful of tokens. */
 export const PER_MESSAGE_TOKEN_OVERHEAD = 4;
 
-/** Held back from the history budget for everything in the request that is
- *  neither the system prompt nor the message history: the JSON schemas of
- *  this turn's tool catalog (chat.ts's TOOLS -- four tools' names,
- *  descriptions and input schemas are real input tokens the model is
+/** Held back from the history budget for the two STATIC extras a request
+ *  carries beyond the system prompt and the message history: the JSON
+ *  schemas of this turn's tool catalog (chat.ts's TOOLS -- four tools'
+ *  names, descriptions and input schemas are real input tokens the model is
  *  charged for), plus provider-side framing. Flat rather than computed from
  *  the live catalog: the catalog is small and bounded, and a fixed reserve
  *  keeps this function pure and independent of the `ai` package's own tool
- *  serialization, which this module deliberately does not import. */
+ *  serialization, which this module deliberately does not import.
+ *
+ *  It does NOT cover the turn's GENERATION cost. That is a separate,
+ *  config-dependent reservation (`max_completion_tokens` x MAX_TURN_STEPS)
+ *  taken in resolveHistoryTokenBudget below -- see its doc comment. This
+ *  constant used to be the only thing standing in for that slack, which
+ *  worked only because the numbers involved are noise against a 128K
+ *  window; it is not a substitute and is no longer asked to be one. */
 export const TOOL_AND_FRAMING_RESERVE_TOKENS = 1_024;
 
 /** Per-model context windows, in tokens.
@@ -191,12 +200,15 @@ export interface HistoryBudgetInput {
    *  the failover hop when one is configured (#364/#98). The smallest window
    *  among them wins; see resolveHistoryTokenBudget's own doc comment. */
   modelNames: readonly string[];
-  /** The reservation for the model's own answer: `llm_configs.
+  /** The PER-STEP reservation for the model's own output: `llm_configs.
    *  max_completion_tokens`, which chat.ts also passes to streamText as
    *  `maxOutputTokens`. #88 requirement 1 states the budget in exactly these
    *  terms ("...must fit the configured model's window with headroom for the
    *  response (`max_completion_tokens`)"). Carried from the PRIMARY on both
-   *  hops, matching what chat.ts's buildTurnParams actually sends (#364). */
+   *  hops, matching what chat.ts's buildTurnParams actually sends (#364).
+   *
+   *  PER STEP, not per turn -- resolveHistoryTokenBudget multiplies it by
+   *  MAX_TURN_STEPS. See that function's doc comment. */
   maxCompletionTokens: number;
   /** The fully assembled system prompt (lib/prompts.ts's
    *  assembleSystemPrompt output) -- template + section content + guardrails
@@ -209,6 +221,24 @@ export interface HistoryBudgetInput {
 /** How many tokens of message history the window has room for, once the
  *  response headroom, the system prompt, and the tool/framing reserve are
  *  taken out of it.
+ *
+ *  THE RESPONSE HEADROOM IS `max_completion_tokens` x MAX_TURN_STEPS, not
+ *  x 1. chat.ts runs a turn as `stopWhen: stepCountIs(MAX_TURN_STEPS)`, so
+ *  one turn is up to that many model calls, and each step's completion
+ *  (assistant text, tool calls, and the tool results appended after them)
+ *  becomes part of the context the NEXT step is sent. Reserving for a single
+ *  completion therefore under-reserves a tool-using turn by up to four more
+ *  completions' worth -- the request the provider sees on step 5 is the one
+ *  that has to fit, not the one built here on step 1.
+ *
+ *  Not reachable on today's models: at a 128K window and a typical
+ *  `max_completion_tokens` near 1,000, the four unreserved steps are ~4K of
+ *  noise. It becomes live the moment MODEL_CONTEXT_WINDOW_TOKENS gains a
+ *  genuinely small entry -- the 8K/16K local model DEFAULT_CONTEXT_WINDOW_
+ *  TOKENS names as the expected next addition -- where the same 1,000 is
+ *  5,000, i.e. most of the window, and the failure mode is a provider-side
+ *  context overflow on a student's turn. Reserving for the worst case costs
+ *  a few thousand tokens of history on models that had them to spare.
  *
  *  THE SMALLEST WINDOW AMONG THE HOPS, not the primary's: chat.ts builds ONE
  *  message array and hands it to both hops (buildTurnParams' own invariant --
@@ -231,7 +261,10 @@ export function resolveHistoryTokenBudget(input: HistoryBudgetInput): number {
       ? DEFAULT_CONTEXT_WINDOW_TOKENS
       : Math.min(...input.modelNames.map(contextWindowTokensFor));
   const budget =
-    window - input.maxCompletionTokens - estimateTextTokens(input.systemPrompt) - TOOL_AND_FRAMING_RESERVE_TOKENS;
+    window -
+    input.maxCompletionTokens * MAX_TURN_STEPS -
+    estimateTextTokens(input.systemPrompt) -
+    TOOL_AND_FRAMING_RESERVE_TOKENS;
   return Math.max(budget, MIN_HISTORY_BUDGET_TOKENS);
 }
 

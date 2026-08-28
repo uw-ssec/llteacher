@@ -96,7 +96,7 @@ import { z } from "zod";
 import { makeDb } from "../../db/client";
 import type { Db } from "../../db/client";
 import type { ConversationKind } from "../../db/schema";
-import { MAX_HISTORY_MESSAGES } from "../../shared/chat-limits";
+import { MAX_HISTORY_MESSAGES, MAX_TURN_STEPS } from "../../shared/chat-limits";
 import { resolveHistoryTokenBudget, windowMessagesToTokenBudget } from "../../lib/context-window";
 import {
   createConversation,
@@ -2194,10 +2194,13 @@ export async function chatHandler(c: Context<AppEnv>) {
       providerOptions: SUPPORTS_REASONING_EFFORT_NONE.test(config.modelName)
         ? { openai: { reasoningEffort: "none" } }
         : undefined,
-      /* Allow up to 5 steps so the model can call a display tool and then
-         continue with the follow-up Socratic question in the same turn.
-         Without this, streamText stops the moment a tool call is emitted. */
-      stopWhen: stepCountIs(5),
+      /* Allow up to MAX_TURN_STEPS steps so the model can call a display tool
+         and then continue with the follow-up Socratic question in the same
+         turn. Without this, streamText stops the moment a tool call is
+         emitted. Shared rather than a literal because lib/context-window.ts
+         has to reserve window space for the same number of completions --
+         see MAX_TURN_STEPS' own doc comment. */
+      stopWhen: stepCountIs(MAX_TURN_STEPS),
       // #143: bounds how long a stuck/hanging upstream can hold this request
       // open. A genuine provider error (including a 429) already arrives as
       // an in-stream `error` chunk well before this fires (ai@5.0.195 -- see
