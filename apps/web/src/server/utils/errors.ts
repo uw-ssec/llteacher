@@ -55,3 +55,19 @@ export function logServerError(context: string, err: unknown, extra?: LogContext
 export function logServerWarn(context: string, detail: string, extra?: LogContext): void {
   emitLogLine(console.warn, { level: "warn", context, message: detail, ...extra });
 }
+
+/** #167: the same JSON shape again at info level, for an outcome that is
+ *  neither a failure nor a warning but still has to be *observable* -- a
+ *  background job's run summary. Every other line this module emits is
+ *  something going wrong, because until now every caller was a request
+ *  handler, where "nothing went wrong" needs no log line at all: the
+ *  response is the record. A scheduled run (jobs/autoSubmitOverdue.ts) has
+ *  no response and no caller watching, so its counts are only ever visible
+ *  if it says them out loud.
+ *
+ *  Emitted through emitLogLine like the other two so a run summary is
+ *  greppable by the same keys (`"context":"job.autoSubmitOverdue"`) and
+ *  countable the same way -- one line per run, not one per row processed. */
+export function logServerInfo(context: string, detail: string, extra?: LogContext): void {
+  emitLogLine(console.info, { level: "info", context, message: detail, ...extra });
+}

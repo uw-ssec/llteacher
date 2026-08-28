@@ -13,6 +13,23 @@
   "observability": {
     "enabled": true
   },
+  // #167: the auto-submit sweep for overdue sections -- the first scheduled
+  // work in this system. Fires the Worker's `scheduled()` export
+  // (src/server/index.ts), which runs jobs/autoSubmitOverdue.ts.
+  //
+  // Hourly rather than daily: a section becomes eligible the moment its
+  // homework's due date passes, and an hourly sweep bounds how long a
+  // student's finished work sits looking un-submitted on the instructor
+  // dashboard. Cheap to run at that rate because the candidate set empties
+  // itself -- a section is submitted once, ever, so a steady-state run over
+  // a course with no deadline in the last hour finds nothing and inserts
+  // nothing.
+  //
+  // Minute 17, not 0: the top of the hour is when every Cron Trigger on the
+  // platform fires at once, and nothing here needs to be aligned to it.
+  "triggers": {
+    "crons": ["17 * * * *"]
+  },
   "vars": {
     // Non-secret vars go here. Secrets live in .dev.vars locally and Wrangler secrets in prod.
   }

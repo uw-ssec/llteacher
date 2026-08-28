@@ -141,7 +141,7 @@ vi.mock("../db/client", () => ({
 }));
 
 // Imported after the mocks above are registered.
-const { default: app } = await import("./index");
+const { app } = await import("./index");
 
 beforeEach(() => {
   findMany.mockReset();
