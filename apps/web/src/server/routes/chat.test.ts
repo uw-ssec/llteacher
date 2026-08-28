@@ -2922,13 +2922,23 @@ describe("POST /api/chat", () => {
     // The same request, the same history, the same max_completion_tokens --
     // only `llm_configs.model_name` differs. If the window were hardcoded,
     // these two would keep the same number of messages.
+    //
+    // 25,400, not the 127,000 the neighbouring tests use: since the turn
+    // budget reserves max_completion_tokens x MAX_TURN_STEPS rather than x1,
+    // 127,000 now reserves 635,000 tokens and floors the 262K window too --
+    // which would make BOTH calls keep 5 messages and quietly turn this test
+    // into a tautology that no longer distinguishes the two windows. The
+    // figure below reserves the same 127,000 in total, so the arithmetic this
+    // test was written around is unchanged: the default window floors, the
+    // 262K one has ~134K left and keeps everything.
+    const maxCompletionTokens = 25_400;
     createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
 
     getLastMessagesMock.mockResolvedValueOnce(budgetHistoryRows());
     resolveLLMConfigMock.mockResolvedValueOnce({
       ...baseLlmConfig,
       modelName: "unlisted/default-window-model",
-      maxCompletionTokens: 127_000,
+      maxCompletionTokens,
     });
     await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
     const smallWindowCall = streamTextMock.mock.calls[0]![0] as { messages: unknown[] };
@@ -2937,7 +2947,7 @@ describe("POST /api/chat", () => {
     resolveLLMConfigMock.mockResolvedValueOnce({
       ...baseLlmConfig,
       modelName: "google/gemma-4-31b-it:free",
-      maxCompletionTokens: 127_000,
+      maxCompletionTokens,
     });
     await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
     const largeWindowCall = streamTextMock.mock.calls[1]![0] as { messages: unknown[] };
