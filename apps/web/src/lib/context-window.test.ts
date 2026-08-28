@@ -166,6 +166,14 @@ describe("resolveHistoryTokenBudget (#88 requirement 1: budget math)", () => {
     );
   });
 
+  it("falls back to the default window rather than an unbounded one when handed no models", () => {
+    // Math.min() of nothing is Infinity -- "no bound at all" is the one
+    // direction this module must never fail in, so the empty case is pinned.
+    expect(
+      resolveHistoryTokenBudget({ modelNames: [], maxCompletionTokens: 1_000, systemPrompt: sys }),
+    ).toBe(DEFAULT_CONTEXT_WINDOW_TOKENS - 1_000 - estimateTextTokens(sys) - TOOL_AND_FRAMING_RESERVE_TOKENS);
+  });
+
   it("floors at MIN_HISTORY_BUDGET_TOKENS rather than returning zero or negative", () => {
     // A config whose max_completion_tokens is near its model's whole window
     // is a misconfiguration; serving it faithfully would mean a tutor with

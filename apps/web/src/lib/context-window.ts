@@ -222,7 +222,14 @@ export interface HistoryBudgetInput {
  *  Floors at MIN_HISTORY_BUDGET_TOKENS -- see that constant for why a
  *  zero/negative result is not passed through. */
 export function resolveHistoryTokenBudget(input: HistoryBudgetInput): number {
-  const window = Math.min(...input.modelNames.map(contextWindowTokensFor));
+  // `Math.min()` of nothing is Infinity, which would silently mean "no
+  // bound" -- the one direction this module must never fail in. An empty
+  // list is not reachable from chat.ts (it always passes the resolved
+  // primary), so this is a guard on the signature, not a supported mode.
+  const window =
+    input.modelNames.length === 0
+      ? DEFAULT_CONTEXT_WINDOW_TOKENS
+      : Math.min(...input.modelNames.map(contextWindowTokensFor));
   const budget =
     window - input.maxCompletionTokens - estimateTextTokens(input.systemPrompt) - TOOL_AND_FRAMING_RESERVE_TOKENS;
   return Math.max(budget, MIN_HISTORY_BUDGET_TOKENS);
