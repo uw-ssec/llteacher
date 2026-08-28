@@ -18,11 +18,11 @@ import type { Db } from "../../db/client";
 import {
   autoSubmitOverdueSections,
   autoSubmitOverdueSectionsForOrg,
-  findAutoSubmitCandidates,
+
   AUTO_SUBMIT_LOG_CONTEXT,
 } from "./autoSubmitOverdue";
 import { unsafeOrgScope, unsafeCourseScope } from "../repositories/scope";
-import { getHomeworkSubmissionsMatrix } from "../repositories/submissions";
+import { getHomeworkSubmissionsMatrix, findOverdueSubmissionCandidates } from "../repositories/submissions";
 import { getStudentHomeworksForUser } from "../repositories/studentHomeworks";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
@@ -331,7 +331,7 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
     // The candidate query itself must not see across the boundary -- not
     // just the insert. A sweep that read every tenant's rows and then
     // filtered before writing would still be a cross-tenant read.
-    const candidatesA = await findAutoSubmitCandidates(db, orgA.scope);
+    const candidatesA = await findOverdueSubmissionCandidates(db, orgA.scope);
     expect(candidatesA.map((c) => c.userId)).toEqual([studentA]);
 
     await autoSubmitOverdueSectionsForOrg(db, orgA.scope);
@@ -354,7 +354,7 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
     // write. Simulated by letting the candidate query see all three and
     // then writing the row underneath one of them -- the ON CONFLICT DO
     // NOTHING path, which is what `skipped` counts.
-    const staleCandidates = await findAutoSubmitCandidates(db, org.scope);
+    const staleCandidates = await findOverdueSubmissionCandidates(db, org.scope);
     expect(staleCandidates).toHaveLength(3);
 
     const failingDb = withFailures(db, {

@@ -44,28 +44,28 @@
    The epic's cross-cutting invariant (#30) is that every query is org- or
    course-scoped. A "sweep the whole platform" job is the one shape that can
    quietly violate it, so the sweep is not one global query: it enumerates
-   organizations and runs autoSubmitOverdueSectionsForOrg once per org, and
-   every statement inside that function is filtered by that OrgScope. No
-   query in this file can return or write a row belonging to another tenant,
-   and one org's failure cannot abort another org's work.
+   organizations (listAllOrgScopes, the single platform-wide read, which
+   hands back OrgScopes rather than raw ids) and runs
+   autoSubmitOverdueSectionsForOrg once per org. Every statement that
+   follows takes that scope and is filtered by it, so no query can return or
+   write a row belonging to another tenant, and one org's failure cannot
+   abort another org's work.
+
+   The data access itself lives in repositories/ (findOverdueSubmissionCandidates,
+   insertAutoSubmission, listAllOrgScopes), not here -- ARCHITECTURE.md's
+   "Routes and Repositories" rule is about keeping tenancy scoping in one
+   layer, and a background job needs that guard more than a route does, not
+   less: it has no authenticated caller whose membership would have narrowed
+   a forgotten WHERE clause by accident. What is left in this file is
+   orchestration: iterate, count, log.
    -------------------------------------------------------------------------- */
 
-import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import {
-  conversations,
-  courses,
-  homeworks,
-  organizations,
-  sections,
-  submissions,
-} from "../../db/schema";
-import { deriveHomeworkStatus } from "../repositories/homeworks";
-import { type OrgScope, unsafeOrgScope } from "../repositories/scope";
+import { listAllOrgScopes } from "../repositories/organizations";
+import { findOverdueSubmissionCandidates, insertAutoSubmission } from "../repositories/submissions";
+import type { OrgScope } from "../repositories/scope";
 import { logServerError, logServerInfo } from "../utils/errors";
 
-/** Log context label -- one value, so a run summary and its per-row failures
- *  are greppable together (`"context":"job.autoSubmitOverdue"`). */
 export const AUTO_SUBMIT_LOG_CONTEXT = "job.autoSubmitOverdue";
 
 export interface AutoSubmitRunSummary {
@@ -84,92 +84,8 @@ export interface AutoSubmitRunSummary {
   failed: number;
 }
 
-/** One row the sweep may act on. `sectionId` is non-null by construction --
- *  the query filters `kind = 'section'`, and conversations_kind_section_chk
- *  makes section_id NOT NULL for that kind. */
-interface AutoSubmitCandidate {
-  conversationId: string;
-  userId: string;
-  sectionId: string;
-}
-
 function emptySummary(): AutoSubmitRunSummary {
   return { candidates: 0, submitted: 0, skipped: 0, failed: 0 };
-}
-
-/** Every (conversation, user, section) in `scope` that this run should
- *  submit for.
- *
- *  The structural conditions are SQL predicates; the release-state one is
- *  not. Whether a homework counts as "past due" is `deriveHomeworkStatus`'s
- *  answer, not a raw `due_date < now()` comparison -- repositories/
- *  homeworks.ts's own doc comment names the gates that must key on the
- *  derived status precisely so a new status (#166 added `hidden` a
- *  milestone ago) reaches all of them from one edit. Hand-writing the
- *  published/released/hidden/expired predicate in SQL here would make this
- *  the sixth gate that can silently drift from it. The SQL has already
- *  narrowed to "has a live conversation and no submission", which is a
- *  small set, so deriving in JS costs nothing worth the drift risk.
- *
- *  Excluded by the SQL, each for a reason the manual path also enforces:
- *    - soft-deleted conversations (a restart voids its submission and
- *      soft-deletes the conversation; the fresh one is the live attempt)
- *    - `tutor` conversations -- not submittable at all, and structurally
- *      impossible to submit anyway (#128's composite FK)
- *    - teacher-test conversations -- submitSection refuses these (#242);
- *      an instructor trying out their own prompt is not student work
- *    - anything with an existing submission for that (user, section) */
-export async function findAutoSubmitCandidates(
-  db: Db,
-  scope: OrgScope,
-): Promise<AutoSubmitCandidate[]> {
-  const rows = await db
-    .select({
-      conversationId: conversations.id,
-      userId: conversations.ownerUserId,
-      sectionId: conversations.sectionId,
-      dueDate: homeworks.dueDate,
-      publishedAt: homeworks.publishedAt,
-      releasedAt: homeworks.releasedAt,
-      isHidden: homeworks.isHidden,
-      expiresAt: homeworks.expiresAt,
-    })
-    .from(conversations)
-    .innerJoin(courses, eq(conversations.courseId, courses.id))
-    .innerJoin(sections, eq(conversations.sectionId, sections.id))
-    .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
-    // The (user, section) pair, not conversation_id: that is the pair
-    // submissions_user_section_uq caps (#128), and it is the honest
-    // question -- a student who submitted, restarted, and started a new
-    // conversation has no submission for the section any more (restart
-    // deletes it, see restartSectionConversation), while one who submitted
-    // and never restarted must not be submitted for again through a
-    // different conversation row.
-    .leftJoin(
-      submissions,
-      and(
-        eq(submissions.userId, conversations.ownerUserId),
-        eq(submissions.sectionId, conversations.sectionId),
-      ),
-    )
-    .where(
-      and(
-        eq(courses.organizationId, scope),
-        eq(conversations.kind, "section"),
-        eq(conversations.isDeleted, false),
-        eq(conversations.isTeacherTest, false),
-        isNull(submissions.id),
-      ),
-    );
-
-  return rows
-    .filter((row) => deriveHomeworkStatus(row) === "past_due")
-    .map((row) => ({
-      conversationId: row.conversationId,
-      userId: row.userId,
-      // Non-null for kind = 'section' (see AutoSubmitCandidate).
-      sectionId: row.sectionId!,
-    }));
 }
 
 /** Runs the sweep for exactly one organization. Exported so the tenancy
@@ -179,54 +95,26 @@ export async function autoSubmitOverdueSectionsForOrg(
   db: Db,
   scope: OrgScope,
 ): Promise<AutoSubmitRunSummary> {
-  const candidates = await findAutoSubmitCandidates(db, scope);
+  const candidates = await findOverdueSubmissionCandidates(db, scope);
   const summary = { ...emptySummary(), candidates: candidates.length };
 
   for (const candidate of candidates) {
     try {
-      // Idempotency lives in the database, not in a prior existence check.
-      // findAutoSubmitCandidates already filtered out anything submitted,
-      // but that read and this write are not one transaction -- a student
-      // pressing submit in between (or two overlapping cron invocations)
-      // would make a check-then-insert produce either a duplicate or a
-      // crash. ON CONFLICT DO NOTHING makes the insert itself the check:
-      // re-running this job over the same state inserts nothing and throws
-      // nothing. Same class of fix as #266/#273 elsewhere on this branch.
-      //
-      // Untargeted deliberately. `submissions` has two unique constraints
-      // that mean the same thing here -- UNIQUE(conversation_id) and
-      // submissions_user_section_uq -- and a re-run violates BOTH at once.
-      // Naming one as the arbiter would leave the other free to raise, so
-      // the bare form (any unique violation on this table means "already
-      // submitted") is the correct one, not a lazier one.
-      const [created] = await db
-        .insert(submissions)
-        .values({
-          conversationId: candidate.conversationId,
-          userId: candidate.userId,
-          sectionId: candidate.sectionId,
-          // Verified to be this org's, not taken on the caller's word: the
-          // candidate query joined through courses and filtered on this
-          // exact organization_id, so the denormalized column cannot be
-          // written with another tenant's id.
-          organizationId: scope,
-          source: "auto",
-          // submittedAt left to the column's own defaultNow(): the row
-          // records when the submission was made, and there is no other
-          // sensible value -- back-dating it to the due date would claim
-          // the student submitted on time, which is the opposite of what
-          // this row means.
-        })
-        .onConflictDoNothing()
-        .returning({ id: submissions.id });
-
-      if (created) summary.submitted++;
+      // insertAutoSubmission is ON CONFLICT DO NOTHING, so a candidate that
+      // was submitted between the query above and this write is reported as
+      // skipped rather than duplicated or thrown -- see its own doc comment
+      // for why idempotency belongs in the database rather than in a prior
+      // existence check here.
+      const inserted = await insertAutoSubmission(db, scope, candidate);
+      if (inserted) summary.submitted++;
       else summary.skipped++;
     } catch (err) {
       // Per-candidate, not per-run: one row failing (a conversation deleted
-      // mid-run, so the FK no longer resolves) must not cost every other
+      // mid-run, so its FK no longer resolves) must not cost every other
       // student in the org their submission. Logged individually because
-      // the run summary's `failed` count alone would not say which row.
+      // the run summary's `failed` count alone would not say which row --
+      // and nothing about a candidate is consumed by a failed attempt, so
+      // the next scheduled run simply picks it up again.
       summary.failed++;
       logServerError(AUTO_SUBMIT_LOG_CONTEXT, err, {
         organizationId: scope,
@@ -247,13 +135,14 @@ export async function autoSubmitOverdueSectionsForOrg(
  *  per-org pass. */
 export async function autoSubmitOverdueSections(db: Db): Promise<AutoSubmitRunSummary> {
   const startedAt = Date.now();
-  const orgs = await db.select({ id: organizations.id }).from(organizations);
+  // The one platform-wide read in the whole job, and it returns scopes
+  // rather than ids -- so everything past this line is per-tenant by
+  // construction, not by remembering to add a WHERE clause.
+  const orgScopes = await listAllOrgScopes(db);
 
   const total = emptySummary();
-  for (const org of orgs) {
-    // unsafeOrgScope is sound here in the sense scope.ts requires: the id
-    // was just read back from `organizations`, not taken from a caller.
-    const orgSummary = await autoSubmitOverdueSectionsForOrg(db, unsafeOrgScope(org.id));
+  for (const scope of orgScopes) {
+    const orgSummary = await autoSubmitOverdueSectionsForOrg(db, scope);
     total.candidates += orgSummary.candidates;
     total.submitted += orgSummary.submitted;
     total.skipped += orgSummary.skipped;
@@ -261,7 +150,7 @@ export async function autoSubmitOverdueSections(db: Db): Promise<AutoSubmitRunSu
   }
 
   logServerInfo(AUTO_SUBMIT_LOG_CONTEXT, "auto-submit sweep complete", {
-    organizations: orgs.length,
+    organizations: orgScopes.length,
     ...total,
     durationMs: Date.now() - startedAt,
   });
