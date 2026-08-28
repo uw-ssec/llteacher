@@ -73,9 +73,12 @@ Not covered here (instructor-console reads, different audience and guard tier):
 
 ### Authentication
 
-Every `/api/*` route except `/api/auth/*` requires a session cookie,
-`llt_session`, set by the WorkOS AuthKit login flow (`GET /api/auth/login` →
-`GET /api/auth/callback`). There is no API-key or bearer-token path today.
+Every `/api/*` route except `/api/auth/*` and `/api/webhooks/workos` requires
+a session cookie, `llt_session`, set by the WorkOS AuthKit login flow (`GET
+/api/auth/login` → `GET /api/auth/callback`). `/api/webhooks/workos` is a
+server-to-server call from WorkOS, which never carries our session cookie —
+it authenticates via a signature over the request body instead. There is no
+API-key or bearer-token path today.
 
 A request with no valid session is rejected by middleware before any handler
 runs:
@@ -734,9 +737,13 @@ data: {"type":"finish"}
 data: [DONE]
 ```
 
-Identical stream body, **no model call, no new database rows** — and
-`x-replayed: true` is how you know. This is correct and intended: it makes a
-lost-response retry safe.
+Same frame vocabulary, same content — but not byte-identical (see the note
+above under [`x-replayed: true`](#the-id-idempotency-key): a real turn emits
+many `text-delta` chunks and, for a tool call, `tool-input-start` /
+`tool-input-delta` frames; a replay emits one single `text-delta` carrying the
+whole text and no input-streaming frames at all). **No model call, no new
+database rows** — and `x-replayed: true` is how you know. This is correct and
+intended: it makes a lost-response retry safe.
 
 **Turn 2, re-sent with the SAME id but DIFFERENT text — permanent conflict.**
 
@@ -929,11 +936,13 @@ Submit the section conversation identified by `:id`. Student role only.
 
 | Status | Body |
 | --- | --- |
+| 401 | `{"error":"Unauthorized"}` — no session |
 | 403 | `{"error":"Insufficient permissions"}` — caller is not a student |
 | 403 | `{"error":"No organization membership found"}` |
 | 403 | `{"error":"Conversation not found or not accessible"}` — **403, not 404**; see the [conventions exception](#404-not-403-row-ownership-vs-403-course-scope). Covers both "not yours" and "not a submittable conversation". |
 | 409 | `{"error":"Teacher test conversations cannot be submitted"}` |
 | 409 | `{"error":"Homework is hidden or expired"}` |
+| 503 | `{"error":"Something went wrong. Please try again later."}` — malformed `:id`; see [Known gaps](#known-gaps) |
 
 ---
 
