@@ -5180,6 +5180,19 @@ body {
   border: 1px solid rgba(70, 130, 80, 0.3);
 }
 
+/* #167: a submission the scheduled overdue sweep created, not one the
+   student made. Still a submitted cell -- same green, same gradeable
+   affordance, because the work is real and gradeable -- distinguished by a
+   dashed border, the way --missing already signals "nothing here yet"
+   through border style rather than a separate hue. Deliberately not a
+   fourth colour: it is not a fourth status, it is the same status with a
+   different origin, and the accompanying "‡" superscript plus the
+   aria-label/title text (SubmissionsView) are what carry the meaning for
+   anyone who cannot see the border at all. */
+.admin-progress-cell--auto {
+  border-style: dashed;
+}
+
 .admin-submission-row__conv {
   display: inline-flex;
   align-items: center;

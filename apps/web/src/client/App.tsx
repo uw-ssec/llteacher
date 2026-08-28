@@ -130,6 +130,11 @@ export function useStudentHomework() {
                 : s.status === "in_progress"
                   ? ("current" as const)
                   : ("pending" as const),
+            // #167: a section the overdue sweep submitted still maps to
+            // "submitted" above -- the work really was submitted -- but the
+            // row says so differently (SectionItem), because a student who
+            // never pressed submit should not be left to conclude they did.
+            autoSubmitted: s.submissionSource === "auto",
           })),
         );
         setSectionMetaByOrder(

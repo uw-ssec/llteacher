@@ -1,6 +1,6 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { conversations, submissions, courseMemberships, sectionAnswers } from "../../db/schema";
+import { conversations, submissions, courseMemberships, sectionAnswers, type SubmissionSource } from "../../db/schema";
 import { deriveHomeworkStatus, isUnreleased } from "./homeworks";
 
 export type SectionStatusType = "not_started" | "in_progress" | "in_progress_overdue" | "submitted" | "overdue";
@@ -29,6 +29,18 @@ export interface StudentSectionProgress {
   order: number;
   status: SectionStatusType;
   conversationId: string | null;
+  /** #167: for a `submitted` section, whether the student submitted it or
+   *  the scheduled overdue sweep did (jobs/autoSubmitOverdue.ts). Null for
+   *  every other status, and null for a non_interactive section's answer --
+   *  an answer row has no submission and so no provenance.
+   *
+   *  A separate field rather than a sixth SectionStatusType value: "was it
+   *  submitted" and "who submitted it" are independent questions, and
+   *  folding them into one union would force every existing consumer of
+   *  `status === "submitted"` (the client sidebar, the percentage
+   *  arithmetic below) to be rewritten to match two values instead of one,
+   *  with a silent under-count for any that were missed. */
+  submissionSource: SubmissionSource | null;
 }
 
 export interface StudentHomeworkSummary {
@@ -112,9 +124,15 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
 
   const conversationIds = activeConversations.map((c) => c.id);
   const submittedRows = conversationIds.length
-    ? await db.select({ conversationId: submissions.conversationId }).from(submissions).where(inArray(submissions.conversationId, conversationIds))
+    ? await db
+        .select({ conversationId: submissions.conversationId, source: submissions.source })
+        .from(submissions)
+        .where(inArray(submissions.conversationId, conversationIds))
     : [];
-  const submittedConversationIds = new Set(submittedRows.map((s) => s.conversationId));
+  // #167: conversation -> source, replacing the plain id Set. One map does
+  // both jobs -- `has` answers "did this convert to a submission" exactly as
+  // the Set did, and `get` answers "who submitted it" off the same row.
+  const submissionSourceByConversation = new Map(submittedRows.map((s) => [s.conversationId, s.source]));
 
   // #164: same batched inArray fetch as conversations/submissions above --
   // one extra query, still a fixed count regardless of section/homework
@@ -136,7 +154,7 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
 
     for (const section of hw.sections) {
       const activeConversation = conversationBySectionId.get(section.id) ?? null;
-      const hasSubmission = activeConversation ? submittedConversationIds.has(activeConversation.id) : false;
+      const hasSubmission = activeConversation ? submissionSourceByConversation.has(activeConversation.id) : false;
 
       const sectionStatus = deriveSectionStatus({
         dueDate: hw.dueDate,
@@ -150,6 +168,10 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
       sectionSummaries.push({
         id: section.id, title: section.title, order: section.order, status: sectionStatus,
         conversationId: activeConversation?.id ?? null,
+        // Only meaningful when a real submission row backs the status --
+        // a non_interactive section's answer also derives "submitted", and
+        // it has no submission row behind it.
+        submissionSource: hasSubmission ? (submissionSourceByConversation.get(activeConversation!.id) ?? null) : null,
       });
     }
     sectionSummaries.sort((a, b) => a.order - b.order);

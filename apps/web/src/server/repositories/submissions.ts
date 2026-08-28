@@ -1,6 +1,6 @@
 import { and, eq, inArray, isNull, or } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { submissions, grades, conversations, courses, courseMemberships, homeworks, sections, users, sectionAnswers } from "../../db/schema";
+import { submissions, grades, conversations, courses, courseMemberships, homeworks, sections, users, sectionAnswers, type SubmissionSource } from "../../db/schema";
 import type { OrgScope, CourseScope } from "./scope";
 import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { deriveHomeworkStatus, isHomeworkHidden, type HomeworkStatus } from "./homeworks";
@@ -288,6 +288,18 @@ export interface SubmissionCell {
    *  already reads `submissions` to decide the status, so this is a field
    *  off a row it holds, not another query. */
   submissionId: string | null;
+  /** #167: whether this cell's submission was the student pressing submit
+   *  or the scheduled overdue sweep recording work they had in progress
+   *  when the deadline passed (jobs/autoSubmitOverdue.ts). Null wherever
+   *  submissionId is null -- there is no provenance without a submission --
+   *  and null for a non_interactive section, which records an answer row
+   *  rather than a submission.
+   *
+   *  An instructor reading this dashboard is entitled to the difference: a
+   *  `submitted` cell means something materially different when the student
+   *  never declared themselves done. Rides along on the same row the cell
+   *  already reads, so it costs no extra query. */
+  submissionSource: SubmissionSource | null;
 }
 
 export type ParticipationStatus = "no_interaction" | "partial" | "active";
@@ -392,6 +404,8 @@ export async function getHomeworkSubmissionsMatrix(
   // #75: conversation -> submission, so a submitted cell can carry the id
   // the grading panel needs without a second query.
   const submissionIdByConversation = new Map(allSubmissions.map((s) => [s.conversationId, s.id]));
+  // #167: same row, second field -- who created the submission.
+  const submissionSourceByConversation = new Map(allSubmissions.map((s) => [s.conversationId, s.source]));
 
   // #164: non_interactive sections never produce a conversation, so
   // submitted/activeConvo below are always empty/false for them -- fetched
@@ -437,8 +451,10 @@ export async function getHomeworkSubmissionsMatrix(
           lastActivityAt: null,
           hasDeletedConversation: false,
           // #164: a non_interactive section records a section_answers row,
-          // never a submission -- so there is no submission to grade here.
+          // never a submission -- so there is no submission to grade here,
+          // and (#167) no submission provenance either.
           submissionId: null,
+          submissionSource: null,
         });
         continue;
       }
@@ -466,6 +482,7 @@ export async function getHomeworkSubmissionsMatrix(
         lastActivityAt: cellLastActivityAt?.toISOString() ?? null,
         hasDeletedConversation: hasDeleted,
         submissionId: submittedConvo ? (submissionIdByConversation.get(submittedConvo.id) ?? null) : null,
+        submissionSource: submittedConvo ? (submissionSourceByConversation.get(submittedConvo.id) ?? null) : null,
       });
     }
 
