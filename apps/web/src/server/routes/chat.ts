@@ -757,7 +757,15 @@ function replayPersistedPart(part: { type: string } & Record<string, unknown>, w
 function replayResponse(conversationId: string, persistedParts: unknown) {
   const parts = Array.isArray(persistedParts) ? persistedParts : [];
   return createUIMessageStreamResponse({
-    headers: { "x-conversation-id": conversationId },
+    // #285: `x-replayed: true` marks this as a replay of an
+    // already-persisted turn rather than a fresh model call. Deliberately a
+    // HEADER and not a stream chunk: the body stays byte-compatible with a
+    // real streamText response, so useChat still cannot tell the difference
+    // (which is correct for the client -- see this function's doc comment),
+    // while an integrator debugging their idempotency-key handling can see
+    // at a glance that no model call happened. Only ever set on this path;
+    // its absence is the "fresh turn" signal.
+    headers: { "x-conversation-id": conversationId, "x-replayed": "true" },
     stream: createUIMessageStream({
       execute: ({ writer }) => {
         writer.write({ type: "start" });

@@ -1952,6 +1952,40 @@ describe("POST /api/chat", () => {
       expect(text).toContain('"type":"tool-output-available"');
     });
 
+    // #285: an integrator consuming this route needs to be able to tell a
+    // replay from a fresh model call while debugging their own
+    // idempotency-key handling. The BODY deliberately stays
+    // indistinguishable (see replayResponse's doc comment) -- the header is
+    // the only difference, and it must be absent, not "false", on a real
+    // turn so its mere presence is the signal.
+    it("marks a replay with x-replayed: true, and does not set the header on a fresh model call", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([
+        { role: "assistant", parts: [{ type: "text", text: "already answered this one" }], clientMessageId: null },
+        { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+      ]);
+
+      const replayed = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(replayed.status).toBe(200);
+      expect(replayed.headers.get("x-replayed")).toBe("true");
+      expect(streamTextMock).not.toHaveBeenCalled();
+
+      // Same conversation, a genuinely new turn: no replay header at all.
+      getLastMessagesMock.mockResolvedValue([]);
+      const fresh = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(fresh.status).toBe(200);
+      expect(fresh.headers.get("x-replayed")).toBeNull();
+      expect(streamTextMock).toHaveBeenCalledTimes(1);
+    });
+
     it("calls the model again (not a replay) when the persisted assistant row for a DIFFERENT clientMessageId has content", async () => {
       getOwnedConversationOrNullMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
       // Same shape as the "already answered" case, but the persisted user

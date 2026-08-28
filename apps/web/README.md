@@ -4,6 +4,17 @@ TypeScript / React 19 / Vite / Tailwind 4 / Hono / Cloudflare Workers / Drizzle 
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the routes-vs-repositories convention and how tenancy scoping is enforced.
 
+## API documentation
+
+`ARCHITECTURE.md` documents *internal* invariants. For the consumer-facing HTTP
+contract — request/response shapes, every status code with its literal `error`
+string, pagination cursors, and worked `curl` examples — see:
+
+- [`docs/api/conversations.md`](./docs/api/conversations.md) — the conversation
+  and chat routes (`/api/conversations*`, `/api/chat`, and the section-conversation
+  lifecycle routes under `/api/courses/...`), including the `x-conversation-id`
+  header protocol and the per-send `id` idempotency key.
+
 ## Setup
 
 1. `npm install`
