@@ -34,6 +34,7 @@ import {
   homeworks,
   sections,
   conversations,
+  messages,
   submissions,
 } from "../../db/schema";
 
@@ -155,9 +156,19 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
     return { homeworkId: hw!.id, sectionId: section!.id };
   }
 
+  /** Models what startSectionConversation actually writes: a conversation
+   *  plus an assistant greeting. `studentWrote` then adds a message of the
+   *  student's own -- true by default, because a conversation a student
+   *  worked in is the ordinary case, and `false` is the #318 "clicked in,
+   *  read the greeting, left" case the sweep must not treat as work. */
   async function seedConversation(
     args: { userId: string; courseId: string; sectionId: string | null },
-    overrides: Partial<{ isDeleted: boolean; isTeacherTest: boolean; kind: "section" | "tutor" }> = {},
+    overrides: Partial<{
+      isDeleted: boolean;
+      isTeacherTest: boolean;
+      kind: "section" | "tutor";
+      studentWrote: boolean;
+    }> = {},
   ) {
     const [conv] = await db
       .insert(conversations)
@@ -172,6 +183,20 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
         ...(overrides.isDeleted ? { deletedAt: new Date() } : {}),
       })
       .returning();
+    // The greeting startSectionConversation writes at creation time -- present
+    // on every real section conversation, and never the student's own work.
+    await db.insert(messages).values({
+      conversationId: conv!.id,
+      role: "assistant",
+      parts: [{ type: "text", text: "greeting" }],
+    });
+    if (overrides.studentWrote !== false) {
+      await db.insert(messages).values({
+        conversationId: conv!.id,
+        role: "user",
+        parts: [{ type: "text", text: "my attempt" }],
+      });
+    }
     return conv!.id;
   }
 
@@ -301,6 +326,40 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
     expect(rows).toHaveLength(1);
     expect(rows[0]!.conversationId).toBe(alreadyConv);
     expect(rows[0]!.source).toBe("student");
+  });
+
+  it("skips a conversation the student opened but never wrote in (#167 review)", async () => {
+    const org = await seedOrg("greeting-only");
+    const student = await seedStudent(org.courseId, `greet-${crypto.randomUUID()}@test.example`);
+    const { sectionId } = await seedHomeworkWithSection(org);
+    // Exactly what #318's eager creation leaves behind when a student clicks
+    // into a past-due section, sees the greeting, and leaves: a live,
+    // non-teacher-test conversation on a past-due section with no
+    // submission -- every structural condition satisfied except the one
+    // that matters, that the student did anything.
+    await seedConversation(
+      { userId: student, courseId: org.courseId, sectionId },
+      { studentWrote: false },
+    );
+
+    const summary = await autoSubmitOverdueSectionsForOrg(db, org.scope);
+
+    expect(summary).toEqual({ candidates: 0, submitted: 0, skipped: 0, failed: 0 });
+    expect(await submissionsForOrg(org.orgId)).toHaveLength(0);
+  });
+
+  it("still submits once the student has written even one message", async () => {
+    // The other side of the clause above -- it gates on the student having
+    // spoken, not on any threshold of how much, so a single message is work.
+    const org = await seedOrg("one-message");
+    const student = await seedStudent(org.courseId, `one-${crypto.randomUUID()}@test.example`);
+    const { sectionId } = await seedHomeworkWithSection(org);
+    await seedConversation({ userId: student, courseId: org.courseId, sectionId });
+
+    const summary = await autoSubmitOverdueSectionsForOrg(db, org.scope);
+
+    expect(summary.submitted).toBe(1);
+    expect(await submissionsForOrg(org.orgId)).toHaveLength(1);
   });
 
   it("does not touch a tutor conversation", async () => {

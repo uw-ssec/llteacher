@@ -21,11 +21,21 @@
    one job, and speculative until an instructor actually asks to opt out.
 
    The behavior is also conservative enough not to need a gate: it only ever
-   records work the student really did (an active, non-teacher-test
-   conversation on a section whose deadline has passed), never grades it,
-   and never touches a homework the instructor has hidden, unpublished, or
-   expired. An instructor who does not want it has the existing lever --
-   hide or expire the homework, which removes it from the candidate set.
+   records work the student really did -- a non-teacher-test conversation on
+   a past-due section that the student has actually written at least one
+   message in -- never grades it, and never touches a homework the
+   instructor has hidden, unpublished, or expired. An instructor who does
+   not want it has the existing lever: hide or expire the homework, which
+   removes it from the candidate set.
+
+   That "written at least one message in" clause is load-bearing for this
+   decision, not incidental (#167 review). A live conversation alone does
+   not mean work happened: since #318 the client eagerly creates one the
+   moment a student selects a section, so "clicked in, read the greeting,
+   left" would otherwise have produced a submission -- a green cell on the
+   instructor grid for reading a greeting, which is the inverse of the
+   problem this job exists to fix. The predicate lives in the candidate
+   query (findOverdueSubmissionCandidates, repositories/submissions.ts).
 
    ---------------------------------------------------------------------------
    Design decision 2 -- Cloudflare Cron Trigger.

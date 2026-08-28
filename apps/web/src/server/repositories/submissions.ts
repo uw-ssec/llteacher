@@ -1,6 +1,6 @@
-import { and, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, eq, exists, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { submissions, grades, conversations, courses, courseMemberships, homeworks, sections, users, sectionAnswers, type SubmissionSource } from "../../db/schema";
+import { submissions, grades, conversations, courses, courseMemberships, homeworks, messages, sections, users, sectionAnswers, type SubmissionSource } from "../../db/schema";
 import type { OrgScope, CourseScope } from "./scope";
 import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { deriveHomeworkStatus, isHomeworkHidden, type HomeworkStatus } from "./homeworks";
@@ -556,8 +556,8 @@ export interface OverdueSubmissionCandidate {
   sectionId: string;
 }
 
-/** Every section in `scope` that is past due, has a live conversation, and
- *  has no submission yet.
+/** Every section in `scope` that is past due, has a live conversation the
+ *  student has actually written in, and has no submission yet.
  *
  *  The structural conditions are SQL predicates; the release-state one is
  *  not. Whether a homework counts as "past due" is deriveHomeworkStatus's
@@ -578,6 +578,8 @@ export interface OverdueSubmissionCandidate {
  *      impossible to submit anyway (#128's composite FK)
  *    - teacher-test conversations -- submitSection refuses these (#242);
  *      an instructor trying their own prompt is not student work
+ *    - conversations with no message the student wrote (#167 review) -- see
+ *      the EXISTS clause below; "opened the section" is not "did the work"
  *    - anything already submitted for that (user, section) */
 export async function findOverdueSubmissionCandidates(
   db: Db,
@@ -619,6 +621,34 @@ export async function findOverdueSubmissionCandidates(
         eq(conversations.isDeleted, false),
         eq(conversations.isTeacherTest, false),
         isNull(submissions.id),
+        // #167 review: the conversation must contain at least one message
+        // the STUDENT wrote. "Has a live conversation" is not the same
+        // question as "did any work", and since #318 the client eagerly
+        // POSTs a conversation the moment a student selects a section with
+        // none (App.tsx's startFreshSectionConversation, so the greeting
+        // renders) -- ungated, and startSectionConversation does not refuse
+        // a past-due homework (isUnreleased covers draft/scheduled/hidden,
+        // not past_due). So a student who clicks into an overdue section,
+        // reads the greeting and leaves has a live conversation carrying
+        // exactly one assistant message and nothing of their own.
+        //
+        // Without this, that student got a `submitted` row: a green cell on
+        // the instructor grid and a bump in their own completion
+        // percentage, for reading a greeting. That inverts the issue's own
+        // stated purpose (auto-submit exists because the dashboard
+        // "understates actual work done") and would make the auto signal
+        // something an instructor learns to distrust.
+        //
+        // EXISTS rather than a join: this must not multiply the candidate
+        // rows by the message count, and the predicate is existence, not
+        // aggregation. Served by messages_conversation_created_idx, whose
+        // leading column is conversation_id.
+        exists(
+          db
+            .select({ one: sql`1` })
+            .from(messages)
+            .where(and(eq(messages.conversationId, conversations.id), eq(messages.role, "user"))),
+        ),
       ),
     );
 
