@@ -33,9 +33,13 @@
  *  only ever drop MORE. So a message above the divider is certainly not seen
  *  by the model, which is exactly what the divider claims -- the residual gap
  *  is that on a pathologically large conversation a few messages just BELOW
- *  the divider may also have been dropped. #288's own text anticipates this
- *  ("worth fixing regardless of which bound is used"): under-promising which
- *  turns survived is the safe direction for a disclosure to be wrong in. */
+ *  the divider may also have been dropped, so the divider can over-promise
+ *  what survived, never under-promise it. #288's own text anticipates this
+ *  ("worth fixing regardless of which bound is used"): over-promising is the
+ *  UNSAFE direction for a disclosure to be wrong in, which is why this is a
+ *  tracked residual gap rather than a closed one -- it is narrow (needs a
+ *  conversation long enough for the token budget to bite inside the last 40
+ *  messages, not just above them) but real. */
 export const MAX_HISTORY_MESSAGES = 40;
 
 /** How many model steps ONE turn may run. Passed to streamText as
