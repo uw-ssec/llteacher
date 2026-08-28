@@ -313,8 +313,10 @@ Create a **tutor** conversation. (Section conversations are created by
 }
 ```
 
-`kind` is always `"tutor"`; sending anything else has no effect. An omitted or
-empty `title` becomes `"New Conversation"`.
+`kind` is always `"tutor"`; sending anything else has no effect. An **omitted**
+`title` becomes `"New Conversation"`. An **empty or whitespace-only** `title` is
+a 400, not a default — `title` is trimmed before its 1–100 length check, and the
+stored value is the trimmed one.
 
 **201** — `ConversationSummary` (note: **no `messageCount`** key; a new
 conversation has no messages, and clients should default it to 0 rather than
@@ -440,7 +442,7 @@ of `courseId` when creating.
     }
   ],
 
-  "conversationId": "2222...",  // omit on the first turn; required-ish after (see below)
+  "conversationId": "2222...",  // omit to create; send it to continue an existing one
   "courseId":       "5555...",  // REQUIRED when conversationId is omitted
   "kind":           "tutor",    // "tutor" | "section"; defaults to "tutor"
   "sectionId":      "7777...",  // REQUIRED when kind === "section"
@@ -580,10 +582,17 @@ conversation depends on what is stored under it:
 
 | Stored under that id | Server behavior |
 | --- | --- |
-| Same content, and the assistant already answered it completely | **200 replay.** The persisted answer is streamed back verbatim. No model call, no new rows. `x-replayed: true` is set. |
-| Same content, but no assistant answer yet | The user message is not re-inserted; the model is called (again) and a fresh answer streams. No `x-replayed`. |
+| Same content, and the assistant's complete answer to it is the newest message | **200 replay.** The persisted answer is streamed back verbatim. No model call, no new rows. `x-replayed: true` is set. |
+| Same content, and it is itself the newest message (no answer yet) | The user message is not re-inserted; the model is called (again) and a fresh answer streams. No `x-replayed`. |
 | Same content, and another request is mid-flight for it | `409 {"error":"...already being processed...","code":"in_progress"}` — retryable |
 | **Different** content | `409 {"error":"A message with this clientMessageId already exists with different content","code":"duplicate_message"}` — **permanent**, retrying is futile. Nothing is persisted and no model call is made. |
+
+Replay is decided against the **tail** of the conversation, not the whole
+transcript: only the newest stored turn is considered. Re-sending an id from
+several turns ago — after the conversation has moved on — is therefore not a
+replay; it resolves to the existing row and comes back as `409 in_progress`,
+which is retryable in shape but will not become a replay by retrying. Reuse an
+id only for an immediate retry of the turn you just sent.
 
 Content comparison is structural, not string-based, so a `parts` array that
 round-tripped through JSON with reordered object keys still counts as the same
@@ -599,15 +608,18 @@ Practical rules for an integrator:
   low resolution. Any of those will eventually collide with different content
   and produce a permanent `duplicate_message` for a legitimate message.
 
-`x-replayed: true` exists for you, not for the in-browser client: the stream
-body of a replay is byte-compatible with a real model turn on purpose, so the
-header is the only way to tell them apart. Its **absence** means a real model
+`x-replayed: true` exists for you, not for the in-browser client: a replay's
+stream uses the same frame vocabulary and the same wire protocol as a real
+model turn, deliberately, so a stream consumer cannot tell them apart from the
+body alone. The header is the only signal. Its **absence** means a real model
 call happened; it is never sent as `"false"`.
 
 ### Worked two-turn example
 
 Assumes `$COOKIE` holds a valid `llt_session` cookie and `$COURSE` a course you
-are a member of.
+are a member of. The stream bodies below are abridged — a real turn also emits
+`tool-input-start` / `tool-input-delta` frames while the model is composing a
+tool call, and many more `text-delta` frames.
 
 **Turn 1 — no `conversationId`; the server creates one.**
 
