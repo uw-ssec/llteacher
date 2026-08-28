@@ -1599,6 +1599,21 @@ describe("POST /api/chat", () => {
         ],
         expectInBody: "definition lookup failed",
       },
+      // Final review of #307/#342: the renderable-name check must not turn
+      // into "any non-renderable tool poisons the turn." A section turn
+      // where the model records a hint request AND then answers in text is
+      // an ordinary, complete turn -- the requestHint part is invisible,
+      // not incomplete, so it must still persist and still replay (and the
+      // replay must carry the tool part too, so the client's history keeps
+      // matching the transcript).
+      {
+        name: "a resolved non-renderable tool call alongside real text",
+        parts: [
+          { type: "tool-requestHint", toolCallId: "call-1", state: "output-available", input: {}, output: { status: "recorded" } },
+          { type: "text", text: "here is the hint you asked for" },
+        ],
+        expectInBody: "here is the hint you asked for",
+      },
     ];
 
     for (const { name, parts, expectInBody } of acceptedCases) {
@@ -1635,6 +1650,33 @@ describe("POST /api/chat", () => {
         name: "a tool call whose input landed but never resolved (input-available)",
         parts: [
           { type: "tool-showDefinition", toolCallId: "call-1", state: "input-available", input: { term: "p-value" } },
+        ],
+      },
+      // Final review of #307/#342: RESOLVED IS NOT RENDERABLE. requestHint
+      // (#80) is a real, model-callable tool in section conversations that
+      // deliberately has NO client renderer -- render.tsx returns null for
+      // it, by design, because its whole effect is server-side. The old
+      // gate accepted any tool name in a resolved state, so this exact
+      // shape was persisted and then replayed forever as a permanently
+      // blank bubble that Retry could not fix (this branch would have
+      // replayed it with a 200 and no model call).
+      {
+        name: "a resolved call to a tool the client cannot render (requestHint)",
+        parts: [
+          {
+            type: "tool-requestHint",
+            toolCallId: "call-1",
+            state: "output-available",
+            input: {},
+            output: { status: "recorded", hintsRemaining: 2 },
+          },
+        ],
+      },
+      {
+        name: "a resolved non-renderable tool call whose sibling text never finished",
+        parts: [
+          { type: "tool-requestHint", toolCallId: "call-1", state: "output-available", input: {}, output: { status: "recorded" } },
+          { type: "text", text: "here's a hi", state: "streaming" },
         ],
       },
     ];
@@ -2370,6 +2412,74 @@ describe("POST /api/chat", () => {
         null,
         expect.anything(),
       );
+      warnSpy.mockRestore();
+    });
+
+    // Final review of #307/#342: the persistence half of the
+    // resolved-is-not-renderable fix. A turn whose ONLY content is a
+    // resolved requestHint call has nothing the client can draw
+    // (render.tsx has no case for it, by design), so it must be refused
+    // here rather than written -- otherwise it replays forever as a blank
+    // bubble via the "already answered" path, which Retry cannot escape.
+    // Refused the same way an empty turn already is (#268/#342): no row,
+    // one warn, and the next attempt gets a genuine model call.
+    it("refuses to persist a turn whose only content is a resolved non-renderable tool call", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      await capturedOnFinish!({
+        responseMessage: {
+          id: "resp-1",
+          role: "assistant",
+          parts: [
+            { type: "step-start" },
+            {
+              type: "tool-requestHint",
+              toolCallId: "call-1",
+              state: "output-available",
+              input: {},
+              output: { status: "recorded", hintsRemaining: 2 },
+            },
+          ],
+        },
+        finishReason: "tool-calls",
+      });
+
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "22222222-2222-2222-2222-222222222222",
+        null,
+        expect.anything(),
+      );
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(
+        (JSON.parse(warnSpy.mock.calls[0]![0] as string) as { context?: string }).context,
+      ).toBe("chatHandler.onFinish.noRenderableContent");
+      warnSpy.mockRestore();
+    });
+
+    // The positive control for the test above: the name check must not
+    // reject an ordinary turn that merely USED a side-effecting tool.
+    it("persists a turn that pairs a resolved non-renderable tool call with real text", async () => {
+      createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      getLastMessagesMock.mockResolvedValue([]);
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      const parts = [
+        { type: "tool-requestHint", toolCallId: "call-1", state: "output-available", input: {}, output: { status: "recorded" } },
+        { type: "text", text: "try re-reading the null hypothesis" },
+      ];
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts },
+        finishReason: "stop",
+      });
+
+      expect(warnSpy).not.toHaveBeenCalled();
+      const [, , assistantMessage] = finalizeAssistantTurnMock.mock.calls[0]!;
+      expect(assistantMessage).toMatchObject({ parts });
       warnSpy.mockRestore();
     });
 

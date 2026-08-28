@@ -144,6 +144,10 @@ import {
   type ResolvedLLMConfig,
 } from "../../lib/llm-config";
 import { streamWithFallback } from "../llm/streamWithFallback";
+// Final review of #307/#342: the client renderer registry's own allowlist,
+// imported rather than re-declared -- see its doc comment (plain TS, no
+// React, same cross-boundary pattern as @llteacher/ui/auth/courseRole).
+import { isRenderableToolPartType } from "@llteacher/ui/generative/renderableTools";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 
@@ -698,6 +702,30 @@ function hasRenderableContent(parts: unknown): boolean {
       // next turn), so it now fails the WHOLE array rather than being
       // silently skipped while a completed part elsewhere still passes.
       if (typeof toolCallId !== "string" || (state !== "output-available" && state !== "output-error")) return false;
+      // Final review of #307/#342: RESOLVED IS NOT THE SAME AS RENDERABLE.
+      // The check above is about the tool call's state; this one is about
+      // its NAME. Not every tool in TOOLS has a renderer -- requestHint
+      // (#80) deliberately has none, since its whole effect is server-side
+      // (a hint_events row, a budget check) and it has nothing to display.
+      // Without this, a turn whose only content was a resolved requestHint
+      // call passed the gate, got persisted, replayed forever via
+      // replayPersistedPart, and rendered to NOTHING on the client
+      // (renderToolPart returns null for it) -- a permanently blank
+      // assistant bubble Retry could never fix, because the idempotency
+      // path above sees a persisted row and treats it as "already
+      // answered." RENDERABLE_TOOL_NAMES is the single source of truth,
+      // shared with the client registry that gates on it too
+      // (@llteacher/ui/generative/renderableTools, render.tsx).
+      //
+      // Not a `return false`, unlike the state check: a resolved
+      // side-effect-only call is COMPLETE, just invisible. A turn that
+      // calls requestHint and then answers in text is a perfectly good
+      // turn and must still persist -- so this part simply doesn't COUNT
+      // as content, exactly like step-start below. It is only when nothing
+      // else in the array renders that the turn is refused, and then it is
+      // refused the same way an empty turn already is (#268/#342's
+      // shouldPersist gate: not persisted, logged, retryable).
+      if (!isRenderableToolPartType(type)) continue;
       sawRenderablePart = true;
       continue;
     }
@@ -736,6 +764,18 @@ function replayPersistedPart(part: { type: string } & Record<string, unknown>, w
     // hasRenderableContent's matching allowlist guarantees any part that
     // gets here is output-available or output-error, never a dangling
     // input-available/input-streaming call with no result to show.
+    //
+    // Final review of #307/#342: deliberately still generic over the tool
+    // NAME, unlike hasRenderableContent's new RENDERABLE_TOOL_NAMES check.
+    // The two are asking different questions. That gate asks "is there
+    // anything here worth persisting"; this replays a row that was already
+    // judged worth persisting, and the client's own message state has to
+    // come back matching what is stored (a resolved tool call the replay
+    // dropped would leave the client's next request carrying a different
+    // history than the transcript). A non-renderable name replays as an
+    // invisible tool part -- exactly what it was live -- rather than a
+    // blank bubble, because by construction something ELSE in this array
+    // is what passed the gate.
     const toolName = part.type.slice("tool-".length);
     writer.write({ type: "tool-input-available", toolCallId: part.toolCallId, toolName, input: part.input });
     if (part.state === "output-error") {

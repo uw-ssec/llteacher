@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { restartSectionConversation } from "./sectionConversations";
 import { SubmissionGradedError } from "./submissions";
 import { unsafeOrgScope } from "./scope";
-import { SECTION_CONVERSATION_PROMPTS } from "../../lib/prompts";
+import { SECTION_CONVERSATION_PROMPTS, type SectionConversationPrompts } from "../../lib/prompts";
 import type { Db } from "../../db/client";
 
 // #25: both restartSectionConversation and startSectionConversation now
@@ -23,6 +23,15 @@ vi.mock("../../lib/prompts", async (importOriginal) => {
     resolvePromptTemplate: async () => ({ id: null, content: "test system prompt", version: null }),
   };
 });
+
+/** A SECOND TENANT's wording -- deliberately unlike SECTION_CONVERSATION_
+ *  PROMPTS in both templates, so an assertion on the persisted text can only
+ *  pass if this object is what the repository actually formatted with. #305's
+ *  whole reason for making these a parameter. */
+const TENANT_TWO_PROMPTS: SectionConversationPrompts = {
+  greeting: (s) => `Bienvenue -- partie ${s.order}. ${s.content}`,
+  title: (s) => `Partie ${s.order} : ${s.title}`,
+};
 
 const SCOPE = unsafeOrgScope("org-1");
 const CONV = "11111111-2222-4333-8444-555555555555";
@@ -184,6 +193,106 @@ describe("restartSectionConversation (#27, #128)", () => {
     );
     expect(result.conversation.title).toBe("Section 2: Confidence intervals");
     expect(batch).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes the CALLER's wording, not a built-in default (#305 seam)", async () => {
+    // Nothing else proves the `prompts` parameter is load-bearing: every
+    // other test in this file (and its siblings) passes
+    // SECTION_CONVERSATION_PROMPTS, so a repository that ignored the
+    // parameter and reached for that same module-level object again would
+    // pass all of them. This one drives an ALTERNATE object through the real
+    // function and asserts on the persisted row, so reintroducing a hardcoded
+    // default fails here.
+    const { db, inserted } = makeDb([[OWNED], [], []]);
+
+    const result = await restartSectionConversation(db, SCOPE, CONV, OWNER, true, TENANT_TWO_PROMPTS);
+
+    const greeting = inserted.find((v) => v.parts) as { parts: { text: string }[] };
+    expect(greeting.parts[0]!.text).toBe("Bienvenue -- partie 2. Estimate the mean.");
+    expect(result.conversation.title).toBe("Partie 2 : Confidence intervals");
+    // And explicitly NOT the built-in copy, so the assertions above can't be
+    // satisfied by a formatter that merely appended the tenant's text to it.
+    expect(greeting.parts[0]!.text).not.toContain("Where would you like to start?");
+    expect(result.conversation.title).not.toContain("Section 2");
+  });
+});
+
+describe("startSectionConversation prompt injection point (#305 seam)", () => {
+  /** db double whose insert batch SUCCEEDS, so the greeting and title the
+   *  function formatted are observable on the values it inserted. Select
+   *  queue matches the order startSectionConversation issues: membership,
+   *  section, existing-conversation pre-check. */
+  function startingDb() {
+    const inserted: Record<string, unknown>[] = [];
+    const queue: unknown[][] = [
+      [{ id: "membership-1" }],
+      [{ id: "section-1", order: 7, title: "Bootstrap", content: "Resample it.", type: "conversation" }],
+      [],
+    ];
+    const joinable: Record<string, unknown> = {
+      where: async () => queue.shift() ?? [],
+      get innerJoin() {
+        return () => joinable;
+      },
+    };
+    const db = {
+      select: () => ({ from: () => joinable }),
+      insert: () => ({
+        values: (v: Record<string, unknown>) => {
+          inserted.push(v);
+          return "stmt";
+        },
+      }),
+      batch: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Db;
+    return { db, inserted };
+  }
+
+  it("opens the conversation with the CALLER's wording, not a built-in default", async () => {
+    // Companion to the restart-side seam test above, on the other writer.
+    // Both call sites take the formatters as a parameter precisely so a
+    // second tenant can supply different copy; asserting on the persisted
+    // greeting/title is the only thing that can fail if that parameter is
+    // ever quietly ignored in favour of SECTION_CONVERSATION_PROMPTS again.
+    const { startSectionConversation } = await import("./sectionConversations");
+    const { unsafeCourseScope } = await import("./scope");
+    const { db, inserted } = startingDb();
+
+    const result = await startSectionConversation(db, unsafeCourseScope("course-1"), {
+      sectionId: "section-1",
+      ownerUserId: OWNER,
+      isTeacherTest: false,
+      canViewDrafts: true,
+      prompts: TENANT_TWO_PROMPTS,
+    });
+
+    expect(result.title).toBe("Partie 7 : Bootstrap");
+    const greeting = inserted.find((v) => v.parts) as { parts: { text: string }[] };
+    expect(greeting.parts[0]!.text).toBe("Bienvenue -- partie 7. Resample it.");
+    expect(greeting.parts[0]!.text).not.toContain("Where would you like to start?");
+    expect(result.title).not.toContain("Section 7");
+  });
+
+  it("opens it with the built-in wording when that is what the caller passed", async () => {
+    // The other half of the seam: same harness, default formatters, canonical
+    // copy. Together these two pin that the output tracks the ARGUMENT.
+    const { startSectionConversation } = await import("./sectionConversations");
+    const { unsafeCourseScope } = await import("./scope");
+    const { db, inserted } = startingDb();
+
+    const result = await startSectionConversation(db, unsafeCourseScope("course-1"), {
+      sectionId: "section-1",
+      ownerUserId: OWNER,
+      isTeacherTest: false,
+      canViewDrafts: true,
+      prompts: SECTION_CONVERSATION_PROMPTS,
+    });
+
+    expect(result.title).toBe("Section 7: Bootstrap");
+    const greeting = inserted.find((v) => v.parts) as { parts: { text: string }[] };
+    expect(greeting.parts[0]!.text).toBe(
+      "Resample it.\n\nWhere would you like to start? If you already have an idea, tell me what you're thinking and we'll work from there.",
+    );
   });
 });
 
