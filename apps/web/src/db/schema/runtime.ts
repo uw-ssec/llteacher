@@ -49,6 +49,26 @@ export const messageRoleEnum = pgEnum("message_role", [
   "system",
 ]);
 
+// #167: who created a submission row. "student" is a deliberate act -- the
+// student pressed submit (routes/submissions.ts's submitSectionHandler);
+// "auto" is the scheduled overdue sweep (server/jobs/autoSubmitOverdue.ts)
+// capturing work that was in progress when the due date passed.
+//
+// A native Postgres enum rather than a boolean `is_auto`, matching this
+// schema's existing enum convention (materialSourceEnum, content.ts): the
+// distinction is a provenance category, and a third origin (an instructor
+// submitting on a student's behalf, an LMS import) is a plausible future
+// value that a boolean could not express without a second column.
+export const submissionSourceEnum = pgEnum("submission_source", [
+  "student",
+  "auto",
+]);
+
+/** App-code union derived from the enum rather than hand-written, the same
+ *  way ConversationKind is above (#308's rule) -- a third value can't leave
+ *  a literal union somewhere else silently stale. */
+export type SubmissionSource = (typeof submissionSourceEnum.enumValues)[number];
+
 // ---------- Conversation ----------
 // "section" conversations are a student working a specific homework Section;
 // "tutor" conversations are the free-standing course-wide tutor (no section).
@@ -469,6 +489,16 @@ export const submissions = pgTable(
     submittedAt: timestamp("submitted_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    // #167: how this row came to exist. Defaults to 'student' so every row
+    // written before this column existed -- and every writer that predates
+    // it (submitSection/createSubmission) -- keeps its true meaning without
+    // a backfill: until the overdue sweep landed, a submission row could
+    // only ever have been a student pressing submit.
+    //
+    // Deliberately NOT nullable-with-null-meaning-student: "unknown origin"
+    // is not a state this table can be in, and a nullable column would make
+    // every consumer handle a third case that never occurs.
+    source: submissionSourceEnum("source").notNull().default("student"),
   },
   (t) => [
     index("submissions_org_idx").on(t.organizationId),
