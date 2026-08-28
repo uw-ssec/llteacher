@@ -523,8 +523,8 @@ and it will de-duplicate rather than double-write your question).
 | 400 | — | `conversationId/courseId/sectionId must be valid UUIDs when present; kind must be 'tutor' or 'section'` |
 | 400 | — | `messages is required` |
 | 400 | `history_too_long` | `messages must contain at most 500 entries` |
-| 400 | — | `Every message must have role "user" or "assistant" and a well-formed parts array` |
-| 400 | — | `The last message must be a user message with a non-empty parts array` ⚠ **also what you get for a missing or malformed `id`** — see below |
+| 400 | — | `Every message must have role "user" or "assistant" and a well-formed parts array` ⚠ **also what a missing or malformed `id` gets** — see below |
+| 400 | — | `The last message must be a user message with a non-empty parts array` — in practice only reachable when the last element's `role` is `"assistant"`; see below |
 | 400 | — | `courseId is required when conversationId is omitted` |
 | 400 | — | `sectionId is required when kind is 'section'` |
 | 401 | `unauthorized` | `Unauthorized` |
@@ -540,11 +540,28 @@ and it will de-duplicate rather than double-write your question).
 | 500 | `unavailable` | `I'm sorry, but there's no valid LLM configuration available right now. Reference ID: <uuid>` |
 | 503 | `unavailable` | `Something went wrong. Please try again later.` |
 
-⚠ The `The last message must be a user message with a non-empty parts array`
-400 is emitted for **four** distinct causes: a non-`user` role, an empty
-`parts` array, a **missing `id`**, and an **`id` that fails the character/length
-pattern**. The message does not mention `id` at all. If you get this 400 and
-your `role`/`parts` look fine, check `id` first.
+⚠ **Which 400 you get for a bad `id` is not the one the wording suggests.**
+Validation runs in two passes, and the *first* pass is the one that catches
+almost everything:
+
+1. **Every element** — including the last — is checked for a well-formed `id`
+   (`/^[A-Za-z0-9_-]{1,128}$/`), a `role` of `"user"` or `"assistant"`, and a
+   `parts` array of 1–32 allowed part types. Any failure anywhere in the array
+   returns `Every message must have role "user" or "assistant" and a
+   well-formed parts array`.
+2. **Only then** is the last element checked for `role === "user"`.
+
+So a **missing `id`**, an **`id` that fails the pattern**, and an **empty
+`parts` array** all return the *first* message — which does not mention `id` at
+all. That is the string to debug an id problem against. If you get it and your
+`role`/`parts` look fine on every element, check `id` first.
+
+The second message (`The last message must be a user message with a non-empty
+parts array`) is correspondingly narrower than it reads: by the time it can
+fire, `id` and `parts` have already passed. In practice the only condition that
+reaches it is **a last element whose `role` is `"assistant"`**. Its mention of
+a "non-empty parts array" is vestigial — an empty `parts` array is rejected by
+pass 1 and never reaches it.
 
 Only **one turn per conversation** may be in flight at a time. A second
 concurrent send on the same conversation gets `409 in_progress` immediately. It
@@ -784,7 +801,8 @@ which makes the conversation non-submittable.
 
 | Status | Body |
 | --- | --- |
-| 403 | `{"error":"Course access denied"}` — not a member, or no session |
+| 401 | `{"error":"Unauthorized"}` — no session |
+| 403 | `{"error":"Course access denied"}` — not a member of `:courseId` |
 | 404 | `{"error":"Section not found"}` — missing, malformed id, outside the course, or unreleased to you |
 | 409 | `{"error":"An active conversation already exists for this section"}` — GET it instead |
 | 409 | `{"error":"Section is not interactive and cannot hold a conversation"}` |
@@ -827,7 +845,8 @@ field** even though `before` is a seq cursor.
 | --- | --- |
 | 400 | `{"error":"limit must be an integer between 1 and 500"}` |
 | 400 | `{"error":"before must be an integer seq value"}` |
-| 403 | `{"error":"Course access denied"}` |
+| 401 | `{"error":"Unauthorized"}` — no session |
+| 403 | `{"error":"Course access denied"}` — not a member of `:courseId` |
 | 404 | `{"error":"Section not found"}` — missing or malformed `sectionId` |
 | 404 | `{"error":"Conversation not found"}` — the section is unreleased to you |
 
@@ -857,7 +876,8 @@ Same `limit` / `before` params as above.
 | Status | Body |
 | --- | --- |
 | 400 | `{"error":"limit must be an integer between 1 and 500"}` / `{"error":"before must be an integer seq value"}` |
-| 403 | `{"error":"Course access denied"}` |
+| 401 | `{"error":"Unauthorized"}` — no session |
+| 403 | `{"error":"Course access denied"}` — not a member of `:courseId` |
 | 404 | `{"error":"Conversation not found"}` — missing, malformed id, not readable by you, or its section is unreleased to you |
 
 ### `POST /api/courses/:courseId/conversations/:conversationId/restart`
@@ -881,7 +901,8 @@ conversation, it is voided.**
 
 | Status | Body |
 | --- | --- |
-| 403 | `{"error":"Course access denied"}` — not a member, or the course has no resolvable organization |
+| 401 | `{"error":"Unauthorized"}` — no session |
+| 403 | `{"error":"Course access denied"}` — not a member of `:courseId`, or the course has no resolvable organization |
 | 404 | `{"error":"Conversation not found"}` — missing, malformed id, or not yours |
 | 409 | `{"error":"Submission has already been graded and cannot be restarted"}` |
 
