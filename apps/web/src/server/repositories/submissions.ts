@@ -1,4 +1,4 @@
-import { and, eq, exists, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, eq, exists, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { submissions, grades, conversations, courses, courseMemberships, homeworks, messages, sections, users, sectionAnswers, type SubmissionSource } from "../../db/schema";
 import type { OrgScope, CourseScope } from "./scope";
@@ -556,8 +556,47 @@ export interface OverdueSubmissionCandidate {
   sectionId: string;
 }
 
+/** How many candidates one call may return for one organization.
+ *
+ *  Final review: the sweep had no bound at all. On the neon-http driver
+ *  every statement is a Cloudflare subrequest, and the job does one
+ *  sequential insert per candidate (jobs/autoSubmitOverdue.ts), so the
+ *  candidate count IS the per-invocation subrequest count. The cron is
+ *  hourly, but the FIRST production run has no lower bound on due date --
+ *  it would try to sweep the entire historical backlog of past-due,
+ *  student-written, unsubmitted sections in one invocation. Worse, that
+ *  failure would not converge: nothing marks a candidate "seen", so an
+ *  oversized run would blow the same limit every hour forever.
+ *
+ *  The bound is what makes the job's existing self-draining design actually
+ *  work: a candidate this run does not reach is not consumed, so the next
+ *  hourly run picks it up. A backlog drains at this rate per org per hour
+ *  instead of failing whole.
+ *
+ *  Per-org rather than per-run deliberately. A per-run budget shared across
+ *  organizations would be consumed by whichever orgs listAllOrgScopes
+ *  happens to return first, every run, permanently starving the rest -- a
+ *  worse failure than the one being fixed. The run-level ceiling is
+ *  therefore orgs x this. */
+export const OVERDUE_SUBMISSION_CANDIDATE_LIMIT = 500;
+
 /** Every section in `scope` that is past due, has a live conversation the
- *  student has actually written in, and has no submission yet.
+ *  student has actually written in, and has no submission yet -- at most
+ *  `limit` of them, oldest due date first.
+ *
+ *  The bound is applied AFTER the release-state filter below, not as a SQL
+ *  `LIMIT`. A SQL limit can only order on columns, and the rows it would
+ *  keep are not necessarily the ones that survive deriveHomeworkStatus: a
+ *  hidden or expired homework with an old due date sorts to the front of
+ *  the window and is then dropped in JS, so an org carrying `limit` worth
+ *  of such rows would return zero candidates every run, forever. Slicing
+ *  the derived list cannot starve that way, and it bounds the quantity that
+ *  actually costs subrequests -- the inserts.
+ *
+ *  What stays unbounded is the SELECT's own result set, which is one
+ *  subrequest whatever its size. The `due_date <= now()` predicate below
+ *  keeps it from including every in-progress conversation in the org, which
+ *  is the bulk of a healthy system's rows.
  *
  *  The structural conditions are SQL predicates; the release-state one is
  *  not. Whether a homework counts as "past due" is deriveHomeworkStatus's
@@ -584,6 +623,7 @@ export interface OverdueSubmissionCandidate {
 export async function findOverdueSubmissionCandidates(
   db: Db,
   scope: OrgScope,
+  limit: number = OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
 ): Promise<OverdueSubmissionCandidate[]> {
   const rows = await db
     .select({
@@ -621,6 +661,16 @@ export async function findOverdueSubmissionCandidates(
         eq(conversations.isDeleted, false),
         eq(conversations.isTeacherTest, false),
         isNull(submissions.id),
+        // A narrowing, not the gate. deriveHomeworkStatus below stays the
+        // only authority on what "past due" means; this restates one of its
+        // necessary conditions (`past_due` is unreachable while due_date is
+        // in the future, homeworks.ts) in SQL so the query does not drag
+        // every currently-active conversation in the org across the wire
+        // just to drop it in JS. It can only exclude rows that filter would
+        // have excluded anyway, so it cannot become the sixth gate free to
+        // drift that the note above warns about -- it has no say over which
+        // surviving rows are candidates.
+        lte(homeworks.dueDate, sql`now()`),
         // #167 review: the conversation must contain at least one message
         // the STUDENT wrote. "Has a live conversation" is not the same
         // question as "did any work", and since #318 the client eagerly
@@ -650,10 +700,15 @@ export async function findOverdueSubmissionCandidates(
             .where(and(eq(messages.conversationId, conversations.id), eq(messages.role, "user"))),
         ),
       ),
-    );
+    )
+    // Oldest backlog first, so the bound below drains a backlog in a
+    // predictable order rather than an arbitrary one, and so the same run
+    // twice over the same data picks the same rows.
+    .orderBy(asc(homeworks.dueDate));
 
   return rows
     .filter((row) => deriveHomeworkStatus(row) === "past_due")
+    .slice(0, limit)
     .map((row) => ({
       conversationId: row.conversationId,
       userId: row.userId,

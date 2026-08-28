@@ -49,6 +49,19 @@
    already-reviewed config rather than an admin screen.
 
    ---------------------------------------------------------------------------
+   Design decision 3 -- bounded per invocation (final review).
+
+   Each org's candidate read is capped at OVERDUE_SUBMISSION_CANDIDATE_LIMIT
+   (repositories/submissions.ts). On the neon-http driver every statement is
+   a Cloudflare subrequest and the loop below inserts one at a time, so the
+   candidate count is the invocation's subrequest count; the first
+   production run, which has no lower bound on due date, would otherwise
+   have tried to sweep the whole historical backlog at once and then failed
+   identically every hour, since nothing here marks a candidate "seen".
+   That same absence of bookkeeping is what makes the cap safe: a candidate
+   this run does not reach is untouched, so the next hourly run takes it.
+
+   ---------------------------------------------------------------------------
    Tenancy.
 
    The epic's cross-cutting invariant (#30) is that every query is org- or
@@ -72,7 +85,11 @@
 
 import type { Db } from "../../db/client";
 import { listAllOrgScopes } from "../repositories/organizations";
-import { findOverdueSubmissionCandidates, insertAutoSubmission } from "../repositories/submissions";
+import {
+  findOverdueSubmissionCandidates,
+  insertAutoSubmission,
+  OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
+} from "../repositories/submissions";
 import type { OrgScope } from "../repositories/scope";
 import { logServerError, logServerInfo } from "../utils/errors";
 
@@ -100,12 +117,19 @@ function emptySummary(): AutoSubmitRunSummary {
 
 /** Runs the sweep for exactly one organization. Exported so the tenancy
  *  boundary is directly testable, and so a future operator-triggered
- *  single-org run has something to call. */
+ *  single-org run has something to call.
+ *
+ *  `limit` caps how many candidates this call may submit for; the default
+ *  is the production one. It is a parameter rather than a constant read
+ *  inside so that the bound's actual consequence -- that the remainder is
+ *  still there for the next run -- is testable without seeding the
+ *  production limit's worth of fixtures. */
 export async function autoSubmitOverdueSectionsForOrg(
   db: Db,
   scope: OrgScope,
+  limit: number = OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
 ): Promise<AutoSubmitRunSummary> {
-  const candidates = await findOverdueSubmissionCandidates(db, scope);
+  const candidates = await findOverdueSubmissionCandidates(db, scope, limit);
   const summary = { ...emptySummary(), candidates: candidates.length };
 
   for (const candidate of candidates) {

@@ -473,6 +473,64 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
     expect(recovered.map((r) => r.conversationId)).toContain(failingConv);
   });
 
+  it("caps one run at the candidate limit and drains the rest on later runs (final review)", async () => {
+    // The unbounded sweep's failure mode: on the neon-http driver every
+    // insert is a Cloudflare subrequest, and the first production run has no
+    // lower bound on due date, so an entire historical backlog would be
+    // attempted in one invocation -- and would then fail identically every
+    // hour, because nothing marks a candidate "seen". A limit of 2 against 5
+    // candidates stands in for that shape at a size a test can seed.
+    const org = await seedOrg("bounded");
+    const { sectionId } = await seedHomeworkWithSection(org);
+    const students: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const student = await seedStudent(org.courseId, `bound-${crypto.randomUUID()}@test.example`);
+      students.push(student);
+      await seedConversation({ userId: student, courseId: org.courseId, sectionId });
+    }
+
+    // Without the bound this first call reports 5 candidates and writes 5
+    // rows -- the whole backlog, in one invocation.
+    const first = await autoSubmitOverdueSectionsForOrg(db, org.scope, 2);
+    expect(first).toEqual({ candidates: 2, submitted: 2, skipped: 0, failed: 0 });
+    expect(await submissionsForOrg(org.orgId)).toHaveLength(2);
+
+    // The three the bound withheld are untouched, not consumed: no retry
+    // bookkeeping exists, so the next scheduled run simply sees them again.
+    const second = await autoSubmitOverdueSectionsForOrg(db, org.scope, 2);
+    expect(second).toEqual({ candidates: 2, submitted: 2, skipped: 0, failed: 0 });
+    const third = await autoSubmitOverdueSectionsForOrg(db, org.scope, 2);
+    expect(third).toEqual({ candidates: 1, submitted: 1, skipped: 0, failed: 0 });
+
+    // Every student ends up submitted exactly once -- the backlog drained,
+    // it was not dropped.
+    const rows = await submissionsForOrg(org.orgId);
+    expect(rows).toHaveLength(5);
+    expect([...new Set(rows.map((r) => r.userId))].sort()).toEqual([...students].sort());
+    expect(rows.every((r) => r.source === "auto")).toBe(true);
+  });
+
+  it("bounds the candidate query itself, oldest due date first (final review)", async () => {
+    // The bound has to live in the query, not in the loop that consumes it:
+    // a job that read every candidate and then processed a slice would still
+    // have paid the read. Ordering is asserted because it is what makes a
+    // partial run predictable -- the oldest backlog drains first rather than
+    // an arbitrary slice of it.
+    const org = await seedOrg("bounded-query");
+    const student = await seedStudent(org.courseId, `bq-${crypto.randomUUID()}@test.example`);
+    const oldest = await seedHomeworkWithSection(org, { dueDate: new Date(Date.now() - 30 * DAY), title: "oldest" });
+    const middle = await seedHomeworkWithSection(org, { dueDate: new Date(Date.now() - 10 * DAY), title: "middle" });
+    const newest = await seedHomeworkWithSection(org, { dueDate: new Date(Date.now() - HOUR), title: "newest" });
+    for (const { sectionId } of [newest, middle, oldest]) {
+      await seedConversation({ userId: student, courseId: org.courseId, sectionId });
+    }
+
+    expect(await findOverdueSubmissionCandidates(db, org.scope)).toHaveLength(3);
+
+    const bounded = await findOverdueSubmissionCandidates(db, org.scope, 2);
+    expect(bounded.map((c) => c.sectionId)).toEqual([oldest.sectionId, middle.sectionId]);
+  });
+
   it("surfaces the auto/student distinction on both the instructor matrix and the student's own view", async () => {
     const org = await seedOrg("dashboard");
     const autoStudent = await seedStudent(org.courseId, `auto-${crypto.randomUUID()}@test.example`);
