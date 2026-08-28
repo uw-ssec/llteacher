@@ -17,6 +17,11 @@ const TEST_ENV = {
   ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
   BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
 } as Env;
+/** A syntactically valid conversation id. These tests used to pass "conv-1",
+ *  which only worked because the handler had no UUID guard -- the value went
+ *  straight to Postgres in production and raised `invalid input syntax for
+ *  type uuid`. */
+const CONVERSATION_ID = "11111111-2222-4333-8444-555555555555";
 const submitSectionMock = vi.fn();
 const getOrgScopesForUserMock = vi.fn();
 const getHomeworkSubmissionsMatrixMock = vi.fn();
@@ -49,16 +54,45 @@ function buildApp(authContext: AuthContext | undefined) {
 describe("POST /api/conversations/:id/submit", () => {
   it("denies a non-student with 403", async () => {
     const res = await buildApp(fakeAuthContext({ hasRole: () => false })).request(
-      "/api/conversations/conv-1/submit", { method: "POST" }, TEST_ENV,
+      `/api/conversations/${CONVERSATION_ID}/submit`, { method: "POST" }, TEST_ENV,
     );
     expect(res.status).toBe(403);
   });
 
+  it.each(["not-a-uuid", "1", "11111111-2222-4333-8444-55555555555", "%20"])(
+    "refuses the malformed id %s without touching the database (final review)",
+    async (malformed) => {
+      // #267 fixed this on every other `:id` route and missed this one: an
+      // unguarded id reaches Postgres, raises `invalid input syntax for type
+      // uuid`, and app.onError reports that permanent client error as a 503 --
+      // so any authenticated student could make the service claim to be down.
+      getOrgScopesForUserMock.mockReset().mockRejectedValue(new Error("db must not be reached"));
+      submitSectionMock.mockReset().mockRejectedValue(new Error("db must not be reached"));
+
+      const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
+        `/api/conversations/${malformed}/submit`, { method: "POST" }, TEST_ENV,
+      );
+
+      expect(res.status).not.toBe(503);
+      // This route's own refusal, byte for byte: a distinct status or message
+      // for a malformed id would undo the deliberate collapse of "no such
+      // conversation" and "not yours" into one opaque answer.
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe(
+        "Conversation not found or not accessible",
+      );
+      // The guard is before the DB, not merely a nicer error after it -- the
+      // whole point is that no statement is ever issued.
+      expect(getOrgScopesForUserMock).not.toHaveBeenCalled();
+      expect(submitSectionMock).not.toHaveBeenCalled();
+    },
+  );
+
   it("creates a submission and returns 201, isResubmission=false", async () => {
     getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
-    submitSectionMock.mockReset().mockResolvedValue({ id: "sub-1", conversationId: "conv-1", submittedAt: new Date(), isResubmission: false });
+    submitSectionMock.mockReset().mockResolvedValue({ id: "sub-1", conversationId: CONVERSATION_ID, submittedAt: new Date(), isResubmission: false });
     const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
-      "/api/conversations/conv-1/submit", { method: "POST" }, TEST_ENV,
+      `/api/conversations/${CONVERSATION_ID}/submit`, { method: "POST" }, TEST_ENV,
     );
     expect(res.status).toBe(201);
     const body = (await res.json()) as SubmissionResponse;
@@ -67,9 +101,9 @@ describe("POST /api/conversations/:id/submit", () => {
 
   it("resubmit returns 200, isResubmission=true", async () => {
     getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
-    submitSectionMock.mockReset().mockResolvedValue({ id: "sub-1", conversationId: "conv-1", submittedAt: new Date(), isResubmission: true });
+    submitSectionMock.mockReset().mockResolvedValue({ id: "sub-1", conversationId: CONVERSATION_ID, submittedAt: new Date(), isResubmission: true });
     const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
-      "/api/conversations/conv-1/submit", { method: "POST" }, TEST_ENV,
+      `/api/conversations/${CONVERSATION_ID}/submit`, { method: "POST" }, TEST_ENV,
     );
     expect(res.status).toBe(200);
   });
@@ -81,7 +115,7 @@ describe("POST /api/conversations/:id/submit", () => {
       getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
       submitSectionMock.mockReset().mockRejectedValue(new mod[errorName]());
       const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
-        "/api/conversations/conv-1/submit", { method: "POST" }, TEST_ENV,
+        `/api/conversations/${CONVERSATION_ID}/submit`, { method: "POST" }, TEST_ENV,
       );
       expect(res.status).toBe(403);
       // Identical body either way -- a non-owner must not be able to tell
@@ -97,7 +131,7 @@ describe("POST /api/conversations/:id/submit", () => {
     getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
     submitSectionMock.mockReset().mockRejectedValue(new HomeworkClosedError());
     const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
-      "/api/conversations/conv-1/submit", { method: "POST" }, TEST_ENV,
+      `/api/conversations/${CONVERSATION_ID}/submit`, { method: "POST" }, TEST_ENV,
     );
     // The student had legitimate access -- "not found" would send them
     // hunting a bug that isn't there.
@@ -111,7 +145,7 @@ describe("POST /api/conversations/:id/submit", () => {
     getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
     submitSectionMock.mockReset().mockRejectedValue(new Error("connection terminated unexpectedly"));
     const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
-      "/api/conversations/conv-1/submit", { method: "POST" }, TEST_ENV,
+      `/api/conversations/${CONVERSATION_ID}/submit`, { method: "POST" }, TEST_ENV,
     );
     expect(res.status).toBe(503);
   });

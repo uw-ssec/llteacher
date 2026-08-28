@@ -180,13 +180,11 @@ before any database call:
 | `:id` path param on `/api/conversations/:id[/messages]` | `404 {"error":"Conversation not found"}` — same body as a genuine miss |
 | `:sectionId` / `:conversationId` path params on the section routes | `404 {"error":"Section not found"}` / `404 {"error":"Conversation not found"}` |
 | `conversationId` / `courseId` / `sectionId` in the `/api/chat` body | `400 {"error":"conversationId/courseId/sectionId must be valid UUIDs when present; kind must be 'tutor' or 'section'"}` |
+| `:id` path param on `/api/conversations/:id/submit` | `403 {"error":"Conversation not found or not accessible"}` — 403 rather than 404 because that route collapses every refusal into one opaque answer; see the [conventions exception](#404-not-403-row-ownership-vs-403-course-scope) |
 
 A malformed `courseId` **query** param on `GET /api/conversations` is neither —
 it fails the membership check and returns `403 "Course access denied"`, because
 membership is matched in memory before any query runs.
-
-The one route with no such guard is `POST /api/conversations/:id/submit`; see
-[Known gaps](#known-gaps).
 
 ### Rate limits
 
@@ -939,10 +937,9 @@ Submit the section conversation identified by `:id`. Student role only.
 | 401 | `{"error":"Unauthorized"}` — no session |
 | 403 | `{"error":"Insufficient permissions"}` — caller is not a student |
 | 403 | `{"error":"No organization membership found"}` |
-| 403 | `{"error":"Conversation not found or not accessible"}` — **403, not 404**; see the [conventions exception](#404-not-403-row-ownership-vs-403-course-scope). Covers both "not yours" and "not a submittable conversation". |
+| 403 | `{"error":"Conversation not found or not accessible"}` — **403, not 404**; see the [conventions exception](#404-not-403-row-ownership-vs-403-course-scope). Covers "not yours", "not a submittable conversation", and a malformed `:id` (rejected before any database call). |
 | 409 | `{"error":"Teacher test conversations cannot be submitted"}` |
 | 409 | `{"error":"Homework is hidden or expired"}` |
-| 503 | `{"error":"Something went wrong. Please try again later."}` — malformed `:id`; see [Known gaps](#known-gaps) |
 
 ---
 
@@ -951,21 +948,16 @@ Submit the section conversation identified by `:id`. Student role only.
 Current behavior, stated so you do not waste time deciding whether it is a bug
 on your side:
 
-1. **`POST /api/conversations/:id/submit` does not validate `:id` as a UUID.**
-   Every other `:id` route rejects a malformed id with a 404 before touching the
-   database. This one passes it through, so a malformed id surfaces as a generic
-   `503 {"error":"Something went wrong. Please try again later."}` rather than a
-   404. Send well-formed UUIDs.
-2. **The messages page has no `nextCursor`.** Page by reading `seq` off the
+1. **The messages page has no `nextCursor`.** Page by reading `seq` off the
    oldest row you received. On the section-conversation routes, message rows do
    not carry `seq` at all, so those routes are effectively single-page unless you
    track sequence numbers another way.
-3. **A non-null `nextCursor` on `GET /api/conversations` does not guarantee more
+2. **A non-null `nextCursor` on `GET /api/conversations` does not guarantee more
    rows** — it means "the page was full," which is the only signal available.
-4. **`x-conversation-id` is a header, not a body field**, because the body is a
+3. **`x-conversation-id` is a header, not a body field**, because the body is a
    stream. There is no JSON alternative.
-5. **`code` is only present on `/api/chat` responses.** Other routes give you a
+4. **`code` is only present on `/api/chat` responses.** Other routes give you a
    status and a sentence.
-6. **No OpenAPI artifact.** This document is hand-maintained against the Zod
+5. **No OpenAPI artifact.** This document is hand-maintained against the Zod
    schemas in the source files listed at the top; if you find a discrepancy, the
    code wins — please file an issue.
