@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
-import { users, chatRateLimitWindows } from "../../db/schema";
+import { users, chatRateLimitWindows, organizations, courses, conversations, messages } from "../../db/schema";
 import { reserveRateLimitSlot } from "./rateLimits";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -169,5 +169,58 @@ describe.skipIf(!DATABASE_URL)("reserveRateLimitSlot (#265, real DB)", () => {
         .where(and(eq(chatRateLimitWindows.userId, userId), eq(chatRateLimitWindows.windowStart, windowStart)));
       expect(row?.count).toBe(2);
     });
+  });
+
+  // #308 (requirement 5, as filed): the issue's evidence was
+  // `countRecentUserMessagesForUser`, a function that read a COUNT of
+  // persisted message rows and did not filter `conversations.isDeleted` --
+  // so messages sitting in a conversation the student had soft-deleted still
+  // inflated their live budget. That function no longer exists anywhere in
+  // this codebase (#265 replaced it, predating this dispatch): the current
+  // counter is `chatRateLimitWindows`, an atomic per-(userId, windowStart)
+  // upsert that never queries `conversations` or `messages` at all -- see
+  // reserveRateLimitSlot's own signature above, which takes no
+  // conversationId and joins nothing. This test encodes the exact scenario
+  // the issue feared (a pile of messages sitting in a deleted conversation
+  // for this user) and proves it has zero effect on the counter, as a
+  // regression guard against a future rate limiter that goes back to
+  // scanning messages/conversations without an isDeleted filter.
+  it("#308: messages in a deleted conversation do not inflate the rate-limit counter", async () => {
+    const [org] = await db
+      .insert(organizations)
+      .values({ slug: `ratelimit-${crypto.randomUUID()}`, name: "RL Org", workosOrganizationId: `w-rl-${crypto.randomUUID()}` })
+      .returning({ id: organizations.id });
+    const [course] = await db
+      .insert(courses)
+      .values({ organizationId: org!.id, code: "C", term: "T", title: "T" })
+      .returning({ id: courses.id });
+    const [deletedConvo] = await db
+      .insert(conversations)
+      .values({
+        ownerUserId: userId,
+        courseId: course!.id,
+        sectionId: null,
+        kind: "tutor",
+        title: "deleted before this test asserts anything",
+        isDeleted: true,
+        deletedAt: new Date(),
+      })
+      .returning({ id: conversations.id });
+
+    // A pile of messages -- comfortably more than RATE_LIMIT_MAX_PER_MINUTE
+    // would allow as live requests -- sitting in that deleted conversation.
+    // If any rate limiter ever counted these, this user's very first real
+    // request afterward would already read as throttled.
+    await db.insert(messages).values(
+      Array.from({ length: 30 }, (_, i) => ({
+        conversationId: deletedConvo!.id,
+        role: (i % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+        parts: [{ type: "text", text: `message ${i}` }],
+        clientMessageId: i % 2 === 0 ? crypto.randomUUID() : null,
+      })),
+    );
+
+    const count = await reserveRateLimitSlot(db, userId, testWindow(8), windowMs);
+    expect(count).toBe(1);
   });
 });
