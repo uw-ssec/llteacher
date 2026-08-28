@@ -49,6 +49,26 @@
    consume the branch `toUIMessageStreamResponse` later takes: the full text
    still reaches the client afterwards, verified rather than assumed.
 
+   WHAT THE PROBE DOES COST, stated because it is a real trade and not a
+   free win (final review). TEXT time-to-first-token is preserved -- the
+   probe peeks a tee'd branch and returns on the very chunk the client would
+   have rendered first. But constructing the HTTP RESPONSE is now DEFERRED
+   until that chunk arrives. chat.ts awaits this function before it can call
+   `toUIMessageStreamResponse`, so the response line, its headers -- notably
+   `x-conversation-id`, which is how a first-turn client learns the
+   conversation it just created -- and the SDK's opening `start` /
+   `start-step` framing no longer go out immediately, synchronously, ahead of
+   any model output. They now go out with the first committing chunk.
+
+   Concretely: on a slow-first-token turn the client holds a connection with
+   no response headers for as long as the model takes to produce anything, up
+   to chat.ts's STREAM_TIMEOUT_MS, where previously it had headers and stream
+   framing in hand within milliseconds. Nothing is lost -- the header is
+   correct whenever the response does resolve (proven in this module's test)
+   -- and the exchange buys a failover window that is otherwise
+   unimplementable, since ai@5.0.195 gives no earlier signal that a turn will
+   fail. It is a deliberate trade, not an accident of the implementation.
+
    THIS FUNCTION NEVER THROWS. It chooses WHICH result to hand downstream and
    says who served it; it is not an error-raising layer. When there is no
    fallback, when the failure is not the kind a different model would

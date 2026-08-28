@@ -400,6 +400,76 @@ describe("chatHandler provider failover (#364)", () => {
     expect(finalizeCalls[0]!.llmLog).toMatchObject({ llmConfigId: "llm-config-primary" });
   });
 
+  it("defers the response until the first chunk, and still sends x-conversation-id (final review)", async () => {
+    // The probe's UNSTATED cost, made explicit. TEXT time-to-first-token is
+    // preserved -- the probe returns on the very chunk the client would have
+    // rendered first -- but constructing the HTTP RESPONSE is now deferred
+    // until that chunk arrives, because chatHandler cannot call
+    // toUIMessageStreamResponse before streamWithFallback resolves. Before
+    // the probe existed, headers and the SDK's `start`/`start-step` framing
+    // went out immediately, synchronously, ahead of any model output.
+    //
+    // x-conversation-id rides those headers, and it is how a FIRST-TURN
+    // client learns the id of the conversation it just created -- so the
+    // thing worth pinning is that a slow first token delays it but never
+    // loses it.
+    let releaseFirstChunk!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseFirstChunk = resolve;
+    });
+    const calls: LanguageModelV2CallOptions[] = [];
+    primaryModel = {
+      calls,
+      model: {
+        specificationVersion: "v2",
+        provider: "test-provider",
+        modelId: "gpt-5.3-codex",
+        supportedUrls: {},
+        async doGenerate() {
+          throw new Error("doGenerate should not be called by streamText's streaming path");
+        },
+        async doStream(options: LanguageModelV2CallOptions) {
+          calls.push(options);
+          return {
+            // A model that has accepted the request but not yet produced a
+            // token -- gated rather than timed, so the assertion below is
+            // about ordering and cannot flake on a slow machine.
+            stream: new ReadableStream<LanguageModelV2StreamPart>({
+              async start(controller) {
+                await gate;
+                for (const chunk of ANSWERING_CHUNKS) controller.enqueue(chunk);
+                controller.close();
+              },
+            }),
+          };
+        },
+      },
+    };
+
+    // Hono's `request` is typed `Response | Promise<Response>`; it is always
+    // the promise for an async handler, and awaiting eagerly here would
+    // defeat the point of the test.
+    const pending = Promise.resolve(postChatRaw());
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    // The deferral itself: no response object exists yet, so the client is
+    // holding a header-less connection. Documented, accepted, and now pinned
+    // -- if a future change made the response resolve eagerly again, the
+    // failover window would have closed and this would say so.
+    expect(settled).toBe(false);
+    expect(calls).toHaveLength(1);
+
+    releaseFirstChunk();
+    const res = await pending;
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-conversation-id")).toBe("22222222-2222-2222-2222-222222222222");
+    expect(await res.text()).toContain("the backup answered");
+  });
+
   it("still serves the primary's whole answer after the probe peeks at it", async () => {
     // The probe reads its own `.tee()` branch and cancels it; the branch
     // toUIMessageStreamResponse takes must still carry every chunk. If this
