@@ -64,10 +64,12 @@
    no response headers for as long as the model takes to produce anything, up
    to chat.ts's STREAM_TIMEOUT_MS, where previously it had headers and stream
    framing in hand within milliseconds. Nothing is lost -- the header is
-   correct whenever the response does resolve (proven in this module's test)
-   -- and the exchange buys a failover window that is otherwise
-   unimplementable, since ai@5.0.195 gives no earlier signal that a turn will
-   fail. It is a deliberate trade, not an accident of the implementation.
+   correct whenever the response does resolve (proven in
+   routes/chat.fallback.integration.test.ts, which gates the model's first
+   chunk on a promise so the assertion can't pass by timing luck) -- and the
+   exchange buys a failover window that is otherwise unimplementable, since
+   ai@5.0.195 gives no earlier signal that a turn will fail. It is a
+   deliberate trade, not an accident of the implementation.
 
    THIS FUNCTION NEVER THROWS. It chooses WHICH result to hand downstream and
    says who served it; it is not an error-raising layer. When there is no

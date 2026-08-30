@@ -2146,6 +2146,87 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     expect(isComposerDisabled(composer)).toBe(true);
   });
+
+  it("tutor chat: creating a new conversation clears a stale hydration error from the previous one", async () => {
+    /* Final review: handleCreateTutorConversation resets the pagination
+       state a prior conversation left behind (the test above this describe
+       block), but tutorHydrationError is the same kind of per-conversation
+       state and was missed in that pass -- it is cleared on select (line
+       ~918) and on delete-of-displayed (~1073), but not on create. Without
+       this reset, creating a conversation while an earlier one's hydration
+       had failed left the brand-new conversation rendered with t1's stale
+       error: composer disabled (isSending checks tutorHydrationError) and a
+       Retry that closes over t1's id, not t2's. */
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const tutorFixture = {
+      homeworks: [{ ...HOMEWORK_FIXTURE.homeworks[0], sections: [] }],
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(tutorFixture), { status: 200 });
+        if (url === "/api/conversations" && init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              id: "t2",
+              kind: "tutor",
+              title: "New conversation",
+              createdAt: "2026-01-03T00:00:00.000Z",
+              updatedAt: "2026-01-03T00:00:00.000Z",
+            }),
+            { status: 201 },
+          );
+        }
+        if (url.startsWith("/api/conversations?courseId=")) {
+          return new Response(
+            JSON.stringify({
+              items: [
+                { id: "t1", title: "Existing tutor chat", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 2 },
+              ],
+              nextCursor: null,
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/conversations/t1/messages")) {
+          return new Response(JSON.stringify({ error: "server unavailable" }), { status: 503 });
+        }
+        if (url.startsWith("/api/conversations/t2/messages")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("Existing tutor chat"));
+    expect(await screen.findByText(/Couldn't load that conversation/i)).toBeTruthy();
+    const composerBefore = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    expect(isComposerDisabled(composerBefore)).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: /new conversation/i }));
+
+    // t2 has nothing wrong with it -- t1's error must not have survived.
+    await waitFor(() => expect(screen.queryByText(/Couldn't load that conversation/i)).toBeNull());
+    const composerAfter = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    expect(isComposerDisabled(composerAfter)).toBe(false);
+  });
 });
 
 // #248: the section chat's restart affordance -- confirm dialog copy,

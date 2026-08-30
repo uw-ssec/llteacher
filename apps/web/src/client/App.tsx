@@ -1093,10 +1093,19 @@ export default function App() {
        Same three resets handleSelectExistingTutorConversation already does;
        they live here rather than inside selectTutorConversation because
        that function's other caller sets its own (real, fetched) values in
-       the same batch. */
+       the same batch.
+
+       tutorHydrationError belongs to the same "whichever conversation was
+       previously on screen" state and was missed in that same pass: without
+       clearing it, creating a conversation while an earlier one's hydration
+       had failed left the brand-new conversation rendered with that stale
+       error -- composer disabled (isSending checks tutorHydrationError) and
+       a Retry that closes over the OLD conversation's id, so clicking it
+       would navigate the student off the one they just created. */
     setTutorHistoryHasMore(false);
     setTutorOldestSeq(undefined);
     setTutorOlderMessagesError(false);
+    setTutorHydrationError(null);
     selectTutorConversation(created.id);
     setJustCreatedTutorConversationId(created.id);
     return true;

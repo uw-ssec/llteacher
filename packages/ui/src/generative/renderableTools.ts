@@ -30,7 +30,10 @@
  *  `render.tsx`. A side-effect-only tool (requestHint's shape) must stay
  *  out -- the model can still call it, its result still reaches the model,
  *  and a turn is simply not treated as "answered" on that call alone.
- *  `render.test.tsx` asserts the two stay in lockstep in both directions. */
+ *  Lockstep is enforced structurally -- `renderToolPart` gates on this same
+ *  set before its dispatch (below) -- but nothing tests the drift case (a
+ *  name added here with no matching renderer, or vice versa); add that
+ *  coverage before relying on this comment alone. */
 export const RENDERABLE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "showDefinition",
   "executeRCode",
