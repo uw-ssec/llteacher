@@ -525,7 +525,14 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     });
     // Bump `older`'s updatedAt past `newer`'s so creation order and
     // updatedAt order genuinely disagree -- proves the list is ordered by
-    // updatedAt, not insertion/created_at order.
+    // updatedAt, not insertion/created_at order. The delay guards against
+    // `updated_at`'s millisecond precision (0042_steady_slayback.sql): a
+    // fast local Postgres can create `newer` and update `older` inside the
+    // same millisecond, at which point the (updatedAt, id) tiebreaker
+    // (#281) breaks the tie by id -- essentially random relative to
+    // creation order -- and this assertion flakes on which UUID happened to
+    // sort second. 5ms guarantees older's bump lands in a later millisecond.
+    await new Promise((resolve) => setTimeout(resolve, 5));
     await updateConversationTitle(db, unsafeCourseScope(courseAId), older.id, "Ordering: now most recently updated");
 
     const rows = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId);
