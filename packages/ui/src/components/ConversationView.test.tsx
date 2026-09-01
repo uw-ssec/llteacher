@@ -192,6 +192,50 @@ describe("ConversationView send-failure recovery (#96)", () => {
       "words I am still writing",
     );
   });
+
+  it("#427: surfaces the message it could not restore, instead of losing it silently", () => {
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} />,
+    );
+    const composer = screen.getByLabelText("Message input") as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "words I am still writing" } });
+
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        restoredDraft={{ text: "why is my p-value 0.03?" }}
+        error={{ message: "Load failed", stage: "send" }}
+      />,
+    );
+
+    /* The draft is still protected -- that guard exists for a real case (a
+       hint send failing while the student is mid-question). But the failed
+       message used to just cease to exist: the bubble was already dropped
+       from the transcript, the server never stored it, and the error row
+       went on saying it was "back in the box below". */
+    expect((screen.getByLabelText("Message input") as HTMLTextAreaElement).value).toBe(
+      "words I am still writing",
+    );
+    expect(screen.getByText("why is my p-value 0.03?")).toBeTruthy();
+  });
+
+  it("#427: says nothing extra when the restore actually succeeded", () => {
+    render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        restoredDraft={{ text: "the only copy" }}
+        error={{ message: "Load failed", stage: "send" }}
+      />,
+    );
+    // It went into the composer, so the error row must not also print it --
+    // the student would see the same words twice and wonder which is real.
+    expect((screen.getByLabelText("Message input") as HTMLTextAreaElement).value).toBe("the only copy");
+    expect(screen.queryByText(/composer already had text/i)).toBeNull();
+  });
 });
 
 // #280: the messages route pages at 200. `hasMoreHistory` means there are
@@ -275,6 +319,66 @@ describe("ConversationView hasMoreHistory (#280)", () => {
        is a no-op; what this asserts is the guard itself, i.e. that
        ConversationView does not scroll on a prepend the way it does on an
        append. */
+    it("#428: a reply landing mid-request does not consume the anchor meant for the prepend", async () => {
+      /* The ordering this exists for: the student scrolls up and clicks
+         "Load older messages" WHILE a reply is still streaming. The reply
+         lands first, changing messages.length -- and the layout effect,
+         keyed on length alone, spent the anchor on that append. It scrolled
+         to a meaningless offset and suppressed the new reply's own scroll,
+         and then the real prepend found a null anchor and fell through to
+         scrollToBottom: the student was thrown to the newest message,
+         exactly the jump the anchoring exists to prevent. */
+      const scrollTo = vi.fn();
+      const shown: MessageData = { id: "m1", role: "ai" as const, content: "newest" };
+      const appended: MessageData = { id: "m2", role: "ai" as const, content: "the reply that was streaming" };
+      const older: MessageData = { id: "m0", role: "ai" as const, content: "oldest" };
+
+      const { rerender, container } = render(
+        <ConversationView
+          breadcrumb="b"
+          messages={[shown]}
+          onSendMessage={() => {}}
+          hasMoreHistory={true}
+          onLoadOlderMessages={() => {}}
+          isLoadingOlderMessages={false}
+        />,
+      );
+      const scroller = container.querySelector(".conversation-messages") ?? container.firstElementChild!;
+      (scroller as HTMLElement & { scrollTo: unknown }).scrollTo = scrollTo;
+
+      await userEvent.click(screen.getByRole("button", { name: /load older messages/i }));
+      scrollTo.mockClear();
+
+      // The streaming reply arrives BEFORE the older page. This is an
+      // append: the message at the top has not changed.
+      rerender(
+        <ConversationView
+          breadcrumb="b"
+          messages={[shown, appended]}
+          onSendMessage={() => {}}
+          hasMoreHistory={true}
+          onLoadOlderMessages={() => {}}
+          isLoadingOlderMessages={true}
+        />,
+      );
+
+      // Now the page the student actually asked for. The anchor must still
+      // be armed, so this prepend is recognised and does NOT scroll.
+      scrollTo.mockClear();
+      rerender(
+        <ConversationView
+          breadcrumb="b"
+          messages={[older, shown, appended]}
+          onSendMessage={() => {}}
+          hasMoreHistory={true}
+          onLoadOlderMessages={() => {}}
+          isLoadingOlderMessages={false}
+        />,
+      );
+
+      expect(scrollTo).not.toHaveBeenCalled();
+    });
+
     it("does not scroll to the bottom when older messages are prepended", async () => {
       const scrollTo = vi.fn();
       const older: MessageData = { id: "m0", role: "ai" as const, content: "oldest" };
