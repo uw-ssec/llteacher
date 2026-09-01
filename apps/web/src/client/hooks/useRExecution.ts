@@ -48,22 +48,67 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-/** An `error`/`message`/`warning` captured item's `data` is an R condition
- *  object (an RObject proxy, not a plain string) -- r-execution-manager.js
- *  awaits its own `.toString()` on the `error` case to get readable text;
- *  this generalizes that to all three condition types (see processCapture
- *  below), which share the same RObject-proxy shape. Tolerates a sync OR
- *  async `toString`, and falls back to `fallback` rather than throwing if
- *  neither shape holds. */
+/** An RObject proxy's `toString()` resolves to a *type description*, not
+ *  content -- literally the string `"[object RObject:list]"`. It is
+ *  non-empty and isn't `"[object Object]"`, so a naive
+ *  truthy-and-not-`[object Object]` guard accepts it as if it were real
+ *  text. Anything shaped like `[object <something>]` is that artifact, not
+ *  message content, and must be rejected. */
+const ROBJECT_TOSTRING_ARTIFACT = /^\[object [^\]]*\]$/;
+
+/** An `error`/`message`/`warning` captured item's `data` is an R *condition*
+ *  object -- an RObject proxy over an R list, verified live to carry exactly
+ *  `names() === ["message", "call"]`. The readable text is the `message`
+ *  element; the proxy's own `toString()` is not it.
+ *
+ *  This originally awaited `.toString()` on the proxy (following
+ *  r-execution-manager.js's `error` handling) and accepted whatever came
+ *  back. Live verification during the #374 fix showed what that actually
+ *  produces for a real condition: three lines of `[object RObject:list]`
+ *  above the student's output, one per `library()` call. `toJs()` is not an
+ *  escape hatch either -- it throws `"This R object cannot be converted to
+ *  JS"`, because the sibling `call` element is an R language object with no
+ *  JS equivalent. Reading just the `message` element sidesteps it entirely.
+ *
+ *  Latent before now and newly visible because of #374: with the default
+ *  packages finally installing, every `library()` call emits its attach
+ *  messages for the first time, so what used to be a rare path (a student's
+ *  own `message()`/`warning()`) is now on every single run.
+ *
+ *  Order is deliberate: the `message` element first, the proxy's own
+ *  `toString()` only as a fallback (a future webR version could hand this
+ *  branch a plain string), and `fallback` if neither yields real text.
+ *  Never throws. */
 async function stringifyConditionData(data: unknown, fallback: string): Promise<string> {
-  if (data && typeof (data as { toString?: unknown }).toString === "function") {
+  const asText = async (value: unknown): Promise<string | null> => {
+    if (typeof value === "string") return value;
+    if (!value || typeof (value as { toString?: unknown }).toString !== "function") return null;
+    const maybe = (value as { toString(): unknown }).toString();
+    const str = maybe instanceof Promise ? await maybe : maybe;
+    if (typeof str !== "string" || str.length === 0) return null;
+    return ROBJECT_TOSTRING_ARTIFACT.test(str) ? null : str;
+  };
+
+  // R appends a trailing newline to message() text; processCapture joins
+  // lines with "\n" of its own, so keeping it would emit a blank line after
+  // every condition.
+  const clean = (str: string): string => str.replace(/\n+$/, "");
+
+  const getter = (data as { get?: unknown } | null)?.get;
+  if (typeof getter === "function") {
     try {
-      const maybe = (data as { toString(): unknown }).toString();
-      const str = maybe instanceof Promise ? await maybe : maybe;
-      if (typeof str === "string" && str.length > 0 && str !== "[object Object]") return str;
+      const text = await asText(await (data as { get(name: string): Promise<unknown> }).get("message"));
+      if (text !== null && text.trim().length > 0) return clean(text);
     } catch {
-      // fall through to the fallback below
+      // Not a condition list, or webR refused the lookup -- try toString().
     }
+  }
+
+  try {
+    const text = await asText(data);
+    if (text !== null && text.trim().length > 0) return clean(text);
+  } catch {
+    // fall through to the fallback below
   }
   return fallback;
 }
@@ -120,11 +165,51 @@ async function processCapture(captured: WebRCaptureResult): Promise<ProcessedCap
   return { output, error: errorText, images };
 }
 
+/* #374 review finding: `missingPackages` was dead data. useWebR() produced it,
+   useRExecution() dropped it, and App.tsx took only `run` -- so the ONLY
+   externally-observable signal that a package failed to install was a
+   console.warn, invisible to a student. #379 fixes the install itself, but if
+   it ever fails again (repo outage, a package pulled from the WASM repo) the
+   student is left with R's own message, which blames their code:
+
+       Error in library(dplyr) : there is no package called 'dplyr'
+
+   That reads as "you typed something wrong". It is not.
+
+   Appended only when the failure is PLAUSIBLY about a missing package -- the
+   error names one, or the code asked for one. Appending to every error would
+   attach an irrelevant paragraph to a student's genuine typo, which is how
+   people learn to stop reading error messages. */
+function explainMissingPackages(
+  code: string,
+  errorText: string,
+  missing: readonly string[] | undefined,
+): string | null {
+  /* Defensive: this hook's whole contract is that it NEVER rejects -- every
+     failure resolves to status:"error". A caller (or a test double) supplying
+     an older useWebR shape without missingPackages must not turn a student's
+     R error into an unhandled TypeError. */
+  if (!missing || missing.length === 0) return null;
+  const relevant = missing.filter(
+    (pkg) =>
+      errorText.includes(pkg) ||
+      new RegExp(`\\b(?:library|require|requireNamespace)\\s*\\(\\s*["']?${pkg}\\b`).test(code),
+  );
+  if (relevant.length === 0) return null;
+  const list = relevant.join(", ");
+  const isAre = relevant.length === 1 ? "isn't" : "aren't";
+  return `${list} ${isAre} available in this session -- the package failed to load when R started, so this is an environment problem rather than a mistake in your code. Let your instructor know.`;
+}
+
 export interface UseRExecutionResult {
   /** Passed through from useWebR -- lets a caller (e.g. CodeExecution's Run
    *  button) show a loading/error state without needing its own useWebR(). */
   webRStatus: WebRStatus;
   webRError?: string;
+  /** #374 review finding: packages that failed to install, so a caller can
+   *  warn a student BEFORE they run `library(dplyr)` rather than only
+   *  annotating the failure afterwards. Empty in the normal case. */
+  missingPackages: string[];
   isRunning: boolean;
   /** Executes R code against the shared WebR singleton, lazily
    *  initializing it on first call. Never rejects: every failure mode
@@ -136,7 +221,7 @@ export interface UseRExecutionResult {
 }
 
 export function useRExecution(): UseRExecutionResult {
-  const { status: webRStatus, error: webRError, ensureReady } = useWebR();
+  const { status: webRStatus, error: webRError, missingPackages, ensureReady } = useWebR();
   const [isRunning, setIsRunning] = useState(false);
 
   const run = useCallback(
@@ -162,7 +247,14 @@ export function useRExecution(): UseRExecutionResult {
           const { output, error, images } = await processCapture(captured);
           const executionTimeMs = Date.now() - startedAt;
           if (error) {
-            return { status: "error", error, output: output || undefined, executionTimeMs, images: images.length ? images : undefined };
+            const note = explainMissingPackages(code, error, missingPackages);
+            return {
+              status: "error",
+              error: note ? `${error}\n\n${note}` : error,
+              output: output || undefined,
+              executionTimeMs,
+              images: images.length ? images : undefined,
+            };
           }
           return { status: "success", output: output || undefined, executionTimeMs, images: images.length ? images : undefined };
         } catch (err) {
@@ -222,5 +314,9 @@ export function useRExecution(): UseRExecutionResult {
     [ensureReady],
   );
 
-  return { webRStatus, webRError, isRunning, run };
+  /* #374 review finding: `missingPackages` used to stop here. It is returned
+     now so a caller can surface it BEFORE a student runs anything, not only
+     after a failure -- the error annotation above is the floor, not the
+     ceiling. */
+  return { webRStatus, webRError, missingPackages, isRunning, run };
 }

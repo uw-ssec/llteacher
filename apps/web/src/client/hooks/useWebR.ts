@@ -104,15 +104,37 @@ const WEBR_BASE_URL = "/webr/";
 
 /** Installed once at init, matching r-execution-manager.js's own list --
  *  common enough that most section R exercises need at least one, and
- *  installing upfront avoids a multi-second `install.packages()` stall the
- *  first time a student's own code happens to `library(ggplot2)`.
+ *  installing upfront avoids a multi-second install stall the first time a
+ *  student's own code happens to `library(ggplot2)`.
  *
- *  Live verification (see docs/architecture/webr-self-hosting.md) found
- *  that every one of these installs actually fails on this WASM build
- *  ("This version of R is not set up to install source packages") --
- *  non-fatal (the try/catch below), but likely means none of these are
- *  ever really available to students. Tracked in #374; not fixed here. */
+ *  #374: these used to be installed by evaluating R's own
+ *  `install.packages()`, which fails outright on this build -- "This
+ *  version of R is not set up to install source packages". That is not a
+ *  misconfiguration to work around, it is correct: R's stock installer
+ *  builds packages from source, and there is no C/C++/Fortran toolchain
+ *  inside the WASM R process to build them with. webR's answer is a
+ *  separate repository of packages *pre-compiled to WASM* and its own
+ *  installer that fetches them -- `WebR#installPackages` (JS) /
+ *  `webr::install()` (R), which resolves dependencies and mounts each
+ *  package as an Emscripten filesystem image rather than compiling
+ *  anything. Verified against the pinned repo before switching: all three
+ *  are present as real WASM binaries at repoUrl's contrib/4.6 index
+ *  (R_VERSION 4.6.0 for webr@0.6.0) -- ggplot2 4.0.3, dplyr 1.2.1,
+ *  tidyr 1.3.2 -- and it serves `access-control-allow-origin: *`, which is
+ *  what lets these fetches succeed under the COEP `require-corp` header
+ *  server/index.ts sets on this origin. */
 const DEFAULT_PACKAGES = ["ggplot2", "dplyr", "tidyr"];
+
+/** Where the WASM-compiled packages come from. Deliberately left at webR's
+ *  own default (`https://repo.r-wasm.org`) rather than self-hosted like the
+ *  runtime itself is: #369's objection was to third-party *JavaScript*
+ *  executing in this authenticated origin, and this is a different risk
+ *  class -- R packages fetched as data and run inside the sandboxed WASM R
+ *  process, never in the page's JS realm. The full mirror is also far too
+ *  large to vendor (the contrib index alone is ~4.7MB; the packages behind
+ *  it are tens of GB). Named here rather than left implicit so the tradeoff
+ *  is visible, and so pointing it at a mirror later is a one-line change. */
+const WEBR_REPO_URL = "https://repo.r-wasm.org";
 
 /* Minimal shape of the webr.mjs module/instance this app actually calls --
    not the full WebROptions/WebR type surface `webr`'s own .d.ts exports
@@ -139,6 +161,15 @@ export interface WebRInstance {
   init(): Promise<void>;
   evalRVoid(code: string): Promise<void>;
   evalR(code: string): Promise<unknown>;
+  /** webR's WASM-binary package installer -- see DEFAULT_PACKAGES (#374).
+   *  Spelled exactly as WebR declares it (node_modules/webr/dist/webR/
+   *  webr-main.d.ts), including the `repos`/`quiet`/`mount` option names. */
+  installPackages(packages: string | string[], options?: { repos?: string | string[]; quiet?: boolean; mount?: boolean }): Promise<void>;
+  /** Preferred over `evalR` for a plain predicate: webR unwraps the R
+   *  logical to a JS boolean and disposes the underlying R object itself,
+   *  so the caller neither guesses at the RObject proxy's shape nor leaks a
+   *  reference into the shelter on every call. */
+  evalRBoolean(code: string): Promise<boolean>;
   Shelter: new () => WebRShelter;
 }
 interface WebRModule {
@@ -148,9 +179,32 @@ interface WebRModule {
 let webRInstance: WebRInstance | null = null;
 let initPromise: Promise<WebRInstance> | null = null;
 let initError: string | null = null;
+/** Which of DEFAULT_PACKAGES init could not make available, surfaced on the
+ *  hook so a caller can tell a student "dplyr isn't available here" instead
+ *  of letting `library(dplyr)` fail with a bare R error (#374). */
+let missingPackages: string[] = [];
 
 function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Asks R itself which of DEFAULT_PACKAGES actually resolve, rather than
+ *  trusting the installer's return. This is the check whose absence made
+ *  #374 invisible for a whole release: `requireNamespace` is the same
+ *  question `library()` will ask when a student's code runs, so a package
+ *  that passes here is genuinely usable and one that doesn't is genuinely
+ *  not. Never throws -- a broken probe must not fail init. */
+async function findMissingPackages(webR: WebRInstance): Promise<string[]> {
+  const missing: string[] = [];
+  for (const pkg of DEFAULT_PACKAGES) {
+    try {
+      const ok = await webR.evalRBoolean(`isTRUE(requireNamespace("${pkg}", quietly = TRUE))`);
+      if (!ok) missing.push(pkg);
+    } catch {
+      missing.push(pkg);
+    }
+  }
+  return missing;
 }
 
 async function doInit(): Promise<WebRInstance> {
@@ -165,15 +219,26 @@ async function doInit(): Promise<WebRInstance> {
   // webr::canvas as the default graphics device -- Django parity, and the
   // one setting that makes plot capture (useRExecution.ts) possible at all.
   await webR.evalRVoid("options(device=webr::canvas)");
-  for (const pkg of DEFAULT_PACKAGES) {
-    try {
-      await webR.evalR(`if (!require(${pkg}, quietly = TRUE)) { install.packages("${pkg}", quiet = TRUE) }`);
-    } catch {
-      // Best-effort, matching r-execution-manager.js's installCommonPackages
-      // -- WebR is still usable without any one of these; a single package
-      // failing to install (e.g. this CDN mirror not carrying it) must not
-      // fail init for the whole app.
-    }
+  // One call for the whole list, not one per package: webR resolves the
+  // shared dependency graph (all three pull in rlang/vctrs/cli/glue/...)
+  // once, instead of re-walking it three times.
+  //
+  // Best-effort, matching r-execution-manager.js's installCommonPackages --
+  // WebR is still usable without any of these, and a repo outage must not
+  // leave the whole R feature dead. But #374's real lesson is that
+  // best-effort was also *silent*: every install had been failing since the
+  // feature shipped and nothing said so. So the outcome is checked and
+  // recorded either way, and anything missing is reported once.
+  try {
+    await webR.installPackages(DEFAULT_PACKAGES, { repos: WEBR_REPO_URL, quiet: true });
+  } catch (err: unknown) {
+    console.warn(`[webr] package install failed: ${describeError(err)}`);
+  }
+  missingPackages = await findMissingPackages(webR);
+  if (missingPackages.length > 0) {
+    console.warn(
+      `[webr] these packages are NOT available to student code: ${missingPackages.join(", ")} -- library() will fail for them (#374)`,
+    );
   }
   return webR;
 }
@@ -191,6 +256,9 @@ function ensureInit(): Promise<WebRInstance> {
       })
       .catch((err: unknown) => {
         initError = describeError(err);
+        // A failed init taught us nothing about package availability -- do
+        // not leave a stale verdict from a previous attempt behind it.
+        missingPackages = [];
         // Un-pin the promise so a later ensureReady() call retries instead
         // of replaying the same rejection forever -- a transient CDN blip
         // shouldn't be this app's permanent failure state.
@@ -206,6 +274,12 @@ export type WebRStatus = "idle" | "loading" | "ready" | "error";
 export interface UseWebRResult {
   status: WebRStatus;
   error?: string;
+  /** Any of DEFAULT_PACKAGES that init could not make available, verified
+   *  against R itself rather than assumed (#374). Empty until init resolves
+   *  -- callers should read it only once `status === "ready"`. Lets a
+   *  surface warn the student up front instead of leaving them to decode a
+   *  bare `there is no package called 'dplyr'` from their own code. */
+  missingPackages: string[];
   /** Lazily triggers init on first call and resolves once the shared
    *  singleton is ready. Safe to call again once ready (resolves
    *  immediately with the same instance) or concurrently from multiple
@@ -221,6 +295,7 @@ export function useWebR(): UseWebRResult {
   // called.
   const [status, setStatus] = useState<WebRStatus>(webRInstance ? "ready" : initError ? "error" : "idle");
   const [error, setError] = useState<string | undefined>(initError ?? undefined);
+  const [missing, setMissing] = useState<string[]>(missingPackages);
 
   const ensureReady = useCallback(() => {
     setStatus((s) => (s === "ready" ? s : "loading"));
@@ -228,15 +303,17 @@ export function useWebR(): UseWebRResult {
       .then((webR) => {
         setStatus("ready");
         setError(undefined);
+        setMissing(missingPackages);
         return webR;
       })
       .catch((err: unknown) => {
         const message = describeError(err);
         setStatus("error");
         setError(message);
+        setMissing([]);
         throw err;
       });
   }, []);
 
-  return { status, error, ensureReady };
+  return { status, error, missingPackages: missing, ensureReady };
 }

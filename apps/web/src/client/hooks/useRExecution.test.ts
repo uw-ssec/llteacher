@@ -13,7 +13,15 @@ import { renderHook, act } from "@testing-library/react";
    -------------------------------------------------------------------------- */
 
 const ensureReady = vi.fn();
-const useWebRMock = vi.fn(() => ({ status: "ready" as const, error: undefined, ensureReady }));
+const useWebRMock = vi.fn(() => ({
+  status: "ready" as const,
+  error: undefined,
+  /* #374 review finding: the real useWebR returns this, and
+     useRExecution now reads it to explain a package-related failure to
+     the student. Empty is the healthy case. */
+  missingPackages: [] as string[],
+  ensureReady,
+}));
 
 vi.mock("./useWebR", () => ({
   useWebR: () => useWebRMock(),
@@ -39,7 +47,7 @@ function makeWebR(shelter: ReturnType<typeof makeShelter>) {
 beforeEach(() => {
   ensureReady.mockReset();
   useWebRMock.mockReset();
-  useWebRMock.mockReturnValue({ status: "ready", error: undefined, ensureReady });
+  useWebRMock.mockReturnValue({ status: "ready", error: undefined, missingPackages: [], ensureReady });
 });
 
 async function importUseRExecution() {
@@ -156,6 +164,146 @@ describe("useRExecution", () => {
     });
 
     expect(out.status).toBe("success");
+    expect(out.output).toBe("An R message occurred during execution");
+  });
+
+  /* ---- Real R condition objects (#374 follow-on) ----------------------
+     Live verification showed the shape the previous tests never modelled:
+     a real condition `data` is an RObject *proxy* over an R list whose
+     `toString()` resolves to the type description "[object RObject:list]",
+     not the message. Everything below models that real shape, because the
+     bug was that a hand-written `{ toString: async () => "..." }` stub
+     passes either way -- the old code looked correct against the stub and
+     printed "[object RObject:list]" to actual students. */
+
+  /** A real webR condition proxy: `names() === ["message", "call"]`, a
+   *  type-description `toString()`, and a `toJs()` that throws because the
+   *  `call` element is an R language object. Verified against webR 0.6.0. */
+  function makeConditionProxy(message: string) {
+    return {
+      toString: () => "[object RObject:list]",
+      toJs: () => Promise.reject(new Error("This R object cannot be converted to JS")),
+      names: async () => ["message", "call"],
+      get: async (name: string) => {
+        if (name !== "message") throw new Error(`unexpected element ${name}`);
+        // R's own message() text carries a trailing newline.
+        return { toString: async () => `${message}\n` };
+      },
+    };
+  }
+
+  it("reads a real condition proxy's message element instead of printing [object RObject:list]", async () => {
+    const shelter = makeShelter(async () => ({
+      output: [
+        { type: "message", data: makeConditionProxy("Attaching package: 'dplyr'") },
+        { type: "stdout", data: "[1] 42" },
+      ],
+    }));
+    ensureReady.mockResolvedValue(makeWebR(shelter));
+
+    const { useRExecution } = await importUseRExecution();
+    const { result } = renderHook(() => useRExecution());
+
+    let out!: Awaited<ReturnType<typeof result.current.run>>;
+    await act(async () => {
+      out = await result.current.run("library(dplyr)");
+    });
+
+    expect(out.status).toBe("success");
+    expect(out.output).toBe("Attaching package: 'dplyr'\n[1] 42");
+    expect(out.output).not.toContain("[object");
+  });
+
+  it("strips the trailing newline R appends, so a condition does not emit a blank line", async () => {
+    const shelter = makeShelter(async () => ({
+      output: [
+        { type: "message", data: makeConditionProxy("first") },
+        { type: "message", data: makeConditionProxy("second") },
+      ],
+    }));
+    ensureReady.mockResolvedValue(makeWebR(shelter));
+
+    const { useRExecution } = await importUseRExecution();
+    const { result } = renderHook(() => useRExecution());
+
+    let out!: Awaited<ReturnType<typeof result.current.run>>;
+    await act(async () => {
+      out = await result.current.run("message('first'); message('second')");
+    });
+
+    expect(out.output).toBe("first\nsecond");
+  });
+
+  it("rejects any [object ...] type description, not just the exact [object Object] string", async () => {
+    // No `get`, and a toString that yields only the proxy artifact -- there
+    // is no real text to be had, so the generic label is correct.
+    const shelter = makeShelter(async () => ({
+      output: [{ type: "warning", data: { toString: () => "[object RObject:character]" } }],
+    }));
+    ensureReady.mockResolvedValue(makeWebR(shelter));
+
+    const { useRExecution } = await importUseRExecution();
+    const { result } = renderHook(() => useRExecution());
+
+    let out!: Awaited<ReturnType<typeof result.current.run>>;
+    await act(async () => {
+      out = await result.current.run("warning('x')");
+    });
+
+    expect(out.output).toBe("A warning occurred during execution");
+  });
+
+  it("falls back to toString() when the condition has no message element to read", async () => {
+    // Guards the ordering: a future webR handing this branch a plain
+    // string, or a condition whose `get` rejects, must still render.
+    const shelter = makeShelter(async () => ({
+      output: [
+        {
+          type: "message",
+          data: {
+            get: async () => {
+              throw new Error("not a list");
+            },
+            toString: async () => "plain readable text",
+          },
+        },
+      ],
+    }));
+    ensureReady.mockResolvedValue(makeWebR(shelter));
+
+    const { useRExecution } = await importUseRExecution();
+    const { result } = renderHook(() => useRExecution());
+
+    let out!: Awaited<ReturnType<typeof result.current.run>>;
+    await act(async () => {
+      out = await result.current.run("message('x')");
+    });
+
+    expect(out.output).toBe("plain readable text");
+  });
+
+  it("falls back to the generic label when the message element is present but blank", async () => {
+    const shelter = makeShelter(async () => ({
+      output: [
+        {
+          type: "message",
+          data: {
+            get: async () => ({ toString: async () => "   \n" }),
+            toString: () => "[object RObject:list]",
+          },
+        },
+      ],
+    }));
+    ensureReady.mockResolvedValue(makeWebR(shelter));
+
+    const { useRExecution } = await importUseRExecution();
+    const { result } = renderHook(() => useRExecution());
+
+    let out!: Awaited<ReturnType<typeof result.current.run>>;
+    await act(async () => {
+      out = await result.current.run("message('')");
+    });
+
     expect(out.output).toBe("An R message occurred during execution");
   });
 
@@ -311,5 +459,65 @@ describe("useRExecution", () => {
       await runPromise;
     });
     expect(result.current.isRunning).toBe(false);
+  });
+});
+
+/* #374's root complaint was that install failures are INVISIBLE to a student:
+   R blames their code ("there is no package called 'dplyr'") for what is an
+   environment problem. #379 fixes the install; these pin that if it ever
+   breaks again, the student is told. */
+describe("useRExecution -- missing-package explanation (#374 review finding)", () => {
+  async function runWith(missingPackages: string[] | undefined, stderr: string, code: string) {
+    useWebRMock.mockReturnValue({
+      status: "ready" as const,
+      error: undefined,
+      ...(missingPackages ? { missingPackages } : {}),
+      ensureReady,
+    } as never);
+    /* type:"error", not "stderr" -- processCapture only treats the former as
+       the turn's error text (see the "captures an R error distinctly" test
+       above); stderr is ordinary output a warning also uses. */
+    const shelter = makeShelter(async () => ({
+      output: [{ type: "error", data: { toString: async () => stderr } }],
+    }));
+    ensureReady.mockResolvedValue(makeWebR(shelter));
+    const { useRExecution } = await importUseRExecution();
+    const { result } = renderHook(() => useRExecution());
+    let out!: Awaited<ReturnType<typeof result.current.run>>;
+    await act(async () => {
+      out = await result.current.run(code);
+    });
+    return out;
+  }
+
+  it("explains a missing package when the R error names it", async () => {
+    const out = await runWith(
+      ["dplyr"],
+      "Error in library(dplyr) : there is no package called 'dplyr'",
+      "library(dplyr)",
+    );
+    expect(out.status).toBe("error");
+    expect(out.error).toContain("there is no package called");
+    expect(out.error).toContain("environment problem rather than a mistake in your code");
+  });
+
+  it("explains it when the CODE asked for the package, even if the error does not name it", async () => {
+    const out = await runWith(["ggplot2"], "Error: object 'p' not found", 'library("ggplot2")\np');
+    expect(out.error).toContain("ggplot2");
+  });
+
+  it("stays SILENT when the failure has nothing to do with the missing package", async () => {
+    /* Attaching an irrelevant paragraph to a student's genuine typo is how
+       people learn to stop reading error messages. */
+    const out = await runWith(["dplyr"], "Error: object 'x' not found", "x + 1");
+    expect(out.error).toBe("Error: object 'x' not found");
+  });
+
+  it("does not crash when a caller supplies no missingPackages at all", async () => {
+    // This hook's contract is that it never rejects; an older useWebR shape
+    // must not turn a student's R error into an unhandled TypeError.
+    const out = await runWith(undefined, "Error: boom", "stop('boom')");
+    expect(out.status).toBe("error");
+    expect(out.error).toBe("Error: boom");
   });
 });
