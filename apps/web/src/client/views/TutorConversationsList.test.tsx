@@ -230,19 +230,27 @@ describe("TutorConversationsList", () => {
       expect(onRenameConversation).toHaveBeenCalledWith("conv-a", "Renamed chat");
     });
 
-    it("reports the failed row's error inline when onRenameConversation rejects", async () => {
+    // #291: a rejected rename used to revert the row to its old title and
+    // close edit mode -- it now stays in edit mode with the student's
+    // typed text intact (see EditableTitle's own doc comment), so there
+    // is no "Rename: Chat A" button to find until the row exits edit mode
+    // (Escape, or a subsequent successful save).
+    it("reports the failed row's error inline when onRenameConversation rejects, staying in edit mode with the typed value", async () => {
       const onRenameConversation = vi.fn(async () => {
         throw new Error("Title already in use");
       });
       renderList({ conversations: [CONV_A], onRenameConversation });
 
       await userEvent.click(screen.getByRole("button", { name: "Rename: Chat A" }));
-      const input = screen.getByLabelText("Edit title");
+      const input = screen.getByLabelText("Edit title") as HTMLInputElement;
       await userEvent.clear(input);
       await userEvent.type(input, "Attempted rename{Enter}");
 
-      expect(await screen.findByRole("button", { name: "Rename: Chat A" })).toBeTruthy();
-      expect(screen.getByText("Title already in use")).toBeTruthy();
+      expect(await screen.findByText("Title already in use")).toBeTruthy();
+      const stillEditing = screen.getByLabelText("Edit title") as HTMLInputElement;
+      expect(stillEditing).toBe(input);
+      expect(stillEditing.value).toBe("Attempted rename");
+      expect(screen.queryByRole("button", { name: "Rename: Chat A" })).toBeNull();
     });
   });
 });

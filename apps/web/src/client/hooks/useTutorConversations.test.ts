@@ -344,6 +344,38 @@ describe("useTutorConversations", () => {
       expect(result.current.conversations[0]!.title).toBe(CONV_A.title);
     });
 
+    // #291: "Conversation not found" is updateConversationHandler's own
+    // internal vocabulary for its 404 -- it read as a system fault
+    // rendered permanently beside a rail title the student just tried to
+    // rename themselves. Translated here, the one place this route's
+    // error text reaches the student.
+    it("translates a 404's server vocabulary into student-facing copy", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+          if (init?.method === "PATCH") {
+            return new Response(JSON.stringify({ error: "Conversation not found" }), { status: 404 });
+          }
+          return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
+        }),
+      );
+
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      let caught: unknown;
+      await act(async () => {
+        try {
+          await result.current.renameConversation("conv-a", "Attempted rename");
+        } catch (err) {
+          caught = err;
+        }
+      });
+
+      expect((caught as Error).message).toBe("This conversation is no longer available.");
+      expect(result.current.conversations[0]!.title).toBe(CONV_A.title);
+    });
+
     it("rejects with a generic error on a network failure, and reverts the optimistic update", async () => {
       vi.stubGlobal(
         "fetch",
@@ -382,26 +414,54 @@ describe("useTutorConversations", () => {
 
       const before = result.current.renameConversation;
       act(() => {
-        result.current.bumpConversation("conv-a");
+        result.current.bumpConversation("conv-a", 2);
       });
-      expect(result.current.conversations[0]!.messageCount).toBe(CONV_A.messageCount + 1);
+      expect(result.current.conversations[0]!.messageCount).toBe(CONV_A.messageCount + 2);
       expect(result.current.renameConversation).toBe(before);
     });
   });
 
-  // #216
+  // #216, #292
   describe("bumpConversation", () => {
-    it("increments messageCount and updates updatedAt for the given conversation", async () => {
+    // #292: the server counts MESSAGE ROWS, and a completed turn writes
+    // two (the student's message, then the reply) -- this asserts the
+    // hook adds exactly whatever `delta` the caller passes, for BOTH
+    // values a real turn outcome can produce, rather than pinning a
+    // single hardcoded constant the way the old "+1" version of this test
+    // did (it would have kept passing at the wrong number). Getting the
+    // right delta for a given turn outcome is App.tsx's job, exercised in
+    // App.test.tsx against the server's own two-rows-per-turn shape; this
+    // hook only has to add what it's told.
+    it.each([
+      [2, "a completed turn (student message + reply, matching the server's count(*))"],
+      [1, "an errored/empty turn (only the student's message was persisted)"],
+    ])("increments messageCount by %i and updates updatedAt for %s", async (delta) => {
       vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 })));
       const { result } = renderHook(() => useTutorConversations("course-a"));
       await waitFor(() => expect(result.current.loading).toBe(false));
 
       act(() => {
-        result.current.bumpConversation("conv-a");
+        result.current.bumpConversation("conv-a", delta);
       });
 
-      expect(result.current.conversations[0]!.messageCount).toBe(CONV_A.messageCount + 1);
+      expect(result.current.conversations[0]!.messageCount).toBe(CONV_A.messageCount + delta);
       expect(result.current.conversations[0]!.updatedAt).not.toBe(CONV_A.updatedAt);
+    });
+
+    // #292: a send-half failure (the request never reached the server, or
+    // was refused outright) persists nothing at all -- the caller passes
+    // 0, and it must be a genuine no-op, not "+0 but still re-sort/re-stamp
+    // updatedAt as though something happened."
+    it("is a no-op when delta is 0 (nothing was persisted for this turn)", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 })));
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      act(() => {
+        result.current.bumpConversation("conv-a", 0);
+      });
+
+      expect(result.current.conversations).toEqual([CONV_A]);
     });
 
     it("re-sorts the bumped conversation to the top, matching the server's updatedAt-desc ordering", async () => {
@@ -417,7 +477,7 @@ describe("useTutorConversations", () => {
       expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-b", "conv-a"]);
 
       act(() => {
-        result.current.bumpConversation("conv-a");
+        result.current.bumpConversation("conv-a", 2);
       });
 
       expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-a", "conv-b"]);
@@ -429,7 +489,7 @@ describe("useTutorConversations", () => {
       await waitFor(() => expect(result.current.loading).toBe(false));
 
       act(() => {
-        result.current.bumpConversation("conv-nonexistent");
+        result.current.bumpConversation("conv-nonexistent", 2);
       });
 
       expect(result.current.conversations).toEqual([CONV_A]);
@@ -734,14 +794,14 @@ describe("useTutorConversations", () => {
       const before = result.current.conversations;
 
       act(() => {
-        result.current.bumpConversation("conv-0");
+        result.current.bumpConversation("conv-0", 2);
       });
 
       // The overwhelmingly common case: you are talking to the conversation
       // that is already at the top. Rows must not shuffle under a student
       // who might be reading them.
       expect(result.current.conversations.map((c) => c.id)).toEqual(before.map((c) => c.id));
-      expect(result.current.conversations[0]!.messageCount).toBe(before[0]!.messageCount + 1);
+      expect(result.current.conversations[0]!.messageCount).toBe(before[0]!.messageCount + 2);
     });
 
     it("moves a bumped row to the front without disturbing the rest", async () => {
@@ -758,7 +818,7 @@ describe("useTutorConversations", () => {
       await waitFor(() => expect(result.current.conversations).toHaveLength(3));
 
       act(() => {
-        result.current.bumpConversation("conv-2");
+        result.current.bumpConversation("conv-2", 2);
       });
 
       expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-2", "conv-0", "conv-1"]);
@@ -783,7 +843,7 @@ describe("useTutorConversations", () => {
       await waitFor(() => expect(result.current.conversations).toHaveLength(3));
 
       act(() => {
-        result.current.bumpConversation("conv-2");
+        result.current.bumpConversation("conv-2", 2);
       });
 
       expect(result.current.conversations[0]!.id).toBe("conv-2");

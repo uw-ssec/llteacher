@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConversationView } from "./ConversationView";
 import type { MessageData } from "./ConversationView";
@@ -109,6 +109,107 @@ describe("ConversationView error row (#144)", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Try again" }));
     expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+});
+
+/* #286 (requirement 5): a rate-limited student had a Retry button that was
+   always live, even though the server had just said (via `Retry-After`)
+   that retrying for the next N seconds is certain to fail. */
+describe("ConversationView Retry-After cooldown (#286)", () => {
+  const RATE_LIMITED_MESSAGE = JSON.stringify({
+    error: "You're sending messages faster than the tutor can answer. Wait a few seconds, then send again.",
+    code: "rate_limited",
+  });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("disables Retry and counts down when retryAfterSeconds is set", () => {
+    const onRetry = vi.fn();
+    render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3 }}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: /Try again in 3s/ }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    expect(onRetry).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.getByRole("button", { name: /Try again in 2s/ })).toBeTruthy();
+
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    const readyButton = screen.getByRole("button", { name: "Try again" }) as HTMLButtonElement;
+    expect(readyButton.disabled).toBe(false);
+    fireEvent.click(readyButton);
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders a live Retry button immediately when retryAfterSeconds is absent", () => {
+    const onRetry = vi.fn();
+    render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: "The response failed. Please try again.", onRetry }}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Try again" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+  });
+
+  it("restarts the countdown for a genuinely new rate-limit error, not the same one re-rendering", () => {
+    const onRetry = vi.fn();
+    const { rerender } = render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3 }}
+      />,
+    );
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(screen.getByRole("button", { name: /Try again in 1s/ })).toBeTruthy();
+
+    // An unrelated re-render with the SAME error content (e.g. the parent
+    // re-rendering for an unrelated reason) must not reset the countdown
+    // back to the top.
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3 }}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /Try again in 1s/ })).toBeTruthy();
+
+    // A genuinely NEW failure (a retry that failed again) does restart it.
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 5 }}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /Try again in 5s/ })).toBeTruthy();
   });
 });
 

@@ -27,6 +27,54 @@ import { MAX_HISTORY_MESSAGES } from "../shared/chat-limits";
    Purple is the chrome. Heritage Gold is the AI's voice. Paper is the content.
    ========================================================================== */
 
+/* #286: a non-2xx /api/chat response's body is the exact JSON envelope
+   chat.ts always sends (`{error, code}`) -- @ai-sdk/react's own transport
+   (HttpChatTransport#sendMessages, node_modules/ai/dist/index.mjs) calls
+   OUR fetch wrapper (chatFetch/tutorChatFetch below) as `fetch2`, then
+   itself does `if (!response.ok) throw new Error(await response.text())`
+   on whatever that resolves to. Throwing INSIDE our wrapper instead means
+   that `await fetch2(...)` never resolves at all -- the SDK's own check
+   is never reached, and OUR exception is what the SDK's surrounding
+   try/catch stores as `chat.error` (both paths land in the same catch,
+   confirmed against the SDK's own AbstractChat#sendMessage sequencing --
+   it doesn't distinguish "the transport threw" from "the transport
+   returned and then something after it threw").
+   `.message` is left as the exact same raw JSON text the SDK would have
+   used, so packages/ui's readErrorMessage (which already parses that
+   shape for `code`/`error` and never renders it verbatim) keeps working
+   completely unchanged -- this only ADDS `.status` and
+   `.retryAfterSeconds`, neither of which anything downstream could
+   otherwise recover once a generic `Error` had already discarded the
+   Response object. */
+class ChatResponseError extends Error {
+  status: number;
+  /** #286 (requirement 5): the 429 response's own `Retry-After` header
+   *  (seconds), read here since this is the only place in the client that
+   *  ever sees the real Response headers on a failure. `undefined` for
+   *  every other status. */
+  retryAfterSeconds?: number;
+  constructor(message: string, status: number, retryAfterSeconds?: number) {
+    super(message);
+    this.name = "ChatResponseError";
+    this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+/** #286: shared by chatFetch and tutorChatFetch below -- both wrap a
+ *  distinct `useChat` instance's own fetch, but a non-ok /api/chat
+ *  response is classified identically either way. */
+async function toChatResponseError(res: Response): Promise<ChatResponseError> {
+  const rawText = await res.text();
+  const retryAfterHeader = res.headers.get("Retry-After");
+  const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : undefined;
+  return new ChatResponseError(
+    rawText || "Failed to fetch the chat response.",
+    res.status,
+    retryAfterSeconds !== undefined && Number.isFinite(retryAfterSeconds) ? retryAfterSeconds : undefined,
+  );
+}
+
 /* -- Worker status ping ---------------------------------------------------- */
 
 type HelloResponse = { message: string; ping_id: string };
@@ -337,6 +385,30 @@ function studentTextOf(message: UIMessage): string {
     .join("");
 }
 
+/** #294: TopNav's account chip used to hardcode `userInitials="AC"` --
+ *  initials belonging to no signed-in user at all, shown to every
+ *  student. `useAuth`'s only identity fields are `displayName` (nullable
+ *  -- not every user has set one) and `email` (always present once
+ *  authenticated); there is no separate given/family name field anywhere
+ *  in this client. Prefers the first letter of up to the first two words
+ *  of `displayName`; falls back to the first two characters of the
+ *  email's local part (before the "@") when there is no display name;
+ *  falls back to a neutral placeholder (never a fabricated name) when
+ *  neither is available yet -- e.g. mid-fetch, or a profile response this
+ *  client doesn't recognize the shape of. */
+function getUserInitials(profile: { displayName?: string | null; email?: string }): string {
+  const name = profile.displayName?.trim();
+  if (name) {
+    const words = name.split(/\s+/).filter(Boolean);
+    return words.length >= 2
+      ? (words[0]![0]! + words[words.length - 1]![0]!).toUpperCase()
+      : words[0]!.slice(0, 2).toUpperCase();
+  }
+  const localPart = profile.email?.trim().split("@")[0];
+  if (localPart) return localPart.slice(0, 2).toUpperCase();
+  return "?";
+}
+
 /* #96 (interrupted-stream resilience, and the two-tabs non-goal).
    ---------------------------------------------------------------
    A turn can fail in two places, and the recovery differs:
@@ -374,7 +446,10 @@ function studentTextOf(message: UIMessage): string {
 
 export default function App() {
   const { status: workerStatus, loading: workerLoading } = useWorkerStatus();
-  const { isAuthenticated, loading: authLoading, error: authError, login, logout } = useAuth();
+  const { isAuthenticated, loading: authLoading, error: authError, login, logout, email, displayName } = useAuth();
+  // #294: real initials derived from the signed-in profile, not the
+  // hardcoded "AC" stand-in -- see getUserInitials's own doc comment.
+  const userInitials = getUserInitials({ email, displayName });
   const navigate = useNavigate();
 
   /* #3: the server creates a conversation on the first turn and returns its
@@ -414,7 +489,13 @@ export default function App() {
      sectionSendAcceptedRef above. */
   const chatFetch: typeof fetch = async (input, init) => {
     const res = await fetch(input, init);
-    if (res.ok) sectionSendAcceptedRef.current = true;
+    if (!res.ok) {
+      // #286: see ChatResponseError's own doc comment above -- parsed and
+      // re-thrown here, before the AI SDK's own generic
+      // `Error(await response.text())` would otherwise run.
+      throw await toChatResponseError(res);
+    }
+    sectionSendAcceptedRef.current = true;
     const newConversationId = res.headers.get("x-conversation-id");
     if (newConversationId) {
       setConversationId(newConversationId);
@@ -598,9 +679,26 @@ export default function App() {
      here -- tutorChatFetch below does only the half that IS shared (#96's
      send-accepted classification). */
   const tutorSendAcceptedRef = useRef(true);
+  /** #292: which conversation the CURRENTLY in-flight tutor turn belongs
+   *  to -- set at the moment a send/regenerate is dispatched (see
+   *  handleSendTutorMessage and the error row's onRetry below), not read
+   *  from `tutorConversationId` at the moment the status transition is
+   *  observed. Reading the live `tutorConversationId` there was #292's
+   *  mis-credit bug: this `useChat` instance is keyed by `id:
+   *  tutorConversationId`, so switching conversations mid-stream swaps
+   *  `id` and recreates the Chat instance with a fresh "ready" status --
+   *  the effect below re-runs with BOTH deps changed and would credit
+   *  whichever conversation happens to be selected when that recreation
+   *  is observed, not the one that actually streamed the turn. */
+  const tutorBumpTargetIdRef = useRef<string | undefined>(undefined);
   const tutorChatFetch: typeof fetch = async (input, init) => {
     const res = await fetch(input, init);
-    if (res.ok) tutorSendAcceptedRef.current = true;
+    if (!res.ok) {
+      // #286: see chatFetch's own comment above -- identical reasoning,
+      // this instance's own turn.
+      throw await toChatResponseError(res);
+    }
+    tutorSendAcceptedRef.current = true;
     return res;
   };
   const {
@@ -1478,6 +1576,12 @@ export default function App() {
       ? {
           message: chatError?.message || "Something went wrong. Please try again.",
           stage: sectionSendFailure ? ("send" as const) : ("response" as const),
+          // #286: only ChatResponseError (a non-2xx /api/chat response --
+          // see its own doc comment) ever carries this; an in-stream
+          // failure (2xx, then an `error` chunk) or a dropped connection
+          // never does, and neither has a cooldown to enforce.
+          retryAfterSeconds:
+            chatError instanceof ChatResponseError ? chatError.retryAfterSeconds : undefined,
           onRetry: sectionSendFailure
             ? undefined
             : () =>
@@ -1494,31 +1598,72 @@ export default function App() {
       ? {
           message: tutorChatError?.message || "Something went wrong. Please try again.",
           stage: tutorSendFailure ? ("send" as const) : ("response" as const),
+          retryAfterSeconds:
+            tutorChatError instanceof ChatResponseError ? tutorChatError.retryAfterSeconds : undefined,
           onRetry: tutorSendFailure
             ? undefined
-            : () =>
-                regenerateTutorChat({ body: tutorConversationId ? { conversationId: tutorConversationId } : {} }),
+            : () => {
+                // #292: a regenerate re-starts an in-flight turn for
+                // WHATEVER conversation is selected right now -- same
+                // "capture at dispatch time" reasoning as
+                // handleSendTutorMessage below.
+                tutorBumpTargetIdRef.current = tutorConversationId;
+                regenerateTutorChat({ body: tutorConversationId ? { conversationId: tutorConversationId } : {} });
+              },
         }
       : null);
 
-  /* #216: bumps the rail row's messageCount/updatedAt (and re-sorts it to
-     the top) the moment a tutor turn finishes -- /api/chat writes bypass
-     useTutorConversations entirely, so without this the rail kept showing
-     a conversation's original creation timestamp and a stuck messageCount
-     of 0 for the entire session. Fires on the submitted/streaming -> ready
-     transition specifically (not on every render where status happens to
-     be "ready"), via a ref tracking the previous status -- an "error"
-     transition deliberately does not bump (no new message was actually
-     persisted, see chat.ts's hasRenderableContent-gated onFinish). */
+  /* #216, #292: bumps the rail row's messageCount/updatedAt (and re-sorts
+     it to the top) the moment a tutor turn settles -- /api/chat writes
+     bypass useTutorConversations entirely, so without this the rail kept
+     showing a conversation's original creation timestamp and a stuck
+     messageCount for the entire session. Fires on the
+     submitted/streaming -> ready|error transition specifically (not on
+     every render where status happens to already be one of those), via a
+     ref tracking the previous status.
+
+     #292: credits `tutorBumpTargetIdRef.current` -- the conversation that
+     was ACTUALLY streaming when this turn was dispatched (set by
+     handleSendTutorMessage/the error row's onRetry below) -- never the
+     live `tutorConversationId`. This `useChat` instance is keyed by `id:
+     tutorConversationId`, so switching conversations mid-stream swaps
+     `id`, recreating the Chat instance with a fresh "ready" status; the
+     old code read `tutorConversationId` at the moment that recreation was
+     observed and credited whichever conversation happened to be selected
+     then, not the one the turn actually belonged to.
+
+     #292: the delta matches what chat.ts actually persists for this
+     outcome (repositories/conversations.ts counts message ROWS, not
+     turns):
+       - "ready" (the turn completed): TWO rows -- chatHandler's
+         appendMessage for the student's message, then
+         onFinish -> finalizeAssistantTurn for the reply.
+       - "error" AND the send was accepted (tutorSendAcceptedRef true, a
+         response-half failure -- the model died mid-stream or produced no
+         renderable content): ONE row -- only the student's message was
+         ever persisted; chat.ts's shouldPersist gate means no assistant
+         row was written for it.
+       - "error" and the send was NOT accepted (a send-half failure --
+         non-2xx or the request never reached the server at all): ZERO
+         rows. bumpConversation(id, 0) is a no-op (see its own doc
+         comment), so this branch could omit the call entirely, but making
+         it explicit here keeps all three outcomes visibly accounted for
+         in one place rather than one of them being "whatever falls
+         through". */
   const prevTutorChatStatusRef = useRef(tutorChatStatus);
   useEffect(() => {
     const previousStatus = prevTutorChatStatusRef.current;
     prevTutorChatStatusRef.current = tutorChatStatus;
     const wasInFlight = previousStatus === "submitted" || previousStatus === "streaming";
-    if (tutorConversationId && wasInFlight && tutorChatStatus === "ready") {
-      bumpTutorConversation(tutorConversationId);
+    if (!wasInFlight) return;
+    const targetId = tutorBumpTargetIdRef.current;
+    if (!targetId) return;
+    if (tutorChatStatus === "ready") {
+      bumpTutorConversation(targetId, 2);
+    } else if (tutorChatStatus === "error") {
+      bumpTutorConversation(targetId, tutorSendAcceptedRef.current ? 1 : 0);
     }
-  }, [tutorChatStatus, tutorConversationId, bumpTutorConversation]);
+  }, [tutorChatStatus, bumpTutorConversation]);
 
   const handleSendMessage = (text: string, options?: { isHintRequest?: boolean }) => {
     /* #144: AI SDK v5's Chat#sendMessage has no internal guard against
@@ -1607,6 +1752,9 @@ export default function App() {
     if (tutorChatStatus === "submitted" || tutorChatStatus === "streaming") return;
     // #96: see handleSendMessage above.
     tutorSendAcceptedRef.current = false;
+    // #292: captured NOW, at dispatch, not read later off `tutorConversationId`
+    // when the turn settles -- see tutorBumpTargetIdRef's own doc comment.
+    tutorBumpTargetIdRef.current = tutorConversationId;
     setTutorSendFailure(null);
     // #304: courseId is now sent on every tutor turn, not only when minting
     // a new conversation -- chatHandler's conversationId branch doesn't
@@ -1872,10 +2020,13 @@ export default function App() {
           // #304 (requirement 4): matches homework="" right below -- the
           // fetch that would have supplied a real courseName failed, so
           // this is the same honest-empty state, not a hardcoded stand-in.
+          // #294: `term` has no data source anywhere in this client (no
+          // schema column, no fetch) -- omitted rather than asserting a
+          // specific term (TopNav treats it as optional, see its own
+          // comment). `userInitials` comes from the signed-in profile.
           course={courseName}
-          term="Autumn 2026"
           homework=""
-          userInitials="AC"
+          userInitials={userInitials}
           isAuthenticated={isAuthenticated}
           onProfileClick={() => navigate("/profile")}
           onLogout={logout}
@@ -1907,10 +2058,12 @@ export default function App() {
       <TopNav
         // #304 (requirement 4): real course code from the homework summary
         // (StudentHomeworkSummary.courseName), not a hardcoded stand-in.
+        // #294: `term` omitted (no data source anywhere in this client --
+        // see the loadError branch's own comment above) and `userInitials`
+        // derived from the signed-in profile instead of "AC".
         course={courseName}
-        term="Autumn 2026"
         homework={hwTitle}
-        userInitials="AC"
+        userInitials={userInitials}
         isAuthenticated={isAuthenticated}
         onProfileClick={() => navigate("/profile")}
         onLogout={logout}

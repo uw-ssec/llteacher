@@ -25,19 +25,23 @@ import { PencilSimple } from "@phosphor-icons/react";
    click-to-select and this component's nested pencil button coexist
    without a nested-<button> HTML violation.
 
-   Two distinct error paths, matching the issue's two separate requirement
-   lines ("show inline guidance for invalid input" vs "on failure, revert
-   and show inline error"):
+   Two distinct error paths, both of which now STAY in edit mode (#291):
      - Client-side validation (empty-after-trim, over maxLength) never
-       calls onSave at all -- it shows an error and STAYS in edit mode so
+       calls onSave at all -- it shows an error and stays in edit mode so
        the student doesn't lose what they typed and can just fix it.
-     - A rejected onSave (network/server failure) is terminal for this
-       attempt: the input reverts to the last known-good `value` and edit
-       mode closes, with the error left visible next to the (reverted)
-       read-only title. This matches Pitfall #1 in the issue's Code
-       Framework ("on rejection, the component reverts pendingValue to
-       value") and Testing Strategy #2 ("UI reverts to the old title AND
-       shows inline error").
+     - A rejected onSave (network/server failure) used to revert
+       `pendingValue` to the last known-good `value` and close edit mode,
+       leaving the error next to a read-only title -- which discarded
+       whatever the student had just typed on a merely transient failure,
+       and left the error with no dismiss affordance other than re-opening
+       the editor (#291's "crushes the input" report). It now leaves edit
+       mode OPEN with the student's attempted text still in the input and
+       refocuses it (see the isSubmitting effect below -- the input is
+       disabled for the duration of the request, and a disabled element
+       cannot hold focus, so the refocus has to happen after that flips
+       back). `localError` itself is cleared on the next keystroke
+       (`onChange` below) rather than lingering until the editor is
+       reopened.
 
    Owner-only: when `isEditable` is false, this renders inert text with no
    pencil button at all (not a disabled one) -- a non-owner should not even
@@ -152,6 +156,23 @@ export function EditableTitle({
     wasEditingRef.current = isEditing;
   }, [isEditing]);
 
+  // #291: a failed save keeps edit mode open (see commitSave's catch
+  // branch and the doc comment above) instead of closing it, but the
+  // input was disabled for the duration of the request and a disabled
+  // element cannot hold focus -- it fell back to <body> the moment
+  // isSubmitting flipped true. Refocus once submitting ends while still
+  // editing with a fresh local error, i.e. exactly the failure path: the
+  // success path already closes edit mode (isEditing false) in the same
+  // batched update that clears isSubmitting, so this condition never
+  // fires there, and the two client-validation branches (empty/too-long)
+  // never set isSubmitting true in the first place, so this effect never
+  // fires for them either -- the input was never disabled or defocused.
+  useEffect(() => {
+    if (!isSubmitting && isEditing && localError) {
+      inputRef.current?.focus();
+    }
+  }, [isSubmitting]);
+
   if (!isEditable) {
     if (onActivateValue) {
       return (
@@ -207,10 +228,13 @@ export function EditableTitle({
       suppressNextBlurRef.current = true;
       setIsEditing(false);
     } catch (err) {
-      setPendingValue(value); // revert -- see doc comment above
+      // #291: stays in edit mode with the student's typed text intact --
+      // see the doc comment above for why this no longer reverts
+      // `pendingValue` or closes the editor. Refocusing happens in the
+      // isSubmitting effect below, not here: the input is still disabled
+      // (isSubmitting hasn't flipped back to false yet) and a disabled
+      // element cannot take focus.
       setLocalError(err instanceof Error ? err.message : "Failed to save. Please try again.");
-      suppressNextBlurRef.current = true;
-      setIsEditing(false);
     } finally {
       setIsSubmitting(false);
     }
@@ -302,7 +326,15 @@ export function EditableTitle({
         type="text"
         className="editable-title__input"
         value={pendingValue}
-        onChange={(e) => setPendingValue(e.target.value)}
+        onChange={(e) => {
+          setPendingValue(e.target.value);
+          // #291: a correction dismisses the error naturally, on the next
+          // keystroke -- it used to persist until the editor was reopened
+          // (localError was cleared in exactly two other places: entering
+          // edit mode and pressing Escape), so a student who had already
+          // fixed a rejected title kept reading the stale complaint.
+          if (localError) setLocalError(null);
+        }}
         onBlur={handleBlur}
         onKeyDown={handleKeyDown}
         onClick={(e) => e.stopPropagation()}

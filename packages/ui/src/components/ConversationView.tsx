@@ -396,8 +396,19 @@ export interface ConversationViewProps {
    *  and defaults to "response", the only case that existed before. `onRetry`
    *  is optional because a "send"-stage failure has nothing to regenerate --
    *  omit it and no Retry button renders, since the student's text has been
-   *  handed back to the composer via `restoredDraft` instead. */
-  error?: { message: string; onRetry?: () => void; stage?: TurnFailureStage } | null;
+   *  handed back to the composer via `restoredDraft` instead.
+   *
+   *  #286 (requirement 5): `retryAfterSeconds` is the server's own
+   *  `Retry-After` header value on a 429 -- when present, the Retry
+   *  button below is disabled and counts down instead of being live
+   *  immediately for a request the server has already said will fail for
+   *  the next N seconds. Undefined for every other failure. */
+  error?: {
+    message: string;
+    onRetry?: () => void;
+    stage?: TurnFailureStage;
+    retryAfterSeconds?: number;
+  } | null;
   /** #96 (send-failure UX): text to put back into the composer after a send
    *  that never reached the server, so the student's words survive a dropped
    *  connection or a refused request instead of being stranded in a
@@ -849,6 +860,43 @@ export function ConversationView({
      existed only to bind locals, and foreclosed memoising or extracting. */
   const errorCopy = error ? readErrorMessage(error.message, error.stage ?? "response") : null;
 
+  /* #286 (requirement 5): disables the Retry button for `retryAfterSeconds`
+     (the 429's own `Retry-After` header) instead of leaving it live for a
+     request the server has already said will fail for the next N
+     seconds. Keyed off the error's own content (message + seconds), not
+     object identity -- the caller (App.tsx) recomputes this `error` prop
+     on every render, including ones that have nothing to do with a new
+     failure (e.g. the student typing in an unrelated field), so an
+     identity-keyed effect would restart the countdown from the top on
+     every keystroke. A genuinely NEW rate-limit error (a retry that
+     failed again) changes at least one of message/seconds and correctly
+     restarts it; the same still-active error re-rendering does not. */
+  const [cooldownRemainingSec, setCooldownRemainingSec] = useState(0);
+  const cooldownKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const key =
+      error?.retryAfterSeconds && error.retryAfterSeconds > 0
+        ? `${error.message}::${error.retryAfterSeconds}`
+        : null;
+    if (key) {
+      if (key !== cooldownKeyRef.current) {
+        cooldownKeyRef.current = key;
+        setCooldownRemainingSec(error!.retryAfterSeconds!);
+      }
+    } else if (cooldownKeyRef.current !== null) {
+      cooldownKeyRef.current = null;
+      setCooldownRemainingSec(0);
+    }
+  }, [error?.message, error?.retryAfterSeconds]);
+  useEffect(() => {
+    if (cooldownRemainingSec <= 0) return;
+    const interval = setInterval(() => {
+      setCooldownRemainingSec((s) => Math.max(0, s - 1));
+    }, 1000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cooldownRemainingSec > 0]);
+
   return (
     <div className="conversation-column">
       {/* Scrollable message area */}
@@ -1119,8 +1167,15 @@ export function ConversationView({
                   type="button"
                   className="conversation-error-row__retry"
                   onClick={error.onRetry}
+                  disabled={cooldownRemainingSec > 0}
+                  aria-disabled={cooldownRemainingSec > 0}
                 >
-                  Try again
+                  {/* #286 (requirement 5): a rate-limited student otherwise
+                      had a permanently-live button they could hammer, which
+                      the server was certain to refuse again for the next
+                      Retry-After seconds -- this counts down instead of
+                      lying that retrying right now might work. */}
+                  {cooldownRemainingSec > 0 ? `Try again in ${cooldownRemainingSec}s` : "Try again"}
                   <span className="conversation-error-row__retry-arrow" aria-hidden="true">
                     →
                   </span>

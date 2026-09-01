@@ -1154,6 +1154,19 @@ body {
     color: var(--color-text-muted);
   }
 
+  /* #292: the message count gets a visible icon, not just an sr-only
+     word -- a bare numeral here read as unlabeled, indistinguishable from
+     any other small number in the row. */
+  .tutor-conversation-item__count {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .tutor-conversation-item__count-icon {
+    flex-shrink: 0;
+  }
+
   /* -------------------------------------------------------------------------
      .editable-title — inline click-to-rename primitive (#6). Shared by
      the tutor-conversation-item row (.tutor-conversation-item__title
@@ -1174,6 +1187,11 @@ body {
     align-items: center;
     gap: var(--space-1);
     max-width: 100%;
+    /* #291: without this, .editable-title__error (flex-basis: 100% below)
+       had nowhere to wrap TO -- a single-line inline-flex row with no
+       wrap squeezes its flex items instead, and the input (min-width: 0)
+       is the one that has nowhere else to give in a 220px rail. */
+    flex-wrap: wrap;
   }
 
   .editable-title__value {
@@ -1339,6 +1357,9 @@ body {
     font-family: var(--font-sans);
     font-size: var(--font-size-xs);
     color: var(--color-error);
+    /* #291: its own line, not a flex sibling competing with the input/value
+       for the row's width -- see .editable-title's own flex-wrap comment. */
+    flex-basis: 100%;
   }
 
   /* -------------------------------------------------------------------------
@@ -1931,6 +1952,22 @@ body {
 
   .conversation-error-row__retry:hover {
     color: var(--color-accent-hover);
+  }
+
+  /* #286 (requirement 5): the Retry-After cooldown state -- a request the
+     server has already said will fail for the next N seconds should not
+     read as an ordinary live control. */
+  .conversation-error-row__retry:disabled {
+    color: var(--color-text-muted);
+    cursor: not-allowed;
+  }
+
+  .conversation-error-row__retry:disabled:hover {
+    color: var(--color-text-muted);
+  }
+
+  .conversation-error-row__retry:disabled .conversation-error-row__retry-arrow {
+    transform: none;
   }
 
   .conversation-error-row__retry-arrow {

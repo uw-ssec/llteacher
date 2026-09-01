@@ -1,4 +1,4 @@
-import { Trash } from "@phosphor-icons/react";
+import { ChatCircleText, Trash } from "@phosphor-icons/react";
 import { EditableTitle } from "@llteacher/ui";
 import type { ConversationListItemResponse } from "../../shared/types";
 
@@ -156,6 +156,13 @@ export function ConversationListItem({
               the accessible-name-bearing control here since the redesign
               that removed this row's own role="button"). */}
           <span className="tutor-conversation-item__count">
+            {/* #292: a visible unit, not a bare numeral -- the word itself
+                was sr-only, so a sighted student saw an unlabeled "6" with
+                no way to tell it apart from, say, a time or an unread
+                badge. The icon carries that meaning visually without
+                spelling out "messages" at this size; the full word stays
+                for assistive tech via the sr-only span below. */}
+            <ChatCircleText className="tutor-conversation-item__count-icon" size={11} weight="regular" aria-hidden="true" />
             {messageCount}
             <span className="sr-only"> {messageCount === 1 ? "message" : "messages"}</span>
           </span>

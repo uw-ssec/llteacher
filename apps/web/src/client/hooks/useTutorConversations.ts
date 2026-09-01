@@ -84,14 +84,28 @@ export interface UseTutorConversationsResult {
    *  renameConversation makes, where an optimistic update is cheap because
    *  a failed rename rolls back to a value the student can still see. */
   deleteConversation: (id: string) => Promise<boolean>;
-  /** #216: optimistically bumps a conversation's messageCount and
-   *  updatedAt (and re-sorts by updatedAt desc, matching
+  /** #216, #292: optimistically bumps a conversation's messageCount by
+   *  `delta` and updatedAt (and re-sorts by updatedAt desc, matching
    *  listConversationsForOwner's server-side ordering) -- called by App.tsx
-   *  once a chat turn in this conversation completes. `/api/chat` writes
+   *  once a chat turn in this conversation settles. `/api/chat` writes
    *  bypass this hook entirely (it only knows about the CRUD routes), so
    *  without an explicit bump the rail's message count and position never
-   *  reflect actual chat activity until a full reload re-fetches the list. */
-  bumpConversation: (id: string) => void;
+   *  reflect actual chat activity until a full reload re-fetches the list.
+   *
+   *  #292: `delta` is required, not defaulted to 1 -- the server counts
+   *  MESSAGE ROWS (`count(*)` in repositories/conversations.ts), and a
+   *  completed turn writes TWO (chatHandler's appendMessage for the
+   *  student's message, then onFinish -> finalizeAssistantTurn for the
+   *  reply) -- a hardcoded +1 here meant the rail read half the server's
+   *  own count after every turn. A turn that errors out or produces no
+   *  renderable content writes only the first of those two rows (or, if
+   *  the send itself was refused before appendMessage ever ran, neither)
+   *  -- the caller is expected to pass 1 or 0 for those cases, never a
+   *  hardcoded constant. Forcing an explicit argument (no default) is
+   *  deliberate: a bare `bumpConversation(id)` compiling at all would
+   *  silently reintroduce a guessed constant the next time this is
+   *  touched. */
+  bumpConversation: (id: string, delta: number) => void;
 }
 
 export function useTutorConversations(courseId: string | undefined): UseTutorConversationsResult {
@@ -401,6 +415,19 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
         } catch {
           /* non-JSON error body -- fall back to the generic message */
         }
+        // #291: "Conversation not found" is the server's own internal
+        // vocabulary (updateConversationHandler's 404) -- reads as a
+        // system fault rendered permanently beside a rail title the
+        // student just tried to rename themselves. Translated here, the
+        // one place this route's error text reaches the student, rather
+        // than in EditableTitle (generic, shared by callers with no
+        // knowledge of "conversation" as a concept at all). Every other
+        // message this route sends (the length/emptiness validation
+        // string) is already student-appropriate and passes through
+        // unchanged.
+        if (res.status === 404) {
+          message = "This conversation is no longer available.";
+        }
         throw new Error(message);
       }
       // PATCH's response is a plain ConversationSummary, same shape as
@@ -422,14 +449,20 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     }
   }, []);
 
-  const bumpConversation = useCallback((id: string) => {
+  const bumpConversation = useCallback((id: string, delta: number) => {
+    // #292: a zero-delta bump (a send-half failure that never wrote
+    // anything server-side) still nothing to do -- no-op rather than
+    // touching mutationSeqRef/setConversations for a change that isn't
+    // one, which would otherwise invalidate an in-flight refetch for
+    // nothing.
+    if (delta === 0) return;
     mutationSeqRef.current += 1;
     setConversations((prev) => {
       const index = prev.findIndex((c) => c.id === id);
       if (index === -1) return prev;
 
       const now = new Date().toISOString();
-      const next = prev.map((c) => (c.id === id ? { ...c, messageCount: c.messageCount + 1, updatedAt: now } : c));
+      const next = prev.map((c) => (c.id === id ? { ...c, messageCount: c.messageCount + delta, updatedAt: now } : c));
 
       /* #310: two problems with re-sorting here, both fixed by not doing it
          in the usual case.
