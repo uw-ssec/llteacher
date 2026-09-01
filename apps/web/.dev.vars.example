@@ -44,4 +44,4 @@ WORKOS_WEBHOOK_SECRET="whsec_placeholder"
 # There is deliberately no default value -- an LLMoxie catalogue name like
 # `gpt-5.3-codex` is not an OpenRouter slug, so the substitute has to be a
 # deployment decision, not a guess baked into the code.
-# LLM_DEGRADED_FALLBACK_MODEL="vendor/some-model"
+# LLM_DEGRADED_MODEL="vendor/some-model"

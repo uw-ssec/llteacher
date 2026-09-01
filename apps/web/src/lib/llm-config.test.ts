@@ -282,7 +282,7 @@ describe("resolveProviderCredential (#343 degradation)", () => {
        catalogue name, not an OpenRouter slug, so carrying it across would
        fail worse than the 500 it replaces. */
     const res = await resolveProviderCredential(
-      fakeEnv({ OPENROUTER_API_KEY: "sk-or", LLM_DEGRADED_FALLBACK_MODEL: "vendor/fallback-model" }),
+      fakeEnv({ OPENROUTER_API_KEY: "sk-or", LLM_DEGRADED_MODEL: "vendor/fallback-model" }),
       db, orgScope, llmoxie,
     );
     expect(res).toEqual({
@@ -304,7 +304,7 @@ describe("resolveProviderCredential (#343 degradation)", () => {
   it("does NOT degrade when the fallback provider's own key is also missing", async () => {
     await expect(
       resolveProviderCredential(
-        fakeEnv({ LLM_DEGRADED_FALLBACK_MODEL: "vendor/fallback-model" }), db, orgScope, llmoxie,
+        fakeEnv({ LLM_DEGRADED_MODEL: "vendor/fallback-model" }), db, orgScope, llmoxie,
       ),
     ).rejects.toBeInstanceOf(LLMCredentialMissingError);
   });
@@ -319,7 +319,7 @@ describe("resolveProviderCredential (#343 degradation)", () => {
     } as never;
     await expect(
       resolveProviderCredential(
-        fakeEnv({ OPENROUTER_API_KEY: "sk-or", LLM_DEGRADED_FALLBACK_MODEL: "vendor/fallback-model" }),
+        fakeEnv({ OPENROUTER_API_KEY: "sk-or", LLM_DEGRADED_MODEL: "vendor/fallback-model" }),
         dbMissingCred, orgScope, withCredential,
       ),
     ).rejects.toBeInstanceOf(LLMCredentialMissingError);
@@ -328,7 +328,7 @@ describe("resolveProviderCredential (#343 degradation)", () => {
   it("has no degradation path for openrouter itself -- it IS the fallback", async () => {
     await expect(
       resolveProviderCredential(
-        fakeEnv({ LLM_DEGRADED_FALLBACK_MODEL: "vendor/fallback-model" }), db, orgScope, baseConfig,
+        fakeEnv({ LLM_DEGRADED_MODEL: "vendor/fallback-model" }), db, orgScope, baseConfig,
       ),
     ).rejects.toBeInstanceOf(LLMCredentialMissingError);
   });

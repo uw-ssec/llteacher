@@ -135,7 +135,9 @@ import {
 import {
   resolveLLMConfig,
   resolveFallbackLLMConfig,
-  resolveApiKey,
+  // #431: chat.ts has exactly ONE keying primitive now. resolveApiKey is
+  // still exported for routes/llmConfigs.ts's Test button, which should
+  // report a missing credential honestly rather than degrade past it.
   resolveProviderCredential,
   PROVIDER_FALLBACK_ENV_VAR_NAME,
   type ResolvedProviderCredential,
@@ -957,6 +959,39 @@ export type TurnClassification = "replay" | "skip-insert" | "insert";
 // seq, createdAt) that persistedHistory below never reads.
 type MessageHistoryRow = { id: string; role: string; parts: unknown };
 
+/** #343 x #364 x #431: the config a hop actually RUNS as.
+ *
+ *  `config` is what the org/instructor CHOSE; `credential` is what could
+ *  actually be keyed. They differ only when degradation fired, and then they
+ *  differ in provider AND model together -- an LLMoxie model id sent to
+ *  OpenRouter fails worse than the 500 the degradation replaced, so the two
+ *  can never be mixed.
+ *
+ *  Deriving one config rather than threading `credential` through the turn is
+ *  what keeps #364's machinery correct for free: buildTurnParams gets a
+ *  matched provider/model pair, the per-hop onError/onAbort lines name the
+ *  model that really ran, and `servingConfig` -- hence the llm_call_logs row
+ *  -- is truthful without a second code path.
+ *
+ *  Pricing is dropped when degraded ON PURPOSE: pricePerMillion* on the row
+ *  is a rate for THAT row's model. Costing an OpenRouter fallback at the
+ *  LLMoxie rate would write a confidently wrong number into the cost
+ *  reporting these rows feed, which is worse than the honest null
+ *  estimateCostCents returns for a model it has no rate for. */
+export function degradedConfigOf(
+  config: ResolvedLLMConfig,
+  credential: ResolvedProviderCredential,
+): ResolvedLLMConfig {
+  if (!credential.degradedFrom) return config;
+  return {
+    ...config,
+    provider: credential.provider,
+    modelName: credential.modelName,
+    pricePerMillionInputTokens: null,
+    pricePerMillionOutputTokens: null,
+  };
+}
+
 export function classifyTurn(
   lastMessage: { role: string; parts: unknown; clientMessageId: string | null } | undefined,
   secondLastMessage: { role: string; clientMessageId: string | null } | undefined,
@@ -1611,7 +1646,7 @@ export async function chatHandler(c: Context<AppEnv>) {
       logServerError(
         "chatHandler.llmConfig.degraded",
         new Error(
-          `Provider "${credential.degradedFrom}" credential unavailable; serving this turn from "${credential.provider}" with model "${credential.modelName}" (LLM_DEGRADED_FALLBACK_MODEL). Provision ${PROVIDER_FALLBACK_ENV_VAR_NAME[credential.degradedFrom] ?? "the platform credential"} to restore the configured provider.`,
+          `Provider "${credential.degradedFrom}" credential unavailable; serving this turn from "${credential.provider}" with model "${credential.modelName}" (LLM_DEGRADED_MODEL). Provision ${PROVIDER_FALLBACK_ENV_VAR_NAME[credential.degradedFrom] ?? "the platform credential"} to restore the configured provider.`,
         ),
       );
     }
@@ -1654,15 +1689,21 @@ export async function chatHandler(c: Context<AppEnv>) {
      at the LLMoxie rate would write a confidently wrong number into the cost
      reporting these rows feed, which is worse than the honest null
      estimateCostCents returns for a model it has no rate for. */
-  const primaryConfig: ResolvedLLMConfig = credential.degradedFrom
-    ? {
-        ...resolvedLLMConfig,
-        provider: credential.provider,
-        modelName: credential.modelName,
-        pricePerMillionInputTokens: null,
-        pricePerMillionOutputTokens: null,
-      }
-    : resolvedLLMConfig;
+  /* #431, PRECEDENCE, recorded rather than left as a consequence of call
+     ordering: when a config both degrades AND names an instructor fallback,
+     DEGRADATION WINS. It has to -- degradation happens at keying time, before
+     any provider is contacted, and failover only exists once a keyed provider
+     has failed on the wire. The student is therefore served by the operator's
+     model, not the instructor's chosen fallback.
+
+     That is the right answer and not merely the reachable one: degradation
+     fires because the PLATFORM credential is missing, and an instructor's
+     fallback config is very often keyed off the same missing secret -- so
+     preferring it would trade a working turn for a second failure. The
+     fallback is still resolved and still keyed (through the same primitive,
+     see below), so it remains available for the wire failures it exists
+     for. */
+  const primaryConfig: ResolvedLLMConfig = degradedConfigOf(resolvedLLMConfig, credential);
 
   // #364 (requirement 1): the failover hop resolved through the SAME
   // resolveApiKey + buildProviderClient pair as the primary, against the
@@ -1695,12 +1736,32 @@ export async function chatHandler(c: Context<AppEnv>) {
   let fallbackConfig: ResolvedLLMConfig | null = null;
   let fallbackProviderClient: ReturnType<typeof buildProviderClient> | null = null;
   try {
-    fallbackConfig = await resolveFallbackLLMConfig(db, orgScope, resolvedLLMConfig);
-    if (fallbackConfig) {
-      const fallbackApiKey = await resolveApiKey(c.env, db, orgScope, fallbackConfig);
-      fallbackProviderClient = buildProviderClient(fallbackConfig.provider, fallbackApiKey, {
+    const rawFallback = await resolveFallbackLLMConfig(db, orgScope, resolvedLLMConfig);
+    if (rawFallback) {
+      /* #431: the fallback hop is keyed through resolveProviderCredential
+         too, not raw resolveApiKey.
+
+         The two mechanisms answer different questions -- degradation asks
+         "can this config be keyed at all", failover asks "did the keyed
+         provider fail on the wire" -- and keying is the earlier of the two.
+         Keying the fallback the old way meant a fallback config backed by
+         the SAME missing platform secret as the primary simply failed to
+         resolve, and the turn quietly had no failover on precisely the
+         outage degradation exists for. Routing both hops through one
+         primitive makes degradation a property of keying ANY config, so the
+         two compose instead of overlapping. */
+      const fallbackCredential = await resolveProviderCredential(c.env, db, orgScope, rawFallback);
+      fallbackConfig = degradedConfigOf(rawFallback, fallbackCredential);
+      fallbackProviderClient = buildProviderClient(fallbackCredential.provider, fallbackCredential.apiKey, {
         llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL,
       });
+      if (fallbackCredential.degradedFrom) {
+        logServerWarn("chatHandler.fallbackConfig.degraded", "the fallback config was itself served by degradation", {
+          conversationId: conv.id,
+          degradedFrom: fallbackCredential.degradedFrom,
+          servingProvider: fallbackCredential.provider,
+        });
+      }
     }
   } catch (err) {
     // Warn, not error: nothing is broken for this student -- the primary is

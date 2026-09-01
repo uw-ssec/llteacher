@@ -438,8 +438,14 @@ function readEnvSecret(env: Env, bindingName: string): string | undefined {
  *  than the honest 500 they replaced. So provider, key and model degrade
  *  together or not at all.
  *
+ *  NAMED `LLM_DEGRADED_MODEL`, not `..._FALLBACK_MODEL` (#431): "fallback"
+ *  is #364's instructor-configured, per-config, stream-level failover
+ *  (`llm_configs.fallback_llm_config_id`). This is the operator's
+ *  credential-time degradation. Two mechanisms sharing one word in their
+ *  vocabulary is how the two stop being distinguishable in review.
+ *
  *  OPT-IN by design: this engages only when an operator has set
- *  LLM_DEGRADED_FALLBACK_MODEL to a model their OpenRouter account can
+ *  LLM_DEGRADED_MODEL to a model their OpenRouter account can
  *  actually serve. There is no default, deliberately -- guessing a slug here
  *  would trade a loud, diagnosable failure for a silent one against a model
  *  nobody chose, with its own pricing. Unset, behaviour is exactly as before.
@@ -474,7 +480,7 @@ export async function resolveProviderCredential(
     const degradation = config.credentialId === null ? PROVIDER_DEGRADATION[config.provider] : undefined;
     if (!degradation) throw err;
 
-    const fallbackModel = env.LLM_DEGRADED_FALLBACK_MODEL;
+    const fallbackModel = env.LLM_DEGRADED_MODEL;
     if (!fallbackModel) throw err;
 
     const fallbackVar = PROVIDER_FALLBACK_ENV_VAR[degradation.provider];

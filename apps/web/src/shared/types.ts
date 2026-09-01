@@ -459,7 +459,7 @@ declare global {
        `gpt-5.3-codex` are not OpenRouter slugs. Unset (the default) means no
        degradation: a missing platform credential still fails loudly rather
        than silently answering from a model nobody chose. */
-    LLM_DEGRADED_FALLBACK_MODEL?: string;
+    LLM_DEGRADED_MODEL?: string;
     ASSETS: Fetcher;
     // Auth (M1): sealed session cookie key + IdentityCipher keys.
     SESSION_SECRET: string;

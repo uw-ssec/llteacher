@@ -208,6 +208,12 @@ const resolveApiKeyMock = vi.fn();
 // written against. The failover paths themselves are owned by
 // chat.fallback.integration.test.ts, which drives the real streamText.
 const resolveFallbackLLMConfigMock = vi.fn();
+/** #430: when set, resolveProviderCredential returns this instead of the
+ *  pass-through -- the only way to reach chatHandler's degraded branch, which
+ *  no handler test could exercise before. */
+const degradeNextCredentialMock = vi.fn<
+  () => { provider: string; apiKey: string; modelName: string; degradedFrom: string } | null
+>(() => null);
 vi.mock("../../lib/llm-config", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/llm-config")>();
   return {
@@ -230,11 +236,17 @@ vi.mock("../../lib/llm-config", async (importOriginal) => {
       _db: unknown,
       _scope: unknown,
       config: { provider: string; modelName: string },
-    ) => ({
-      provider: config.provider,
-      apiKey: await resolveApiKeyMock(_env, _db, _scope, config),
-      modelName: config.modelName,
-    }),
+    ) => {
+      /* #430: the degraded shape is opt-in per test. Default is the
+         pass-through above, so every existing test is unaffected. */
+      const degraded = degradeNextCredentialMock();
+      if (degraded) return degraded;
+      return {
+        provider: config.provider,
+        apiKey: await resolveApiKeyMock(_env, _db, _scope, config),
+        modelName: config.modelName,
+      };
+    },
   };
 });
 
@@ -371,6 +383,7 @@ describe("POST /api/chat", () => {
     releaseConversationTurnLockMock.mockReset().mockResolvedValue(undefined);
     pinConversationPromptTemplateMock.mockReset().mockResolvedValue(undefined);
     finalizeAssistantTurnMock.mockReset().mockResolvedValue(undefined);
+    degradeNextCredentialMock.mockReset().mockReturnValue(null);
     mockUsage = { inputTokens: 10, outputTokens: 20 };
     mockResponseMeta = { id: "provider-resp-1" };
     mockWarnings = undefined;
@@ -2270,6 +2283,74 @@ describe("POST /api/chat", () => {
         errorFlag: false,
       });
       expect(typeof logged.latencyMs).toBe("number");
+    });
+
+    it("#430: a degraded turn is logged under the provider that actually served it, and is not costed at the original model's rate", async () => {
+      /* The seam this pins is `degradedConfigOf` -- the one place where the
+         operator's credential-time degradation (#343) enters #364's failover
+         machinery. Nothing reached it before: the credential stub always
+         echoed the config back, so the degraded branch, buildProviderClient's
+         provider argument and every call-log field were invisible to a
+         161-test suite. Two of the three original review findings on #412
+         lived in exactly that blind spot. */
+      degradeNextCredentialMock.mockReturnValue({
+        provider: "openrouter",
+        apiKey: "or-key",
+        modelName: "vendor/fallback",
+        degradedFrom: "llmoxie",
+      });
+      // A CONFIRMED per-million rate on the org's own config -- without this
+      // the cost assertion below would pass trivially, since the shared
+      // fixture already prices at null.
+      resolveLLMConfigMock.mockResolvedValue({
+        id: "llm-config-1",
+        provider: "llmoxie",
+        modelName: "gpt-5.3-codex",
+        temperature: 0.7,
+        maxCompletionTokens: 1000,
+        credentialId: null,
+        fallbackLlmConfigId: null,
+        basePrompt: "",
+        pricePerMillionInputTokens: 250,
+        pricePerMillionOutputTokens: 1000,
+        markCompleteInstruction: null,
+      });
+      createConversationMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      mockUsage = { inputTokens: 100, outputTokens: 50 };
+      mockResponseMeta = { id: "req-degraded" };
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+      });
+
+      const [, , , logged] = finalizeAssistantTurnMock.mock.calls[0]! as [
+        unknown,
+        unknown,
+        unknown,
+        Record<string, unknown>,
+      ];
+      // The provider and model that RAN, not the ones the org chose. Logging
+      // the config's provider beside the credential's model produced a pair
+      // that never existed.
+      expect(logged).toMatchObject({ provider: "openrouter", model: "vendor/fallback" });
+      // llmConfigId still names the org's own choice, so a degraded turn is
+      // visible as the mismatch between them.
+      expect(logged.llmConfigId).toBe("llm-config-1");
+      /* And cost is NULL, not the configured rate. pricePerMillion* belongs
+         to the config's own model; billing an OpenRouter fallback at the
+         LLMoxie rate writes a confidently wrong number into the CDI cost
+         reporting these rows feed -- worse than no number. */
+      expect(logged.costCents).toBeNull();
     });
 
     it("passes a null assistantMessage (and errorFlag true) when the turn is aborted", async () => {
