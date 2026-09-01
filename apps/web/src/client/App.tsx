@@ -372,6 +372,25 @@ function studentTextOf(message: UIMessage): string {
    ConversationView. Empty initial state — the student starts by typing.
    ========================================================================== */
 
+/** #310: the 429's `Retry-After`, as an absolute deadline.
+ *
+ *  Returns undefined for every non-429 response, which is what clears a
+ *  previous window: the next successful (or differently-failed) request is
+ *  proof the limit is no longer in force, so the countdown should not
+ *  outlive it.
+ *
+ *  The header is seconds per RFC 9110. A malformed or absent value yields
+ *  undefined rather than a guess -- a countdown to a made-up deadline is
+ *  worse than the always-live button this replaces. */
+function readRetryAfterUntil(res: Response): number | undefined {
+  if (res.status !== 429) return undefined;
+  const raw = res.headers.get("Retry-After");
+  if (!raw) return undefined;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined;
+  return Date.now() + seconds * 1000;
+}
+
 export default function App() {
   const { status: workerStatus, loading: workerLoading } = useWorkerStatus();
   const { isAuthenticated, loading: authLoading, error: authError, login, logout } = useAuth();
@@ -397,6 +416,18 @@ export default function App() {
      TurnFailureStage (packages/ui) for what each half implies. */
   const sectionSendAcceptedRef = useRef(true);
 
+  /* #310: the deadline a rate-limited retry must wait for, per surface.
+     `chat.ts` has always answered 429 with `Retry-After`, and no client ever
+     read it -- so the Retry button stayed live for the whole window and
+     every click was certain to fail, which reads as a broken control rather
+     than a rate limit.
+
+     Stored as an absolute epoch ms, not a duration: the value has to survive
+     re-renders and outlive the response that produced it, and a deadline
+     does that without anything having to tick it down. */
+  const [sectionRetryAfterUntil, setSectionRetryAfterUntil] = useState<number | undefined>(undefined);
+  const [tutorRetryAfterUntil, setTutorRetryAfterUntil] = useState<number | undefined>(undefined);
+
   /* Wraps fetch to read the x-conversation-id response header before handing
      the (untouched) Response back to useChat's own stream parsing --
      DefaultChatTransport otherwise has no way to surface response headers
@@ -415,6 +446,7 @@ export default function App() {
   const chatFetch: typeof fetch = async (input, init) => {
     const res = await fetch(input, init);
     if (res.ok) sectionSendAcceptedRef.current = true;
+    setSectionRetryAfterUntil(readRetryAfterUntil(res));
     const newConversationId = res.headers.get("x-conversation-id");
     if (newConversationId) {
       setConversationId(newConversationId);
@@ -610,6 +642,7 @@ export default function App() {
   const tutorChatFetch: typeof fetch = async (input, init) => {
     const res = await fetch(input, init);
     if (res.ok) tutorSendAcceptedRef.current = true;
+    setTutorRetryAfterUntil(readRetryAfterUntil(res));
     return res;
   };
   const {
@@ -1514,6 +1547,9 @@ export default function App() {
       ? {
           message: chatError?.message || "Something went wrong. Please try again.",
           stage: sectionSendFailure ? ("send" as const) : ("response" as const),
+          // #310: gates the Retry button for the rest of the rate-limit
+          // window instead of letting the student discover it by clicking.
+          retryAfterUntil: sectionRetryAfterUntil,
           onRetry: sectionSendFailure
             ? undefined
             : () =>
@@ -1530,6 +1566,8 @@ export default function App() {
       ? {
           message: tutorChatError?.message || "Something went wrong. Please try again.",
           stage: tutorSendFailure ? ("send" as const) : ("response" as const),
+          // #310: see the section surface above.
+          retryAfterUntil: tutorRetryAfterUntil,
           onRetry: tutorSendFailure
             ? undefined
             : () =>

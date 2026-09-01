@@ -1929,8 +1929,16 @@ body {
     animation-delay: 200ms;
   }
 
-  .conversation-error-row__retry:hover {
+  .conversation-error-row__retry:hover:not(:disabled) {
     color: var(--color-accent-hover);
+  }
+
+  /* #310: the rate-limit countdown. Muted and not-allowed rather than
+     hidden, so the control's position is stable and the label carries the
+     reason -- a button that disappears and comes back reads as a glitch. */
+  .conversation-error-row__retry:disabled {
+    color: var(--color-text-muted);
+    cursor: not-allowed;
   }
 
   .conversation-error-row__retry-arrow {
@@ -1938,7 +1946,7 @@ body {
     transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
   }
 
-  .conversation-error-row__retry:hover .conversation-error-row__retry-arrow {
+  .conversation-error-row__retry:hover:not(:disabled) .conversation-error-row__retry-arrow {
     transform: translateX(3px);
   }
 

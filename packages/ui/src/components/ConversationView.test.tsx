@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConversationView } from "./ConversationView";
 import type { MessageData } from "./ConversationView";
@@ -668,6 +668,73 @@ describe("ConversationView Stop control (#274)", () => {
    previously had no direct test. These pin the two properties that matter:
    the client never renders an unrecognized string as the student's message,
    and a non-retryable condition offers no retry. */
+describe("ConversationView rate-limit retry gating (#310)", () => {
+  const rateLimited = JSON.stringify({ error: "You're sending messages too quickly.", code: "rate_limited" });
+
+  it("disables Retry for the rate-limit window and says when it will work", () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <ConversationView
+          breadcrumb="b"
+          messages={[]}
+          onSendMessage={() => {}}
+          error={{ message: rateLimited, onRetry: vi.fn(), retryAfterUntil: Date.now() + 60_000 }}
+        />,
+      );
+      /* The server has always sent Retry-After on this 429 and no client
+         ever read it, so the button stayed live for the full window and
+         every click was certain to fail -- which reads as a broken control
+         rather than a rate limit. */
+      const btn = screen.getByRole("button", { name: /Try again/ }) as HTMLButtonElement;
+      expect(btn.disabled).toBe(true);
+      expect(btn.textContent).toContain("60s");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-enables itself when the window elapses, without a reload", () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <ConversationView
+          breadcrumb="b"
+          messages={[]}
+          onSendMessage={() => {}}
+          error={{ message: rateLimited, onRetry: vi.fn(), retryAfterUntil: Date.now() + 3_000 }}
+        />,
+      );
+      expect((screen.getByRole("button", { name: /Try again/ }) as HTMLButtonElement).disabled).toBe(true);
+
+      act(() => {
+        vi.advanceTimersByTime(3_100);
+      });
+
+      const btn = screen.getByRole("button", { name: /Try again/ }) as HTMLButtonElement;
+      expect(btn.disabled).toBe(false);
+      expect(btn.textContent).not.toMatch(/\d+s/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves an ordinary retryable error's button alone", () => {
+    // No Retry-After means no deadline: the countdown must not appear on
+    // every error just because the mechanism exists.
+    render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: JSON.stringify({ error: "x", code: "tutor_stopped" }), onRetry: vi.fn() }}
+      />,
+    );
+    const btn = screen.getByRole("button", { name: "Try again" }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+  });
+});
+
 describe("readErrorMessage", () => {
   it("uses its own copy for a known code, never the server's prose", () => {
     const r = readErrorMessage(
