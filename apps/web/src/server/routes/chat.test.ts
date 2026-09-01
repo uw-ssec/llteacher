@@ -1763,6 +1763,79 @@ describe("POST /api/chat", () => {
       const body = await res.text();
       expect(body).toContain("winner's reply");
     });
+
+    it("#433: re-runs the model when the turn already ran but its answer cannot be replayed", async () => {
+      /* The loop this closes: the earlier turn's only content was a resolved
+         NON-renderable tool call (a requestHint-only turn, the shape #307/#342
+         deliberately refuse to replay). classifyTurn therefore does not say
+         "replay", appendMessage deduped so `created` is false, and the branch
+         answered `in_progress` -- a code readErrorMessage renders as
+         RETRYABLE. Nothing was actually in flight, so every retry hit the
+         same 409 forever and only Restart, which voids the submission, got
+         the student out. */
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      appendMessageMock.mockResolvedValueOnce({ row: { id: "msg-1" }, created: false });
+      const unreplayableAnswer = {
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-requestHint",
+            toolCallId: "call-1",
+            state: "output-available",
+            output: { granted: true },
+          },
+        ],
+        clientMessageId: null,
+      };
+      getLastMessagesMock
+        .mockResolvedValueOnce([]) // top-of-handler idempotency read
+        .mockResolvedValueOnce([unreplayableAnswer, { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" }])
+        .mockResolvedValueOnce([unreplayableAnswer, { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" }]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      // A real answer, which is what #307 already decided this turn should
+      // get -- it just never survived the dedupe.
+      expect(res.status).toBe(200);
+      expect(streamTextMock).toHaveBeenCalledTimes(1);
+      // And the lock is HELD, not released: this request is going on to call
+      // the model exactly as the normal path does.
+      expect(releaseConversationTurnLockMock).not.toHaveBeenCalled();
+    });
+
+    it("#433: still 409s for a genuine race, where the winner has not answered yet", async () => {
+      /* The other shape reaching the same branch, and the one `in_progress`
+         is actually correct for: the last row IS the inbound user message, so
+         a concurrent request persisted it and is still working. Waiting is
+         the right advice here, and #433 must not have widened the escape
+         hatch to cover it. */
+      getOwnedConversationOrNullMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      appendMessageMock.mockResolvedValueOnce({ row: { id: "msg-1" }, created: false });
+      getLastMessagesMock
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" }]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "in_progress" });
+      expect(streamTextMock).not.toHaveBeenCalled();
+      expect(releaseConversationTurnLockMock).toHaveBeenCalled();
+    });
   });
 
   /* #96 requirement 4: two tabs on one conversation. The v1 contract is
