@@ -32,6 +32,22 @@ export async function submitSectionHandler(c: Context<AppEnv>) {
     return c.json({ error: "Insufficient permissions" }, 403);
   }
 
+  // #267 fixed this class of bug on every other `:id` route in the app --
+  // conversations.ts's PATCH/DELETE/messages handlers, sectionConversations.ts
+  // -- and missed this one. Without the guard a malformed id reaches Postgres,
+  // raises `invalid input syntax for type uuid`, and app.onError turns that
+  // permanent client error into a 503, so any authenticated student can make
+  // the service report itself as down on attacker-chosen input.
+  //
+  // Returns this route's OWN refusal body and status, not a 404: the two
+  // repository refusals below are deliberately collapsed into one opaque 403
+  // so a non-owner cannot tell "no such conversation" from "not yours". A
+  // distinct status or message for a malformed id would reopen that split
+  // from the other side.
+  if (!conversationId || !UUID_RE.test(conversationId)) {
+    return c.json({ error: "Conversation not found or not accessible" }, 403);
+  }
+
   const db = makeDb(c.env.DATABASE_URL);
   // A student's conversation belongs to exactly one org via its course;
   // getOrgScopesForUser (existing, repositories/users.ts) returns every org
@@ -45,7 +61,7 @@ export async function submitSectionHandler(c: Context<AppEnv>) {
   if (!orgScope) return c.json({ error: "No organization membership found" }, 403);
 
   try {
-    const result = await submitSection(db, orgScope, conversationId!, authContext.session.userId);
+    const result = await submitSection(db, orgScope, conversationId, authContext.session.userId);
     const body: SubmissionResponse = {
       id: result.id,
       conversationId: result.conversationId,

@@ -21,6 +21,7 @@ import {
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
+import { LLMCredentialMissingError, UnsupportedLLMProviderError } from "../../lib/llm-config";
 
 const TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "sk-test" } as Env;
 const CONFIG_ID = "11111111-2222-4333-8444-555555555555";
@@ -42,17 +43,30 @@ const CONFIG = {
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
 
-/** #365: what getResolvedLLMConfigById returns -- the provider/credential
- *  shape, deliberately NOT the admin-console record shape. Defaults to
- *  llmoxie, which is the case the old hardcoded-OpenRouter code got wrong
- *  (every org's default after migration 0035). */
+/** #365: what `loadLLMConfigById` (lib/llm-config.ts) returns for the same
+ *  row -- the test button reads through that loader now, not the console's
+ *  own `getLlmConfig` projection, because it needs `credentialId` to resolve
+ *  a key for the config's actual provider. Deliberately NOT the
+ *  admin-console record shape.
+ *
+ *  #390/merge note: this ONE row is everything the handler uses -- provider
+ *  and credentialId for the client, modelName/basePrompt/temperature/
+ *  maxCompletionTokens for the generation -- which is why no test here mocks
+ *  a second per-request config read.
+ *
+ *  Mirrors CONFIG's provider so the record and the resolved row describe the
+ *  same config; both provider branches (openrouter, llmoxie -- every org's
+ *  default after migration 0035, and the case the old hardcoded-OpenRouter
+ *  code got wrong) get their own explicit test below. */
 const RESOLVED_CONFIG = {
   id: CONFIG_ID,
-  provider: "llmoxie" as const,
+  provider: CONFIG.provider as "openrouter" | "llmoxie",
   modelName: CONFIG.modelName,
   temperature: CONFIG.temperature,
   maxCompletionTokens: CONFIG.maxCompletionTokens,
   credentialId: null,
+  fallbackLlmConfigId: null,
+  basePrompt: CONFIG.basePrompt,
   pricePerMillionInputTokens: null,
   pricePerMillionOutputTokens: null,
   markCompleteInstruction: null,
@@ -67,6 +81,9 @@ const cloneMock = vi.fn();
 const getOrgScopeForCourseMock = vi.fn();
 const auditBestEffortMock = vi.fn();
 const generateTextMock = vi.fn();
+const loadLlmConfigByIdMock = vi.fn();
+const resolveApiKeyMock = vi.fn();
+const buildProviderClientMock = vi.fn();
 
 vi.mock("../repositories/llmConfigs", () => ({
   listLlmConfigsForOrg: (...a: unknown[]) => listMock(...a),
@@ -90,14 +107,12 @@ vi.mock("ai", () => ({ generateText: (...a: unknown[]) => generateTextMock(...a)
    record WHICH provider and key it resolved with, which is the whole point
    of the fix: the old code produced a plausible-looking result while
    talking to the wrong provider. `importOriginal` keeps every other export
-   real so nothing else in this module is silently stubbed out. */
-const resolveApiKeyMock = vi.fn();
-const buildProviderClientMock = vi.fn();
-const getResolvedConfigMock = vi.fn();
-
+   real so nothing else in this module is silently stubbed out -- in
+   particular the error classes, so the handler's `instanceof` branches are
+   exercised rather than stubbed. */
 vi.mock("../../lib/llm-config", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/llm-config")>()),
-  getResolvedLLMConfigById: (...a: unknown[]) => getResolvedConfigMock(...a),
+  loadLLMConfigById: (...a: unknown[]) => loadLlmConfigByIdMock(...a),
   resolveApiKey: (...a: unknown[]) => resolveApiKeyMock(...a),
   buildProviderClient: (...a: unknown[]) => buildProviderClientMock(...a),
 }));
@@ -155,9 +170,15 @@ beforeEach(() => {
   generateTextMock
     .mockReset()
     .mockResolvedValue({ text: "Hello.", usage: { inputTokens: 12, outputTokens: 3 } });
-  getResolvedConfigMock.mockReset().mockResolvedValue(RESOLVED_CONFIG);
-  resolveApiKeyMock.mockReset().mockResolvedValue("resolved-key");
-  buildProviderClientMock.mockReset().mockImplementation(() => (model: string) => ({ model }));
+  loadLlmConfigByIdMock.mockReset().mockResolvedValue(RESOLVED_CONFIG);
+  resolveApiKeyMock.mockReset().mockResolvedValue("sk-resolved");
+  buildProviderClientMock
+    .mockReset()
+    .mockImplementation((provider: string, apiKey: string) => (model: string) => ({
+      provider,
+      apiKey,
+      model,
+    }));
 });
 
 describe("LLM config authorization (#31)", () => {
@@ -376,9 +397,41 @@ describe("POST test (#31)", () => {
   it("omits the system message entirely when the config states no prompt", async () => {
     // '' is a legitimate stored state (the column defaults to it); sending an
     // empty system message would be a different test than the one saved.
-    getMock.mockResolvedValue({ ...CONFIG, basePrompt: "" });
+    loadLlmConfigByIdMock.mockResolvedValue({ ...RESOLVED_CONFIG, basePrompt: "" });
     await test({ message: "hi" });
     expect(generateTextMock.mock.calls[0]![0]).not.toHaveProperty("system");
+  });
+
+  /** #365: the button used to hardcode `getOpenRouter(OPENROUTER_API_KEY)`
+   *  whatever the config said. Since migration 0035 every organization's
+   *  default is `llmoxie`/`gpt-5.3-codex`, so Test on the default sent an
+   *  LLMOxie model id to openrouter.ai under an OpenRouter key. */
+  it("builds the client for the config's OWN provider, not OpenRouter", async () => {
+    loadLlmConfigByIdMock.mockResolvedValue({
+      ...RESOLVED_CONFIG,
+      provider: "llmoxie",
+      modelName: "gpt-5.3-codex",
+    });
+    resolveApiKeyMock.mockResolvedValue("sk-llmoxie");
+    await test({ message: "hi" });
+
+    // The credential is resolved from the config itself (its credentialId, or
+    // its provider's own fallback binding) -- never a fixed env var.
+    expect(resolveApiKeyMock.mock.calls[0]![3]).toMatchObject({ provider: "llmoxie" });
+    expect(buildProviderClientMock.mock.calls[0]![0]).toBe("llmoxie");
+    expect(buildProviderClientMock.mock.calls[0]![1]).toBe("sk-llmoxie");
+    expect(generateTextMock.mock.calls[0]![0].model).toMatchObject({
+      provider: "llmoxie",
+      apiKey: "sk-llmoxie",
+      model: "gpt-5.3-codex",
+    });
+  });
+
+  it("reads the config through the loader that carries its credential link", async () => {
+    // `getLlmConfig`'s console projection has no credentialId, so a config
+    // whose org has a linked credential could never have resolved a key.
+    await test({ message: "hi" });
+    expect(loadLlmConfigByIdMock).toHaveBeenCalledWith({}, "org-1", CONFIG_ID, { activeOnly: false });
   });
 
   it("answers 200 with ok:false when the provider refuses, and leaks nothing", async () => {
@@ -402,67 +455,113 @@ describe("POST test (#31)", () => {
     expect(generateTextMock).not.toHaveBeenCalled();
   });
 
-  it("503s with an actionable sentence when no credential can be resolved", async () => {
-    // #365: the missing-key check moved from "is OPENROUTER_API_KEY set" to
-    // "can resolveApiKey produce a credential for THIS config's provider",
-    // which is the question that was actually being asked all along.
-    resolveApiKeyMock.mockRejectedValue(new Error('Secret "LLMOXIE_API_KEY" is not set in this environment'));
+  it("503s with an actionable sentence when the config's own key is unreachable", async () => {
+    // #365: no longer "OPENROUTER_API_KEY is unset" specifically -- this now
+    // covers every way resolveApiKey can refuse (no credential and no
+    // fallback binding for THIS provider, a stale credentialId, a secret_ref
+    // off the #323 allowlist).
+    resolveApiKeyMock.mockRejectedValue(
+      new LLMCredentialMissingError("fallback env var LLMOXIE_API_KEY is not set"),
+    );
     const res = await test({ message: "hi" });
     expect(res.status).toBe(503);
     expect(generateTextMock).not.toHaveBeenCalled();
-    // The message names a secret binding -- it must not reach the instructor.
+    // The message names a binding; that is server-log material, not console copy.
     expect(JSON.stringify(await res.json())).not.toMatch(/LLMOXIE_API_KEY/);
   });
 
-  /* ---- #365: provider resolution -------------------------------------
-     The bug was not a crash. testLlmConfigHandler called
-     getOpenRouter(c.env.OPENROUTER_API_KEY) whatever the config said, so
-     Test on an llmoxie config -- every org's default after migration 0035 --
-     sent that model to OpenRouter under an OpenRouter key. It reported
-     something, and that something said nothing about the configuration
-     under test, which is the button's entire purpose. */
-
-  it("resolves the provider the config actually specifies, not OpenRouter", async () => {
-    await test({ message: "hi" });
-    expect(buildProviderClientMock).toHaveBeenCalledTimes(1);
-    expect(buildProviderClientMock.mock.calls[0]![0]).toBe("llmoxie");
+  it("503s rather than misrouting when the provider has no client factory", async () => {
+    buildProviderClientMock.mockImplementation(() => {
+      throw new UnsupportedLLMProviderError("anthropic");
+    });
+    expect((await test({ message: "hi" })).status).toBe(503);
+    expect(generateTextMock).not.toHaveBeenCalled();
   });
 
-  it("uses the credential resolveApiKey produced, not the deployment-wide OpenRouter key", async () => {
-    await test({ message: "hi" });
-    expect(resolveApiKeyMock).toHaveBeenCalledTimes(1);
-    expect(buildProviderClientMock.mock.calls[0]![1]).toBe("resolved-key");
-    expect(buildProviderClientMock.mock.calls[0]![1]).not.toBe("sk-test");
-  });
-
-  it("scopes the resolution lookup to the caller's own org", async () => {
-    await test({ message: "hi" });
-    // A config id alone must not be enough to resolve another org's
-    // credential -- the org scope is part of the query, as it is for the
-    // record read above it.
-    expect(getResolvedConfigMock.mock.calls[0]![1]).toBe("org-1");
-    expect(getResolvedConfigMock.mock.calls[0]![2]).toBe(CONFIG_ID);
-  });
-
+  /* Their-side coverage kept from PR #382: the llmoxie case above is the one
+     the old hardcoded code got wrong, but the openrouter case has to keep
+     working too -- a "fix" that simply flipped the hardcoded provider would
+     pass the test above and fail here. */
   it("still routes an openrouter config to openrouter", async () => {
-    getResolvedConfigMock.mockResolvedValue({ ...RESOLVED_CONFIG, provider: "openrouter" });
+    loadLlmConfigByIdMock.mockResolvedValue({ ...RESOLVED_CONFIG, provider: "openrouter" });
     await test({ message: "hi" });
     expect(buildProviderClientMock.mock.calls[0]![0]).toBe("openrouter");
   });
 
-  it("503s rather than guessing when the provider is one this deployment cannot build", async () => {
-    buildProviderClientMock.mockImplementation(() => {
-      throw new Error("Unsupported LLM provider: anthropic");
-    });
+  it("404s when the config no longer exists, without reaching a provider", async () => {
+    loadLlmConfigByIdMock.mockResolvedValue(null);
     const res = await test({ message: "hi" });
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(404);
+    expect(resolveApiKeyMock).not.toHaveBeenCalled();
     expect(generateTextMock).not.toHaveBeenCalled();
   });
 
-  it("404s when the config vanished between the record read and the resolution read", async () => {
-    getResolvedConfigMock.mockResolvedValue(null);
+  /** #390 (the follow-up staging PR #382 opened against its own fix): that
+   *  implementation paired the console's `getLlmConfig` read with a second
+   *  `getResolvedLLMConfigById` read, and mixed the two -- provider and
+   *  credential from one, model/prompt/temperature from the other. An admin
+   *  saving the config between them produced a request that was a hybrid of
+   *  the old and the new row. This handler reads the row ONCE and takes
+   *  everything from it, which closes that window structurally rather than
+   *  by ordering; this test is what keeps a second read from creeping back. */
+  it("reads the config exactly once, so an edit mid-request cannot split it", async () => {
+    /* Review finding (I1): the assertions below only discriminate if the two
+       possible sources disagree. RESOLVED_CONFIG mirrors CONFIG field for
+       field, so with the default mocks a handler that pulled model, prompt
+       and generation params off `getLlmConfig` would satisfy every value
+       assertion here -- only the `getMock` call count would have caught it.
+       Staging's own fixture diverged on purpose for exactly this reason.
+       So: make the row the loader returns disagree with CONFIG on EVERY
+       field the handler forwards, and leave getMock on CONFIG. Now each
+       assertion names which read it came from. */
+    const ROW_UNDER_TEST = {
+      ...RESOLVED_CONFIG,
+      provider: "llmoxie" as const,
+      modelName: "gpt-5.3-codex",
+      basePrompt: "ROW-UNDER-TEST",
+      temperature: 0.11,
+      maxCompletionTokens: 222,
+    };
+    loadLlmConfigByIdMock.mockResolvedValue(ROW_UNDER_TEST);
+
+    await test({ message: "hi" });
+    expect(loadLlmConfigByIdMock).toHaveBeenCalledTimes(1);
+    // The console's own projection is not consulted by this handler at all.
+    expect(getMock).not.toHaveBeenCalled();
+
+    // Everything sent to the provider came off that single row -- and none
+    // of it matches CONFIG, so a reintroduced second read fails here.
+    const call = generateTextMock.mock.calls[0]![0];
+    expect(call.model).toMatchObject({ provider: "llmoxie", model: "gpt-5.3-codex" });
+    expect(call).toMatchObject({
+      system: "ROW-UNDER-TEST",
+      temperature: 0.11,
+      maxOutputTokens: 222,
+    });
+    // The credential is resolved from that same row too, not a re-read one.
+    expect(resolveApiKeyMock.mock.calls[0]![3]).toBe(ROW_UNDER_TEST);
+    // Belt and braces: none of CONFIG's values leaked into the call.
+    expect(call.model.model).not.toBe(CONFIG.modelName);
+    expect(call.system).not.toBe(CONFIG.basePrompt);
+    expect(call.temperature).not.toBe(CONFIG.temperature);
+    expect(call.maxOutputTokens).not.toBe(CONFIG.maxCompletionTokens);
+  });
+
+  /** Review finding (I2): the narrowed catch's negative case. The handler
+   *  turns LLMCredentialMissingError / UnsupportedLLMProviderError into
+   *  "The model gateway is not configured", logged under
+   *  `testLlmConfigHandler`; anything else it rethrows. Both end up 503 in
+   *  production (index.ts's onError catches the rethrow), so the status is
+   *  NOT what the narrowing buys -- what it buys is that an unrelated
+   *  failure keeps its own generic sentence and its own log context instead
+   *  of being reported to the instructor as a gateway misconfiguration they
+   *  would then go and "fix". Staging's version caught everything, so this
+   *  case was indistinguishable from a genuinely missing credential. */
+  it("does not relabel an unrelated failure as a gateway misconfiguration", async () => {
+    resolveApiKeyMock.mockRejectedValue(new Error("connect ECONNREFUSED 10.0.0.1:5432"));
     const res = await test({ message: "hi" });
-    expect(res.status).toBe(404);
+    const body = await res.text();
+    expect(body).not.toMatch(/model gateway is not configured/i);
     expect(generateTextMock).not.toHaveBeenCalled();
   });
 

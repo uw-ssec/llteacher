@@ -60,3 +60,23 @@ export async function getOrgScopeAndLlmConfigForCourse(
   });
   return course ? { orgScope: unsafeOrgScope(course.organizationId), courseLlmConfigId: course.llmConfigId } : null;
 }
+
+/** #167: every organization on the platform, as scopes.
+ *
+ *  The one function here that answers a question no request-scoped caller
+ *  should ever ask -- a route resolves the caller's own org(s) via
+ *  getOrgScopesForUser (repositories/users.ts), never this. It exists for
+ *  the scheduled sweep (server/jobs/autoSubmitOverdue.ts), which genuinely
+ *  operates platform-wide and has no caller to derive a scope from, and
+ *  whose whole tenancy story is "enumerate the tenants, then do everything
+ *  else one tenant at a time".
+ *
+ *  Returning OrgScope rather than raw ids is the point: the sweep's per-org
+ *  work takes an OrgScope, and minting one from a row just read back from
+ *  `organizations` is exactly the sanctioned use of unsafeOrgScope
+ *  (scope.ts's own doc comment) -- so no caller of this function ever holds
+ *  an unscoped platform-wide handle to work with. */
+export async function listAllOrgScopes(db: Db): Promise<OrgScope[]> {
+  const rows = await db.select({ id: organizations.id }).from(organizations);
+  return rows.map((r) => unsafeOrgScope(r.id));
+}

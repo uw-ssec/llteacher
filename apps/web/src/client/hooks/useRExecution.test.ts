@@ -357,25 +357,24 @@ describe("useRExecution", () => {
     expect(out.error).toContain("network blocked");
   });
 
-  // Final-review fix wave finding 2: this test used to give hungShelter a
-  // `purge` that resolves INSTANTLY (`vi.fn().mockResolvedValue(undefined)`,
-  // via makeShelter's default) even while its own captureR is still "hung".
-  // That's not physically possible for real WebR -- the worker is
-  // single-threaded, so a purge message queued behind a genuinely spinning
-  // evaluation cannot be processed until the loop stops, which for `while
-  // (TRUE) {}` is never. The old finally block awaited purge() before
-  // run() could settle, so this test only passed because its mock was MORE
-  // capable than the real dependency it stands in for -- it couldn't have
-  // caught the real bug (run() hanging forever on a genuine timeout)
-  // because the mock never modeled the one property that caused it.
+  // #28: hungShelter's `purge` must NOT resolve instantly here. A mock that
+  // resolves immediately (`vi.fn().mockResolvedValue(undefined)`, via
+  // makeShelter's default) while its own captureR is still "hung" is not
+  // physically possible for real WebR -- the worker is single-threaded, so
+  // a purge message queued behind a genuinely spinning evaluation cannot be
+  // processed until the loop stops, which for `while (TRUE) {}` is never.
+  // A mock MORE capable than the dependency it stands in for cannot catch
+  // this bug class at all: run() hanging forever on a genuine timeout is
+  // invisible unless the mock models the one property that causes it.
   //
   // Here hungShelter.purge() is a promise that never resolves either --
   // the honest model of "queued behind a worker that's still occupied by
-  // an infinite loop, so this purge might never actually run." This is the
-  // regression test for the fix: with the OLD `await shelter.purge()` code,
-  // this test would time out/hang, because run() could never settle while
-  // purge() never resolves. With the fix (fire-and-forget), run() still
-  // settles with the timeout error at the 30s mark regardless.
+  // an infinite loop, so this purge might never actually run." That makes
+  // this test the guard on useRExecution's fire-and-forget purge: reinstate
+  // `await shelter.purge()` in that `finally` block and this test hangs,
+  // because run() cannot settle while purge() never resolves. Fire-and-
+  // forget is what lets run() settle with the timeout error at the 30s
+  // mark regardless.
   it("times out after 30s with a clear message, and the run() promise settles even though the hung shelter's own purge() never resolves", async () => {
     vi.useFakeTimers();
     try {

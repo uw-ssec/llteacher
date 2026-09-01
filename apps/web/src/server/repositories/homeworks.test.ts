@@ -103,7 +103,7 @@ describe("homeworks repository", () => {
     expect(select).not.toHaveBeenCalled();
   });
 
-  // Finding 2 (Phase 7 final review): with no explicit orderBy, Postgres
+  // listHomeworksForCourse must order explicitly: with no explicit orderBy, Postgres
   // heap-scan order can change after any UPDATE, silently reordering the
   // catalog and renumbering the HW-00N badges apps/admin derives from array
   // position. This fake findMany actually applies the `orderBy` callback

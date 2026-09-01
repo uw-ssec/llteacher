@@ -31,6 +31,10 @@ export interface SidebarSection {
    *  Storybook-style fixtures, if any) have no conversation concept at all;
    *  only apps/web's real data populates it. */
   conversationId?: string;
+  /** #167: this section's submission came from the scheduled overdue sweep
+   *  rather than the student. Optional for the same reason conversationId
+   *  is -- only apps/web's real data populates it. */
+  autoSubmitted?: boolean;
 }
 
 export interface SidebarProps {
@@ -123,6 +127,7 @@ export function Sidebar({
             title={s.title}
             status={s.status}
             justSubmitted={s.number === justSubmittedSection}
+            autoSubmitted={s.autoSubmitted}
             onSelect={onSectionSelect}
           />
         ))}

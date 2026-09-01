@@ -12,7 +12,7 @@ export { Sidebar } from "./components/Sidebar";
 export type { SidebarProps, SidebarSection } from "./components/Sidebar";
 
 export { ConversationView } from "./components/ConversationView";
-export type { ConversationViewProps, MessageData, AIMessageData, StudentMessageData, SystemMessageData } from "./components/ConversationView";
+export type { ConversationViewProps, MessageData, AIMessageData, StudentMessageData, SystemMessageData, TurnFailureStage } from "./components/ConversationView";
 
 export { Message, MessageMarkdown } from "./components/Message";
 export type { MessageProps, MessageRole } from "./components/Message";

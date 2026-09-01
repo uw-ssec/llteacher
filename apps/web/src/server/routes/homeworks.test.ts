@@ -194,11 +194,11 @@ describe("GET /api/courses/:courseId/homeworks", () => {
     expect(res.status).toBe(403);
   });
 
-  // Finding 4 (Phase 7 final review): the list endpoint is guarded by
-  // requireCourseMember() (any role) but never filtered draft/scheduled
-  // homeworks out for non-instructors -- apps/web's student-facing
-  // studentHomeworks.ts already does this filtering; this list endpoint
-  // must match that policy.
+  // The list endpoint is guarded by requireCourseMember() (any role), which
+  // is not by itself enough: draft/scheduled homeworks must still be
+  // filtered out for non-instructors. apps/web's student-facing
+  // studentHomeworks.ts already does this filtering, and this list endpoint
+  // must match that policy or the two disagree about what a student sees.
   function mixedStatusHomeworks() {
     findManyHomeworks.mockReset().mockResolvedValue([
       // draft: publishedAt null
@@ -779,7 +779,7 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId/publish", () => {
     expect(res.status).toBe(200);
   });
 
-  // Finding 1 (Phase 7 final review): an uncontrolled <input
+  // An uncontrolled <input
   // type="datetime-local"> in apps/admin's HomeworkForm sends "" for an
   // untouched releasedAt field, never undefined -- this "" must not reach
   // `new Date("")` (Invalid Date) and 400 an unpublish. releasedAt is also

@@ -17,7 +17,7 @@ import { runAtomically } from "./atomic";
 import { SubmissionGradedError } from "./submissions";
 import { getOrgScopeForCourse } from "./organizations";
 import { deriveHomeworkStatus, isUnreleased, type HomeworkStatus } from "./homeworks";
-import { resolvePromptTemplate, sectionGreeting, sectionConversationTitle } from "../../lib/prompts";
+import { resolvePromptTemplate, type SectionConversationPrompts } from "../../lib/prompts";
 import { DEFAULT_MESSAGES_PAGE_SIZE } from "./conversations";
 import { isUniqueViolation } from "./errors";
 import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
@@ -33,10 +33,17 @@ import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
    them keeps each file about one thing, and it keeps this work off the file
    PR #212 is actively rewriting.
 
-   #305: sectionGreeting/sectionConversationTitle -- the persona/wording this
-   module used to own directly -- now live in lib/prompts.ts, imported above.
-   This repository stays about persistence; prompt-facing copy stays in the
-   prompt-assembly module.
+   #305: this module owns no prompt-facing copy at all. sectionGreeting and
+   the `Section N: Title` template, which it used to define and then (after
+   the first half of #305) merely import, now reach it as a caller-supplied
+   `prompts: SectionConversationPrompts` parameter -- see that interface's
+   own doc comment in lib/prompts.ts for why the injected value is a pair of
+   formatters rather than the issue's literal `greeting: string`. Importing
+   the text was still the repository deciding which wording a section
+   conversation gets; taking it as a parameter is what actually gives a
+   second tenant a route in. The one lib/prompts import left here,
+   resolvePromptTemplate, is a scope-walking DB query (#25's pinning), not
+   copy.
    -------------------------------------------------------------------------- */
 
 /** The message `parts` shape the AI SDK uses, and that messages.parts stores. */
@@ -125,6 +132,11 @@ type StartInput = {
    *  (courseId) here -- this function has no authContext of its own to
    *  derive it from. */
   canViewDrafts: boolean;
+  /** #305: the conversation's opening tutor message and its title, as
+   *  formatters the CALLER chooses -- this module no longer knows what
+   *  either says. Required, with no default: a default here would be this
+   *  repository owning the wording again by another name. */
+  prompts: SectionConversationPrompts;
 };
 
 /** Creates a section conversation plus its opening tutor message.
@@ -234,8 +246,8 @@ export async function startSectionConversation(
 
   const conversationId = crypto.randomUUID();
   const greetingMessageId = crypto.randomUUID();
-  const title = sectionConversationTitle(section);
-  const greeting = greetingParts(sectionGreeting(section));
+  const title = input.prompts.title(section);
+  const greeting = greetingParts(input.prompts.greeting(section));
 
   // #25: resolved and pinned once, here, at creation -- see lib/prompts.ts's
   // module doc comment for why this must never be re-resolved per-message.
@@ -315,6 +327,11 @@ export async function restartSectionConversation(
   // startSectionConversation), but the identical vulnerability class:
   // fixed alongside them rather than left for a separate pass.
   canViewDrafts: boolean,
+  // #305: same caller-supplied copy startSectionConversation now takes (see
+  // StartInput.prompts) -- a restart writes a fresh greeting and title, so it
+  // needs the identical injection or half the layering fix would leak back in
+  // through this function.
+  prompts: SectionConversationPrompts,
 ): Promise<{
   voidedSubmission: { id: string; submittedAt: Date } | null;
   conversation: { id: string; title: string; greetingMessageId: string };
@@ -395,7 +412,7 @@ export async function restartSectionConversation(
 
   const newConversationId = crypto.randomUUID();
   const greetingMessageId = crypto.randomUUID();
-  const title = sectionConversationTitle({ order: owned.sectionOrder, title: owned.sectionTitle });
+  const title = prompts.title({ order: owned.sectionOrder, title: owned.sectionTitle });
 
   // #25: a restart is a fresh conversation lifecycle start (same reasoning
   // as startSectionConversation's own pin) -- re-resolved now rather than
@@ -435,7 +452,7 @@ export async function restartSectionConversation(
       conversationId: newConversationId,
       role: "assistant",
       parts: greetingParts(
-        sectionGreeting({
+        prompts.greeting({
           order: owned.sectionOrder,
           title: owned.sectionTitle,
           content: owned.sectionContent,

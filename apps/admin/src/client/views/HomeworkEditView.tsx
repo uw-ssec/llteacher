@@ -6,7 +6,8 @@ import type { LlmConfigPayload } from "@llteacher/ui/api";
 /** ISO datetime string -> the `YYYY-MM-DDTHH:mm` shape a <input
  *  type="datetime-local"> requires, in the *browser's local* timezone (a
  *  raw ISO string with seconds/ms/Z is rejected by the input and silently
- *  renders blank -- that's I2 from the final review). */
+ *  renders blank -- no error, just an empty field, so the conversion is not
+ *  optional). */
 function toDatetimeLocalValue(iso: string): string {
   const d = new Date(iso);
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -32,13 +33,13 @@ export function HomeworkEditView({
   // compares against these to decide whether the publish state actually
   // changed, instead of unconditionally PATCHing /publish on every save
   // (which would otherwise silently overwrite an already-scheduled release
-  // timestamp on an unrelated edit -- see final review finding I3).
+  // timestamp on an unrelated edit).
   const [originalPublishState, setOriginalPublishState] = useState<{ publish: boolean; releasedAt: string | undefined } | null>(null);
   // #166: captured the same way originalPublishState is, from the same
   // initial load -- onSubmit compares against these to decide whether the
   // hide/expiry fields actually changed, instead of unconditionally
-  // PATCHing /hide on every save (same rationale as final review finding I3
-  // for /publish).
+  // PATCHing /hide on every save (same rationale as originalPublishState
+  // above, applied to the hide/expiry pair).
   const [originalHideState, setOriginalHideState] = useState<{ hidden: boolean; expiresAt: string | undefined } | null>(null);
 
   useEffect(() => {

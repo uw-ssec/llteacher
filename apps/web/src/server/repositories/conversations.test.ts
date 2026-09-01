@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import { organizations, courses, users, courseMemberships, homeworks, sections, conversations, messages, llmCallLogs, llmConfigs } from "../../db/schema";
@@ -234,13 +234,13 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     ).rejects.toThrow(TenancyMismatchError);
   });
 
-  // PR-1 whole-branch review (#140): appendMessage previously only wrote to
-  // `messages`, never touching the parent conversation row -- so
-  // listConversationsForOwner's `ORDER BY updatedAt DESC` (#5) never
-  // reflected actual chat activity, only renames (the only other writer of
-  // this row). Real DB test (not the mocked route-level one) specifically
-  // because the fix relies on Postgres's own clock advancing between the
-  // two inserts, which a mock can't meaningfully simulate.
+  // #140: appendMessage must touch the parent conversation row, not just
+  // `messages` -- listConversationsForOwner's `ORDER BY updatedAt DESC` (#5)
+  // is the tutor rail's live-activity ordering, and if only renames move
+  // that column it reflects everything except actual chat. Real DB test (not
+  // the mocked route-level one) specifically because this relies on
+  // Postgres's own clock advancing between the two inserts, which a mock
+  // can't meaningfully simulate.
   it("appendMessage bumps the parent conversation's updatedAt (#140)", async () => {
     const created = await createConversation(db, unsafeCourseScope(courseAId), {
       ownerUserId: userId,
@@ -429,7 +429,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     expect(row.conversationId).toBe(created.id);
   });
 
-  it("getMessagesForConversation (#4 fix-round) returns full history oldest-first", async () => {
+  it("getMessagesForConversation (#4) returns full history oldest-first", async () => {
     const created = await createConversation(db, unsafeCourseScope(courseAId), {
       ownerUserId: userId,
       sectionId: null,
@@ -525,7 +525,14 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     });
     // Bump `older`'s updatedAt past `newer`'s so creation order and
     // updatedAt order genuinely disagree -- proves the list is ordered by
-    // updatedAt, not insertion/created_at order.
+    // updatedAt, not insertion/created_at order. The delay guards against
+    // `updated_at`'s millisecond precision (0042_steady_slayback.sql): a
+    // fast local Postgres can create `newer` and update `older` inside the
+    // same millisecond, at which point the (updatedAt, id) tiebreaker
+    // (#281) breaks the tie by id -- essentially random relative to
+    // creation order -- and this assertion flakes on which UUID happened to
+    // sort second. 5ms guarantees older's bump lands in a later millisecond.
+    await new Promise((resolve) => setTimeout(resolve, 5));
     await updateConversationTitle(db, unsafeCourseScope(courseAId), older.id, "Ordering: now most recently updated");
 
     const rows = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId);
@@ -929,6 +936,71 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
         before: { updatedAt: firstPage[0]!.updatedAt, id: firstPage[0]!.id },
       });
 
+      const allIds = [...firstPage, ...secondPage].map((r) => r.id);
+      expect(allIds).toContain(c1.id);
+      expect(allIds).toContain(c2.id);
+      expect(new Set(allIds).size).toBe(allIds.length);
+    });
+
+    /* #281 follow-up (review finding): the SUB-MILLISECOND half of the same
+       bug. The compound (updatedAt, id) cursor fixes ties, but it cannot
+       fix a cursor value that never matched the stored one in the first
+       place.
+
+       `conversations.updated_at` is timestamptz and `createConversation`
+       inserts without an explicit value, so it takes `defaultNow()` -- a
+       genuine MICROSECOND Postgres value -- and stays microsecond until the
+       conversation's first message or rename (both of which write a
+       millisecond JS `new Date()`). Every read goes through a JS Date, so a
+       stored `.000615` is handed to the cursor as `.000`, and
+       `(updated_at, id) < ('.000', $id)` then matches NEITHER a sibling at
+       `.000200` (not strictly less, not equal) nor anything else in that
+       microsecond -- silently dropping it from both pages, which is exactly
+       the defect this issue was filed about.
+
+       The column is now `timestamptz(3)`, so Postgres itself stores what
+       the JS layer already assumes, and the round-trip is lossless. Values
+       are written here through raw SQL rather than a JS Date, because a JS
+       Date cannot express a sub-millisecond value at all -- which is the
+       whole point. */
+    it("does not drop a row whose updated_at differs only below millisecond precision", async () => {
+      const c1 = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Sub-ms: older",
+      });
+      const c2 = await createConversation(db, unsafeCourseScope(courseAId), {
+        ownerUserId: userId,
+        sectionId: null,
+        kind: "tutor",
+        title: "Sub-ms: newer",
+      });
+      // Far-future for the same reason the tie test above uses one: this DB
+      // is shared with the rest of the file, and these two must sort ahead
+      // of every other tutor conversation for the page-boundary assertion
+      // below to be about the cursor rather than about neighbours.
+      await db.execute(
+        sql`UPDATE conversations SET updated_at = '2099-06-01 00:00:00.000200+00'::timestamptz WHERE id = ${c1.id}`,
+      );
+      await db.execute(
+        sql`UPDATE conversations SET updated_at = '2099-06-01 00:00:00.000615+00'::timestamptz WHERE id = ${c2.id}`,
+      );
+
+      const firstPage = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId, {
+        limit: 1,
+        kind: "tutor",
+      });
+      expect(firstPage).toHaveLength(1);
+      expect([c1.id, c2.id]).toContain(firstPage[0]!.id);
+
+      const secondPage = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId, {
+        limit: 5,
+        kind: "tutor",
+        before: { updatedAt: firstPage[0]!.updatedAt, id: firstPage[0]!.id },
+      });
+
+      // Both rows must be reachable across the boundary, exactly once each.
       const allIds = [...firstPage, ...secondPage].map((r) => r.id);
       expect(allIds).toContain(c1.id);
       expect(allIds).toContain(c2.id);

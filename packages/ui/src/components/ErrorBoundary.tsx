@@ -58,7 +58,6 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    // eslint-disable-next-line no-console
     console.error("[ErrorBoundary] caught a render error", error, info.componentStack);
     // #310: a throw arriving after a retry means the retry did not work,
     // and -- for the deterministic case this boundary exists for -- never

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConversationView } from "./ConversationView";
 import type { MessageData } from "./ConversationView";
@@ -112,19 +112,213 @@ describe("ConversationView error row (#144)", () => {
   });
 });
 
-// #280: the messages route pages at 200 with no "load older" wired -- this
-// makes that ceiling visible instead of silent.
-describe("ConversationView hasMoreHistory notice (#280)", () => {
+/* #96: the send-half of a failed turn. A refused/undelivered send persisted
+   nothing, so there is no turn to regenerate and the student's own words are
+   what needs rescuing -- the caller omits onRetry and passes the text back
+   through restoredDraft instead. */
+describe("ConversationView send-failure recovery (#96)", () => {
+  it("renders no Retry button when the error carries no onRetry", () => {
+    render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: "Load failed", stage: "send" }}
+      />,
+    );
+    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it("puts a restored draft back into the composer", () => {
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} />,
+    );
+    const composer = screen.getByLabelText("Message input") as HTMLTextAreaElement;
+    expect(composer.value).toBe("");
+
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        restoredDraft={{ text: "why is my p-value 0.03?" }}
+      />,
+    );
+    expect((screen.getByLabelText("Message input") as HTMLTextAreaElement).value).toBe(
+      "why is my p-value 0.03?",
+    );
+  });
+
+  it("restores the SAME text twice when it fails twice (keyed on identity, not value)", async () => {
+    const onSendMessage = vi.fn();
+    const firstFailure = { text: "same question" };
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={onSendMessage} restoredDraft={firstFailure} />,
+    );
+    const composer = screen.getByLabelText("Message input") as HTMLTextAreaElement;
+    expect(composer.value).toBe("same question");
+
+    // The student sends it again (composer clears), and it fails again with
+    // identical text. A value-keyed effect would see no change and silently
+    // swallow the second restore -- the "my words vanished" bug twice over.
+    const user = userEvent.setup();
+    await user.type(composer, "{Enter}");
+    expect(onSendMessage).toHaveBeenCalledWith("same question");
+    expect(composer.value).toBe("");
+
+    rerender(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={onSendMessage} restoredDraft={{ text: "same question" }} />,
+    );
+    expect((screen.getByLabelText("Message input") as HTMLTextAreaElement).value).toBe("same question");
+  });
+
+  it("never overwrites a draft the student has already started", () => {
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} />,
+    );
+    const composer = screen.getByLabelText("Message input") as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "words I am still writing" } });
+
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        restoredDraft={{ text: "something that failed to send" }}
+      />,
+    );
+    expect((screen.getByLabelText("Message input") as HTMLTextAreaElement).value).toBe(
+      "words I am still writing",
+    );
+  });
+});
+
+// #280: the messages route pages at 200. `hasMoreHistory` means there are
+// older messages than the transcript holds; what is rendered for it depends
+// on whether the caller wired paging.
+describe("ConversationView hasMoreHistory (#280)", () => {
   it("renders nothing extra when hasMoreHistory is omitted/false", () => {
     render(<ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} />);
     expect(screen.queryByText(/older messages aren't shown yet/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /load older messages/i })).toBeNull();
   });
 
-  it("renders a notice above the transcript when hasMoreHistory is true", () => {
-    render(
-      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} hasMoreHistory={true} />,
-    );
+  /* The defensive default. No current caller reaches this -- both of
+     App.tsx's surfaces wire the loader, and apps/admin's
+     TranscriptDetailView never passes `hasMoreHistory` at all (it renders
+     its own offset-based pagination outside this component). The two props
+     are independently optional though, so the combination is reachable by
+     construction, and #280 is a bug about a ceiling being SILENT -- this
+     pins the safe behaviour so a future caller that sets one without the
+     other cannot silently reintroduce it. */
+  it("renders the static notice when hasMoreHistory is true but no loader is given", () => {
+    render(<ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} hasMoreHistory={true} />);
     expect(screen.getByText(/older messages aren't shown yet/i)).toBeTruthy();
+  });
+
+  /* #280 (requirement 2, transcript half): the real control. Before this,
+     `before`/`limit` appeared zero times in the client and message 201+ of
+     a conversation was unreachable from every surface -- and unlike the
+     rail, its head being missing also meant the student could not read the
+     start of their own thread. */
+  describe("load older messages", () => {
+    it("replaces the notice with a button and calls onLoadOlderMessages when clicked", async () => {
+      const onLoadOlderMessages = vi.fn();
+      render(
+        <ConversationView
+          breadcrumb="b"
+          messages={[]}
+          onSendMessage={() => {}}
+          hasMoreHistory={true}
+          onLoadOlderMessages={onLoadOlderMessages}
+        />,
+      );
+      expect(screen.queryByText(/older messages aren't shown yet/i)).toBeNull();
+      await userEvent.click(screen.getByRole("button", { name: /load older messages/i }));
+      expect(onLoadOlderMessages).toHaveBeenCalledTimes(1);
+    });
+
+    it("disables the button while a page is in flight", () => {
+      render(
+        <ConversationView
+          breadcrumb="b"
+          messages={[]}
+          onSendMessage={() => {}}
+          hasMoreHistory={true}
+          onLoadOlderMessages={() => {}}
+          isLoadingOlderMessages={true}
+        />,
+      );
+      expect((screen.getByRole("button", { name: /loading/i }) as HTMLButtonElement).disabled).toBe(true);
+    });
+
+    it("surfaces a failure without removing the control", () => {
+      render(
+        <ConversationView
+          breadcrumb="b"
+          messages={[]}
+          onSendMessage={() => {}}
+          hasMoreHistory={true}
+          onLoadOlderMessages={() => {}}
+          loadOlderMessagesError={true}
+        />,
+      );
+      expect(screen.getByRole("button", { name: /load older messages/i })).toBeTruthy();
+      expect(screen.getByRole("alert").textContent).toMatch(/load older messages/i);
+    });
+
+    /* The prepend must NOT trigger the scroll-to-bottom that every other
+       messages.length change does -- that would throw the student to the
+       newest message, the exact opposite of what they just asked for.
+       jsdom has no layout, so scrollHeight is 0 and the anchor arithmetic
+       is a no-op; what this asserts is the guard itself, i.e. that
+       ConversationView does not scroll on a prepend the way it does on an
+       append. */
+    it("does not scroll to the bottom when older messages are prepended", async () => {
+      const scrollTo = vi.fn();
+      const older: MessageData = { id: "m0", role: "ai" as const, content: "oldest" };
+      const shown: MessageData = { id: "m1", role: "ai" as const, content: "newest" };
+      const { rerender, container } = render(
+        <ConversationView
+          breadcrumb="b"
+          messages={[shown]}
+          onSendMessage={() => {}}
+          hasMoreHistory={true}
+          onLoadOlderMessages={() => {}}
+        />,
+      );
+      const scroller = container.querySelector(".conversation-messages") ?? container.firstElementChild!;
+      (scroller as HTMLElement & { scrollTo: unknown }).scrollTo = scrollTo;
+
+      // The click is what arms the scroll anchor -- a prepend that did not
+      // come from this control is still an ordinary length change.
+      await userEvent.click(screen.getByRole("button", { name: /load older messages/i }));
+      scrollTo.mockClear();
+
+      rerender(
+        <ConversationView
+          breadcrumb="b"
+          messages={[older, shown]}
+          onSendMessage={() => {}}
+          hasMoreHistory={true}
+          onLoadOlderMessages={() => {}}
+        />,
+      );
+      expect(scrollTo).not.toHaveBeenCalled();
+
+      // ...but an ordinary append still scrolls, so the guard is narrow.
+      rerender(
+        <ConversationView
+          breadcrumb="b"
+          messages={[older, shown, { id: "m2", role: "student" as const, content: "new turn" }]}
+          onSendMessage={() => {}}
+          hasMoreHistory={true}
+          onLoadOlderMessages={() => {}}
+        />,
+      );
+      expect(scrollTo).toHaveBeenCalled();
+    });
   });
 });
 
@@ -382,10 +576,38 @@ describe("readErrorMessage", () => {
   });
 
   it("does not offer retry when retrying provably cannot succeed", () => {
-    for (const code of ["unauthorized", "history_too_long", "not_found", "denied", "unavailable"]) {
+    for (const code of [
+      "unauthorized",
+      "history_too_long",
+      "not_found",
+      "denied",
+      "unavailable",
+      "duplicate_message",
+    ]) {
       const r = readErrorMessage(JSON.stringify({ error: "x", code }));
       expect(r.retryable).toBe(false);
     }
+  });
+
+  /* #266: a reused clientMessageId carrying DIFFERENT content is refused
+     with a 409, and that refusal is permanent -- the same id with the same
+     different content fails identically forever. It used to share
+     in_progress's code, so the student was told their message was "already
+     on its way" (it was not; it was rejected and never persisted) and
+     handed a Retry that could not succeed. Same defect, and same fix, as
+     the section_closed carve-out above it. */
+  it("treats a duplicate-message conflict as permanent, not as a send still in flight", () => {
+    const dup = readErrorMessage(
+      JSON.stringify({ error: "A message with this clientMessageId already exists with different content", code: "duplicate_message" }),
+    );
+    const inFlight = readErrorMessage(JSON.stringify({ error: "x", code: "in_progress" }));
+    expect(dup.retryable).toBe(false);
+    expect(inFlight.retryable).toBe(true);
+    expect(dup.label).not.toBe(inFlight.label);
+    expect(dup.message).not.toMatch(/on its way/i);
+    /* The student must be told their message did not land -- the whole
+       point of #266 is that it silently did not. */
+    expect(dup.message).toMatch(/wasn't sent|not sent|didn't send/i);
   });
 
   // #317 review, #344: "unavailable" is a server misconfiguration (a
@@ -464,6 +686,33 @@ describe("readErrorMessage", () => {
       expect(r.label).toBe("No response");
       expect(r.message).toMatch(/didn't finish answering/i);
     }
+  });
+
+  /* #96: the same raw string means two different things depending on which
+     half of the turn died, and the single pre-#96 sentence ("the tutor didn't
+     finish answering") was only ever true for one of them. */
+  describe("failure stage (#96)", () => {
+    it("defaults to the response half, preserving every pre-#96 caller's copy", () => {
+      expect(readErrorMessage("Load failed")).toEqual(readErrorMessage("Load failed", "response"));
+    });
+
+    it("says the message never arrived, not that the tutor didn't answer, for a send-half failure", () => {
+      const sent = readErrorMessage("Load failed", "send");
+      expect(sent.label).toBe("Not sent");
+      expect(sent.message).toMatch(/didn't reach the tutor/i);
+      expect(sent.message).not.toMatch(/didn't finish answering/i);
+      // The machine's words still go to the detail line, same as before.
+      expect(sent.detail).toBe("Load failed");
+    });
+
+    it("never offers a retry on the send half, even for a code the response half treats as retryable", () => {
+      const raw = JSON.stringify({ error: "too fast", code: "rate_limited" });
+      // Same input, same classification -- only the recovery differs: there
+      // is no server-side turn to regenerate, so the row must not offer one.
+      expect(readErrorMessage(raw, "response").retryable).toBe(true);
+      expect(readErrorMessage(raw, "send").retryable).toBe(false);
+      expect(readErrorMessage(raw, "send").label).toBe("Slow down");
+    });
   });
 });
 

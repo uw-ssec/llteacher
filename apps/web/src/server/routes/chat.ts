@@ -46,6 +46,32 @@
      4. return the conversationId to the client via the x-conversation-id
         response header, so it can send it back on the next turn
 
+   Resilience & concurrency (#96): the contract every failure mode here is
+   held to, and the two non-goals that are deliberate rather than missing.
+     · Duplicate sends are deduped on the client-minted `clientMessageId`
+       (never on content -- see classifyTurn and #213), so a double-fired
+       send, a fetch-layer retry, or a duplicated tab resolves to the SAME
+       turn: the completed reply is replayed if the winner already finished,
+       and the loser is told to wait (409 `in_progress`) if it hasn't. The
+       per-conversation turn lock is what makes that the common path rather
+       than the race path.
+     · An interrupted turn persists NOTHING for the assistant half (#268's
+       onFinish gate), so the transcript after a drop is the student's
+       question with no reply -- never a truncated answer, and never a
+       "partial, flagged interrupted" row. Recovery is a plain re-ask or the
+       client's regenerate (same clientMessageId, so it dedupes here rather
+       than double-writing the question). NON-GOAL: there is no stream
+       checkpoint, no resume endpoint, and no partial-content store. #30's
+       streaming invariant ("verify either message is completely saved or
+       partially saved messages don't appear in transcript") is upheld by
+       refusing the write, not by recording and replaying progress.
+     · Two tabs on one conversation is last-writer-wins, with the persisted
+       transcript as truth on reload. NON-GOAL for v1: no realtime sync, no
+       cross-tab channel, no merge. The lock already prevents the only
+       corrupting outcome (two interleaved turns writing into one
+       conversation); a second tab otherwise just holds a stale view until it
+       reloads.
+
    System prompt: resolved per-conversation (#25, lib/prompts.ts) from the
    conversation's pinned prompt_templates row + section context, never
    hardcoded. Model/provider/params are resolved per-conversation too (#26,
@@ -70,7 +96,8 @@ import { z } from "zod";
 import { makeDb } from "../../db/client";
 import type { Db } from "../../db/client";
 import type { ConversationKind } from "../../db/schema";
-import { MAX_HISTORY_MESSAGES } from "../../shared/chat-limits";
+import { MAX_HISTORY_MESSAGES, MAX_TURN_STEPS } from "../../shared/chat-limits";
+import { resolveHistoryTokenBudget, windowMessagesToTokenBudget } from "../../lib/context-window";
 import {
   createConversation,
   appendMessage,
@@ -94,7 +121,7 @@ import { courseScopeFromAuthContext, unsafeCourseScope, unsafeOrgScope, type Org
 import { IdempotencyKeyConflictError } from "../repositories/errors";
 import { recordHintRequest } from "../repositories/hints";
 import { getOrgScopeAndLlmConfigForCourse } from "../repositories/organizations";
-import { logServerError } from "../utils/errors";
+import { logServerError, logServerWarn } from "../utils/errors";
 import {
   assembleSystemPrompt,
   DEFAULT_SYSTEM_PROMPT,
@@ -103,16 +130,24 @@ import {
   getPinnedPromptTemplateContent,
   getSectionPromptContext,
   resolvePromptTemplate,
+  SECTION_CONVERSATION_PROMPTS,
 } from "../../lib/prompts";
 import {
   resolveLLMConfig,
+  resolveFallbackLLMConfig,
   resolveApiKey,
   buildProviderClient,
   estimateCostCents,
   LLMConfigNotFoundError,
   LLMCredentialMissingError,
   UnsupportedLLMProviderError,
+  type ResolvedLLMConfig,
 } from "../../lib/llm-config";
+import { streamWithFallback } from "../llm/streamWithFallback";
+// Final review of #307/#342: the client renderer registry's own allowlist,
+// imported rather than re-declared -- see its doc comment (plain TS, no
+// React, same cross-boundary pattern as @llteacher/ui/auth/courseRole).
+import { isRenderableToolPartType } from "@llteacher/ui/generative/renderableTools";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 
@@ -253,9 +288,9 @@ export const TOOLS: ToolSet = {
     }),
     execute: async (_input: Record<string, never>, options: ToolCallOptions) => {
       // Structurally withheld from a tutor-kind conversation's tool list
-      // (SECTION_ONLY_TOOL_NAMES / toolsForConversation, below) since the
-      // PR3 final-review cleanup -- ctx.sectionId is therefore guaranteed
-      // non-null whenever the model can actually reach this execute(). The
+      // (SECTION_ONLY_TOOL_NAMES / toolsForConversation, below), so
+      // ctx.sectionId is guaranteed non-null whenever the model can
+      // actually reach this execute(). The
       // `HintToolContext` type still carries `sectionId: string | null`
       // because it's shared with a tutor-kind request's experimental_context
       // (never read there, since the tool isn't offered), not because this
@@ -337,7 +372,7 @@ export const TOOLS: ToolSet = {
   },
 };
 
-/** #168, folded together with #80 in the PR3 final-review cleanup: tool
+/** #168/#80: tool
  *  names that must be withheld from a tutor-kind conversation -- there is no
  *  section for either of these to act on without one. Both markSectionComplete
  *  and requestHint are real, structural gating here: the model is never even
@@ -347,14 +382,14 @@ export const TOOLS: ToolSet = {
  *  requestHint originally shipped (#80) with a weaker mechanism instead --
  *  staying in every conversation's tool list and self-reporting
  *  `{ status: "unavailable" }` from inside its own execute() when there was
- *  no sectionId. The PR3 final review flagged the resulting three-way
- *  inconsistency (this structural gate vs. that self-report vs.
- *  executeRCode/showDefinition's "never gated, and correctly so -- both are
- *  meaningful on either conversation kind") as worth a human decision rather
- *  than auto-fixing it. The decision: fold requestHint in here too, since
- *  toolsForConversation already existed and already gates on the identical
- *  sectionId signal -- there was no real reason left for a second, weaker
- *  mechanism to keep gating the same thing. */
+ *  no sectionId. That left three different answers to one question (this
+ *  structural gate vs. that self-report vs. executeRCode/showDefinition's
+ *  "never gated, and correctly so -- both are meaningful on either
+ *  conversation kind"). requestHint belongs in this set, not in a second,
+ *  weaker mechanism: toolsForConversation already gates on the identical
+ *  sectionId signal, so sectionId-gating has exactly one home. Any future
+ *  section-only tool goes here too rather than self-reporting from inside
+ *  its own execute(). */
 const SECTION_ONLY_TOOL_NAMES = new Set<keyof typeof TOOLS>(["markSectionComplete", "requestHint"]);
 
 /** #168: the actual conditional that makes section-kind-only gating real
@@ -371,9 +406,10 @@ const SECTION_ONLY_TOOL_NAMES = new Set<keyof typeof TOOLS>(["markSectionComplet
  *  conditional -- not just TOOLS.markSectionComplete's own shape -- is
  *  unit-testable without going through the full HTTP handler.
  *
- *  Final-review fix wave, #80 finding (hint double-grant): `options.
- *  withholdRequestHint` is the second, independent axis this function now
- *  gates on -- passed `true` by chatHandler exactly when isHintGranted is
+ *  #80 (hint double-grant): `options.withholdRequestHint` is the second,
+ *  independent axis this function gates on -- sectionId decides whether
+ *  requestHint exists at all, this decides whether it is offered on a turn
+ *  that already granted. Passed `true` by chatHandler exactly when isHintGranted is
  *  true for THIS turn (the envelope's isHintRequest flag already granted a
  *  hint via recordHintRequest before streamText is ever called). Without
  *  this, requestHint stayed in the model's tool list on a hint-granted turn
@@ -666,6 +702,30 @@ function hasRenderableContent(parts: unknown): boolean {
       // next turn), so it now fails the WHOLE array rather than being
       // silently skipped while a completed part elsewhere still passes.
       if (typeof toolCallId !== "string" || (state !== "output-available" && state !== "output-error")) return false;
+      // Final review of #307/#342: RESOLVED IS NOT THE SAME AS RENDERABLE.
+      // The check above is about the tool call's state; this one is about
+      // its NAME. Not every tool in TOOLS has a renderer -- requestHint
+      // (#80) deliberately has none, since its whole effect is server-side
+      // (a hint_events row, a budget check) and it has nothing to display.
+      // Without this, a turn whose only content was a resolved requestHint
+      // call passed the gate, got persisted, replayed forever via
+      // replayPersistedPart, and rendered to NOTHING on the client
+      // (renderToolPart returns null for it) -- a permanently blank
+      // assistant bubble Retry could never fix, because the idempotency
+      // path above sees a persisted row and treats it as "already
+      // answered." RENDERABLE_TOOL_NAMES is the single source of truth,
+      // shared with the client registry that gates on it too
+      // (@llteacher/ui/generative/renderableTools, render.tsx).
+      //
+      // Not a `return false`, unlike the state check: a resolved
+      // side-effect-only call is COMPLETE, just invisible. A turn that
+      // calls requestHint and then answers in text is a perfectly good
+      // turn and must still persist -- so this part simply doesn't COUNT
+      // as content, exactly like step-start below. It is only when nothing
+      // else in the array renders that the turn is refused, and then it is
+      // refused the same way an empty turn already is (#268/#342's
+      // shouldPersist gate: not persisted, logged, retryable).
+      if (!isRenderableToolPartType(type)) continue;
       sawRenderablePart = true;
       continue;
     }
@@ -704,6 +764,18 @@ function replayPersistedPart(part: { type: string } & Record<string, unknown>, w
     // hasRenderableContent's matching allowlist guarantees any part that
     // gets here is output-available or output-error, never a dangling
     // input-available/input-streaming call with no result to show.
+    //
+    // Final review of #307/#342: deliberately still generic over the tool
+    // NAME, unlike hasRenderableContent's new RENDERABLE_TOOL_NAMES check.
+    // The two are asking different questions. That gate asks "is there
+    // anything here worth persisting"; this replays a row that was already
+    // judged worth persisting, and the client's own message state has to
+    // come back matching what is stored (a resolved tool call the replay
+    // dropped would leave the client's next request carrying a different
+    // history than the transcript). A non-renderable name replays as an
+    // invisible tool part -- exactly what it was live -- rather than a
+    // blank bubble, because by construction something ELSE in this array
+    // is what passed the gate.
     const toolName = part.type.slice("tool-".length);
     writer.write({ type: "tool-input-available", toolCallId: part.toolCallId, toolName, input: part.input });
     if (part.state === "output-error") {
@@ -726,7 +798,15 @@ function replayPersistedPart(part: { type: string } & Record<string, unknown>, w
 function replayResponse(conversationId: string, persistedParts: unknown) {
   const parts = Array.isArray(persistedParts) ? persistedParts : [];
   return createUIMessageStreamResponse({
-    headers: { "x-conversation-id": conversationId },
+    // #285: `x-replayed: true` marks this as a replay of an
+    // already-persisted turn rather than a fresh model call. Deliberately a
+    // HEADER and not a stream chunk: the body stays byte-compatible with a
+    // real streamText response, so useChat still cannot tell the difference
+    // (which is correct for the client -- see this function's doc comment),
+    // while an integrator debugging their idempotency-key handling can see
+    // at a glance that no model call happened. Only ever set on this path;
+    // its absence is the "fresh turn" signal.
+    headers: { "x-conversation-id": conversationId, "x-replayed": "true" },
     stream: createUIMessageStream({
       execute: ({ writer }) => {
         writer.write({ type: "start" });
@@ -781,16 +861,24 @@ function deriveTutorConversationTitle(parts: unknown): string | null {
 // pulled from the server's own persisted history (#143 redesign below), so
 // per-turn token cost is bounded regardless of how long the conversation
 // has run. Decision (documented per the issue's own request): a plain
-// trailing window, dropped silently -- no rolling summary. A summarization
-// strategy is real, separate work (tracked as #88, context-window
-// management); until it lands, the oldest turns beyond this window are
-// simply not seen by the model on a given turn, which is a graceful
-// degradation rather than a hard failure -- and, since #288, one the
-// student can actually see: ConversationView renders a boundary divider
-// above the oldest message still inside this window, so "the tutor did not
-// see that" is legible instead of looking like the tutor ignoring them.
-// The constant itself moved to shared/chat-limits.ts for that reason; the
-// client describes the same number the server enforces.
+// trailing window, dropped silently -- no rolling summary. The oldest turns
+// beyond this window are simply not seen by the model on a given turn, which
+// is a graceful degradation rather than a hard failure -- and, since #288,
+// one the student can actually see: ConversationView renders a boundary
+// divider above the oldest message still inside this window, so "the tutor
+// did not see that" is legible instead of looking like the tutor ignoring
+// them. The constant itself moved to shared/chat-limits.ts for that reason;
+// the client describes the same number the server enforces.
+//
+// #88: this COUNT is now the OUTER of two bounds. A count cannot tell 40
+// turns of "why?" from 40 turns of pasted datasets, so lib/context-window.ts
+// adds a token-aware inner bound, applied in memory further down (see
+// budgetedContextMessages) once the resolved config and the assembled system
+// prompt are both known. That bound can only ever tighten this one, which is
+// what keeps the #288 divider's claim safe: a message above the divider is
+// certainly unseen, and the divider never promises MORE than 40. #88
+// deliberately implements truncation only -- a rolling summary remains real,
+// separate work (its own storage, versioning, logging and leakage story).
 
 // #143: bound on the inbound request body itself, checked before any
 // parsing/db work -- distinct from MAX_HISTORY_MESSAGES above (which trims
@@ -899,20 +987,17 @@ export function classifyTurn(
  *  reading chatHandler's own body to follow -- callers must check
  *  `instanceof Response` before touching `.conv`.
  *
- *  #317 review, #353: this comment used to claim the extraction "leaves
- *  chatHandler's own body a thin 'resolve, then stream' dispatcher" --
- *  measured false the moment it was written, and more so with every #317
- *  review round since (request validation, rate limiting, prompt/config
- *  resolution, the release gate, lock acquisition, history fetch, turn
- *  classification, replay, model-context assembly, the streamText call,
- *  and its three stream callbacks all still live in chatHandler itself).
- *  `classifyTurn` (below) is the other extracted seam; the rest of that
- *  list are real candidates for the same treatment
- *  (`validateChatRequest`, `resolvePromptAndConfig`, `prepareTurn`) but
- *  aren't done -- correcting the claim rather than leaving it stated as
- *  true, per the same review's own reasoning: a doc comment asserting an
- *  architectural property the code doesn't have is worse than no comment
- *  at all. */
+ *  #353: this extraction does NOT make chatHandler a thin "resolve, then
+ *  stream" dispatcher, and no comment here should claim it does. Request
+ *  validation, rate limiting, prompt/config resolution, the release gate,
+ *  lock acquisition, the history fetch, turn classification, replay,
+ *  model-context assembly, the streamText call, and its three stream
+ *  callbacks all still live in chatHandler itself. `classifyTurn` (below)
+ *  is the only other extracted seam; the rest of that list are real
+ *  candidates for the same treatment (`validateChatRequest`,
+ *  `resolvePromptAndConfig`, `prepareTurn`) and are not done. Stated
+ *  plainly because a doc comment asserting an architectural property the
+ *  code does not have is worse than no comment at all. */
 async function resolveConversation(
   c: Context<AppEnv>,
   db: Db,
@@ -963,6 +1048,20 @@ async function resolveConversation(
   | Response
 > {
   if (envelope.conversationId) {
+    // #279: THIS BRANCH MUST STAY READ-ONLY. chatHandler starts it
+    // speculatively, BEFORE the rate-limit gate has resolved (the preflight
+    // at chatHandler's `preflightResolution` below, gated on
+    // this same `conversationId` check; its own comment carries the full
+    // argument), precisely because it writes nothing -- that is the entire
+    // reason overlapping it with the reservation cannot orphan anything. A
+    // write added here (a `lastAccessedAt` touch, a lazy backfill, an
+    // access-audit row) would silently reintroduce the bug that overlap was
+    // designed around: a request that goes on to 429 would still have left
+    // that write behind. If this branch ever needs to write, move the write
+    // below the gate in chatHandler, or drop the preflight -- do not just
+    // add it here. The other two branches below already create rows, which
+    // is why they are deliberately NOT started early.
+    //
     // #217/#222: getOwnedConversationOrNull collapses "doesn't exist",
     // "exists but isn't yours", and "exists, is yours, but soft-deleted"
     // into the same null -> 404, matching routes/conversations.ts's
@@ -1035,6 +1134,12 @@ async function resolveConversation(
         // not who isInstructorOf's AUTHOR_ROLES tier means.
         isTeacherTest: !isStudentInCourse(authContext.memberships, courseId),
         canViewDrafts: authContext.canViewDraftsIn(courseId),
+        // #305: the repository no longer owns the greeting/title wording --
+        // every caller states which copy it wants. Same constant
+        // startSectionConversationHandler passes, so the conversation this
+        // handler mints on a first turn is byte-identical to one started
+        // through #27's own route (#259's whole point).
+        prompts: SECTION_CONVERSATION_PROMPTS,
       });
       return {
         conv: {
@@ -1214,6 +1319,66 @@ export async function chatHandler(c: Context<AppEnv>) {
 
   const db = makeDb(c.env.DATABASE_URL);
 
+  const resolveNow = () => resolveConversation(c, db, authContext, envelopeParsed.data, inboundMessage);
+
+  // #279 (requirement 2), scoped deliberately narrower than the issue asks.
+  //
+  // The issue says "run the rate-limit check and conversation resolution
+  // concurrently with Promise.all". Done literally -- wrapping
+  // reserveRateLimitSlot and resolveConversation in one Promise.all -- that
+  // is UNSAFE, and an earlier pass on this route rejected it for exactly
+  // that reason: resolveConversation is not one call, it is a three-way
+  // branch, and two of those branches WRITE. `kind: "section"` runs
+  // startSectionConversation and the tutor fallthrough runs
+  // createConversation (both above in this file), so a request that ends up
+  // 429'd would still have minted a conversation row that nothing goes on
+  // to use or clean up -- a permanent orphan produced by a request the
+  // server told the client it refused.
+  //
+  // What IS safe is the branch the issue's own evidence table actually
+  // names as its "step 2": the `conversationId` branch, which is
+  // getOwnedConversationOrNull -> getConversationById, a single SELECT with
+  // no write anywhere in it (repositories/conversations.ts). Racing THAT
+  // against the reservation can leave nothing behind, because it creates
+  // nothing. So the preflight below is gated on the same `conversationId`
+  // truthiness check resolveConversation itself branches on -- when it's
+  // set, we are provably on the read-only branch; when it isn't, resolution
+  // stays strictly behind the rate-limit gate, exactly as before. This is
+  // also the dominant case: every turn after a conversation's first one
+  // carries a conversationId.
+  //
+  // Three properties make this safe rather than merely convenient:
+  //   1. No data dependency either way. reserveRateLimitSlot takes
+  //      (db, userId, now, windowMs) and resolveConversation takes the
+  //      envelope; neither reads the other's result.
+  //   2. Strictly separate resources. The reservation touches only
+  //      chatRateLimitWindows, keyed (userId, windowStart); the preflight
+  //      touches only conversations/courses. They cannot serialize against
+  //      or deadlock each other.
+  //   3. The 429 still wins. The reservation is awaited FIRST and returns
+  //      before the preflight is ever unwrapped, so a rate-limited request
+  //      returns the same 429 it always did -- it never returns a 404/403
+  //      the preflight happened to resolve first.
+  //
+  // The `.then(ok, err)` wrapper (rather than handing the bare promise
+  // around) is load-bearing: this promise is DISCARDED on the 429 path, so
+  // it must never reject. A bare rejection would surface as an unhandled
+  // rejection, and a Promise.all-style await would let a transient Neon
+  // blip on the read turn a legitimate 429 into a 503. Rejections are
+  // captured here and rethrown below, on the non-429 path only, preserving
+  // today's error behaviour byte for byte.
+  //
+  // Cost of the trade: a request that goes on to 429 now issues one read it
+  // will not use. That is bounded by the rate limiter itself (which has
+  // already charged the request either way) and is a wasted read, never a
+  // wasted write.
+  const preflightResolution = envelopeParsed.data.conversationId
+    ? resolveNow().then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      )
+    : undefined;
+
   // #219/#265: per-user rate limit, checked (and incremented, atomically,
   // in the same statement) before any persistence or model call. 429 +
   // Retry-After, surfaced through useChat's existing #144 error row (its
@@ -1243,7 +1408,20 @@ export async function chatHandler(c: Context<AppEnv>) {
   // #312: conversation resolution extracted to its own function -- see
   // resolveConversation's own doc comment. Early-exit cases (404/403/400/409)
   // come back as a Response to return directly.
-  const resolved = await resolveConversation(c, db, authContext, envelopeParsed.data, inboundMessage);
+  //
+  // #279: on the read-only `conversationId` branch this promise was already
+  // started above and has been running alongside the reservation -- awaiting
+  // it here costs whatever is left of it, not a fresh round-trip. Every
+  // other branch (the two that can CREATE a conversation) still starts here,
+  // after the 429 gate, and is unchanged.
+  let resolved: Awaited<ReturnType<typeof resolveConversation>>;
+  if (preflightResolution) {
+    const settled = await preflightResolution;
+    if (!settled.ok) throw settled.error;
+    resolved = settled.value;
+  } else {
+    resolved = await resolveNow();
+  }
   if (resolved instanceof Response) return resolved;
   const { conv, sectionGreetingParts, sectionGreetingMessageId } = resolved;
 
@@ -1437,6 +1615,64 @@ export async function chatHandler(c: Context<AppEnv>) {
     throw err;
   }
 
+  // #364 (requirement 1): the failover hop resolved through the SAME
+  // resolveApiKey + buildProviderClient pair as the primary, against the
+  // FALLBACK CONFIG'S OWN row -- its own provider, its own credential, its
+  // own model. #363's version hardcoded `openrouter()` for both hops, which
+  // since migration 0035 (llmoxie is every organization's default) would
+  // have routed every failover through the wrong provider under the wrong
+  // key. Nothing here assumes the two hops share a provider.
+  //
+  // BEST-EFFORT, deliberately: a fallback that cannot be resolved or keyed
+  // must never fail a turn the primary could have served. Every failure here
+  // degrades to "this turn has no fallback", which is exactly the behaviour
+  // of the overwhelming majority of configs (none has a fallback set) and
+  // therefore a path already exercised on every request today.
+  //
+  // EAGER rather than resolved lazily inside the failover, and the cost is
+  // real enough to state: a config that names a fallback pays one extra Neon
+  // read per turn (plus a credential read, only if that fallback row has a
+  // credentialId -- otherwise the key is an env lookup) even on turns where
+  // the primary answers fine. A config that names NO fallback pays nothing
+  // at all: resolveFallbackLLMConfig short-circuits on the null column
+  // without issuing a query, which is every config today.
+  //
+  // Eager wins on the thing that matters more than those reads: an
+  // instructor who configured a fallback believes they have one, and a
+  // fallback whose credential is missing or whose row was retired is a fact
+  // an operator needs BEFORE the primary goes down. Resolving lazily would
+  // surface it for the first time mid-outage, on the one code path that
+  // exists precisely because something is already wrong.
+  let fallbackConfig: ResolvedLLMConfig | null = null;
+  let fallbackProviderClient: ReturnType<typeof buildProviderClient> | null = null;
+  try {
+    fallbackConfig = await resolveFallbackLLMConfig(db, orgScope, resolvedLLMConfig);
+    if (fallbackConfig) {
+      const fallbackApiKey = await resolveApiKey(c.env, db, orgScope, fallbackConfig);
+      fallbackProviderClient = buildProviderClient(fallbackConfig.provider, fallbackApiKey, {
+        llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL,
+      });
+    }
+  } catch (err) {
+    // Warn, not error: nothing is broken for this student -- the primary is
+    // about to run normally. But an instructor who configured a fallback
+    // believes they have one, and a silently unusable fallback is a fact an
+    // operator needs before the primary actually goes down. Structured per
+    // #275 so it is countable rather than a prose line.
+    logServerWarn(
+      "chatHandler.fallbackConfig.unusable",
+      "a fallback config is set but could not be resolved or keyed; this turn has no failover",
+      {
+        conversationId: conv.id,
+        primaryLlmConfigId: resolvedLLMConfig.id,
+        fallbackLlmConfigId: resolvedLLMConfig.fallbackLlmConfigId,
+        reason: err instanceof Error ? err.message : String(err),
+      },
+    );
+    fallbackConfig = null;
+    fallbackProviderClient = null;
+  }
+
   // Idempotency (#3, reworked #213) -- two distinct retry shapes, both
   // covered so neither the user row nor the assistant row can be
   // double-written:
@@ -1604,12 +1840,21 @@ export async function chatHandler(c: Context<AppEnv>) {
   const markCompleteInstruction = conv.sectionId
     ? (resolvedLLMConfig.markCompleteInstruction ?? DEFAULT_MARK_COMPLETE_INSTRUCTION)
     : undefined;
+  // #305 (#230 requirement 3): resolved ONCE, here, and used for two things
+  // -- the generated tool-usage paragraph in the system prompt below, and
+  // streamText's own `tools` option further down. Previously the streamText
+  // call resolved it inline, which is fine while there is one consumer; with
+  // the prompt now describing the catalog, two independent
+  // toolsForConversation calls could describe a different set than the model
+  // was actually offered the moment either call site's arguments drifted.
+  const turnTools = toolsForConversation(conv.sectionId, { withholdRequestHint: isHintGranted });
   const systemPrompt = assembleSystemPrompt(
     resolvedSystemPromptContent,
     sectionPromptContext ?? undefined,
     isDefaultPrompt,
     isHintGranted,
     markCompleteInstruction,
+    Object.keys(turnTools),
   );
 
   // #317 review, #326: "skip-insert" means `recentMessages[0]` already IS
@@ -1699,7 +1944,16 @@ export async function chatHandler(c: Context<AppEnv>) {
       // see. Best-effort: a stuck lock still self-heals via LOCK_STALE_MS.
       await releaseConversationTurnLock(db, conv.id).catch(() => {});
       if (err instanceof IdempotencyKeyConflictError) {
-        return c.json({ error: err.message, code: "in_progress" }, 409);
+        // #266: `duplicate_message`, NOT the `in_progress` the route's other
+        // two 409s use. Those two mean "a turn is genuinely in flight, try
+        // again shortly" and readErrorMessage (packages/ui) renders them
+        // retryable. This one is permanent: the id in this request already
+        // identifies DIFFERENT stored content, so an identical re-send is
+        // refused identically every time. Sharing the code offered a retry
+        // that could not succeed and told the student a message that was
+        // REFUSED was "already on its way" -- the same conflation
+        // section_closed was carved out of in_progress to fix.
+        return c.json({ error: err.message, code: "duplicate_message" }, 409);
       }
       throw err;
     }
@@ -1774,22 +2028,131 @@ export async function chatHandler(c: Context<AppEnv>) {
           ]
         : modelMessages;
 
+    /* #88: the SECOND, token-aware bound on what the model sees.
+       MAX_HISTORY_MESSAGES above is a flat COUNT, applied at the DB read; it
+       cannot tell 40 turns of "why?" from 40 turns each carrying an
+       8,000-character pasted dataset (both well-formed under this route's own
+       MAX_TEXT_PART_LENGTH cap), and the second one overflows the model's
+       real context window -- a hard provider error on a student's turn rather
+       than a graceful forget.
+
+       Applied HERE, and not earlier, because the budget depends on two things
+       that are only both known at this point: the resolved config (the
+       model's window, and the `max_completion_tokens` reserved for the
+       answer) and the fully assembled system prompt. It reads them off the
+       values this handler ALREADY resolved once for this turn -- no second
+       config lookup, no per-message resolution (#30's LLM-config stability
+       invariant).
+
+       Both hops' model names, not just the primary's: buildTurnParams below
+       hands this ONE array to the fallback too, so it has to fit the smaller
+       of the two windows (see resolveHistoryTokenBudget's own doc comment).
+
+       Truncation only -- no rolling summary. See lib/context-window.ts's
+       header for why that is a deliberate scope boundary rather than an
+       omission; the output here is always a contiguous suffix of the input,
+       never anything synthesized. */
+    const budgeted = windowMessagesToTokenBudget(
+      modelContextMessages,
+      resolveHistoryTokenBudget({
+        modelNames: fallbackConfig
+          ? [resolvedLLMConfig.modelName, fallbackConfig.modelName]
+          : [resolvedLLMConfig.modelName],
+        maxCompletionTokens: resolvedLLMConfig.maxCompletionTokens,
+        systemPrompt,
+      }),
+    );
+    if (budgeted.droppedCount > 0) {
+      // Not silent: #288's whole complaint about the count-based window is
+      // that a silent drop is indistinguishable from the tutor being obtuse,
+      // and an operator fielding "the tutor forgot what I said" needs to be
+      // able to see that this bound (rather than the count) is what fired.
+      // warn, not error: dropping the oldest turns of a very long
+      // conversation is this feature working, not failing.
+      logServerWarn(
+        "chatHandler.contextWindow.truncated",
+        "token budget dropped the oldest messages from this turn's model context",
+        {
+          conversationId: conv.id,
+          model: resolvedLLMConfig.modelName,
+          droppedCount: budgeted.droppedCount,
+          keptCount: budgeted.messages.length,
+        },
+      );
+    }
+    if (budgeted.lastMessageExceedsBudget) {
+      // #88's own edge case: one message bigger than the whole budget is
+      // still sent (dropping the question the student just asked would leave
+      // the model answering nothing), so this is the warning the issue asks
+      // for rather than a refusal. MAX_TEXT_PART_LENGTH/MAX_PARTS_PER_MESSAGE
+      // already bound how large a single message can get, so reaching this
+      // needs a genuinely tiny configured window.
+      logServerWarn(
+        "chatHandler.contextWindow.oversizedMessage",
+        "the student's own message exceeds this model's history budget; sending it anyway",
+        { conversationId: conv.id, model: resolvedLLMConfig.modelName },
+      );
+    }
+    const budgetedContextMessages = budgeted.messages;
+
     // #317 review, #321: latency for the llm_call_logs row written in
     // onFinish below -- captured right before the model call actually
     // starts, not at the top of chatHandler, so it reflects the LLM call
     // itself rather than this turn's own persistence/setup overhead.
     const turnStartedAt = Date.now();
 
-    const result = streamText({
-      // #26: model/provider/params all come from resolvedLLMConfig now --
-      // homework override or org default, never hardcoded.
-      model: providerClient(resolvedLLMConfig.modelName),
+    // #364: one params builder, used for BOTH hops, so a failover can only
+    // ever differ from the primary in the two things it is supposed to
+    // differ in -- which provider client, and which model id. Everything
+    // else (the system prompt, the history, the tool set, the tool context,
+    // prepareStep, stopWhen, the abort budget) is by construction identical,
+    // rather than identical because two call sites were kept in sync by
+    // hand. That is what makes "the failover answered a different question"
+    // unrepresentable here.
+    //
+    // #364 (requirement 4), the generation parameters, stated because two
+    // readings exist and the choice matters:
+    //
+    //  · `temperature` and `maxOutputTokens` are CARRIED FROM THE PRIMARY,
+    //    not re-read from the fallback's own row. The issue's requirement is
+    //    "a failover must not silently change generation parameters" -- an
+    //    instructor set 0.2 for this homework's turns, and a turn that
+    //    quietly became 0.9 because the backup model's row says so is a
+    //    different answer to the student's question, not a resilient one. A
+    //    failover swaps WHO serves the turn, never WHAT was asked or how
+    //    deterministically it is answered.
+    //  · `providerOptions` IS recomputed per model, from that hop's own
+    //    model id. This is not an exception to the rule above, it is what
+    //    ENFORCES it: `reasoningEffort: "none"` is the escape hatch that
+    //    stops @ai-sdk/openai silently dropping `temperature`, and it only
+    //    exists for the gpt-5.1-5.4 family (see
+    //    SUPPORTS_REASONING_EFFORT_NONE's own doc comment). Copying the
+    //    primary's literal value onto a fallback from a different family
+    //    would both misroute an OpenAI-specific parameter and lose the
+    //    carried temperature -- the same rule applied to a different model
+    //    is what keeps the temperature actually honoured on both hops.
+    //
+    // The SYSTEM PROMPT is likewise the primary's, and does not re-resolve
+    // `markCompleteInstruction` from the fallback's row: the prompt is a
+    // property of the conversation and its section (#25's prompt_templates
+    // resolution), not of whichever model happens to be reachable.
+    const buildTurnParams = (
+      config: ResolvedLLMConfig,
+      client: ReturnType<typeof buildProviderClient>,
+    ): Parameters<typeof streamText>[0] => ({
+      // #26: model/provider/params all come from a resolved config now --
+      // homework override, course override, or org default, never hardcoded.
+      model: client(config.modelName),
       system: systemPrompt,
       // #143: server-authoritative history (modelMessages, from
       // persistedHistory above), not a client-supplied array -- see
       // persistedHistory's own doc comment for the trust-boundary rationale
       // this closes.
-      messages: convertToModelMessages(modelContextMessages),
+      // #88: the token-budgeted suffix of modelContextMessages, not the raw
+      // array -- see its own doc comment above. Still server-authoritative:
+      // windowing only ever DROPS whole messages off the front, so every
+      // element here is still a row this handler itself confirmed or wrote.
+      messages: convertToModelMessages(budgetedContextMessages),
       // #264: belt-and-suspenders alongside historyMessageSchema's role
       // allowlist above -- the SDK warns and proceeds by default (its own
       // words: "a security risk because they may enable prompt injection
@@ -1801,7 +2164,7 @@ export async function chatHandler(c: Context<AppEnv>) {
       // own doc comment (this file's TOOLS catalog, above) for why this is
       // real gating, not a prompt instruction alone.
       //
-      // Final-review fix wave, #80 finding (hint double-grant): also
+      // #80 (hint double-grant): also
       // withholds requestHint for this exact turn when isHintGranted is
       // true -- the envelope path (above) already recorded a hintEvents row
       // for this turn before streamText was ever reached, so the model has
@@ -1809,7 +2172,11 @@ export async function chatHandler(c: Context<AppEnv>) {
       // toolsForConversation's own doc comment for the full mechanism/
       // rationale, and its `withholdRequestHint` option's doc comment for
       // why the double-grant was possible without this.
-      tools: toolsForConversation(conv.sectionId, { withholdRequestHint: isHintGranted }),
+      //
+      // #305: `turnTools`, resolved once above -- the same object whose keys
+      // generated this turn's tool-usage paragraph, so the prompt cannot
+      // describe a catalog the model was not handed.
+      tools: turnTools,
       // #80: threads request-scoped context into the requestHint tool's
       // execute() (its second argument's own `experimental_context` field)
       // -- see TOOLS.requestHint's own doc comment for why a static,
@@ -1855,18 +2222,25 @@ export async function chatHandler(c: Context<AppEnv>) {
         }
         return undefined;
       },
+      // #364: the PRIMARY's values on both hops -- see buildTurnParams' own
+      // doc comment for why these are carried rather than re-read.
       temperature: resolvedLLMConfig.temperature,
       maxOutputTokens: resolvedLLMConfig.maxCompletionTokens,
       // #317 review, #349: see SUPPORTS_REASONING_EFFORT_NONE's own doc
       // comment -- this is what actually keeps `temperature` above from
-      // being silently dropped for the gpt-5.1-5.4 family.
-      providerOptions: SUPPORTS_REASONING_EFFORT_NONE.test(resolvedLLMConfig.modelName)
+      // being silently dropped for the gpt-5.1-5.4 family. #364: computed
+      // from THIS hop's own model id, so the carried temperature survives on
+      // a fallback from a different model family too.
+      providerOptions: SUPPORTS_REASONING_EFFORT_NONE.test(config.modelName)
         ? { openai: { reasoningEffort: "none" } }
         : undefined,
-      /* Allow up to 5 steps so the model can call a display tool and then
-         continue with the follow-up Socratic question in the same turn.
-         Without this, streamText stops the moment a tool call is emitted. */
-      stopWhen: stepCountIs(5),
+      /* Allow up to MAX_TURN_STEPS steps so the model can call a display tool
+         and then continue with the follow-up Socratic question in the same
+         turn. Without this, streamText stops the moment a tool call is
+         emitted. Shared rather than a literal because lib/context-window.ts
+         has to reserve window space for the same number of completions --
+         see MAX_TURN_STEPS' own doc comment. */
+      stopWhen: stepCountIs(MAX_TURN_STEPS),
       // #143: bounds how long a stuck/hanging upstream can hold this request
       // open. A genuine provider error (including a 429) already arrives as
       // an in-stream `error` chunk well before this fires (ai@5.0.195 -- see
@@ -1883,12 +2257,21 @@ export async function chatHandler(c: Context<AppEnv>) {
       // SDK's own default is a bare console.error with no request context
       // this app could act on -- "zero evidence" was #321's whole complaint.
       onError: ({ error }) => {
-        logServerError(
-          "chatHandler.streamText.onError",
-          new Error(
-            `LLM call failed for conversation ${conv.id}, user ${authContext.session.userId}, provider ${resolvedLLMConfig.provider}, model ${resolvedLLMConfig.modelName}: ${error instanceof Error ? error.message : String(error)}`,
-          ),
-        );
+        // #275: previously folded conversationId/userId/provider/model into
+        // the Error's own message string via template literal -- readable
+        // in a single console line, but not a field a log query can filter
+        // or group on. Passed as structured `extra` context instead (see
+        // logServerError's own doc comment), same data, greppable now.
+        // #364: `config`, not `resolvedLLMConfig` -- on the fallback hop
+        // this names the model that actually errored, so an operator can
+        // tell "the backup failed too" from "the primary failed" instead of
+        // seeing the primary's name on both lines.
+        logServerError("chatHandler.streamText.onError", error instanceof Error ? error : new Error(String(error)), {
+          conversationId: conv.id,
+          userId: authContext.session.userId,
+          provider: config.provider,
+          model: config.modelName,
+        });
       },
       // Fires specifically when abortSignal (STREAM_TIMEOUT_MS above)
       // actually trips -- a stuck/hanging upstream that never errored and
@@ -1899,11 +2282,81 @@ export async function chatHandler(c: Context<AppEnv>) {
         logServerError(
           "chatHandler.streamText.onAbort",
           new Error(
-            `LLM call timed out after ${STREAM_TIMEOUT_MS}ms for conversation ${conv.id}, provider ${resolvedLLMConfig.provider}, model ${resolvedLLMConfig.modelName}`,
+            `LLM call timed out after ${STREAM_TIMEOUT_MS}ms for conversation ${conv.id}, provider ${config.provider}, model ${config.modelName}`,
           ),
         );
       },
     });
+
+    // #98/#364: one hop of provider failover, finally wired in. Both hops are
+    // built by buildTurnParams above, so the fallback honours its own
+    // config's provider and credential (resolved further up) while every
+    // other parameter of the turn is identical to the primary's.
+    //
+    // streamWithFallback never throws: when there is no fallback, when the
+    // primary's failure is not the retryable kind, or when the fallback fails
+    // too, it hands back the corresponding result and everything below runs
+    // on it exactly as it did before this existed. See that module's header
+    // for the boundary it detects and why it is not `await result.response`.
+    const { result, attribution } = await streamWithFallback({
+      primary: buildTurnParams(resolvedLLMConfig, providerClient),
+      fallback:
+        fallbackConfig && fallbackProviderClient
+          ? buildTurnParams(fallbackConfig, fallbackProviderClient)
+          : null,
+      primaryModelName: resolvedLLMConfig.modelName,
+      fallbackModelName: fallbackConfig?.modelName ?? null,
+      logContext: `chatHandler.streamWithFallback conversation=${conv.id}`,
+    });
+
+    // #364 (requirement 3): the config whose provider/model/id the turn's
+    // single llm_call_logs row is written under -- WHOEVER ACTUALLY SERVED
+    // IT. `usedFallback` is the only thing that can select it, and it comes
+    // from the attempt streamWithFallback actually returned, so the row
+    // cannot name the primary for a turn the fallback answered. Its pricing
+    // columns come from the same row too, so cost is estimated against the
+    // model that was really billed.
+    const servingConfig: ResolvedLLMConfig =
+      attribution.usedFallback && fallbackConfig ? fallbackConfig : resolvedLLMConfig;
+
+    // #364 (requirement 5) -- DESIGN DECISION, recorded rather than silently
+    // picked: `usedFallback` is a structured LOG LINE, not a new column.
+    //
+    // Reasoning. The persisted half of the question is already answered by
+    // the requirement above it: llm_call_logs now records the SERVING
+    // provider/model/llm_config_id, so "which model answered this turn" is a
+    // queryable column today, not an inference. What a dedicated column would
+    // add is only the DELTA -- "and it wasn't the one we asked first" -- and
+    // the sole consumer for that is the fallback-rate report (#48), which
+    // does not exist. #275 built structured JSON logging on this route
+    // specifically for chat-failure-path observability, and a rate over these
+    // lines is computable from a log query the day someone wants it. A
+    // migration adding a column to a table whose reporting story is still
+    // unbuilt would be guessing at that report's shape before it has one.
+    //
+    // The upgrade path is deliberately cheap and stated here so it is not
+    // rediscovered: when #48 lands, add `used_fallback boolean not null
+    // default false` (plus, if the report wants it, `primary_llm_config_id`)
+    // to llm_call_logs and pass `attribution.usedFallback` straight through
+    // finalizeAssistantTurn's existing llmLog argument. Nothing about this
+    // decision makes that harder later.
+    //
+    // Warn, not error: the turn SUCCEEDED. This is the system working as
+    // configured. But a rising rate of these means the primary provider is in
+    // trouble, and nothing else in the system would surface that.
+    if (attribution.usedFallback) {
+      logServerWarn("chatHandler.streamWithFallback.usedFallback", "primary provider failed; fallback served the turn", {
+        conversationId: conv.id,
+        userId: authContext.session.userId,
+        primaryLlmConfigId: resolvedLLMConfig.id,
+        primaryProvider: resolvedLLMConfig.provider,
+        primaryModel: resolvedLLMConfig.modelName,
+        servingLlmConfigId: servingConfig.id,
+        servingProvider: servingConfig.provider,
+        servingModel: attribution.servedBy,
+        primaryError: attribution.primaryError ?? null,
+      });
+    }
 
     return result.toUIMessageStreamResponse({
       headers: { "x-conversation-id": conv.id },
@@ -1922,11 +2375,22 @@ export async function chatHandler(c: Context<AppEnv>) {
       // c.json({error, code}) response on this route already uses. A bare
       // string would classify as "unknown" and bury this sentence in the
       // "details for support" disclosure instead of the headline.
+      // #275: `context: "chatHandler.stream"` -- distinct from
+      // streamText's own "chatHandler.streamText.onError" above -- these are
+      // genuinely different failure surfaces even though both handle "a
+      // provider/stream error happened": streamText's onError sees an
+      // in-stream `error` chunk (a provider failure mid-generation), while
+      // THIS onError is the UI-message-stream wrapper's own hook, which can
+      // also fire for a stream-processing failure that never produced an
+      // `error` chunk at all. Kept separate on purpose so an operator can
+      // tell which layer actually failed instead of one context string
+      // conflating both.
       onError: (error) => {
-        logServerError(
-          "chatHandler.toUIMessageStreamResponse.onError",
-          error instanceof Error ? error : new Error(String(error)),
-        );
+        logServerError("chatHandler.stream", error instanceof Error ? error : new Error(String(error)), {
+          conversationId: conv.id,
+          userId: authContext.session.userId,
+          model: servingConfig.modelName,
+        });
         return JSON.stringify({
           error: "The tutor stopped partway through. Nothing you wrote was lost.",
           code: "tutor_stopped",
@@ -1986,10 +2450,40 @@ export async function chatHandler(c: Context<AppEnv>) {
         // perceived as tail latency since the SDK awaits onFinish inside
         // the stream's flush) collapse into one db.batch()/transaction.
         const shouldPersist = !isErrorOutcome && hasRenderableContent(responseMessage.parts);
+        // #275: the current equivalent of the old "hasRenderableContent
+        // false -> bare return, nothing logged" branch -- that separate
+        // early return doesn't exist anymore (#268/#342 folded it into this
+        // one shouldPersist gate, above), so this is the single place that
+        // now knows a turn is about to go unpersisted, for either reason
+        // (isErrorOutcome, or a `stop`/`tool-calls` finish that still
+        // produced no renderable content). Warn, not error: nothing threw --
+        // this is the system correctly refusing to write a truncated/blank
+        // row, but an operator debugging "the tutor showed my student an
+        // error" needs to see it happened and why (finishReason/isAborted),
+        // not infer it from a gap in the transcript.
+        if (!shouldPersist) {
+          logServerWarn("chatHandler.onFinish.noRenderableContent", "turn produced no persistable content", {
+            conversationId: conv.id,
+            userId: authContext.session.userId,
+            model: servingConfig.modelName,
+            finishReason: finishReason ?? null,
+            isAborted: Boolean(isAborted),
+          });
+        }
         const assistantMessage = shouldPersist
           ? { id: crypto.randomUUID(), parts: responseMessage.parts }
           : null;
 
+        // #364 (requirement 3): still ONE row per turn after a failover, not
+        // one per attempt. There is exactly one finalizeAssistantTurn call
+        // site pair in this callback and streamWithFallback returns exactly
+        // one result, so a failed-over turn cannot produce a second row --
+        // and `servingConfig` (above) means the one row it does produce names
+        // the provider/model/config that actually answered, never the primary
+        // that didn't. `latencyMs` deliberately still measures from
+        // turnStartedAt, i.e. the whole model-call window including the
+        // failed first attempt: that is what the student actually waited.
+        //
         // #317 review, #321: one llm_call_logs row per turn -- including the
         // error/aborted/no-content cases above, which previously early-
         // returned with nothing written anywhere. This was the operational
@@ -2033,9 +2527,9 @@ export async function chatHandler(c: Context<AppEnv>) {
             );
             await finalizeAssistantTurn(db, conv.id, assistantMessage, {
               organizationId: orgScope,
-              llmConfigId: resolvedLLMConfig.id,
-              provider: resolvedLLMConfig.provider,
-              model: resolvedLLMConfig.modelName,
+              llmConfigId: servingConfig.id,
+              provider: servingConfig.provider,
+              model: servingConfig.modelName,
               providerRequestId: null,
               inputTokens: null,
               outputTokens: null,
@@ -2057,25 +2551,25 @@ export async function chatHandler(c: Context<AppEnv>) {
             logServerError(
               "chatHandler.onFinish.warnings",
               new Error(
-                `streamText warnings for conversation ${conv.id}, model ${resolvedLLMConfig.modelName}: ${JSON.stringify(warnings)}`,
+                `streamText warnings for conversation ${conv.id}, model ${servingConfig.modelName}: ${JSON.stringify(warnings)}`,
               ),
             );
           }
           await finalizeAssistantTurn(db, conv.id, assistantMessage, {
             organizationId: orgScope,
-            llmConfigId: resolvedLLMConfig.id,
-            provider: resolvedLLMConfig.provider,
-            model: resolvedLLMConfig.modelName,
+            llmConfigId: servingConfig.id,
+            provider: servingConfig.provider,
+            model: servingConfig.modelName,
             providerRequestId: response.id ?? null,
             inputTokens: usage.inputTokens ?? null,
             outputTokens: usage.outputTokens ?? null,
             costCents: estimateCostCents(
-              resolvedLLMConfig.modelName,
+              servingConfig.modelName,
               usage.inputTokens ?? null,
               usage.outputTokens ?? null,
               {
-                input: resolvedLLMConfig.pricePerMillionInputTokens,
-                output: resolvedLLMConfig.pricePerMillionOutputTokens,
+                input: servingConfig.pricePerMillionInputTokens,
+                output: servingConfig.pricePerMillionOutputTokens,
               },
             ),
             latencyMs: Date.now() - turnStartedAt,
@@ -2089,7 +2583,18 @@ export async function chatHandler(c: Context<AppEnv>) {
           // by this failing self-heals via LOCK_STALE_MS, same as any other
           // path that never reaches its own release call (see this
           // function's trade-off note in conversations.ts).
-          logServerError("chatHandler.onFinish.finalizeAssistantTurn", err);
+          //
+          // #275: this used to be the ONE log statement on this whole route
+          // that carried any turn-level identifying context at all -- and
+          // even it carried none: `err` alone, no conversationId/userId/
+          // model. An operator debugging "students say the tutor is weird"
+          // couldn't even grep this one line down to a specific
+          // conversation or model.
+          logServerError("chatHandler.onFinish.finalizeAssistantTurn", err, {
+            conversationId: conv.id,
+            userId: authContext.session.userId,
+            model: servingConfig.modelName,
+          });
         }
       },
     });

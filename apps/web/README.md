@@ -4,6 +4,17 @@ TypeScript / React 19 / Vite / Tailwind 4 / Hono / Cloudflare Workers / Drizzle 
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the routes-vs-repositories convention and how tenancy scoping is enforced.
 
+## API documentation
+
+`ARCHITECTURE.md` documents *internal* invariants. For the consumer-facing HTTP
+contract — request/response shapes, every status code with its literal `error`
+string, pagination cursors, and worked `curl` examples — see:
+
+- [`docs/api/conversations.md`](./docs/api/conversations.md) — the conversation
+  and chat routes (`/api/conversations*`, `/api/chat`, and the section-conversation
+  lifecycle routes under `/api/courses/...`), including the `x-conversation-id`
+  header protocol and the per-send `id` idempotency key.
+
 ## Setup
 
 1. `npm install`
@@ -31,6 +42,15 @@ provisions secrets, so these must already be set on the target environment
 - `SESSION_SECRET`, `ENCRYPTION_KEY`, `BLIND_INDEX_KEY`, `WORKOS_API_KEY`,
   `WORKOS_WEBHOOK_SECRET` -- see `.dev.vars.example` for what each is for;
   same requirement (must exist on the target before deploy).
+
+`wrangler.jsonc` also registers a Cloudflare Cron Trigger (`"crons": ["17 *
+* * *"]`, `wrangler deploy` provisions it automatically) -- the first
+scheduled job in this system. It fires the Worker's `scheduled()` export
+hourly, at minute 17, to run `autoSubmitOverdueSections` (#167): an
+unattended sweep that writes `submissions` rows for section conversations
+past their homework's deadline. There is no student or instructor request
+behind these writes, so if you're auditing "what can write to `submissions`
+outside an HTTP request," this is it.
 
 ## Seeding a dev dataset
 
@@ -94,7 +114,7 @@ regenerated via `drizzle-kit generate` and verified against the shared dev
 Neon DB (llteacher#373; renumber commit on the `worktree-m4-conv-chat-pr3`
 branch).
 
-### Hot-table indexes — `CREATE INDEX CONCURRENTLY` (#372)
+### Hot-table migrations — avoid strong locks (#372)
 
 A plain `CREATE INDEX` takes a `SHARE` lock that blocks writes to the
 indexed table for the duration of the build. On `conversations`,
@@ -111,11 +131,25 @@ re-verified against the shared dev Neon DB (`scripts/migrate.db.test.ts`'s
 transaction" test copies the real migration files, so it re-validates this
 specific statement, not a synthetic stand-in).
 
-**The rule: every index migration on `conversations`, `messages`,
-or `llm_call_logs` uses `CREATE INDEX CONCURRENTLY`, and must include `IF
-NOT EXISTS`.** `drizzle-kit generate` does not emit `CONCURRENTLY` on its
-own -- add it by hand to the generated statement before committing the
-migration.
+The same concern isn't limited to index builds.
+`0042_steady_slayback.sql` narrows `conversations.updated_at` to millisecond
+precision with `ALTER TABLE "conversations" ALTER COLUMN "updated_at" SET
+DATA TYPE timestamp (3) with time zone` -- a full table rewrite under an
+`ACCESS EXCLUSIVE` lock, strictly heavier than the `SHARE` lock an index
+build takes, for the same "written on every chat turn" reason this rule
+exists in the first place.
+
+**The rule: any migration on `conversations`, `messages`, or `llm_call_logs`
+that would take a lock stronger than what `CREATE INDEX CONCURRENTLY` takes
+needs the same scrutiny.** For index migrations specifically, that means
+using `CREATE INDEX CONCURRENTLY` with `IF NOT EXISTS` --
+`drizzle-kit generate` does not emit `CONCURRENTLY` on its own, so add it by
+hand to the generated statement before committing the migration. For other
+lock-heavy statements (column type changes, `ALTER TABLE` rewrites, etc.),
+there is no `CONCURRENTLY` equivalent -- weigh whether the change can be
+done with a lighter-weight technique (e.g. add-column-then-backfill) before
+accepting an `ACCESS EXCLUSIVE` lock on one of these tables, and call out the
+tradeoff in the migration's PR when you can't avoid it.
 
 `CREATE INDEX CONCURRENTLY` cannot run inside a transaction block at all
 (a hard Postgres error, not just a lock question), and drizzle's own

@@ -10,7 +10,7 @@
    The breadcrumb string is passed as a prop.
    -------------------------------------------------------------------------- */
 
-import { Fragment, useCallback, useRef, useEffect, useState } from "react";
+import { Fragment, useCallback, useRef, useEffect, useLayoutEffect, useState } from "react";
 import { Message } from "./Message";
 import { Composer } from "./Composer";
 import { CodeBlock } from "./CodeBlock";
@@ -45,6 +45,7 @@ export type StoppedReason =
   | "not_found"
   | "denied"
   | "in_progress"
+  | "duplicate_message"
   | "section_closed"
   | "tutor_stopped"
   | "unavailable"
@@ -74,7 +75,40 @@ function clampDetail(raw: string): string | undefined {
     : trimmed;
 }
 
-export function readErrorMessage(raw: string): StoppedCopy {
+/** #96 (send-failure UX): which HALF of a turn failed.
+ *
+ *  "send" — the request never reached the server, or the server refused it
+ *  outright (any non-2xx). Nothing about this turn was persisted: no user
+ *  row, no assistant row. The student's own text is the thing at risk, and
+ *  the caller is expected to have put it back in the composer (see
+ *  `restoredDraft`), so the copy must say "not sent" and must NOT offer a
+ *  regenerate-style retry against a turn the server never heard of.
+ *
+ *  "response" — the server accepted the send (2xx) and therefore persisted
+ *  the student's message, but the model turn didn't complete (an in-stream
+ *  `error` chunk, a dropped connection mid-stream, a server timeout). The
+ *  student's message IS in the transcript and will still be there on reload;
+ *  only the reply is missing, so the right recovery is regenerate.
+ *
+ *  These were conflated before: every failed turn rendered the same row with
+ *  the same regenerate retry, which for a refused send meant the student's
+ *  text sat in the transcript as a bubble the server had never stored (it
+ *  vanished on reload) while the copy told them to retype it by hand. */
+export type TurnFailureStage = "send" | "response";
+
+export function readErrorMessage(raw: string, stage: TurnFailureStage = "response"): StoppedCopy {
+  const copy = classifyStoppedTurn(raw, stage);
+  /* #96: a refused/undelivered send is never retryable through the error
+     row, whatever its code says in the response-failure case. The turn does
+     not exist server-side, so there is nothing to regenerate -- the caller
+     has put the student's text back in the composer instead, and Enter is
+     the retry. Applied centrally so no individual case below can drift out
+     of step with that (rate_limited's "retryable: true" is correct for a
+     response-half failure and wrong for this one). */
+  return stage === "send" ? { ...copy, retryable: false } : copy;
+}
+
+function classifyStoppedTurn(raw: string, stage: TurnFailureStage): StoppedCopy {
   /* Defensive: the SDK stores whatever was thrown, typed `unknown`. A
      non-Error throw yields `undefined` here, and `.trim()` on it would raise
      inside the render body -- escalating a recoverable failed turn into a
@@ -137,6 +171,25 @@ export function readErrorMessage(raw: string): StoppedCopy {
         message: "That message is already on its way. Give it a moment before sending again.",
         retryable: true,
       };
+    case "duplicate_message":
+      /* #266: the third 409 on this route, and distinct from in_progress for
+         the same reason section_closed is -- the server refused this send
+         because its message id already identifies DIFFERENT stored text, so
+         re-sending the identical id and body 409s identically forever.
+         Sharing in_progress's code told the student their message was
+         "already on its way" when it had in fact been rejected and never
+         persisted -- the precise silent-drop this issue exists to end, just
+         relocated from the transcript to the error copy. Says plainly that
+         nothing was sent, and points at the one action that does work
+         (compose it again, which mints a fresh id -- #96 puts the text
+         itself back in the composer, so that's one keystroke, not a
+         retype). */
+      return {
+        label: "Message not sent",
+        message:
+          "That message wasn't sent — it clashed with an earlier one. Nothing was lost from the conversation: it's back in the box below, ready to send again.",
+        retryable: false,
+      };
     case "section_closed":
       /* Distinct from in_progress on purpose: both are 409s, but this one is
          permanent. Sharing a code meant a closed section rendered "already on
@@ -170,6 +223,25 @@ export function readErrorMessage(raw: string): StoppedCopy {
         retryable: false,
       };
     default:
+      /* #96: an unrecognized failure means very different things depending
+         on which half of the turn died, and the previous single sentence
+         ("The tutor didn't finish answering") was only ever true for the
+         response half. A send that never reached the server -- a dropped
+         wifi connection, a WebKit "Load failed", a gateway page in front of
+         the Worker -- did not fail to ANSWER; it failed to ARRIVE, and the
+         student's own words are what needs accounting for. */
+      if (stage === "send") {
+        return {
+          label: "Not sent",
+          message:
+            "Your message didn't reach the tutor, so nothing was added to this conversation. It's back in the box below — check your connection and send it again.",
+          detail: clampDetail(serverError ?? trimmed),
+          /* The composer holds the text: pressing Enter is the retry. A
+             regenerate-style button here would re-request a turn the server
+             never received. */
+          retryable: false,
+        };
+      }
       /* Everything unrecognized -- a provider string, a gateway HTML page, a
          WebKit "Load failed", a body whose shape we do not know. The student
          gets a sentence; the machine's words go to the detail line only. */
@@ -318,18 +390,58 @@ export interface ConversationViewProps {
    *  "error") so a failed/rate-limited stream doesn't just silently
    *  disappear. Rendered as an inline row below the messages with a Retry
    *  action; `onRetry` should call that `useChat` instance's own
-   *  `regenerate()`. `null`/`undefined` renders nothing. */
-  error?: { message: string; onRetry: () => void } | null;
+   *  `regenerate()`. `null`/`undefined` renders nothing.
+   *
+   *  #96: `stage` says which half of the turn failed (see TurnFailureStage)
+   *  and defaults to "response", the only case that existed before. `onRetry`
+   *  is optional because a "send"-stage failure has nothing to regenerate --
+   *  omit it and no Retry button renders, since the student's text has been
+   *  handed back to the composer via `restoredDraft` instead. */
+  error?: { message: string; onRetry?: () => void; stage?: TurnFailureStage } | null;
+  /** #96 (send-failure UX): text to put back into the composer after a send
+   *  that never reached the server, so the student's words survive a dropped
+   *  connection or a refused request instead of being stranded in a
+   *  transcript bubble the server never stored.
+   *
+   *  Restored once per object identity -- pass a NEW object per failure (the
+   *  same text failing twice must restore twice) and `null` the rest of the
+   *  time. Never overwrites a non-empty draft: if the student has already
+   *  started typing something else, their current words win. */
+  restoredDraft?: { text: string } | null;
   /** #235: focuses the composer once on mount -- pass true for the one
    *  render right after a brand-new conversation was created and switched
    *  to, so a keyboard user lands in the composer without an extra Tab. */
   autoFocusComposer?: boolean;
-  /** #280: true when the fetched history came back a full page (the
-   *  messages route pages at 200, no "load older" is wired yet) -- renders
-   *  a static notice above the transcript so the ceiling is visible rather
-   *  than silent (a conversation with exactly 200 messages is otherwise
-   *  indistinguishable from one truncated at 200). */
+  /** #280: true when there are older messages than the transcript holds
+   *  (the messages route pages at 200). Renders the "Load older messages"
+   *  control above the transcript when `onLoadOlderMessages` is also
+   *  given, and a static "older messages aren't shown" notice when it
+   *  isn't.
+   *
+   *  That notice branch has NO live consumer today -- both callers (App.tsx's
+   *  tutor and section surfaces) wire the loader. It is kept deliberately,
+   *  as a defensive default rather than a described behaviour: these two
+   *  props are independently optional, so `hasMoreHistory` without a loader
+   *  is reachable by construction of this API, and #280 is specifically a
+   *  bug about a page ceiling being SILENT. Disclosing it is the safe thing
+   *  for this component to do when it is told history is truncated but given
+   *  no way to fetch more.
+   *
+   *  (The instructor transcript viewer, apps/admin's TranscriptDetailView,
+   *  is not that consumer: it never passes `hasMoreHistory` at all and
+   *  renders its own offset-based pagination outside this component.) */
   hasMoreHistory?: boolean;
+  /** #280 (requirement 2, transcript half): fetches the page of messages
+   *  BEFORE the oldest one showing and prepends it. The caller owns the
+   *  cursor (the oldest loaded message's `seq`); this component only owns
+   *  the affordance and the scroll anchoring that keeps the student
+   *  looking at the same message afterwards. */
+  onLoadOlderMessages?: () => void;
+  /** #280: true while `onLoadOlderMessages`' request is in flight. */
+  isLoadingOlderMessages?: boolean;
+  /** #280: true when the last "load older" attempt failed. The control
+   *  stays live -- the page is still there to ask for. */
+  loadOlderMessagesError?: boolean;
   /** #288: how many trailing messages the model actually sees on a turn.
    *  When the transcript is longer than this, a divider is rendered above
    *  the oldest message still inside the window.
@@ -476,8 +588,12 @@ export function ConversationView({
   onSendMessage,
   isSending = false,
   error = null,
+  restoredDraft = null,
   autoFocusComposer = false,
   hasMoreHistory = false,
+  onLoadOlderMessages,
+  isLoadingOlderMessages = false,
+  loadOlderMessagesError = false,
   contextWindowSize,
   headerActions,
   onStop,
@@ -542,7 +658,54 @@ export function ConversationView({
      A new message or a failed turn scrolls unconditionally: both are
      content the student has not seen, and the error row carries the only
      recovery control, so it must not mount below the fold. */
+  /* #280: a "load older" prepend also grows `messages.length`, and the
+     scroll-to-bottom below would then throw the student to the newest
+     message -- the exact opposite of what they just asked for. Two refs
+     cooperate:
+
+     - `pendingScrollAnchorRef` records the scroll geometry at the moment
+       the control was pressed, so the layout effect can restore the same
+       message to the same place once the older page has been inserted
+       ABOVE it (browser scroll anchoring is not reliable enough to lean on,
+       and jsdom has none at all).
+     - `restoredScrollAnchorRef` tells the bottom-scroll effect that this
+       particular length change was a prepend it must not react to. Layout
+       effects all run before passive ones in the same commit, so the flag
+       is always set by the time the effect below reads it. */
+  const pendingScrollAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const restoredScrollAnchorRef = useRef(false);
+
+  const handleLoadOlderMessages = () => {
+    const el = scrollRef.current;
+    if (el) pendingScrollAnchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
+    onLoadOlderMessages?.();
+  };
+
+  useLayoutEffect(() => {
+    const anchor = pendingScrollAnchorRef.current;
+    const el = scrollRef.current;
+    if (!anchor || !el) return;
+    pendingScrollAnchorRef.current = null;
+    restoredScrollAnchorRef.current = true;
+    // The prepended page's own height -- whatever was added above the
+    // message the student was looking at is exactly how far down it moved.
+    el.scrollTop = anchor.scrollTop + (el.scrollHeight - anchor.scrollHeight);
+  }, [messages.length]);
+
+  /* A request that returned no older messages never changes
+     `messages.length`, so the layout effect above never fires and its
+     anchor would sit stale until the next genuine append -- which would
+     then be mistaken for a prepend. Clearing on the in-flight flag going
+     false covers that (and the failure case) without a third signal. */
   useEffect(() => {
+    if (!isLoadingOlderMessages) pendingScrollAnchorRef.current = null;
+  }, [isLoadingOlderMessages]);
+
+  useEffect(() => {
+    if (restoredScrollAnchorRef.current) {
+      restoredScrollAnchorRef.current = false;
+      return;
+    }
     scrollToBottom(true);
   }, [messages.length, error, scrollToBottom]);
 
@@ -663,6 +826,18 @@ export function ConversationView({
     setDraft("");
   };
 
+  /* #96: hand a failed-to-send message back to the composer. Keyed on object
+     identity rather than on the text, so the same message failing twice in a
+     row restores both times -- a value-keyed effect would see no change and
+     silently swallow the second failure, which is exactly the "my words just
+     disappeared" complaint this exists to prevent. */
+  const lastRestoredDraftRef = useRef<{ text: string } | null>(null);
+  useEffect(() => {
+    if (!restoredDraft || restoredDraft === lastRestoredDraftRef.current) return;
+    lastRestoredDraftRef.current = restoredDraft;
+    setDraft((current) => (current.trim() ? current : restoredDraft.text));
+  }, [restoredDraft]);
+
   /* Composer history: the student's most recent 10 sent messages, oldest→newest.
      Derived from the conversation messages already in props — no separate store. */
   const composerHistory = messages
@@ -672,7 +847,7 @@ export function ConversationView({
 
   /* Hoisted rather than computed inside JSX: the previous inline IIFE
      existed only to bind locals, and foreclosed memoising or extracting. */
-  const errorCopy = error ? readErrorMessage(error.message) : null;
+  const errorCopy = error ? readErrorMessage(error.message, error.stage ?? "response") : null;
 
   return (
     <div className="conversation-column">
@@ -745,11 +920,38 @@ export function ConversationView({
               the copy: `messages` here keeps growing as the conversation
               continues after hydration, so a count captured from the
               fetched page would go stale the moment a new turn is sent. */}
-          {hasMoreHistory && (
-            <p className="conversation-history-notice">
-              Showing the most recent messages. Older messages aren't shown yet.
-            </p>
-          )}
+          {hasMoreHistory &&
+            (onLoadOlderMessages ? (
+              /* #280 (requirement 2): the real control. A button rather
+                 than load-on-scroll-to-top: this column's scroll handler is
+                 already carrying the streaming-follow and
+                 scroll-to-bottom behaviours, and a fetch fired by scrolling
+                 up would race both of them. */
+              <div className="conversation-history-more">
+                <button
+                  type="button"
+                  className="conversation-history-more__btn"
+                  onClick={handleLoadOlderMessages}
+                  disabled={isLoadingOlderMessages}
+                  aria-busy={isLoadingOlderMessages}
+                >
+                  {isLoadingOlderMessages ? "Loading…" : "Load older messages"}
+                </button>
+                {loadOlderMessagesError && (
+                  <p className="conversation-history-notice" role="alert">
+                    Couldn&rsquo;t load older messages. Please try again.
+                  </p>
+                )}
+              </div>
+            ) : (
+              /* Defensive default, not a path any current caller takes --
+                 see hasMoreHistory's own doc comment. Told history is
+                 truncated but given no way to fetch more, disclosing the
+                 ceiling beats hiding it. */
+              <p className="conversation-history-notice">
+                Showing the most recent messages. Older messages aren't shown yet.
+              </p>
+            ))}
 
           {/* #300: role="log" is the ARIA role specified for exactly this
               case -- a sequence of items where new ones append at the end
@@ -907,7 +1109,12 @@ export function ConversationView({
               {/* Before the detail, not after. A gateway error body pushed the
                   only recovery control arbitrarily far down a thread that does
                   not auto-scroll on error. */}
-              {errorCopy.retryable && (
+              {/* #96: `onRetry` is optional now -- a send-stage failure has
+                  no server-side turn to regenerate, so the caller omits it
+                  and the student recovers from the composer instead
+                  (readErrorMessage already forces retryable false there;
+                  this second condition keeps the two from ever disagreeing). */}
+              {errorCopy.retryable && error.onRetry && (
                 <button
                   type="button"
                   className="conversation-error-row__retry"

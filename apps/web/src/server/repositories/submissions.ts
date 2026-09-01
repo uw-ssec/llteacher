@@ -1,6 +1,6 @@
-import { and, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, asc, eq, exists, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { submissions, grades, conversations, courses, courseMemberships, homeworks, sections, users, sectionAnswers } from "../../db/schema";
+import { submissions, grades, conversations, courses, courseMemberships, homeworks, messages, sections, users, sectionAnswers, type SubmissionSource } from "../../db/schema";
 import type { OrgScope, CourseScope } from "./scope";
 import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { deriveHomeworkStatus, isHomeworkHidden, type HomeworkStatus } from "./homeworks";
@@ -288,6 +288,18 @@ export interface SubmissionCell {
    *  already reads `submissions` to decide the status, so this is a field
    *  off a row it holds, not another query. */
   submissionId: string | null;
+  /** #167: whether this cell's submission was the student pressing submit
+   *  or the scheduled overdue sweep recording work they had in progress
+   *  when the deadline passed (jobs/autoSubmitOverdue.ts). Null wherever
+   *  submissionId is null -- there is no provenance without a submission --
+   *  and null for a non_interactive section, which records an answer row
+   *  rather than a submission.
+   *
+   *  An instructor reading this dashboard is entitled to the difference: a
+   *  `submitted` cell means something materially different when the student
+   *  never declared themselves done. Rides along on the same row the cell
+   *  already reads, so it costs no extra query. */
+  submissionSource: SubmissionSource | null;
 }
 
 export type ParticipationStatus = "no_interaction" | "partial" | "active";
@@ -392,6 +404,8 @@ export async function getHomeworkSubmissionsMatrix(
   // #75: conversation -> submission, so a submitted cell can carry the id
   // the grading panel needs without a second query.
   const submissionIdByConversation = new Map(allSubmissions.map((s) => [s.conversationId, s.id]));
+  // #167: same row, second field -- who created the submission.
+  const submissionSourceByConversation = new Map(allSubmissions.map((s) => [s.conversationId, s.source]));
 
   // #164: non_interactive sections never produce a conversation, so
   // submitted/activeConvo below are always empty/false for them -- fetched
@@ -437,8 +451,10 @@ export async function getHomeworkSubmissionsMatrix(
           lastActivityAt: null,
           hasDeletedConversation: false,
           // #164: a non_interactive section records a section_answers row,
-          // never a submission -- so there is no submission to grade here.
+          // never a submission -- so there is no submission to grade here,
+          // and (#167) no submission provenance either.
           submissionId: null,
+          submissionSource: null,
         });
         continue;
       }
@@ -466,6 +482,7 @@ export async function getHomeworkSubmissionsMatrix(
         lastActivityAt: cellLastActivityAt?.toISOString() ?? null,
         hasDeletedConversation: hasDeleted,
         submissionId: submittedConvo ? (submissionIdByConversation.get(submittedConvo.id) ?? null) : null,
+        submissionSource: submittedConvo ? (submissionSourceByConversation.get(submittedConvo.id) ?? null) : null,
       });
     }
 
@@ -518,4 +535,227 @@ export async function getHomeworkSubmissionsMatrix(
       submissionRate: students.length ? Math.round((submittedStudents / students.length) * 100) : 0,
     },
   };
+}
+
+/* --------------------------------------------------------------------------
+   #167: the data access behind the scheduled overdue-submission sweep. The
+   orchestration, counting and logging live in server/jobs/autoSubmitOverdue.ts;
+   the two functions below are here because ARCHITECTURE.md's "Routes and
+   Repositories" rule is about where tenancy scoping is enforced, and a
+   background job needs that guard at least as much as a route does -- more,
+   arguably, since it has no authenticated caller whose membership would have
+   narrowed the query by accident.
+   -------------------------------------------------------------------------- */
+
+/** One (conversation, user, section) the sweep may submit for. `sectionId`
+ *  is non-null by construction: the query filters `kind = 'section'`, and
+ *  conversations_kind_section_chk makes section_id NOT NULL for that kind. */
+export interface OverdueSubmissionCandidate {
+  conversationId: string;
+  userId: string;
+  sectionId: string;
+}
+
+/** How many candidates one call may return for one organization.
+ *
+ *  Final review: the sweep had no bound at all. On the neon-http driver
+ *  every statement is a Cloudflare subrequest, and the job does one
+ *  sequential insert per candidate (jobs/autoSubmitOverdue.ts), so the
+ *  candidate count IS the per-invocation subrequest count. The cron is
+ *  hourly, but the FIRST production run has no lower bound on due date --
+ *  it would try to sweep the entire historical backlog of past-due,
+ *  student-written, unsubmitted sections in one invocation. Worse, that
+ *  failure would not converge: nothing marks a candidate "seen", so an
+ *  oversized run would blow the same limit every hour forever.
+ *
+ *  The bound is what makes the job's existing self-draining design actually
+ *  work: a candidate this run does not reach is not consumed, so the next
+ *  hourly run picks it up. A backlog drains at this rate per org per hour
+ *  instead of failing whole.
+ *
+ *  Per-org rather than per-run deliberately. A per-run budget shared across
+ *  organizations would be consumed by whichever orgs listAllOrgScopes
+ *  happens to return first, every run, permanently starving the rest -- a
+ *  worse failure than the one being fixed. The run-level ceiling is
+ *  therefore orgs x this. */
+export const OVERDUE_SUBMISSION_CANDIDATE_LIMIT = 500;
+
+/** Every section in `scope` that is past due, has a live conversation the
+ *  student has actually written in, and has no submission yet -- at most
+ *  `limit` of them, oldest due date first.
+ *
+ *  The bound is applied AFTER the release-state filter below, not as a SQL
+ *  `LIMIT`. A SQL limit can only order on columns, and the rows it would
+ *  keep are not necessarily the ones that survive deriveHomeworkStatus: a
+ *  hidden or expired homework with an old due date sorts to the front of
+ *  the window and is then dropped in JS, so an org carrying `limit` worth
+ *  of such rows would return zero candidates every run, forever. Slicing
+ *  the derived list cannot starve that way, and it bounds the quantity that
+ *  actually costs subrequests -- the inserts.
+ *
+ *  What stays unbounded is the SELECT's own result set, which is one
+ *  subrequest whatever its size. The `due_date <= now()` predicate below
+ *  keeps it from including every in-progress conversation in the org, which
+ *  is the bulk of a healthy system's rows.
+ *
+ *  The structural conditions are SQL predicates; the release-state one is
+ *  not. Whether a homework counts as "past due" is deriveHomeworkStatus's
+ *  answer, not a hand-written `due_date < now() AND published_at IS NOT
+ *  NULL AND ...` predicate -- homeworks.ts's own doc comment enumerates the
+ *  gates that must key on the derived status precisely so that adding a
+ *  status (#166 added `hidden` a milestone ago) reaches all of them from
+ *  one edit, and spelling the predicate out in SQL here would make this the
+ *  sixth gate free to drift from it. The SQL has already narrowed to "live
+ *  conversation, no submission", a small set, so deriving in JS costs
+ *  nothing worth that risk.
+ *
+ *  Excluded by the SQL, each for a reason the manual submit path also
+ *  enforces:
+ *    - soft-deleted conversations -- a restart voids its submission and
+ *      soft-deletes the conversation; the fresh one is the live attempt
+ *    - `tutor` conversations -- not submittable, and structurally
+ *      impossible to submit anyway (#128's composite FK)
+ *    - teacher-test conversations -- submitSection refuses these (#242);
+ *      an instructor trying their own prompt is not student work
+ *    - conversations with no message the student wrote (#167 review) -- see
+ *      the EXISTS clause below; "opened the section" is not "did the work"
+ *    - anything already submitted for that (user, section) */
+export async function findOverdueSubmissionCandidates(
+  db: Db,
+  scope: OrgScope,
+  limit: number = OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
+): Promise<OverdueSubmissionCandidate[]> {
+  const rows = await db
+    .select({
+      conversationId: conversations.id,
+      userId: conversations.ownerUserId,
+      sectionId: conversations.sectionId,
+      dueDate: homeworks.dueDate,
+      publishedAt: homeworks.publishedAt,
+      releasedAt: homeworks.releasedAt,
+      isHidden: homeworks.isHidden,
+      expiresAt: homeworks.expiresAt,
+    })
+    .from(conversations)
+    .innerJoin(courses, eq(conversations.courseId, courses.id))
+    .innerJoin(sections, eq(conversations.sectionId, sections.id))
+    .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
+    // The (user, section) pair, not conversation_id: that is the pair
+    // submissions_user_section_uq caps (#128), and it is the honest
+    // question. A student who submitted, restarted, and started a new
+    // conversation has no submission for the section any more (restart
+    // deletes it, see restartSectionConversation); one who submitted and
+    // never restarted must not be submitted for again through some other
+    // conversation row.
+    .leftJoin(
+      submissions,
+      and(
+        eq(submissions.userId, conversations.ownerUserId),
+        eq(submissions.sectionId, conversations.sectionId),
+      ),
+    )
+    .where(
+      and(
+        eq(courses.organizationId, scope),
+        eq(conversations.kind, "section"),
+        eq(conversations.isDeleted, false),
+        eq(conversations.isTeacherTest, false),
+        isNull(submissions.id),
+        // A narrowing, not the gate. deriveHomeworkStatus below stays the
+        // only authority on what "past due" means; this restates one of its
+        // necessary conditions (`past_due` is unreachable while due_date is
+        // in the future, homeworks.ts) in SQL so the query does not drag
+        // every currently-active conversation in the org across the wire
+        // just to drop it in JS. It can only exclude rows that filter would
+        // have excluded anyway, so it cannot become the sixth gate free to
+        // drift that the note above warns about -- it has no say over which
+        // surviving rows are candidates.
+        lte(homeworks.dueDate, sql`now()`),
+        // #167 review: the conversation must contain at least one message
+        // the STUDENT wrote. "Has a live conversation" is not the same
+        // question as "did any work", and since #318 the client eagerly
+        // POSTs a conversation the moment a student selects a section with
+        // none (App.tsx's startFreshSectionConversation, so the greeting
+        // renders) -- ungated, and startSectionConversation does not refuse
+        // a past-due homework (isUnreleased covers draft/scheduled/hidden,
+        // not past_due). So a student who clicks into an overdue section,
+        // reads the greeting and leaves has a live conversation carrying
+        // exactly one assistant message and nothing of their own.
+        //
+        // Without this, that student got a `submitted` row: a green cell on
+        // the instructor grid and a bump in their own completion
+        // percentage, for reading a greeting. That inverts the issue's own
+        // stated purpose (auto-submit exists because the dashboard
+        // "understates actual work done") and would make the auto signal
+        // something an instructor learns to distrust.
+        //
+        // EXISTS rather than a join: this must not multiply the candidate
+        // rows by the message count, and the predicate is existence, not
+        // aggregation. Served by messages_conversation_created_idx, whose
+        // leading column is conversation_id.
+        exists(
+          db
+            .select({ one: sql`1` })
+            .from(messages)
+            .where(and(eq(messages.conversationId, conversations.id), eq(messages.role, "user"))),
+        ),
+      ),
+    )
+    // Oldest backlog first, so the bound below drains a backlog in a
+    // predictable order rather than an arbitrary one, and so the same run
+    // twice over the same data picks the same rows.
+    .orderBy(asc(homeworks.dueDate));
+
+  return rows
+    .filter((row) => deriveHomeworkStatus(row) === "past_due")
+    .slice(0, limit)
+    .map((row) => ({
+      conversationId: row.conversationId,
+      userId: row.userId,
+      sectionId: row.sectionId!,
+    }));
+}
+
+/** Writes one `source: 'auto'` submission, or reports that one already
+ *  existed. Returns false rather than throwing on a conflict, and never
+ *  updates an existing row -- a student's own submission (or an earlier
+ *  auto one) must not have its submittedAt or its source rewritten by a
+ *  later sweep.
+ *
+ *  Idempotency lives here, in the database, not in a caller's prior
+ *  existence check. findOverdueSubmissionCandidates has already filtered
+ *  out anything submitted, but that read and this write are not one
+ *  transaction -- a student pressing submit in between, or two overlapping
+ *  cron invocations, would make a check-then-insert produce either a
+ *  duplicate or a crash. ON CONFLICT DO NOTHING makes the insert itself the
+ *  check. Same class of fix as #266/#273 elsewhere.
+ *
+ *  Untargeted deliberately: `submissions` has two unique constraints that
+ *  mean the same thing here -- UNIQUE(conversation_id) and
+ *  submissions_user_section_uq -- and a re-run violates both at once, so
+ *  naming one as the arbiter would leave the other free to raise. */
+export async function insertAutoSubmission(
+  db: Db,
+  scope: OrgScope,
+  candidate: OverdueSubmissionCandidate,
+): Promise<boolean> {
+  const [created] = await db
+    .insert(submissions)
+    .values({
+      conversationId: candidate.conversationId,
+      userId: candidate.userId,
+      sectionId: candidate.sectionId,
+      // Verified, not taken on the caller's word: the candidate query
+      // joined through `courses` and filtered on this exact
+      // organization_id, so the denormalized column cannot be written with
+      // another tenant's id.
+      organizationId: scope,
+      source: "auto",
+      // submittedAt left to the column's defaultNow(): the row records when
+      // the submission was made. Back-dating it to the due date would claim
+      // the student submitted on time, the opposite of what it means.
+    })
+    .onConflictDoNothing()
+    .returning({ id: submissions.id });
+  return created !== undefined;
 }

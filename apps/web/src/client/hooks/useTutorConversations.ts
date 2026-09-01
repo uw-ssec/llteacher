@@ -35,13 +35,24 @@ export interface UseTutorConversationsResult {
   /** True only when a fetch to a *known* courseId failed (network error or
    *  non-2xx) -- never true just because courseId hasn't loaded yet. */
   loadError: boolean;
-  /** #280: true when the server's response carried a non-null `nextCursor`
-   *  -- there are more conversations than fit in one page (the list route's
-   *  default page size, 50) that this hook doesn't fetch. Load-more itself
-   *  isn't wired yet (the fix here is making the ceiling visible instead of
-   *  silent, the issue's own explicitly-sanctioned interim); a caller can
-   *  use this to render a "showing the most recent N" notice. */
+  /** #280: true when the most recent page carried a non-null `nextCursor`
+   *  -- there are older conversations the list does not hold yet. Goes
+   *  false once `loadMore` has walked to the last page, so a caller can
+   *  render its load-more affordance directly off this. */
   hasMore: boolean;
+  /** #280: true while a `loadMore` request is in flight. */
+  loadingMore: boolean;
+  /** #280: true when the last `loadMore` failed. Cleared when the next one
+   *  is attempted. Separate from `loadError` (which is about the page-1
+   *  load): a failed load-more leaves everything already on screen valid,
+   *  so it must not read as "the list is broken". */
+  loadMoreError: boolean;
+  /** #280: fetches the next page using the server's own opaque
+   *  `nextCursor` (#281) and APPENDS it -- the rail is ordered
+   *  updatedAt-desc, so the next page is always older than what is showing.
+   *  A no-op when there is no cursor (last page reached), no courseId, or a
+   *  load-more is already in flight. */
+  loadMore: () => Promise<void>;
   /** Refetches the list from the server. Not called automatically after
    *  createConversation (that appends optimistically instead). */
   refetch: () => void;
@@ -87,7 +98,23 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
   const [conversations, setConversations] = useState<ConversationListItemResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
-  const [hasMore, setHasMore] = useState(false);
+  /* #280: the server's own opaque cursor (#281), not a client-reconstructed
+     one -- `hasMore` is derived from it rather than stored separately, so
+     "there is another page" and "here is how to ask for it" can never
+     disagree. `null` means the last page has been reached. */
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState(false);
+  /* Read inside loadMore AFTER its own await, and to decide whether to
+     start at all -- `nextCursor` captured in that useCallback's closure is
+     frozen at creation (it is keyed on courseId, not on the cursor), so a
+     second click would re-request the page it just fetched. */
+  const nextCursorRef = useRef(nextCursor);
+  nextCursorRef.current = nextCursor;
+  /* Guards against a double-fired click starting two identical requests;
+     a ref, not `loadingMore`, because it has to be readable synchronously
+     at the top of the handler rather than one render later. */
+  const loadingMoreRef = useRef(false);
 
   // #223: renameConversation needs to read the row being renamed BEFORE its
   // own optimistic update, to roll back to the right value on failure --
@@ -147,7 +174,8 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
       // conversation button and its reason, never "No conversations yet".
       setConversations([]);
       setLoadError(false);
-      setHasMore(false);
+      setNextCursor(null);
+      setLoadMoreError(false);
       setLoading(false);
       return;
     }
@@ -174,16 +202,32 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
            snapshot is older than what is on screen. Keeping the local list
            is the conservative choice: it may be missing another device's
            changes until the next load, but it cannot delete a row the
-           student just created in front of them. `hasMore`/`loadError` are
-           still worth taking -- neither is invalidated by a local edit. */
+           student just created in front of them. `loadError` is still worth
+           taking -- it is not invalidated by a local edit. The cursor is
+           (see below), so it travels with the rows. */
         const stale = mutationSeqAtRequest !== mutationSeqRef.current;
-        if (!stale) setConversations(data.items);
-        // #281: the route returns { items, nextCursor } instead of a bare
-        // array. #280: `nextCursor` is now surfaced as `hasMore` -- this
-        // hook still only ever fetches one page (an actual load-more
-        // request isn't wired), but a non-null cursor means the ceiling is
-        // real and worth showing rather than leaving the ceiling silent.
-        setHasMore(data.nextCursor !== null);
+        if (!stale) {
+          setConversations(data.items);
+          setNextCursor(data.nextCursor);
+        }
+        /* #281: the route returns { items, nextCursor } instead of a bare
+           array. #280: the cursor is kept, not just reduced to a boolean --
+           `loadMore` echoes this exact opaque value back as the next
+           request's `before`, which is the whole point of the server
+           emitting it (a client-reconstructed cursor off a
+           millisecond-truncated `updatedAt` was the precision-loss half of
+           #281's bug).
+
+           A refetch is a reload from page 1, so it RESETS pagination:
+           whatever `loadMore` had walked to is replaced by this response's
+           own cursor, matching the page-1 list that replaced the rows.
+           Set above, inside the same `!stale` branch as the rows -- the
+           cursor describes the TAIL of the list this response carried, so
+           taking it while keeping a different (locally-mutated, possibly
+           load-more-extended) list would point `before` at a row that is
+           not this list's tail. Unlike `loadError`, it is invalidated by
+           declining the rows it came with. */
+        setLoadMoreError(false);
         setLoadError(false);
       })
       .catch((err: unknown) => {
@@ -220,10 +264,66 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
        selectable. `loadError` is cleared too: an error belonging to the
        previous scope says nothing about this one. */
     setConversations([]);
-    setHasMore(false);
+    setNextCursor(null);
+    setLoadMoreError(false);
     setLoadError(false);
     refetch();
   }, [refetch]);
+
+  /* #280 (requirement 2, rail half): the actual load-more request. Appends
+     rather than replaces -- the list is updatedAt-desc, so every page after
+     the first is strictly older than what is already on screen.
+
+     `before` is the server's own opaque cursor verbatim. This hook never
+     constructs one: #281 moved the list to a compound (updatedAt, id)
+     cursor precisely because a client-side reconstruction off a
+     millisecond-truncated `updatedAt.toISOString()` silently dropped rows
+     at a page boundary. */
+  const loadMore = useCallback(async (): Promise<void> => {
+    const cursor = nextCursorRef.current;
+    if (!courseId || cursor === null || loadingMoreRef.current) return;
+
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    setLoadMoreError(false);
+    const requestedCourseId = courseId;
+    /* Not a new request seq of its own: this reads whatever page-1 request
+       was current when the click happened, so a refetch landing mid-flight
+       (which resets the list AND the cursor to page 1) invalidates this
+       page. Appending it afterwards would splice a page taken from the
+       PREVIOUS list's tail onto a list that no longer ends there. */
+    const requestSeqAtRequest = requestSeqRef.current;
+    try {
+      const res = await fetch(
+        `/api/conversations?courseId=${encodeURIComponent(courseId)}&kind=tutor&before=${encodeURIComponent(cursor)}`,
+      );
+      if (!res.ok) throw new Error(`failed to load more tutor conversations: ${res.status}`);
+      const data = (await res.json()) as ConversationListResponse;
+      if (requestedCourseId !== courseIdRef.current || requestSeqAtRequest !== requestSeqRef.current) return;
+      setConversations((prev) => {
+        /* Defensive de-dupe. The compound cursor (#281) makes a duplicate
+           across a page boundary impossible on the server side, but a row
+           bumped to the top by a chat turn between the two requests can
+           legitimately come back in a later page having already been
+           rendered from an earlier one -- the mutable-sort-key caveat #281
+           documents but does not (and cannot, without a snapshot) remove.
+           Duplicate React keys would be the visible symptom. */
+        const seen = new Set(prev.map((c) => c.id));
+        return [...prev, ...data.items.filter((c) => !seen.has(c.id))];
+      });
+      setNextCursor(data.nextCursor);
+    } catch (err: unknown) {
+      console.error("[useTutorConversations.loadMore]", err);
+      if (requestedCourseId !== courseIdRef.current || requestSeqAtRequest !== requestSeqRef.current) return;
+      /* Deliberately does NOT clear the cursor: the page that failed is
+         still there to ask for, so the affordance stays and Try again is
+         just another click on it. */
+      setLoadMoreError(true);
+    } finally {
+      loadingMoreRef.current = false;
+      if (requestedCourseId === courseIdRef.current) setLoadingMore(false);
+    }
+  }, [courseId]);
 
   const createConversation = useCallback(
     async (title?: string): Promise<ConversationListItemResponse | null> => {
@@ -363,7 +463,10 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     loading,
     awaitingCourseContext: courseId === undefined,
     loadError,
-    hasMore,
+    hasMore: nextCursor !== null,
+    loadingMore,
+    loadMoreError,
+    loadMore,
     refetch,
     createConversation,
     deleteConversation,

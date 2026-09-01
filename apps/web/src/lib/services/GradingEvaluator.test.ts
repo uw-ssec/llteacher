@@ -14,7 +14,6 @@ import { draftGrade, parseDraftReply, redactSolutionEcho } from "./GradingEvalua
 
 const generateTextMock = vi.fn();
 vi.mock("ai", () => ({ generateText: (a: unknown) => generateTextMock(a) }));
-vi.mock("../ai", () => ({ getOpenRouter: () => (m: string) => ({ m }) }));
 
 const SOLUTION =
   "The p-value is the probability of observing a test statistic at least as extreme as the one computed, assuming the null hypothesis is true.";
@@ -30,7 +29,12 @@ const input = (over: Record<string, unknown> = {}) => ({
   transcript: [{ role: "user", text: "I think it's the chance the null is true?" }],
   maxScore: 100,
   modelName: "test/model",
-  apiKey: "sk-test",
+  // #365: this module no longer builds a client of its own -- the caller
+  // hands it one, already built from the resolved config's own provider and
+  // credential. A stand-in object suffices here: generateText is mocked, and
+  // "which provider was chosen" is now the ROUTE's decision, asserted in
+  // routes/grades.test.ts.
+  model: { __fake: "provider-model" } as never,
   ...over,
 });
 

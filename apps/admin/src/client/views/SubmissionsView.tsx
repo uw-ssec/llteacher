@@ -33,6 +33,15 @@ export interface SubmissionCell {
   /** #75: present on a submitted cell, so it can be graded. Null otherwise
    *  -- there is nothing to grade until a student has submitted. */
   submissionId: string | null;
+  /** #167: "student" means they pressed submit; "auto" means the scheduled
+   *  overdue sweep recorded work that was still in progress when the due
+   *  date passed. Null on any cell with no submission behind it.
+   *
+   *  Optional here (unlike on the server type) so a caller still on the
+   *  previous response shape keeps type-checking -- the cell renders
+   *  without the marker in that case, which is the correct fallback rather
+   *  than an assertion that the submission was student-initiated. */
+  submissionSource?: "student" | "auto" | null;
 }
 
 export interface StudentSubmissionRow {
@@ -273,10 +282,22 @@ export function SubmissionsView({ data, onBack, onOpenTranscript, onGrade }: Sub
                 const deletedNote = cell?.hasDeletedConversation
                   ? " (has a deleted conversation)"
                   : "";
+                // #167: a cell the overdue sweep filled in, not the student.
+                // Both are genuinely "submitted" -- the work exists and is
+                // gradeable -- but an instructor reading engagement off this
+                // grid should not be told the student declared themselves
+                // done when they never did. Marked the same way the
+                // deleted-conversation case already is (a superscript plus
+                // the note in aria-label/title, since the grid has no
+                // legend), with its own cell class so the distinction is
+                // not carried by the glyph alone.
+                const autoSubmitted = cell?.status === "submitted" && cell.submissionSource === "auto";
+                const autoNote = autoSubmitted ? " (auto-submitted at the due date)" : "";
                 const body = (
                   <>
                     {header.order}
                     {cell?.hasDeletedConversation && <sup aria-hidden="true">†</sup>}
+                    {autoSubmitted && <sup aria-hidden="true">‡</sup>}
                   </>
                 );
                 // #75: only a SUBMITTED cell is gradeable, and only for a
@@ -312,13 +333,19 @@ export function SubmissionsView({ data, onBack, onOpenTranscript, onGrade }: Sub
                     ? () => onOpenTranscript!(header.id, row.studentId)
                     : undefined;
                 const ariaAction = gradeable ? " -- grade" : openable ? " -- view transcripts" : "";
-                const titleAction = gradeable ? `Grade ${header.title}` : `${header.title}: ${state}${cell?.hasDeletedConversation ? " -- includes a deleted conversation" : ""}`;
+                const titleAction = gradeable
+                  ? `Grade ${header.title}${autoSubmitted ? " (auto-submitted at the due date)" : ""}`
+                  : `${header.title}: ${state}${autoNote}${cell?.hasDeletedConversation ? " -- includes a deleted conversation" : ""}`;
                 return (
                   <button
                     key={header.id}
                     type="button"
-                    className={`admin-progress-cell admin-progress-cell--${state}${gradeable ? " admin-progress-cell--gradeable" : ""}`}
-                    aria-label={gradeable ? `Grade ${row.displayName}, ${header.title}` : `${header.title}: ${state}${deletedNote}${ariaAction}`}
+                    className={`admin-progress-cell admin-progress-cell--${state}${autoSubmitted ? " admin-progress-cell--auto" : ""}${gradeable ? " admin-progress-cell--gradeable" : ""}`}
+                    aria-label={
+                      gradeable
+                        ? `Grade ${row.displayName}, ${header.title}${autoNote}`
+                        : `${header.title}: ${state}${autoNote}${deletedNote}${ariaAction}`
+                    }
                     title={titleAction}
                     disabled={!onCellClick}
                     onClick={onCellClick}

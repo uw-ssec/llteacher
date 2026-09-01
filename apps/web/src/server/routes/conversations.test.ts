@@ -534,12 +534,12 @@ describe("DELETE /api/conversations/:id", () => {
   });
 });
 
-// #4 fix-round: added after code review found that selecting an existing
-// tutor conversation reset the client's chat to empty with no way to
-// reseed it -- not just a visual gap, since chatHandler builds the model's
-// context from exactly what the client sends (chat.ts). Ownership tests
-// below mirror PATCH/DELETE's 404-not-403 pattern exactly (same
-// getOwnedConversationOrNull helper), not a new one.
+// #4: this route is what lets a client that selects an existing tutor
+// conversation reseed its chat instead of starting from empty -- not just a
+// visual concern, since chatHandler builds the model's context from exactly
+// what the client sends (chat.ts), so an un-hydrated client loses the LLM's
+// history too. Ownership tests below mirror PATCH/DELETE's 404-not-403
+// pattern exactly (same getOwnedConversationOrNull helper), not a new one.
 describe("GET /api/conversations/:id/messages", () => {
   it("returns 401 when there is no authContext", async () => {
     const res = await request(buildApp(undefined), "/api/conversations/22222222-2222-2222-2222-222222222222/messages");

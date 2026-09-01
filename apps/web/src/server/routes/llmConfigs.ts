@@ -55,9 +55,11 @@ import { getOrgScopeForCourse } from "../repositories/organizations";
 import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
 import { logServerError } from "../utils/errors";
 import {
-  buildProviderClient,
-  getResolvedLLMConfigById,
+  loadLLMConfigById,
   resolveApiKey,
+  buildProviderClient,
+  LLMCredentialMissingError,
+  UnsupportedLLMProviderError,
 } from "../../lib/llm-config";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
@@ -433,49 +435,67 @@ export async function testLlmConfigHandler(c: Context<AppEnv>) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
-  const config = await getLlmConfig(db, ctx.scope, configId);
+  // #365: `loadLLMConfigById`, not the console's own `getLlmConfig`. This
+  // handler needs the row's `credentialId` (which the console's wire shape
+  // deliberately does not carry) to resolve a key at all, and reading it
+  // through the same primitive chat.ts's resolution uses keeps the
+  // provider/credential rule in exactly one place. `activeOnly: false`:
+  // testing a retired config before reactivating it is precisely what this
+  // button is for, and it serves no student traffic -- the previous
+  // `getLlmConfig` read didn't filter on isActive either, so this preserves
+  // that behaviour rather than tightening it as a side effect.
+  const config = await loadLLMConfigById(db, ctx.scope, configId, { activeOnly: false });
   if (!config) return c.json({ error: "That configuration no longer exists." }, 404);
 
-  /* #365: resolve the provider and credential the SAME way the chat path
-     does, instead of hardcoding OpenRouter.
-
-     This handler used to call getOpenRouter(c.env.OPENROUTER_API_KEY)
-     unconditionally, whatever the config said. So pressing Test on an org
-     whose default is llmoxie/gpt-5.3-codex (every org after migration 0035)
-     sent that model to OpenRouter under an OpenRouter key -- wrong provider,
-     wrong credential. The result was not a broken button but a lying one:
-     whatever came back said nothing about whether the configuration under
-     test actually works, which is the button's entire purpose. A pass could
-     mean OpenRouter happens to front a same-named model; a failure looked
-     like a bad model id rather than a misdirected request.
-
-     resolveApiKey prefers the config's own credential row and falls back to
-     the provider's env binding, so a config with an explicit credential is
-     now tested with that credential rather than the deployment-wide key. */
-  const resolvedConfig = await getResolvedLLMConfigById(db, ctx.scope, configId);
-  if (!resolvedConfig) return c.json({ error: "That configuration no longer exists." }, 404);
-
-  let providerClient: ReturnType<typeof buildProviderClient>;
+  // #365: previously hardcoded `getOpenRouter(c.env.OPENROUTER_API_KEY)`
+  // regardless of what the config actually said. Since migration 0035 every
+  // organization's default config is `llmoxie`/`gpt-5.3-codex`, so pressing
+  // Test on the default sent an LLMOxie model id to openrouter.ai under an
+  // OpenRouter key -- wrong provider, wrong credential, and an error message
+  // ("check the model id") that pointed the instructor at the one thing that
+  // was correct. The result was not a broken button but a lying one:
+  // whatever came back said nothing about whether the configuration under
+  // test actually works, which is the button's entire purpose -- a pass
+  // could mean OpenRouter happens to front a same-named model, and a failure
+  // looked like a bad model id rather than a misdirected request. Resolved
+  // through the same `resolveApiKey` + `buildProviderClient` pair chat.ts
+  // uses, so the button now tests what a student's turn would actually hit,
+  // with the config's own credential rather than the deployment-wide key
+  // when it has one.
+  //
+  // #390 (staging PR #382's follow-up): everything below reads off the ONE
+  // `loadLLMConfigById` row above -- provider and credentialId for the
+  // client, modelName/basePrompt/temperature/maxCompletionTokens for the
+  // generation. There is deliberately no second `getLlmConfig` read to pair
+  // with it, so an admin editing the config mid-request cannot make this
+  // handler run a hybrid of the old provider and the new model.
+  let model: ReturnType<ReturnType<typeof buildProviderClient>>;
   try {
-    const apiKey = await resolveApiKey(c.env, db, ctx.scope, resolvedConfig);
-    providerClient = buildProviderClient(resolvedConfig.provider, apiKey, {
-      llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL,
-    });
+    const apiKey = await resolveApiKey(c.env, db, ctx.scope, config);
+    // #333: only consulted for the llmoxie provider; ignored for every other.
+    model = buildProviderClient(config.provider, apiKey, { llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL })(
+      config.modelName,
+    );
   } catch (err) {
-    // Both failure modes are an operator problem, not something the
-    // instructor pressing Test can act on -- a missing/stale credential and
-    // an unsupported provider are equally "this deployment cannot reach that
-    // model". 503, with the specifics logged rather than returned: the
-    // messages name secret bindings.
-    logServerError("testLlmConfigHandler", err);
-    return c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503);
+    if (err instanceof LLMCredentialMissingError || err instanceof UnsupportedLLMProviderError) {
+      // Same 503 + sentence the missing-OPENROUTER_API_KEY branch produced,
+      // now covering every way this config can be unreachable: no credential
+      // and no fallback binding for its provider, a stale/cross-org
+      // credentialId, a secret_ref off the allowlist (#323), or a provider
+      // this deployment has no client factory for (#325). The message stays
+      // deliberately generic -- err.message names bindings and config ids,
+      // which is server-log material, not console copy.
+      logServerError("testLlmConfigHandler", err);
+      return c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503);
+    }
+    throw err;
   }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TEST_SEND_TIMEOUT_MS);
   try {
     const result = await generateText({
-      model: providerClient(config.modelName),
+      model,
       // The config's own prompt is what is under test. An empty one is a
       // legitimate state (the column defaults to ''), and sending no system
       // message is the honest representation of it.

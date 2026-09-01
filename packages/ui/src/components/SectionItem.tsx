@@ -21,6 +21,13 @@ export interface SectionItemProps {
   /** When true, the ✓ indicator plays a brief gold-halo success animation.
       Consumer is responsible for clearing this back to false after ~800ms. */
   justSubmitted?: boolean;
+  /** #167: this section was submitted by the scheduled overdue sweep, not
+      by the student. Only meaningful with status "submitted"; ignored
+      otherwise. Changes what the row *says*, not how it looks -- the ✓ is
+      accurate either way (the work was submitted), but a student who never
+      pressed submit should be told why their section shows as done rather
+      than being left to assume they did it and forgot. */
+  autoSubmitted?: boolean;
   /** Called when the item is clicked */
   onSelect?: (number: number) => void;
 }
@@ -43,7 +50,10 @@ const ITEM_CLASS: Record<SectionStatus, string> = {
   pending:   "section-item",
 };
 
-export function SectionItem({ number, title, status, justSubmitted = false, onSelect }: SectionItemProps) {
+export function SectionItem({ number, title, status, justSubmitted = false, autoSubmitted = false, onSelect }: SectionItemProps) {
+  const submittedLabel = autoSubmitted
+    ? " (submitted automatically when the due date passed)"
+    : " (submitted)";
   const handleClick = () => onSelect?.(number);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -58,6 +68,10 @@ export function SectionItem({ number, title, status, justSubmitted = false, onSe
       className={ITEM_CLASS[status]}
       role="button"
       tabIndex={0}
+      /* Sighted parity for the sr-only note above: the row is a ✓ and a
+         title either way, so without this the auto/manual distinction
+         would be available to screen-reader users only. */
+      title={status === "submitted" && autoSubmitted ? `${title}${submittedLabel}` : undefined}
       aria-current={status === "current" ? "step" : undefined}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
@@ -78,7 +92,7 @@ export function SectionItem({ number, title, status, justSubmitted = false, onSe
       <span className="section-item__title">
         {title}
         <span className="sr-only">
-          {status === "submitted" ? " (submitted)" : ""}
+          {status === "submitted" ? submittedLabel : ""}
           {status === "current" ? " (current)" : ""}
         </span>
       </span>

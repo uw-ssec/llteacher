@@ -107,7 +107,6 @@ export const DEFAULT_MARK_COMPLETE_INSTRUCTION =
   "small gaps. The goal is to unblock the student as early as possible, never to gatekeep. Calling this tool only " +
   "surfaces a suggestion to the student that they may be ready to move on -- it does not submit anything on their " +
   "behalf and does not end the conversation, so err on the side of calling it rather than withholding it.";
-/** #354: the house voice constraint, appended to EVERY assembled system
 /** #397: the house voice constraint, appended to EVERY assembled system
  *  prompt (see assembleSystemPrompt below) -- unlike TUTOR_GUARDRAIL above,
  *  this is NOT gated on `isDefaultPrompt`.
@@ -418,6 +417,77 @@ export function sectionConversationTitle(section: { order: number; title: string
   return `Section ${section.order}: ${section.title}`;
 }
 
+/** #305: the prompt-shaped copy a section-conversation write needs, supplied
+ *  BY THE CALLER rather than reached for by the repository itself.
+ *
+ *  The issue asks for "a `greeting: string` parameter resolved by the
+ *  caller". A plain string is not reachable here: both writers
+ *  (startSectionConversation, restartSectionConversation, repositories/
+ *  sectionConversations.ts) read `sections.order/title/content` themselves,
+ *  inside the same course-scoped join that enforces membership, the #317
+ *  release gate, and the non_interactive refusal -- so no caller holds those
+ *  values before the call, and having each of the three call sites re-read
+ *  them would put back exactly the redundant round-trips #279 just removed.
+ *
+ *  Injecting the FORMATTERS gets the requirement's actual goal -- the
+ *  repository owns no persona-bearing English, and "which greeting does this
+ *  tenant use" is now a decision the signature can express -- without that
+ *  cost. Tenant #2 passes a different object here; nothing in the repository
+ *  layer changes, which is the whole point (a repository resolving org
+ *  config would be the same layering violation in a new place). */
+export interface SectionConversationPrompts {
+  greeting: (section: { order: number; title: string; content: string }) => string;
+  title: (section: { order: number; title: string }) => string;
+}
+
+/** The built-in (Django-parity) copy every caller passes today. Named and
+ *  exported so a call site reads as an explicit choice of wording, not as
+ *  the absence of one -- there is deliberately no default value on the
+ *  repository's own parameter, which would let the repository quietly own
+ *  this text again. */
+export const SECTION_CONVERSATION_PROMPTS: SectionConversationPrompts = {
+  greeting: sectionGreeting,
+  title: sectionConversationTitle,
+};
+
+/** #305 (and #230 requirement 3): the system prompt's tool-usage paragraph,
+ *  GENERATED from the names of the tools this turn actually offers rather
+ *  than hand-written alongside them.
+ *
+ *  It was hand-written in two places and had already drifted: the seeded org
+ *  template (scripts/seed.ts's TUTOR_BASE_PROMPT) still said "You have one
+ *  structured rendering tool available: showDefinition" long after
+ *  `executeRCode`, `requestHint` and `markSectionComplete` joined chat.ts's
+ *  TOOLS catalog. chat.ts passes `Object.keys(toolsForConversation(...))` --
+ *  the very object handed to streamText's own `tools` option -- so the
+ *  paragraph describes exactly the tools the model was offered on THIS turn
+ *  (a tutor-kind conversation is not told about section-only tools it was
+ *  structurally denied), and a new entry in TOOLS shows up here with no
+ *  second edit.
+ *
+ *  Names only, not each tool's `description`: the descriptions are already
+ *  delivered to the model as part of the tool schema, so restating them
+ *  here would pay for the same tokens twice. What this paragraph adds is
+ *  the part no individual tool description can state -- the closed-world
+ *  rule (the list is complete; don't invent one) and the default
+ *  (everything else is plain markdown), which is what the hand-written
+ *  version was actually carrying.
+ *
+ *  Takes `string[]`, not the AI SDK's `ToolSet`, to keep this module free of
+ *  an `ai` import -- lib/prompts.ts is otherwise pure text assembly plus
+ *  drizzle. Empty list -> empty string, so a caller with no tools appends
+ *  nothing rather than a paragraph about none. */
+export function toolUsageParagraph(toolNames: readonly string[]): string {
+  if (toolNames.length === 0) return "";
+  const count = toolNames.length === 1 ? "one structured tool" : `${toolNames.length} structured tools`;
+  return (
+    `You have ${count} available: ${toolNames.join(", ")}. ` +
+    "Each tool's own description states when to call it -- follow those, and never call a tool that is not on " +
+    "that list. For everything else (guiding questions, follow-ups, gentle nudges, walking through " +
+    "computations), reply in plain markdown with no tool call."
+  );
+}
+
 /** Pure composition: template content + (optional) section context +
  *  (conditionally) the tutor guardrail -> one system-prompt string. No db
  *  access, no I/O -- the whole point of extracting this from
@@ -465,17 +535,27 @@ export function sectionConversationTitle(section: { order: number; title: string
  *  deterministically granted the request server-side -- never from a
  *  client-supplied flag taken at face value.
  *
+ *  `toolNames` (#305/#230 requirement 3): appended as toolUsageParagraph's
+ *  generated sentence, placed after TUTOR_GUARDRAIL and before
+ *  markCompleteInstruction -- it introduces the catalog that
+ *  markCompleteInstruction then gives one member's pedagogy for, so it has
+ *  to come first for that instruction to have an antecedent. Omitted (or
+ *  empty) appends nothing, which is what every pure prompt-assembly test
+ *  fixture that isn't about tools wants.
+ *
  *  #397: VOICE_CONSTRAINTS is appended unconditionally, after everything
- *  else. It is the one part of the assembled prompt no template can drop,
- *  because it governs register rather than pedagogy -- and because the
- *  emoji/em-dash output this fixes was produced under a real (non-default)
- *  template, so a conditional append would have left the bug in place. */
+ *  else (including the tool-usage paragraph). It is the one part of the
+ *  assembled prompt no template can drop, because it governs register
+ *  rather than pedagogy -- and because the emoji/em-dash output this fixes
+ *  was produced under a real (non-default) template, so a conditional
+ *  append would have left the bug in place. */
 export function assembleSystemPrompt(
   templateContent: string,
   section?: PromptSectionContext,
   isDefaultPrompt = false,
   isHintRequest = false,
   markCompleteInstruction?: string,
+  toolNames: readonly string[] = [],
 ): string {
   const parts = [templateContent.trim()];
   if (section) {
@@ -489,9 +569,10 @@ export function assembleSystemPrompt(
     );
   }
   if (isDefaultPrompt) parts.push(TUTOR_GUARDRAIL);
+  const toolUsage = toolUsageParagraph(toolNames);
+  if (toolUsage) parts.push(toolUsage);
   if (markCompleteInstruction) parts.push(markCompleteInstruction);
   if (isHintRequest) parts.push(HINT_INSTRUCTION);
-  // #354: always last, and always present -- see VOICE_CONSTRAINTS' own doc
   // #397: always last, and always present -- see VOICE_CONSTRAINTS' own doc
   // comment for why this one is NOT gated on isDefaultPrompt the way the
   // guardrail above is.

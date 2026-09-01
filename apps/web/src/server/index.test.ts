@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import app from "./index";
+import { app, default as workerHandler } from "./index";
 import {
   SESSION_COOKIE_NAME,
   createSessionPayload,
@@ -63,6 +63,15 @@ vi.mock("./repositories/rateLimits", () => ({
 // routes/promptTemplates.ts module doesn't throw for tests that never hit
 // this route.
 const upsertCourseScopedPromptTemplateMock = vi.fn();
+// #167: the Cron Trigger's job. Stubbed so the scheduled() tests below
+// assert the wiring (does the handler run it, does it re-throw) without
+// needing a database -- the job's own behaviour is covered against a real
+// Postgres in jobs/autoSubmitOverdue.db.test.ts.
+const autoSubmitOverdueSectionsMock = vi.fn();
+vi.mock("./jobs/autoSubmitOverdue", () => ({
+  autoSubmitOverdueSections: (...args: unknown[]) => autoSubmitOverdueSectionsMock(...args),
+}));
+
 vi.mock("./repositories/promptTemplates", () => ({
   getCourseScopedPromptTemplate: vi.fn(),
   upsertCourseScopedPromptTemplate: (...args: unknown[]) => upsertCourseScopedPromptTemplateMock(...args),
@@ -75,6 +84,7 @@ beforeEach(() => {
   findFirst.mockResolvedValue({ isActive: true, sessionEpoch: 0 });
   createConversationMock.mockReset();
   upsertCourseScopedPromptTemplateMock.mockReset();
+  autoSubmitOverdueSectionsMock.mockReset().mockResolvedValue({ candidates: 0, submitted: 0, skipped: 0, failed: 0 });
 });
 
 describe("app composition", () => {
@@ -111,7 +121,12 @@ describe("app composition", () => {
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error: string };
     expect(body.error).not.toMatch(/ECONNREFUSED/);
-    expect(consoleSpy).toHaveBeenCalledWith(expect.anything(), dbError);
+    // #275: logServerError now emits one JSON line (via console.error)
+    // instead of two separate args -- assert on the parsed payload's
+    // `message` field rather than a literal Error object.
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+    const logged = JSON.parse(consoleSpy.mock.calls[0]![0] as string) as Record<string, unknown>;
+    expect(logged.message).toBe(dbError.message);
 
     consoleSpy.mockRestore();
   });
@@ -246,6 +261,40 @@ describe("unmatched /api/* routes (#172 audit)", () => {
     // answered by the JSON catch-all above.
     const res = await app.request("/some/spa/route", {}, ENV);
     expect(res.headers.get("content-type")).not.toContain("application/json");
+    expect(await res.text()).toBe("not found");
+  });
+});
+
+
+/** #167: the Worker's Cron Trigger entry point. The default export is no
+ *  longer the Hono app itself -- a scheduled Worker has to export an object
+ *  carrying both handlers -- so the fetch side is asserted here too. */
+describe("scheduled() cron handler (#167)", () => {
+  const CONTROLLER = { cron: "17 * * * *", scheduledTime: Date.now(), noRetry: () => {} } as unknown as ScheduledController;
+  const CTX = { waitUntil: () => {}, passThroughOnException: () => {} } as unknown as ExecutionContext;
+
+  it("runs the auto-submit sweep", async () => {
+    await workerHandler.scheduled!(CONTROLLER, ENV, CTX);
+    expect(autoSubmitOverdueSectionsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs and re-throws a whole-run failure so the invocation is marked failed", async () => {
+    // Awaited rather than handed to ctx.waitUntil, precisely so this can
+    // happen: a rejection the runtime never sees is an invocation that
+    // reports success while the sweep is dead.
+    autoSubmitOverdueSectionsMock.mockRejectedValue(new Error("db unreachable"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(workerHandler.scheduled!(CONTROLLER, ENV, CTX)).rejects.toThrow("db unreachable");
+      const line = JSON.parse(errorSpy.mock.calls.at(-1)![0] as string);
+      expect(line).toMatchObject({ level: "error", context: "scheduled", cron: "autoSubmitOverdue" });
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("still serves fetch through the same default export", async () => {
+    const res = await workerHandler.fetch!(new Request("https://x/some/spa/route"), ENV, CTX);
     expect(await res.text()).toBe("not found");
   });
 });

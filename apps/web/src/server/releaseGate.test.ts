@@ -29,7 +29,7 @@
    -------------------------------------------------------------------------- */
 
 import { describe, it, expect } from "vitest";
-import app from "./index";
+import { app } from "./index";
 import { releaseGatePostureOf, type ReleaseGatePosture } from "./utils/guards";
 
 /** Every grader-tier route, with the release posture its registration

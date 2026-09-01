@@ -350,15 +350,15 @@ export async function deleteConversationHandler(c: Context<AppEnv>) {
   return c.body(null, 204);
 }
 
-// #4 fix-round: GET /api/conversations/:id/messages -- added after code
-// review found that TutorConversationsList selecting an *existing*
-// conversation reset the client's chat to empty with no way to reseed it,
-// which wasn't just a visual gap: chatHandler (chat.ts) builds the model's
-// context from convertToModelMessages(uiMessages), the array the CLIENT
-// sends, so an empty client-side history meant the LLM had actually lost
-// every prior turn, not just the UI. Same ownership pattern as PATCH/DELETE
-// above (getOwnedConversationOrNull -> 404, never 403, on "doesn't exist or
-// isn't yours") rather than a new one.
+// #4: GET /api/conversations/:id/messages -- the only way a client that
+// selects an *existing* conversation can reseed its chat, and that is not
+// merely a display concern: chatHandler (chat.ts) builds the model's context
+// from convertToModelMessages(uiMessages), the array the CLIENT sends, so a
+// client-side history that starts empty means the LLM itself has lost every
+// prior turn, not just the UI. Any surface that switches into an existing
+// conversation must hydrate through this route first. Same ownership pattern
+// as PATCH/DELETE above (getOwnedConversationOrNull -> 404, never 403, on
+// "doesn't exist or isn't yours") rather than a new one.
 export async function listConversationMessagesHandler(c: Context<AppEnv>) {
   const authContext = c.get("authContext") as AuthContext | undefined;
   if (!authContext) {

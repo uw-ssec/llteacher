@@ -124,6 +124,10 @@ describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)
     // this is also this function's only enrollment-scoping guarantee this
     // test already exercises above.
     expect(result[0]!.courseId).toBe(courseA!.id);
+    // #304 (requirement 4): course A's real code, not course B's and not a
+    // client-side hardcoded stand-in -- the client threads this straight
+    // into TopNav/breadcrumb instead of deriving course context itself.
+    expect(result[0]!.courseName).toBe("TEST-A");
     const sec1Status = result[0]!.sections.find((s) => s.title === "Sec 1")!;
     expect(sec1Status.status).toBe("not_started");
 

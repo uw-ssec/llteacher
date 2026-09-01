@@ -20,6 +20,23 @@ call one or more repository functions, shape the response. No `.from(...)`,
 Enforcement today is code-review convention, not a lint rule. Revisit if
 violations recur.
 
+### Scheduled jobs are the second caller of that layer (#167)
+
+`apps/web/src/server/jobs/*.ts` holds work triggered by a Cloudflare Cron
+Trigger (`triggers.crons` in `wrangler.jsonc` -> the Worker's `scheduled()`
+export in `server/index.ts`) rather than by a request. The same rule
+applies, for a stronger reason: a job has no authenticated caller, so
+there is no `AuthContext` membership that would have narrowed a forgotten
+`WHERE` clause by accident. A job resolves a `Db`, obtains scopes, calls
+repository functions, and does nothing else — orchestration, counting,
+logging.
+
+A platform-wide job still never issues a platform-wide *query*. The one
+unscoped read it may perform is enumerating tenants
+(`listAllOrgScopes`, `repositories/organizations.ts`), which returns
+`OrgScope`s rather than raw ids so that everything downstream of it is
+per-tenant by construction. See `jobs/autoSubmitOverdue.ts`.
+
 ## Tenancy Enforcement
 
 Shared-schema multi-tenancy (one Postgres schema, every tenant's rows

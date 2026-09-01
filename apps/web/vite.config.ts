@@ -123,7 +123,6 @@ const devApiProxy: Plugin = {
         }
         res.end();
       } catch (err) {
-        // eslint-disable-next-line no-console
         console.error("[dev-api-proxy] error:", err);
         res.statusCode = 500;
         res.setHeader("Content-Type", "application/json");
@@ -133,7 +132,7 @@ const devApiProxy: Plugin = {
   },
 };
 
-/* #368 (PR3 final review): matches server/index.ts's own COOP/COEP
+/* #368: matches server/index.ts's own COOP/COEP
    middleware -- see that file's comment for the full reasoning. Needed here
    too because dev mode serves the page and static assets directly through
    Vite's own server, not through the Hono app (only /api/* goes through

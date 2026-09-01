@@ -49,6 +49,26 @@ export const messageRoleEnum = pgEnum("message_role", [
   "system",
 ]);
 
+// #167: who created a submission row. "student" is a deliberate act -- the
+// student pressed submit (routes/submissions.ts's submitSectionHandler);
+// "auto" is the scheduled overdue sweep (server/jobs/autoSubmitOverdue.ts)
+// capturing work that was in progress when the due date passed.
+//
+// A native Postgres enum rather than a boolean `is_auto`, matching this
+// schema's existing enum convention (materialSourceEnum, content.ts): the
+// distinction is a provenance category, and a third origin (an instructor
+// submitting on a student's behalf, an LMS import) is a plausible future
+// value that a boolean could not express without a second column.
+export const submissionSourceEnum = pgEnum("submission_source", [
+  "student",
+  "auto",
+]);
+
+/** App-code union derived from the enum rather than hand-written, the same
+ *  way ConversationKind is above (#308's rule) -- a third value can't leave
+ *  a literal union somewhere else silently stale. */
+export type SubmissionSource = (typeof submissionSourceEnum.enumValues)[number];
+
 // ---------- Conversation ----------
 // "section" conversations are a student working a specific homework Section;
 // "tutor" conversations are the free-standing course-wide tutor (no section).
@@ -119,7 +139,28 @@ export const conversations = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true })
+    /* #281 follow-up: `precision: 3` (millisecond), not the timestamptz
+       default of microsecond. This column is the conversation-list cursor's
+       sort key, and every read of it goes through a JS `Date` -- which
+       cannot represent anything finer than a millisecond. Left at
+       microsecond, a row inserted by `createConversation` (no explicit
+       value, so `defaultNow()` -- a real microsecond timestamp) was handed
+       to the cursor truncated: stored `.000615`, compared as `.000`. The
+       compound (updatedAt, id) cursor cannot rescue that, because the
+       truncated value is neither strictly less than NOR equal to the stored
+       one, so a sibling inside the same millisecond matched no branch of
+       the comparison and was dropped from BOTH pages -- the exact defect
+       #281 is about, surviving underneath its own fix.
+
+       Scoped to this one column deliberately: it is the only cursor sort
+       key on this table. `createdAt` is never paged on, and the same
+       microsecond/millisecond mismatch elsewhere in the schema is not this
+       issue's to change.
+
+       Changes no writer -- `$onUpdate` and appendMessage already write
+       millisecond `new Date()`s. It makes the column store what the rest of
+       the stack has always assumed. */
+    updatedAt: timestamp("updated_at", { withTimezone: true, precision: 3 })
       .notNull()
       .defaultNow()
       .$onUpdate(() => new Date()),
@@ -448,6 +489,16 @@ export const submissions = pgTable(
     submittedAt: timestamp("submitted_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    // #167: how this row came to exist. Defaults to 'student' so every row
+    // written before this column existed -- and every writer that predates
+    // it (submitSection/createSubmission) -- keeps its true meaning without
+    // a backfill: until the overdue sweep landed, a submission row could
+    // only ever have been a student pressing submit.
+    //
+    // Deliberately NOT nullable-with-null-meaning-student: "unknown origin"
+    // is not a state this table can be in, and a nullable column would make
+    // every consumer handle a third case that never occurs.
+    source: submissionSourceEnum("source").notNull().default("student"),
   },
   (t) => [
     index("submissions_org_idx").on(t.organizationId),

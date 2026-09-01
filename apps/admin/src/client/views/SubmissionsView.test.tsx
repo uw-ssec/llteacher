@@ -170,3 +170,73 @@ describe("SubmissionsView grade drill-in (#75, merge precedence review follow-up
     expect(onOpenTranscript).toHaveBeenCalledWith("s1", "student-1");
   });
 });
+
+/** #167: a submission the scheduled overdue sweep created reads as
+ *  "submitted" -- the work exists and is gradeable -- but the cell must not
+ *  claim the student declared themselves done. */
+describe("SubmissionsView auto-submitted cells (#167)", () => {
+  const dataWithCell = (
+    cell: Partial<HomeworkSubmissionsData["students"][number]["sections"][number]>,
+  ): HomeworkSubmissionsData => ({
+    ...BASE_DATA,
+    sectionHeaders: [{ id: "s1", order: 1, title: "Section 1" }],
+    students: [
+      {
+        studentId: "student-1",
+        displayName: "Ada Lovelace",
+        email: "ada@example.com",
+        sections: [
+          {
+            sectionId: "s1",
+            status: "submitted",
+            conversationCount: 1,
+            lastActivityAt: null,
+            hasDeletedConversation: false,
+            submissionId: "sub-1",
+            ...cell,
+          },
+        ],
+        totalConversations: 1,
+        submissionCount: 1,
+        participationStatus: "active",
+        lastActivityAt: null,
+      },
+    ],
+  });
+
+  it("names the auto origin in the cell's accessible label", () => {
+    render(
+      <SubmissionsView data={dataWithCell({ submissionSource: "auto" })} onBack={vi.fn()} />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Section 1: submitted \(auto-submitted at the due date\)/i }),
+    ).toBeTruthy();
+  });
+
+  it("says nothing of the sort for a student-initiated submission", () => {
+    render(
+      <SubmissionsView data={dataWithCell({ submissionSource: "student" })} onBack={vi.fn()} />,
+    );
+    expect(screen.queryByRole("button", { name: /auto-submitted/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /Section 1: submitted/i })).toBeTruthy();
+  });
+
+  it("keeps the cell gradeable and carries the note into the grade label", () => {
+    const onGrade = vi.fn();
+    render(
+      <SubmissionsView
+        data={dataWithCell({ submissionSource: "auto" })}
+        onBack={vi.fn()}
+        onGrade={onGrade}
+      />,
+    );
+    const cell = screen.getByRole("button", {
+      name: /Grade Ada Lovelace, Section 1 \(auto-submitted at the due date\)/i,
+    });
+    // The distinction is not carried by the label alone: the modifier class
+    // is what makes it visible without a screen reader.
+    expect(cell.className).toContain("admin-progress-cell--auto");
+    fireEvent.click(cell);
+    expect(onGrade).toHaveBeenCalledWith(expect.objectContaining({ submissionId: "sub-1" }));
+  });
+});

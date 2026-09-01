@@ -20,11 +20,15 @@ import {
   getLlmConfig,
   listLlmConfigsForOrg,
   llmConfigBelongsToOrg,
-  resolveFallbackConfig,
   resolveLlmConfig,
   updateLlmConfig,
   type LlmConfigInput,
 } from "./llmConfigs";
+// #364: the failover hop moved out of this repository (see the note where
+// `resolveFallbackConfig` used to be) -- these tests moved with it rather
+// than being deleted, since what they pin is a database behaviour, not a
+// module boundary.
+import { resolveFallbackLLMConfig } from "../../lib/llm-config";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -354,7 +358,7 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
     });
   });
 
-  describe("resolveFallbackConfig (#98)", () => {
+  describe("resolveFallbackLLMConfig (#98/#364)", () => {
     it("returns the configured fallback, and nothing when it was deactivated", async () => {
       await reset();
       const backup = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Backup" }));
@@ -364,24 +368,54 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
         input({ name: "Primary", fallbackLlmConfigId: backup.id }),
       );
 
-      expect((await resolveFallbackConfig(db, unsafeOrgScope(orgId), primary))!.id).toBe(backup.id);
+      expect((await resolveFallbackLLMConfig(db, unsafeOrgScope(orgId), primary))!.id).toBe(backup.id);
       await deactivateLlmConfig(db, unsafeOrgScope(orgId), backup.id);
       // An instructor who retires a config has not said "except when the
       // primary is down".
-      expect(await resolveFallbackConfig(db, unsafeOrgScope(orgId), primary)).toBeNull();
+      expect(await resolveFallbackLLMConfig(db, unsafeOrgScope(orgId), primary)).toBeNull();
     });
 
     it("returns null when no fallback is configured", async () => {
       await reset();
       const solo = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Solo" }));
-      expect(await resolveFallbackConfig(db, unsafeOrgScope(orgId), solo)).toBeNull();
+      expect(await resolveFallbackLLMConfig(db, unsafeOrgScope(orgId), solo)).toBeNull();
+    });
+
+    it("returns null rather than degrading to the org default when the fallback is gone", async () => {
+      // #364's whole reason for NOT reusing resolveLLMConfig here: that
+      // function cannot fail, so an unresolvable fallback id would fall
+      // through to the ORG DEFAULT -- which is what most turns resolve their
+      // PRIMARY to, so the "failover" would retry the model that just failed.
+      await reset();
+      await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Org default", isDefault: true }));
+      const primary = await createLlmConfig(
+        db,
+        unsafeOrgScope(orgId),
+        // A fallback id that resolves to nothing under this org -- the state
+        // an ON DELETE SET NULL race or a cross-tenant id would produce.
+        input({ name: "Primary", fallbackLlmConfigId: null }),
+      );
+      expect(
+        await resolveFallbackLLMConfig(db, unsafeOrgScope(orgId), {
+          fallbackLlmConfigId: crypto.randomUUID(),
+        }),
+      ).toBeNull();
+      expect(await resolveFallbackLLMConfig(db, unsafeOrgScope(orgId), primary)).toBeNull();
+    });
+
+    it("will not resolve a fallback belonging to another organization", async () => {
+      await reset();
+      const foreign = await createLlmConfig(db, unsafeOrgScope(otherOrgId), input({ name: "Foreign" }));
+      expect(
+        await resolveFallbackLLMConfig(db, unsafeOrgScope(orgId), { fallbackLlmConfigId: foreign.id }),
+      ).toBeNull();
     });
 
     it("refuses a self-referencing fallback at the database", async () => {
       await reset();
       const solo = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Solo" }));
-      // At depth one this is the entire cycle problem -- resolveFallbackConfig
-      // reads exactly one hop, so there is no A -> B -> A to detect.
+      // At depth one this is the entire cycle problem -- the resolver reads
+      // exactly one hop, so there is no A -> B -> A to detect.
       await expect(
         db
           .update(llmConfigs)

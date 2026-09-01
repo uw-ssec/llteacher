@@ -17,7 +17,7 @@ import {
 } from "../repositories/sectionConversations";
 import { getOrgScopeForCourse } from "../repositories/organizations";
 import { SubmissionGradedError } from "../repositories/submissions";
-import { getSectionPromptContext } from "../../lib/prompts";
+import { getSectionPromptContext, SECTION_CONVERSATION_PROMPTS } from "../../lib/prompts";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
@@ -93,6 +93,9 @@ export async function startSectionConversationHandler(c: Context<AppEnv>) {
       // column comment for why storing beats deriving.
       isTeacherTest: !isStudentInCourse(authContext.memberships, courseId!),
       canViewDrafts: authContext.canViewDraftsIn(courseId!),
+      // #305: the greeting/title wording is this route's choice to make, not
+      // the repository's -- see SECTION_CONVERSATION_PROMPTS in lib/prompts.ts.
+      prompts: SECTION_CONVERSATION_PROMPTS,
     });
     return c.json(created, 201);
   } catch (err) {
@@ -273,6 +276,9 @@ export async function restartSectionConversationHandler(c: Context<AppEnv>) {
       conversationId,
       authContext.session.userId,
       authContext.canViewDraftsIn(courseId!),
+      // #305: see startSectionConversationHandler above -- a restart's fresh
+      // greeting/title comes from the same caller-chosen wording.
+      SECTION_CONVERSATION_PROMPTS,
     );
     return c.json(
       {

@@ -86,7 +86,6 @@ export function createAuthProvider<TExtra extends object = Record<string, never>
       return () => {
         cancelled = true;
       };
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     const login = useCallback(() => {

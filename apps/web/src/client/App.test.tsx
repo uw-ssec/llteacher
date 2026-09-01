@@ -91,6 +91,39 @@ function chatStreamResponse(conversationId: string, replyText: string) {
   });
 }
 
+/* #96/#268: a fault-injecting response for the RESPONSE half of a turn --
+   the server accepted the send (2xx, so chatHandler has already persisted the
+   student's message) and streamed real content, and THEN the model died
+   mid-generation. ai@5.0.195 delivers that as an in-stream `error` chunk, not
+   a rejected request, carrying whatever chat.ts's
+   toUIMessageStreamResponse.onError returned -- the same `{error, code}`
+   envelope readErrorMessage (packages/ui) classifies by `code`.
+
+   Note what is deliberately absent: no `finish` chunk and no `text-end`. That
+   is the wire shape #268's server-side fix keys off (finishReason "error", a
+   text part still `state:"streaming"`), so the truncated reply is never
+   persisted and a reload shows the question with no answer. */
+function interruptedChatStreamResponse(conversationId: string, partialText: string) {
+  const chunks = [
+    { type: "start" },
+    { type: "start-step" },
+    { type: "text-start", id: "t1" },
+    { type: "text-delta", id: "t1", delta: partialText },
+    {
+      type: "error",
+      errorText: JSON.stringify({
+        error: "The tutor stopped partway through. Nothing you wrote was lost.",
+        code: "tutor_stopped",
+      }),
+    },
+  ];
+  const body = chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/event-stream", "x-conversation-id": conversationId },
+  });
+}
+
 // #3 follow-up fix: conversationId must flow into every /api/chat request
 // after the first, not just be captured and then dropped. This renders the
 // real App (real useChat + DefaultChatTransport, not a mocked hook) against
@@ -179,6 +212,7 @@ describe("App tutor-conversations rail (#4)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -223,10 +257,10 @@ describe("App tutor-conversations rail (#4)", () => {
             ? extra.onConversationsPost(JSON.parse(String(init.body)))
             : new Response(JSON.stringify({ error: "unexpected POST" }), { status: 500 });
         }
-        // #4 fix-round: history hydration -- defaults to an empty history so
-        // existing tests that don't care about hydration itself (e.g.
-        // "selecting a homework section switches back") don't need to know
-        // about this endpoint's existence.
+        // #4: history hydration -- defaults to an empty history so tests
+        // that don't care about hydration itself (e.g. "selecting a homework
+        // section switches back") don't need to know about this endpoint's
+        // existence.
         // #280: matches with or without a query string -- fetchConversationHistory
         // now requests an explicit `?limit=` param.
         const messagesMatch = url.match(/^\/api\/conversations\/([^/]+)\/messages(?:\?.*)?$/);
@@ -282,8 +316,8 @@ describe("App tutor-conversations rail (#4)", () => {
     expect(screen.getByRole("button", { name: /Sec 1/ })).toBeTruthy();
   });
 
-  it("creating a tutor conversation switches the chat column to it, and sends chat turns with its conversationId", async () => {
-    const chatCalls: Array<{ conversationId?: string }> = [];
+  it("creating a tutor conversation switches the chat column to it, and sends chat turns with its conversationId and courseId (#304)", async () => {
+    const chatCalls: Array<{ conversationId?: string; courseId?: string }> = [];
     stubBaseFetch({
       onConversationsPost: () =>
         new Response(
@@ -309,7 +343,7 @@ describe("App tutor-conversations rail (#4)", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input.toString();
         if (url === "/api/chat") {
-          const body = JSON.parse(String(init?.body)) as { conversationId?: string };
+          const body = JSON.parse(String(init?.body)) as { conversationId?: string; courseId?: string };
           chatCalls.push(body);
           const chunks = [
             { type: "start" },
@@ -351,16 +385,20 @@ describe("App tutor-conversations rail (#4)", () => {
 
     expect(chatCalls).toHaveLength(1);
     expect(chatCalls[0]!.conversationId).toBe("tutor-conv-1");
+    // #304: the tutor rail sends the courseId it already holds on every
+    // turn, not only the section path -- previously omitted entirely, so
+    // chatHandler's conversationId branch had no courseId to fall back to
+    // if it ever needed one.
+    expect(chatCalls[0]!.courseId).toBe("course-a");
   });
 
-  // #4 fix-round: the core regression test for the code-review finding.
-  // Selecting an existing tutor conversation must not just *display* its
-  // prior messages -- chat.ts's chatHandler builds the model's context via
-  // convertToModelMessages(uiMessages) over exactly what the client sends,
-  // so the next /api/chat request must actually include the hydrated
-  // history, or the LLM silently forgets the whole prior exchange. This
-  // test fails on the pre-fix code (which hydrated nothing, so `/api/chat`
-  // would receive only the freshly-typed message).
+  // #4: selecting an existing tutor conversation must not just *display*
+  // its prior messages -- chat.ts's chatHandler builds the model's context
+  // via convertToModelMessages(uiMessages) over exactly what the client
+  // sends, so the next /api/chat request must actually carry the hydrated
+  // history, or the LLM silently forgets the whole prior exchange. The
+  // display assertion alone cannot catch that: a hydration that seeds the
+  // transcript but not the outbound request looks correct on screen.
   it("selecting an existing tutor conversation hydrates its history into the chat column AND into the next /api/chat request", async () => {
     const chatCalls: Array<{ conversationId?: string; messages: Array<{ role: string }> }> = [];
     stubBaseFetch({
@@ -448,15 +486,14 @@ describe("App tutor-conversations rail (#4)", () => {
     expect(chatCalls[0]!.messages.map((m) => m.role)).toEqual(["user"]);
   });
 
-  // #4 fix-round 2: the hydration fix above introduced an async gap
-  // (fetch /messages, then apply) that didn't exist when selection was a
-  // synchronous setState. Regression test for the resulting race: select
-  // conversation A, then B before A's /messages response lands, then let
-  // A's response resolve LAST (after B's) -- the exact interleaving a
-  // slower/earlier-started request can produce. Without the
-  // latestTutorSelectionRef guard, A's late response would silently flip
-  // the chat column (and the sidebar's selected-row highlight) back to A
-  // even though B was the student's actual last action.
+  // #4: because hydration is async (fetch /messages, then apply), tutor
+  // selection is racy in a way a synchronous setState was not. Pins the
+  // losing interleaving: select conversation A, then B before A's /messages
+  // response lands, then let A's response resolve LAST (after B's) -- what
+  // a slower or earlier-started request actually produces. Without the
+  // latestTutorSelectionRef guard, A's late response silently flips the
+  // chat column (and the sidebar's selected-row highlight) back to A even
+  // though B was the student's last action.
   it("discards a stale /messages response when a later selection supersedes it before the first resolves", async () => {
     vi.stubGlobal("CSS", { supports: () => true });
     Element.prototype.scrollIntoView = vi.fn();
@@ -604,6 +641,7 @@ describe("App tutor conversation header rename (#6)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -861,10 +899,15 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
     stubHomeworkFetch(async () => {
       chatCallCount += 1;
       if (chatCallCount === 1) {
-        // HttpChatTransport throws `new Error(await response.text())` for a
-        // non-ok response -- this is the exact path a failed/rate-limited
-        // /api/chat request takes in production.
-        return new Response("rate limited", { status: 429 });
+        // #96: a RESPONSE-half failure specifically -- the send was accepted
+        // (2xx), so the student's message is persisted and regenerate is the
+        // correct recovery. (This test used to inject a 429, which #96
+        // reclassified as a SEND-half failure: nothing persisted, no
+        // regenerate offered, text handed back to the composer instead. That
+        // case now has its own tests below; this one keeps #144's original
+        // subject -- a failed turn must surface and Retry must recover it --
+        // with the fault shape that still matches it.)
+        return interruptedChatStreamResponse("conv-1", "A p-value is the probability of");
       }
       return new Response(
         [
@@ -897,10 +940,16 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
     // resolve into a visible, retryable error row -- not just vanish, which
     // was #144's actual complaint.
     expect(await screen.findByRole("alert")).toBeTruthy();
-    expect(await screen.findByText("rate limited")).toBeTruthy();
-    // PR-1 whole-branch review (Important): the composer must stay USABLE
-    // in the "error" state, not locked -- only a genuinely in-flight
-    // request ("submitted"/"streaming") disables it. The section chat's
+    expect(
+      await screen.findByText("The tutor stopped partway through. Nothing you wrote was lost."),
+    ).toBeTruthy();
+    // #96: a response-half failure must NOT hand the text back to the
+    // composer -- the server persisted that message, so re-typing it would
+    // send it twice.
+    expect(composer.value).toBe("");
+    // "error" is not "disabled": the composer must stay USABLE in the error
+    // state -- only a genuinely in-flight request
+    // ("submitted"/"streaming") disables it. The section chat's
     // useChat has no `id` (unlike the tutor chat), so nothing else ever
     // resets it out of an error state; if the composer stayed disabled
     // here too, Retry (which replays the exact request that just failed)
@@ -920,7 +969,10 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
     let chatCallCount = 0;
     stubHomeworkFetch(async () => {
       chatCallCount += 1;
-      if (chatCallCount === 1) return new Response("rate limited", { status: 429 });
+      // Response-half again, so the composer starts empty for the "type a
+      // genuinely different message" step below (#96 pre-fills it on a
+      // send-half failure -- covered separately).
+      if (chatCallCount === 1) return interruptedChatStreamResponse("conv-1", "half an answer");
       return new Response(
         [
           `data: ${JSON.stringify({ type: "start" })}\n\n`,
@@ -970,6 +1022,7 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -1020,7 +1073,10 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
     let chatCallCount = 0;
     stubTutorFetch(async () => {
       chatCallCount += 1;
-      if (chatCallCount === 1) return new Response("tutor stream failed", { status: 500 });
+      // #96: a RESPONSE-half failure (2xx, then the model died mid-stream) --
+      // see the section chat's equivalent test above for why this replaced a
+      // bare non-2xx here.
+      if (chatCallCount === 1) return interruptedChatStreamResponse("tutor-conv-1", "Well, a p-value");
       return new Response(
         [
           `data: ${JSON.stringify({ type: "start" })}\n\n`,
@@ -1052,10 +1108,12 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
     await user.type(composer, "tutor question{Enter}");
 
     expect(await screen.findByRole("alert")).toBeTruthy();
-    expect(await screen.findByText("tutor stream failed")).toBeTruthy();
-    // PR-1 whole-branch review (Important): same "error" != "disabled" fix
-    // as the section chat above, applied to the tutor chat's independent
-    // useChat instance too.
+    expect(
+      await screen.findByText("The tutor stopped partway through. Nothing you wrote was lost."),
+    ).toBeTruthy();
+    // Same "error" != "disabled" invariant as the section chat above, which
+    // has to hold independently here: the tutor chat is its own useChat
+    // instance, so nothing about the section chat's behavior implies it.
     expect(isComposerDisabled(composer)).toBe(false);
 
     await user.click(screen.getByRole("button", { name: "Try again" }));
@@ -1063,6 +1121,297 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
     await screen.findByText("tutor recovered");
     expect(chatCallCount).toBe(2);
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+/* #96 (streaming resilience), driven through a fault-injecting mock
+   transport -- the real App, the real useChat/DefaultChatTransport, and a
+   stubbed `fetch` that fails in a specific, chosen place.
+
+   The whole point of these tests is the SPLIT that #96 requirement 3 asks
+   for, which the client did not make before: every failed turn used to
+   render one error row with one regenerate retry, regardless of whether the
+   server had ever heard of the turn.
+
+     send half     -- the fetch threw, or the server answered non-2xx.
+                      chatHandler persists the student's message BEFORE it
+                      opens the stream, so nothing at all was written. The
+                      un-persisted bubble must leave the transcript (a reload
+                      would drop it anyway) and the words must come back in
+                      the composer.
+     response half -- 2xx, so the question IS persisted; only the reply died.
+                      The bubble stays, the composer stays empty, and Retry
+                      regenerates (covered by the #144 blocks above, which
+                      now inject exactly this shape).
+
+   Requirement 1 as amended by the controller ruling on #268 vs #96: there is
+   no partial persist and no resume-from-checkpoint. An interrupted turn
+   leaves the question with no answer, which is what the reload test below
+   asserts against the transcript the server actually returns. */
+describe("App streaming resilience: send-half vs response-half failures (#96)", () => {
+  const HOMEWORK_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        courseName: "STATS 311",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
+      },
+    ],
+  };
+
+  function stubFetch(chatFetch: typeof fetch, homeworks: unknown = HOMEWORK_FIXTURE, messagesFor?: () => Response) {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(homeworks), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url.endsWith("/hints")) {
+          return new Response(JSON.stringify({ used: 0, limit: null }), { status: 200 });
+        }
+        if (url.includes("/messages") && messagesFor) return messagesFor();
+        if (url === "/api/chat") return chatFetch(input, init);
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+  }
+
+  function renderApp() {
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  it("hands the student's words back to the composer, and drops the un-persisted bubble, when the request never reaches the server", async () => {
+    let chatCallCount = 0;
+    stubFetch(async () => {
+      chatCallCount += 1;
+      // A dropped connection: `fetch` itself rejects, so the Worker never
+      // saw this request and nothing was persisted for it.
+      if (chatCallCount === 1) throw new TypeError("Load failed");
+      return chatStreamResponse("conv-1", "a real reply at last");
+    });
+
+    renderApp();
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "why is my p-value 0.03?{Enter}");
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    // The copy names the right failure: not "the tutor didn't answer" (it was
+    // never asked), but "your message didn't arrive".
+    expect(await screen.findByText(/didn't reach the tutor/)).toBeTruthy();
+
+    // The requirement itself: the student's text is not lost.
+    await waitFor(() => expect(composer.value).toBe("why is my p-value 0.03?"));
+
+    // ...and it is no longer sitting in the transcript as a message the
+    // server never stored. Before this, the bubble stayed on screen and then
+    // silently vanished on the next reload.
+    expect(screen.queryByText("why is my p-value 0.03?", { selector: "p, div, span" })).toBeNull();
+
+    // No regenerate affordance: there is no server-side turn to regenerate.
+    // The composer IS the retry.
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+
+    // And that retry works: Enter on the restored text re-sends it.
+    await user.type(composer, "{Enter}");
+    await screen.findByText("a real reply at last");
+    expect(chatCallCount).toBe(2);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("restores the text for a server-REFUSED send too (a non-2xx never persists anything either)", async () => {
+    let chatCallCount = 0;
+    stubFetch(async () => {
+      chatCallCount += 1;
+      if (chatCallCount === 1) {
+        // #266's duplicate_message 409: the server refused this send
+        // outright. Nothing persisted, and re-sending the same id can never
+        // succeed -- so the text must come back for a fresh send.
+        return new Response(
+          JSON.stringify({ error: "A message with this clientMessageId already exists", code: "duplicate_message" }),
+          { status: 409 },
+        );
+      }
+      return chatStreamResponse("conv-1", "accepted on the second try");
+    });
+
+    renderApp();
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "does this clash?{Enter}");
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(await screen.findByText(/it's back in the box below/)).toBeTruthy();
+    await waitFor(() => expect(composer.value).toBe("does this clash?"));
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+
+    await user.type(composer, "{Enter}");
+    await screen.findByText("accepted on the second try");
+    expect(chatCallCount).toBe(2);
+  });
+
+  it("does not clobber a draft the student is already holding when the failed send came from elsewhere", async () => {
+    /* The reachable version of the "don't overwrite" guard: #80's hint
+       button sends its own fixed message through the same pipeline while the
+       composer may already hold the student's own half-written question. If
+       that hint send is refused, restoring it would overwrite words the
+       student never sent and never wants replaced. */
+    stubFetch(async () => new Response("gateway timeout", { status: 504 }));
+
+    renderApp();
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "my own half-written question");
+
+    await user.click(screen.getByRole("button", { name: "Give me a hint" }));
+    await screen.findByRole("alert");
+
+    // The hint's own text must not have landed on top of the student's draft.
+    await waitFor(() => expect(composer.value).toBe("my own half-written question"));
+    expect(composer.value).not.toContain("Give me a hint for this section");
+  });
+
+  it("clears the restored draft on a section switch, so one section's failed text can never be sent into another's conversation", async () => {
+    /* #96: the section ConversationView is keyed `key={currentSection}`, so
+       switching sections REMOUNTS it -- resetting both its draft and the
+       `lastRestoredDraftRef` that makes a restore fire only once. A
+       `sectionSendFailure` left over from section 1 therefore looks
+       brand-new to section 2's fresh mount, and without the reset the
+       restore effect writes section 1's failed text into section 2's empty
+       composer: one Enter away from sending it into a different graded
+       conversation.
+
+       This is NOT the same as an ordinary unsent draft surviving a switch --
+       the keyed remount deliberately discards a typed draft. Only the restore
+       path could carry text across sections, which is why only it needs the
+       explicit `[currentSection]` reset (the tutor surface's equivalent is
+       keyed on `[tutorConversationId]`). */
+    const twoSections = {
+      homeworks: [
+        {
+          ...HOMEWORK_FIXTURE.homeworks[0],
+          sections: [
+            { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+            { id: "s2", title: "Sec 2", order: 2, status: "not_started", conversationId: "sec-conv-2" },
+          ],
+        },
+      ],
+    };
+    stubFetch(
+      // Every send fails before reaching the server.
+      async () => new Response("gateway timeout", { status: 504 }),
+      twoSections,
+      () => new Response(JSON.stringify([]), { status: 200 }),
+    );
+
+    renderApp();
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "section one's own question{Enter}");
+
+    await screen.findByRole("alert");
+    // Precondition: the restore genuinely happened in section 1, so a pass
+    // below can't come from the restore never firing at all.
+    await waitFor(() => expect(composer.value).toBe("section one's own question"));
+
+    await user.click(screen.getByRole("button", { name: /Sec 2/ }));
+    await screen.findByText(/Section 2: Sec 2/);
+
+    // Section 2's composer is a fresh mount. It must be empty.
+    const sectionTwoComposer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    await waitFor(() => expect(sectionTwoComposer.value).toBe(""));
+    expect(sectionTwoComposer.value).not.toContain("section one");
+  });
+
+  it("keeps the question on screen for a RESPONSE-half failure, and does not pre-fill the composer", async () => {
+    stubFetch(async () => interruptedChatStreamResponse("conv-1", "A p-value is the probability of"));
+
+    renderApp();
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "explain p-values{Enter}");
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    // The server accepted and persisted this question, so it stays in the
+    // transcript -- and must NOT be handed back to the composer, or the
+    // student would send it a second time.
+    expect(await screen.findByText("explain p-values")).toBeTruthy();
+    expect(composer.value).toBe("");
+    // Regenerate IS the right recovery here: it re-sends the same
+    // clientMessageId, which the server's idempotency check dedupes rather
+    // than double-writing the question.
+    expect(await screen.findByRole("button", { name: "Try again" })).toBeTruthy();
+  });
+
+  it("shows the question with no assistant reply on reload after an interrupted turn, and lets the student send again", async () => {
+    /* Requirement 1 as amended: no partial persist, no resume endpoint. The
+       transcript the server returns after an interrupted turn is exactly the
+       user row (#268's onFinish gate refuses the truncated reply -- proved
+       server-side in chat.errorChunk.integration.test.ts), and this is the
+       client half: that transcript renders faithfully, and the plain composer
+       is the "try again" affordance from it. */
+    const hydrated = {
+      homeworks: [
+        {
+          ...HOMEWORK_FIXTURE.homeworks[0],
+          sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
+        },
+      ],
+    };
+    let chatCallCount = 0;
+    stubFetch(
+      async () => {
+        chatCallCount += 1;
+        return chatStreamResponse("sec-conv-1", "the answer, this time in full");
+      },
+      hydrated,
+      () =>
+        new Response(
+          // Only the question. No assistant row at all -- not a partial one
+          // flagged "interrupted", which is what #96's superseded original
+          // design would have written here.
+          JSON.stringify([{ id: "m1", role: "user", parts: [{ type: "text", text: "what does 0.03 mean?" }] }]),
+          { status: 200 },
+        ),
+    );
+
+    renderApp();
+
+    expect(await screen.findByText("what does 0.03 mean?")).toBeTruthy();
+    // Nothing half-written is replayed as if it were an answer.
+    expect(screen.queryByText(/A p-value is the probability of/)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "what does 0.03 mean?{Enter}");
+    await screen.findByText("the answer, this time in full");
+    expect(chatCallCount).toBe(1);
   });
 });
 
@@ -1170,19 +1519,20 @@ describe("App main landmark + skip link (#299)", () => {
   });
 });
 
-// #252: the section chat's own version of the #4 fix-round regression --
-// resuming a section with an existing conversationId set `conversationId`
-// but never hydrated `useChat`'s messages, so the LLM received zero prior
-// context on every reload while the server kept appending to the same,
-// real conversation row. Covers both the requirement's own "assert what
-// the section chat sends after a reload" ask and the visible-transcript
-// side of the same bug.
+// #252: the section chat's own version of the #4 hydration invariant --
+// resuming a section must hydrate `useChat`'s messages, not just set
+// `conversationId`. Setting the id alone leaves the LLM with zero prior
+// context on every reload while the server keeps appending to the same,
+// real conversation row. Covers both what the section chat SENDS after a
+// reload and the visible transcript, since only the first of those catches
+// the silent-context-loss half.
 describe("App section chat resumes with hydrated history (#252)", () => {
   const HOMEWORK_FIXTURE = {
     homeworks: [
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -1323,6 +1673,7 @@ describe("App eager section greeting (#318)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -1503,6 +1854,7 @@ describe("App section conversationId stays live after mid-session creation (#271
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -1680,6 +2032,7 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -1793,6 +2146,87 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     expect(isComposerDisabled(composer)).toBe(true);
   });
+
+  it("tutor chat: creating a new conversation clears a stale hydration error from the previous one", async () => {
+    /* Final review: handleCreateTutorConversation resets the pagination
+       state a prior conversation left behind (the test above this describe
+       block), but tutorHydrationError is the same kind of per-conversation
+       state and was missed in that pass -- it is cleared on select (line
+       ~918) and on delete-of-displayed (~1073), but not on create. Without
+       this reset, creating a conversation while an earlier one's hydration
+       had failed left the brand-new conversation rendered with t1's stale
+       error: composer disabled (isSending checks tutorHydrationError) and a
+       Retry that closes over t1's id, not t2's. */
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const tutorFixture = {
+      homeworks: [{ ...HOMEWORK_FIXTURE.homeworks[0], sections: [] }],
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(tutorFixture), { status: 200 });
+        if (url === "/api/conversations" && init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              id: "t2",
+              kind: "tutor",
+              title: "New conversation",
+              createdAt: "2026-01-03T00:00:00.000Z",
+              updatedAt: "2026-01-03T00:00:00.000Z",
+            }),
+            { status: 201 },
+          );
+        }
+        if (url.startsWith("/api/conversations?courseId=")) {
+          return new Response(
+            JSON.stringify({
+              items: [
+                { id: "t1", title: "Existing tutor chat", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 2 },
+              ],
+              nextCursor: null,
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/conversations/t1/messages")) {
+          return new Response(JSON.stringify({ error: "server unavailable" }), { status: 503 });
+        }
+        if (url.startsWith("/api/conversations/t2/messages")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("Existing tutor chat"));
+    expect(await screen.findByText(/Couldn't load that conversation/i)).toBeTruthy();
+    const composerBefore = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    expect(isComposerDisabled(composerBefore)).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: /new conversation/i }));
+
+    // t2 has nothing wrong with it -- t1's error must not have survived.
+    await waitFor(() => expect(screen.queryByText(/Couldn't load that conversation/i)).toBeNull());
+    const composerAfter = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    expect(isComposerDisabled(composerAfter)).toBe(false);
+  });
 });
 
 // #248: the section chat's restart affordance -- confirm dialog copy,
@@ -1804,6 +2238,7 @@ describe("App section restart affordance (#248)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -2061,6 +2496,7 @@ describe("App Stop control (#274)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -2297,6 +2733,7 @@ describe("App hint state (#80)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -2433,6 +2870,11 @@ describe("App delete during a pending selection (#392)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        // #304 (merge): App reads StudentHomeworkSummary.courseName for the
+        // top nav's course label. Every other fixture in this file carries
+        // it; these two were written against the pre-#304 App, where the
+        // label was a hardcoded stand-in, so omitting it crashed TopNav.
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -2578,8 +3020,9 @@ describe("App delete during a pending selection (#392)", () => {
     // The distinguishing signal is which SURFACE is mounted, not the title:
     // the title is looked up from the rail list, and the deleted row is
     // already gone from it, so no title renders whether the conversation
-    // opened or not. "STATS 311 · TUTOR CHAT" is the tutor column's own
-    // breadcrumb and appears only while a tutor conversation is active.
+    // opened or not. "TUTOR CHAT" is the tutor column's own breadcrumb
+    // (#397 dropped the course prefix; the nav carries it) and appears only
+    // while a tutor conversation is active.
     await waitFor(() => expect(screen.queryByText(CONV_B.title)).toBeNull());
     await new Promise((r) => setTimeout(r, 0));
     expect(screen.queryByText(/TUTOR CHAT/)).toBeNull();
@@ -2602,6 +3045,11 @@ describe("App superseded tutor selection (#398)", () => {
       {
         id: "hw-1",
         courseId: "course-a",
+        // #304 (merge): App reads StudentHomeworkSummary.courseName for the
+        // top nav's course label. Every other fixture in this file carries
+        // it; these two were written against the pre-#304 App, where the
+        // label was a hardcoded stand-in, so omitting it crashed TopNav.
+        courseName: "STATS 311",
         title: "HW 3",
         description: "d",
         dueDate: "2099-01-01T00:00:00.000Z",
@@ -2667,5 +3115,418 @@ describe("App superseded tutor selection (#398)", () => {
     await waitFor(() => expect(document.querySelector('[aria-busy="true"]')).toBeNull());
 
     releaseHistory(new Response(JSON.stringify([]), { status: 200 }));
+  });
+});
+
+/* #280 (requirement 2, transcript half). The regression: `limit`/`before`
+   appeared ZERO times in the entire client, so the messages route's 200-row
+   page was a silent hard ceiling -- message 201 and back was unreachable
+   from every surface, including the head of the student's own thread.
+
+   The cursor is a real `seq` taken from a row this same route returned
+   (#280 requirement 1 added `seq` to the wire shape precisely so this is
+   possible without a second round-trip) -- not a reconstructed value. */
+describe("App tutor transcript load-older (#280)", () => {
+  // No sections -- this covers the tutor surface, which is reached by
+  // clicking a rail row rather than by section auto-selection.
+  const TUTOR_ONLY_FIXTURE = {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        courseName: "STATS 311",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: [],
+      },
+    ],
+  };
+  const PAGE_SIZE = 200;
+  // Page 1 is the most recent PAGE_SIZE messages, oldest-first, seq
+  // 201..400. A full page is what makes `hasMoreHistory` true, which is
+  // what renders the control -- so it has to be genuinely full.
+  const PAGE_ONE = Array.from({ length: PAGE_SIZE }, (_, i) => ({
+    id: `m${201 + i}`,
+    role: i % 2 === 0 ? "user" : "assistant",
+    parts: [{ type: "text", text: `recent message ${201 + i}` }],
+    seq: 201 + i,
+    createdAt: "2026-01-02T00:00:00.000Z",
+  }));
+  const OLDER_PAGE = [
+    {
+      id: "m200",
+      role: "assistant" as const,
+      parts: [{ type: "text", text: "the very first thing the tutor said" }],
+      seq: 200,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+  ];
+
+  it("pages back with before=<oldest loaded seq> and PREPENDS the result", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const messagesUrls: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(JSON.stringify(TUTOR_ONLY_FIXTURE), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations?courseId=")) {
+          return new Response(
+            JSON.stringify({
+              items: [
+                { id: "t1", title: "Long tutor chat", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 401 },
+              ],
+              nextCursor: null,
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/conversations/t1/messages")) {
+          messagesUrls.push(url);
+          const isOlderPage = url.includes("before=");
+          return new Response(JSON.stringify(isOlderPage ? OLDER_PAGE : PAGE_ONE), { status: 200 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("Long tutor chat"));
+
+    // A full first page means older messages exist, so the control renders.
+    const loadOlder = await screen.findByRole("button", { name: /load older messages/i });
+    expect(screen.queryByText("the very first thing the tutor said")).toBeNull();
+
+    await user.click(loadOlder);
+
+    await waitFor(() => expect(screen.getByText("the very first thing the tutor said")).toBeTruthy());
+
+    // The cursor is the oldest LOADED message's seq (page 1's head, 201) --
+    // exclusive, so seq 200 is exactly what comes back. Asserting the URL,
+    // not merely "a second call happened": a request without `before` would
+    // re-fetch page 1 and the transcript would still look "loaded".
+    expect(messagesUrls).toEqual([
+      "/api/conversations/t1/messages?limit=200",
+      "/api/conversations/t1/messages?limit=200&before=201",
+    ]);
+
+    // Prepended, not appended: the older message must render ABOVE the
+    // page-1 messages it precedes, or the transcript reads out of order.
+    const oldest = screen.getByText("the very first thing the tutor said");
+    const firstOfPageOne = screen.getByText("recent message 201");
+    expect(oldest.compareDocumentPosition(firstOfPageOne) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // The older page was short (1 < 200), so there is nothing left to ask
+    // for and the control retires rather than offering an empty page.
+    await waitFor(() => expect(screen.queryByRole("button", { name: /load older messages/i })).toBeNull());
+  });
+
+  it("a newly created conversation starts with no history affordance, not the previous conversation's cursor", async () => {
+    /* Final review: "New conversation" went through selectTutorConversation,
+       which sets the id and the seed messages but owns none of the pagination
+       state -- so the hasMore/oldestSeq belonging to the conversation that was
+       previously open survived into a conversation seconds old. The UI then
+       claimed history exists for a thread that has none, and clicking the
+       button sent the OLD conversation's cursor at the NEW conversation's
+       endpoint. */
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const messagesUrls: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(JSON.stringify(TUTOR_ONLY_FIXTURE), { status: 200 });
+        }
+        if (url === "/api/conversations" && init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              id: "t2",
+              kind: "tutor",
+              title: "New conversation",
+              createdAt: "2026-01-03T00:00:00.000Z",
+              updatedAt: "2026-01-03T00:00:00.000Z",
+            }),
+            { status: 201 },
+          );
+        }
+        if (url.startsWith("/api/conversations?courseId=")) {
+          return new Response(
+            JSON.stringify({
+              items: [
+                { id: "t1", title: "Long tutor chat", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 401 },
+              ],
+              nextCursor: null,
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/conversations/t1/messages")) {
+          messagesUrls.push(url);
+          return new Response(JSON.stringify(url.includes("before=") ? OLDER_PAGE : PAGE_ONE), { status: 200 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("Long tutor chat"));
+    // t1 is at the page cap, so it legitimately offers older history.
+    expect(await screen.findByRole("button", { name: /load older messages/i })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: /new conversation/i }));
+
+    // The brand-new, empty conversation must not inherit t1's claim that
+    // there is more history to load.
+    await waitFor(() => expect(screen.queryByRole("button", { name: /load older messages/i })).toBeNull());
+    // And in particular t1's cursor was never fired at t2's endpoint.
+    expect(messagesUrls).toEqual(["/api/conversations/t1/messages?limit=200"]);
+  });
+});
+
+/* Final review: the SECTION surface's half of #280 had no App-level test at
+   all -- only the tutor surface above did. The two surfaces run separate
+   useChat instances, separate cursors and separate staleness refs (they share
+   only fetchConversationHistory), so the tutor test proves nothing about this
+   one. The gap is what let the section surface keep a stale cursor across a
+   failed hydration; the second test here is that specific defect. */
+describe("App section transcript load-older", () => {
+  const PAGE_SIZE = 200;
+  const homeworkFixture = (sections: unknown[]) => ({
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: "course-a",
+        courseName: "STATS 311",
+        title: "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections,
+      },
+    ],
+  });
+  // Full page => hasMore, which is what renders the control. seq 201..400.
+  const pageOne = (label: string) =>
+    Array.from({ length: PAGE_SIZE }, (_, i) => ({
+      id: `${label}-m${201 + i}`,
+      role: i % 2 === 0 ? "user" : "assistant",
+      parts: [{ type: "text", text: `${label} recent message ${201 + i}` }],
+      seq: 201 + i,
+      createdAt: "2026-01-02T00:00:00.000Z",
+    }));
+
+  it("pages back with before=<oldest loaded seq> and PREPENDS the result", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const messagesUrls: string[] = [];
+    const olderPage = [
+      {
+        id: "s1-m200",
+        role: "assistant" as const,
+        parts: [{ type: "text", text: "the very first thing this section said" }],
+        seq: 200,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(
+            JSON.stringify(
+              homeworkFixture([{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }]),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url.endsWith("/hints")) {
+          return new Response(JSON.stringify({ count: 0, limit: null, remaining: null }), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
+          messagesUrls.push(url);
+          return new Response(JSON.stringify(url.includes("before=") ? olderPage : pageOne("s1")), { status: 200 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // Sec 1 auto-selects on mount and hydrates a full page, so older
+    // messages exist and the control renders.
+    const loadOlder = await screen.findByRole("button", { name: /load older messages/i });
+    expect(screen.queryByText("the very first thing this section said")).toBeNull();
+
+    const user = userEvent.setup();
+    await user.click(loadOlder);
+
+    await waitFor(() => expect(screen.getByText("the very first thing this section said")).toBeTruthy());
+
+    // The cursor is the oldest LOADED seq (page 1's head, 201), exclusive.
+    // Asserting the URL, not just "a second call happened": a request without
+    // `before` would re-fetch page 1 and still look "loaded".
+    expect(messagesUrls).toEqual([
+      "/api/conversations/sec-conv-1/messages?limit=200",
+      "/api/conversations/sec-conv-1/messages?limit=200&before=201",
+    ]);
+
+    // Prepended, not appended -- or the transcript reads out of order.
+    const oldest = screen.getByText("the very first thing this section said");
+    const firstOfPageOne = screen.getByText("s1 recent message 201");
+    expect(oldest.compareDocumentPosition(firstOfPageOne) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // Short older page (1 < 200) -- nothing left to ask for, control retires.
+    await waitFor(() => expect(screen.queryByRole("button", { name: /load older messages/i })).toBeNull());
+  });
+
+  it("drops the pagination cursor when a section switch fails to hydrate, so load-older can't splice the new section's history into the old one's transcript", async () => {
+    /* The defect: #276 deliberately leaves the PREVIOUS section's messages on
+       screen when hydration fails (failing closed beats blanking the
+       transcript), while `conversationId` and latestSectionConversationRef
+       have already moved to the NEW section. The failure path cleared
+       sectionHydrationError's sibling state but not the cursor, so
+       `hasMoreHistory` stayed true from sec 1 and "Load older messages" was
+       still offered -- and clicking it PASSED the staleness guard (which
+       correctly checks the new section) and prepended sec 2's older page onto
+       sec 1's still-rendered transcript. The tutor surface's own failure path
+       has always cleared its cursor; this was the asymmetry. */
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const messagesUrls: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") {
+          return new Response(
+            JSON.stringify(
+              homeworkFixture([
+                { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+                { id: "s2", title: "Sec 2", order: 2, status: "in_progress", conversationId: "sec-conv-2" },
+              ]),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url.endsWith("/hints")) {
+          return new Response(JSON.stringify({ count: 0, limit: null, remaining: null }), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
+          messagesUrls.push(url);
+          return new Response(JSON.stringify(pageOne("s1")), { status: 200 });
+        }
+        if (url.startsWith("/api/conversations/sec-conv-2/messages")) {
+          messagesUrls.push(url);
+          // Sec 2's hydration fails. Its older-page request, if the buggy
+          // build ever makes one, would succeed and be the visible splice.
+          if (url.includes("before=")) {
+            return new Response(
+              JSON.stringify([
+                {
+                  id: "s2-m200",
+                  role: "assistant",
+                  parts: [{ type: "text", text: "SEC 2 OLDER MESSAGE" }],
+                  seq: 200,
+                  createdAt: "2026-01-01T00:00:00.000Z",
+                },
+              ]),
+              { status: 200 },
+            );
+          }
+          return new Response(JSON.stringify({ error: "server unavailable" }), { status: 503 });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // Sec 1 hydrates a full page -- cursor set, control offered.
+    expect(await screen.findByRole("button", { name: /load older messages/i })).toBeTruthy();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Sec 2/ }));
+
+    expect(await screen.findByText(/Couldn't load this section's conversation/i)).toBeTruthy();
+    // #276's behaviour, unchanged: sec 1's transcript is still on screen
+    // rather than blanked. That is precisely what makes a stale cursor
+    // dangerous, so the test asserts it rather than assuming it.
+    expect(screen.getByText("s1 recent message 201")).toBeTruthy();
+
+    // No cursor => no affordance. Before the fix this button was still
+    // rendered (sec 1's `hasMore` survived the failure).
+    await waitFor(() => expect(screen.queryByRole("button", { name: /load older messages/i })).toBeNull());
+
+    // And nothing ever asked sec 2 for a page it would have spliced in.
+    expect(messagesUrls.some((u) => u.includes("before="))).toBe(false);
+    expect(screen.queryByText("SEC 2 OLDER MESSAGE")).toBeNull();
   });
 });

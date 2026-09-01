@@ -84,7 +84,6 @@ describe("EditableTitle", () => {
   it("clicking the pencil does not propagate to an ancestor click handler", async () => {
     const onAncestorClick = vi.fn();
     render(
-      // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
       <div onClick={onAncestorClick}>
         <EditableTitle value="Original title" onSave={() => {}} />
       </div>,

@@ -14,6 +14,7 @@ import { SubmissionNotInCourseError } from "../repositories/grades";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
+import { LLMCredentialMissingError } from "../../lib/llm-config";
 
 const TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "sk-test" } as Env;
 const SUBMISSION_ID = "11111111-2222-4333-8444-555555555555";
@@ -41,7 +42,44 @@ vi.mock("../utils/audit", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../utils/audit")>()),
   auditBestEffort: (...a: unknown[]) => auditBestEffortMock(...a),
 }));
-vi.mock("../../db/client", () => ({ makeDb: () => ({ select: () => ({ from: () => ({ innerJoin: () => ({ leftJoin: () => ({ where: async () => [] }), where: async () => [] }), where: async () => [] }) }) }) }));
+/* #365: a chainable Drizzle stub, replacing a hand-shaped one that modelled
+   exactly `select().from().innerJoin().leftJoin().where()`. draftGradeHandler
+   issues TWO joined queries (the section/solution context, then the message
+   tail with orderBy/limit), and the old stub had no second `innerJoin` and no
+   `orderBy`, so the handler threw a TypeError there. That went unnoticed only
+   because the OPENROUTER_API_KEY gate used to return before either query ran
+   -- which meant the draft route's model-selection path had no route-level
+   coverage at all. Every terminal await now takes the next queued result, so
+   the two queries can return their own shapes. */
+const dbResults: unknown[][] = [];
+function chainableDb(): unknown {
+  const node: Record<string, unknown> = {};
+  for (const method of ["select", "from", "innerJoin", "leftJoin", "where", "orderBy", "limit"]) {
+    node[method] = () => node;
+  }
+  node.then = (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
+    Promise.resolve(dbResults.shift() ?? []).then(resolve, reject);
+  return node;
+}
+vi.mock("../../db/client", () => ({ makeDb: () => chainableDb() }));
+
+const resolveLlmConfigMock = vi.fn();
+const loadLLMConfigByIdMock = vi.fn();
+const resolveApiKeyMock = vi.fn();
+const buildProviderClientMock = vi.fn();
+const draftGradeMock = vi.fn();
+vi.mock("../repositories/llmConfigs", () => ({
+  resolveLlmConfig: (...a: unknown[]) => resolveLlmConfigMock(...a),
+}));
+vi.mock("../../lib/llm-config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/llm-config")>()),
+  loadLLMConfigById: (...a: unknown[]) => loadLLMConfigByIdMock(...a),
+  resolveApiKey: (...a: unknown[]) => resolveApiKeyMock(...a),
+  buildProviderClient: (...a: unknown[]) => buildProviderClientMock(...a),
+}));
+vi.mock("../../lib/services/GradingEvaluator", () => ({
+  draftGrade: (...a: unknown[]) => draftGradeMock(...a),
+}));
 vi.mock("../../lib/secrets-loader", () => ({ loadIdentityCipherKeys: async () => ({}) }));
 vi.mock("../../lib/crypto/identity-cipher", () => ({ IdentityCipher: class {} }));
 
@@ -81,6 +119,42 @@ beforeEach(() => {
   getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
   auditBestEffortMock.mockReset().mockResolvedValue(undefined);
   vi.spyOn(console, "error").mockImplementation(() => {});
+
+  // #365: the draft path's two queries, in the order the handler issues them
+  // -- the section/solution context, then the message tail.
+  dbResults.length = 0;
+  dbResults.push(
+    [{ sectionContent: "Explain a p-value.", sectionId: "sec-1", solution: null }],
+    [{ role: "user", parts: [{ type: "text", text: "I think it means..." }] }],
+  );
+  // An org whose default config is llmoxie -- what migration 0035 makes every
+  // organization's, and the exact case the old hardcoded OpenRouter client
+  // got wrong.
+  resolveLlmConfigMock.mockReset().mockResolvedValue({ id: "cfg-1", modelName: "gpt-5.3-codex" });
+  loadLLMConfigByIdMock.mockReset().mockResolvedValue({
+    id: "cfg-1",
+    provider: "llmoxie",
+    modelName: "gpt-5.3-codex",
+    temperature: 0.7,
+    maxCompletionTokens: 1000,
+    credentialId: "cred-1",
+    fallbackLlmConfigId: null,
+    basePrompt: "",
+    pricePerMillionInputTokens: null,
+    pricePerMillionOutputTokens: null,
+    markCompleteInstruction: null,
+  });
+  resolveApiKeyMock.mockReset().mockResolvedValue("sk-llmoxie");
+  buildProviderClientMock
+    .mockReset()
+    .mockImplementation((provider: string, apiKey: string) => (model: string) => ({
+      provider,
+      apiKey,
+      model,
+    }));
+  draftGradeMock
+    .mockReset()
+    .mockResolvedValue({ score: 80, maxScore: 100, rationale: "ok", modelName: "gpt-5.3-codex" });
 });
 
 describe("grading authorization (#75)", () => {
@@ -199,13 +273,49 @@ describe("GET grades (#75)", () => {
 });
 
 describe("POST draft (#75)", () => {
-  it("503s with an actionable sentence when the gateway is unconfigured", async () => {
-    const res = await buildApp(instructorOfA()).request(
-      url("/draft"),
-      json({}),
-      { DATABASE_URL: "ignored" } as Env,
+  const draft = (env: Env = TEST_ENV) => buildApp(instructorOfA()).request(url("/draft"), json({}), env);
+
+  /** #365: the draft used to be produced by `getOpenRouter(OPENROUTER_API_KEY)`
+   *  whatever the resolved config said, so an org on the post-0035 default
+   *  (llmoxie/gpt-5.3-codex) had that model id sent to openrouter.ai under an
+   *  OpenRouter key. The route now resolves provider and credential from the
+   *  config itself, the same way chat.ts does. */
+  it("drafts through the resolved config's OWN provider and credential", async () => {
+    const res = await draft();
+    expect(res.status).toBe(201);
+
+    expect(resolveApiKeyMock.mock.calls[0]![3]).toMatchObject({ credentialId: "cred-1" });
+    expect(buildProviderClientMock.mock.calls[0]![0]).toBe("llmoxie");
+    expect(buildProviderClientMock.mock.calls[0]![1]).toBe("sk-llmoxie");
+    expect(draftGradeMock.mock.calls[0]![0]).toMatchObject({
+      modelName: "gpt-5.3-codex",
+      model: { provider: "llmoxie", apiKey: "sk-llmoxie", model: "gpt-5.3-codex" },
+    });
+  });
+
+  it("does not need an OpenRouter key when the config is not an OpenRouter one", async () => {
+    // The old up-front gate refused the whole feature on a deployment whose
+    // configs are all llmoxie, which after migration 0035 is every one of
+    // them by default.
+    const res = await draft({ DATABASE_URL: "ignored" } as Env);
+    expect(res.status).toBe(201);
+    expect(draftGradeMock).toHaveBeenCalled();
+  });
+
+  it("503s with an actionable sentence when the config's own key is unreachable", async () => {
+    resolveApiKeyMock.mockRejectedValue(
+      new LLMCredentialMissingError("fallback env var LLMOXIE_API_KEY is not set"),
     );
+    const res = await draft();
     expect(res.status).toBe(503);
+    expect(draftGradeMock).not.toHaveBeenCalled();
+  });
+
+  it("still 503s on a missing OpenRouter key for the no-config default, which IS an OpenRouter model", async () => {
+    resolveLlmConfigMock.mockResolvedValue(null);
+    const res = await draft({ DATABASE_URL: "ignored" } as Env);
+    expect(res.status).toBe(503);
+    expect(draftGradeMock).not.toHaveBeenCalled();
   });
 
   it("404s a submission that is not in this course", async () => {

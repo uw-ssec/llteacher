@@ -92,6 +92,11 @@ export function useStudentHomework() {
   // StudentHomeworkSummary.courseId's doc comment), so it's threaded
   // through here rather than added as a second fetch.
   const [courseId, setCourseId] = useState<string | undefined>(undefined);
+  // #304 (requirement 4): threaded from the same homework summary as
+  // courseId above (StudentHomeworkSummary.courseName, the course's real
+  // code) -- previously the TopNav/breadcrumb had "STATS 311" hardcoded as
+  // a literal stand-in instead of deriving it from any server data at all.
+  const [courseName, setCourseName] = useState<string>("");
   const [loading, setLoading] = useState(true);
   // #160: distinct from "loaded, zero homeworks" -- a 401/403/503 must not
   // render as an indistinguishable empty sidebar. r.ok was never checked
@@ -114,6 +119,7 @@ export function useStudentHomework() {
         }
         setHwTitle(hw.title);
         setCourseId(hw.courseId);
+        setCourseName(hw.courseName);
         setSections(
           hw.sections.map((s) => ({
             number: s.order,
@@ -124,6 +130,11 @@ export function useStudentHomework() {
                 : s.status === "in_progress"
                   ? ("current" as const)
                   : ("pending" as const),
+            // #167: a section the overdue sweep submitted still maps to
+            // "submitted" above -- the work really was submitted -- but the
+            // row says so differently (SectionItem), because a student who
+            // never pressed submit should not be left to conclude they did.
+            autoSubmitted: s.submissionSource === "auto",
           })),
         );
         setSectionMetaByOrder(
@@ -144,7 +155,7 @@ export function useStudentHomework() {
   // above is gone; previously this setter existed only inside this hook,
   // which made it structurally impossible for anything outside the hook to
   // keep the map current after the initial fetch.
-  return { sections, setSections, sectionMetaByOrder, setSectionMetaByOrder, hwTitle, courseId, loading, loadError };
+  return { sections, setSections, sectionMetaByOrder, setSectionMetaByOrder, hwTitle, courseId, courseName, loading, loadError };
 }
 
 /* Translates the AI SDK's UIMessage[] + status into the design system's
@@ -314,6 +325,45 @@ function prepareSendMessagesRequest({
   return { body: { ...body, messages: messages.slice(-1) } };
 }
 
+/* #96: the plain text a student actually typed, recovered from the UIMessage
+   useChat optimistically appended for it. Used only on the send-failure path
+   below, to hand those words back to the composer before dropping the bubble
+   the server never stored. Tool/file parts are ignored: a student message is
+   text parts only (see handleSendMessage's `sendMessage({ text })`). */
+function studentTextOf(message: UIMessage): string {
+  return message.parts
+    .filter((p): p is { type: "text"; text: string } => p.type === "text")
+    .map((p) => p.text)
+    .join("");
+}
+
+/* #96 (interrupted-stream resilience, and the two-tabs non-goal).
+   ---------------------------------------------------------------
+   A turn can fail in two places, and the recovery differs:
+
+     send half     -- the request never reached the server, or the server
+                      refused it (any non-2xx: rate limit, closed section,
+                      duplicate id, lost wifi). Nothing was persisted. The
+                      student's words are handed back to the composer and the
+                      un-persisted bubble is dropped, so what's on screen
+                      matches what a reload would show.
+     response half -- the server accepted the send (2xx), so the user message
+                      IS persisted, but the model turn didn't finish. #268's
+                      onFinish gate means the truncated reply is deliberately
+                      NOT persisted, so a reload shows the question with no
+                      answer; the in-session recovery is regenerate, which
+                      re-sends the same clientMessageId and so is deduped by
+                      the server's own idempotency check rather than
+                      double-writing the question.
+
+   Two tabs on one conversation is last-writer-wins with the persisted
+   transcript as truth on reload -- an explicit v1 non-goal, not an oversight:
+   there is no realtime sync, no cross-tab channel, and no attempt to merge.
+   The server's per-conversation turn lock (chat.ts) already prevents the only
+   outcome that would corrupt anything -- two interleaved turns writing into
+   one conversation -- by 409ing the second tab's overlapping send; each tab
+   otherwise just shows its own stale view until it reloads. */
+
 /* ==========================================================================
    App — the root component
 
@@ -335,6 +385,18 @@ export default function App() {
      history on mount, is conversation-lifecycle scope (#27), not this task. */
   const [conversationId, setConversationId] = useState<string | undefined>(undefined);
 
+  /* #96: false from the moment a fresh send is dispatched until the server
+     answers 2xx for it. A 2xx on /api/chat is exactly the point at which the
+     student's own message is durably persisted -- chatHandler appends the
+     user row (or resolves it to an already-persisted one) BEFORE it opens the
+     stream, so every non-2xx, and every fetch that throws outright, means the
+     turn does not exist server-side at all.
+     Deliberately NOT reset by `regenerate`: once a send has been accepted, the
+     user row stays persisted no matter how many later regenerate attempts
+     fail, so a failed regenerate is always a response-half failure. See
+     TurnFailureStage (packages/ui) for what each half implies. */
+  const sectionSendAcceptedRef = useRef(true);
+
   /* Wraps fetch to read the x-conversation-id response header before handing
      the (untouched) Response back to useChat's own stream parsing --
      DefaultChatTransport otherwise has no way to surface response headers
@@ -346,9 +408,13 @@ export default function App() {
      were on that first render forever. currentSectionRef/sectionMetaByOrderRef
      (declared below, kept current via their own effects) are how this
      stays correct across every later render without recreating the
-     transport. */
+     transport.
+
+     #96: it also records whether the server ACCEPTED this send -- see
+     sectionSendAcceptedRef above. */
   const chatFetch: typeof fetch = async (input, init) => {
     const res = await fetch(input, init);
+    if (res.ok) sectionSendAcceptedRef.current = true;
     const newConversationId = res.headers.get("x-conversation-id");
     if (newConversationId) {
       setConversationId(newConversationId);
@@ -453,6 +519,29 @@ export default function App() {
     stopChat();
   };
 
+  /* #96: set when the LAST failure was a send-half failure -- carries the
+     student's text back to the composer (ConversationView's `restoredDraft`)
+     and, by being non-null, suppresses the error row's regenerate button
+     (there is no server-side turn to regenerate). A fresh object per failure
+     so the same text failing twice restores twice.
+
+     #96: `section` records WHICH section's composer these words
+     belong in, and the render site below only passes the failure through
+     when it still matches the section on screen. That gate has to happen
+     during render, not in an effect: both ConversationViews are keyed
+     (`key={currentSection}` / `key={tutorConversationId}`), so a switch
+     REMOUNTS the child -- resetting its draft and the `lastRestoredDraftRef`
+     that makes a restore fire only once -- and React runs the freshly-mounted
+     child's effects BEFORE the parent's. An effect that nulls this on switch
+     therefore always loses the race: the child has already written the
+     previous section's failed text into the new section's empty composer,
+     one Enter away from sending it into a different graded conversation.
+     The `[currentSection]` reset further down is still kept, for the separate
+     reason that leaving a section should discard its restored draft exactly
+     the way the keyed remount already discards a typed one. */
+  const [sectionSendFailure, setSectionSendFailure] = useState<{ text: string; section: number } | null>(null);
+  const prevChatStatusRef = useRef(chatStatus);
+
   const {
     sections,
     setSections,
@@ -460,6 +549,7 @@ export default function App() {
     setSectionMetaByOrder,
     hwTitle,
     courseId,
+    courseName,
     loading: homeworkLoading,
     loadError,
   } = useStudentHomework();
@@ -478,15 +568,15 @@ export default function App() {
      this one nullable id fully determines which surface is active. */
   const [tutorConversationId, setTutorConversationId] = useState<string | undefined>(undefined);
 
-  /* #4 fix-round: seeds the tutor Chat instance's message list whenever
+  /* #4: seeds the tutor Chat instance's message list whenever
      tutorConversationId changes (see selectTutorConversation below) --
      empty for a brand-new conversation, or the persisted history for an
      existing one. This is NOT just cosmetic: chatHandler (chat.ts) builds
      the model's context via convertToModelMessages(uiMessages) over
-     exactly the array the client sends on each turn, so if this stayed
-     empty on resume, the LLM would receive zero prior context and respond
-     as if the conversation were brand new -- a real functional break code
-     review caught, not merely "the UI hasn't caught up visually." */
+     exactly the array the client sends on each turn, so leaving this empty
+     on resume means the LLM receives zero prior context and answers as if
+     the conversation were brand new -- a functional break, not merely "the
+     UI hasn't caught up visually." */
   const [tutorInitialMessages, setTutorInitialMessages] = useState<UIMessage[]>([]);
 
   /* A second, independent Chat instance for tutor conversations -- NOT the
@@ -502,12 +592,20 @@ export default function App() {
      `messages: tutorInitialMessages` -- selectTutorConversation below
      always updates both together in the same event handler (batched into
      one render), so the freshly fetched history is already in state by the
-     time `id` changes and useChat recreates its Chat instance off it. Plain
-     `fetch` (not the section chat's chatFetch wrapper): that wrapper writes
-     into the *section* chat's conversationId state, which would corrupt it
-     if reused here. */
+     time `id` changes and useChat recreates its Chat instance off it. Not
+     the section chat's chatFetch wrapper: that wrapper writes into the
+     *section* chat's conversationId state, which would corrupt it if reused
+     here -- tutorChatFetch below does only the half that IS shared (#96's
+     send-accepted classification). */
+  const tutorSendAcceptedRef = useRef(true);
+  const tutorChatFetch: typeof fetch = async (input, init) => {
+    const res = await fetch(input, init);
+    if (res.ok) tutorSendAcceptedRef.current = true;
+    return res;
+  };
   const {
     messages: tutorAiMessages,
+    setMessages: setTutorMessages,
     sendMessage: sendTutorMessage,
     status: tutorChatStatus,
     error: tutorChatError,
@@ -518,10 +616,36 @@ export default function App() {
   } = useChat({
     id: tutorConversationId,
     messages: tutorInitialMessages,
-    transport: new DefaultChatTransport({ api: "/api/chat", prepareSendMessagesRequest }),
+    transport: new DefaultChatTransport({ api: "/api/chat", fetch: tutorChatFetch, prepareSendMessagesRequest }),
     // #277: same reasoning as the section instance above.
     experimental_throttle: STREAM_THROTTLE_MS,
   });
+
+  /* #96: the tutor chat's own half of the send-failure recovery above --
+     same reasoning, this instance's messages.
+     #96: stamped with `conversationId` and gated at the render site
+     for exactly the reason the section surface is (this ConversationView is
+     keyed `key={tutorConversationId}`, so it remounts on every conversation
+     switch and its mount effects beat the reset below). Without the gate, a
+     failed send in one tutor conversation reappears in the next one's
+     composer. */
+  const [tutorSendFailure, setTutorSendFailure] = useState<
+    { text: string; conversationId: string | undefined } | null
+  >(null);
+  useEffect(() => {
+    setTutorSendFailure(null);
+  }, [tutorConversationId]);
+  const prevTutorStatusForFailureRef = useRef(tutorChatStatus);
+  useEffect(() => {
+    const previous = prevTutorStatusForFailureRef.current;
+    prevTutorStatusForFailureRef.current = tutorChatStatus;
+    if (tutorChatStatus !== "error" || previous === "error") return;
+    if (tutorSendAcceptedRef.current) return;
+    const last = tutorAiMessages[tutorAiMessages.length - 1];
+    if (last?.role !== "user") return;
+    setTutorSendFailure({ text: studentTextOf(last), conversationId: tutorConversationId });
+    setTutorMessages(tutorAiMessages.slice(0, -1));
+  }, [tutorChatStatus, tutorAiMessages, setTutorMessages, tutorConversationId]);
 
   // #317 review, #352: same reasoning as sectionStoppedMessageId above.
   // Also reset on tutorConversationId change (switching conversations, or
@@ -538,7 +662,7 @@ export default function App() {
     stopTutorChat();
   };
 
-  /* #4 fix-round 2: tracks whichever tutor-surface switch was requested
+  /* #4: tracks whichever tutor-surface switch was requested
      most recently -- a target conversation id, or undefined when the
      student switched away entirely (handleSectionSelect below). Written
      synchronously at the START of every switch (selectTutorConversation,
@@ -592,14 +716,25 @@ export default function App() {
     null,
   );
 
-  // #280: true when fetchConversationHistory's page came back full (the
-  // messages route pages at 200, no load-more wired yet -- see that
-  // function's own doc comment) -- the ceiling made visible instead of
-  // silent, mirroring tutorConversationsHasMore's role for the rail list.
-  // One flag per surface since tutor/section hydrate independently and
-  // (rarely, but possibly) their most recent fetches could disagree.
+  /* #280: true when there are older messages than the transcript holds
+     (the messages route pages at 200). One flag per surface since
+     tutor/section hydrate independently and (rarely, but possibly) their
+     most recent fetches could disagree.
+
+     #280 (requirement 2): paired with the `seq` of the oldest message
+     currently loaded -- the cursor `GET .../messages?before=` takes. `seq`
+     is a monotonic bigserial (#221), the same tiebreaker-free-by-
+     construction key the conversation list needed a compound cursor to
+     approximate, so no equivalent of #281's tie problem exists here.
+     Undefined means "nothing loaded to page back from". */
   const [tutorHistoryHasMore, setTutorHistoryHasMore] = useState(false);
   const [sectionHistoryHasMore, setSectionHistoryHasMore] = useState(false);
+  const [tutorOldestSeq, setTutorOldestSeq] = useState<number | undefined>(undefined);
+  const [sectionOldestSeq, setSectionOldestSeq] = useState<number | undefined>(undefined);
+  const [loadingOlderTutorMessages, setLoadingOlderTutorMessages] = useState(false);
+  const [loadingOlderSectionMessages, setLoadingOlderSectionMessages] = useState(false);
+  const [tutorOlderMessagesError, setTutorOlderMessagesError] = useState(false);
+  const [sectionOlderMessagesError, setSectionOlderMessagesError] = useState(false);
 
   /* #4/#6, lifted here per #223: one useTutorConversations instance shared
      by the rail (TutorConversationsList, now presentational -- it takes
@@ -619,6 +754,11 @@ export default function App() {
     awaitingCourseContext: tutorConversationsAwaitingCourse,
     loadError: tutorConversationsLoadError,
     hasMore: tutorConversationsHasMore,
+    // #280 (requirement 2): the rail's real load-more, paging with the
+    // server's own compound cursor (#281).
+    loadingMore: tutorConversationsLoadingMore,
+    loadMoreError: tutorConversationsLoadMoreError,
+    loadMore: loadMoreTutorConversations,
     refetch: refetchTutorConversations,
     createConversation: createTutorConversationRow,
     deleteConversation: deleteTutorConversationRow,
@@ -633,7 +773,7 @@ export default function App() {
     await renameTutorConversationRow(tutorConversationId, newTitle);
   };
 
-  /* #4 fix-round: the single place that switches the tutor surface to a
+  /* #4: the single place that switches the tutor surface to a
      given conversation, always setting its seed messages in the same
      event-handler pass as its id (React batches both into one commit, so
      useChat's `id` change and its `messages` seed are never torn apart
@@ -660,11 +800,11 @@ export default function App() {
     setTutorConversationId(id);
   };
 
-  /* #4 fix-round: TutorConversationsList's onSelectConversation -- fetches
-     that conversation's persisted history (GET /api/conversations/:id/messages,
-     added this fix-round) before switching the chat column to it, so the
-     LLM's context on the next turn actually includes the prior exchange,
-     not just the UI. A no-op re-fetch guard: re-selecting the
+  /* #4: TutorConversationsList's onSelectConversation -- fetches
+     that conversation's persisted history (GET /api/conversations/:id/messages)
+     before switching the chat column to it, so the LLM's context on the next
+     turn actually includes the prior exchange, not just the UI. A no-op
+     re-fetch guard: re-selecting the
      already-active conversation (e.g. a stray double-click) skips the
      round-trip -- its messages are already showing correctly. Fails open to
      an empty thread (not a thrown error) on a failed fetch, matching this
@@ -672,14 +812,14 @@ export default function App() {
      catch below) -- the student can still send a new message into the
      right conversationId even if history hydration itself failed.
 
-     #4 fix-round 2: stale-response guard. The pre-fetch `id ===
+     #4: stale-response guard. The pre-fetch `id ===
      tutorConversationId` check only rules out re-selecting the conversation
      already showing -- it says nothing about a SECOND selection made while
      THIS fetch is still in flight (student clicks conversation A, then B,
      before A's /messages response lands). Without a post-await recheck,
-     whichever response resolves last would win regardless of click order,
+     whichever response resolves last wins regardless of click order,
      silently reverting the UI to a conversation the student already
-     navigated away from. Fixed by stamping latestTutorSelectionRef.current
+     navigated away from. So: stamp latestTutorSelectionRef.current
      = id synchronously before the fetch starts (so a later call -- to this
      function again, or to selectTutorConversation directly via "New
      conversation," or to undefined via handleSectionSelect -- immediately
@@ -705,15 +845,28 @@ export default function App() {
   // route's own DEFAULT_MESSAGES_PAGE_SIZE) so this function knows for
   // certain whether a full page means "there might be more" -- a length
   // that happens to equal an unstated server default would be a coincidence
-  // to key off of, not a real signal. Older messages beyond this page
-  // aren't fetched (a real prepend-on-scroll isn't wired yet); `hasMore`
-  // lets the caller show that ceiling instead of leaving it silent.
+  // to key off of, not a real signal.
+  //
+  // #280 (requirement 2): `before` walks further back. It is a `seq`
+  // (#221's monotonic bigserial), taken from a row this same route
+  // returned -- `oldestSeq` below is what the caller feeds back in, so the
+  // cursor is never reconstructed from anything lossier than the column
+  // itself. Rows come back oldest-first, so the head of the array is the
+  // page's own oldest row and therefore the next cursor.
   const MESSAGES_HISTORY_LIMIT = 200;
-  const fetchConversationHistory = async (id: string): Promise<{ messages: UIMessage[]; hasMore: boolean }> => {
-    const res = await fetch(`/api/conversations/${id}/messages?limit=${MESSAGES_HISTORY_LIMIT}`);
+  const fetchConversationHistory = async (
+    id: string,
+    before?: number,
+  ): Promise<{ messages: UIMessage[]; hasMore: boolean; oldestSeq: number | undefined }> => {
+    const res = await fetch(
+      `/api/conversations/${id}/messages?limit=${MESSAGES_HISTORY_LIMIT}${
+        before !== undefined ? `&before=${before}` : ""
+      }`,
+    );
     if (!res.ok) throw new Error(`failed to load conversation history: ${res.status}`);
     const rows = (await res.json()) as ConversationMessageResponse[];
     return {
+      oldestSeq: rows[0]?.seq,
       /* #397: createdAt was being dropped here. The server has always sent it
          per message (routes/sectionConversations.ts), and the transcript now
          shows a per-turn time, so it rides along on the UIMessage metadata
@@ -764,9 +917,10 @@ export default function App() {
       if (latestTutorSelectionRef.current !== id) return; // superseded while in flight -- discard
       setTutorHydrationError(null);
       setTutorHistoryHasMore(history.hasMore);
+      setTutorOldestSeq(history.oldestSeq);
+      setTutorOlderMessagesError(false);
       selectTutorConversation(id, history.messages);
     } catch (err) {
-      // eslint-disable-next-line no-console
       console.error("[App] tutor conversation history fetch failed", err);
       if (latestTutorSelectionRef.current !== id) return; // superseded while in flight -- discard
       setTutorHydrationError({
@@ -774,6 +928,7 @@ export default function App() {
         onRetry: () => void handleSelectExistingTutorConversation(id),
       });
       setTutorHistoryHasMore(false);
+      setTutorOldestSeq(undefined);
       selectTutorConversation(id, []);
     } finally {
       /* #398: clear only when this request is still the current one -- a
@@ -792,6 +947,76 @@ export default function App() {
          latestTutorSelectionRef also owns the marker. This branch now only
          handles "my own request finished and I am still current". */
       if (latestTutorSelectionRef.current === id) setPendingTutorSelectionId(undefined);
+    }
+  };
+
+  /* #280 (requirement 2, transcript half): fetch the page of messages
+     BEFORE the oldest one showing and PREPEND it. Prepend, not append:
+     `before` walks backwards through a chronologically-ascending list, so
+     the older page belongs above what is already rendered.
+
+     One handler shape, twice -- the tutor and section surfaces have
+     separate useChat instances, separate cursors, and separate staleness
+     refs, so they share the fetch (fetchConversationHistory) rather than
+     the handler.
+
+     The prepended page is deliberately NOT re-sent to the model: chat.ts
+     trims to a trailing MAX_HISTORY_MESSAGES window anyway (the divider
+     ConversationView draws from `contextWindowSize` says exactly this), so
+     loading older messages is a reading affordance, not a way to widen the
+     model's context. */
+  const handleLoadOlderTutorMessages = async () => {
+    // Not named `conversationId`: that identifier is already this
+    // component's SECTION conversation id.
+    const targetConversationId = tutorConversationId;
+    if (!targetConversationId || tutorOldestSeq === undefined || loadingOlderTutorMessages) return;
+    setLoadingOlderTutorMessages(true);
+    setTutorOlderMessagesError(false);
+    try {
+      const older = await fetchConversationHistory(targetConversationId, tutorOldestSeq);
+      // Same staleness rule as the selection path above: a switch made
+      // while this was in flight must not have another conversation's
+      // messages spliced into it.
+      if (latestTutorSelectionRef.current !== targetConversationId) return;
+      if (older.messages.length === 0) {
+        setTutorHistoryHasMore(false);
+        return;
+      }
+      setTutorMessages((prev) => [...older.messages, ...prev]);
+      setTutorOldestSeq(older.oldestSeq);
+      setTutorHistoryHasMore(older.hasMore);
+    } catch (err) {
+      console.error("[App] tutor older-message fetch failed", err);
+      if (latestTutorSelectionRef.current !== targetConversationId) return;
+      // The cursor is left intact -- the page is still there to ask for,
+      // so the button stays live and retrying is one more click.
+      setTutorOlderMessagesError(true);
+    } finally {
+      setLoadingOlderTutorMessages(false);
+    }
+  };
+
+  const handleLoadOlderSectionMessages = async () => {
+    const targetConversationId = conversationId;
+    if (!targetConversationId || sectionOldestSeq === undefined || loadingOlderSectionMessages) return;
+    setLoadingOlderSectionMessages(true);
+    setSectionOlderMessagesError(false);
+    try {
+      const older = await fetchConversationHistory(targetConversationId, sectionOldestSeq);
+      if (latestSectionConversationRef.current !== targetConversationId) return;
+      if (older.messages.length === 0) {
+        setSectionHistoryHasMore(false);
+        return;
+      }
+      setSectionMessages((prev) => [...older.messages, ...prev]);
+      setSectionOldestSeq(older.oldestSeq);
+      setSectionHistoryHasMore(older.hasMore);
+    } catch (err) {
+      console.error("[App] section older-message fetch failed", err);
+      if (latestSectionConversationRef.current !== targetConversationId) return;
+      setSectionOlderMessagesError(true);
+    } finally {
+      setLoadingOlderSectionMessages(false);
     }
   };
 
@@ -858,6 +1083,29 @@ export default function App() {
   const handleCreateTutorConversation = async (): Promise<boolean> => {
     const created = await createTutorConversationRow();
     if (!created) return false;
+    /* Final review: the pagination state belongs to whichever conversation
+       was previously on screen, and a brand-new conversation has no history
+       at all. Without these resets, creating one while a >200-message
+       conversation was open left "Load older messages" (and a stale
+       older-page error) rendered against a conversation seconds old --
+       UI asserting persistence that does not exist -- and clicking it sent
+       the OLD conversation's cursor at the NEW conversation's endpoint.
+       Same three resets handleSelectExistingTutorConversation already does;
+       they live here rather than inside selectTutorConversation because
+       that function's other caller sets its own (real, fetched) values in
+       the same batch.
+
+       tutorHydrationError belongs to the same "whichever conversation was
+       previously on screen" state and was missed in that same pass: without
+       clearing it, creating a conversation while an earlier one's hydration
+       had failed left the brand-new conversation rendered with that stale
+       error -- composer disabled (isSending checks tutorHydrationError) and
+       a Retry that closes over the OLD conversation's id, so clicking it
+       would navigate the student off the one they just created. */
+    setTutorHistoryHasMore(false);
+    setTutorOldestSeq(undefined);
+    setTutorOlderMessagesError(false);
+    setTutorHydrationError(null);
     selectTutorConversation(created.id);
     setJustCreatedTutorConversationId(created.id);
     return true;
@@ -876,6 +1124,38 @@ export default function App() {
   const currentSectionRef = useRef(currentSection);
   useEffect(() => {
     currentSectionRef.current = currentSection;
+  }, [currentSection]);
+
+  /* #96: detects a send-half failure on the section chat and hands the
+     student's words back (see sectionSendFailure's own doc comment above for
+     the whole contract). Lives here, not beside its state, only because it
+     needs `currentSection` -- which is declared just above -- to stamp the
+     failure with the section those words belong to. */
+  useEffect(() => {
+    const previous = prevChatStatusRef.current;
+    prevChatStatusRef.current = chatStatus;
+    // Only the moment a turn FAILS, not every render while it stays failed.
+    if (chatStatus !== "error" || previous === "error") return;
+    if (sectionSendAcceptedRef.current) return; // response half: the question is persisted, leave it on screen
+    const last = aiMessages[aiMessages.length - 1];
+    // Defensive: a send-half failure never gets far enough for the SDK to
+    // append an assistant message, so the tail is the student's own message.
+    if (last?.role !== "user") return;
+    setSectionSendFailure({ text: studentTextOf(last), section: currentSection });
+    // The bubble is dropped, not merely marked: it was never persisted, so
+    // leaving it would show a message that a reload makes vanish -- the
+    // client-side twin of the truncated assistant row #268 stops the server
+    // from writing.
+    setSectionMessages(aiMessages.slice(0, -1));
+  }, [chatStatus, aiMessages, setSectionMessages, currentSection]);
+
+  /* #96: leaving a section discards its restored draft, exactly
+     the way the keyed remount already discards a typed one. This is the
+     housekeeping half only -- the render-site `section` gate is what
+     actually prevents the cross-section leak, because this effect runs
+     AFTER the newly-mounted child's own effects (see sectionSendFailure). */
+  useEffect(() => {
+    setSectionSendFailure(null);
   }, [currentSection]);
 
   /* #252: tracks whichever section-conversation load was requested most
@@ -963,7 +1243,6 @@ export default function App() {
         prev.map((s) => (s.number === sectionNumber ? { ...s, status: "current" as const } : s)),
       );
     } catch (err) {
-      // eslint-disable-next-line no-console
       console.error("[App] failed to eagerly start section conversation", err);
       // Left as the empty state loadSectionConversation already set -- not
       // surfaced as sectionHydrationError (which disables the composer):
@@ -981,9 +1260,11 @@ export default function App() {
     setConversationId(targetConversationId);
     latestSectionConversationRef.current = targetConversationId;
     setSectionHydrationError(null);
+    setSectionOlderMessagesError(false);
     if (!targetConversationId) {
       setSectionMessages([]);
       setSectionHistoryHasMore(false);
+      setSectionOldestSeq(undefined);
       if (sectionId) void startFreshSectionConversation(sectionNumber, sectionId);
       return;
     }
@@ -992,14 +1273,26 @@ export default function App() {
       if (latestSectionConversationRef.current !== targetConversationId) return; // superseded -- discard
       setSectionMessages(history.messages);
       setSectionHistoryHasMore(history.hasMore);
+      setSectionOldestSeq(history.oldestSeq);
     } catch (err) {
-      // eslint-disable-next-line no-console
       console.error("[App] section conversation history fetch failed", err);
       if (latestSectionConversationRef.current !== targetConversationId) return; // superseded -- discard
       setSectionHydrationError({
         message: "Couldn't load this section's conversation. Please try again.",
         onRetry: () => void loadSectionConversation(sectionNumber, targetConversationId, sectionId),
       });
+      /* Final review: the tutor surface's own failure path clears its
+         cursor (handleSelectExistingTutorConversation's catch above); this
+         one did not, which was an asymmetry rather than a decision. #276
+         deliberately LEAVES the previous section's transcript on screen when
+         hydration fails, while conversationId/latestSectionConversationRef
+         have already moved to the new section -- so a surviving
+         hasMore/oldestSeq made "Load older messages" pass the staleness
+         guard (which checks the NEW section, correctly) and prepend the NEW
+         section's messages onto the OLD section's still-rendered transcript.
+         No cursor, no button, no splice. */
+      setSectionHistoryHasMore(false);
+      setSectionOldestSeq(undefined);
     }
   };
 
@@ -1020,9 +1313,9 @@ export default function App() {
         if (latestSectionConversationRef.current === pendingId) {
           setSectionMessages(history.messages);
           setSectionHistoryHasMore(history.hasMore);
+          setSectionOldestSeq(history.oldestSeq);
         }
       } catch (err) {
-        // eslint-disable-next-line no-console
         console.error("[App] failed to hydrate section greeting after creation", err);
       }
     })();
@@ -1074,7 +1367,6 @@ export default function App() {
         setHintLimit(data.limit);
       })
       .catch((err) => {
-        // eslint-disable-next-line no-console
         console.error("[App] failed to load hint count", err);
       });
   }, [courseId, currentSectionId]);
@@ -1173,17 +1465,27 @@ export default function App() {
   // it's the more fundamental problem (the composer is disabled either way
   // while it's set, see isSending below), and regenerateChat's retry
   // wouldn't even be reachable in a useful state without history loaded.
+  // #96: `stage` splits the one error row into the two cases that need
+  // different recoveries. A send-half failure (sectionSendFailure set) omits
+  // `onRetry` entirely -- regenerate would re-request a turn the server never
+  // accepted, and the student's text is already back in the composer, so
+  // Enter is the retry. A response-half failure keeps the existing
+  // regenerate, which re-sends the same clientMessageId and is therefore
+  // deduped server-side rather than double-writing the question.
   const sectionChatErrorRow =
     sectionHydrationError ??
     (chatStatus === "error"
       ? {
           message: chatError?.message || "Something went wrong. Please try again.",
-          onRetry: () =>
-            regenerateChat({
-              body: conversationId
-                ? { conversationId }
-                : { courseId, kind: "section" as const, sectionId: sectionMetaByOrder.get(currentSection)?.id },
-            }),
+          stage: sectionSendFailure ? ("send" as const) : ("response" as const),
+          onRetry: sectionSendFailure
+            ? undefined
+            : () =>
+                regenerateChat({
+                  body: conversationId
+                    ? { conversationId }
+                    : { courseId, kind: "section" as const, sectionId: sectionMetaByOrder.get(currentSection)?.id },
+                }),
         }
       : null);
   const tutorChatErrorRow =
@@ -1191,8 +1493,11 @@ export default function App() {
     (tutorChatStatus === "error"
       ? {
           message: tutorChatError?.message || "Something went wrong. Please try again.",
-          onRetry: () =>
-            regenerateTutorChat({ body: tutorConversationId ? { conversationId: tutorConversationId } : {} }),
+          stage: tutorSendFailure ? ("send" as const) : ("response" as const),
+          onRetry: tutorSendFailure
+            ? undefined
+            : () =>
+                regenerateTutorChat({ body: tutorConversationId ? { conversationId: tutorConversationId } : {} }),
         }
       : null);
 
@@ -1257,6 +1562,11 @@ export default function App() {
        unconditional per-message increment (every send used to bump
        hintCount regardless of whether anything hint-shaped happened). */
     if (options?.isHintRequest) hintRequestPendingRef.current = true;
+    // #96: a fresh send is un-accepted until the server answers 2xx for it,
+    // and clears any previous send-failure (its text is either being re-sent
+    // right now or was deliberately replaced by the student).
+    sectionSendAcceptedRef.current = false;
+    setSectionSendFailure(null);
     sendMessage(
       { text },
       {
@@ -1295,7 +1605,17 @@ export default function App() {
   const handleSendTutorMessage = (text: string) => {
     if (!tutorConversationId) return;
     if (tutorChatStatus === "submitted" || tutorChatStatus === "streaming") return;
-    sendTutorMessage({ text }, { body: { conversationId: tutorConversationId } });
+    // #96: see handleSendMessage above.
+    tutorSendAcceptedRef.current = false;
+    setTutorSendFailure(null);
+    // #304: courseId is now sent on every tutor turn, not only when minting
+    // a new conversation -- chatHandler's conversationId branch doesn't
+    // read it (getOwnedConversationOrNull's own ownership check is what
+    // actually scopes the turn), but sending it keeps this call's body
+    // shape consistent with handleSendMessage's section path above and
+    // gives the server a value to use if that branch's requirements ever
+    // change without another client round of edits.
+    sendTutorMessage({ text }, { body: { conversationId: tutorConversationId, courseId } });
     // #317 review, #352: same reasoning as handleSendMessage above.
     setTutorStoppedMessageId(null);
   };
@@ -1374,7 +1694,7 @@ export default function App() {
      tutorInitialMessages too (not load-bearing -- selectTutorConversation
      always resets it before the next tutor selection anyway -- but avoids
      holding onto a stale conversation's history in memory for no reason).
-     #4 fix-round 2: also marks latestTutorSelectionRef as "nothing tutor
+     #4: also marks latestTutorSelectionRef as "nothing tutor
      selected" -- otherwise a tutor-conversation /messages fetch already in
      flight when the student jumps to a homework section would still match
      its own id on resolve and incorrectly flip the surface back to a
@@ -1443,7 +1763,6 @@ export default function App() {
       setJustSubmittedSection(sectionNumber);
       setTimeout(() => setJustSubmittedSection(null), 800);
     } catch (err) {
-      // eslint-disable-next-line no-console
       console.error("[App] section submit failed", err);
     }
   };
@@ -1504,7 +1823,6 @@ export default function App() {
       await loadSectionConversation(sectionNumber, result.conversation.id);
       setRestartDialogOpen(false);
     } catch (err) {
-      // eslint-disable-next-line no-console
       console.error("[App] section restart failed", err);
       setRestartError("Something went wrong restarting this section. Please try again.");
     } finally {
@@ -1551,7 +1869,10 @@ export default function App() {
     return (
       <div className="page-frame">
         <TopNav
-          course="STATS 311"
+          // #304 (requirement 4): matches homework="" right below -- the
+          // fetch that would have supplied a real courseName failed, so
+          // this is the same honest-empty state, not a hardcoded stand-in.
+          course={courseName}
           term="Autumn 2026"
           homework=""
           userInitials="AC"
@@ -1584,7 +1905,9 @@ export default function App() {
       </a>
       {/* Top nav — UW Husky Purple full-bleed bar */}
       <TopNav
-        course="STATS 311"
+        // #304 (requirement 4): real course code from the homework summary
+        // (StudentHomeworkSummary.courseName), not a hardcoded stand-in.
+        course={courseName}
         term="Autumn 2026"
         homework={hwTitle}
         userInitials="AC"
@@ -1626,6 +1949,9 @@ export default function App() {
           loadError={tutorConversationsLoadError}
           onRetryLoad={refetchTutorConversations}
           hasMore={tutorConversationsHasMore}
+          onLoadMore={() => void loadMoreTutorConversations()}
+          loadingMore={tutorConversationsLoadingMore}
+          loadMoreError={tutorConversationsLoadMoreError}
           selectedConversationId={tutorConversationId}
           pendingConversationId={pendingTutorSelectionId}
           onSelectConversation={handleSelectExistingTutorConversation}
@@ -1656,11 +1982,15 @@ export default function App() {
           <ErrorBoundary key={`tutor-${tutorConversationId}`}>
             <ConversationView
               key={tutorConversationId}
-              /* #397: the top nav already spells out
-                 "STATS 311 · AUTUMN 2026 · <homework>" one line above, so
-                 repeating the course code here cost the first line of the
-                 reading column to say nothing new. Only the surface name
-                 is new information. */
+              /* #397 (over #304's earlier `${courseName} · TUTOR CHAT`):
+                 the top nav one line above already spells out the course --
+                 and as of #304 requirement 4 it spells out the REAL course
+                 name (TopNav's `course={courseName}` prop above), not the
+                 hardcoded "STATS 311" stand-in this breadcrumb used to
+                 carry. So the prefix here cost the first line of the reading
+                 column to repeat what the nav just said. Only the surface
+                 name is new information; #304's requirement is met by the
+                 nav, which is where the course identity now lives. */
               breadcrumb="TUTOR CHAT"
               title={tutorConversationTitle}
               onRenameTitle={handleRenameTutorConversation}
@@ -1681,8 +2011,20 @@ export default function App() {
                  composer is merely disabled for an unrelated reason. */
               isStopActionable={tutorChatStatus === "submitted" || tutorChatStatus === "streaming"}
               error={tutorChatErrorRow}
+              /* #96: a send that never reached the server hands the
+                 student's text back here rather than stranding it in a
+                 bubble the server never stored. Gated on the failure's own
+                 conversation: this view is keyed, so it remounts (fresh
+                 draft, fresh restore-once ref) on every switch and would
+                 otherwise re-apply the previous conversation's failed text. */
+              restoredDraft={
+                tutorSendFailure?.conversationId === tutorConversationId ? tutorSendFailure : null
+              }
               autoFocusComposer={tutorConversationId === justCreatedTutorConversationId}
               hasMoreHistory={tutorHistoryHasMore}
+              onLoadOlderMessages={() => void handleLoadOlderTutorMessages()}
+              isLoadingOlderMessages={loadingOlderTutorMessages}
+              loadOlderMessagesError={tutorOlderMessagesError}
               contextWindowSize={MAX_HISTORY_MESSAGES}
               onStop={handleStopTutorChat}
             />
@@ -1700,11 +2042,13 @@ export default function App() {
                 genuine mid-conversation appends reach an AT as insertions. */}
             <ConversationView
               key={currentSection}
-              /* #397: was `STATS 311 · ${hwTitle} · Section N: ...`,
-                 which repeated both the course code and the homework title
-                 already shown in the top nav directly above -- long enough
-                 that it wrapped to two lines and pushed the transcript down.
-                 The section identity is the only part the nav doesn't say. */
+              /* #397 (over #304's earlier `${courseName} · ${hwTitle} · ...`):
+                 repeated both the course and the homework title already
+                 shown in the top nav directly above -- long enough that it
+                 wrapped to two lines and pushed the transcript down. The
+                 section identity is the only part the nav doesn't say.
+                 #304 requirement 4 (real course name, never a hardcoded
+                 "STATS 311") is satisfied by TopNav's own `course` prop. */
               breadcrumb={`Section ${currentSection}${
                 currentSectionTitle ? `: ${currentSectionTitle}` : ""
               }`}
@@ -1728,7 +2072,15 @@ export default function App() {
                  ConversationView's own isStopActionable comment above. */
               isStopActionable={chatStatus === "submitted" || chatStatus === "streaming"}
               error={sectionChatErrorRow}
+              /* #96: see the tutor ConversationView's own comment above --
+                 same keyed-remount hazard, gated on the section the failed
+                 words were typed into so they can never surface in a
+                 different section's graded conversation. */
+              restoredDraft={sectionSendFailure?.section === currentSection ? sectionSendFailure : null}
               hasMoreHistory={sectionHistoryHasMore}
+              onLoadOlderMessages={() => void handleLoadOlderSectionMessages()}
+              isLoadingOlderMessages={loadingOlderSectionMessages}
+              loadOlderMessagesError={sectionOlderMessagesError}
               contextWindowSize={MAX_HISTORY_MESSAGES}
               onStop={handleStopSectionChat}
               /* #248: only once there's an active conversation to restart --

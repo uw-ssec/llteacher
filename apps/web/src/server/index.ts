@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import { makeDb } from "../db/client";
+import { autoSubmitOverdueSections } from "./jobs/autoSubmitOverdue";
 import { helloHandler } from "./routes/hello";
 import { chatHandler } from "./routes/chat";
 import { loginHandler, callbackHandler, logoutHandler } from "./routes/auth";
@@ -71,7 +73,12 @@ import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "./utils/errors";
 import { TenancyMismatchError, IdempotencyKeyConflictError, PromptTemplateConflictError } from "./repositories/errors";
 import type { AppEnv } from "./context";
 
-const app = new Hono<AppEnv>();
+/** Exported (in addition to being wrapped by the default export below) so
+ *  the route-level suites can keep calling `app.request(path, init, env)`.
+ *  The default export is no longer the Hono instance itself: a Worker with
+ *  a Cron Trigger has to export an object carrying both `fetch` and
+ *  `scheduled` (#167). */
+export const app = new Hono<AppEnv>();
 
 // Catches anything thrown by middleware/handlers that isn't already handled
 // locally -- e.g. a DB connection failure in rolesMiddleware or a profile
@@ -95,8 +102,14 @@ app.onError((err, c) => {
   // for different content than the row already stored under it -- the
   // request is well-formed and the caller is who they say they are, the id
   // just collides. 409, not a silent 200 that discards the new message.
+  //
+  // Carries the same `code` chatHandler's own local catch (routes/chat.ts)
+  // returns, so the two paths are indistinguishable to readErrorMessage
+  // (packages/ui) -- a body with no `code` at all falls into its `default`
+  // branch, which is both retryable and worded as a model failure ("The
+  // tutor didn't finish answering"), neither of which is true here.
   if (err instanceof IdempotencyKeyConflictError) {
-    return c.json({ error: err.message }, 409);
+    return c.json({ error: err.message, code: "duplicate_message" }, 409);
   }
   // #317 review, code-review follow-up: same 409 treatment as
   // IdempotencyKeyConflictError above -- a well-formed request that lost a
@@ -108,7 +121,7 @@ app.onError((err, c) => {
   return c.json({ error: SERVICE_UNAVAILABLE_MESSAGE }, 503);
 });
 
-// #368 (PR3 final review): cross-origin isolation, so WebR's SharedArrayBuffer
+// #368: cross-origin isolation, so WebR's SharedArrayBuffer
 // channel is available where the browser supports it -- see useWebR.ts's own
 // doc comment for why this is an optimization, not a hard requirement (webR
 // falls back to its PostMessage channel without it, no service worker
@@ -179,7 +192,7 @@ app.patch(
 app.get("/api/student/homeworks", requireRole(["student"])(studentHomeworksHandler));
 app.get("/api/conversations", listConversationsHandler);
 app.post("/api/conversations", createConversationHandler);
-// #4 fix-round: message-history hydration for the tutor-conversations rail
+// #4: message-history hydration for the tutor-conversations rail
 // (see conversations.ts's doc comment above listConversationMessagesHandler).
 app.get("/api/conversations/:id/messages", listConversationMessagesHandler);
 app.patch("/api/conversations/:id", updateConversationHandler);
@@ -358,4 +371,36 @@ app.all("/api/*", (c) => c.json({ error: "Not found" }, 404));
 // per the `not_found_handling: "single-page-application"` setting in wrangler.jsonc.
 app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));
 
-export default app;
+/** #167: the Cron Trigger entry point -- the first scheduled work in this
+ *  system. Wired to the `triggers.crons` schedule in wrangler.jsonc; that
+ *  file's expression is the whole configuration surface, deliberately (an
+ *  admin screen for a cron string would be a second source of truth for
+ *  something only a deployer can change anyway).
+ *
+ *  Awaited, not fired into `ctx.waitUntil` and forgotten: `scheduled()`'s
+ *  own returned promise is what the runtime waits on, and a rejection here
+ *  is what marks the invocation failed in the Cron Trigger's own success
+ *  metrics. waitUntil would let the invocation report success while the
+ *  sweep was still running or already dead.
+ *
+ *  Failures are logged and re-thrown rather than swallowed: the sweep
+ *  already isolates per-row and per-org failures internally
+ *  (autoSubmitOverdueSectionsForOrg), so anything reaching here is the
+ *  whole run failing -- a DB outage, a missing binding -- and the next
+ *  scheduled run picks the same candidates up again, since nothing about a
+ *  candidate is consumed by a failed attempt. */
+async function scheduled(
+  _controller: ScheduledController,
+  env: Env,
+  _ctx: ExecutionContext,
+): Promise<void> {
+  const db = makeDb(env.DATABASE_URL);
+  try {
+    await autoSubmitOverdueSections(db);
+  } catch (err) {
+    logServerError("scheduled", err, { cron: "autoSubmitOverdue" });
+    throw err;
+  }
+}
+
+export default { fetch: app.fetch, scheduled } satisfies ExportedHandler<Env>;

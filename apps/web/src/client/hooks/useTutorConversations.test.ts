@@ -39,9 +39,8 @@ describe("useTutorConversations", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  // #280: nextCursor !== null surfaced as hasMore -- lets a caller show that
-  // the page ceiling is real instead of leaving it silent (load-more itself
-  // isn't wired here yet).
+  // #280: nextCursor !== null surfaced as hasMore -- what the rail's
+  // load-more affordance renders off.
   it("sets hasMore when the response carries a non-null nextCursor", async () => {
     vi.stubGlobal(
       "fetch",
@@ -52,6 +51,88 @@ describe("useTutorConversations", () => {
 
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.hasMore).toBe(true);
+  });
+
+  /* #280 (requirement 2, rail half). The regression this guards: before
+     this fix `limit`/`before` appeared ZERO times in the entire client, so
+     the route's 50-row default page was a silent hard ceiling -- the
+     51st-oldest conversation was unreachable from every UI surface. These
+     assert the request actually goes out carrying the SERVER's own opaque
+     cursor (not a client-reconstructed one -- that reconstruction, off a
+     millisecond-truncated updatedAt, was #281's precision-loss bug), and
+     that the second page is APPENDED to the first rather than replacing
+     it. */
+  describe("loadMore (#280)", () => {
+    const CONV_B = { ...CONV_A, id: "conv-b", title: "Chat B" };
+
+    it("requests the next page with the server's nextCursor as `before` and appends it", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("before=")) {
+          return new Response(JSON.stringify({ items: [CONV_B], nextCursor: null }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ items: [CONV_A], nextCursor: "cursor-page-1" }), { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.conversations).toEqual([CONV_A]);
+      expect(result.current.hasMore).toBe(true);
+
+      await act(async () => {
+        await result.current.loadMore();
+      });
+
+      // The exact URL, not just "a second call happened": the cursor has to
+      // be the server's own value, echoed back verbatim and URL-encoded.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const secondUrl = fetchMock.mock.calls[1]![0] as string;
+      expect(secondUrl).toBe("/api/conversations?courseId=course-a&kind=tutor&before=cursor-page-1");
+
+      // Appended (older rows below), not replaced.
+      expect(result.current.conversations).toEqual([CONV_A, CONV_B]);
+      // Last page reached -- the affordance must disappear rather than
+      // offer a page that isn't there.
+      expect(result.current.hasMore).toBe(false);
+    });
+
+    it("is a no-op once the last page has been reached (no cursor to page with)", async () => {
+      const fetchMock = vi.fn(
+        async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      await act(async () => {
+        await result.current.loadMore();
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("sets loadMoreError and KEEPS the cursor on a failed page, so retrying is one more click", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("before=")) return new Response("nope", { status: 500 });
+        return new Response(JSON.stringify({ items: [CONV_A], nextCursor: "cursor-page-1" }), { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      await act(async () => {
+        await result.current.loadMore();
+      });
+
+      expect(result.current.loadMoreError).toBe(true);
+      // Page 1 is untouched -- a failed load-more invalidates nothing
+      // already on screen.
+      expect(result.current.conversations).toEqual([CONV_A]);
+      expect(result.current.hasMore).toBe(true);
+    });
   });
 
   it("does not fetch and returns an empty, non-error list while courseId is undefined", async () => {

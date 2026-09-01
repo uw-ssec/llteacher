@@ -850,6 +850,14 @@ body {
     color: var(--color-error);
   }
 
+  /* Final review: this rule used to target only `.tutor-sidebar__error p`,
+     i.e. the wrapper-plus-nested-paragraph shape the load-failure alert
+     uses. Two of the three error sites put the class directly ON the <p>
+     (the create failure, and the load-more failure under the full-width
+     "Load older conversations" button), so the rule never matched them and
+     they kept the UA's default `margin: 1em 0`. Both shapes are covered
+     rather than picking one, since both are in the markup today. */
+  .tutor-sidebar__error,
   .tutor-sidebar__error p {
     margin: 0 0 var(--space-2);
   }
@@ -898,6 +906,34 @@ body {
     text-wrap: pretty;
   }
 
+  /* #280: the rail's load-more affordance. Reuses .tutor-sidebar__retry's
+     treatment rather than inventing a third button idiom for this 220px
+     rail -- it is the same "quiet, full-width, accent-outlined" role. */
+  .tutor-sidebar__more {
+    padding: var(--space-2) var(--space-1) var(--space-4);
+  }
+
+  .tutor-sidebar__load-more {
+    width: 100%;
+    border: 1px solid var(--color-accent);
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--color-accent);
+    font-size: var(--font-size-sm);
+    padding: var(--space-1) var(--space-2);
+    cursor: pointer;
+    transition: background-color 120ms ease-out;
+  }
+
+  .tutor-sidebar__load-more:hover:not(:disabled) {
+    background-color: var(--color-accent-faint);
+  }
+
+  .tutor-sidebar__load-more:disabled {
+    opacity: 0.4;
+    cursor: progress;
+  }
+
   .tutor-sidebar__list {
     list-style: none;
     padding: 0;
@@ -915,12 +951,23 @@ body {
      the originals do -- a long sentence in a 64px column wraps into a tall
      clipped stripe. They were omitted when they were added, which is the
      same mistake as #403/#404: a new sibling that did not inherit the
-     treatment every one of its neighbours already had. */
+     treatment every one of its neighbours already had.
+
+     #280's load-more block is here for exactly that reason too -- it is a
+     full-width bordered button with a sentence of copy, i.e. the very shape
+     this rule exists to suppress. Hiding the wrapper is enough (the button
+     and its error paragraph are inside it), but both are listed so the
+     class can't be moved out from under its parent later and silently
+     reappear. There is nothing to lose at 64px: the rail's rows are hidden
+     here too, so "load older conversations" would be offering to extend a
+     list that isn't rendered. */
   .sidebar--collapsed .tutor-sidebar__label,
   .sidebar--collapsed .tutor-sidebar__new-btn-label,
   .sidebar--collapsed .tutor-sidebar__empty,
   .sidebar--collapsed .tutor-sidebar__disabled-reason,
   .sidebar--collapsed .tutor-sidebar__error,
+  .sidebar--collapsed .tutor-sidebar__more,
+  .sidebar--collapsed .tutor-sidebar__load-more,
   .sidebar--collapsed .tutor-sidebar__list {
     display: none;
   }
@@ -1658,6 +1705,49 @@ body {
 
   .conversation-header-title .editable-title__value {
     max-width: 60ch;
+  }
+
+  /* -------------------------------------------------------------------------
+     #280: the "there is more history above" zone, between the header and
+     the first message. Either a static notice (a caller with no paging
+     wired) or the Load older messages control.
+     ------------------------------------------------------------------------- */
+  .conversation-history-notice {
+    margin: 0 0 var(--space-4);
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+  }
+
+  .conversation-history-more {
+    margin: 0 0 var(--space-4);
+  }
+
+  .conversation-history-more__btn {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+    padding: var(--space-1) var(--space-3);
+    cursor: pointer;
+    transition:
+      background-color 120ms ease-out,
+      color 120ms ease-out;
+  }
+
+  .conversation-history-more__btn:hover:not(:disabled) {
+    background-color: var(--color-accent-faint);
+    color: var(--color-accent);
+  }
+
+  .conversation-history-more__btn:disabled {
+    opacity: 0.5;
+    cursor: progress;
+  }
+
+  .conversation-history-more .conversation-history-notice {
+    margin: var(--space-1) 0 0;
+    color: var(--color-error);
   }
 
   /* -------------------------------------------------------------------------
@@ -5096,6 +5186,19 @@ body {
   background-color: rgba(70, 130, 80, 0.12);
   color: var(--color-success);
   border: 1px solid rgba(70, 130, 80, 0.3);
+}
+
+/* #167: a submission the scheduled overdue sweep created, not one the
+   student made. Still a submitted cell -- same green, same gradeable
+   affordance, because the work is real and gradeable -- distinguished by a
+   dashed border, the way --missing already signals "nothing here yet"
+   through border style rather than a separate hue. Deliberately not a
+   fourth colour: it is not a fourth status, it is the same status with a
+   different origin, and the accompanying "‡" superscript plus the
+   aria-label/title text (SubmissionsView) are what carry the meaning for
+   anyone who cannot see the border at all. */
+.admin-progress-cell--auto {
+  border-style: dashed;
 }
 
 .admin-submission-row__conv {

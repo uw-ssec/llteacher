@@ -22,6 +22,15 @@ import { getOpenRouter, getLLMoxie } from "./ai";
                                plaintext DB column
      buildProviderClient    -- the AI SDK provider factory for that row's
                                provider ("openrouter" and "llmoxie" today)
+
+   #364 adds a fourth, deliberately NOT a fifth: `resolveFallbackLLMConfig`
+   (the one configured failover hop) reads through the SAME
+   `loadLLMConfigById` primitive `resolveLLMConfig`'s own override branches
+   use, so a failover config is loaded, keyed and clients-built by exactly
+   the pair above -- never a second, parallel resolution mechanism that
+   could drift on provider/credential handling. See that function's own doc
+   comment for why it is not just `resolveLLMConfig` called with the
+   fallback id.
    -------------------------------------------------------------------------- */
 
 export type LlmProvider = "openai" | "anthropic" | "claude_for_education" | "openrouter" | "local" | "llmoxie";
@@ -71,6 +80,19 @@ export interface ResolvedLLMConfig {
   temperature: number;
   maxCompletionTokens: number;
   credentialId: string | null;
+  /** #364: the one configured failover hop, or null. Read as part of this
+   *  same projection rather than by a second query, so the primary's own
+   *  resolution already carries everything `resolveFallbackLLMConfig` needs
+   *  to decide whether a failover is even possible for this turn. */
+  fallbackLlmConfigId: string | null;
+  /** #365: the config's own stored system prompt. The CHAT path deliberately
+   *  ignores this -- #317 replaced it with `assembleSystemPrompt` +
+   *  `prompt_templates` resolution (see chat.ts's own header) -- but the
+   *  config-test route (routes/llmConfigs.ts) exercises "the config exactly
+   *  as saved", which includes this column. Carried on this shape so that
+   *  route can resolve provider, credential AND prompt from the one
+   *  canonical loader instead of a second read of the same row. */
+  basePrompt: string;
   /** #317 review, #349: this config's own $/1M-token rates, if an operator
    *  has set them -- estimateCostCents prefers these over its built-in
    *  static table. Both null unless both columns are set (see the schema
@@ -96,7 +118,64 @@ const LLM_CONFIG_COLUMNS = {
   pricePerMillionOutputTokens: llmConfigs.pricePerMillionOutputTokens,
   markCompleteInstruction: llmConfigs.markCompleteInstruction,
   credentialId: llmConfigs.credentialId,
+  fallbackLlmConfigId: llmConfigs.fallbackLlmConfigId,
+  basePrompt: llmConfigs.basePrompt,
 } as const;
+
+/** #364: the single "load THIS config row, under THIS org" primitive. Every
+ *  by-id config read in the application goes through it -- `resolveLLMConfig`'s
+ *  homework and course override branches below, `resolveFallbackLLMConfig`'s
+ *  failover hop, and routes/llmConfigs.ts's test button (#365) -- so the org
+ *  scoping, the column projection, and the active-row rule each have exactly
+ *  one implementation rather than one per call site.
+ *
+ *  `activeOnly` defaults to true, matching every resolution caller: an
+ *  instructor who deactivated a config has said it should not serve traffic,
+ *  so a homework/course/fallback pointing at a deactivated row resolves as if
+ *  it pointed at nothing. The config-test route passes false -- testing a
+ *  retired config before reactivating it is exactly what that button is for,
+ *  and it serves no student traffic.
+ *
+ *  Returns null for "no such id" and "belongs to another organization"
+ *  indistinguishably; the org predicate is in the same WHERE clause as the id,
+ *  so a cross-tenant row cannot be read even to learn that it exists.
+ *
+ *  Distinct from repositories/llmConfigs.ts's `getLlmConfig`, which returns
+ *  the admin-console `LlmConfigRecord` -- that shape is the wire contract
+ *  apps/admin reads (its `_RecordMatchesWire` guard enforces both
+ *  directions), and it deliberately carries no `credentialId`: which secret
+ *  backs a config is not something the console renders, and adding it there
+ *  to serve routes/llmConfigs.ts's Test button would push a server-only
+ *  field into the public payload. Reusing LLM_CONFIG_COLUMNS here is also
+ *  what keeps that button from drifting from the chat path -- two
+ *  hand-maintained column lists would be exactly how #365 came back.
+ *
+ *  #390 (staging PR #382's own follow-up): because this one read carries
+ *  provider, credentialId, modelName, basePrompt, temperature AND
+ *  maxCompletionTokens, a caller never has to pair it with a second read of
+ *  the same row, so there is no window in which an admin's edit lands
+ *  between the two and the request runs a hybrid of old and new config. Any
+ *  new by-id call site should take everything it needs from ONE call here
+ *  rather than reaching for `getLlmConfig` alongside it. */
+export async function loadLLMConfigById(
+  db: Db,
+  orgScope: OrgScope,
+  id: string,
+  opts?: { activeOnly?: boolean },
+): Promise<ResolvedLLMConfig | null> {
+  const activeOnly = opts?.activeOnly ?? true;
+  const [row] = await db
+    .select(LLM_CONFIG_COLUMNS)
+    .from(llmConfigs)
+    .where(
+      and(
+        eq(llmConfigs.id, id),
+        eq(llmConfigs.organizationId, orgScope),
+        ...(activeOnly ? [eq(llmConfigs.isActive, true)] : []),
+      ),
+    );
+  return row ?? null;
+}
 
 /** Homework's `llm_config_id` if set (and still active) -> the course's
  *  `llm_config_id` if set (and still active) -> the org's
@@ -133,16 +212,7 @@ export async function resolveLLMConfig(
   courseLlmConfigId?: string | null,
 ): Promise<ResolvedLLMConfig> {
   if (homeworkLlmConfigId) {
-    const [override] = await db
-      .select(LLM_CONFIG_COLUMNS)
-      .from(llmConfigs)
-      .where(
-        and(
-          eq(llmConfigs.id, homeworkLlmConfigId),
-          eq(llmConfigs.organizationId, orgScope),
-          eq(llmConfigs.isActive, true),
-        ),
-      );
+    const override = await loadLLMConfigById(db, orgScope, homeworkLlmConfigId);
     if (override) return override;
   }
 
@@ -152,16 +222,7 @@ export async function resolveLLMConfig(
       : ((await db.select({ llmConfigId: courses.llmConfigId }).from(courses).where(eq(courses.id, courseScope)))[0]
           ?.llmConfigId ?? null);
   if (resolvedCourseLlmConfigId) {
-    const [courseOverride] = await db
-      .select(LLM_CONFIG_COLUMNS)
-      .from(llmConfigs)
-      .where(
-        and(
-          eq(llmConfigs.id, resolvedCourseLlmConfigId),
-          eq(llmConfigs.organizationId, orgScope),
-          eq(llmConfigs.isActive, true),
-        ),
-      );
+    const courseOverride = await loadLLMConfigById(db, orgScope, resolvedCourseLlmConfigId);
     if (courseOverride) return courseOverride;
   }
 
@@ -246,6 +307,61 @@ async function ensurePlatformDefaultLLMConfig(db: Db, orgScope: OrgScope): Promi
   return row;
 }
 
+/** #364/#98: the one configured failover hop for a config, or null.
+ *
+ *  DESIGN DECISION (the open fork #364 left to whoever implemented it):
+ *  **a direct read of `fallback_llm_config_id`, through the shared
+ *  `loadLLMConfigById` primitive above -- NOT `resolveLLMConfig` called with
+ *  the fallback id as its `homeworkLlmConfigId` entry point.**
+ *
+ *  That reuse looks natural (resolveLLMConfig's first branch IS a by-id,
+ *  org-scoped, active-only read) and was the issue's own leaning, but it is
+ *  wrong here for three independent reasons, in descending severity:
+ *
+ *   1. It cannot fail. resolveLLMConfig's contract is "always produce a
+ *      usable config", so a fallback id that no longer resolves -- retired,
+ *      deleted, moved org -- falls THROUGH to the course override and then
+ *      the org default. The org default is what the great majority of
+ *      conversations resolve their PRIMARY to, so a failover would routinely
+ *      retry the exact model that just failed: a second paid call, doubled
+ *      latency before the student sees the error, and a log line naming the
+ *      "fallback" for a fault that was never anyone else's. A failover path
+ *      must be able to answer "there is no fallback" (-> null, rethrow the
+ *      primary's error, today's behaviour exactly), and resolveLLMConfig
+ *      structurally cannot.
+ *   2. It writes. The no-default tail calls ensurePlatformDefaultLLMConfig,
+ *      which INSERTs a row. Auto-provisioning an org's default config is
+ *      correct on a first turn; doing it from inside an error path, while a
+ *      provider outage is in progress, is not -- an error handler must not
+ *      have a side effect the happy path doesn't.
+ *   3. It re-walks. homework -> course -> org, for a config id already
+ *      known, is up to two extra Neon round-trips added to a turn that has
+ *      already spent one failed provider call.
+ *
+ *  So: one hop, read directly, never a walk. `fallbackLlmConfigId` on the
+ *  FALLBACK is deliberately not consulted, which is what makes depth-one safe
+ *  without cycle detection -- there is no traversal to loop -- and the
+ *  schema's `llm_configs_fallback_not_self_chk` closes the degenerate case.
+ *
+ *  A deactivated fallback resolves to null (loadLLMConfigById's active-only
+ *  default): an instructor who retired a config said it should not serve
+ *  traffic, and "except when the primary is down" is not something they said.
+ *
+ *  CONVERSATION-STABILITY INVARIANT (#30): this is derived from the PRIMARY
+ *  config's own row, per turn, and is never written back to the conversation
+ *  or consulted on a later turn. It therefore inherits whatever stability the
+ *  primary resolution has and adds no new re-resolution of its own -- a
+ *  failover changes which model serves ONE turn, never which config the
+ *  conversation is on. */
+export async function resolveFallbackLLMConfig(
+  db: Db,
+  orgScope: OrgScope,
+  primary: Pick<ResolvedLLMConfig, "fallbackLlmConfigId">,
+): Promise<ResolvedLLMConfig | null> {
+  if (!primary.fallbackLlmConfigId) return null;
+  return loadLLMConfigById(db, orgScope, primary.fallbackLlmConfigId);
+}
+
 /** Provider -> the conventional Worker-secret binding name used when a
  *  config has no linked credential row -- the same convention
  *  OPENROUTER_API_KEY already used before this issue, and #178's
@@ -290,34 +406,6 @@ function readEnvSecret(env: Env, bindingName: string): string | undefined {
  *  is set, else the provider's conventional fallback env var above. Reads
  *  the key into a local variable only, at the moment of use -- callers must
  *  not log or persist it (see chat.ts's call site). */
-/** Loads ONE config by id, scoped to the org, in the `ResolvedLLMConfig`
- *  shape `resolveApiKey`/`buildProviderClient` take (#365).
- *
- *  Distinct from repositories/llmConfigs.ts's `getLlmConfig`, which returns
- *  the admin-console `LlmConfigRecord` -- that shape is the wire contract
- *  apps/admin reads (its `_RecordMatchesWire` guard enforces both
- *  directions), and it deliberately carries no `credentialId`: which secret
- *  backs a config is not something the console renders, and adding it there
- *  to serve this call site would push a server-only field into the public
- *  payload.
- *
- *  Reuses LLM_CONFIG_COLUMNS so this can never drift from what
- *  `resolveLLMConfig` returns on the chat path -- the whole point of #365
- *  is that the Test button and the chat path resolve a provider the same
- *  way, and two hand-maintained column lists would be exactly how that
- *  stops being true again. */
-export async function getResolvedLLMConfigById(
-  db: Db,
-  orgScope: OrgScope,
-  id: string,
-): Promise<ResolvedLLMConfig | null> {
-  const [row] = await db
-    .select(LLM_CONFIG_COLUMNS)
-    .from(llmConfigs)
-    .where(and(eq(llmConfigs.id, id), eq(llmConfigs.organizationId, orgScope)));
-  return row ?? null;
-}
-
 export async function resolveApiKey(
   env: Env,
   db: Db,

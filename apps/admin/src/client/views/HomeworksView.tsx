@@ -88,7 +88,9 @@ function formatDueDate(iso: string): string {
   // unlike the fixture's plain YYYY-MM-DD -- parse directly rather than
   // appending a redundant time component that would double up on "Z".
   const d = new Date(iso);
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  // #228: undefined locale -- Intl resolves the viewer's own runtime
+  // default instead of always formatting as en-US.
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
 export function HomeworksView({

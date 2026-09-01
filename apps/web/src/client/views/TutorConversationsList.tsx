@@ -49,12 +49,27 @@ export interface TutorConversationsListProps {
    *  a failed fetch, so this is offered alongside whatever was last loaded
    *  rather than next to an empty list. */
   onRetryLoad: () => void;
-  /** #280: true when the server has more conversations than this list
-   *  fetched (the list route pages at 50, no load-more is wired yet) --
-   *  renders a visible note below the list so the page ceiling is visible
-   *  rather than silent (an empty-looking tail otherwise looks identical to
-   *  "I have exactly N conversations"). */
+  /** #280: true when the server has older conversations than this list
+   *  holds (the list route pages at 50). Renders the load-more button
+   *  below the list; goes false once the last page has been loaded, at
+   *  which point the affordance disappears because there is genuinely
+   *  nothing left to ask for. */
   hasMore: boolean;
+  /** #280 (requirement 2): fetches and appends the next (older) page.
+   *  Replaces the interim "older ones aren't shown yet" notice this
+   *  component used to render under `hasMore` -- that notice was the
+   *  issue's own explicitly-sanctioned stand-in for "paging is out of
+   *  scope", and stating it alongside a working Load older button would be
+   *  false. Nothing is rendered once `hasMore` is false, which is the
+   *  honest end state: everything is on screen. */
+  onLoadMore: () => void;
+  /** #280: true while `onLoadMore`'s request is in flight. */
+  loadingMore: boolean;
+  /** #280: true when the last load-more failed. Surfaced next to the
+   *  button (which stays live, since the page is still there to ask for)
+   *  rather than through the list-level error above -- everything already
+   *  on screen is still valid. */
+  loadMoreError: boolean;
   selectedConversationId: string | undefined;
   /** #290: the row whose history is being fetched right now, if any. */
   pendingConversationId?: string | undefined;
@@ -85,6 +100,9 @@ export function TutorConversationsList({
   loadError,
   onRetryLoad,
   hasMore,
+  onLoadMore,
+  loadingMore,
+  loadMoreError,
   selectedConversationId,
   pendingConversationId,
   onSelectConversation,
@@ -347,12 +365,6 @@ export function TutorConversationsList({
         </ul>
       )}
 
-      {/* #280: the list route pages at 50 with no load-more wired yet --
-          without this, the 51st-oldest conversation is silently
-          unreachable (an empty-looking tail is indistinguishable from "I
-          have exactly 50 conversations"). Static text, not a live region:
-          it's present at initial render, not something that appears mid-
-          interaction and needs to interrupt anything. */}
       {/* Mounted whenever a delete has been requested this session, and
           driven by `open` rather than by mounting/unmounting.
 
@@ -405,10 +417,35 @@ export function TutorConversationsList({
         />
       )}
 
+      {/* #280 (requirement 2): the real load-more affordance, replacing the
+          interim notice that used to sit here. A button rather than
+          infinite scroll: this rail has no scroll-position infrastructure
+          to hang an observer off, and a student paging back through a
+          term's conversations wants a deliberate step, not a list that
+          keeps growing while they read it.
+
+          Hidden alongside `loadError` for the same reason the notice was:
+          `hasMore` describes the last SUCCESSFUL page, so offering "load
+          older" next to "couldn't refresh" would invite a second request
+          against a cursor whose list may already be stale -- Try again
+          (which reloads from page 1) is the right control there. */}
       {!loadError && hasMore && (
-        <p className="tutor-sidebar__more-notice">
-          Showing your most recent {conversations.length} conversations. Older ones aren't shown yet.
-        </p>
+        <div className="tutor-sidebar__more">
+          <button
+            type="button"
+            className="tutor-sidebar__load-more"
+            onClick={onLoadMore}
+            disabled={loadingMore}
+            aria-busy={loadingMore}
+          >
+            {loadingMore ? "Loading…" : "Load older conversations"}
+          </button>
+          {loadMoreError && (
+            <p className="tutor-sidebar__error" role="alert">
+              Couldn&rsquo;t load older conversations. Please try again.
+            </p>
+          )}
+        </div>
       )}
     </nav>
   );

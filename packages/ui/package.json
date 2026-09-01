@@ -11,6 +11,7 @@
     ".": "./src/index.ts",
     "./styles.css": "./styles.css",
     "./auth/courseRole": "./src/auth/courseRole.ts",
+    "./generative/renderableTools": "./src/generative/renderableTools.ts",
     "./api": "./src/api/types.ts"
   },
   "scripts": {
@@ -26,7 +27,7 @@
     "remark-math": "^6.0.0"
   },
   "peerDependencies": {
-    "react": "^19.0.0",
+    "react": "^19.2.1",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
