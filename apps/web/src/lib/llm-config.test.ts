@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   buildProviderClient,
   resolveApiKey,
+  resolveProviderCredential,
   estimateCostCents,
   LLMConfigNotFoundError,
   LLMCredentialMissingError,
@@ -256,5 +257,79 @@ describe("estimateCostCents", () => {
     // name that would otherwise need a static-table entry to price at all.
     const cents = estimateCostCents("acme/priced-model", 1_000_000, 1_000_000, { input: 1, output: 1 });
     expect(cents).toBe(200);
+  });
+});
+
+/* #343: migration 0035 makes llmoxie every org's default with no credential
+   row, so a missing LLMOXIE_API_KEY is a 500 for every student, in every org,
+   on every turn -- and rolling the Worker back does not help, because the DB
+   rows are already flipped. This is the documented degradation. */
+describe("resolveProviderCredential (#343 degradation)", () => {
+  const orgScope = "org-1" as never;
+  const db = {} as never;
+  const llmoxie: ResolvedLLMConfig = { ...baseConfig, provider: "llmoxie", modelName: "gpt-5.3-codex" };
+
+  it("passes the config's own provider, key and model straight through when nothing is missing", async () => {
+    const res = await resolveProviderCredential(
+      fakeEnv({ LLMOXIE_API_KEY: "sk-llmoxie" }), db, orgScope, llmoxie,
+    );
+    expect(res).toEqual({ provider: "llmoxie", apiKey: "sk-llmoxie", modelName: "gpt-5.3-codex" });
+    expect(res.degradedFrom).toBeUndefined();
+  });
+
+  it("degrades llmoxie -> openrouter, moving provider AND model together", async () => {
+    /* The model has to move with the provider: "gpt-5.3-codex" is an LLMoxie
+       catalogue name, not an OpenRouter slug, so carrying it across would
+       fail worse than the 500 it replaces. */
+    const res = await resolveProviderCredential(
+      fakeEnv({ OPENROUTER_API_KEY: "sk-or", LLM_DEGRADED_MODEL: "vendor/fallback-model" }),
+      db, orgScope, llmoxie,
+    );
+    expect(res).toEqual({
+      provider: "openrouter",
+      apiKey: "sk-or",
+      modelName: "vendor/fallback-model",
+      degradedFrom: "llmoxie",
+    });
+  });
+
+  it("does NOT degrade unless an operator opted in with a fallback model", async () => {
+    // An OpenRouter key alone is not consent: it would answer students from a
+    // model nobody chose, with its own pricing, and say nothing.
+    await expect(
+      resolveProviderCredential(fakeEnv({ OPENROUTER_API_KEY: "sk-or" }), db, orgScope, llmoxie),
+    ).rejects.toBeInstanceOf(LLMCredentialMissingError);
+  });
+
+  it("does NOT degrade when the fallback provider's own key is also missing", async () => {
+    await expect(
+      resolveProviderCredential(
+        fakeEnv({ LLM_DEGRADED_MODEL: "vendor/fallback-model" }), db, orgScope, llmoxie,
+      ),
+    ).rejects.toBeInstanceOf(LLMCredentialMissingError);
+  });
+
+  it("does NOT degrade a config that names its own credential", async () => {
+    /* A config with a credentialId asked for a SPECIFIC secret. Serving it
+       from the platform's OpenRouter key would bill the wrong account and
+       hide the misconfiguration. */
+    const withCredential: ResolvedLLMConfig = { ...llmoxie, credentialId: "cred-1" };
+    const dbMissingCred = {
+      select: () => ({ from: () => ({ where: async () => [] }) }),
+    } as never;
+    await expect(
+      resolveProviderCredential(
+        fakeEnv({ OPENROUTER_API_KEY: "sk-or", LLM_DEGRADED_MODEL: "vendor/fallback-model" }),
+        dbMissingCred, orgScope, withCredential,
+      ),
+    ).rejects.toBeInstanceOf(LLMCredentialMissingError);
+  });
+
+  it("has no degradation path for openrouter itself -- it IS the fallback", async () => {
+    await expect(
+      resolveProviderCredential(
+        fakeEnv({ LLM_DEGRADED_MODEL: "vendor/fallback-model" }), db, orgScope, baseConfig,
+      ),
+    ).rejects.toBeInstanceOf(LLMCredentialMissingError);
   });
 });

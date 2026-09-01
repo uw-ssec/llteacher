@@ -104,6 +104,25 @@ vi.mock("../../lib/llm-config", async (importOriginal) => {
     resolveLLMConfig: async () => PRIMARY_CONFIG,
     resolveFallbackLLMConfig: (...a: unknown[]) => resolveFallbackLLMConfigMock(...a),
     resolveApiKey: (...a: unknown[]) => (resolveApiKeyMock as unknown as (...x: unknown[]) => unknown)(...a),
+    /* #343: chatHandler keys the PRIMARY hop through resolveProviderCredential
+       now, not resolveApiKey directly. The real one calls resolveApiKey
+       module-internally, so overriding the export above does not reach it --
+       it would run the real Drizzle-backed lookup against the `{}` db and 500
+       every test in this file. Stubbed to the non-degraded path (provider and
+       model straight off the config) and delegating to resolveApiKeyMock, so
+       every assertion this suite makes about WHICH config was keyed and with
+       WHICH key keeps working unchanged. The degraded path is a different
+       suite's concern -- see #430. */
+    resolveProviderCredential: async (
+      env: unknown,
+      db: unknown,
+      scope: unknown,
+      config: { id: string; provider: string; modelName: string },
+    ) => ({
+      provider: config.provider,
+      apiKey: await (resolveApiKeyMock as unknown as (...x: unknown[]) => Promise<string>)(env, db, scope, config),
+      modelName: config.modelName,
+    }),
     buildProviderClient: (...a: unknown[]) => buildProviderClientMock(...a),
   };
 });
