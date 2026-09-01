@@ -1913,29 +1913,74 @@ export async function chatHandler(c: Context<AppEnv>) {
           });
           return replayResponse(conv.id, raceLast!.parts);
         }
-        await releaseConversationTurnLock(db, conv.id).catch((err) => {
-          logServerError("chatHandler.releaseLock.raceConflict", err);
-        });
-        // #317 review, #344: same code as the lock-acquisition 409 above --
-        // both are "a turn is already in flight for this conversation",
-        // just detected at different points.
-        return c.json(
-          { error: "This message is already being processed. Please wait a moment.", code: "in_progress" },
-          409,
+
+        /* #433: "the insert deduped" is not the same fact as "a turn is in
+           flight", and this branch used to answer the second for both.
+
+           Two shapes reach here. If the last row IS the inbound user message,
+           a concurrent request persisted it and has not answered yet -- a
+           genuine race, and `in_progress` is exactly right. But if the last
+           row is an ASSISTANT row answering this same clientMessageId, the
+           turn already RAN; it simply produced something `hasRenderableContent`
+           declines to replay (a resolved non-renderable tool call -- see
+           #307/#342, which chose that a requestHint-only turn should get a
+           real answer rather than a blank replay).
+
+           Nothing is in flight in that second case, so waiting never helps,
+           and `in_progress` is rendered RETRYABLE by readErrorMessage -- the
+           student retried into an identical 409 forever, with Restart (which
+           voids the submission) the only escape. Falling through to a real
+           model call is what #307 already decided should happen; it just
+           never survived the dedupe.
+
+           The lock is deliberately NOT released here: this request is going
+           on to call the model, so it keeps the turn lock exactly as the
+           normal path does. */
+        const alreadyAnswered =
+          raceLast?.role === "assistant" &&
+          raceSecondLast?.role === "user" &&
+          raceSecondLast.clientMessageId === parsedInbound.data.id;
+
+        if (!alreadyAnswered) {
+          await releaseConversationTurnLock(db, conv.id).catch((err) => {
+            logServerError("chatHandler.releaseLock.raceConflict", err);
+          });
+          // #317 review, #344: same code as the lock-acquisition 409 above --
+          // both are "a turn is already in flight for this conversation",
+          // just detected at different points.
+          return c.json(
+            { error: "This message is already being processed. Please wait a moment.", code: "in_progress" },
+            409,
+          );
+        }
+
+        /* Re-read rather than reusing `recentMessages`: that snapshot predates
+           this request's own insert attempt AND whatever the earlier turn
+           persisted, so it is exactly the stale view the race-detection above
+           exists to avoid trusting. One extra read, on a path that only runs
+           for a turn that already failed to replay. */
+        logServerWarn(
+          "chatHandler.dedupe.alreadyAnswered",
+          "the inbound turn is already persisted with an unreplayable answer; re-running the model instead of 409ing",
+          { conversationId: conv.id, userId: authContext.session.userId },
         );
+        persistedHistory = await getLastMessages(db, scope, conv.id, MAX_HISTORY_MESSAGES, {
+          skipOwnershipCheck: true,
+        });
+      } else {
+        // #317 review, #326: the row this call just wrote, prepended ahead of
+        // the pre-insert snapshot -- exactly what a fresh
+        // `getLastMessages(MAX_HISTORY_MESSAGES)` read would return post-insert
+        // (newest-first, capped at the same limit), without actually
+        // re-reading it from Postgres. role/parts come from the input this
+        // handler itself constructed the insert from (already known, not
+        // re-derived from appendMessage's returned row) -- only `id` is
+        // server-generated and genuinely needs the DB round-trip's result.
+        persistedHistory = [
+          { id: insertedRow.id, role: "user", parts: inboundMessage.parts },
+          ...recentMessages.slice(0, MAX_HISTORY_MESSAGES - 1),
+        ];
       }
-      // #317 review, #326: the row this call just wrote, prepended ahead of
-      // the pre-insert snapshot -- exactly what a fresh
-      // `getLastMessages(MAX_HISTORY_MESSAGES)` read would return post-insert
-      // (newest-first, capped at the same limit), without actually
-      // re-reading it from Postgres. role/parts come from the input this
-      // handler itself constructed the insert from (already known, not
-      // re-derived from appendMessage's returned row) -- only `id` is
-      // server-generated and genuinely needs the DB round-trip's result.
-      persistedHistory = [
-        { id: insertedRow.id, role: "user", parts: inboundMessage.parts },
-        ...recentMessages.slice(0, MAX_HISTORY_MESSAGES - 1),
-      ];
     } catch (err) {
       // #317 review, #350 (requirement 1): `.catch(() => {})`, matching the
       // outer catch's own release below -- this catch can re-throw `err`
