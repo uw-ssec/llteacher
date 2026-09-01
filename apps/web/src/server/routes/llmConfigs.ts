@@ -488,7 +488,15 @@ export async function testLlmConfigHandler(c: Context<AppEnv>) {
       logServerError("testLlmConfigHandler", err);
       return c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503);
     }
-    throw err;
+    /* #425: resolveApiKey does a DB read (organization_credentials), so a
+       transient Neon failure lands here too. Narrowing the catch to the two
+       typed errors turned that into an unhandled 500 with no actionable copy
+       -- on a button whose entire purpose is to report a diagnosable result.
+       Reported as the same 503 the other unreachable cases produce: from the
+       admin's side "we could not check right now" is the honest answer, and
+       the real error is in the log. */
+    logServerError("testLlmConfigHandler", err);
+    return c.json({ error: "The model gateway could not be reached. Try again shortly." }, 503);
   }
 
   const controller = new AbortController();

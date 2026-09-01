@@ -25,6 +25,10 @@ const recordHumanGradeMock = vi.fn();
 const graderMembershipForMock = vi.fn();
 const getSubmissionInCourseMock = vi.fn();
 const getOrgScopeForCourseMock = vi.fn();
+/** #421: the course-level llm_config_id the resolver should see. Null in
+ *  every existing test, which is what keeps their homework -> org-default
+ *  expectations unchanged. */
+const getCourseLlmConfigIdMock = vi.fn<() => string | null>(() => null);
 const auditBestEffortMock = vi.fn();
 
 vi.mock("../repositories/grades", async (importOriginal) => ({
@@ -37,6 +41,15 @@ vi.mock("../repositories/grades", async (importOriginal) => ({
 }));
 vi.mock("../repositories/organizations", () => ({
   getOrgScopeForCourse: (...a: unknown[]) => getOrgScopeForCourseMock(...a),
+  /* #421: the draft-grade path resolves through the COURSE tier now, so it
+     reads the scope and the course's own llm_config_id in one round-trip.
+     Derived from the same mock, so a test that sets one org scope does not
+     have to set two. `courseLlmConfigId` defaults to null -- the course-level
+     override is opted into per-test via getCourseLlmConfigIdMock. */
+  getOrgScopeAndLlmConfigForCourse: async (...a: unknown[]) => {
+    const orgScope = await getOrgScopeForCourseMock(...a);
+    return orgScope ? { orgScope, courseLlmConfigId: getCourseLlmConfigIdMock() } : null;
+  },
 }));
 vi.mock("../utils/audit", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../utils/audit")>()),
@@ -117,6 +130,7 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue({ submissionId: SUBMISSION_ID, conversationId: "conv-1", studentUserId: "u-student" });
   getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
+  getCourseLlmConfigIdMock.mockReset().mockReturnValue(null);
   auditBestEffortMock.mockReset().mockResolvedValue(undefined);
   vi.spyOn(console, "error").mockImplementation(() => {});
 

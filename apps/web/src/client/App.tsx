@@ -485,6 +485,10 @@ export default function App() {
     status: chatStatus,
     error: chatError,
     regenerate: regenerateChat,
+    // #420: this useChat has no `id`, so nothing recreates it on a section
+    // switch and an error row from one section renders over the next one.
+    // Aliased for the same collision reason as `stop` below.
+    clearError: clearChatError,
     // #274: a client-side escape hatch for a turn that's merely slow, not
     // yet timed out (chat.ts's own STREAM_TIMEOUT_MS bounds the server
     // side) -- aliased since both useChat instances below would otherwise
@@ -540,6 +544,11 @@ export default function App() {
      reason that leaving a section should discard its restored draft exactly
      the way the keyed remount already discards a typed one. */
   const [sectionSendFailure, setSectionSendFailure] = useState<{ text: string; section: number } | null>(null);
+  /* #418: what the in-flight section send actually was. Written by
+     handleSendMessage at send time and read by the failure effect below, so
+     neither the text nor its owning section can be re-derived from state
+     that a section switch has already moved on. */
+  const pendingSectionSendRef = useRef<{ text: string; section: number } | null>(null);
   const prevChatStatusRef = useRef(chatStatus);
 
   const {
@@ -1137,26 +1146,53 @@ export default function App() {
     // Only the moment a turn FAILS, not every render while it stays failed.
     if (chatStatus !== "error" || previous === "error") return;
     if (sectionSendAcceptedRef.current) return; // response half: the question is persisted, leave it on screen
-    const last = aiMessages[aiMessages.length - 1];
-    // Defensive: a send-half failure never gets far enough for the SDK to
-    // append an assistant message, so the tail is the student's own message.
-    if (last?.role !== "user") return;
-    setSectionSendFailure({ text: studentTextOf(last), section: currentSection });
-    // The bubble is dropped, not merely marked: it was never persisted, so
-    // leaving it would show a message that a reload makes vanish -- the
-    // client-side twin of the truncated assistant row #268 stops the server
-    // from writing.
-    setSectionMessages(aiMessages.slice(0, -1));
+    const pending = pendingSectionSendRef.current;
+    // No record of a send means nothing to hand back -- a turn that reached
+    // "error" without this handler having started it is not a send-half
+    // failure this can recover.
+    if (!pending) return;
+    pendingSectionSendRef.current = null;
+    setSectionSendFailure(pending);
+    /* The bubble is dropped, not merely marked: it was never persisted, so
+       leaving it would show a message that a reload makes vanish -- the
+       client-side twin of the truncated assistant row #268 stops the server
+       from writing.
+
+       #418: only when the student is still LOOKING at the section that
+       failed. After a switch, `aiMessages` belongs to a different section
+       and slicing its tail would delete that section's real, persisted
+       message. The failed section needs no cleanup in that case: its
+       transcript is unmounted, and returning re-hydrates it from the
+       server, which never stored the message in the first place. */
+    if (pending.section === currentSection) {
+      const last = aiMessages[aiMessages.length - 1];
+      if (last?.role === "user") setSectionMessages(aiMessages.slice(0, -1));
+    }
   }, [chatStatus, aiMessages, setSectionMessages, currentSection]);
 
-  /* #96: leaving a section discards its restored draft, exactly
-     the way the keyed remount already discards a typed one. This is the
-     housekeeping half only -- the render-site `section` gate is what
-     actually prevents the cross-section leak, because this effect runs
-     AFTER the newly-mounted child's own effects (see sectionSendFailure). */
+  /* #419 + #420: what a section switch does to a send-half failure.
+
+     #419 -- the draft is KEPT, not discarded. After a send-half failure the
+     student's words exist nowhere else: the bubble was dropped from the
+     transcript above and the server never stored them, so nulling this on a
+     section change destroyed the message outright the moment they looked
+     away. The render-site `section` gate (`restoredDraft` below) is what
+     keeps it from leaking into another section's composer, so retaining it
+     is safe and returning to the section hands the words back.
+
+     #420 -- the ERROR ROW is cleared, which is the half that does have to
+     go. This useChat has no `id`, so nothing else ever resets its status:
+     an error row from section 1 stayed rendered over section 2, and because
+     `stage` is computed from `sectionSendFailure` (now correctly scoped to
+     section 1), it flipped from "send" to "response" and re-offered the
+     Retry the send-half case deliberately suppresses -- pointed at section
+     2's conversation, regenerating a turn that never failed in graded
+     work. */
   useEffect(() => {
-    setSectionSendFailure(null);
-  }, [currentSection]);
+    clearChatError();
+    // An in-flight send belongs to the section it was typed in; if it fails
+    // after this point the effect above still stamps it correctly.
+  }, [currentSection, clearChatError]);
 
   /* #252: tracks whichever section-conversation load was requested most
      recently -- the same staleness-guard shape latestTutorSelectionRef
@@ -1567,6 +1603,19 @@ export default function App() {
     // right now or was deliberately replaced by the student).
     sectionSendAcceptedRef.current = false;
     setSectionSendFailure(null);
+    /* #418: the words and the section they belong to, recorded HERE, at the
+       moment of sending -- not reconstructed in the failure effect from
+       whatever `aiMessages` and `currentSection` happen to hold when the
+       request finally rejects.
+
+       A hanging send outlives a section switch: `loadSectionConversation`
+       replaces aiMessages with the NEW section's history, so the effect's
+       old `aiMessages[length-1]` read the wrong section's last message,
+       stamped the failure with the wrong section number, dropped a
+       PERSISTED message out of that section's transcript, and pre-filled
+       its composer one Enter away from sending it twice. The failed
+       section's actual text was lost either way. */
+    pendingSectionSendRef.current = { text, section: currentSection };
     sendMessage(
       { text },
       {

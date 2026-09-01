@@ -672,12 +672,23 @@ export function ConversationView({
        particular length change was a prepend it must not react to. Layout
        effects all run before passive ones in the same commit, so the flag
        is always set by the time the effect below reads it. */
-  const pendingScrollAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const pendingScrollAnchorRef = useRef<{
+    scrollHeight: number;
+    scrollTop: number;
+    /** #428: which message was at the TOP when the control was pressed. */
+    firstMessageId: string | undefined;
+  } | null>(null);
   const restoredScrollAnchorRef = useRef(false);
 
   const handleLoadOlderMessages = () => {
     const el = scrollRef.current;
-    if (el) pendingScrollAnchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
+    if (el) {
+      pendingScrollAnchorRef.current = {
+        scrollHeight: el.scrollHeight,
+        scrollTop: el.scrollTop,
+        firstMessageId: messages[0]?.id,
+      };
+    }
     onLoadOlderMessages?.();
   };
 
@@ -685,6 +696,19 @@ export function ConversationView({
     const anchor = pendingScrollAnchorRef.current;
     const el = scrollRef.current;
     if (!anchor || !el) return;
+    /* #428: only a PREPEND may consume the anchor.
+
+       This effect is keyed on `messages.length`, and an assistant reply
+       landing while a "load older" request is still in flight changes that
+       too. The anchor was then spent on an APPEND: scrollTop was set to a
+       meaningless offset, restoredScrollAnchorRef suppressed the scroll for
+       the new reply, and when the older page finally arrived the anchor was
+       null -- so the prepend fell through to scrollToBottom and threw the
+       student to the newest message, the exact jump this exists to prevent.
+
+       A prepend is precisely the case where the message at the top changes;
+       an append never touches it. */
+    if (messages[0]?.id === anchor.firstMessageId) return;
     pendingScrollAnchorRef.current = null;
     restoredScrollAnchorRef.current = true;
     // The prepended page's own height -- whatever was added above the
@@ -832,10 +856,32 @@ export function ConversationView({
      silently swallow the second failure, which is exactly the "my words just
      disappeared" complaint this exists to prevent. */
   const lastRestoredDraftRef = useRef<{ text: string } | null>(null);
+  /* #427: the failed text when the composer was ALREADY occupied and the
+     restore had to be declined. It exists nowhere else at that point -- the
+     bubble was dropped from the transcript and the server never stored it --
+     so without surfacing it here the message is simply gone, while the error
+     row goes on claiming it is "back in the box below".
+
+     Shown in the error row rather than appended to the draft: appending
+     splices two different thoughts into one message the student never wrote,
+     and would overwrite the exact case the "don't clobber" guard exists for
+     (a hint send failing while the student is mid-question). */
+  const [unrestoredText, setUnrestoredText] = useState<string | null>(null);
   useEffect(() => {
     if (!restoredDraft || restoredDraft === lastRestoredDraftRef.current) return;
     lastRestoredDraftRef.current = restoredDraft;
-    setDraft((current) => (current.trim() ? current : restoredDraft.text));
+    setDraft((current) => {
+      if (!current.trim()) {
+        setUnrestoredText(null);
+        return restoredDraft.text;
+      }
+      setUnrestoredText(restoredDraft.text);
+      return current;
+    });
+  }, [restoredDraft]);
+  // Cleared once there is no failure left to describe.
+  useEffect(() => {
+    if (!restoredDraft) setUnrestoredText(null);
   }, [restoredDraft]);
 
   /* Composer history: the student's most recent 10 sent messages, oldest→newest.
@@ -1125,6 +1171,18 @@ export function ConversationView({
                     →
                   </span>
                 </button>
+              )}
+
+              {/* #427: only when the restore was declined. The ordinary case
+                  puts the text in the composer and says so; this is the
+                  branch where that sentence would otherwise be false. */}
+              {unrestoredText && (
+                <div className="conversation-error-row__unrestored">
+                  <p className="conversation-error-row__message">
+                    Your composer already had text, so we left it alone. The message that didn&rsquo;t send was:
+                  </p>
+                  <pre className="conversation-error-row__unrestored-text">{unrestoredText}</pre>
+                </div>
               )}
 
               {errorCopy.detail && (
