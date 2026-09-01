@@ -22,7 +22,12 @@ import {
   AUTO_SUBMIT_LOG_CONTEXT,
 } from "./autoSubmitOverdue";
 import { unsafeOrgScope, unsafeCourseScope } from "../repositories/scope";
-import { getHomeworkSubmissionsMatrix, findOverdueSubmissionCandidates } from "../repositories/submissions";
+import {
+  getHomeworkSubmissionsMatrix,
+  findOverdueSubmissionCandidates,
+  insertAutoSubmission,
+  submitSection,
+} from "../repositories/submissions";
 import { getStudentHomeworksForUser } from "../repositories/studentHomeworks";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
@@ -566,6 +571,71 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
     expect(autoSection.submissionSource).toBe("auto");
     expect(manualSection.submissionSource).toBe("student");
   });
+
+  it("#415: a student's own submit after the sweep is recorded as theirs, not as automatic", async () => {
+    const org = await seedOrg("resubmit-source");
+    const student = await seedStudent(org.courseId, `late-${crypto.randomUUID()}@test.example`);
+    const { homeworkId, sectionId } = await seedHomeworkWithSection(org);
+    const conv = await seedConversation({ userId: student, courseId: org.courseId, sectionId });
+
+    // 23:17 -- the sweep gets there first.
+    await autoSubmitOverdueSectionsForOrg(db, org.scope);
+    const [afterSweep] = await db.select().from(submissions).where(eq(submissions.conversationId, conv));
+    expect(afterSweep!.source).toBe("auto");
+
+    // 23:30 -- the student presses Submit anyway.
+    const result = await submitSection(db, org.scope, conv, student);
+    expect(result.isResubmission).toBe(true);
+
+    const [afterSubmit] = await db.select().from(submissions).where(eq(submissions.conversationId, conv));
+    // The whole point: this student DID submit, deliberately, and the row
+    // has to say so. Before #415 only submittedAt moved and the row kept
+    // claiming the deadline submitted it for them.
+    expect(afterSubmit!.source).toBe("student");
+    expect(afterSubmit!.submittedAt.getTime()).toBeGreaterThanOrEqual(afterSweep!.submittedAt.getTime());
+
+    // And it is the student's provenance that reaches both surfaces.
+    const matrix = await getHomeworkSubmissionsMatrix(db, unsafeCourseScope(org.courseId), cipher, homeworkId);
+    expect(matrix!.students.find((st) => st.studentId === student)!.sections[0]!.submissionSource).toBe("student");
+    const view = await getStudentHomeworksForUser(db, student);
+    expect(view.find((h) => h.id === homeworkId)!.sections[0]!.submissionSource).toBe("student");
+  });
+
+  it("#417: a conversation soft-deleted after the candidate read is not auto-submitted", async () => {
+    const org = await seedOrg("restart-race");
+    const student = await seedStudent(org.courseId, `racer-${crypto.randomUUID()}@test.example`);
+    const { sectionId } = await seedHomeworkWithSection(org);
+    const convA = await seedConversation({ userId: student, courseId: org.courseId, sectionId });
+
+    // Read the candidate the way the sweep does...
+    const [candidate] = await findOverdueSubmissionCandidates(db, org.scope, 10);
+    expect(candidate!.conversationId).toBe(convA);
+
+    // ...then the student restarts mid-sweep: conv A is soft-deleted and a
+    // replacement takes over the section. This is the window the sweep's
+    // sequential inserts leave open for tens of seconds on a large org.
+    await db.update(conversations).set({ isDeleted: true, deletedAt: new Date() }).where(eq(conversations.id, convA));
+    const convB = await seedConversation({ userId: student, courseId: org.courseId, sectionId });
+
+    const inserted = await insertAutoSubmission(db, org.scope, candidate!);
+
+    // No row for the dead conversation. The composite FK would have happily
+    // resolved against it (soft delete, not a real delete) and
+    // onConflictDoNothing had nothing to conflict with -- so before #417
+    // this wrote a submission that permanently occupied the
+    // (user, section) unique slot.
+    expect(inserted).toBe(false);
+    const orphans = await db.select().from(submissions).where(eq(submissions.conversationId, convA));
+    expect(orphans).toHaveLength(0);
+
+    // The consequence that actually mattered to the student: they can still
+    // submit the conversation they are now working in. This threw a bare
+    // unique-violation 503, on every retry, forever.
+    const result = await submitSection(db, org.scope, convB, student);
+    expect(result.conversationId).toBe(convB);
+    const [row] = await db.select().from(submissions).where(eq(submissions.conversationId, convB));
+    expect(row!.source).toBe("student");
+  });
 });
 
 /** A `Db` that behaves exactly like the real one except for two injected
@@ -594,23 +664,45 @@ function withFailures(
         return typeof value === "function" ? value.bind(target) : value;
       }
       return (table: unknown) => {
-        const builder = (value as (t: unknown) => { values: (v: unknown) => unknown }).call(target, table);
+        const builder = (value as (t: unknown) => { values: (v: unknown) => unknown; select: (q: unknown) => unknown }).call(
+          target,
+          table,
+        );
+
+        const gate = async (chained: unknown, conversationId: string | undefined, columns?: unknown) => {
+          if (firstInsertPending) {
+            firstInsertPending = false;
+            await opts.beforeFirstInsert();
+          }
+          if (conversationId === opts.failInsertFor) {
+            throw new Error("forced insert failure");
+          }
+          return (chained as { onConflictDoNothing: () => { returning: (c?: unknown) => Promise<unknown[]> } })
+            .onConflictDoNothing()
+            .returning(columns);
+        };
+
         return {
-          values: (row: { conversationId?: string }) => ({
+          /* #417: insertAutoSubmission is INSERT ... SELECT now, so the
+             candidate is no longer a plain object this proxy can read a
+             conversationId off. It is a bound parameter of the generated
+             statement instead, which `toSQL()` exposes -- so the injection
+             point stays exactly as targeted as it was, without the
+             production code carrying a seam that exists only for this
+             test. */
+          select: (sub: unknown) => ({
             onConflictDoNothing: () => ({
               returning: async (columns?: unknown) => {
-                if (firstInsertPending) {
-                  firstInsertPending = false;
-                  await opts.beforeFirstInsert();
-                }
-                if (row.conversationId === opts.failInsertFor) {
-                  throw new Error("forced insert failure");
-                }
-                const chained = builder.values(row) as {
-                  onConflictDoNothing: () => { returning: (c?: unknown) => Promise<unknown[]> };
-                };
-                return chained.onConflictDoNothing().returning(columns);
+                const chained = builder.select(sub) as { toSQL: () => { params: unknown[] } };
+                const params = chained.toSQL().params.map(String);
+                const target = params.includes(opts.failInsertFor) ? opts.failInsertFor : undefined;
+                return gate(chained, target, columns);
               },
+            }),
+          }),
+          values: (row: { conversationId?: string }) => ({
+            onConflictDoNothing: () => ({
+              returning: async (columns?: unknown) => gate(builder.values(row), row.conversationId, columns),
             }),
           }),
         };
