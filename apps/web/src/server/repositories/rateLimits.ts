@@ -52,6 +52,21 @@ const RATE_LIMIT_RETENTION_MS = 24 * 60 * 60 * 1000;
 // function's own doc comment above.
 const PURGE_PROBABILITY = 0.01;
 
+/** #310 review: seconds until the CURRENT fixed window closes, which is what
+ *  `Retry-After` is supposed to mean.
+ *
+ *  Lives here, beside the bucketing it has to agree with: the window start is
+ *  `Math.floor(now/windowMs)*windowMs` in reserveRateLimitSlot below, and a
+ *  second copy of that arithmetic in the route is exactly how the header and
+ *  the limiter would drift apart.
+ *
+ *  Always at least 1: a sub-second remainder that floors to 0 would tell a
+ *  client there is nothing to wait for, on a request that was just refused. */
+export function retryAfterSeconds(now: Date, windowMs: number): number {
+  const windowStart = Math.floor(now.getTime() / windowMs) * windowMs;
+  return Math.max(1, Math.ceil((windowStart + windowMs - now.getTime()) / 1000));
+}
+
 /** Atomically increments this user's counter for the window containing
  *  `now` and returns the post-increment count. Call unconditionally, before
  *  any other work -- the whole point is that every request that reaches

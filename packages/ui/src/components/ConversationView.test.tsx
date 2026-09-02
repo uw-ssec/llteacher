@@ -687,8 +687,13 @@ describe("ConversationView rate-limit retry gating (#310)", () => {
          every click was certain to fail -- which reads as a broken control
          rather than a rate limit. */
       const btn = screen.getByRole("button", { name: /Try again/ }) as HTMLButtonElement;
-      expect(btn.disabled).toBe(true);
+      expect(btn.getAttribute("aria-disabled")).toBe("true");
       expect(btn.textContent).toContain("60s");
+      /* #310 review: focusable, deliberately. The real `disabled` attribute
+         drops the control out of the tab order and out of a screen reader's
+         listing, so a student using one would find no "Try again" at all --
+         the same disappearance the visual design rejects. */
+      expect(btn.hasAttribute("disabled")).toBe(false);
     } finally {
       vi.useRealTimers();
     }
@@ -705,15 +710,36 @@ describe("ConversationView rate-limit retry gating (#310)", () => {
           error={{ message: rateLimited, onRetry: vi.fn(), retryAfterUntil: Date.now() + 3_000 }}
         />,
       );
-      expect((screen.getByRole("button", { name: /Try again/ }) as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.getByRole("button", { name: /Try again/ }).getAttribute("aria-disabled")).toBe("true");
 
       act(() => {
         vi.advanceTimersByTime(3_100);
       });
 
       const btn = screen.getByRole("button", { name: /Try again/ }) as HTMLButtonElement;
-      expect(btn.disabled).toBe(false);
+      expect(btn.getAttribute("aria-disabled")).toBeNull();
       expect(btn.textContent).not.toMatch(/\d+s/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not fire onRetry while the window is open, even though it stays focusable", async () => {
+    vi.useFakeTimers();
+    try {
+      const onRetry = vi.fn();
+      render(
+        <ConversationView
+          breadcrumb="b"
+          messages={[]}
+          onSendMessage={() => {}}
+          error={{ message: rateLimited, onRetry, retryAfterUntil: Date.now() + 60_000 }}
+        />,
+      );
+      // aria-disabled is advisory; the handler has to actually be inert or
+      // the countdown is decoration over a still-live control.
+      fireEvent.click(screen.getByRole("button", { name: /Try again/ }));
+      expect(onRetry).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -731,7 +757,7 @@ describe("ConversationView rate-limit retry gating (#310)", () => {
       />,
     );
     const btn = screen.getByRole("button", { name: "Try again" }) as HTMLButtonElement;
-    expect(btn.disabled).toBe(false);
+    expect(btn.getAttribute("aria-disabled")).toBeNull();
   });
 });
 

@@ -826,7 +826,10 @@ export default function App() {
      row" case. Also stamps latestTutorSelectionRef -- every switch, sync
      or async, funnels through here, so this is the one place that needs to
      mark "this is now the latest requested switch." */
-  const selectTutorConversation = (id: string, initialMessages: UIMessage[] = []) => {
+  /* #310 review: stable, so the handlers built on it are too. Captures only
+     setters and a ref, all of which React guarantees are stable, so an empty
+     dep list is honest here rather than a lie that freezes state. */
+  const selectTutorConversation = useCallback((id: string, initialMessages: UIMessage[] = []) => {
     latestTutorSelectionRef.current = id;
     /* #398: reaching here means a conversation is now current, so nothing
        is pending any more. This is the choke point for every "a different
@@ -840,7 +843,7 @@ export default function App() {
     setPendingTutorSelectionId(undefined);
     setTutorInitialMessages(initialMessages);
     setTutorConversationId(id);
-  };
+  }, []);
 
   /* #4: TutorConversationsList's onSelectConversation -- fetches
      that conversation's persisted history (GET /api/conversations/:id/messages)
@@ -933,7 +936,12 @@ export default function App() {
   // tutorHydrationError alongside the empty seed: rendered as a retryable
   // error row (tutorChatErrorRow below) and disables the composer (see
   // isSending below) until Retry succeeds.
-  const handleSelectExistingTutorConversation = async (id: string) => {
+  /* #310 review: wrapped so the rail's memo can actually hit. This is the
+     prop every row receives, and a plain arrow in the render body is
+     referentially new on every one of App's streamed-token re-renders --
+     which made ConversationListItem's memo compare unequal every time and
+     the row-level memoisation a no-op, however stable its siblings were. */
+  const handleSelectExistingTutorConversation = useCallback(async (id: string) => {
     if (id === tutorConversationId) return;
     // #290: a repeat click on a row that is already loading is now a genuine
     // no-op. The guard above only ruled out re-selecting the ALREADY-ACTIVE
@@ -990,7 +998,12 @@ export default function App() {
          handles "my own request finished and I am still current". */
       if (latestTutorSelectionRef.current === id) setPendingTutorSelectionId(undefined);
     }
-  };
+    /* Depends on the CURRENT selection, deliberately, rather than reading it
+       from a ref: `tutorConversationId` changes once per selection, not per
+       streamed token, so the identity is stable across exactly the renders
+       the rail's memo needs it to be. An empty dep list would have frozen it
+       at undefined and broken the "already selected" guard above. */
+  }, [tutorConversationId, selectTutorConversation]);
 
   /* #280 (requirement 2, transcript half): fetch the page of messages
      BEFORE the oldest one showing and PREPEND it. Prepend, not append:

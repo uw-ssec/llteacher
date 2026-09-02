@@ -108,7 +108,12 @@ import {
   finalizeAssistantTurn,
   pinConversationPromptTemplate,
 } from "../repositories/conversations";
-import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from "../repositories/rateLimits";
+import {
+  reserveRateLimitSlot,
+  retryAfterSeconds,
+  RATE_LIMIT_MAX_PER_MINUTE,
+  RATE_LIMIT_WINDOW_MS,
+} from "../repositories/rateLimits";
 import {
   startSectionConversation,
   getActiveSectionConversation,
@@ -1401,7 +1406,17 @@ export async function chatHandler(c: Context<AppEnv>) {
         code: "rate_limited",
       },
       429,
-      { "Retry-After": String(Math.ceil(RATE_LIMIT_WINDOW_MS / 1000)) },
+      /* #310 review: the REMAINING time in this window, not the window's
+         length. reserveRateLimitSlot buckets on
+         `Math.floor(now/windowMs)*windowMs` (a fixed window, not a sliding
+         one), so a request refused at 12:00:59.5 is free again at 12:01:00.0
+         -- half a second later, not sixty. Sending the constant averaged a
+         30s overstatement and could be off by the whole window.
+
+         That was harmless while no client read the header. Now that one
+         gates its Retry button on it, an overstatement locks a control that
+         actually works, so the header has to mean what it says. */
+      { "Retry-After": String(retryAfterSeconds(new Date(), RATE_LIMIT_WINDOW_MS)) },
     );
   }
 

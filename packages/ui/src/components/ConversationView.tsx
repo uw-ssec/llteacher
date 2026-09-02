@@ -1196,13 +1196,21 @@ export function ConversationView({
                 <button
                   type="button"
                   className="conversation-error-row__retry"
-                  onClick={error.onRetry}
+                  onClick={retrySecondsLeft > 0 ? undefined : error.onRetry}
                   /* #310: a rate-limited retry cannot succeed until the
                      window closes, and the old button invited the student to
-                     find that out by clicking. Disabled rather than hidden --
-                     the control vanishing and reappearing is more confusing
-                     than one that says when it will work. */
-                  disabled={retrySecondsLeft > 0}
+                     find that out by clicking. Not hidden -- a control that
+                     vanishes and returns reads as a glitch.
+
+                     #310 review: `aria-disabled`, NOT the real `disabled`
+                     attribute. `disabled` drops the button out of the tab
+                     order and out of a screen reader's control listing
+                     entirely, so a student using one would find no "Try
+                     again" at all -- the exact disappearance the paragraph
+                     above rejects, just invisible to sighted review. This
+                     keeps it focusable and announced, and inert via the
+                     omitted onClick. */
+                  aria-disabled={retrySecondsLeft > 0 ? true : undefined}
                 >
                   {retrySecondsLeft > 0 ? `Try again in ${retrySecondsLeft}s` : "Try again"}
                   <span className="conversation-error-row__retry-arrow" aria-hidden="true">
