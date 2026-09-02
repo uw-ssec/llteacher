@@ -1311,6 +1311,77 @@ describe("ConversationView day separators (#397)", () => {
 });
 
 /* --------------------------------------------------------------------------
+   #90 review, Important #2: renderAiFeedbackSlot's own gating -- the ONLY
+   thing standing between the feedback affordance (apps/web's
+   ResponseFeedback) and a caller that could try to flag a not-yet-persisted
+   message id. chat.ts mints the assistant row's real DB id independently of
+   whatever id the streamed UIMessage itself carries, so a message is only
+   safe to flag once it has round-tripped through the persisted-history
+   fetch -- the one signal for that, on this data shape, is a real
+   `createdAt` (see AIMessageData's own doc comment: absent for a turn with
+   no persisted row yet). These pin the two states renderMessageRow's guard
+   is meant to produce.
+   -------------------------------------------------------------------------- */
+describe("ConversationView renderAiFeedbackSlot gating (#90)", () => {
+  it("does NOT offer the feedback slot for a still-streaming AI message, even with a render callback supplied", () => {
+    const renderAiFeedbackSlot = vi.fn(() => <span data-testid="feedback-slot">flag</span>);
+    render(
+      <ConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[{ id: "a", role: "ai", content: "still typing", isStreaming: true }]}
+        renderAiFeedbackSlot={renderAiFeedbackSlot}
+      />,
+    );
+    expect(renderAiFeedbackSlot).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("feedback-slot")).toBeNull();
+  });
+
+  it("does NOT offer the feedback slot for a just-completed AI message with no createdAt yet (not confirmed persisted)", () => {
+    const renderAiFeedbackSlot = vi.fn(() => <span data-testid="feedback-slot">flag</span>);
+    render(
+      <ConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[{ id: "a", role: "ai", content: "just finished", isStreaming: false }]}
+        renderAiFeedbackSlot={renderAiFeedbackSlot}
+      />,
+    );
+    expect(renderAiFeedbackSlot).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("feedback-slot")).toBeNull();
+  });
+
+  it("DOES offer the feedback slot, with the real message id, once the AI message has settled with a createdAt", () => {
+    const renderAiFeedbackSlot = vi.fn((messageId: string) => (
+      <span data-testid="feedback-slot">{messageId}</span>
+    ));
+    render(
+      <ConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[
+          { id: "real-message-id", role: "ai", content: "settled", createdAt: "2026-08-26T09:00:00.000Z" },
+        ]}
+        renderAiFeedbackSlot={renderAiFeedbackSlot}
+      />,
+    );
+    expect(renderAiFeedbackSlot).toHaveBeenCalledWith("real-message-id");
+    expect(screen.getByTestId("feedback-slot").textContent).toBe("real-message-id");
+  });
+
+  it("renders no feedback slot at all when the caller omits renderAiFeedbackSlot, even for a settled message", () => {
+    render(
+      <ConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[{ id: "a", role: "ai", content: "settled", createdAt: "2026-08-26T09:00:00.000Z" }]}
+      />,
+    );
+    expect(screen.queryByTestId("feedback-slot")).toBeNull();
+  });
+});
+
+/* --------------------------------------------------------------------------
    #405 follow-on: making the rename hint visible to assistive technology
    put it inside the heading that wraps EditableTitle, so heading navigation
    announced the keybindings and character count as part of the conversation

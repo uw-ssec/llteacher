@@ -245,6 +245,12 @@ export interface CourseFeedbackListItemResponse {
    *  AI SDK's UIMessage['parts'] at the render boundary the same way that
    *  field already is). */
   responseSnapshot: unknown;
+  /** #90 review (Minor #5): mirrors the instructor transcript list's own
+   *  isDeleted -- a student's soft-deleted conversation stays INCLUDED
+   *  here (never filtered), just flagged, same "shown, flagged" rule
+   *  TranscriptListView's own dagger marker already renders for the
+   *  identical case. */
+  isDeleted: boolean;
   sectionId: string;
   sectionTitle: string;
   homeworkId: string;

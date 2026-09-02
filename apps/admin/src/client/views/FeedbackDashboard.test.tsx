@@ -14,6 +14,7 @@ function item(overrides: Partial<FeedbackListItem> = {}): FeedbackListItem {
     reason: "incorrect",
     comment: null,
     responseSnapshot: [{ type: "text", text: "The standard error is 5." }],
+    isDeleted: false,
     sectionId: "sec-1",
     sectionTitle: "Section 2: Confidence intervals",
     homeworkId: "hw-1",
@@ -28,12 +29,29 @@ function data(overrides: Partial<FeedbackDashboardData> = {}): FeedbackDashboard
 }
 
 describe("FeedbackDashboard (#90)", () => {
-  it("renders a row per flag with the student's name, reason, section, and a text preview", () => {
+  it("renders a row per flag with the student's name, reason, homework, section, and a text preview", () => {
     render(<FeedbackDashboard data={data()} onBack={vi.fn()} onOpenTranscript={vi.fn()} onChangeOffset={vi.fn()} />);
     expect(screen.getByText("Ada Lovelace")).toBeTruthy();
     expect(screen.getAllByText("Incorrect").length).toBeGreaterThan(0);
+    // #90 review (Minor #6): homeworkTitle is now actually rendered.
+    expect(screen.getByText("HW 1")).toBeTruthy();
     expect(screen.getByText("Section 2: Confidence intervals")).toBeTruthy();
     expect(screen.getByText(/The standard error is 5/)).toBeTruthy();
+  });
+
+  // #90 review (Minor #5): same dagger convention TranscriptListView.test.tsx
+  // already covers for the identical case.
+  it("flags a soft-deleted conversation's flag without hiding it", () => {
+    render(
+      <FeedbackDashboard
+        data={data({ items: [item({ isDeleted: true })] })}
+        onBack={vi.fn()}
+        onOpenTranscript={vi.fn()}
+        onChangeOffset={vi.fn()}
+      />,
+    );
+    expect(screen.getByLabelText(/deleted conversation/i)).toBeTruthy();
+    expect(screen.getByText("Ada Lovelace")).toBeTruthy();
   });
 
   it("shows the student's optional comment as a quote when present", () => {

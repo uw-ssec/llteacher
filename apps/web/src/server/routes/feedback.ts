@@ -15,6 +15,8 @@ import { isUnreleased } from "../repositories/homeworks";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
+import { getOrgScopeForCourse } from "../repositories/organizations";
+import { recordTranscriptAccess } from "../../lib/instructor-authz";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 
@@ -39,6 +41,12 @@ import type { AppEnv } from "../context";
    scoping is non-negotiable" invariant, scoped via
    courseScopeFromAuthContext -- the one sanctioned way to mint a
    CourseScope from request input.
+
+   #90 review, Important #1: the GET route also reuses
+   lib/instructor-authz.ts's FERPA audit hook (recordTranscriptAccess,
+   widened with a "feedback-list" action) -- this read returns decrypted
+   student names and flagged tutor content for a whole course, the same
+   class of student-record access the transcript list already audits.
    -------------------------------------------------------------------------- */
 
 const MAX_COMMENT_CHARS = 2000;
@@ -198,6 +206,21 @@ export async function listCourseFeedbackHandler(c: Context<AppEnv>) {
     ? result.items
     : result.items.filter((item) => !isUnreleased(item.homeworkStatus));
 
+  // #90 review (Important #1): FERPA -- this read returns decrypted student
+  // names plus flagged tutor content for a whole course, the identical
+  // class of student-record access listInstructorTranscriptsHandler already
+  // audits for its own list read. Reuses that exact hook
+  // (lib/instructor-authz.ts's recordTranscriptAccess, widened with a
+  // "feedback-list" action) rather than a second audit call site -- see
+  // that module's own #90 doc comment. Best-effort/never blocks the
+  // response, same tradeoff every other caller of this hook makes.
+  const orgScope = await getOrgScopeForCourse(db, courseId);
+  await recordTranscriptAccess(db, orgScope, {
+    viewerId: authContext.session.userId,
+    courseId,
+    action: "feedback-list",
+  });
+
   return c.json({
     items: visibleItems.map((item) => ({
       id: item.id,
@@ -208,6 +231,7 @@ export async function listCourseFeedbackHandler(c: Context<AppEnv>) {
       reason: item.reason,
       comment: item.comment,
       responseSnapshot: item.responseSnapshot,
+      isDeleted: item.isDeleted,
       sectionId: item.sectionId,
       sectionTitle: item.sectionTitle,
       homeworkId: item.homeworkId,

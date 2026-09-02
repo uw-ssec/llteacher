@@ -141,6 +141,14 @@ export interface CourseFeedbackListItem {
    *  matching that list's own convention. The route filters on this for a
    *  grader without canViewDraftsIn. */
   homeworkStatus: HomeworkStatus;
+  /** #90 review (Minor #5): mirrors InstructorTranscriptListItem.isDeleted
+   *  -- a soft-deleted conversation's flags stay INCLUDED here (not
+   *  filtered out; a student's own delete of their conversation must not
+   *  erase the record that they flagged a response), same rule
+   *  listInstructorTranscripts already applies for the identical reason.
+   *  Flagged (not hidden) so the dashboard can mark it, same "shown,
+   *  flagged" convention TranscriptListView's own dagger marker uses. */
+  isDeleted: boolean;
   flaggedAt: Date;
 }
 
@@ -168,12 +176,32 @@ export async function listCourseFeedback(
   const limit = opts.limit ?? DEFAULT_FEEDBACK_LIST_PAGE_SIZE;
   const offset = opts.offset ?? 0;
 
-  const where = eq(conversations.courseId, scope);
+  // #90 review (Minor #4): excludes a teacher-test conversation's flags,
+  // mirroring listInstructorTranscripts' own
+  // `or(ownerUserId = viewerId, isTeacherTest = false)` rule -- defense in
+  // depth only, since routes/feedback.ts's flagResponseHandler already
+  // requires isStudentInCourse before a flag can be written at all, and a
+  // student-owned conversation is never isTeacherTest per
+  // startSectionConversation's own derivation. Kept simple (a flat
+  // exclusion, not the viewer-aware `or(...)` transcripts uses) because
+  // there is no "the viewer's own teacher-test conversation" case here to
+  // preserve: nothing this route does ever needs to show a grader their
+  // OWN flags, only the course's.
+  const where = and(eq(conversations.courseId, scope), eq(conversations.isTeacherTest, false))!;
 
+  // #90 review (Minor #3): the count and the row queries now join through
+  // the identical table set (conversations -> sections -> homeworks) --
+  // previously the count only joined `conversations`, which was a latent
+  // self-inconsistency (unreachable today only because every flaggable
+  // conversation is guaranteed `kind = 'section'` upstream, so the
+  // sections/homeworks joins below never actually drop a row the count
+  // would have counted).
   const [totalRow] = await db
     .select({ total: sql<number>`count(*)::int` })
     .from(responseFeedback)
     .innerJoin(conversations, eq(responseFeedback.conversationId, conversations.id))
+    .innerJoin(sections, eq(conversations.sectionId, sections.id))
+    .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
     .where(where);
   const total = totalRow?.total ?? 0;
 
@@ -192,6 +220,7 @@ export async function listCourseFeedback(
       comment: responseFeedback.comment,
       responseSnapshot: responseFeedback.responseSnapshot,
       flaggedAt: responseFeedback.flaggedAt,
+      isDeleted: conversations.isDeleted,
       sectionId: sections.id,
       sectionTitle: sections.title,
       homeworkId: homeworks.id,
@@ -232,6 +261,7 @@ export async function listCourseFeedback(
       reason: row.reason,
       comment: row.comment,
       responseSnapshot: row.responseSnapshot,
+      isDeleted: row.isDeleted,
       sectionId: row.sectionId,
       sectionTitle: row.sectionTitle,
       homeworkId: row.homeworkId,

@@ -56,6 +56,25 @@ vi.mock("../repositories/responseFeedback", async (importOriginal) => {
   };
 });
 
+// #90 review, Important #1: listCourseFeedbackHandler now writes a FERPA
+// audit event via lib/instructor-authz.ts's recordTranscriptAccess, the
+// same hook routes/instructor/transcripts.ts's own list handler uses --
+// mocked here exactly the way that file's own test mocks it (makeDb below
+// returns `{}`, which a real recordAuditEvent insert() call would throw
+// against). getOrgScopeForCourse/canReadCourseTranscripts are left
+// otherwise real; only the two functions this route actually calls are
+// stubbed.
+const getOrgScopeForCourseMock = vi.fn();
+vi.mock("../repositories/organizations", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../repositories/organizations")>();
+  return { ...actual, getOrgScopeForCourse: (...a: unknown[]) => getOrgScopeForCourseMock(...a) };
+});
+const recordTranscriptAccessMock = vi.fn();
+vi.mock("../../lib/instructor-authz", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/instructor-authz")>();
+  return { ...actual, recordTranscriptAccess: (...a: unknown[]) => recordTranscriptAccessMock(...a) };
+});
+
 function buildApp(authContext: AuthContext | undefined) {
   const app = new Hono<AppEnv>();
   app.onError((_err, c) => c.json({ error: "SERVICE_UNAVAILABLE" }, 503));
@@ -115,6 +134,8 @@ beforeEach(() => {
     flaggedAt: new Date("2026-08-01T00:10:00.000Z"),
   });
   listCourseFeedbackMock.mockReset().mockResolvedValue({ items: [], total: 0 });
+  getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
+  recordTranscriptAccessMock.mockReset().mockResolvedValue(undefined);
 });
 
 describe("POST /api/conversations/:conversationId/messages/:messageId/feedback (#90)", () => {
@@ -342,6 +363,7 @@ describe("GET /api/courses/:courseId/instructor/feedback (#90)", () => {
           reason: "confusing",
           comment: null,
           responseSnapshot: [{ type: "text", text: "..." }],
+          isDeleted: false,
           sectionId: "section-1",
           sectionTitle: "P-values",
           homeworkId: "hw-1",
@@ -365,6 +387,18 @@ describe("GET /api/courses/:courseId/instructor/feedback (#90)", () => {
     expect(listCourseFeedbackMock).toHaveBeenCalled();
   });
 
+  // #90 review, Important #1: FERPA -- this read returns decrypted student
+  // names and flagged tutor content for a whole course, so it must audit
+  // the same way listInstructorTranscriptsHandler's own list read does.
+  it("audits the read via recordTranscriptAccess with a feedback-list action", async () => {
+    await buildApp(instructor("instructor-1")).request(`/api/courses/${COURSE}/instructor/feedback`, {}, TEST_ENV);
+    expect(recordTranscriptAccessMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "org-1",
+      expect.objectContaining({ viewerId: "instructor-1", courseId: COURSE, action: "feedback-list" }),
+    );
+  });
+
   it("filters out a flag on a currently-unreleased homework for a TA without canViewDrafts", async () => {
     listCourseFeedbackMock.mockResolvedValue({
       items: [
@@ -377,6 +411,7 @@ describe("GET /api/courses/:courseId/instructor/feedback (#90)", () => {
           reason: "other",
           comment: null,
           responseSnapshot: [],
+          isDeleted: false,
           sectionId: "section-1",
           sectionTitle: "Draft section",
           homeworkId: "hw-draft",
@@ -405,6 +440,7 @@ describe("GET /api/courses/:courseId/instructor/feedback (#90)", () => {
           reason: "other",
           comment: null,
           responseSnapshot: [],
+          isDeleted: false,
           sectionId: "section-1",
           sectionTitle: "Draft section",
           homeworkId: "hw-draft",

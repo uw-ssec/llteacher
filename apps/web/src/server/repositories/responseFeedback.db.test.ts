@@ -14,7 +14,7 @@
    -------------------------------------------------------------------------- */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import { unsafeCourseScope } from "./scope";
@@ -218,11 +218,29 @@ describe.skipIf(!RAW_DATABASE_URL)("response feedback (real DB, #90)", () => {
     });
 
     it("#90: rejects a second flag on the same (message, student) via the DB unique constraint, even without an app-level pre-check", async () => {
-      // First flag from this test's own fresh state -- resetFeedback ran in
-      // this describe block's beforeAll, so no flag exists yet for THIS
-      // (message, student) pair beyond the one the previous test already
-      // wrote; that one already occupies the slot, so no extra insert is
-      // needed to reach the constraint.
+      // #90 review (Minor #9): this test now inserts its OWN first flag
+      // rather than relying on the previous test's insert to occupy the
+      // slot -- the previous version was order-coupled (it would have
+      // silently stopped proving anything if this test were ever reordered
+      // or run alone, e.g. via `it.only`) and is fixed here so the test is
+      // self-contained. The delete below clears the row the PREVIOUS test
+      // in this file left behind for the identical (message, student) pair
+      // (this describe block resets feedback once in its own beforeAll,
+      // not between individual tests), so this test's own "first" insert
+      // below cannot itself collide with unrelated state.
+      await db
+        .delete(responseFeedback)
+        .where(
+          and(eq(responseFeedback.messageId, assistantMessageAId), eq(responseFeedback.studentId, studentAId)),
+        );
+      await flagResponse(db, {
+        conversationId: conversationAId,
+        messageId: assistantMessageAId,
+        studentId: studentAId,
+        reason: "incorrect",
+        comment: null,
+        responseSnapshot: [{ type: "text", text: "A: the answer is 42" }],
+      });
       await expect(
         flagResponse(db, {
           conversationId: conversationAId,

@@ -56,7 +56,6 @@ export function ResponseFeedback({ conversationId, messageId }: ResponseFeedback
   const [reason, setReason] = useState<FeedbackReason | null>(null);
   const [comment, setComment] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const fieldsetId = useId();
   const commentId = useId();
 
   const closeDialog = () => {
@@ -148,7 +147,7 @@ export function ResponseFeedback({ conversationId, messageId }: ResponseFeedback
                 Let your instructor know what was wrong with this response. This isn&rsquo;t saved as part of your
                 graded work.
               </p>
-              <fieldset className="response-feedback__reasons" id={fieldsetId}>
+              <fieldset className="response-feedback__reasons">
                 <legend>Reason</legend>
                 {REASON_OPTIONS.map((opt) => (
                   <label key={opt.value} className="response-feedback__reason-option">

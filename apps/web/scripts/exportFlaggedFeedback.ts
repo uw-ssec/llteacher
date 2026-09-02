@@ -44,8 +44,10 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, eq, lt, desc, isNotNull } from "drizzle-orm";
-import { makeNodeDb } from "../src/db/nodeClient";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
 import type { Db } from "../src/db/client";
+import * as schema from "../src/db/schema";
 import {
   responseFeedback,
   messages,
@@ -174,26 +176,39 @@ async function main() {
   const courseArgIndex = process.argv.indexOf("--course");
   const courseId = courseArgIndex !== -1 ? process.argv[courseArgIndex + 1] : undefined;
 
-  const db = makeNodeDb(databaseUrl!);
-  const exported = await exportFlaggedFeedback(db, courseId);
+  // #90 review (Minor #8): owns the Pool directly (mirrors scripts/
+  // migrate.ts's runMigrations) rather than going through makeNodeDb, which
+  // returns only the opaque `Db` wrapper with no exposed close -- a
+  // one-shot CLI script must close its connection explicitly or the
+  // process never exits on its own (pg's Pool keeps a live TCP socket that
+  // holds the event loop open). Cast the same way makeNodeDb itself does;
+  // see that function's own doc comment for why the cast is safe.
+  const pool = new Pool({ connectionString: databaseUrl });
+  const db = drizzle(pool, { schema }) as unknown as Db;
+  try {
+    const exported = await exportFlaggedFeedback(db, courseId);
 
-  const existing: ExportedProbe[] = existsSync(STAGING_PATH)
-    ? (JSON.parse(readFileSync(STAGING_PATH, "utf-8")) as ExportedProbe[])
-    : [];
-  const existingIds = new Set(existing.map((p) => p.id));
-  const fresh = exported.filter((p) => !existingIds.has(p.id));
+    const existing: ExportedProbe[] = existsSync(STAGING_PATH)
+      ? (JSON.parse(readFileSync(STAGING_PATH, "utf-8")) as ExportedProbe[])
+      : [];
+    const existingIds = new Set(existing.map((p) => p.id));
+    const fresh = exported.filter((p) => !existingIds.has(p.id));
 
-  const merged = [...existing, ...fresh];
-  writeFileSync(STAGING_PATH, `${JSON.stringify(merged, null, 2)}\n`);
+    const merged = [...existing, ...fresh];
+    writeFileSync(STAGING_PATH, `${JSON.stringify(merged, null, 2)}\n`);
 
-  console.log(`Exported ${exported.length} flagged response(s)${courseId ? ` for course ${courseId}` : ""}.`);
-  console.log(`${fresh.length} new entr${fresh.length === 1 ? "y" : "ies"} appended to ${STAGING_PATH}.`);
-  if (fresh.length > 0) {
-    console.log(
-      "Review each new entry before merging it into evals/datasets/tutor-behavior-probes.json: " +
-        "confirm/author `solution`, pick a real category if one of the six adversarial types fits, " +
-        "and run `npm test --workspace=evals` (datasets/pii-scan.test.ts) against the merged file.",
-    );
+    console.log(`Exported ${exported.length} flagged response(s)${courseId ? ` for course ${courseId}` : ""}.`);
+    console.log(`${fresh.length} new entr${fresh.length === 1 ? "y" : "ies"} appended to ${STAGING_PATH}.`);
+    if (fresh.length > 0) {
+      console.log(
+        "Review each new entry before merging it into evals/datasets/tutor-behavior-probes.json: " +
+          "confirm/author `solution`, add `finalAnswers` if a short leaked fragment alone would count as " +
+          "a leak, pick a real category if one of the six adversarial types fits, and run " +
+          "`npm test --workspace=evals` (datasets/pii-scan.test.ts) against the merged file.",
+      );
+    }
+  } finally {
+    await pool.end();
   }
 }
 

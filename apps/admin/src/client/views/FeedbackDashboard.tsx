@@ -53,6 +53,11 @@ export interface FeedbackListItem {
    *  defensively by responseSnapshotPreview below, same posture
    *  TranscriptDetailView's own TranscriptMessage.parts doc comment takes. */
   responseSnapshot: unknown;
+  /** #90 review (Minor #5): mirrors TranscriptListItem's own isDeleted --
+   *  a soft-deleted conversation's flag stays in this list (never
+   *  filtered), just marked, same "shown, flagged" rule that view's own
+   *  dagger marker already renders for the identical case. */
+  isDeleted: boolean;
   sectionId: string;
   sectionTitle: string;
   homeworkId: string;
@@ -165,9 +170,23 @@ export function FeedbackDashboard({ data, onBack, onOpenTranscript, onChangeOffs
               >
                 <Flag size={13} weight="fill" aria-hidden="true" />
                 {item.studentName || "(unnamed student)"}
+                {/* #90 review (Minor #5): same dagger convention
+                    TranscriptListView already uses -- a soft-deleted
+                    conversation stays listed (the flag it belongs to is
+                    never hidden), just marked. */}
+                {item.isDeleted && (
+                  <sup aria-label="deleted conversation" title="Deleted conversation">
+                    †
+                  </sup>
+                )}
               </button>
               <div className="admin-record-row__meta">
                 <span className="admin-record-row__meta-chip">{REASON_LABELS[item.reason]}</span>
+                {/* #90 review (Minor #6): homeworkTitle was fetched/typed/
+                    threaded all the way here and never rendered -- shown
+                    alongside the section so a flag on a course with many
+                    homeworks is placeable without opening the transcript. */}
+                <span className="admin-record-row__meta-chip">{item.homeworkTitle}</span>
                 <span className="admin-record-row__meta-chip">{item.sectionTitle}</span>
                 <span className="admin-record-row__meta-chip">{formatTimestamp(item.flaggedAt)}</span>
               </div>
