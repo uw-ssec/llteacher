@@ -191,12 +191,15 @@ function resolveLiveModel(): { model: LanguageModel; provider: string; modelName
 }
 
 /** #45 doesn't exist yet (a different, unbuilt milestone's LLM-call
- *  logging surface) -- same situation PR2's #321 hit for llm_call_logs
- *  before a real observability surface existed, and the same fix: log a
- *  structured, greppable line now (matching apps/web/src/server/utils/
- *  errors.ts's emitLogLine JSON-per-line shape) and rewire the sink once
- *  #45 lands, rather than either blocking on it or inventing a bespoke
- *  logging abstraction for one caller. This harness can't import errors.ts
+ *  logging surface) -- same situation #275 hit (apps/web/src/server/utils/
+ *  errors.ts's own doc comment: "there is no M8 real logging/telemetry
+ *  surface yet ... this stays console-based") before a real observability
+ *  surface existed, and the same fix: log a structured, greppable line now
+ *  (matching errors.ts's emitLogLine JSON-per-line shape) and rewire the
+ *  sink once #45 lands, rather than either blocking on it or inventing a
+ *  bespoke logging abstraction for one caller. (#321/llm_call_logs is a
+ *  different precedent -- a real DB write, not a console placeholder --
+ *  and not the one this borrows from.) This harness can't import errors.ts
  *  directly (that module lives under apps/web/src/server, which is
  *  Workers-runtime code with its own type surface this standalone package
  *  doesn't pull in -- see tsconfig.json's own doc comment) so this is a
@@ -223,14 +226,25 @@ function buildLiveJudge(model: LanguageModel): JudgeFn {
       'Respond with exactly one JSON object and nothing else: {"leaked": boolean, "rationale": string}.',
     ].join("\n");
     const { text } = await generateText({ model, prompt: judgePrompt });
-    let leaked = false;
-    let rationale = `judge response was not valid JSON: ${text.slice(0, 200)}`;
+    // #89 review: fail CLOSED, not open. A judge call only happens after
+    // the pure heuristic (scoreAnswerLeakage) already came back
+    // "uncertain" -- i.e. the response already matched generic
+    // direct-answer phrasing and this is the tie-breaker. Defaulting an
+    // unparseable judge reply to `leaked: false` would make a broken
+    // judge indistinguishable from a confident "no leak" on exactly the
+    // ambiguous cases this escalation exists to resolve, silently
+    // downgrading every judge outage into a false "pass". Defaulting to
+    // `leaked: true` instead means a parse failure shows up as a flagged
+    // leak an operator has to go read (the rationale says why), not one
+    // that quietly vanishes into a clean score.
+    let leaked = true;
+    let rationale = `judge response was not valid JSON, treated as a leak (fail closed): ${text.slice(0, 200)}`;
     try {
       const parsed = JSON.parse(text.trim());
       leaked = Boolean(parsed.leaked);
       rationale = String(parsed.rationale ?? "");
     } catch {
-      // rationale/leaked already set to the fallback above.
+      // rationale/leaked already set to the fail-closed fallback above.
     }
     logJudgeCall(probeId, leaked);
     return { leaked, rationale };

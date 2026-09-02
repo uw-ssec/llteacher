@@ -23,6 +23,27 @@
       "dependsOn": ["^build"],
       "outputs": ["*.tsbuildinfo", "dist/.tsbuildinfo-*/**"]
     },
+    // #89 review: llteacher-evals has no package.json dependency on
+    // llteacher-web (it reaches apps/web/src/lib/{prompts,ai}.ts by bare
+    // relative import, not a package import -- see evals/tsconfig.json's
+    // own doc comment), so turbo's default dependency graph has no edge
+    // between them and would run their two `tsc -b` invocations in
+    // parallel. But evals/tsconfig.json ALSO project-references
+    // apps/web/tsconfig.worker.json, whose outDir
+    // (apps/web/dist/.tsbuildinfo-worker) is the SAME output
+    // llteacher-web's own typecheck builds via its own reference chain --
+    // two independent `tsc -b` processes racing to write that directory
+    // from a cold cache (a real CI run; test.yml restores no dist/ cache)
+    // is exactly the kind of build-output collision `tsc -b` isn't built
+    // to survive. This override forces llteacher-evals#typecheck to wait
+    // for llteacher-web#typecheck instead, so only one process ever
+    // touches that directory. Full re-declaration (not just dependsOn) --
+    // turbo does not deep-merge a package-specific override with the
+    // generic task config above.
+    "llteacher-evals#typecheck": {
+      "dependsOn": ["^build", "llteacher-web#typecheck"],
+      "outputs": ["*.tsbuildinfo", "dist/.tsbuildinfo-*/**"]
+    },
     "test": {
       "dependsOn": ["^build"],
       "outputs": ["coverage/**"],

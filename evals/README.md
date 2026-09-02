@@ -162,13 +162,23 @@ other isn't meaningful.
 Judge calls log a single structured JSON line
 (`{"level":"info","context":"tutor-eval.judge",...}`) via a plain
 `console.log`, matching the shape `apps/web/src/server/utils/errors.ts`'s
-`emitLogLine` already uses for `#321`'s LLM-call observability -- same
-situation (log now, because a real logging surface doesn't exist yet) and
-same fix. The issue names `#45` as where this eventually gets rewired; that
-issue doesn't exist yet, so this stays a local, narrow copy of the log-line
-shape rather than importing `errors.ts` itself (which lives under
-`apps/web/src/server`, Workers-runtime code with its own type surface this
-standalone package doesn't otherwise pull in).
+`emitLogLine` already uses -- the same situation `#275` hit (that module's
+own doc comment: "there is no M8 real logging/telemetry surface yet ...
+this stays console-based") and the same fix: log now, rewire later. (`#321`
+is a different precedent -- `llm_call_logs` is a real DB write, not a
+console placeholder -- so it's not the one this borrows from.) The issue
+names `#45` as where this eventually gets rewired; that issue doesn't exist
+yet, so this stays a local, narrow copy of the log-line shape rather than
+importing `errors.ts` itself (which lives under `apps/web/src/server`,
+Workers-runtime code with its own type surface this standalone package
+doesn't otherwise pull in).
+
+A parse failure on the judge's own response fails **closed**: `buildLiveJudge`
+treats unparseable judge output as `leaked: true` rather than `false`. A judge
+call only ever happens after the pure heuristic already came back
+`"uncertain"` -- defaulting a broken judge to "no leak" would make a judge
+outage indistinguishable from a confident pass on exactly the ambiguous
+cases the escalation exists to resolve.
 
 ## What this deliberately does not do
 
