@@ -1314,3 +1314,45 @@ describe("ConversationView header title naming", () => {
     expect(screen.getByRole("heading", { level: 1, name: "Original title" })).toBeTruthy();
   });
 });
+
+describe("readErrorMessage keeps raw server bodies away from students (#286)", () => {
+  it("never renders an unrecognised body as the student-facing message", () => {
+    const raw = '{"error":"OPENROUTER_API_KEY is not set. Add it to apps/web/.dev.vars for local dev or via `wrangler secret put OPENROUTER_API_KEY` for prod."}';
+    const copy = readErrorMessage(raw);
+    expect(copy.message).toBe("The tutor didn't finish answering. Nothing you wrote was lost.");
+    expect(copy.message).not.toContain("OPENROUTER_API_KEY");
+    expect(copy.message).not.toContain("wrangler");
+    // The operator's words survive, but only in the collapsed detail line.
+    expect(copy.detail).toContain("OPENROUTER_API_KEY");
+  });
+
+  it("handles a non-JSON body (a gateway HTML page, a WebKit 'Load failed') without leaking it as the message", () => {
+    const copy = readErrorMessage("<html><body>502 Bad Gateway</body></html>");
+    expect(copy.message).not.toContain("502");
+    expect(copy.label).toBe("No response");
+  });
+
+  it("maps every code the server actually sends to student vocabulary, not server vocabulary", () => {
+    /* The strings on the left are what /api/chat returns today. None of them
+       should reach a student as-is: "Course access denied" and "Unauthorized"
+       are API vocabulary and read as accusations. */
+    const cases = [
+      ['{"error":"Unauthorized","code":"unauthorized"}', "Signed out"],
+      ['{"error":"Course access denied","code":"denied"}', "No access"],
+      ['{"error":"Conversation not found","code":"not_found"}', "Not found"],
+      ['{"error":"You are sending messages too quickly","code":"rate_limited"}', "Slow down"],
+    ] as const;
+    for (const [raw, expectedLabel] of cases) {
+      const copy = readErrorMessage(raw);
+      expect(copy.label).toBe(expectedLabel);
+      expect(copy.message).not.toContain("Unauthorized");
+      expect(copy.message).not.toContain("denied");
+    }
+  });
+
+  it("truncates an unbounded body rather than letting it fill the column", () => {
+    const copy = readErrorMessage(`{"error":"${"x".repeat(5000)}"}`);
+    expect(copy.detail!.length).toBeLessThan(400);
+    expect(copy.detail!.endsWith("\u2026")).toBe(true);
+  });
+});

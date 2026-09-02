@@ -435,3 +435,73 @@ describe("EditableTitle limit and keybinding disclosure (#310)", () => {
     expect(screen.getByRole("alert").textContent).toMatch(/10 characters or fewer/i);
   });
 });
+
+describe("EditableTitle rename error lifecycle (#291)", () => {
+  it("returns focus to the pencil when the error is dismissed, instead of dropping it to <body>", async () => {
+    /* #434 review: the dismiss button lives INSIDE the role="alert" span it
+       removes, so clicking it unmounts the focused element. This is the same
+       defect #298 was filed for in this component -- fixed there for the
+       edit-mode exits, and reintroduced by a control added later. */
+    const onSave = vi.fn().mockRejectedValue(new Error("nope"));
+    render(<EditableTitle value="Chat A" onSave={onSave} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Chat A" }));
+    const input = screen.getByLabelText("Edit title");
+    await userEvent.clear(input);
+    await userEvent.type(input, "New title{Enter}");
+
+    const dismiss = await screen.findByRole("button", { name: "Dismiss rename error" });
+    await userEvent.click(dismiss);
+
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: /^Rename:/ }));
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("offers a dismiss control and clears the error when it is used", async () => {
+    const onSave = vi.fn().mockRejectedValue(new Error("Conversation not found"));
+    render(<EditableTitle value="Chat A" onSave={onSave} />);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Rename: Chat A" }));
+    await user.clear(screen.getByRole("textbox"));
+    await user.type(screen.getByRole("textbox"), "New title{Enter}");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Conversation not found");
+
+    await user.click(screen.getByRole("button", { name: "Dismiss rename error" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("clears the error when the student activates the row instead", async () => {
+    // Selecting the conversation IS doing something else with it; the stale
+    // failure should not follow them into the next thing they do.
+    const onSave = vi.fn().mockRejectedValue(new Error("Conversation not found"));
+    const onActivateValue = vi.fn();
+    render(
+      <EditableTitle
+        value="Chat A"
+        onSave={onSave}
+        onActivateValue={onActivateValue}
+        activateLabel="Open Chat A"
+      />,
+    );
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Rename: Chat A" }));
+    await user.clear(screen.getByRole("textbox"));
+    await user.type(screen.getByRole("textbox"), "New title{Enter}");
+    await screen.findByRole("alert");
+
+    await user.click(screen.getByRole("button", { name: "Open Chat A" }));
+    expect(onActivateValue).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("does NOT offer a dismiss for a caller-supplied error, which the caller owns", async () => {
+    render(
+      <EditableTitle value="Chat A" onSave={vi.fn()} error="Upstream problem" />,
+    );
+    expect(screen.getByRole("alert").textContent).toContain("Upstream problem");
+    expect(screen.queryByRole("button", { name: "Dismiss rename error" })).toBeNull();
+  });
+});

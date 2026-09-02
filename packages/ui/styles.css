@@ -1171,6 +1171,9 @@ body {
      ------------------------------------------------------------------------- */
   .editable-title {
     display: inline-flex;
+    /* #291: lets .editable-title__error take a line of its own rather than
+       competing with the input for a 220px rail's width. */
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--space-1);
     max-width: 100%;
@@ -1335,10 +1338,40 @@ body {
     color: var(--color-error);
   }
 
+  /* #291: the error used to be a bare flex SIBLING of the input inside an
+     inline-flex row with no wrap, in a 220px rail -- so "Title cannot be
+     empty." competed for width with the very field it annotates and crushed
+     it. Given its own full-width line instead: .editable-title wraps, and
+     this claims the whole next row. */
   .editable-title__error {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-basis: 100%;
     font-family: var(--font-sans);
     font-size: var(--font-size-xs);
+    line-height: var(--leading-normal);
     color: var(--color-error);
+    /* #291: the string is the SERVER's, so its length is not ours to
+       predict -- wrap rather than overflow the rail. */
+    overflow-wrap: anywhere;
+  }
+
+  .editable-title__error-dismiss {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    /* WCAG 2.5.8: 24px target around an 11px glyph. #297 is the same defect
+       on the pencil beside it -- do not reintroduce it here. */
+    inline-size: 24px;
+    block-size: 24px;
+    margin-inline-start: auto;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    cursor: pointer;
   }
 
   /* -------------------------------------------------------------------------
