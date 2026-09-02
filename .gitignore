@@ -147,3 +147,8 @@ node_modules/
 
 # Local meeting notes (not for the shared repo)
 /docs/notes/
+
+# #89 tutor-behavior eval harness: latest.json is a per-run artifact
+# (npm run tutor:eval), regenerated every invocation -- results/baseline.json
+# is the checked-in one this diffs against and is NOT ignored.
+/evals/results/latest.json
