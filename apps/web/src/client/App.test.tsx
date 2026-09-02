@@ -229,6 +229,7 @@ describe("App tutor-conversations rail (#4)", () => {
     onConversationsGet?: () => Response;
     onConversationsPost?: (body: unknown) => Response;
     onConversationMessagesGet?: (conversationId: string) => Response;
+    onConversationPatch?: (id: string, body: unknown) => Response;
   }) {
     vi.stubGlobal("CSS", { supports: () => true });
     Element.prototype.scrollIntoView = vi.fn();
@@ -268,6 +269,15 @@ describe("App tutor-conversations rail (#4)", () => {
           return extra.onConversationMessagesGet
             ? extra.onConversationMessagesGet(messagesMatch[1]!)
             : new Response(JSON.stringify([]), { status: 200 });
+        }
+        // #287: auto-title-on-first-message PATCHes here via the same
+        // renameConversation the header/rail rename UI uses.
+        const patchMatch = url.match(/^\/api\/conversations\/([^/]+)$/);
+        if (patchMatch && init?.method === "PATCH") {
+          const body = JSON.parse(String(init.body));
+          return extra.onConversationPatch
+            ? extra.onConversationPatch(patchMatch[1]!, body)
+            : new Response(JSON.stringify({ error: "unexpected PATCH" }), { status: 500 });
         }
         throw new Error(`unexpected fetch to ${url}`);
       }),
@@ -390,6 +400,210 @@ describe("App tutor-conversations rail (#4)", () => {
     // chatHandler's conversationId branch had no courseId to fall back to
     // if it ever needed one.
     expect(chatCalls[0]!.courseId).toBe("course-a");
+  });
+
+  // #287: #231's auto-titling never ran on any path a student could
+  // actually reach -- every conversation created via "New conversation"
+  // stayed titled "New Conversation" forever. The fix moved onto THIS path:
+  // App.tsx's handleSendTutorMessage now PATCHes a derived title, reusing
+  // renameConversation, right after sending a brand-new conversation's
+  // first message.
+  it("sending the first message in a brand-new tutor conversation auto-titles it from that message (#287)", async () => {
+    const patchCalls: Array<{ id: string; body: unknown }> = [];
+    stubBaseFetch({
+      onConversationsPost: () =>
+        new Response(
+          JSON.stringify({
+            id: "tutor-conv-1",
+            ownerUserId: "u1",
+            courseId: "course-a",
+            sectionId: null,
+            kind: "tutor",
+            title: "New Conversation",
+            isDeleted: false,
+            deletedAt: null,
+            createdAt: "2026-08-01T00:00:00.000Z",
+            updatedAt: "2026-08-01T00:00:00.000Z",
+          }),
+          { status: 201 },
+        ),
+      onConversationPatch: (id, body) => {
+        patchCalls.push({ id, body });
+        const title = (body as { title: string }).title;
+        return new Response(
+          JSON.stringify({
+            id: "tutor-conv-1",
+            ownerUserId: "u1",
+            courseId: "course-a",
+            sectionId: null,
+            kind: "tutor",
+            title,
+            isDeleted: false,
+            deletedAt: null,
+            createdAt: "2026-08-01T00:00:00.000Z",
+            updatedAt: "2026-08-01T00:05:00.000Z",
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    // Layer the /api/chat handler on top of the shared base stub, same as
+    // the test above.
+    const baseFetch = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/chat") {
+          const body = JSON.parse(String(init?.body)) as { conversationId?: string };
+          const chunks = [
+            { type: "start" },
+            { type: "start-step" },
+            { type: "text-start", id: "t1" },
+            { type: "text-delta", id: "t1", delta: "tutor reply" },
+            { type: "text-end", id: "t1" },
+            { type: "finish-step" },
+            { type: "finish" },
+          ];
+          const streamBody = chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
+          return new Response(streamBody, {
+            status: 200,
+            headers: { "content-type": "text/event-stream", "x-conversation-id": body.conversationId ?? "unexpected" },
+          });
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText(/Start one to ask about anything outside a section\./);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await screen.findByText("TUTOR CHAT");
+
+    const composer = await screen.findByLabelText("Message input");
+    await user.type(composer, "help me understand p-values{Enter}");
+    await screen.findByText("tutor reply");
+
+    expect(patchCalls).toEqual([
+      { id: "tutor-conv-1", body: { title: "help me understand p-values" } },
+    ]);
+    // The rail row (and the header, once selected) reflects the derived
+    // title instead of the default -- proof this landed somewhere a
+    // student can actually see it, not just that the network call fired.
+    expect(
+      await screen.findByRole("button", { name: "Select conversation: help me understand p-values" }),
+    ).toBeTruthy();
+  });
+
+  // #287: manually renaming a brand-new conversation BEFORE its first
+  // message must win -- the auto-title must never clobber a title the
+  // student picked themselves. Covers the "never overwrite a
+  // manually-set title" constraint directly, not just via the
+  // title-still-default gate's absence of a positive counter-test.
+  it("does not auto-title a conversation whose title was already changed before the first message (#287)", async () => {
+    const patchCalls: Array<{ id: string; body: unknown }> = [];
+    stubBaseFetch({
+      onConversationsPost: () =>
+        new Response(
+          JSON.stringify({
+            id: "tutor-conv-1",
+            ownerUserId: "u1",
+            courseId: "course-a",
+            sectionId: null,
+            kind: "tutor",
+            title: "New Conversation",
+            isDeleted: false,
+            deletedAt: null,
+            createdAt: "2026-08-01T00:00:00.000Z",
+            updatedAt: "2026-08-01T00:00:00.000Z",
+          }),
+          { status: 201 },
+        ),
+      onConversationPatch: (id, body) => {
+        patchCalls.push({ id, body });
+        const title = (body as { title: string }).title;
+        return new Response(
+          JSON.stringify({
+            id: "tutor-conv-1",
+            ownerUserId: "u1",
+            courseId: "course-a",
+            sectionId: null,
+            kind: "tutor",
+            title,
+            isDeleted: false,
+            deletedAt: null,
+            createdAt: "2026-08-01T00:00:00.000Z",
+            updatedAt: "2026-08-01T00:05:00.000Z",
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    const baseFetch = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/chat") {
+          const body = JSON.parse(String(init?.body)) as { conversationId?: string };
+          const chunks = [
+            { type: "start" },
+            { type: "start-step" },
+            { type: "text-start", id: "t1" },
+            { type: "text-delta", id: "t1", delta: "tutor reply" },
+            { type: "text-end", id: "t1" },
+            { type: "finish-step" },
+            { type: "finish" },
+          ];
+          const streamBody = chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
+          return new Response(streamBody, {
+            status: 200,
+            headers: { "content-type": "text/event-stream", "x-conversation-id": body.conversationId ?? "unexpected" },
+          });
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText(/Start one to ask about anything outside a section\./);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await screen.findByText("TUTOR CHAT");
+
+    // Manually rename via the chat header BEFORE sending any message.
+    await user.click(
+      await screen.findByRole("button", { name: "Rename conversation: New Conversation" }),
+    );
+    const input = screen.getByLabelText("Edit title");
+    await user.clear(input);
+    await user.type(input, "My own title{Enter}");
+    await screen.findByRole("heading", { name: "My own title" });
+    expect(patchCalls).toEqual([{ id: "tutor-conv-1", body: { title: "My own title" } }]);
+
+    const composer = await screen.findByLabelText("Message input");
+    await user.type(composer, "help me understand p-values{Enter}");
+    await screen.findByText("tutor reply");
+
+    // No SECOND patch call from the auto-title path -- the manual rename
+    // already moved the title off the default, so the send-time gate never
+    // fires.
+    expect(patchCalls).toEqual([{ id: "tutor-conv-1", body: { title: "My own title" } }]);
   });
 
   // #4: selecting an existing tutor conversation must not just *display*

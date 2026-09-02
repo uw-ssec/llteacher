@@ -43,6 +43,12 @@ import {
 import type { ConversationKind } from "../../db/schema";
 import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
 import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from "../repositories/rateLimits";
+// #287: the canonical "untouched default title" sentinel, shared with
+// chat.ts's (effectively dead, see its own doc comment) auto-title branch
+// and App.tsx's client-side auto-title-on-first-message fix -- so every
+// caller that needs to create a title-less row, or decide whether a row is
+// still safe to auto-title, agrees on exactly one string.
+import { DEFAULT_TUTOR_CONVERSATION_TITLE } from "../../shared/tutorConversationTitle";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type {
@@ -257,7 +263,7 @@ export async function createConversationHandler(c: Context<AppEnv>) {
     ownerUserId: authContext.session.userId,
     sectionId: null,
     kind: "tutor",
-    title: parsed.data.title || "New Conversation",
+    title: parsed.data.title || DEFAULT_TUTOR_CONVERSATION_TITLE,
   });
 
   return c.json(toConversationSummary(created), 201);

@@ -189,12 +189,17 @@ export function EditableTitle({
           aria-label={activateLabel}
           aria-describedby={activateDescribedBy}
           aria-current={isActive ? "true" : undefined}
+          title={value}
         >
           {value}
         </button>
       );
     }
-    return <span className={`editable-title__text ${className}`.trim()}>{value}</span>;
+    return (
+      <span className={`editable-title__text ${className}`.trim()} title={value}>
+        {value}
+      </span>
+    );
   }
 
   const handleEdit = () => {
@@ -290,11 +295,19 @@ export function EditableTitle({
             aria-label={activateLabel}
             aria-describedby={activateDescribedBy}
             aria-current={isActive ? "true" : undefined}
+            title={value}
           >
             {value}
           </button>
         ) : (
-          <span className="editable-title__value">{value}</span>
+          // #287: `title` (the HTML hover-tooltip attribute, unrelated to
+          // this component's own `value`/conversation-title concept) so a
+          // rail row truncated by this span's own `text-overflow: ellipsis`
+          // (packages/ui/styles.css) can still be read in full on hover --
+          // the only way to see it otherwise was entering rename mode.
+          <span className="editable-title__value" title={value}>
+            {value}
+          </span>
         )}
         <button
           ref={pencilRef}

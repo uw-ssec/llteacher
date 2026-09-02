@@ -11,6 +11,7 @@ import { TutorConversationsList } from "./views/TutorConversationsList";
 import { useTutorConversations } from "./hooks/useTutorConversations";
 import type { ConversationMessageResponse, StudentHomeworkListResponse, HintCountResponse } from "../shared/types";
 import { MAX_HISTORY_MESSAGES } from "../shared/chat-limits";
+import { deriveTutorConversationTitle, DEFAULT_TUTOR_CONVERSATION_TITLE } from "../shared/tutorConversationTitle";
 
 /* ==========================================================================
    LLTeacher v2 — Chat-with-syllabus shell
@@ -1893,6 +1894,52 @@ export default function App() {
     // #96: see handleSendMessage above.
     tutorSendAcceptedRef.current = false;
     setTutorSendFailure(null);
+    // #287: auto-title a brand-new tutor conversation from its first
+    // message. #231's original auto-titling lived entirely in chat.ts, on a
+    // no-conversationId + kind:"tutor" branch this call never exercises --
+    // this function always sends an existing tutorConversationId (the
+    // guard above), never the courseId+kind shape that branch requires --
+    // so every conversation created via the rail's "New conversation"
+    // button stayed titled "New Conversation" forever (see chat.ts's own
+    // doc comment on that now-effectively-dead branch). This is the actual
+    // fix: derive a title from the student's OWN text (reusing
+    // deriveTutorConversationTitle, not reimplementing it -- see
+    // shared/tutorConversationTitle.ts) and PATCH it via the same
+    // renameConversation the header/rail rename affordances already use,
+    // so the rail updates optimistically with no new server code.
+    //
+    // Fired here rather than gated on the turn's own completion: the title
+    // depends only on the text already known at send time, not on
+    // anything the model says back.
+    //
+    // Gated on the row's title still being the untouched default AND its
+    // messageCount still being 0 -- not just the title check alone -- so
+    // this only ever fires for a conversation's genuine first message, not
+    // a later message into some hypothetical conversation that has
+    // history but was (for whatever reason) never auto-titled. Either
+    // condition changing after this fires (a successful auto-title moves
+    // the title off the default; ANY message moves messageCount off 0)
+    // means this can only ever fire once per conversation, and it never
+    // overwrites a title the student set themselves -- a manual rename
+    // moves the title off the default exactly the same way a successful
+    // auto-title does.
+    //
+    // Best-effort: a failed PATCH here is swallowed, not surfaced as a
+    // send failure -- the student's actual message still sends normally,
+    // and the rename pencil is still there if the title never got fixed
+    // automatically.
+    const currentTutorConversationRow = tutorConversations.find((c) => c.id === tutorConversationId);
+    if (
+      currentTutorConversationRow?.title === DEFAULT_TUTOR_CONVERSATION_TITLE &&
+      currentTutorConversationRow.messageCount === 0
+    ) {
+      const derivedTitle = deriveTutorConversationTitle([{ type: "text", text }]);
+      if (derivedTitle) {
+        void renameTutorConversationRow(tutorConversationId, derivedTitle).catch(() => {
+          /* best-effort -- see the comment above. */
+        });
+      }
+    }
     // #304: courseId is now sent on every tutor turn, not only when minting
     // a new conversation -- chatHandler's conversationId branch doesn't
     // read it (getOwnedConversationOrNull's own ownership check is what

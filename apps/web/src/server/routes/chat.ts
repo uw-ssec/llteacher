@@ -121,6 +121,7 @@ import { courseScopeFromAuthContext, unsafeCourseScope, unsafeOrgScope, type Org
 import { IdempotencyKeyConflictError } from "../repositories/errors";
 import { recordHintRequest } from "../repositories/hints";
 import { getOrgScopeAndLlmConfigForCourse } from "../repositories/organizations";
+import { deriveTutorConversationTitle, DEFAULT_TUTOR_CONVERSATION_TITLE } from "../../shared/tutorConversationTitle";
 import { logServerError, logServerWarn } from "../utils/errors";
 import {
   assembleSystemPrompt,
@@ -823,27 +824,13 @@ function replayResponse(conversationId: string, persistedParts: unknown) {
   });
 }
 
-// #231: derives an initial title for a brand-new tutor conversation from
-// its first user message, instead of leaving every row titled "New
-// Conversation" until the student manually renames it. Only ever called at
-// creation time (the new-conversation branch below), so "only while the
-// title is still the default" is automatic: this never re-touches an
-// existing conversation's title on a later turn, whether or not the
-// student has since renamed it. Truncates the first text part; returns
-// null (falls back to "New Conversation") for a message with no text part
-// (a tool-only first message isn't a shape this app's own composer can
-// currently produce, but the fallback keeps this honest either way).
-const AUTO_TITLE_MAX_LENGTH = 60;
-function deriveTutorConversationTitle(parts: unknown): string | null {
-  if (!Array.isArray(parts)) return null;
-  const textPart = parts.find(
-    (p): p is { type: "text"; text: string } =>
-      !!p && typeof p === "object" && (p as { type?: unknown }).type === "text" && typeof (p as { text?: unknown }).text === "string",
-  );
-  const text = textPart?.text.trim();
-  if (!text) return null;
-  return text.length > AUTO_TITLE_MAX_LENGTH ? `${text.slice(0, AUTO_TITLE_MAX_LENGTH).trimEnd()}…` : text;
-}
+// #231/#287: deriveTutorConversationTitle/DEFAULT_TUTOR_CONVERSATION_TITLE
+// now live in ../../shared/tutorConversationTitle -- see that module's own
+// doc comment for the full #287 story (why this got moved out of this
+// file, and why the truncation logic itself changed). Kept as a plain
+// import rather than reimplemented here so the branch below and #287's
+// real (client-side) fix can never derive two different titles from the
+// same first message.
 
 // #265: reserveRateLimitSlot (repositories/rateLimits.ts) is a single
 // atomic upsert, called unconditionally as the FIRST thing this handler
@@ -1188,7 +1175,34 @@ async function resolveConversation(
   }
 
   // #231: auto-title tutor conversations from their first message.
-  const title = deriveTutorConversationTitle(inboundMessage.parts) || "New Conversation";
+  //
+  // #287: THIS BRANCH HAS NO LIVE CALLER as of today's client. Reaching it
+  // requires a request with no `conversationId` AND `kind` resolved to
+  // "tutor" (the default when `kind` is omitted, see `kind` above) --  but
+  // every tutor turn the client actually sends (App.tsx's
+  // handleSendTutorMessage) is guarded on `tutorConversationId` already
+  // being set, and always includes it in the request body. A tutor
+  // conversation only ever comes to exist via the rail's "New conversation"
+  // button, which POSTs to /api/conversations (routes/conversations.ts)
+  // directly -- never through this route. So in the current app, nothing
+  // ever calls /api/chat with kind:"tutor" and no conversationId; this
+  // auto-titling only ever produced "New Conversation" (its own fallback),
+  // never a real derived title, for every conversation a student could
+  // actually create -- the defect #287 was filed to fix.
+  //
+  // Deliberately NOT deleted: the shape this branch handles (mint a
+  // brand-new tutor conversation directly from a /api/chat call, with no
+  // separate create-then-select round trip) is a real, documented part of
+  // this route's contract -- ChatRequestBody.courseId/.kind's own doc
+  // comments -- and a future client (or a direct API caller) that actually
+  // uses it would want auto-titling to work correctly here too, which it
+  // now does via the shared, surrogate-pair-safe implementation below. The
+  // ACTUAL fix for #287 -- the path students can reach -- is client-side:
+  // App.tsx's handleSendTutorMessage PATCHes a derived title onto an
+  // existing conversation right after sending its first message, reusing
+  // the same deriveTutorConversationTitle this branch calls (see
+  // shared/tutorConversationTitle.ts's own doc comment).
+  const title = deriveTutorConversationTitle(inboundMessage.parts) || DEFAULT_TUTOR_CONVERSATION_TITLE;
   const conv = await createConversation(db, scope, {
     ownerUserId: authContext.session.userId,
     sectionId: null,
