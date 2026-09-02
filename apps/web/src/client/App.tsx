@@ -1538,24 +1538,23 @@ export default function App() {
           onRetry: tutorSendFailure
             ? undefined
             : () =>
-                /* #304 req 2: an EMPTY body here is a live bug, not just an
-                   unmet requirement. Requirement 1 of #304 removed the
-                   memberships[0] fallback and made chat.ts 400 a request
-                   carrying neither conversationId nor courseId. This retry
-                   shipped without the matching change, so a student whose
-                   first tutor turn failed -- before any conversation row
-                   exists -- pressed Retry and got a second, different, worse
-                   error for a request they had no way to influence.
+                /* #304 req 2 was withdrawn here after review, and the reason
+                   is worth keeping: this row is only ever rendered inside
+                   `{tutorConversationId ? ...}` (see the tutor
+                   ConversationView below), so the no-conversation branch of
+                   this ternary is unreachable. The empty body it used to send
+                   was never actually sent, and the "student's first tutor
+                   turn fails, Retry 400s" scenario cannot occur on this
+                   surface.
 
-                   #96's stage split above narrowed WHEN this is reachable
-                   (a send-half failure now suppresses Retry entirely) but
-                   did not fix the envelope: a response-half failure on a
-                   first turn still has no conversationId. courseId is what
-                   the server wants in that case, and it is the value
-                   useTutorConversations is already scoped by. */
-                regenerateTutorChat({
-                  body: tutorConversationId ? { conversationId: tutorConversationId } : { courseId },
-                }),
+                   A `{ courseId }` fallback would also have been wrong twice
+                   over if it ever did become reachable: `courseId` is
+                   `string | undefined`, so it serialises to `{}` and produces
+                   exactly the 400 it was meant to avoid; and when it IS set,
+                   chat.ts defaults `kind` to "tutor" and mints a NEW
+                   conversation, so Retry would write the turn somewhere the
+                   student is not looking. Tracked on #304. */
+                regenerateTutorChat({ body: tutorConversationId ? { conversationId: tutorConversationId } : {} }),
         }
       : null);
 

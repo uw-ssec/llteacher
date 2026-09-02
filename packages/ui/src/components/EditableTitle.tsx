@@ -254,7 +254,27 @@ export function EditableTitle({
      Dismissible, and it clears itself the moment the student does anything
      else with the row -- but it does NOT auto-expire on a timer, because an
      error that vanishes on its own is one the student may never have read. */
+  /* Clears the error WITHOUT moving focus. Called incidentally when the
+     student does something else with the row -- selecting it, opening the
+     rename -- where focus belongs wherever that action put it. */
   const dismissError = () => setLocalError(null);
+
+  /* #434 review: the DELIBERATE dismissal, which is the only caller that
+     needs to restore focus. The dismiss button lives inside the
+     `role="alert"` span it removes, so activating it unmounts the element
+     that owns focus and drops focus to <body> -- the same defect #298 fixed
+     for this component's edit-mode exits, reintroduced by a control added
+     later.
+
+     Kept separate from dismissError above rather than folded into it: that
+     one also fires from the value button's onClick, so focusing here would
+     move focus to the pencil every time a student merely SELECTS a
+     conversation -- a worse regression than the one being fixed, and one the
+     existing keyboard test caught immediately. */
+  const dismissErrorAndRestoreFocus = () => {
+    setLocalError(null);
+    pencilRef.current?.focus();
+  };
 
   if (!isEditing) {
     return (
@@ -309,7 +329,7 @@ export function EditableTitle({
               <button
                 type="button"
                 className="editable-title__error-dismiss"
-                onClick={dismissError}
+                onClick={dismissErrorAndRestoreFocus}
                 aria-label="Dismiss rename error"
               >
                 <X size={11} weight="bold" aria-hidden="true" />

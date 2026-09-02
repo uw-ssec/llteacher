@@ -410,17 +410,45 @@ describe("useTutorConversations", () => {
     });
 
     it("stays consistent with a server refetch after several turns (#292)", async () => {
-      /* The real regression was drift, which a single bump cannot show. Three
-         turns must land where count(*) would: six rows. */
-      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 })));
+      /* The regression was DRIFT: the optimistic count and the server's own
+         count disagreeing after a few turns, so the rail said one thing and a
+         reload said another.
+
+         #434 review: this used to assert `+ 6` against the initial fixture
+         and never refetch -- which is `3 x MESSAGES_PER_TURN` restated, the
+         same shape as the `+ 1` assertions this change exists to remove. It
+         would have passed unchanged if the server's counting semantics
+         moved. The server's second response is the oracle now, and the
+         optimistic value has to match it rather than match the constant. */
+      const SERVER_COUNT_AFTER_THREE_TURNS = CONV_A.messageCount + 6;
+      let call = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          call += 1;
+          // First load: the conversation as it stands. Second: what count(*)
+          // genuinely reports after three completed turns landed.
+          const items = [call === 1 ? CONV_A : { ...CONV_A, messageCount: SERVER_COUNT_AFTER_THREE_TURNS }];
+          return new Response(JSON.stringify({ items, nextCursor: null }), { status: 200 });
+        }),
+      );
       const { result } = renderHook(() => useTutorConversations("course-a"));
       await waitFor(() => expect(result.current.loading).toBe(false));
+
       act(() => {
         result.current.bumpConversation("conv-a");
         result.current.bumpConversation("conv-a");
         result.current.bumpConversation("conv-a");
       });
-      expect(result.current.conversations[0]!.messageCount).toBe(CONV_A.messageCount + 6);
+      const optimistic = result.current.conversations[0]!.messageCount;
+
+      await act(async () => {
+        await result.current.refetch();
+      });
+
+      // The assertion that actually means something: what the student saw
+      // while typing equals what the server says on reload.
+      expect(optimistic).toBe(result.current.conversations[0]!.messageCount);
     });
 
     it("re-sorts the bumped conversation to the top, matching the server's updatedAt-desc ordering", async () => {

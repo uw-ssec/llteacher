@@ -437,6 +437,25 @@ describe("EditableTitle limit and keybinding disclosure (#310)", () => {
 });
 
 describe("EditableTitle rename error lifecycle (#291)", () => {
+  it("returns focus to the pencil when the error is dismissed, instead of dropping it to <body>", async () => {
+    /* #434 review: the dismiss button lives INSIDE the role="alert" span it
+       removes, so clicking it unmounts the focused element. This is the same
+       defect #298 was filed for in this component -- fixed there for the
+       edit-mode exits, and reintroduced by a control added later. */
+    const onSave = vi.fn().mockRejectedValue(new Error("nope"));
+    render(<EditableTitle value="Chat A" onSave={onSave} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Chat A" }));
+    const input = screen.getByLabelText("Edit title");
+    await userEvent.clear(input);
+    await userEvent.type(input, "New title{Enter}");
+
+    const dismiss = await screen.findByRole("button", { name: "Dismiss rename error" });
+    await userEvent.click(dismiss);
+
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: /^Rename:/ }));
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
   it("offers a dismiss control and clears the error when it is used", async () => {
     const onSave = vi.fn().mockRejectedValue(new Error("Conversation not found"));
     render(<EditableTitle value="Chat A" onSave={onSave} />);
