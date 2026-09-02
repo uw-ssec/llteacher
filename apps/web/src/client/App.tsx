@@ -994,6 +994,7 @@ export default function App() {
     deleteConversation: deleteTutorConversationRow,
     renameConversation: renameTutorConversationRow,
     bumpConversation: bumpTutorConversation,
+    recentlyMovedId: recentlyMovedTutorConversationId,
   } = useTutorConversations(courseId);
 
   // #292: tutorChatFetch (defined earlier in this component, above the
@@ -2312,6 +2313,7 @@ export default function App() {
           loadMoreError={tutorConversationsLoadMoreError}
           selectedConversationId={tutorConversationId}
           pendingConversationId={pendingTutorSelectionId}
+          recentlyMovedId={recentlyMovedTutorConversationId}
           onSelectConversation={handleSelectExistingTutorConversation}
           onCreateConversation={handleCreateTutorConversation}
           onRenameConversation={renameTutorConversationRow}

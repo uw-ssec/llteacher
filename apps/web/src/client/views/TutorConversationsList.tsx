@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CaretDoubleLeft, CaretDoubleRight, Plus } from "@phosphor-icons/react";
 import { AlertDialog } from "@llteacher/ui";
 import { ConversationListItem } from "../components/ConversationListItem";
@@ -73,6 +73,11 @@ export interface TutorConversationsListProps {
   selectedConversationId: string | undefined;
   /** #290: the row whose history is being fetched right now, if any. */
   pendingConversationId?: string | undefined;
+  /** #310: the id of a conversation just moved to the front of the list by
+   *  a real reorder (see useTutorConversations' bumpConversation and its
+   *  recentlyMovedId doc comment). Renders a brief highlight on that row;
+   *  omitted or null renders no highlight at all. */
+  recentlyMovedId?: string | null;
   /** Fired when an existing row is clicked. */
   onSelectConversation: (conversationId: string) => void;
   /** Creates a new conversation (and, on success, selects/switches to it --
@@ -105,6 +110,7 @@ export function TutorConversationsList({
   loadMoreError,
   selectedConversationId,
   pendingConversationId,
+  recentlyMovedId = null,
   onSelectConversation,
   onCreateConversation,
   onRenameConversation,
@@ -119,6 +125,104 @@ export function TutorConversationsList({
   // success, loading) that don't otherwise interrupt anything.
   const [createError, setCreateError] = useState<string | null>(null);
   const [liveMessage, setLiveMessage] = useState("");
+
+  /* #310: memoization support for the row list below.
+
+     `now` is computed ONCE per mount, not per row per render -- it used to
+     be a fresh `new Date()` built inside ConversationListItem's own
+     formatUpdatedAt on every row on every render of this list, which
+     happens on every streamed token in App.tsx (the chat state that
+     triggers those renders lives above this whole rail). One Date per
+     mount, reused by every row on every render, is what lets
+     ConversationListItem's own React.memo below actually skip a row: a
+     fresh object passed down every render would fail its shallow prop
+     comparison regardless of memoization. The tradeoff this accepts is
+     that the today/not-today boundary in each row's timestamp can go stale
+     if a single browser tab stays open across midnight -- a existing
+     conversation from just before midnight would keep reading as "11:58
+     PM" instead of flipping to a dated format until the page is reloaded.
+     Minor and cosmetic; not worth an interval or effect for.
+
+     onSelectConversation/onRenameConversation are NOT wrapped in
+     useCallback by App.tsx (they're plain functions recreated every
+     render), so caching a per-row bound closure keyed only on those
+     wouldn't be stable either. Refs holding the latest function let the
+     cached, per-id wrapper below never need to change once created --
+     it always calls through to whatever the ref currently holds. */
+  const now = useMemo(() => new Date(), []);
+
+  const onSelectConversationRef = useRef(onSelectConversation);
+  onSelectConversationRef.current = onSelectConversation;
+  const onRenameConversationRef = useRef(onRenameConversation);
+  onRenameConversationRef.current = onRenameConversation;
+  const onDeleteConversationRef = useRef(onDeleteConversation);
+  onDeleteConversationRef.current = onDeleteConversation;
+  // Read inside a cached delete handler, below, at CLICK time rather than
+  // at the time the handler was first created -- a rename landing between
+  // those two moments must not leave the delete-confirmation dialog naming
+  // the row's old title.
+  const conversationsRef = useRef(conversations);
+  conversationsRef.current = conversations;
+
+  // Per-id caches of bound handlers -- created once per conversation id,
+  // reused across every subsequent render regardless of how many times
+  // this component itself re-renders, so the identity ConversationListItem
+  // receives for onSelect/onRename/onRequestDelete never changes and its
+  // React.memo can actually compare equal. Entries for ids no longer in
+  // `conversations` are simply never looked up again; left in the Map
+  // rather than pruned, since a rail's conversation count is small enough
+  // that this never becomes a real leak, and pruning would need its own
+  // effect keyed on the list for no real benefit.
+  const selectHandlersRef = useRef(new Map<string, () => void>());
+  const renameHandlersRef = useRef(new Map<string, (newTitle: string) => Promise<void>>());
+  const deleteHandlersRef = useRef(new Map<string, () => void>());
+
+  const getSelectHandler = (id: string): (() => void) => {
+    const cache = selectHandlersRef.current;
+    let handler = cache.get(id);
+    if (!handler) {
+      handler = () => onSelectConversationRef.current(id);
+      cache.set(id, handler);
+    }
+    return handler;
+  };
+
+  const getRenameHandler = (id: string): ((newTitle: string) => Promise<void>) => {
+    const cache = renameHandlersRef.current;
+    let handler = cache.get(id);
+    if (!handler) {
+      handler = async (newTitle: string) => {
+        await onRenameConversationRef.current(id, newTitle);
+        setLiveMessage(`Renamed to ${newTitle}`);
+      };
+      cache.set(id, handler);
+    }
+    return handler;
+  };
+
+  // #402: a delete request has to name and show the RIGHT row even though
+  // this cached handler is built once and never rebuilt for a given id --
+  // it reads `conversationsRef.current` (kept current above) at CLICK
+  // time, not whatever the title was when the handler was first created,
+  // so a rename landing in between doesn't leave the confirmation dialog
+  // naming a stale title.
+  const getDeleteHandler = (id: string): (() => void) | undefined => {
+    if (!onDeleteConversationRef.current) return undefined;
+    const cache = deleteHandlersRef.current;
+    let handler = cache.get(id);
+    if (!handler) {
+      handler = () => {
+        if (!onDeleteConversationRef.current) return;
+        const conv = conversationsRef.current.find((c) => c.id === id);
+        if (!conv) return;
+        setDeleteError(null);
+        setDeleteTarget(conv);
+        setDeleteOpen(true);
+      };
+      cache.set(id, handler);
+    }
+    return handler;
+  };
 
   const handleCreate = async () => {
     setCreateError(null);
@@ -344,22 +448,11 @@ export function TutorConversationsList({
               conversation={conv}
               isSelected={conv.id === selectedConversationId}
               isPending={conv.id === pendingConversationId}
-              onSelect={() => onSelectConversation(conv.id)}
-              onRename={async (title) => {
-                await onRenameConversation(conv.id, title);
-                setLiveMessage(`Renamed to ${title}`);
-              }}
-              onRequestDelete={
-                onDeleteConversation
-                  ? () => {
-                      // #402: a failure recorded against a previous row must
-                      // not be shown alongside this one.
-                      setDeleteError(null);
-                      setDeleteTarget(conv);
-                      setDeleteOpen(true);
-                    }
-                  : undefined
-              }
+              isRecentlyMoved={conv.id === recentlyMovedId}
+              now={now}
+              onSelect={getSelectHandler(conv.id)}
+              onRename={getRenameHandler(conv.id)}
+              onRequestDelete={getDeleteHandler(conv.id)}
             />
           ))}
         </ul>

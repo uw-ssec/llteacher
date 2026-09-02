@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { ChatCircleText, Trash } from "@phosphor-icons/react";
 import { EditableTitle } from "@llteacher/ui";
 import type { ConversationListItemResponse } from "../../shared/types";
@@ -50,6 +51,25 @@ export interface ConversationListItemProps {
    *  renders nothing, so a non-owner surface stays read-only by default,
    *  matching `isEditable`'s reasoning. */
   onRequestDelete?: () => void;
+  /** #310: true immediately after this row was moved to the front of the
+   *  list by a real reorder (see useTutorConversations' bumpConversation).
+   *  Renders a brief highlight so the shuffle is noticeable rather than
+   *  just discovered after the fact. Defaults to false. */
+  isRecentlyMoved?: boolean;
+  /** #310: "now", for `formatUpdatedAt`'s today/not-today check. Optional,
+   *  defaulting to `new Date()` at call time below purely so existing
+   *  callers/tests that don't care about this distinction keep working
+   *  unchanged. The list this row lives in (TutorConversationsList) always
+   *  supplies it explicitly, computed ONCE per mount and reused across
+   *  every row on every render -- this used to be a fresh `new Date()`
+   *  constructed inside `formatUpdatedAt` on EVERY row on EVERY render
+   *  (including one per streamed token, for every row, not just the active
+   *  conversation's one being streamed to). Hoisting it up is also what
+   *  makes `React.memo` below able to actually skip unaffected rows: a
+   *  fresh Date object arriving as a prop every render would fail the
+   *  shallow prop comparison for every row, every time, regardless of
+   *  memoization. */
+  now?: Date;
 }
 
 /** "3:45 PM" for today, "Jan 5" otherwise -- short enough for a 240px-ish
@@ -59,10 +79,9 @@ export interface ConversationListItemProps {
  *  formatting regardless of their own browser locale. The `options` object
  *  still controls the format (short month, numeric hour); only the locale
  *  argument changed. */
-function formatUpdatedAt(iso: string): string {
+function formatUpdatedAt(iso: string, now: Date): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
-  const now = new Date();
   const isToday =
     date.getFullYear() === now.getFullYear() &&
     date.getMonth() === now.getMonth() &&
@@ -72,7 +91,19 @@ function formatUpdatedAt(iso: string): string {
     : date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-export function ConversationListItem({
+/** #310: `React.memo`'d so this row skips re-rendering when neither its own
+ *  props nor its own conversation object changed -- the list re-renders on
+ *  every streamed token (App.tsx's chat state lives above the whole rail),
+ *  and before this every row re-rendered with it regardless of whether
+ *  that row's own data had moved at all. Only pays off because its props
+ *  are now actually stable across those re-renders: `conversation` keeps
+ *  its object identity for every row `bumpConversation`/rename don't touch
+ *  (see useTutorConversations' own immutable-update comments), and
+ *  `onSelect`/`onRename`/`onRequestDelete`/`now` are supplied by
+ *  TutorConversationsList as per-id-cached, referentially stable callbacks
+ *  and a single hoisted Date rather than fresh closures/Dates created
+ *  inline on every render (see its own doc comments for how). */
+export const ConversationListItem = memo(function ConversationListItem({
   conversation,
   isSelected,
   isPending = false,
@@ -80,6 +111,8 @@ export function ConversationListItem({
   onRename,
   isEditable = true,
   onRequestDelete,
+  isRecentlyMoved = false,
+  now = new Date(),
 }: ConversationListItemProps) {
   const { id, title, updatedAt, messageCount } = conversation;
   // #233: the row keeps a short, stable accessible name ("Select
@@ -104,6 +137,11 @@ export function ConversationListItem({
             "tutor-conversation-item",
             isSelected || isPending ? "tutor-conversation-item--selected" : "",
             isPending ? "tutor-conversation-item--pending" : "",
+            // #310: a brief highlight for a REAL reorder only -- see
+            // useTutorConversations' recentlyMovedId doc comment. Combines
+            // fine with --selected/--pending above; a row can be both the
+            // active conversation and the one that just moved.
+            isRecentlyMoved ? "tutor-conversation-item--reordered" : "",
           ]
             .filter(Boolean)
             .join(" ")
@@ -148,7 +186,7 @@ export function ConversationListItem({
           )}
         </div>
         <span className="tutor-conversation-item__meta" id={metaId}>
-          <span className="tutor-conversation-item__time">{formatUpdatedAt(updatedAt)}</span>
+          <span className="tutor-conversation-item__time">{formatUpdatedAt(updatedAt, now)}</span>
           {/* #233: visible text plus a visually-hidden expansion, not
               aria-label on a plain <span> -- aria-label support on a
               non-interactive element without a naming role isn't
@@ -170,4 +208,4 @@ export function ConversationListItem({
       </div>
     </li>
   );
-}
+});

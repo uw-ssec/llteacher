@@ -1039,6 +1039,33 @@ body {
     }
   }
 
+  /* #310: a real reorder (the bumped row was not already first) gets a
+     brief highlight -- useTutorConversations' bumpConversation only sets
+     this when a row actually changed position, which is the uncommon case
+     (the overwhelmingly common one, the active conversation staying at the
+     top, never fires it). Fades from the same accent used for
+     --selected, so it reads as "this moved" rather than introducing a new
+     color the rail hasn't used elsewhere. */
+  .tutor-conversation-item--reordered {
+    animation: tutor-conversation-item-reorder-flash 1.5s ease-out;
+  }
+
+  @keyframes tutor-conversation-item-reorder-flash {
+    0% {
+      background-color: var(--color-accent-faint);
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tutor-conversation-item--reordered {
+      animation: none;
+      background-color: var(--color-accent-faint);
+    }
+  }
+
   .tutor-conversation-item__title {
     display: flex;
     width: 100%;

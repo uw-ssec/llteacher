@@ -106,6 +106,15 @@ export interface UseTutorConversationsResult {
    *  silently reintroduce a guessed constant the next time this is
    *  touched. */
   bumpConversation: (id: string, delta: number) => void;
+  /** #310: the id of a conversation that was just moved to the front of the
+   *  list by a REAL reorder (it was not already first) -- null the rest of
+   *  the time, including the overwhelmingly common case where a bump is a
+   *  no-op reorder. Cleared automatically ~1.5s after being set, or as soon
+   *  as a newer bump replaces it. A caller (TutorConversationsList) uses
+   *  this to render a brief highlight on the row that moved, so a student
+   *  reading the rail notices the shuffle instead of just finding a
+   *  familiar row gone from where it was. */
+  recentlyMovedId: string | null;
 }
 
 export function useTutorConversations(courseId: string | undefined): UseTutorConversationsResult {
@@ -142,6 +151,19 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
   // dependency.
   const conversationsRef = useRef(conversations);
   conversationsRef.current = conversations;
+
+  /* #310: see recentlyMovedId's doc comment on UseTutorConversationsResult.
+     The timeout ref lets a second real reorder (a different row bumped
+     again before the first highlight has faded) cancel and restart the
+     clear, rather than the earlier timeout firing later and clearing a
+     highlight that belongs to a different row. */
+  const [recentlyMovedId, setRecentlyMovedId] = useState<string | null>(null);
+  const recentlyMovedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (recentlyMovedTimeoutRef.current) clearTimeout(recentlyMovedTimeoutRef.current);
+    };
+  }, []);
 
   /* #388: the course scope as of the latest render. `refetch` is a
      useCallback keyed on courseId, so the `courseId` its body closes over is
@@ -457,6 +479,16 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     // nothing.
     if (delta === 0) return;
     mutationSeqRef.current += 1;
+    /* #310: whether THIS bump will be a real reorder is decided off the
+       same conversationsRef snapshot renameConversation's rollback already
+       relies on (see its own doc comment) -- not inside the setConversations
+       updater below, which React can invoke outside the normal render
+       timing and which must stay free of side effects like scheduling a
+       timeout. The updater still does its own index lookup against `prev`
+       for the actual mutation, so a same-tick update from another source
+       can't desync the two; this snapshot only ever needs to be right
+       about "index 0 or not", not the exact array. */
+    const willReorder = conversationsRef.current.findIndex((c) => c.id === id) > 0;
     setConversations((prev) => {
       const index = prev.findIndex((c) => c.id === id);
       if (index === -1) return prev;
@@ -489,6 +521,16 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
       const bumped = next[index]!;
       return [bumped, ...next.slice(0, index), ...next.slice(index + 1)];
     });
+
+    if (willReorder) {
+      setRecentlyMovedId(id);
+      if (recentlyMovedTimeoutRef.current) clearTimeout(recentlyMovedTimeoutRef.current);
+      recentlyMovedTimeoutRef.current = setTimeout(() => {
+        // Only clear if this is still the highlight it started -- a newer
+        // reorder (of this row or another) already replaced it.
+        setRecentlyMovedId((current) => (current === id ? null : current));
+      }, 1500);
+    }
   }, []);
 
   return {
@@ -505,5 +547,6 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     deleteConversation,
     renameConversation,
     bumpConversation,
+    recentlyMovedId,
   };
 }

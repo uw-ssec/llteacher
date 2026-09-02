@@ -849,4 +849,116 @@ describe("useTutorConversations", () => {
       expect(result.current.conversations[0]!.id).toBe("conv-2");
     });
   });
+
+  /* ------------------------------------------------------------------------
+     #310: recentlyMovedId -- the rail's "a real reorder happened" signal,
+     used to render a brief highlight on the row that moved.
+     ---------------------------------------------------------------------- */
+  describe("recentlyMovedId (#310)", () => {
+    const rows = (updatedAts: string[]) => ({
+      items: updatedAts.map((updatedAt, i) => ({
+        ...CONV_A,
+        id: `conv-${i}`,
+        title: `Chat ${i}`,
+        updatedAt,
+      })),
+      nextCursor: null,
+    });
+
+    it("stays null when the bumped row is already first (a no-op reorder)", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          new Response(
+            JSON.stringify(rows(["2026-08-03T00:00:00.000Z", "2026-08-02T00:00:00.000Z", "2026-08-01T00:00:00.000Z"])),
+            { status: 200 },
+          ),
+        ),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toHaveLength(3));
+
+      act(() => {
+        result.current.bumpConversation("conv-0", 2);
+      });
+
+      expect(result.current.recentlyMovedId).toBeNull();
+    });
+
+    it("is set to the bumped row's id when a real reorder happens", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          new Response(
+            JSON.stringify(rows(["2026-08-03T00:00:00.000Z", "2026-08-02T00:00:00.000Z", "2026-08-01T00:00:00.000Z"])),
+            { status: 200 },
+          ),
+        ),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toHaveLength(3));
+
+      act(() => {
+        result.current.bumpConversation("conv-2", 2);
+      });
+
+      expect(result.current.recentlyMovedId).toBe("conv-2");
+    });
+
+    it("clears itself automatically after the highlight window", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          new Response(
+            JSON.stringify(rows(["2026-08-03T00:00:00.000Z", "2026-08-02T00:00:00.000Z", "2026-08-01T00:00:00.000Z"])),
+            { status: 200 },
+          ),
+        ),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      // Real timers for the initial fetch/render settling -- testing-library's
+      // waitFor polls on its own timers, which fake timers would also freeze.
+      await waitFor(() => expect(result.current.conversations).toHaveLength(3));
+
+      vi.useFakeTimers();
+      try {
+        act(() => {
+          result.current.bumpConversation("conv-2", 2);
+        });
+        expect(result.current.recentlyMovedId).toBe("conv-2");
+
+        act(() => {
+          vi.advanceTimersByTime(1500);
+        });
+        expect(result.current.recentlyMovedId).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a second real reorder replaces the highlighted id rather than stacking", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          new Response(
+            JSON.stringify(rows(["2026-08-03T00:00:00.000Z", "2026-08-02T00:00:00.000Z", "2026-08-01T00:00:00.000Z"])),
+            { status: 200 },
+          ),
+        ),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toHaveLength(3));
+
+      act(() => {
+        result.current.bumpConversation("conv-2", 2);
+      });
+      expect(result.current.recentlyMovedId).toBe("conv-2");
+
+      act(() => {
+        // conv-2 is now first; conv-1 (second) is the one that moves this time.
+        result.current.bumpConversation("conv-1", 2);
+      });
+      expect(result.current.recentlyMovedId).toBe("conv-1");
+    });
+  });
 });

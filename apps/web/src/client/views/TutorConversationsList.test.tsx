@@ -579,3 +579,121 @@ describe("TutorConversationsList announcements and retry (#399, #400)", () => {
     expect((retry as HTMLButtonElement).disabled).toBe(false);
   });
 });
+
+/* --------------------------------------------------------------------------
+   #310: React.memo on ConversationListItem plus per-id-cached, stable
+   onSelect/onRename/onRequestDelete handlers -- these tests pin the
+   behavior that memoization must not silently break: a row's handler has
+   to keep addressing the RIGHT conversation across re-renders of this list
+   even though the function identity it was given never changes.
+   -------------------------------------------------------------------------- */
+describe("TutorConversationsList memoized rows (#310)", () => {
+  const CONV_B: ConversationListItemResponse = {
+    id: "conv-b",
+    kind: "tutor",
+    title: "Chat B",
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-01T12:00:00.000Z",
+    messageCount: 1,
+  };
+
+  it("keeps selecting the right row after an unrelated re-render (e.g. a streamed-token update elsewhere)", async () => {
+    const onSelectConversation = vi.fn();
+    const { rerender } = renderList({ conversations: [CONV_A, CONV_B], onSelectConversation });
+
+    // Simulate the kind of re-render a streamed token causes elsewhere in
+    // the app: a prop on THIS component changes, but `conversations` itself
+    // is the same array reference (no bump/rename happened).
+    rerender(
+      <TutorConversationsList
+        courseId="course-a"
+        courseContextLoading={false}
+        conversations={[CONV_A, CONV_B]}
+        loading={false}
+        loadError={false}
+        awaitingCourseContext={false}
+        onRetryLoad={() => {}}
+        hasMore={false}
+        onLoadMore={() => {}}
+        loadingMore={true}
+        loadMoreError={false}
+        selectedConversationId={undefined}
+        onSelectConversation={onSelectConversation}
+        onCreateConversation={async () => true}
+        onRenameConversation={async () => undefined}
+        isCollapsed={false}
+        onToggleCollapse={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByText("Chat B"));
+    expect(onSelectConversation).toHaveBeenCalledWith("conv-b");
+    expect(onSelectConversation).not.toHaveBeenCalledWith("conv-a");
+  });
+
+  it("renames the right row after a re-render, using the id-bound cached handler", async () => {
+    const onRenameConversation = vi.fn(async () => undefined);
+    renderList({ conversations: [CONV_A, CONV_B], onRenameConversation });
+
+    const pencil = screen.getByRole("button", { name: `Rename: ${CONV_B.title}` });
+    await userEvent.click(pencil);
+    const input = screen.getByLabelText("Edit title");
+    await userEvent.clear(input);
+    await userEvent.type(input, "Renamed B{Enter}");
+
+    expect(onRenameConversation).toHaveBeenCalledWith("conv-b", "Renamed B");
+  });
+
+  it("shows the CURRENT title in the delete-confirmation dialog after a rename, not the title the handler was first created with", async () => {
+    const onDeleteConversation = vi.fn(async () => true);
+    const { rerender } = renderList({
+      conversations: [CONV_A],
+      onDeleteConversation,
+    });
+
+    // A rename lands -- the cached delete handler for conv-a was created
+    // on the first render, before this title existed.
+    const renamed: ConversationListItemResponse = { ...CONV_A, title: "Renamed A" };
+    rerender(
+      <TutorConversationsList
+        courseId="course-a"
+        courseContextLoading={false}
+        conversations={[renamed]}
+        loading={false}
+        loadError={false}
+        awaitingCourseContext={false}
+        onRetryLoad={() => {}}
+        hasMore={false}
+        onLoadMore={() => {}}
+        loadingMore={false}
+        loadMoreError={false}
+        selectedConversationId={undefined}
+        onSelectConversation={() => {}}
+        onCreateConversation={async () => true}
+        onRenameConversation={async () => undefined}
+        onDeleteConversation={onDeleteConversation}
+        isCollapsed={false}
+        onToggleCollapse={() => {}}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: `Delete conversation: ${renamed.title}` }));
+    expect(screen.getByText(new RegExp(`${renamed.title}.*will no longer appear here`))).toBeTruthy();
+  });
+
+  it("highlights the row named by recentlyMovedId and no other", () => {
+    const { container } = renderList({
+      conversations: [CONV_A, CONV_B],
+      recentlyMovedId: "conv-b",
+    });
+    const rows = container.querySelectorAll(".tutor-conversation-item");
+    const [rowA, rowB] = Array.from(rows);
+    expect(rowA?.classList.contains("tutor-conversation-item--reordered")).toBe(false);
+    expect(rowB?.classList.contains("tutor-conversation-item--reordered")).toBe(true);
+  });
+
+  it("renders no highlight when recentlyMovedId is null", () => {
+    const { container } = renderList({ conversations: [CONV_A, CONV_B], recentlyMovedId: null });
+    expect(container.querySelector(".tutor-conversation-item--reordered")).toBeNull();
+  });
+});
