@@ -456,20 +456,7 @@ describe("App tutor-conversations rail (#4)", () => {
         const url = typeof input === "string" ? input : input.toString();
         if (url === "/api/chat") {
           const body = JSON.parse(String(init?.body)) as { conversationId?: string };
-          const chunks = [
-            { type: "start" },
-            { type: "start-step" },
-            { type: "text-start", id: "t1" },
-            { type: "text-delta", id: "t1", delta: "tutor reply" },
-            { type: "text-end", id: "t1" },
-            { type: "finish-step" },
-            { type: "finish" },
-          ];
-          const streamBody = chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
-          return new Response(streamBody, {
-            status: 200,
-            headers: { "content-type": "text/event-stream", "x-conversation-id": body.conversationId ?? "unexpected" },
-          });
+          return chatStreamResponse(body.conversationId ?? "unexpected", "tutor reply");
         }
         return baseFetch(input, init);
       }),
@@ -554,20 +541,7 @@ describe("App tutor-conversations rail (#4)", () => {
         const url = typeof input === "string" ? input : input.toString();
         if (url === "/api/chat") {
           const body = JSON.parse(String(init?.body)) as { conversationId?: string };
-          const chunks = [
-            { type: "start" },
-            { type: "start-step" },
-            { type: "text-start", id: "t1" },
-            { type: "text-delta", id: "t1", delta: "tutor reply" },
-            { type: "text-end", id: "t1" },
-            { type: "finish-step" },
-            { type: "finish" },
-          ];
-          const streamBody = chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
-          return new Response(streamBody, {
-            status: 200,
-            headers: { "content-type": "text/event-stream", "x-conversation-id": body.conversationId ?? "unexpected" },
-          });
+          return chatStreamResponse(body.conversationId ?? "unexpected", "tutor reply");
         }
         return baseFetch(input, init);
       }),
@@ -604,6 +578,103 @@ describe("App tutor-conversations rail (#4)", () => {
     // already moved the title off the default, so the send-time gate never
     // fires.
     expect(patchCalls).toEqual([{ id: "tutor-conv-1", body: { title: "My own title" } }]);
+  });
+
+  // #287 review: the gate is title-only, deliberately NOT also conditioned
+  // on messageCount === 0 -- a stricter gate was tried and rejected because
+  // it forecloses exactly this self-healing case. A conversation that
+  // ALREADY has messages but is still (for whatever reason -- a prior
+  // transient PATCH failure, or simply predating this fix) stuck at the
+  // default title must still get titled on its next message, not stay
+  // stuck forever because its messageCount can never again be 0.
+  it("self-heals an existing multi-message conversation still stuck at the default title (#287 review)", async () => {
+    const patchCalls: Array<{ id: string; body: unknown }> = [];
+    stubBaseFetch({
+      onConversationsGet: () =>
+        new Response(
+          JSON.stringify({
+            items: [
+              {
+                id: "tutor-conv-1",
+                ownerUserId: "u1",
+                courseId: "course-a",
+                sectionId: null,
+                kind: "tutor",
+                title: "New Conversation",
+                isDeleted: false,
+                deletedAt: null,
+                createdAt: "2026-08-01T00:00:00.000Z",
+                updatedAt: "2026-08-01T00:00:00.000Z",
+                // Already has messages -- NOT a brand-new, empty
+                // conversation -- yet its title never got auto-titled.
+                messageCount: 2,
+              },
+            ],
+            nextCursor: null,
+          }),
+          { status: 200 },
+        ),
+      onConversationMessagesGet: (conversationId) => {
+        expect(conversationId).toBe("tutor-conv-1");
+        return new Response(
+          JSON.stringify([
+            { id: "m1", role: "user", parts: [{ type: "text", text: "prior question" }] },
+            { id: "m2", role: "assistant", parts: [{ type: "text", text: "prior answer" }] },
+          ]),
+          { status: 200 },
+        );
+      },
+      onConversationPatch: (id, body) => {
+        patchCalls.push({ id, body });
+        const title = (body as { title: string }).title;
+        return new Response(
+          JSON.stringify({
+            id: "tutor-conv-1",
+            ownerUserId: "u1",
+            courseId: "course-a",
+            sectionId: null,
+            kind: "tutor",
+            title,
+            isDeleted: false,
+            deletedAt: null,
+            createdAt: "2026-08-01T00:00:00.000Z",
+            updatedAt: "2026-08-01T00:05:00.000Z",
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    const baseFetch = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/chat") {
+          const body = JSON.parse(String(init?.body)) as { conversationId?: string };
+          return chatStreamResponse(body.conversationId ?? "unexpected", "follow-up reply");
+        }
+        return baseFetch(input, init);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Select conversation: New Conversation" }));
+    await screen.findByText("prior question");
+
+    const composer = await screen.findByLabelText("Message input");
+    await user.type(composer, "another question{Enter}");
+    await screen.findByText("follow-up reply");
+
+    expect(patchCalls).toEqual([{ id: "tutor-conv-1", body: { title: "another question" } }]);
+    expect(await screen.findByRole("button", { name: "Select conversation: another question" })).toBeTruthy();
   });
 
   // #4: selecting an existing tutor conversation must not just *display*

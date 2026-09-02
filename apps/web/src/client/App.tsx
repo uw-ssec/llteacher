@@ -1912,27 +1912,48 @@ export default function App() {
     // depends only on the text already known at send time, not on
     // anything the model says back.
     //
-    // Gated on the row's title still being the untouched default AND its
-    // messageCount still being 0 -- not just the title check alone -- so
-    // this only ever fires for a conversation's genuine first message, not
-    // a later message into some hypothetical conversation that has
-    // history but was (for whatever reason) never auto-titled. Either
-    // condition changing after this fires (a successful auto-title moves
-    // the title off the default; ANY message moves messageCount off 0)
-    // means this can only ever fire once per conversation, and it never
-    // overwrites a title the student set themselves -- a manual rename
-    // moves the title off the default exactly the same way a successful
-    // auto-title does.
+    // Gated on the row's title still being the untouched default -- that
+    // check ALONE is both necessary and sufficient. It never overwrites a
+    // title the student set themselves: a manual rename moves the title
+    // off the default exactly the same way a successful auto-title does,
+    // so by the time either has happened this condition is already false.
+    //
+    // #287 review: deliberately NOT also gated on messageCount === 0. That
+    // extra condition was tried and removed -- it added no protection
+    // beyond what the title check alone already gives (a manual rename
+    // already can't be clobbered, per the paragraph above), while actively
+    // breaking two real cases the title-only gate handles correctly:
+    //   1. Self-healing: #287's own evidence implies there is already a
+    //      population of multi-message conversations stuck at "New
+    //      Conversation" today. A messageCount===0 gate can never fire for
+    //      any of them again (their count can never return to 0) -- they'd
+    //      stay stuck forever. The title-only gate heals them on their very
+    //      next message.
+    //   2. Permanent lockout after one transient failure: if THIS PATCH
+    //      itself fails (network blip), renameConversation's own rollback
+    //      (see its doc comment) puts the title right back to the default
+    //      -- so message 2 should retry. With messageCount===0 in the gate,
+    //      message 2 no longer qualifies (the first turn already bumped the
+    //      count), permanently locking the conversation at the default
+    //      until a manual rename -- reintroducing #287's own defect for
+    //      this one failure mode. The title-only gate retries correctly.
     //
     // Best-effort: a failed PATCH here is swallowed, not surfaced as a
     // send failure -- the student's actual message still sends normally,
     // and the rename pencil is still there if the title never got fixed
     // automatically.
-    const currentTutorConversationRow = tutorConversations.find((c) => c.id === tutorConversationId);
-    if (
-      currentTutorConversationRow?.title === DEFAULT_TUTOR_CONVERSATION_TITLE &&
-      currentTutorConversationRow.messageCount === 0
-    ) {
+    //
+    // Known, accepted race: this fires alongside the send rather than
+    // serialized against a concurrent manual rename -- a student who
+    // manually renames in the exact instant they also send their first
+    // message could theoretically have the manual rename's PATCH resolve
+    // first, then have this auto-title PATCH resolve after and clobber it.
+    // Narrow enough (both actions would have to be genuinely concurrent,
+    // not just close in time -- the gate above already reads the title
+    // AFTER any rename that has already landed) that real serialization
+    // wasn't judged worth the added complexity here.
+    const currentTutorConversationTitle = tutorConversations.find((c) => c.id === tutorConversationId)?.title;
+    if (currentTutorConversationTitle === DEFAULT_TUTOR_CONVERSATION_TITLE) {
       const derivedTitle = deriveTutorConversationTitle([{ type: "text", text }]);
       if (derivedTitle) {
         void renameTutorConversationRow(tutorConversationId, derivedTitle).catch(() => {
