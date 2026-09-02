@@ -397,7 +397,16 @@ export interface ConversationViewProps {
    *  is optional because a "send"-stage failure has nothing to regenerate --
    *  omit it and no Retry button renders, since the student's text has been
    *  handed back to the composer via `restoredDraft` instead. */
-  error?: { message: string; onRetry?: () => void; stage?: TurnFailureStage } | null;
+  error?: {
+    message: string;
+    onRetry?: () => void;
+    stage?: TurnFailureStage;
+    /** #310: epoch ms until which a retry is certain to fail, from the 429's
+     *  `Retry-After`. The server has always sent that header and no client
+     *  has ever read it, so the Retry button stayed live through the whole
+     *  window and every click was guaranteed to fail. */
+    retryAfterUntil?: number;
+  } | null;
   /** #96 (send-failure UX): text to put back into the composer after a send
    *  that never reached the server, so the student's words survive a dropped
    *  connection or a refused request instead of being stranded in a
@@ -895,6 +904,29 @@ export function ConversationView({
      existed only to bind locals, and foreclosed memoising or extracting. */
   const errorCopy = error ? readErrorMessage(error.message, error.stage ?? "response") : null;
 
+  /* #310: seconds left on a rate-limit window, ticking so the button
+     re-enables on its own. Only runs while there is actually a future
+     deadline -- no interval on the overwhelmingly common error, and none
+     once it has elapsed. */
+  const retryAfterUntil = error?.retryAfterUntil;
+  const [retrySecondsLeft, setRetrySecondsLeft] = useState(0);
+  useEffect(() => {
+    if (!retryAfterUntil) {
+      setRetrySecondsLeft(0);
+      return;
+    }
+    const tick = () => {
+      const left = Math.ceil((retryAfterUntil - Date.now()) / 1000);
+      setRetrySecondsLeft(left > 0 ? left : 0);
+      return left;
+    };
+    if (tick() <= 0) return;
+    const id = setInterval(() => {
+      if (tick() <= 0) clearInterval(id);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [retryAfterUntil]);
+
   return (
     <div className="conversation-column">
       {/* Scrollable message area */}
@@ -1164,9 +1196,23 @@ export function ConversationView({
                 <button
                   type="button"
                   className="conversation-error-row__retry"
-                  onClick={error.onRetry}
+                  onClick={retrySecondsLeft > 0 ? undefined : error.onRetry}
+                  /* #310: a rate-limited retry cannot succeed until the
+                     window closes, and the old button invited the student to
+                     find that out by clicking. Not hidden -- a control that
+                     vanishes and returns reads as a glitch.
+
+                     #310 review: `aria-disabled`, NOT the real `disabled`
+                     attribute. `disabled` drops the button out of the tab
+                     order and out of a screen reader's control listing
+                     entirely, so a student using one would find no "Try
+                     again" at all -- the exact disappearance the paragraph
+                     above rejects, just invisible to sighted review. This
+                     keeps it focusable and announced, and inert via the
+                     omitted onClick. */
+                  aria-disabled={retrySecondsLeft > 0 ? true : undefined}
                 >
-                  Try again
+                  {retrySecondsLeft > 0 ? `Try again in ${retrySecondsLeft}s` : "Try again"}
                   <span className="conversation-error-row__retry-arrow" aria-hidden="true">
                     →
                   </span>

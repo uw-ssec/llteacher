@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { Trash } from "@phosphor-icons/react";
 import { EditableTitle } from "@llteacher/ui";
 import type { ConversationListItemResponse } from "../../shared/types";
@@ -32,10 +33,13 @@ export interface ConversationListItemProps {
    *  the click visibly registers immediately) plus `aria-busy`, which is
    *  what tells assistive tech the region is mid-update rather than done. */
   isPending?: boolean;
-  onSelect: () => void;
+  /** #310: takes the id rather than closing over it, so the parent can hold
+   *  ONE stable handler for the whole list instead of minting a new closure
+   *  per row per render -- which is what made React.memo below pointless. */
+  onSelect: (id: string) => void;
   /** Persists a rename for this row's conversation. Rejects on failure --
    *  see EditableTitle's doc comment for how that's surfaced inline. */
-  onRename: (newTitle: string) => Promise<void>;
+  onRename: (id: string, newTitle: string) => Promise<void>;
   /** False hides the rename affordance entirely. Defaults to true: every
    *  conversation GET /api/conversations returns is already scoped to the
    *  caller's own rows (see routes/conversations.ts's listConversationsHandler
@@ -49,7 +53,7 @@ export interface ConversationListItemProps {
    *  pencil. The caller owns confirmation -- this only asks. Omitted
    *  renders nothing, so a non-owner surface stays read-only by default,
    *  matching `isEditable`'s reasoning. */
-  onRequestDelete?: () => void;
+  onRequestDelete?: (conversation: ConversationListItemResponse) => void;
 }
 
 /** "3:45 PM" for today, "Jan 5" otherwise -- short enough for a 240px-ish
@@ -72,7 +76,7 @@ function formatUpdatedAt(iso: string): string {
     : date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-export function ConversationListItem({
+function ConversationListItemImpl({
   conversation,
   isSelected,
   isPending = false,
@@ -120,10 +124,10 @@ export function ConversationListItem({
         <div className="tutor-conversation-item__row">
           <EditableTitle
             value={title}
-            onSave={onRename}
+            onSave={(newTitle) => onRename(id, newTitle)}
             isEditable={isEditable}
             className="tutor-conversation-item__title"
-            onActivateValue={onSelect}
+            onActivateValue={() => onSelect(id)}
             activateLabel={`Select conversation: ${title}`}
             activateDescribedBy={metaId}
             isActive={isSelected}
@@ -140,7 +144,7 @@ export function ConversationListItem({
             <button
               type="button"
               className="tutor-conversation-item__delete"
-              onClick={onRequestDelete}
+              onClick={() => onRequestDelete(conversation)}
               aria-label={`Delete conversation: ${title}`}
             >
               <Trash size={13} weight="regular" aria-hidden="true" />
@@ -164,3 +168,10 @@ export function ConversationListItem({
     </li>
   );
 }
+
+/* #310: the rail re-rendered all 50 rows on every streamed token. #277's
+   throttle cut how OFTEN that happened; this cuts what it costs when it
+   does. Memo is only worth anything because the callbacks above now take an
+   id -- with per-row closures every prop was referentially new on every
+   render and this would compare unequal every time. */
+export const ConversationListItem = memo(ConversationListItemImpl);

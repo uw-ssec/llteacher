@@ -136,7 +136,9 @@ describe("ConversationListItem", () => {
       const input = screen.getByLabelText("Edit title");
       await userEvent.clear(input);
       await userEvent.type(input, "New name{Enter}");
-      expect(onRename).toHaveBeenCalledWith("New name");
+      // #310: the id travels with the call now, so the parent can hold one
+      // stable handler for the whole list rather than a closure per row.
+      expect(onRename).toHaveBeenCalledWith(CONVERSATION.id, "New name");
     });
 
     it("does not render a rename trigger when isEditable is false, but the row is still selectable", async () => {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConversationView } from "./ConversationView";
 import type { MessageData } from "./ConversationView";
@@ -668,6 +668,99 @@ describe("ConversationView Stop control (#274)", () => {
    previously had no direct test. These pin the two properties that matter:
    the client never renders an unrecognized string as the student's message,
    and a non-retryable condition offers no retry. */
+describe("ConversationView rate-limit retry gating (#310)", () => {
+  const rateLimited = JSON.stringify({ error: "You're sending messages too quickly.", code: "rate_limited" });
+
+  it("disables Retry for the rate-limit window and says when it will work", () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <ConversationView
+          breadcrumb="b"
+          messages={[]}
+          onSendMessage={() => {}}
+          error={{ message: rateLimited, onRetry: vi.fn(), retryAfterUntil: Date.now() + 60_000 }}
+        />,
+      );
+      /* The server has always sent Retry-After on this 429 and no client
+         ever read it, so the button stayed live for the full window and
+         every click was certain to fail -- which reads as a broken control
+         rather than a rate limit. */
+      const btn = screen.getByRole("button", { name: /Try again/ }) as HTMLButtonElement;
+      expect(btn.getAttribute("aria-disabled")).toBe("true");
+      expect(btn.textContent).toContain("60s");
+      /* #310 review: focusable, deliberately. The real `disabled` attribute
+         drops the control out of the tab order and out of a screen reader's
+         listing, so a student using one would find no "Try again" at all --
+         the same disappearance the visual design rejects. */
+      expect(btn.hasAttribute("disabled")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-enables itself when the window elapses, without a reload", () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <ConversationView
+          breadcrumb="b"
+          messages={[]}
+          onSendMessage={() => {}}
+          error={{ message: rateLimited, onRetry: vi.fn(), retryAfterUntil: Date.now() + 3_000 }}
+        />,
+      );
+      expect(screen.getByRole("button", { name: /Try again/ }).getAttribute("aria-disabled")).toBe("true");
+
+      act(() => {
+        vi.advanceTimersByTime(3_100);
+      });
+
+      const btn = screen.getByRole("button", { name: /Try again/ }) as HTMLButtonElement;
+      expect(btn.getAttribute("aria-disabled")).toBeNull();
+      expect(btn.textContent).not.toMatch(/\d+s/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not fire onRetry while the window is open, even though it stays focusable", async () => {
+    vi.useFakeTimers();
+    try {
+      const onRetry = vi.fn();
+      render(
+        <ConversationView
+          breadcrumb="b"
+          messages={[]}
+          onSendMessage={() => {}}
+          error={{ message: rateLimited, onRetry, retryAfterUntil: Date.now() + 60_000 }}
+        />,
+      );
+      // aria-disabled is advisory; the handler has to actually be inert or
+      // the countdown is decoration over a still-live control.
+      fireEvent.click(screen.getByRole("button", { name: /Try again/ }));
+      expect(onRetry).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves an ordinary retryable error's button alone", () => {
+    // No Retry-After means no deadline: the countdown must not appear on
+    // every error just because the mechanism exists.
+    render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: JSON.stringify({ error: "x", code: "tutor_stopped" }), onRetry: vi.fn() }}
+      />,
+    );
+    const btn = screen.getByRole("button", { name: "Try again" }) as HTMLButtonElement;
+    expect(btn.getAttribute("aria-disabled")).toBeNull();
+  });
+});
+
 describe("readErrorMessage", () => {
   it("uses its own copy for a known code, never the server's prose", () => {
     const r = readErrorMessage(

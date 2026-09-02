@@ -372,6 +372,25 @@ function studentTextOf(message: UIMessage): string {
    ConversationView. Empty initial state — the student starts by typing.
    ========================================================================== */
 
+/** #310: the 429's `Retry-After`, as an absolute deadline.
+ *
+ *  Returns undefined for every non-429 response, which is what clears a
+ *  previous window: the next successful (or differently-failed) request is
+ *  proof the limit is no longer in force, so the countdown should not
+ *  outlive it.
+ *
+ *  The header is seconds per RFC 9110. A malformed or absent value yields
+ *  undefined rather than a guess -- a countdown to a made-up deadline is
+ *  worse than the always-live button this replaces. */
+function readRetryAfterUntil(res: Response): number | undefined {
+  if (res.status !== 429) return undefined;
+  const raw = res.headers.get("Retry-After");
+  if (!raw) return undefined;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined;
+  return Date.now() + seconds * 1000;
+}
+
 export default function App() {
   const { status: workerStatus, loading: workerLoading } = useWorkerStatus();
   const { isAuthenticated, loading: authLoading, error: authError, login, logout } = useAuth();
@@ -397,6 +416,18 @@ export default function App() {
      TurnFailureStage (packages/ui) for what each half implies. */
   const sectionSendAcceptedRef = useRef(true);
 
+  /* #310: the deadline a rate-limited retry must wait for, per surface.
+     `chat.ts` has always answered 429 with `Retry-After`, and no client ever
+     read it -- so the Retry button stayed live for the whole window and
+     every click was certain to fail, which reads as a broken control rather
+     than a rate limit.
+
+     Stored as an absolute epoch ms, not a duration: the value has to survive
+     re-renders and outlive the response that produced it, and a deadline
+     does that without anything having to tick it down. */
+  const [sectionRetryAfterUntil, setSectionRetryAfterUntil] = useState<number | undefined>(undefined);
+  const [tutorRetryAfterUntil, setTutorRetryAfterUntil] = useState<number | undefined>(undefined);
+
   /* Wraps fetch to read the x-conversation-id response header before handing
      the (untouched) Response back to useChat's own stream parsing --
      DefaultChatTransport otherwise has no way to surface response headers
@@ -415,6 +446,7 @@ export default function App() {
   const chatFetch: typeof fetch = async (input, init) => {
     const res = await fetch(input, init);
     if (res.ok) sectionSendAcceptedRef.current = true;
+    setSectionRetryAfterUntil(readRetryAfterUntil(res));
     const newConversationId = res.headers.get("x-conversation-id");
     if (newConversationId) {
       setConversationId(newConversationId);
@@ -610,6 +642,7 @@ export default function App() {
   const tutorChatFetch: typeof fetch = async (input, init) => {
     const res = await fetch(input, init);
     if (res.ok) tutorSendAcceptedRef.current = true;
+    setTutorRetryAfterUntil(readRetryAfterUntil(res));
     return res;
   };
   const {
@@ -793,7 +826,10 @@ export default function App() {
      row" case. Also stamps latestTutorSelectionRef -- every switch, sync
      or async, funnels through here, so this is the one place that needs to
      mark "this is now the latest requested switch." */
-  const selectTutorConversation = (id: string, initialMessages: UIMessage[] = []) => {
+  /* #310 review: stable, so the handlers built on it are too. Captures only
+     setters and a ref, all of which React guarantees are stable, so an empty
+     dep list is honest here rather than a lie that freezes state. */
+  const selectTutorConversation = useCallback((id: string, initialMessages: UIMessage[] = []) => {
     latestTutorSelectionRef.current = id;
     /* #398: reaching here means a conversation is now current, so nothing
        is pending any more. This is the choke point for every "a different
@@ -807,7 +843,7 @@ export default function App() {
     setPendingTutorSelectionId(undefined);
     setTutorInitialMessages(initialMessages);
     setTutorConversationId(id);
-  };
+  }, []);
 
   /* #4: TutorConversationsList's onSelectConversation -- fetches
      that conversation's persisted history (GET /api/conversations/:id/messages)
@@ -900,7 +936,12 @@ export default function App() {
   // tutorHydrationError alongside the empty seed: rendered as a retryable
   // error row (tutorChatErrorRow below) and disables the composer (see
   // isSending below) until Retry succeeds.
-  const handleSelectExistingTutorConversation = async (id: string) => {
+  /* #310 review: wrapped so the rail's memo can actually hit. This is the
+     prop every row receives, and a plain arrow in the render body is
+     referentially new on every one of App's streamed-token re-renders --
+     which made ConversationListItem's memo compare unequal every time and
+     the row-level memoisation a no-op, however stable its siblings were. */
+  const handleSelectExistingTutorConversation = useCallback(async (id: string) => {
     if (id === tutorConversationId) return;
     // #290: a repeat click on a row that is already loading is now a genuine
     // no-op. The guard above only ruled out re-selecting the ALREADY-ACTIVE
@@ -957,7 +998,12 @@ export default function App() {
          handles "my own request finished and I am still current". */
       if (latestTutorSelectionRef.current === id) setPendingTutorSelectionId(undefined);
     }
-  };
+    /* Depends on the CURRENT selection, deliberately, rather than reading it
+       from a ref: `tutorConversationId` changes once per selection, not per
+       streamed token, so the identity is stable across exactly the renders
+       the rail's memo needs it to be. An empty dep list would have frozen it
+       at undefined and broken the "already selected" guard above. */
+  }, [tutorConversationId, selectTutorConversation]);
 
   /* #280 (requirement 2, transcript half): fetch the page of messages
      BEFORE the oldest one showing and PREPEND it. Prepend, not append:
@@ -1514,6 +1560,9 @@ export default function App() {
       ? {
           message: chatError?.message || "Something went wrong. Please try again.",
           stage: sectionSendFailure ? ("send" as const) : ("response" as const),
+          // #310: gates the Retry button for the rest of the rate-limit
+          // window instead of letting the student discover it by clicking.
+          retryAfterUntil: sectionRetryAfterUntil,
           onRetry: sectionSendFailure
             ? undefined
             : () =>
@@ -1530,6 +1579,8 @@ export default function App() {
       ? {
           message: tutorChatError?.message || "Something went wrong. Please try again.",
           stage: tutorSendFailure ? ("send" as const) : ("response" as const),
+          // #310: see the section surface above.
+          retryAfterUntil: tutorRetryAfterUntil,
           onRetry: tutorSendFailure
             ? undefined
             : () =>

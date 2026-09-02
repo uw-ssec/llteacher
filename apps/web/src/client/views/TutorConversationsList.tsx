@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CaretDoubleLeft, CaretDoubleRight, Plus } from "@phosphor-icons/react";
 import { AlertDialog } from "@llteacher/ui";
 import { ConversationListItem } from "../components/ConversationListItem";
@@ -142,6 +142,25 @@ export function TutorConversationsList({
      AlertDialog's controlled dialog.close() never ran and focus dropped to
      <body> instead of returning to the delete trigger. */
   const [deleteTarget, setDeleteTarget] = useState<ConversationListItemResponse | null>(null);
+
+  /* #310: ONE handler for the whole list, not one closure per row per
+     render. These are what make the memo on ConversationListItem actually
+     hold -- the row's props are now referentially stable across a render
+     that changed nothing about that row. */
+  const handleRename = useCallback(
+    async (id: string, title: string) => {
+      await onRenameConversation(id, title);
+      setLiveMessage(`Renamed to ${title}`);
+    },
+    [onRenameConversation],
+  );
+  const handleRequestDelete = useCallback((conv: ConversationListItemResponse) => {
+    // #402: a failure recorded against a previous row must not be shown
+    // alongside this one.
+    setDeleteError(null);
+    setDeleteTarget(conv);
+    setDeleteOpen(true);
+  }, []);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -344,22 +363,9 @@ export function TutorConversationsList({
               conversation={conv}
               isSelected={conv.id === selectedConversationId}
               isPending={conv.id === pendingConversationId}
-              onSelect={() => onSelectConversation(conv.id)}
-              onRename={async (title) => {
-                await onRenameConversation(conv.id, title);
-                setLiveMessage(`Renamed to ${title}`);
-              }}
-              onRequestDelete={
-                onDeleteConversation
-                  ? () => {
-                      // #402: a failure recorded against a previous row must
-                      // not be shown alongside this one.
-                      setDeleteError(null);
-                      setDeleteTarget(conv);
-                      setDeleteOpen(true);
-                    }
-                  : undefined
-              }
+              onSelect={onSelectConversation}
+              onRename={handleRename}
+              onRequestDelete={onDeleteConversation ? handleRequestDelete : undefined}
             />
           ))}
         </ul>

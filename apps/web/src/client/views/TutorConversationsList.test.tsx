@@ -416,6 +416,26 @@ describe("TutorConversationsList load failure (#310)", () => {
   });
 });
 
+describe("TutorConversationsList row identity (#310)", () => {
+  it("passes one stable handler for the whole list, not a closure per row", async () => {
+    const onSelectConversation = vi.fn();
+    const onRenameConversation = vi.fn(async () => {});
+    renderList({
+      conversations: [CONV_A, { ...CONV_A, id: "conv-b", title: "Chat B" }],
+      onSelectConversation,
+      onRenameConversation,
+    });
+
+    /* The rail re-rendered all 50 rows on every streamed token with fresh
+       closures. Memoising the row only helps if its props are referentially
+       stable, which they cannot be while the parent mints
+       `() => onSelect(conv.id)` per row per render -- so the id travels with
+       the call instead. */
+    await userEvent.click(screen.getByRole("button", { name: "Select conversation: Chat B" }));
+    expect(onSelectConversation).toHaveBeenCalledWith("conv-b");
+  });
+});
+
 describe("TutorConversationsList selection feedback (#290)", () => {
   it("does not mark a pending row aria-current -- only the settled one is current (#389)", () => {
     renderList({

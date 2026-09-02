@@ -67,6 +67,11 @@ vi.mock("../repositories/conversations", () => ({
 const reserveRateLimitSlotMock = vi.fn();
 vi.mock("../repositories/rateLimits", () => ({
   reserveRateLimitSlot: (...args: unknown[]) => reserveRateLimitSlotMock(...args),
+  /* #310 review: the 429 handler derives Retry-After from this now, so the
+     mock has to provide it for the same reason the two constants below are
+     provided -- chat.ts imports it as a real value. Fixed so the assertions
+     can name an exact header. */
+  retryAfterSeconds: () => 42,
   // #308: RATE_LIMIT_MAX_PER_MINUTE/RATE_LIMIT_WINDOW_MS moved into this
   // module so routes/conversations.ts's createConversationHandler can share
   // them -- chat.ts imports both as real values (not just the mocked
