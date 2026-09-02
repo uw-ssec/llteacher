@@ -548,6 +548,20 @@ export interface ConversationViewProps {
   /** Forwarded straight to Composer's own `hintDisabled` -- see its doc
    *  comment. Ignored when `onRequestHint` is unset. */
   hintDisabled?: boolean;
+  /** #90: given a PERSISTED assistant message's real id, returns the
+   *  content to render in that turn's feedback slot (see Message.tsx's
+   *  own `feedbackSlot` doc comment) -- e.g. apps/web's ResponseFeedback
+   *  flag button. Only ever called for a message that already has a
+   *  `createdAt` (see renderMessageRow's own comment for why streaming/
+   *  just-completed turns are excluded), so a caller never has to guard
+   *  against being asked to render a slot for an id the server hasn't
+   *  actually persisted yet. `undefined` renders no slot at all, matching
+   *  every other optional callback prop's degrade-to-nothing convention on
+   *  this component -- correct for surfaces with nothing to say about
+   *  feedback, e.g. the instructor transcript viewer and the free-standing
+   *  tutor chat (#90 scopes flagging to homework-section conversations
+   *  only). */
+  renderAiFeedbackSlot?: (messageId: string) => React.ReactNode;
 }
 
 /* -- Component ------------------------------------------------------------- */
@@ -582,10 +596,24 @@ function renderMessageRow(
   msg: MessageData,
   onRunRCode?: (code: string) => Promise<RCodeResult>,
   onRevertToMessage?: (messageId: string) => void,
+  renderAiFeedbackSlot?: (messageId: string) => React.ReactNode,
 ) {
   if (msg.role === "ai") {
     return (
-      <Message role="ai" isStreaming={msg.isStreaming} createdAt={msg.createdAt}>
+      <Message
+        role="ai"
+        isStreaming={msg.isStreaming}
+        createdAt={msg.createdAt}
+        /* #90: only for a message that has round-tripped through the
+           persisted history (see createdAt's own doc comment on
+           AIMessageData) -- a turn still streaming or just completed has
+           no createdAt yet, and critically no confirmed REAL row id either
+           (chat.ts's onFinish mints the persisted row's id independently of
+           whatever id the stream itself used, see this task's own report),
+           so offering to flag it here would be flagging an id the server
+           may not recognize as this message once persisted. */
+        feedbackSlot={!msg.isStreaming && msg.createdAt ? renderAiFeedbackSlot?.(msg.id) : undefined}
+      >
         {msg.content}
       </Message>
     );
@@ -629,6 +657,7 @@ export function ConversationView({
   onRequestHint,
   hintDisabled = false,
   onRevertToMessage,
+  renderAiFeedbackSlot,
 }: ConversationViewProps) {
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1132,7 +1161,7 @@ export function ConversationView({
                 return label === "" ? null : label;
               })();
 
-              const row = renderMessageRow(msg, onRunRCode, onRevertToMessage);
+              const row = renderMessageRow(msg, onRunRCode, onRevertToMessage, renderAiFeedbackSlot);
               if (!boundary && !dayLabel) return <Fragment key={msg.id}>{row}</Fragment>;
               return (
                 <Fragment key={msg.id}>

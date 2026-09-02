@@ -30,6 +30,8 @@ import { TranscriptListView } from "./views/TranscriptListView";
 import type { TranscriptListData } from "./views/TranscriptListView";
 import { TranscriptDetailView } from "./views/TranscriptDetailView";
 import type { TranscriptDetailData } from "./views/TranscriptDetailView";
+import { FeedbackDashboard } from "./views/FeedbackDashboard";
+import type { FeedbackDashboardData, FeedbackListItem } from "./views/FeedbackDashboard";
 import { TaCapabilitiesView } from "./views/TaCapabilitiesView";
 import { LLMConfigsDataLoader, type ConfigScreen } from "./views/LLMConfigsDataLoader";
 import { StudentsView } from "./views/StudentsView";
@@ -105,6 +107,11 @@ type View =
         returnToGrade?: { submissionId: string; studentName: string; sectionTitle: string };
       };
     }
+  // #90: offset lives here, not local useState in the view -- same reason
+  // transcript-list's own offset does (App.tsx's View doc comment above it):
+  // navigating away (e.g. to open a transcript) and back preserves which
+  // page of flags was showing.
+  | { kind: "feedback"; offset: number }
   | { kind: "llm-configs" }
   | { kind: "create-llm-config" }
   | { kind: "edit-llm-config"; configId: string }
@@ -140,6 +147,7 @@ const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "create-homework":    "Instructor Console · New Homework",
   "edit-homework":      "Instructor Console · Edit Homework",
   "submissions":        "Instructor Console · Submissions",
+  "feedback":           "Instructor Console · Feedback",
   "transcript-list":    "Instructor Console · Transcripts",
   "transcript-detail":  "Instructor Console · Transcript",
   "llm-configs":        "Instructor Console · LLM Configs",
@@ -258,6 +266,15 @@ export default function App() {
              the student app's own documented choice in App.tsx) -- stay
              on the current view rather than navigating to a broken one. */
         });
+    } else if (key === "feedback") {
+      // #90: unlike every other simple nav target below, this view carries
+      // required state (`offset`) -- the generic `{ kind: key } as View`
+      // cast a plain nav click takes for "students"/"llm-configs"/etc.
+      // would produce a `feedback` view with no `offset` field at all,
+      // silently relying on the render branch to paper over it. Starting a
+      // fresh visit at offset 0 explicitly is what every OTHER entry into
+      // this view (a page-forward click) already does honestly.
+      setView({ kind: "feedback", offset: 0 });
     } else {
       setView({ kind: key } as View);
     }
@@ -468,6 +485,45 @@ export default function App() {
                     offset={view.offset}
                     onBack={() => setView({ kind: "transcript-list", ...view.list })}
                     onChangeOffset={(offset) => setView({ ...view, offset })}
+                  />
+                ) : (
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
+                )
+              )}
+
+              {/* #90: student-flagged tutor responses. Grader-tier like
+                  Submissions above -- no canAuthor gate, a TA reads this
+                  the same as an instructor. */}
+              {view.kind === "feedback" && (
+                CURRENT_COURSE_ID ? (
+                  <FeedbackDashboardDataLoader
+                    courseId={CURRENT_COURSE_ID}
+                    offset={view.offset}
+                    onBack={() => setView({ kind: "homeworks" })}
+                    onChangeOffset={(offset) => setView({ ...view, offset })}
+                    onOpenTranscript={(item) =>
+                      setView({
+                        kind: "transcript-detail",
+                        conversationId: item.conversationId,
+                        offset: 0,
+                        // #90: a synthetic transcript-list context, not one
+                        // the instructor actually navigated through --
+                        // "back" from the transcript lands on that
+                        // (student, section)'s conversation list rather
+                        // than literally on the feedback dashboard.
+                        // TranscriptDetailView's own `list` field has no
+                        // "came from feedback" case to return to (it always
+                        // means transcript-list, per #29), and adding one
+                        // is more than this pilot-scale review surface
+                        // needs -- see this task's own report.
+                        list: {
+                          homeworkId: item.homeworkId,
+                          sectionId: item.sectionId,
+                          studentId: item.studentId,
+                          offset: 0,
+                        },
+                      })
+                    }
                   />
                 ) : (
                   <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
@@ -777,6 +833,53 @@ function TranscriptListDataLoader({
       onOpenTranscript={onOpenTranscript}
       onChangeOffset={onChangeOffset}
     />
+  );
+}
+
+/** #90: the instructor's course-wide flagged-response review. Same
+ *  loader/view split as every other admin{View,DataLoader} pair. */
+function FeedbackDashboardDataLoader({
+  courseId,
+  offset,
+  onBack,
+  onChangeOffset,
+  onOpenTranscript,
+}: {
+  courseId: string;
+  offset: number;
+  onBack: () => void;
+  onChangeOffset: (offset: number) => void;
+  onOpenTranscript: (item: FeedbackListItem) => void;
+}) {
+  const [data, setData] = useState<FeedbackDashboardData | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    setData(null);
+    setLoadError(false);
+    const params = new URLSearchParams({ offset: String(offset) });
+    fetch(`/api/courses/${courseId}/instructor/feedback?${params}`)
+      .then((r) => {
+        if (!r.ok) throw new Error("failed");
+        return r.json();
+      })
+      .then(setData)
+      .catch(() => setLoadError(true));
+  }, [courseId, offset, attempt]);
+  if (loadError)
+    return (
+      <AdminNotice
+        eyebrow="Could not load"
+        title="Feedback didn't load"
+        body="This course's flagged responses couldn't be fetched. Nothing has been altered — the records are intact on the server."
+        detail={`GET /api/courses/${courseId}/instructor/feedback`}
+        onRetry={() => setAttempt((n) => n + 1)}
+        secondaryAction={{ label: "Back to homeworks", onClick: onBack }}
+      />
+    );
+  if (!data) return null;
+  return (
+    <FeedbackDashboard data={data} onBack={onBack} onOpenTranscript={onOpenTranscript} onChangeOffset={onChangeOffset} />
   );
 }
 

@@ -1,5 +1,7 @@
 import type { CourseRole } from "../server/middleware/roles";
-import type { ConversationKind } from "../db/schema";
+import type { ConversationKind, FeedbackReason } from "../db/schema";
+
+export type { FeedbackReason };
 
 export type HelloResponse = {
   message: string;
@@ -211,6 +213,50 @@ export interface ConversationMessageResponse {
    *  routes always sent it; the history route dropped it, so the transcript
    *  could not show a per-turn time. */
   createdAt: string;
+}
+
+/* #90: student feedback flags on AI tutor responses. */
+
+export interface FlagResponseBody {
+  reason: FeedbackReason;
+  comment?: string;
+}
+
+export interface FlagResponseResult {
+  id: string;
+  reason: FeedbackReason;
+  comment: string | null;
+  flaggedAt: string;
+}
+
+export interface CourseFeedbackListItemResponse {
+  id: string;
+  conversationId: string;
+  /** Null once the underlying message row has been cleared (ON DELETE SET
+   *  NULL, db/schema/runtime.ts) -- responseSnapshot below is what an
+   *  instructor still reads in that case, not a join back to `messages`. */
+  messageId: string | null;
+  studentId: string;
+  studentName: string;
+  reason: FeedbackReason;
+  comment: string | null;
+  /** The flagged message's `parts` exactly as they stood at flag time --
+   *  same shape as ConversationMessageResponse.parts (unknown; cast to the
+   *  AI SDK's UIMessage['parts'] at the render boundary the same way that
+   *  field already is). */
+  responseSnapshot: unknown;
+  sectionId: string;
+  sectionTitle: string;
+  homeworkId: string;
+  homeworkTitle: string;
+  flaggedAt: string;
+}
+
+export interface CourseFeedbackListResponse {
+  items: CourseFeedbackListItemResponse[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 export interface SectionResponse {

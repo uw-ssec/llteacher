@@ -69,6 +69,24 @@ export const submissionSourceEnum = pgEnum("submission_source", [
  *  a literal union somewhere else silently stale. */
 export type SubmissionSource = (typeof submissionSourceEnum.enumValues)[number];
 
+// #90: a student's reason for flagging one assistant response. The issue's
+// own four buckets ("incorrect / gave away answer / confusing / other" +
+// optional free text) -- a native enum, matching this schema's existing
+// convention for a closed, small, product-meaningful category (compare
+// materialSourceEnum, hintActionEnum) rather than a free-text column that
+// would let the dashboard's reason breakdown drift into an unbounded set of
+// near-duplicate strings.
+export const feedbackReasonEnum = pgEnum("feedback_reason", [
+  "incorrect",
+  "gave_away_answer",
+  "confusing",
+  "other",
+]);
+
+/** App-code union derived from the enum, same #308 rule as ConversationKind/
+ *  SubmissionSource above. */
+export type FeedbackReason = (typeof feedbackReasonEnum.enumValues)[number];
+
 // ---------- Conversation ----------
 // "section" conversations are a student working a specific homework Section;
 // "tutor" conversations are the free-standing course-wide tutor (no section).
@@ -403,6 +421,80 @@ export const hintEvents = pgTable(
   ],
 );
 
+// ---------- ResponseFeedback ----------
+// #90: a student's flag on one assistant response ("wrong answer", "gave
+// away the solution", "confusing", "other" + optional free text) -- a
+// pilot-scale feedback instrument, not a moderation system (the issue's own
+// "keep it small" framing).
+//
+// Addressed by (conversationId, messageId) -- the REAL row this schema
+// already uses to identify a message (messages.id, alongside its own
+// monotonic `seq`), not the issue's own illustrative "opaque AI-message-id"
+// shape. conversationId is carried directly on this row (not reached only
+// via messages.conversationId) because it is this table's own course-scoping
+// path: every read here goes responseFeedback -> conversations.courseId,
+// the same CourseScope every other conversation-adjacent table in this
+// schema is queried through (conversations itself carries no
+// organization_id, by design -- see that table's own doc comment above).
+// Keeping conversationId here directly also means a feedback query never
+// needs `messages` as a mandatory join, which matters once messageId can be
+// null (see below).
+//
+// messageId is nullable, ON DELETE SET NULL -- the same choice llm_call_logs
+// makes for the identical shape (a per-message row that must be able to
+// outlive the message it is about). responseSnapshot below is what makes a
+// flag legible with no live message at all ("instructors must see the exact
+// text even if [the message is] later edited/deleted", per the issue), so
+// losing the FK on a message deletion drops a cross-reference, not the
+// record. studentId is CASCADE: deleting the student is expected to take
+// their flags with it, matching this table's own "no PII beyond the user FK"
+// requirement -- there is no content-preservation reason to keep a flag
+// whose only human-identifying fact just vanished. conversationId is also
+// CASCADE, so the same account-deletion sweep that removes a user's
+// conversations removes the flags they wrote or received in one pass.
+export const responseFeedback = pgTable(
+  "response_feedback",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id").references(() => messages.id, {
+      onDelete: "set null",
+    }),
+    studentId: uuid("student_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    reason: feedbackReasonEnum("reason").notNull(),
+    comment: text("comment"),
+    // The assistant message's `parts` (same jsonb shape as messages.parts)
+    // exactly as they stood at flag time -- instructors read the flagged
+    // text from here, never by joining back to messages, so a later
+    // deletion (or, if this schema ever grows one, an edit) of the message
+    // can't change what a flag is reported as being about.
+    responseSnapshot: jsonb("response_snapshot").notNull(),
+    flaggedAt: timestamp("flagged_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("response_feedback_conversation_idx").on(t.conversationId),
+    index("response_feedback_student_idx").on(t.studentId),
+    index("response_feedback_message_idx").on(t.messageId),
+    // One flag per (message, student) enforced at the DB level, not just an
+    // application check -- a race between two requests from the same
+    // student for the same message must not double-insert (the issue's own
+    // explicit requirement). Postgres unique indexes never treat two NULLs
+    // as a conflict, so this constraint is only load-bearing while the
+    // message row (and therefore this FK) is live, which is exactly when
+    // re-flagging needs to be prevented; a flag whose message has since
+    // been cleared to NULL can never collide with anything, including
+    // itself re-inserted, but by that point there is no live message left
+    // to flag a second time anyway.
+    uniqueIndex("response_feedback_message_student_uq").on(t.messageId, t.studentId),
+  ],
+);
+
 // ---------- Relations ----------
 
 export const conversationsRelations = relations(
@@ -447,6 +539,21 @@ export const hintEventsRelations = relations(hintEvents, ({ one }) => ({
   organization: one(organizations, {
     fields: [hintEvents.organizationId],
     references: [organizations.id],
+  }),
+}));
+
+export const responseFeedbackRelations = relations(responseFeedback, ({ one }) => ({
+  conversation: one(conversations, {
+    fields: [responseFeedback.conversationId],
+    references: [conversations.id],
+  }),
+  message: one(messages, {
+    fields: [responseFeedback.messageId],
+    references: [messages.id],
+  }),
+  student: one(users, {
+    fields: [responseFeedback.studentId],
+    references: [users.id],
   }),
 }));
 

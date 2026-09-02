@@ -36,6 +36,7 @@ import {
   listInstructorTranscriptsHandler,
   getInstructorTranscriptHandler,
 } from "./routes/instructor/transcripts";
+import { flagResponseHandler, listCourseFeedbackHandler } from "./routes/feedback";
 import { submitWidgetResponseHandler } from "./routes/progressWidgets";
 import {
   addCourseTasHandler,
@@ -198,6 +199,16 @@ app.get("/api/conversations/:id/messages", listConversationMessagesHandler);
 app.patch("/api/conversations/:id", updateConversationHandler);
 app.delete("/api/conversations/:id", deleteConversationHandler);
 app.post("/api/conversations/:id/submit", requireRole(["student"])(submitSectionHandler));
+// #90: student feedback flags on AI tutor responses. No courseId in the
+// URL and no guard wrapper -- same shape as PATCH/DELETE
+// /api/conversations/:id directly above, whose exact ownership primitive
+// (getOwnedConversationOrNull) this handler reuses rather than forking a
+// second one. Enrollment (must be a student, not a teacher-testing
+// instructor/TA) and message ownership are enforced inside the handler.
+app.post(
+  "/api/conversations/:conversationId/messages/:messageId/feedback",
+  flagResponseHandler,
+);
 // #172: grading reads, not authoring -- requireGraderOf admits `ta`
 // alongside instructor/admin. Every content-mutating route above stays on
 // requireInstructorOf.
@@ -250,6 +261,16 @@ app.get(
 app.get(
   "/api/courses/:courseId/instructor/transcripts/:conversationId",
   requireGraderOf("gates-unreleased")(getInstructorTranscriptHandler),
+);
+// #90: instructor review of a course's flagged responses. Same grader tier
+// and the same "gates-unreleased" posture as the transcript list directly
+// above -- a flag's section/homework titles are unreleased content under
+// the identical rule (#208/#366), and listCourseFeedbackHandler consults
+// canViewDraftsIn itself before returning a row whose homework is
+// currently unreleased.
+app.get(
+  "/api/courses/:courseId/instructor/feedback",
+  requireGraderOf("gates-unreleased")(listCourseFeedbackHandler),
 );
 app.patch("/api/sections/:sectionId/answer", requireRole(["student"])(submitSectionAnswerHandler));
 app.get(

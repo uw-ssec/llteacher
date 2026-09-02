@@ -7,6 +7,7 @@ import type { SidebarSection, MessageData, RCodeResult } from "@llteacher/ui";
 import { useRExecution } from "./hooks/useRExecution";
 import { useAuth } from "./components/AuthProvider";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
+import { ResponseFeedback } from "./components/ResponseFeedback";
 import { TutorConversationsList } from "./views/TutorConversationsList";
 import { useTutorConversations } from "./hooks/useTutorConversations";
 import type { ConversationMessageResponse, StudentHomeworkListResponse, HintCountResponse } from "../shared/types";
@@ -2443,6 +2444,18 @@ export default function App() {
               loadOlderMessagesError={sectionOlderMessagesError}
               contextWindowSize={MAX_HISTORY_MESSAGES}
               onStop={handleStopSectionChat}
+              /* #90: only the homework-section chat gets a flag affordance
+                 -- the free-standing tutor ConversationView above never
+                 passes this prop, matching #90's own scope decision
+                 (flagging is only meaningful with a section/homework to
+                 attach it to; see routes/feedback.ts's own kind !== "section"
+                 rejection). Only rendered once there's a real conversation
+                 to flag a message within. */
+              renderAiFeedbackSlot={
+                conversationId
+                  ? (messageId) => <ResponseFeedback conversationId={conversationId} messageId={messageId} />
+                  : undefined
+              }
               /* #248: only once there's an active conversation to restart --
                  a section the student hasn't started yet has nothing for
                  the affordance to act on. */
