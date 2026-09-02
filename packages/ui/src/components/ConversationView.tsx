@@ -402,12 +402,27 @@ export interface ConversationViewProps {
    *  `Retry-After` header value on a 429 -- when present, the Retry
    *  button below is disabled and counts down instead of being live
    *  immediately for a request the server has already said will fail for
-   *  the next N seconds. Undefined for every other failure. */
+   *  the next N seconds. Undefined for every other failure.
+   *
+   *  #286 (review fix): `retryAttemptId` identifies WHICH failed attempt
+   *  this is, for restarting that countdown. It cannot be derived from
+   *  `message`/`retryAfterSeconds` alone -- chat.ts's rate-limit response
+   *  is two fully static constants (RATE_LIMIT_WINDOW_MS and a fixed
+   *  string), so a second, later rate-limit failure after a first
+   *  cooldown expired is BYTE-IDENTICAL to the first, and content-keying
+   *  would fail to restart the countdown on exactly the realistic
+   *  repeat-offense case. The caller is expected to pass a value that
+   *  changes every time the underlying error object identity changes (a
+   *  genuinely new failure) and stays fixed across every other re-render
+   *  (the same still-active failure being recomputed for an unrelated
+   *  reason) -- see App.tsx's own tutorChatErrorAttemptRef/
+   *  sectionChatErrorAttemptRef for how that's derived. */
   error?: {
     message: string;
     onRetry?: () => void;
     stage?: TurnFailureStage;
     retryAfterSeconds?: number;
+    retryAttemptId?: number;
   } | null;
   /** #96 (send-failure UX): text to put back into the composer after a send
    *  that never reached the server, so the student's words survive a dropped
@@ -863,31 +878,41 @@ export function ConversationView({
   /* #286 (requirement 5): disables the Retry button for `retryAfterSeconds`
      (the 429's own `Retry-After` header) instead of leaving it live for a
      request the server has already said will fail for the next N
-     seconds. Keyed off the error's own content (message + seconds), not
-     object identity -- the caller (App.tsx) recomputes this `error` prop
-     on every render, including ones that have nothing to do with a new
-     failure (e.g. the student typing in an unrelated field), so an
-     identity-keyed effect would restart the countdown from the top on
-     every keystroke. A genuinely NEW rate-limit error (a retry that
-     failed again) changes at least one of message/seconds and correctly
-     restarts it; the same still-active error re-rendering does not. */
+     seconds.
+
+     #286 (review fix): keyed off `error.retryAttemptId`, NOT the error's
+     own content (message + seconds) -- chat.ts's rate-limit response is
+     two fully static constants, so a second rate-limit failure after the
+     first cooldown expired is byte-identical to the first, and a
+     content-based key could never tell them apart (the countdown would
+     stay expired-and-live forever after the first occurrence, exactly
+     the realistic repeat-offense case this exists for). `retryAttemptId`
+     is still NOT object identity of the `error` prop itself -- the
+     caller (App.tsx) recomputes that wrapper object on every render,
+     including ones that have nothing to do with a new failure (e.g. the
+     student typing in an unrelated field) -- it's a value App.tsx
+     derives to change only when the underlying error ACTUALLY changes
+     (see tutorChatErrorAttemptRef/sectionChatErrorAttemptRef there). */
   const [cooldownRemainingSec, setCooldownRemainingSec] = useState(0);
-  const cooldownKeyRef = useRef<string | null>(null);
+  /* Wrapped in an object (rather than the bare id) so "no cooldown seen
+     yet" (`null`) is distinguishable from "a cooldown whose
+     `retryAttemptId` happens to be `undefined`" (a caller that didn't
+     provide one) -- comparing the bare id against its own initial value
+     would otherwise treat two different undefined-id cooldowns as the
+     same attempt and never start the very first one. */
+  const cooldownAttemptRef = useRef<{ id: number | undefined } | null>(null);
   useEffect(() => {
-    const key =
-      error?.retryAfterSeconds && error.retryAfterSeconds > 0
-        ? `${error.message}::${error.retryAfterSeconds}`
-        : null;
-    if (key) {
-      if (key !== cooldownKeyRef.current) {
-        cooldownKeyRef.current = key;
+    const hasCooldown = Boolean(error?.retryAfterSeconds && error.retryAfterSeconds > 0);
+    if (hasCooldown) {
+      if (!cooldownAttemptRef.current || cooldownAttemptRef.current.id !== error!.retryAttemptId) {
+        cooldownAttemptRef.current = { id: error!.retryAttemptId };
         setCooldownRemainingSec(error!.retryAfterSeconds!);
       }
-    } else if (cooldownKeyRef.current !== null) {
-      cooldownKeyRef.current = null;
+    } else if (cooldownAttemptRef.current) {
+      cooldownAttemptRef.current = null;
       setCooldownRemainingSec(0);
     }
-  }, [error?.message, error?.retryAfterSeconds]);
+  }, [error?.retryAfterSeconds, error?.retryAttemptId]);
   useEffect(() => {
     if (cooldownRemainingSec <= 0) return;
     const interval = setInterval(() => {

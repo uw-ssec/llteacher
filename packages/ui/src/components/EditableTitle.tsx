@@ -171,6 +171,12 @@ export function EditableTitle({
     if (!isSubmitting && isEditing && localError) {
       inputRef.current?.focus();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately
+    // keyed on isSubmitting's own true->false transition only; isEditing
+    // and localError are read for their value at that moment, not watched
+    // for their own changes (see the comment above for why including them
+    // would be wrong: entering edit mode or a client-validation error
+    // must not re-trigger this).
   }, [isSubmitting]);
 
   if (!isEditable) {

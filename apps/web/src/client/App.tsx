@@ -75,6 +75,118 @@ async function toChatResponseError(res: Response): Promise<ChatResponseError> {
   );
 }
 
+/** #292 (review fix, replacing the original `useChat`-status-based
+ *  approach): reads a TEE'D copy of a tutor turn's own SSE response
+ *  stream to completion and bumps the rail's message count off THAT,
+ *  entirely independent of whichever `useChat` instance the component
+ *  happens to have mounted by the time this resolves.
+ *
+ *  Why the original status-based version was wrong: `@ai-sdk/react`'s
+ *  `useChat` recreates a brand-new `Chat` instance whenever `id` changes
+ *  (`shouldRecreateChat` in its own use-chat.ts), and a freshly
+ *  constructed instance's status defaults to "ready" -- it was never
+ *  submitted or streaming. So switching away from conversation A
+ *  mid-stream (selecting row B) swaps `tutorConversationId`, which
+ *  recreates the Chat instance, which reports "ready" on its very next
+ *  render -- a transition that LOOKS identical, from the
+ *  wasInFlight-then-"ready" effect's point of view, to A's turn actually
+ *  completing. It hadn't: nothing aborts or forwards A's real completion
+ *  once the component stops subscribing to it (confirmed against
+ *  @ai-sdk/react's own subscribeToMessages, keyed on `chatRef.current.id`
+ *  -- once `id` changes, A's own eventual status changes are never
+ *  observed by this component again). Every mid-stream conversation
+ *  switch was therefore credited as an immediate, full +2 for whichever
+ *  conversation was being switched AWAY FROM -- the literal scenario
+ *  #292 reports, still present after the first version of this fix (which
+ *  only corrected WHICH conversation gets credited, not WHEN).
+ *
+ *  Tying the bump to the response stream itself sidesteps the entire
+ *  useChat-instance lifecycle: `tutorChatFetch` tees `res.body` before
+ *  handing one half to the SDK, and this function reads the OTHER half on
+ *  its own, to completion, regardless of what's mounted or selected by
+ *  the time it gets there.
+ *
+ *  Classification is deliberately conservative rather than an exact
+ *  replica of chat.ts's own persistence gate (hasRenderableContent +
+ *  TERMINAL_FINISH_REASONS, apps/web/src/server/routes/chat.ts's
+ *  `onFinish`): a `finish` chunk with no `error` chunk means the model
+ *  produced and completed a real turn -- the overwhelming common case,
+ *  matching what that allowlist exists to recognize -- credited as 2 rows
+ *  (the student's message, then the reply). Anything else (an `error`
+ *  chunk, the stream ending without ever seeing `finish`, or the read
+ *  itself throwing -- a dropped connection or an aborted Stop) is
+ *  credited as 1: this function only ever runs after `res.ok`, so the
+ *  student's own message row was already persisted before the stream
+ *  even started (chatHandler's appendMessage runs before it opens the
+ *  stream) -- only the reply is in question.
+ *
+ *  Known gap, left deliberately rather than papered over: a finish reason
+ *  chat.ts treats as NOT persist-worthy (e.g. "content-filter") still
+ *  reaches the client as an ordinary `finish` chunk in today's protocol,
+ *  which this would credit as 2 when the server actually wrote 1.
+ *  Closing that precisely needs the server to say authoritatively what it
+ *  persisted -- the issue's own alternative ("have /api/chat return the
+ *  authoritative count") -- which is server-side surgery out of scope for
+ *  this batched client-side-defects task. That finish reason is rare
+ *  (a content-filter trip), and reload always shows the true count
+ *  regardless, matching the issue's own "a reload silently corrects
+ *  both" framing of the ORIGINAL bug -- so this is a narrower, rarer
+ *  residual than the bug being fixed, not a reintroduction of it. */
+function trackTutorTurnCompletion(
+  conversationId: string,
+  stream: ReadableStream<Uint8Array>,
+  bumpRef: { current: (id: string, delta: number) => void },
+): void {
+  void (async () => {
+    let sawFinish = false;
+    let sawError = false;
+    try {
+      // Decoded manually (not via `pipeThrough(new TextDecoderStream())`)
+      // -- lib.dom's TextDecoderStream is typed as a
+      // ReadableWritablePair<string, BufferSource>, and BufferSource is
+      // wider than the Uint8Array `pipeThrough` on a
+      // ReadableStream<Uint8Array> requires, so TS refuses the pipe even
+      // though it's correct at runtime. `{ stream: true }` keeps a
+      // multi-byte UTF-8 character that lands across two chunks from
+      // being decoded (and silently corrupted) before its second half
+      // arrives.
+      const decoder = new TextDecoder();
+      const reader = stream.getReader();
+      let buffer = "";
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            const payload = line.slice("data: ".length);
+            if (payload === "[DONE]") continue;
+            try {
+              const chunk = JSON.parse(payload) as { type?: unknown };
+              if (chunk.type === "finish") sawFinish = true;
+              if (chunk.type === "error") sawError = true;
+            } catch {
+              /* an unparseable line changes neither flag -- the
+                 conservative "no finish observed" classification below
+                 already covers it */
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    } catch {
+      /* the stream itself errored or was aborted (a dropped connection, a
+         client-initiated Stop) -- sawFinish stays false, which is exactly
+         the right classification: no confirmed completion. */
+    }
+    bumpRef.current(conversationId, sawFinish && !sawError ? 2 : 1);
+  })();
+}
+
 /* -- Worker status ping ---------------------------------------------------- */
 
 type HelloResponse = { message: string; ping_id: string };
@@ -679,18 +791,13 @@ export default function App() {
      here -- tutorChatFetch below does only the half that IS shared (#96's
      send-accepted classification). */
   const tutorSendAcceptedRef = useRef(true);
-  /** #292: which conversation the CURRENTLY in-flight tutor turn belongs
-   *  to -- set at the moment a send/regenerate is dispatched (see
-   *  handleSendTutorMessage and the error row's onRetry below), not read
-   *  from `tutorConversationId` at the moment the status transition is
-   *  observed. Reading the live `tutorConversationId` there was #292's
-   *  mis-credit bug: this `useChat` instance is keyed by `id:
-   *  tutorConversationId`, so switching conversations mid-stream swaps
-   *  `id` and recreates the Chat instance with a fresh "ready" status --
-   *  the effect below re-runs with BOTH deps changed and would credit
-   *  whichever conversation happens to be selected when that recreation
-   *  is observed, not the one that actually streamed the turn. */
-  const tutorBumpTargetIdRef = useRef<string | undefined>(undefined);
+  /** #292 (review fix): holds the CURRENT bumpTutorConversation so
+   *  tutorChatFetch/trackTutorTurnCompletion below -- both defined before
+   *  useTutorConversations runs later in this function -- can call it once
+   *  a turn's stream actually finishes, at whatever later, asynchronous
+   *  point that happens to be. Kept current every render (see the
+   *  assignment right after useTutorConversations' destructure below). */
+  const bumpTutorConversationRef = useRef<(id: string, delta: number) => void>(() => {});
   const tutorChatFetch: typeof fetch = async (input, init) => {
     const res = await fetch(input, init);
     if (!res.ok) {
@@ -699,6 +806,30 @@ export default function App() {
       throw await toChatResponseError(res);
     }
     tutorSendAcceptedRef.current = true;
+    // #292 (review fix): tee the response body and track ITS completion
+    // independently of whatever `useChat` instance is mounted by the time
+    // this turn actually finishes -- see trackTutorTurnCompletion's own
+    // doc comment for the full reasoning (switching conversations
+    // mid-stream replaces the Chat instance keyed on `id`, and a freshly
+    // created instance reports "ready" immediately, which the ORIGINAL
+    // version of this fix mistook for genuine completion). The
+    // conversationId comes from the request body this exact fetch call is
+    // making, not from component state, so it's correct even if the
+    // student has switched away by the time this resolves.
+    if (res.body) {
+      let requestConversationId: string | undefined;
+      try {
+        const parsedBody = JSON.parse(String(init?.body)) as { conversationId?: unknown };
+        if (typeof parsedBody.conversationId === "string") requestConversationId = parsedBody.conversationId;
+      } catch {
+        /* no parseable body -- nothing to track this turn against */
+      }
+      if (requestConversationId) {
+        const [forSdk, forBump] = res.body.tee();
+        trackTutorTurnCompletion(requestConversationId, forBump, bumpTutorConversationRef);
+        return new Response(forSdk, { status: res.status, statusText: res.statusText, headers: res.headers });
+      }
+    }
     return res;
   };
   const {
@@ -863,6 +994,16 @@ export default function App() {
     renameConversation: renameTutorConversationRow,
     bumpConversation: bumpTutorConversation,
   } = useTutorConversations(courseId);
+
+  // #292: tutorChatFetch (defined earlier in this component, above the
+  // useChat call it wraps) needs to call the CURRENT bumpTutorConversation
+  // -- but that only exists once useTutorConversations has run, later in
+  // this function body. Assigned here, on every render, so an async
+  // callback firing later always reads whichever bumpTutorConversation is
+  // current at that moment (its identity is itself useCallback-stable
+  // across unrelated re-renders, so this isn't masking staleness the way
+  // it would for a value that actually changes often).
+  bumpTutorConversationRef.current = bumpTutorConversation;
 
   const tutorConversationTitle = tutorConversations.find((c) => c.id === tutorConversationId)?.title;
 
@@ -1570,6 +1711,38 @@ export default function App() {
   // Enter is the retry. A response-half failure keeps the existing
   // regenerate, which re-sends the same clientMessageId and is therefore
   // deduped server-side rather than double-writing the question.
+  /* #286 (review fix): a stable id per DISTINCT chatError/tutorChatError
+     object, threaded into the error row below as `retryAttemptId` so
+     ConversationView's Retry-After cooldown can tell "a genuinely new
+     failure" apart from "the same still-active failure being recomputed
+     on an unrelated re-render" -- content alone can't do this: chat.ts's
+     rate-limit response is two fully static constants
+     (RATE_LIMIT_WINDOW_MS and a fixed string), so a SECOND 429 is
+     byte-identical to the first, and a content-keyed cooldown could never
+     restart on exactly the realistic repeat-offense case.
+
+     Derived directly during render (not in an effect, so it's already
+     current by the time the error row below reads it) by comparing
+     against the previous render's error reference: `useChat`'s error
+     value is stable across renders that don't represent an actual
+     change -- this file already relies on that same stability for
+     `chatStatus`/`aiMessages` elsewhere -- so this only increments when
+     the SDK (or our own ChatResponseError-throwing fetch wrapper)
+     genuinely produced a new Error instance, never merely because the
+     component re-rendered. */
+  const sectionChatErrorAttemptRef = useRef(0);
+  const lastSectionChatErrorRef = useRef<unknown>(undefined);
+  if (chatError !== lastSectionChatErrorRef.current) {
+    lastSectionChatErrorRef.current = chatError;
+    sectionChatErrorAttemptRef.current += 1;
+  }
+  const tutorChatErrorAttemptRef = useRef(0);
+  const lastTutorChatErrorRef = useRef<unknown>(undefined);
+  if (tutorChatError !== lastTutorChatErrorRef.current) {
+    lastTutorChatErrorRef.current = tutorChatError;
+    tutorChatErrorAttemptRef.current += 1;
+  }
+
   const sectionChatErrorRow =
     sectionHydrationError ??
     (chatStatus === "error"
@@ -1579,9 +1752,17 @@ export default function App() {
           // #286: only ChatResponseError (a non-2xx /api/chat response --
           // see its own doc comment) ever carries this; an in-stream
           // failure (2xx, then an `error` chunk) or a dropped connection
-          // never does, and neither has a cooldown to enforce.
+          // never does, and neither has a cooldown to enforce. The
+          // `status === 429` check (not just "does it have a
+          // retryAfterSeconds") is the one place `.status` itself is
+          // read -- defensive against a future response that somehow
+          // carries a Retry-After header on a status this cooldown UI has
+          // no business treating as rate-limited.
           retryAfterSeconds:
-            chatError instanceof ChatResponseError ? chatError.retryAfterSeconds : undefined,
+            chatError instanceof ChatResponseError && chatError.status === 429
+              ? chatError.retryAfterSeconds
+              : undefined,
+          retryAttemptId: sectionChatErrorAttemptRef.current,
           onRetry: sectionSendFailure
             ? undefined
             : () =>
@@ -1598,72 +1779,31 @@ export default function App() {
       ? {
           message: tutorChatError?.message || "Something went wrong. Please try again.",
           stage: tutorSendFailure ? ("send" as const) : ("response" as const),
+          // #286: see sectionChatErrorRow's own comment above.
           retryAfterSeconds:
-            tutorChatError instanceof ChatResponseError ? tutorChatError.retryAfterSeconds : undefined,
+            tutorChatError instanceof ChatResponseError && tutorChatError.status === 429
+              ? tutorChatError.retryAfterSeconds
+              : undefined,
+          retryAttemptId: tutorChatErrorAttemptRef.current,
           onRetry: tutorSendFailure
             ? undefined
-            : () => {
-                // #292: a regenerate re-starts an in-flight turn for
-                // WHATEVER conversation is selected right now -- same
-                // "capture at dispatch time" reasoning as
-                // handleSendTutorMessage below.
-                tutorBumpTargetIdRef.current = tutorConversationId;
-                regenerateTutorChat({ body: tutorConversationId ? { conversationId: tutorConversationId } : {} });
-              },
+            : () =>
+                regenerateTutorChat({ body: tutorConversationId ? { conversationId: tutorConversationId } : {} }),
         }
       : null);
 
-  /* #216, #292: bumps the rail row's messageCount/updatedAt (and re-sorts
-     it to the top) the moment a tutor turn settles -- /api/chat writes
-     bypass useTutorConversations entirely, so without this the rail kept
-     showing a conversation's original creation timestamp and a stuck
-     messageCount for the entire session. Fires on the
-     submitted/streaming -> ready|error transition specifically (not on
-     every render where status happens to already be one of those), via a
-     ref tracking the previous status.
-
-     #292: credits `tutorBumpTargetIdRef.current` -- the conversation that
-     was ACTUALLY streaming when this turn was dispatched (set by
-     handleSendTutorMessage/the error row's onRetry below) -- never the
-     live `tutorConversationId`. This `useChat` instance is keyed by `id:
-     tutorConversationId`, so switching conversations mid-stream swaps
-     `id`, recreating the Chat instance with a fresh "ready" status; the
-     old code read `tutorConversationId` at the moment that recreation was
-     observed and credited whichever conversation happened to be selected
-     then, not the one the turn actually belonged to.
-
-     #292: the delta matches what chat.ts actually persists for this
-     outcome (repositories/conversations.ts counts message ROWS, not
-     turns):
-       - "ready" (the turn completed): TWO rows -- chatHandler's
-         appendMessage for the student's message, then
-         onFinish -> finalizeAssistantTurn for the reply.
-       - "error" AND the send was accepted (tutorSendAcceptedRef true, a
-         response-half failure -- the model died mid-stream or produced no
-         renderable content): ONE row -- only the student's message was
-         ever persisted; chat.ts's shouldPersist gate means no assistant
-         row was written for it.
-       - "error" and the send was NOT accepted (a send-half failure --
-         non-2xx or the request never reached the server at all): ZERO
-         rows. bumpConversation(id, 0) is a no-op (see its own doc
-         comment), so this branch could omit the call entirely, but making
-         it explicit here keeps all three outcomes visibly accounted for
-         in one place rather than one of them being "whatever falls
-         through". */
-  const prevTutorChatStatusRef = useRef(tutorChatStatus);
-  useEffect(() => {
-    const previousStatus = prevTutorChatStatusRef.current;
-    prevTutorChatStatusRef.current = tutorChatStatus;
-    const wasInFlight = previousStatus === "submitted" || previousStatus === "streaming";
-    if (!wasInFlight) return;
-    const targetId = tutorBumpTargetIdRef.current;
-    if (!targetId) return;
-    if (tutorChatStatus === "ready") {
-      bumpTutorConversation(targetId, 2);
-    } else if (tutorChatStatus === "error") {
-      bumpTutorConversation(targetId, tutorSendAcceptedRef.current ? 1 : 0);
-    }
-  }, [tutorChatStatus, bumpTutorConversation]);
+  /* #216, #292: the rail row's messageCount/updatedAt bump used to live
+     here, as an effect watching `tutorChatStatus`'s submitted/streaming ->
+     ready|error transition. That was #292's mis-credit bug: switching
+     conversations mid-stream recreates the `useChat` instance (keyed on
+     `id: tutorConversationId`), and a freshly created instance reports
+     "ready" immediately -- indistinguishable, from this effect's point of
+     view, from the PREVIOUS conversation's turn actually completing. The
+     bump now happens inside tutorChatFetch/trackTutorTurnCompletion
+     (both defined above, near tutorSendAcceptedRef) instead, tied to the
+     turn's own response stream reaching completion -- see
+     trackTutorTurnCompletion's own doc comment for the full trace of why
+     the status-based version was wrong and what replaces it. */
 
   const handleSendMessage = (text: string, options?: { isHintRequest?: boolean }) => {
     /* #144: AI SDK v5's Chat#sendMessage has no internal guard against
@@ -1752,9 +1892,6 @@ export default function App() {
     if (tutorChatStatus === "submitted" || tutorChatStatus === "streaming") return;
     // #96: see handleSendMessage above.
     tutorSendAcceptedRef.current = false;
-    // #292: captured NOW, at dispatch, not read later off `tutorConversationId`
-    // when the turn settles -- see tutorBumpTargetIdRef's own doc comment.
-    tutorBumpTargetIdRef.current = tutorConversationId;
     setTutorSendFailure(null);
     // #304: courseId is now sent on every tutor turn, not only when minting
     // a new conversation -- chatHandler's conversationId branch doesn't

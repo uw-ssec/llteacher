@@ -135,7 +135,7 @@ describe("ConversationView Retry-After cooldown (#286)", () => {
         breadcrumb="b"
         messages={[]}
         onSendMessage={() => {}}
-        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3 }}
+        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3, retryAttemptId: 1 }}
       />,
     );
 
@@ -172,14 +172,14 @@ describe("ConversationView Retry-After cooldown (#286)", () => {
     expect(button.disabled).toBe(false);
   });
 
-  it("restarts the countdown for a genuinely new rate-limit error, not the same one re-rendering", () => {
+  it("does not restart the countdown for an unrelated re-render of the SAME failed attempt (same retryAttemptId)", () => {
     const onRetry = vi.fn();
     const { rerender } = render(
       <ConversationView
         breadcrumb="b"
         messages={[]}
         onSendMessage={() => {}}
-        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3 }}
+        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3, retryAttemptId: 1 }}
       />,
     );
     act(() => {
@@ -187,29 +187,59 @@ describe("ConversationView Retry-After cooldown (#286)", () => {
     });
     expect(screen.getByRole("button", { name: /Try again in 1s/ })).toBeTruthy();
 
-    // An unrelated re-render with the SAME error content (e.g. the parent
-    // re-rendering for an unrelated reason) must not reset the countdown
-    // back to the top.
+    // An unrelated re-render carrying the SAME retryAttemptId (e.g. the
+    // parent re-rendering for a reason that has nothing to do with a new
+    // failure -- the student typing in an unrelated field) must not reset
+    // the countdown back to the top.
     rerender(
       <ConversationView
         breadcrumb="b"
         messages={[]}
         onSendMessage={() => {}}
-        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3 }}
+        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3, retryAttemptId: 1 }}
       />,
     );
     expect(screen.getByRole("button", { name: /Try again in 1s/ })).toBeTruthy();
+  });
 
-    // A genuinely NEW failure (a retry that failed again) does restart it.
+  // #286 (review fix): the realistic repeat-offense case. chat.ts's
+  // rate-limit response is two fully static constants (RATE_LIMIT_WINDOW_MS
+  // and a fixed error string) -- every 429 it ever sends is byte-identical.
+  // A cooldown keyed on the error's own content (message + seconds) could
+  // never tell a second, later rate-limit failure apart from the first one
+  // re-rendering, so the button would stay permanently live after the
+  // FIRST cooldown ever expired. `retryAttemptId` (App.tsx derives it from
+  // the underlying error object's own identity, not its content) is what
+  // makes this distinguishable.
+  it("restarts the countdown for a genuinely new rate-limit failure even though the message and seconds are IDENTICAL to the last one", () => {
+    const onRetry = vi.fn();
+    const { rerender } = render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3, retryAttemptId: 1 }}
+      />,
+    );
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    // First cooldown fully expired -- button live again.
+    expect((screen.getByRole("button", { name: "Try again" }) as HTMLButtonElement).disabled).toBe(false);
+
+    // A second rate-limit failure -- same message, same Retry-After
+    // seconds (the server has no other message to send), but a NEW
+    // attempt id.
     rerender(
       <ConversationView
         breadcrumb="b"
         messages={[]}
         onSendMessage={() => {}}
-        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 5 }}
+        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3, retryAttemptId: 2 }}
       />,
     );
-    expect(screen.getByRole("button", { name: /Try again in 5s/ })).toBeTruthy();
+    const button = screen.getByRole("button", { name: /Try again in 3s/ }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
   });
 });
 

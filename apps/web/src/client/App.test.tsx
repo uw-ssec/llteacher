@@ -627,6 +627,213 @@ describe("App tutor-conversations rail (#4)", () => {
     await screen.findByText("Section 1: Sec 1");
     expect(screen.queryByText("TUTOR CHAT")).toBeNull();
   });
+
+  // #292 (review fix): the mis-credit bug's own motivating scenario, driven
+  // with real timing -- a turn's stream genuinely completes only AFTER the
+  // student has already switched to a different conversation.
+  // `@ai-sdk/react`'s `useChat` recreates its `Chat` instance whenever `id`
+  // changes, and a freshly created instance reports "ready" immediately (it
+  // was never submitted/streaming) -- so switching away mid-stream produces
+  // an instant, spurious "ready" transition for whatever conversation is
+  // selected NEXT, indistinguishable from a real completion to anything
+  // watching `tutorChatStatus`. This drives that exact timing to prove the
+  // fix (tying the bump to the turn's own response stream, not to
+  // `useChat`'s status) doesn't fall into that trap: A's turn is left
+  // genuinely unfinished when the switch happens, and only completes well
+  // afterward.
+  it("credits the conversation that was actually streaming, not whichever one is selected when its turn later completes", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    let controllerA: ReadableStreamDefaultController<Uint8Array> | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(
+            JSON.stringify({
+              items: [
+                { id: "conv-a", title: "Chat A", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 2 },
+                { id: "conv-b", title: "Chat B", updatedAt: "2026-01-02T00:00:00.000Z", messageCount: 5 },
+              ],
+              nextCursor: null,
+            }),
+            { status: 200 },
+          );
+        }
+        if (
+          url.startsWith("/api/conversations/conv-a/messages") ||
+          url.startsWith("/api/conversations/conv-b/messages")
+        ) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        if (url === "/api/chat") {
+          const body = JSON.parse(String(init?.body)) as { conversationId?: string };
+          if (body.conversationId !== "conv-a") {
+            throw new Error(`unexpected /api/chat call for conversation ${body.conversationId}`);
+          }
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controllerA = controller;
+              controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "start" })}\n\n`));
+            },
+          });
+          return new Response(stream, {
+            status: 200,
+            headers: { "content-type": "text/event-stream", "x-conversation-id": "conv-a" },
+          });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Select conversation: Chat A" }));
+    const composer = await screen.findByLabelText("Message input");
+    await user.type(composer, "question for A{Enter}");
+    await waitFor(() => expect(controllerA).toBeTruthy());
+
+    // Switch away from A WHILE its turn is still streaming server-side --
+    // recreates the tutor useChat instance for B, which reports "ready"
+    // on this very next render despite never having sent anything.
+    await user.click(screen.getByRole("button", { name: "Select conversation: Chat B" }));
+    expect(
+      screen.getByRole("button", { name: "Select conversation: Chat B" }).getAttribute("aria-current"),
+    ).toBe("true");
+
+    // Flush any microtask/effect the switch itself might have queued.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The critical assertion this test exists for: A must NOT be credited
+    // yet, merely because B's fresh instance just reported "ready". A
+    // version of this fix that watched `tutorChatStatus` (rather than the
+    // turn's own response stream) would have credited A here, immediately
+    // on the switch -- before its turn had actually finished at all.
+    const rowABeforeCompletion = screen
+      .getByRole("button", { name: "Select conversation: Chat A" })
+      .closest(".tutor-conversation-item");
+    expect(rowABeforeCompletion?.querySelector(".tutor-conversation-item__count")?.textContent).toBe(
+      "2 messages",
+    );
+
+    // Only NOW does A's turn actually complete -- well after the switch,
+    // and after B's fresh Chat instance has already reported "ready".
+    controllerA!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "start-step" })}\n\n`));
+    controllerA!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "text-start", id: "m1" })}\n\n`));
+    controllerA!.enqueue(
+      new TextEncoder().encode(
+        `data: ${JSON.stringify({ type: "text-delta", id: "m1", delta: "answer for A" })}\n\n`,
+      ),
+    );
+    controllerA!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "text-end", id: "m1" })}\n\n`));
+    controllerA!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "finish-step" })}\n\n`));
+    controllerA!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "finish" })}\n\n`));
+    controllerA!.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+    controllerA!.close();
+
+    // A's row is credited +2 (2 -> 4, the two rows a completed turn writes
+    // server-side: the student's message, then the reply) even though it
+    // is no longer selected; B, which received nothing, stays at 5.
+    await waitFor(() => {
+      const rowA = screen
+        .getByRole("button", { name: "Select conversation: Chat A" })
+        .closest(".tutor-conversation-item");
+      expect(rowA?.querySelector(".tutor-conversation-item__count")?.textContent).toBe("4 messages");
+    });
+    const rowB = screen
+      .getByRole("button", { name: "Select conversation: Chat B" })
+      .closest(".tutor-conversation-item");
+    expect(rowB?.querySelector(".tutor-conversation-item__count")?.textContent).toBe("5 messages");
+  });
+
+  // #292: the server counts message ROWS, and a completed turn writes two
+  // (the student's message, then the reply) while a turn that reaches the
+  // server but produces no persistable reply (chat.ts's
+  // hasRenderableContent/finishReason gate) writes only the first --
+  // asserted here against the REAL App-level bump path (tutorChatFetch's
+  // tee'd-stream tracking), not just the isolated useTutorConversations
+  // hook.
+  it("credits +2 for a completed turn and +1 for a response-half failure (server row counts, not turns)", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    let chatCallCount = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(
+            JSON.stringify({
+              items: [{ id: "conv-a", title: "Chat A", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 2 }],
+              nextCursor: null,
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("/api/conversations/conv-a/messages")) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        if (url === "/api/chat") {
+          chatCallCount += 1;
+          if (chatCallCount === 1) return chatStreamResponse("conv-a", "a real reply");
+          // #96/#268's shape: 2xx (the question IS persisted), then the
+          // model dies mid-stream with no `finish` chunk -- exactly the
+          // "response was accepted but produced nothing persistable" case.
+          return interruptedChatStreamResponse("conv-a", "a partial reply");
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Select conversation: Chat A" }));
+    const composer = await screen.findByLabelText("Message input");
+
+    await user.type(composer, "first question{Enter}");
+    await screen.findByText("a real reply");
+    await waitFor(() => {
+      const row = screen
+        .getByRole("button", { name: "Select conversation: Chat A" })
+        .closest(".tutor-conversation-item");
+      expect(row?.querySelector(".tutor-conversation-item__count")?.textContent).toBe("4 messages");
+    });
+
+    await user.type(composer, "second question{Enter}");
+    await screen.findByRole("alert");
+    await waitFor(() => {
+      const row = screen
+        .getByRole("button", { name: "Select conversation: Chat A" })
+        .closest(".tutor-conversation-item");
+      expect(row?.querySelector(".tutor-conversation-item__count")?.textContent).toBe("5 messages");
+    });
+  });
 });
 
 // #6: the tutor chat column's header title -- mirrors whatever
