@@ -3318,6 +3318,16 @@ describe("App markdown render cost does not scale with hydrated history per stre
     // chunk would suggest, but every commit that DOES happen re-renders
     // every hydrated message's markdown instead of just the growing one,
     // landing at 20. 10 sits cleanly between the two.
+    //
+    // The lower bound matters just as much as the upper one: if the
+    // react-markdown mock ever stopped intercepting the module Message.tsx
+    // actually imports (a module-resolution change, a react-markdown
+    // version bump reshaping its exports), markdownRenderTracker.count
+    // would silently stay 0 forever and the upper-bound assertion alone
+    // would keep passing regardless of whether the memoization this test
+    // exists to guard ever regressed -- a permanent false negative. This
+    // pins that the counting mechanism itself is actually firing.
+    expect(markdownRenderTracker.count).toBeGreaterThan(0);
     expect(markdownRenderTracker.count).toBeLessThan(10);
   });
 });
