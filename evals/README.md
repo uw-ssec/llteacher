@@ -17,7 +17,8 @@ guardrail rewrite is exercised by the same code path a live student turn uses.
 | What | Where | Live model calls? | Runs in `npm test` / CI? |
 |---|---|---|---|
 | `scoring/answer-leakage.test.ts`, `scoring/socratic-rubric.test.ts` | this package's vitest suite | No -- fixture strings only | **Yes**, via `npm test` (turbo) |
-| `datasets/pii-scan.test.ts` | this package's vitest suite | No -- regex scan of the checked-in dataset | **Yes**, via `npm test` (turbo) |
+| `datasets/pii-scan.test.ts` | this package's vitest suite | No -- regex scan of the checked-in dataset (and, when present, the gitignored `datasets/flagged-feedback-export.json` -- see "The dataset" below) | **Yes**, via `npm test` (turbo) |
+| `tutor-behavior.test.ts` | this package's vitest suite | No -- unit test of `modeMismatch`, a pure function; imports nothing else from `tutor-behavior.ts` | **Yes**, via `npm test` (turbo) |
 | `npm run tutor:eval` (`tutor-behavior.ts`) | this package's own script | Yes, in `--mode=live` (the default is `--mode=recorded`, which needs none) | **No** -- not a test, not wired into `turbo.json`'s `test`/`build` tasks, no CI job invokes it |
 
 `apps/web/`'s own `npx vitest run` is untouched by any of this -- the scoring
@@ -106,7 +107,15 @@ leak), and the adversarial or benign `studentMessage`.
 `datasets/pii-scan.test.ts` regex-scans every text field of every probe for
 email addresses, UW email domains, phone numbers, SSN-shaped numbers,
 7+-digit runs (student-ID-shaped), and credit-card-shaped numbers, and fails
-loudly if any contributor's future probe edit introduces one.
+loudly if any contributor's future probe edit introduces one. The same scan
+also covers `datasets/flagged-feedback-export.json` -- the gitignored
+staging file `apps/web/scripts/exportFlaggedFeedback.ts` (#90) writes real,
+verbatim student messages and comments into -- whenever that file exists
+locally; it's a no-op in CI and in a fresh checkout, where the file was
+never generated. `scanForPii`, the shared scan mechanism, has its own direct
+unit tests (inline fixtures, not file-dependent) in the same test file, so
+the mechanism itself always has coverage even when the export-file suite is
+skipped.
 
 ## The findings loop
 
@@ -156,6 +165,13 @@ overwrite it** (`npm run tutor:eval -- --mode=live --update-baseline`) rather
 than trying to reconcile the two -- a recorded-fixture baseline and a live
 model's baseline aren't measuring the same thing, and diffing one against the
 other isn't meaningful.
+
+Final-review fix: `tutor-behavior.ts` now enforces this itself rather than
+only documenting it. If a run's `--mode` doesn't match the baseline's
+recorded mode, the script still prints the delta (informational) but warns
+and skips the pass/fail regression gate instead of exiting non-zero (or
+zero) off a comparison that was never meaningful -- see `modeMismatch` in
+that file.
 
 ## Logging
 

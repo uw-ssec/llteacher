@@ -316,6 +316,17 @@ async function main(): Promise<void> {
     `\nBaseline meanOverall=${baseline.meanOverall.toFixed(3)} (${baseline.mode}), ` +
       `current meanOverall=${summary.meanOverall.toFixed(3)} (${summary.mode}), delta=${delta >= 0 ? "+" : ""}${delta.toFixed(3)}`,
   );
+
+  if (modeMismatch(baseline, summary)) {
+    console.warn(
+      `\nBaseline was recorded in --mode=${baseline.mode} but this run used --mode=${summary.mode} -- ` +
+        'these are not measuring the same thing (see README.md\'s "On the current baseline"), so the delta ' +
+        "above is informational only. Skipping the regression pass/fail gate. Run with --update-baseline once " +
+        "you have a same-mode baseline to compare future runs against.",
+    );
+    return;
+  }
+
   if (-delta > REGRESSION_THRESHOLD) {
     console.error(
       `\nRegression: meanOverall dropped by ${(-delta).toFixed(3)}, exceeding the ${REGRESSION_THRESHOLD} threshold.`,
@@ -324,6 +335,19 @@ async function main(): Promise<void> {
   } else {
     console.log("No regression past threshold.");
   }
+}
+
+/** #89 review (final-review fix, Minor #3): a `--mode=live` run diffed
+ *  against a `--mode=recorded` baseline (or vice versa) isn't a real
+ *  regression check -- README.md's "On the current baseline" documents this
+ *  exact trap ("a recorded-fixture baseline and a live model's baseline
+ *  aren't measuring the same thing, and diffing one against the other isn't
+ *  meaningful"), but nothing in the script itself enforced it: a mismatched
+ *  pair still printed a delta and still set a pass/fail exit code as if the
+ *  comparison meant something. Pulled out as its own function so the guard
+ *  is unit-testable without needing real baseline/results files on disk. */
+export function modeMismatch(baseline: Pick<EvalSummary, "mode">, current: Pick<EvalSummary, "mode">): boolean {
+  return baseline.mode !== current.mode;
 }
 
 // Only run when invoked directly (tsx tutor-behavior.ts / npm run tutor:eval)

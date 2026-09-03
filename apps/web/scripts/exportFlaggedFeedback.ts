@@ -23,6 +23,11 @@
        data (even with responseSnapshot already stripped of anything beyond
        the tutor's own reply) into a dataset that ships with the repo would
        skip the one review step #89's own pii-scan.test.ts exists to gate.
+       (#90 final-review fix: that staging file carries verbatim
+       `studentMessage`/`comment` text, so it's gitignored -- see
+       .gitignore's own comment -- and pii-scan.test.ts now scans it
+       directly, whenever it exists locally, not just the curated dataset
+       it eventually gets merged into.)
      - It does not attempt to guess which of #89's six adversarial
        categories (solution_extraction, roleplay_jailbreak, ...) a flagged
        response belongs to -- a REAL flagged exchange is a different kind of
@@ -204,7 +209,8 @@ async function main() {
         "Review each new entry before merging it into evals/datasets/tutor-behavior-probes.json: " +
           "confirm/author `solution`, add `finalAnswers` if a short leaked fragment alone would count as " +
           "a leak, pick a real category if one of the six adversarial types fits, and run " +
-          "`npm test --workspace=evals` (datasets/pii-scan.test.ts) against the merged file.",
+          "`npm test --workspace=evals` (datasets/pii-scan.test.ts, which now scans this staging file too, " +
+          "in addition to tutor-behavior-probes.json) both before AND after merging.",
       );
     }
   } finally {
