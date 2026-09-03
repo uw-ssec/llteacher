@@ -59,8 +59,17 @@ export interface UseTutorConversationsResult {
   /** POSTs a new tutor conversation and prepends it to the local list.
    *  Returns the created conversation, or null if courseId isn't loaded
    *  yet or the request failed -- callers should treat null as "nothing to
-   *  select," not throw. */
-  createConversation: (title?: string) => Promise<ConversationListItemResponse | null>;
+   *  select," not throw.
+   *
+   *  #311: no longer takes an optional title -- App.tsx's one call site
+   *  (the "New conversation" button) never passed one; #287's auto-titling
+   *  solved the "name it something useful" problem by PATCHing a title
+   *  derived from the first message instead of naming it at creation, so
+   *  this parameter was a no-op the entire time it existed. The server
+   *  route (POST /api/conversations) still accepts an optional `title` --
+   *  that half is real, validated, and covered by its own route tests, for
+   *  whatever future caller (e.g. an instructor-facing surface) needs it. */
+  createConversation: () => Promise<ConversationListItemResponse | null>;
   /** PATCHes a conversation's title, optimistically updating the local
    *  list immediately (so both the list row AND any other consumer reading
    *  from this same `conversations` array, e.g. App.tsx's tutor chat
@@ -362,13 +371,13 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
   }, [courseId]);
 
   const createConversation = useCallback(
-    async (title?: string): Promise<ConversationListItemResponse | null> => {
+    async (): Promise<ConversationListItemResponse | null> => {
       if (!courseId) return null;
       try {
         const res = await fetch("/api/conversations", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(title ? { courseId, title } : { courseId }),
+          body: JSON.stringify({ courseId }),
         });
         if (!res.ok) throw new Error(`failed to create conversation: ${res.status}`);
         // POST's response is a plain ConversationSummary -- messageCount

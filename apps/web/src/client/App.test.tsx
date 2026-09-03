@@ -6,6 +6,25 @@ import { MemoryRouter } from "react-router";
 import App, { useStudentHomework } from "./App";
 import { AuthProvider } from "./components/AuthProvider";
 
+// #309: a counting wrapper around the real react-markdown, used by the
+// "doesn't rebuild every message per streamed chunk" regression test at the
+// end of this file. Delegates to the real implementation (so every other
+// test's rendered output is unaffected) -- it only adds an observable call
+// count. vi.hoisted is required here: vi.mock's factory runs before this
+// file's own top-level `const`s would otherwise be initialized, and the
+// factory needs to write into the same object the test later reads.
+const markdownRenderTracker = vi.hoisted(() => ({ count: 0 }));
+vi.mock("react-markdown", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-markdown")>();
+  return {
+    ...actual,
+    default: (props: Parameters<typeof actual.default>[0]) => {
+      markdownRenderTracker.count += 1;
+      return actual.default(props);
+    },
+  };
+});
+
 afterEach(cleanup);
 
 // #160: useStudentHomework parsed the response body without checking
@@ -124,6 +143,126 @@ function interruptedChatStreamResponse(conversationId: string, partialText: stri
   });
 }
 
+/* --------------------------------------------------------------------------
+   #303: one shared mount-fetch router, replacing ten near-identical copies
+   (four differently-named local helpers -- stubBaseFetch x2, stubFetch x2,
+   stubHomeworkFetch, stubTutorFetch -- plus many inline vi.stubGlobal
+   blocks) that each re-implemented the same baseline routing
+   (/api/profile, /api/hello, /api/student/homeworks,
+   /api/conversations?... empty-list default) and the same two jsdom
+   polyfills (CSS.supports, Element.prototype.scrollIntoView). Any new
+   unconditional fetch App.tsx makes on mount used to require updating all
+   ten places by hand; now it requires updating one.
+
+   `routes`, when given, is consulted FIRST for every URL and can answer or
+   override ANY of them, including the baseline ones -- returning
+   `undefined` falls through to the defaults below. This preserves every
+   test's original routing logic exactly as written (nothing here changes
+   what any test asserts), it just gives that logic one shared home for the
+   boilerplate around it instead of ten.
+
+   jsdom implements neither Element.prototype.scrollIntoView (verified:
+   `typeof jsdomWindow.Element.prototype.scrollIntoView === "undefined"`,
+   not a stub that merely no-ops) nor HTMLDialogElement's showModal/close --
+   Composer/ConversationView call the first unconditionally, and the
+   restart-affordance/delete-dialog tests need the other two. A real
+   function has to exist on each prototype once, at module scope, before
+   vi.spyOn (below) has anything to wrap -- spying on `undefined` throws. */
+if (typeof Element.prototype.scrollIntoView !== "function") {
+  Element.prototype.scrollIntoView = function scrollIntoView() {};
+}
+if (typeof HTMLDialogElement.prototype.showModal !== "function") {
+  HTMLDialogElement.prototype.showModal = function showModal(this: HTMLDialogElement) {
+    this.setAttribute("open", "");
+  };
+}
+if (typeof HTMLDialogElement.prototype.close !== "function") {
+  HTMLDialogElement.prototype.close = function close(this: HTMLDialogElement) {
+    this.removeAttribute("open");
+    this.dispatchEvent(new Event("close"));
+  };
+}
+
+/** A single-section, not-yet-started homework -- the shape most tests in
+ *  this file want and previously redeclared (verbatim or near-verbatim) as
+ *  their own local `HOMEWORK_FIXTURE`. Pass `sections` for a test that
+ *  needs a specific count/status/conversationId shape (a second section, an
+ *  in-progress one with a real conversationId, a zero-section tutor-only
+ *  homework, etc.) instead of redeclaring the whole homework object just to
+ *  change the one field that actually varies. */
+function homeworkFixture(
+  overrides: {
+    sections?: unknown[];
+    courseId?: string;
+    courseName?: string;
+    title?: string;
+  } = {},
+) {
+  return {
+    homeworks: [
+      {
+        id: "hw-1",
+        courseId: overrides.courseId ?? "course-a",
+        courseName: overrides.courseName ?? "STATS 311",
+        title: overrides.title ?? "HW 3",
+        description: "d",
+        dueDate: "2099-01-01T00:00:00.000Z",
+        completedPercentage: 0,
+        inProgressPercentage: 0,
+        sections: overrides.sections ?? [
+          { id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null },
+        ],
+      },
+    ],
+  };
+}
+
+/** Installs the jsdom polyfills above, stubs `fetch` with the baseline
+ *  router (falling through to `options.routes` first for anything a test
+ *  needs to answer differently or additionally -- a custom /api/chat
+ *  handler, /api/conversations POST/PATCH/DELETE, section-specific
+ *  endpoints like .../hints or .../restart, a manually-controlled
+ *  ReadableStream, etc.), and renders the real App inside the same
+ *  MemoryRouter+AuthProvider tree every test used to hand-write. Returns
+ *  whatever `render` returns, for the handful of tests that need e.g.
+ *  `unmount` or `container`. */
+function renderApp(
+  options: {
+    homeworks?: unknown;
+    routes?: (url: string, init?: RequestInit) => Response | Promise<Response> | undefined;
+  } = {},
+) {
+  vi.stubGlobal("CSS", { supports: () => true });
+  vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+
+  const homeworks = options.homeworks ?? homeworkFixture();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const custom = options.routes ? await options.routes(url, init) : undefined;
+      if (custom !== undefined) return custom;
+      if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+      if (url === "/api/hello") {
+        return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+      }
+      if (url === "/api/student/homeworks") return new Response(JSON.stringify(homeworks), { status: 200 });
+      if (url.startsWith("/api/conversations?")) {
+        return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    }),
+  );
+
+  return render(
+    <MemoryRouter>
+      <AuthProvider>
+        <App />
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+}
+
 // #3 follow-up fix: conversationId must flow into every /api/chat request
 // after the first, not just be captured and then dropped. This renders the
 // real App (real useChat + DefaultChatTransport, not a mocked hook) against
@@ -136,47 +275,19 @@ function interruptedChatStreamResponse(conversationId: string, partialText: stri
 // every single turn.
 describe("App chat conversationId propagation (#3 follow-up)", () => {
   it("sends the conversationId from turn 1's response on turn 2's request, not just turn 1's", async () => {
-    // jsdom doesn't implement these two DOM APIs that @llteacher/ui's
-    // Composer/ConversationView call unconditionally (field-sizing feature
-    // detection, scroll-to-latest-message) -- stubbed so mounting the real
-    // component tree doesn't throw on unrelated missing browser APIs.
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     const chatCalls: Array<{ conversationId?: string; messages: unknown[] }> = [];
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") {
-          return new Response(JSON.stringify({}), { status: 200 });
-        }
-        if (url === "/api/hello") {
-          return new Response(
-            JSON.stringify({ message: "ok", ping_id: "11111111-1111-1111-1111-111111111111" }),
-            { status: 200 },
-          );
-        }
-        if (url === "/api/student/homeworks") {
-          return new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
-        }
+    renderApp({
+      homeworks: homeworkFixture({ sections: [] }),
+      routes: (url, init) => {
         if (url === "/api/chat") {
           const parsedBody = JSON.parse(String(init?.body)) as { conversationId?: string; messages: unknown[] };
           chatCalls.push(parsedBody);
           return chatStreamResponse("conv-1", `reply-${chatCalls.length}`);
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     const composer = await screen.findByLabelText("Message input");
     const user = userEvent.setup();
@@ -212,32 +323,16 @@ describe("App chat conversationId propagation (#3 follow-up)", () => {
 describe("App section chat surface is not recreated every render while it has no key yet (#302 review fix)", () => {
   it("does not lose earlier turns to a per-render Chat-instance reset when the homework has zero sections", async () => {
     let chatCallCount = 0;
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
+    renderApp({
+      homeworks: homeworkFixture({ sections: [] }),
+      routes: (url) => {
         if (url === "/api/chat") {
           chatCallCount += 1;
           return chatStreamResponse("conv-1", `reply-${chatCallCount}`);
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
@@ -269,59 +364,35 @@ describe("App section chat surface is not recreated every render while it has no
    only go as far as "reports the id up" without checking that App actually
    switches the chat column on it. */
 describe("App tutor-conversations rail (#4)", () => {
-  const HOMEWORK_FIXTURE = {
-    homeworks: [
-      {
-        id: "hw-1",
-        courseId: "course-a",
-        courseName: "STATS 311",
-        title: "HW 3",
-        description: "d",
-        dueDate: "2099-01-01T00:00:00.000Z",
-        completedPercentage: 0,
-        inProgressPercentage: 0,
-        sections: [
-          { id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null },
-        ],
-      },
-    ],
-  };
-
-  function stubBaseFetch(extra: {
-    onConversationsGet?: () => Response;
-    onConversationsPost?: (body: unknown) => Response;
-    onConversationMessagesGet?: (conversationId: string) => Response;
-    onConversationPatch?: (id: string, body: unknown) => Response;
-  }) {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(
-            JSON.stringify({ message: "ok", ping_id: "11111111-1111-1111-1111-111111111111" }),
-            { status: 200 },
-          );
+  /** This describe block's own extension of the shared `renderApp` --
+   *  layers the tutor-rail-specific conversations endpoints (list/create/
+   *  rename, plus an optional /api/chat handler) on top of it, so each
+   *  test below only states what it actually cares about. */
+  function renderTutorRailApp(
+    extra: {
+      onConversationsGet?: (url: string) => Response;
+      onConversationsPost?: (body: unknown) => Response;
+      onConversationMessagesGet?: (conversationId: string) => Response | Promise<Response>;
+      onConversationPatch?: (id: string, body: unknown) => Response;
+      onChat?: (body: unknown, init?: RequestInit) => Response | Promise<Response>;
+    } = {},
+  ) {
+    return renderApp({
+      routes: (url, init) => {
+        if (url === "/api/chat" && extra.onChat) {
+          const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+          return extra.onChat(body, init);
         }
-        if (url === "/api/student/homeworks") {
-          return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        }
-        if (url.startsWith("/api/conversations?")) {
-          return extra.onConversationsGet
-            ? extra.onConversationsGet()
-            : new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        }
+        if (url.startsWith("/api/conversations?")) return extra.onConversationsGet?.(url);
         if (url === "/api/conversations" && init?.method === "POST") {
           return extra.onConversationsPost
             ? extra.onConversationsPost(JSON.parse(String(init.body)))
             : new Response(JSON.stringify({ error: "unexpected POST" }), { status: 500 });
         }
-        // #4: history hydration -- defaults to an empty history so tests
-        // that don't care about hydration itself (e.g. "selecting a homework
+        // #4: history hydration -- defaults to an empty history (renderApp's
+        // own baseline doesn't cover /messages, so falling through to
+        // `undefined` here would 404 as "unexpected fetch") so tests that
+        // don't care about hydration itself (e.g. "selecting a homework
         // section switches back") don't need to know about this endpoint's
         // existence.
         // #280: matches with or without a query string -- fetchConversationHistory
@@ -341,39 +412,19 @@ describe("App tutor-conversations rail (#4)", () => {
             ? extra.onConversationPatch(patchMatch[1]!, body)
             : new Response(JSON.stringify({ error: "unexpected PATCH" }), { status: 500 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
+        return undefined;
+      },
+    });
   }
 
   it("renders the tutor rail scoped to the homework's courseId, alongside the homework sidebar", async () => {
     const conversationsGetUrls: string[] = [];
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) {
-          conversationsGetUrls.push(url);
-          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+    renderTutorRailApp({
+      onConversationsGet: (url) => {
+        conversationsGetUrls.push(url);
+        return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+      },
+    });
 
     expect(await screen.findByText("Tutor Chats")).toBeTruthy();
     expect(await screen.findByText(/Start one to ask about anything outside a section\./)).toBeTruthy();
@@ -390,7 +441,7 @@ describe("App tutor-conversations rail (#4)", () => {
 
   it("creating a tutor conversation switches the chat column to it, and sends chat turns with its conversationId and courseId (#304)", async () => {
     const chatCalls: Array<{ conversationId?: string; courseId?: string }> = [];
-    stubBaseFetch({
+    renderTutorRailApp({
       onConversationsPost: () =>
         new Response(
           JSON.stringify({
@@ -407,42 +458,12 @@ describe("App tutor-conversations rail (#4)", () => {
           }),
           { status: 201 },
         ),
+      onChat: (body) => {
+        const parsed = body as { conversationId?: string; courseId?: string };
+        chatCalls.push(parsed);
+        return chatStreamResponse(parsed.conversationId ?? "unexpected", "tutor reply");
+      },
     });
-    // Layer the /api/chat handler on top of the shared base stub.
-    const baseFetch = globalThis.fetch;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/chat") {
-          const body = JSON.parse(String(init?.body)) as { conversationId?: string; courseId?: string };
-          chatCalls.push(body);
-          const chunks = [
-            { type: "start" },
-            { type: "start-step" },
-            { type: "text-start", id: "t1" },
-            { type: "text-delta", id: "t1", delta: "tutor reply" },
-            { type: "text-end", id: "t1" },
-            { type: "finish-step" },
-            { type: "finish" },
-          ];
-          const streamBody = chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
-          return new Response(streamBody, {
-            status: 200,
-            headers: { "content-type": "text/event-stream", "x-conversation-id": body.conversationId ?? "unexpected" },
-          });
-        }
-        return baseFetch(input, init);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
 
     await screen.findByText(/Start one to ask about anything outside a section\./);
     const user = userEvent.setup();
@@ -472,7 +493,7 @@ describe("App tutor-conversations rail (#4)", () => {
   // first message.
   it("sending the first message in a brand-new tutor conversation auto-titles it from that message (#287)", async () => {
     const patchCalls: Array<{ id: string; body: unknown }> = [];
-    stubBaseFetch({
+    renderTutorRailApp({
       onConversationsPost: () =>
         new Response(
           JSON.stringify({
@@ -508,29 +529,11 @@ describe("App tutor-conversations rail (#4)", () => {
           { status: 200 },
         );
       },
+      onChat: (body) => {
+        const parsed = body as { conversationId?: string };
+        return chatStreamResponse(parsed.conversationId ?? "unexpected", "tutor reply");
+      },
     });
-    // Layer the /api/chat handler on top of the shared base stub, same as
-    // the test above.
-    const baseFetch = globalThis.fetch;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/chat") {
-          const body = JSON.parse(String(init?.body)) as { conversationId?: string };
-          return chatStreamResponse(body.conversationId ?? "unexpected", "tutor reply");
-        }
-        return baseFetch(input, init);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
 
     await screen.findByText(/Start one to ask about anything outside a section\./);
     const user = userEvent.setup();
@@ -559,7 +562,7 @@ describe("App tutor-conversations rail (#4)", () => {
   // title-still-default gate's absence of a positive counter-test.
   it("does not auto-title a conversation whose title was already changed before the first message (#287)", async () => {
     const patchCalls: Array<{ id: string; body: unknown }> = [];
-    stubBaseFetch({
+    renderTutorRailApp({
       onConversationsPost: () =>
         new Response(
           JSON.stringify({
@@ -595,27 +598,11 @@ describe("App tutor-conversations rail (#4)", () => {
           { status: 200 },
         );
       },
+      onChat: (body) => {
+        const parsed = body as { conversationId?: string };
+        return chatStreamResponse(parsed.conversationId ?? "unexpected", "tutor reply");
+      },
     });
-    const baseFetch = globalThis.fetch;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/chat") {
-          const body = JSON.parse(String(init?.body)) as { conversationId?: string };
-          return chatStreamResponse(body.conversationId ?? "unexpected", "tutor reply");
-        }
-        return baseFetch(input, init);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
 
     await screen.findByText(/Start one to ask about anything outside a section\./);
     const user = userEvent.setup();
@@ -651,7 +638,7 @@ describe("App tutor-conversations rail (#4)", () => {
   // stuck forever because its messageCount can never again be 0.
   it("self-heals an existing multi-message conversation still stuck at the default title (#287 review)", async () => {
     const patchCalls: Array<{ id: string; body: unknown }> = [];
-    stubBaseFetch({
+    renderTutorRailApp({
       onConversationsGet: () =>
         new Response(
           JSON.stringify({
@@ -705,27 +692,11 @@ describe("App tutor-conversations rail (#4)", () => {
           { status: 200 },
         );
       },
+      onChat: (body) => {
+        const parsed = body as { conversationId?: string };
+        return chatStreamResponse(parsed.conversationId ?? "unexpected", "follow-up reply");
+      },
     });
-    const baseFetch = globalThis.fetch;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/chat") {
-          const body = JSON.parse(String(init?.body)) as { conversationId?: string };
-          return chatStreamResponse(body.conversationId ?? "unexpected", "follow-up reply");
-        }
-        return baseFetch(input, init);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Select conversation: New Conversation" }));
@@ -748,7 +719,7 @@ describe("App tutor-conversations rail (#4)", () => {
   // transcript but not the outbound request looks correct on screen.
   it("selecting an existing tutor conversation hydrates its history into the chat column AND into the next /api/chat request", async () => {
     const chatCalls: Array<{ conversationId?: string; messages: Array<{ role: string }> }> = [];
-    stubBaseFetch({
+    renderTutorRailApp({
       onConversationsGet: () =>
         new Response(
           JSON.stringify({
@@ -781,31 +752,12 @@ describe("App tutor-conversations rail (#4)", () => {
           { status: 200 },
         );
       },
+      onChat: (body) => {
+        const parsed = body as { conversationId?: string; messages: Array<{ role: string }> };
+        chatCalls.push(parsed);
+        return chatStreamResponse(parsed.conversationId ?? "unexpected", "follow-up reply");
+      },
     });
-    const baseFetch = globalThis.fetch;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/chat") {
-          const body = JSON.parse(String(init?.body)) as {
-            conversationId?: string;
-            messages: Array<{ role: string }>;
-          };
-          chatCalls.push(body);
-          return chatStreamResponse(body.conversationId ?? "unexpected", "follow-up reply");
-        }
-        return baseFetch(input, init);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
 
     const user = userEvent.setup();
     // #6: the row (which the title is part of, per #4's original contract)
@@ -842,9 +794,6 @@ describe("App tutor-conversations rail (#4)", () => {
   // chat column (and the sidebar's selected-row highlight) back to A even
   // though B was the student's last action.
   it("discards a stale /messages response when a later selection supersedes it before the first resolves", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     let resolveA!: (res: Response) => void;
     let resolveB!: (res: Response) => void;
     const pendingA = new Promise<Response>((resolve) => {
@@ -868,37 +817,17 @@ describe("App tutor-conversations rail (#4)", () => {
       messageCount: 1,
     });
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) {
-          return new Response(
-            JSON.stringify({
-              items: [conversationFixture("conv-a", "Conversation A"), conversationFixture("conv-b", "Conversation B")],
-              nextCursor: null,
-            }),
-            { status: 200 },
-          );
-        }
-        if (url.startsWith("/api/conversations/conv-a/messages")) return pendingA;
-        if (url.startsWith("/api/conversations/conv-b/messages")) return pendingB;
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+    renderTutorRailApp({
+      onConversationsGet: () =>
+        new Response(
+          JSON.stringify({
+            items: [conversationFixture("conv-a", "Conversation A"), conversationFixture("conv-b", "Conversation B")],
+            nextCursor: null,
+          }),
+          { status: 200 },
+        ),
+      onConversationMessagesGet: (conversationId) => (conversationId === "conv-a" ? pendingA : pendingB),
+    });
 
     const user = userEvent.setup();
     // Click order: A, then B, both before either /messages response lands.
@@ -933,7 +862,7 @@ describe("App tutor-conversations rail (#4)", () => {
   });
 
   it("selecting a homework section switches the chat column back out of the tutor surface", async () => {
-    stubBaseFetch({
+    renderTutorRailApp({
       onConversationsGet: () =>
         new Response(
           JSON.stringify({
@@ -958,14 +887,6 @@ describe("App tutor-conversations rail (#4)", () => {
         ),
     });
 
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
-
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
     await screen.findByText("TUTOR CHAT");
@@ -989,64 +910,37 @@ describe("App tutor-conversations rail (#4)", () => {
   // genuinely unfinished when the switch happens, and only completes well
   // afterward.
   it("credits the conversation that was actually streaming, not whichever one is selected when its turn later completes", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     let controllerA: ReadableStreamDefaultController<Uint8Array> | undefined;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+    renderTutorRailApp({
+      onConversationsGet: () =>
+        new Response(
+          JSON.stringify({
+            items: [
+              { id: "conv-a", title: "Chat A", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 2 },
+              { id: "conv-b", title: "Chat B", updatedAt: "2026-01-02T00:00:00.000Z", messageCount: 5 },
+            ],
+            nextCursor: null,
+          }),
+          { status: 200 },
+        ),
+      onConversationMessagesGet: () => new Response(JSON.stringify([]), { status: 200 }),
+      onChat: (body) => {
+        const parsed = body as { conversationId?: string };
+        if (parsed.conversationId !== "conv-a") {
+          throw new Error(`unexpected /api/chat call for conversation ${parsed.conversationId}`);
         }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) {
-          return new Response(
-            JSON.stringify({
-              items: [
-                { id: "conv-a", title: "Chat A", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 2 },
-                { id: "conv-b", title: "Chat B", updatedAt: "2026-01-02T00:00:00.000Z", messageCount: 5 },
-              ],
-              nextCursor: null,
-            }),
-            { status: 200 },
-          );
-        }
-        if (
-          url.startsWith("/api/conversations/conv-a/messages") ||
-          url.startsWith("/api/conversations/conv-b/messages")
-        ) {
-          return new Response(JSON.stringify([]), { status: 200 });
-        }
-        if (url === "/api/chat") {
-          const body = JSON.parse(String(init?.body)) as { conversationId?: string };
-          if (body.conversationId !== "conv-a") {
-            throw new Error(`unexpected /api/chat call for conversation ${body.conversationId}`);
-          }
-          const stream = new ReadableStream<Uint8Array>({
-            start(controller) {
-              controllerA = controller;
-              controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "start" })}\n\n`));
-            },
-          });
-          return new Response(stream, {
-            status: 200,
-            headers: { "content-type": "text/event-stream", "x-conversation-id": "conv-a" },
-          });
-        }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controllerA = controller;
+            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "start" })}\n\n`));
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream", "x-conversation-id": "conv-a" },
+        });
+      },
+    });
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Select conversation: Chat A" }));
@@ -1114,50 +1008,26 @@ describe("App tutor-conversations rail (#4)", () => {
   // tee'd-stream tracking), not just the isolated useTutorConversations
   // hook.
   it("credits +2 for a completed turn and +1 for a response-half failure (server row counts, not turns)", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
     let chatCallCount = 0;
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) {
-          return new Response(
-            JSON.stringify({
-              items: [{ id: "conv-a", title: "Chat A", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 2 }],
-              nextCursor: null,
-            }),
-            { status: 200 },
-          );
-        }
-        if (url.startsWith("/api/conversations/conv-a/messages")) {
-          return new Response(JSON.stringify([]), { status: 200 });
-        }
-        if (url === "/api/chat") {
-          chatCallCount += 1;
-          if (chatCallCount === 1) return chatStreamResponse("conv-a", "a real reply");
-          // #96/#268's shape: 2xx (the question IS persisted), then the
-          // model dies mid-stream with no `finish` chunk -- exactly the
-          // "response was accepted but produced nothing persistable" case.
-          return interruptedChatStreamResponse("conv-a", "a partial reply");
-        }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+    renderTutorRailApp({
+      onConversationsGet: () =>
+        new Response(
+          JSON.stringify({
+            items: [{ id: "conv-a", title: "Chat A", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 2 }],
+            nextCursor: null,
+          }),
+          { status: 200 },
+        ),
+      onConversationMessagesGet: () => new Response(JSON.stringify([]), { status: 200 }),
+      onChat: () => {
+        chatCallCount += 1;
+        if (chatCallCount === 1) return chatStreamResponse("conv-a", "a real reply");
+        // #96/#268's shape: 2xx (the question IS persisted), then the
+        // model dies mid-stream with no `finish` chunk -- exactly the
+        // "response was accepted but produced nothing persistable" case.
+        return interruptedChatStreamResponse("conv-a", "a partial reply");
+      },
+    });
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Select conversation: Chat A" }));
@@ -1190,36 +1060,13 @@ describe("App tutor-conversations rail (#4)", () => {
 // exposes via onRenameHandlerReady, so a header rename shows up in the list
 // row too and vice versa -- one hook instance, one `conversations` array.
 describe("App tutor conversation header rename (#6)", () => {
-  const HOMEWORK_FIXTURE = {
-    homeworks: [
-      {
-        id: "hw-1",
-        courseId: "course-a",
-        courseName: "STATS 311",
-        title: "HW 3",
-        description: "d",
-        dueDate: "2099-01-01T00:00:00.000Z",
-        completedPercentage: 0,
-        inProgressPercentage: 0,
-        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
-      },
-    ],
-  };
-
-  function stubFetch(extra: {
-    onPatch?: (id: string, body: unknown) => Response;
-  }) {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+  function renderHeaderRenameApp(
+    extra: {
+      onPatch?: (id: string, body: unknown) => Response;
+    } = {},
+  ) {
+    return renderApp({
+      routes: (url, init) => {
         if (url.startsWith("/api/conversations?")) {
           return new Response(
             JSON.stringify({
@@ -1251,20 +1098,13 @@ describe("App tutor conversation header rename (#6)", () => {
             ? extra.onPatch(patchMatch[1]!, body)
             : new Response(JSON.stringify({ error: "unexpected PATCH" }), { status: 500 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
+        return undefined;
+      },
+    });
   }
 
   it("shows the selected tutor conversation's title as an editable heading in the chat column", async () => {
-    stubFetch({});
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+    renderHeaderRenameApp();
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
@@ -1289,7 +1129,7 @@ describe("App tutor conversation header rename (#6)", () => {
 
   it("renaming from the header PATCHes the conversation and updates both the header and the list row", async () => {
     const patchCalls: Array<{ id: string; body: unknown }> = [];
-    stubFetch({
+    renderHeaderRenameApp({
       onPatch: (id, body) => {
         patchCalls.push({ id, body });
         return new Response(
@@ -1309,13 +1149,6 @@ describe("App tutor conversation header rename (#6)", () => {
         );
       },
     });
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
@@ -1335,14 +1168,7 @@ describe("App tutor conversation header rename (#6)", () => {
   });
 
   it("does not show a header title for the homework-section chat (no per-conversation title there)", async () => {
-    stubFetch({});
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+    renderHeaderRenameApp();
 
     await screen.findByText("Section 1: Sec 1");
     expect(screen.queryByRole("button", { name: /Rename conversation/ })).toBeNull();
@@ -1358,23 +1184,13 @@ describe("App tutor conversation header rename (#6)", () => {
 // context flags that both instances need the fix, not just whichever is
 // nearer the top of the file.
 describe("App section chat streaming guard + error surfacing (#144)", () => {
-  function stubHomeworkFetch(chatFetch: typeof fetch) {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        if (url === "/api/chat") return chatFetch(input, init);
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
+  /** Zero-section (tutor-only) homework, and /api/chat delegated wholesale
+   *  to `chatFetch` -- what every test in this block needs. */
+  function renderHomeworkChatApp(chatFetch: typeof fetch) {
+    return renderApp({
+      homeworks: homeworkFixture({ sections: [] }),
+      routes: (url, init) => (url === "/api/chat" ? chatFetch(url, init) : undefined),
+    });
   }
 
   it("disables the composer while a turn is in flight and does not fire a second /api/chat request for a same-message Enter", async () => {
@@ -1383,18 +1199,10 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
     const pendingChat = new Promise<Response>((resolve) => {
       resolveChat = resolve;
     });
-    stubHomeworkFetch(async () => {
+    renderHomeworkChatApp(async () => {
       chatCallCount += 1;
       return pendingChat;
     });
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
@@ -1450,7 +1258,7 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
 
   it("surfaces a failed turn as an inline retryable error instead of silently disappearing, and regenerate() recovers it", async () => {
     let chatCallCount = 0;
-    stubHomeworkFetch(async () => {
+    renderHomeworkChatApp(async () => {
       chatCallCount += 1;
       if (chatCallCount === 1) {
         // #96: a RESPONSE-half failure specifically -- the send was accepted
@@ -1477,14 +1285,6 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
         { status: 200, headers: { "content-type": "text/event-stream", "x-conversation-id": "conv-1" } },
       );
     });
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
@@ -1521,7 +1321,7 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
 
   it("recovers from an error by sending a fresh message directly, without using Retry", async () => {
     let chatCallCount = 0;
-    stubHomeworkFetch(async () => {
+    renderHomeworkChatApp(async () => {
       chatCallCount += 1;
       // Response-half again, so the composer starts empty for the "type a
       // genuinely different message" step below (#96 pre-fills it on a
@@ -1541,14 +1341,6 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
         { status: 200, headers: { "content-type": "text/event-stream", "x-conversation-id": "conv-1" } },
       );
     });
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
@@ -1571,35 +1363,10 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
 // isn't scoped to only whichever useChat call happens to sit nearer the top
 // of App.tsx.
 describe("App tutor chat streaming guard + error surfacing (#144)", () => {
-  const HOMEWORK_FIXTURE = {
-    homeworks: [
-      {
-        id: "hw-1",
-        courseId: "course-a",
-        courseName: "STATS 311",
-        title: "HW 3",
-        description: "d",
-        dueDate: "2099-01-01T00:00:00.000Z",
-        completedPercentage: 0,
-        inProgressPercentage: 0,
-        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
-      },
-    ],
-  };
-
-  function stubTutorFetch(chatFetch: typeof fetch) {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+  it("surfaces a failed tutor turn as an inline retryable error, and disables the tutor composer while errored", async () => {
+    let chatCallCount = 0;
+    renderApp({
+      routes: (url, init) => {
         if (url === "/api/conversations" && init?.method === "POST") {
           return new Response(
             JSON.stringify({
@@ -1617,42 +1384,29 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
             { status: 201 },
           );
         }
-        if (url === "/api/chat") return chatFetch(input, init);
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-  }
-
-  it("surfaces a failed tutor turn as an inline retryable error, and disables the tutor composer while errored", async () => {
-    let chatCallCount = 0;
-    stubTutorFetch(async () => {
-      chatCallCount += 1;
-      // #96: a RESPONSE-half failure (2xx, then the model died mid-stream) --
-      // see the section chat's equivalent test above for why this replaced a
-      // bare non-2xx here.
-      if (chatCallCount === 1) return interruptedChatStreamResponse("tutor-conv-1", "Well, a p-value");
-      return new Response(
-        [
-          `data: ${JSON.stringify({ type: "start" })}\n\n`,
-          `data: ${JSON.stringify({ type: "start-step" })}\n\n`,
-          `data: ${JSON.stringify({ type: "text-start", id: "t1" })}\n\n`,
-          `data: ${JSON.stringify({ type: "text-delta", id: "t1", delta: "tutor recovered" })}\n\n`,
-          `data: ${JSON.stringify({ type: "text-end", id: "t1" })}\n\n`,
-          `data: ${JSON.stringify({ type: "finish-step" })}\n\n`,
-          `data: ${JSON.stringify({ type: "finish" })}\n\n`,
-          "data: [DONE]\n\n",
-        ].join(""),
-        { status: 200, headers: { "content-type": "text/event-stream", "x-conversation-id": "tutor-conv-1" } },
-      );
+        if (url === "/api/chat") {
+          chatCallCount += 1;
+          // #96: a RESPONSE-half failure (2xx, then the model died mid-stream)
+          // -- see the section chat's equivalent test above for why this
+          // replaced a bare non-2xx here.
+          if (chatCallCount === 1) return interruptedChatStreamResponse("tutor-conv-1", "Well, a p-value");
+          return new Response(
+            [
+              `data: ${JSON.stringify({ type: "start" })}\n\n`,
+              `data: ${JSON.stringify({ type: "start-step" })}\n\n`,
+              `data: ${JSON.stringify({ type: "text-start", id: "t1" })}\n\n`,
+              `data: ${JSON.stringify({ type: "text-delta", id: "t1", delta: "tutor recovered" })}\n\n`,
+              `data: ${JSON.stringify({ type: "text-end", id: "t1" })}\n\n`,
+              `data: ${JSON.stringify({ type: "finish-step" })}\n\n`,
+              `data: ${JSON.stringify({ type: "finish" })}\n\n`,
+              "data: [DONE]\n\n",
+            ].join(""),
+            { status: 200, headers: { "content-type": "text/event-stream", "x-conversation-id": "tutor-conv-1" } },
+          );
+        }
+        return undefined;
+      },
     });
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "New conversation" }));
@@ -1710,68 +1464,38 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
   // (#4)", which asserts exact localStorage values).
   afterEach(() => window.localStorage.clear());
 
-  const HOMEWORK_FIXTURE = {
-    homeworks: [
-      {
-        id: "hw-1",
-        courseId: "course-a",
-        courseName: "STATS 311",
-        title: "HW 3",
-        description: "d",
-        dueDate: "2099-01-01T00:00:00.000Z",
-        completedPercentage: 0,
-        inProgressPercentage: 0,
-        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
-      },
-    ],
-  };
-
-  function stubFetch(chatFetch: typeof fetch, homeworks: unknown = HOMEWORK_FIXTURE, messagesFor?: () => Response) {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(homeworks), { status: 200 });
-        if (url.startsWith("/api/conversations?")) {
-          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        }
+  /** This describe block's own extension of the shared `renderApp` --
+   *  layers /hints and /messages defaults on top of it (both endpoints
+   *  every test here needs answered even though none of them are the
+   *  point of any individual test), plus the /api/chat handler each test
+   *  actually varies. */
+  function renderResilienceApp(
+    chatFetch: typeof fetch,
+    homeworks?: unknown,
+    messagesFor?: () => Response,
+  ) {
+    return renderApp({
+      homeworks,
+      routes: (url, init) => {
         if (url.endsWith("/hints")) {
           return new Response(JSON.stringify({ used: 0, limit: null }), { status: 200 });
         }
         if (url.includes("/messages") && messagesFor) return messagesFor();
-        if (url === "/api/chat") return chatFetch(input, init);
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-  }
-
-  function renderApp() {
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        if (url === "/api/chat") return chatFetch(url, init);
+        return undefined;
+      },
+    });
   }
 
   it("hands the student's words back to the composer, and drops the un-persisted bubble, when the request never reaches the server", async () => {
     let chatCallCount = 0;
-    stubFetch(async () => {
+    renderResilienceApp(async () => {
       chatCallCount += 1;
       // A dropped connection: `fetch` itself rejects, so the Worker never
       // saw this request and nothing was persisted for it.
       if (chatCallCount === 1) throw new TypeError("Load failed");
       return chatStreamResponse("conv-1", "a real reply at last");
     });
-
-    renderApp();
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
@@ -1803,7 +1527,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
 
   it("restores the text for a server-REFUSED send too (a non-2xx never persists anything either)", async () => {
     let chatCallCount = 0;
-    stubFetch(async () => {
+    renderResilienceApp(async () => {
       chatCallCount += 1;
       if (chatCallCount === 1) {
         // #266's duplicate_message 409: the server refused this send
@@ -1816,8 +1540,6 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
       }
       return chatStreamResponse("conv-1", "accepted on the second try");
     });
-
-    renderApp();
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
@@ -1839,9 +1561,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
        composer may already hold the student's own half-written question. If
        that hint send is refused, restoring it would overwrite words the
        student never sent and never wants replaced. */
-    stubFetch(async () => new Response("gateway timeout", { status: 504 }));
-
-    renderApp();
+    renderResilienceApp(async () => new Response("gateway timeout", { status: 504 }));
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
@@ -1870,25 +1590,18 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
        path could carry text across sections, which is why only it needs the
        explicit `[currentSection]` reset (the tutor surface's equivalent is
        keyed on `[tutorConversationId]`). */
-    const twoSections = {
-      homeworks: [
-        {
-          ...HOMEWORK_FIXTURE.homeworks[0],
-          sections: [
-            { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
-            { id: "s2", title: "Sec 2", order: 2, status: "not_started", conversationId: "sec-conv-2" },
-          ],
-        },
+    const twoSections = homeworkFixture({
+      sections: [
+        { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+        { id: "s2", title: "Sec 2", order: 2, status: "not_started", conversationId: "sec-conv-2" },
       ],
-    };
-    stubFetch(
+    });
+    renderResilienceApp(
       // Every send fails before reaching the server.
       async () => new Response("gateway timeout", { status: 504 }),
       twoSections,
       () => new Response(JSON.stringify([]), { status: 200 }),
     );
-
-    renderApp();
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
@@ -1925,9 +1638,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
        collapse button here stands in for "any re-render" -- it touches
        localStorage-backed state that has nothing to do with the chat
        surface at all. */
-    stubFetch(async () => new Response("gateway timeout", { status: 504 }));
-
-    renderApp();
+    renderResilienceApp(async () => new Response("gateway timeout", { status: 504 }));
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
@@ -1949,9 +1660,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
   });
 
   it("keeps the question on screen for a RESPONSE-half failure, and does not pre-fill the composer", async () => {
-    stubFetch(async () => interruptedChatStreamResponse("conv-1", "A p-value is the probability of"));
-
-    renderApp();
+    renderResilienceApp(async () => interruptedChatStreamResponse("conv-1", "A p-value is the probability of"));
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
@@ -1976,16 +1685,11 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
        server-side in chat.errorChunk.integration.test.ts), and this is the
        client half: that transcript renders faithfully, and the plain composer
        is the "try again" affordance from it. */
-    const hydrated = {
-      homeworks: [
-        {
-          ...HOMEWORK_FIXTURE.homeworks[0],
-          sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
-        },
-      ],
-    };
+    const hydrated = homeworkFixture({
+      sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
+    });
     let chatCallCount = 0;
-    stubFetch(
+    renderResilienceApp(
       async () => {
         chatCallCount += 1;
         return chatStreamResponse("sec-conv-1", "the answer, this time in full");
@@ -2000,8 +1704,6 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
           { status: 200 },
         ),
     );
-
-    renderApp();
 
     expect(await screen.findByText("what does 0.03 mean?")).toBeTruthy();
     // Nothing half-written is replayed as if it were an answer.
@@ -2025,43 +1727,20 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
 // actually happens now.
 describe("App section chat gains a reset path on switch/restart (#302 review fix)", () => {
   it("clears a section's stale chat-stream error when the student switches away and back, with no new message sent", async () => {
-    const twoSections = {
-      homeworks: [
-        {
-          id: "hw-1",
-          courseId: "course-a",
-          courseName: "STATS 311",
-          title: "HW 3",
-          description: "d",
-          dueDate: "2099-01-01T00:00:00.000Z",
-          completedPercentage: 0,
-          inProgressPercentage: 0,
-          sections: [
-            { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
-            { id: "s2", title: "Sec 2", order: 2, status: "in_progress", conversationId: "sec-conv-2" },
-          ],
-        },
+    const twoSections = homeworkFixture({
+      sections: [
+        { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+        { id: "s2", title: "Sec 2", order: 2, status: "in_progress", conversationId: "sec-conv-2" },
       ],
-    };
+    });
     const historyByConversation: Record<string, unknown[]> = {
       "sec-conv-1": [{ id: "m1", role: "user", parts: [{ type: "text", text: "sec 1 question" }] }],
       "sec-conv-2": [{ id: "m2", role: "user", parts: [{ type: "text", text: "sec 2 question" }] }],
     };
     let chatCallCount = 0;
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(twoSections), { status: 200 });
-        if (url.startsWith("/api/conversations?")) {
-          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        }
+    renderApp({
+      homeworks: twoSections,
+      routes: (url) => {
         if (url.endsWith("/hints")) return new Response(JSON.stringify({ used: 0, limit: null }), { status: 200 });
         const messagesMatch = url.match(/^\/api\/conversations\/([^/]+)\/messages/);
         if (messagesMatch) {
@@ -2075,17 +1754,9 @@ describe("App section chat gains a reset path on switch/restart (#302 review fix
           // point here is only whether the ERROR ROW itself persists.
           return interruptedChatStreamResponse("sec-conv-1", "half an answer");
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     expect(await screen.findByText("sec 1 question")).toBeTruthy();
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
@@ -2118,29 +1789,7 @@ describe("App tutor sidebar collapse persistence (#4)", () => {
   });
 
   it("persists the tutor rail's collapsed state across a remount, independently of the homework sidebar's", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    const { unmount } = render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+    const { unmount } = renderApp({ homeworks: homeworkFixture({ sections: [] }) });
 
     const toggle = await screen.findByRole("button", { name: "Collapse tutor conversations" });
     const user = userEvent.setup();
@@ -2154,13 +1803,7 @@ describe("App tutor sidebar collapse persistence (#4)", () => {
 
     unmount();
 
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+    renderApp({ homeworks: homeworkFixture({ sections: [] }) });
 
     expect(await screen.findByRole("button", { name: "Expand tutor conversations" })).toBeTruthy();
   });
@@ -2172,29 +1815,7 @@ describe("App tutor sidebar collapse persistence (#4)", () => {
 // is the standard 2.4.1 Bypass Blocks fix.
 describe("App main landmark + skip link (#299)", () => {
   it("wraps the conversation column in a focusable <main id=\"conversation-main\">, reachable from a first-child skip link", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    const { container } = render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+    const { container } = renderApp({ homeworks: homeworkFixture({ sections: [] }) });
 
     await screen.findByRole("button", { name: "New conversation" });
 
@@ -2218,40 +1839,14 @@ describe("App main landmark + skip link (#299)", () => {
 // reload and the visible transcript, since only the first of those catches
 // the silent-context-loss half.
 describe("App section chat resumes with hydrated history (#252)", () => {
-  const HOMEWORK_FIXTURE = {
-    homeworks: [
-      {
-        id: "hw-1",
-        courseId: "course-a",
-        courseName: "STATS 311",
-        title: "HW 3",
-        description: "d",
-        dueDate: "2099-01-01T00:00:00.000Z",
-        completedPercentage: 0,
-        inProgressPercentage: 0,
-        sections: [
-          { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
-        ],
-      },
-    ],
-  };
+  const SEC1_IN_PROGRESS = [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }];
 
   it("hydrates the section chat's transcript on mount AND includes the prior turns in the next /api/chat request", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     const chatCalls: Array<{ conversationId?: string; messages: Array<{ role: string }> }> = [];
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+    renderApp({
+      homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
+      routes: (url, init) => {
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           return new Response(
             JSON.stringify([
@@ -2269,17 +1864,9 @@ describe("App section chat resumes with hydrated history (#252)", () => {
           chatCalls.push(body);
           return chatStreamResponse(body.conversationId ?? "unexpected", "follow-up section reply");
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     // The visible transcript reflects the persisted history on mount, not
     // an empty thread -- the other half of #252 (the model's context is
@@ -2301,48 +1888,23 @@ describe("App section chat resumes with hydrated history (#252)", () => {
   });
 
   it("switching from a hydrated section back to it after visiting another surface re-hydrates rather than staying empty", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
-    const twoSectionFixture = {
-      homeworks: [
-        {
-          ...HOMEWORK_FIXTURE.homeworks[0],
-          sections: [
-            { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
-            { id: "s2", title: "Sec 2", order: 2, status: "not_started", conversationId: null },
-          ],
-        },
-      ],
-    };
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(twoSectionFixture), { status: 200 });
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+    renderApp({
+      homeworks: homeworkFixture({
+        sections: [
+          { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+          { id: "s2", title: "Sec 2", order: 2, status: "not_started", conversationId: null },
+        ],
+      }),
+      routes: (url) => {
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           return new Response(
             JSON.stringify([{ id: "m1", role: "user", parts: [{ type: "text", text: "sec 1 question" }] }]),
             { status: 200 },
           );
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     // Sec 1 auto-selected on mount, hydrated.
     expect(await screen.findByText("sec 1 question")).toBeTruthy();
@@ -2370,36 +1932,10 @@ describe("App section chat resumes with hydrated history (#252)", () => {
        state and never the LIVE instance, so this second fetch's content
        was silently dropped and the stale first-fetch transcript stayed on
        screen forever. */
-    const homework = {
-      homeworks: [
-        {
-          id: "hw-1",
-          courseId: "course-a",
-          courseName: "STATS 311",
-          title: "HW 3",
-          description: "d",
-          dueDate: "2099-01-01T00:00:00.000Z",
-          completedPercentage: 0,
-          inProgressPercentage: 0,
-          sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
-        },
-      ],
-    };
     let messagesCallCount = 0;
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(homework), { status: 200 });
-        if (url.startsWith("/api/conversations?")) {
-          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        }
+    renderApp({
+      homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
+      routes: (url) => {
         if (url.endsWith("/hints")) return new Response(JSON.stringify({ used: 0, limit: null }), { status: 200 });
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           messagesCallCount += 1;
@@ -2409,17 +1945,9 @@ describe("App section chat resumes with hydrated history (#252)", () => {
             { status: 200 },
           );
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     expect(await screen.findByText("first fetch content")).toBeTruthy();
 
@@ -2432,39 +1960,10 @@ describe("App section chat resumes with hydrated history (#252)", () => {
 });
 
 describe("App eager section greeting (#318)", () => {
-  const HOMEWORK_FIXTURE = {
-    homeworks: [
-      {
-        id: "hw-1",
-        courseId: "course-a",
-        courseName: "STATS 311",
-        title: "HW 3",
-        description: "d",
-        dueDate: "2099-01-01T00:00:00.000Z",
-        completedPercentage: 0,
-        inProgressPercentage: 0,
-        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
-      },
-    ],
-  };
-
   it("shows the section's greeting on open, before the student sends anything", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     let startCalls = 0;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) {
-          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        }
+    renderApp({
+      routes: (url, init) => {
         if (url === "/api/courses/course-a/sections/s1/conversations" && init?.method === "POST") {
           startCalls += 1;
           return new Response(
@@ -2488,17 +1987,9 @@ describe("App eager section greeting (#318)", () => {
             { status: 201 },
           );
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     // No message sent yet -- the greeting must already be visible.
     expect(await screen.findByText(/Where would you like to start\?/)).toBeTruthy();
@@ -2525,84 +2016,44 @@ describe("App eager section greeting (#318)", () => {
        already tends to resolve BEFORE the render flushes -- this test
        forces the opposite, slower ordering deterministically) exercises
        the other half of that "regardless of which order" claim. */
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     let startCalls = 0;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) {
-          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        }
+    renderApp({
+      routes: (url, init) => {
         if (url === "/api/courses/course-a/sections/s1/conversations" && init?.method === "POST") {
           startCalls += 1;
           // A macrotask boundary always runs after any microtasks (and
           // React's own render flush) already queued in this tick.
-          await new Promise((resolve) => setTimeout(resolve, 0));
-          return new Response(
-            JSON.stringify({
-              id: "sec-conv-new",
-              title: "Section 1: Sec 1",
-              greetingMessageId: "g1",
-              greetingParts: [{ type: "text", text: "Where would you like to start?" }],
-              promptTemplateId: null,
-            }),
-            { status: 201 },
-          );
+          return (async () => {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            return new Response(
+              JSON.stringify({
+                id: "sec-conv-new",
+                title: "Section 1: Sec 1",
+                greetingMessageId: "g1",
+                greetingParts: [{ type: "text", text: "Where would you like to start?" }],
+                promptTemplateId: null,
+              }),
+              { status: 201 },
+            );
+          })();
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     expect(await screen.findByText(/Where would you like to start\?/)).toBeTruthy();
     expect(startCalls).toBe(1);
   });
 
   it("leaves the composer empty (no crash) when the eager-start call 409s", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) {
-          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        }
+    renderApp({
+      routes: (url, init) => {
         if (url === "/api/courses/course-a/sections/s1/conversations" && init?.method === "POST") {
           return new Response(JSON.stringify({ error: "Section is not interactive" }), { status: 409 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     const composer = await screen.findByLabelText("Message input");
     expect(composer).toBeTruthy();
@@ -2610,22 +2061,9 @@ describe("App eager section greeting (#318)", () => {
   });
 
   it("Submit does nothing for a section whose only content is the eager greeting -- no student turn yet", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     let submitCalls = 0;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) {
-          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        }
+    renderApp({
+      routes: (url, init) => {
         if (url === "/api/courses/course-a/sections/s1/conversations" && init?.method === "POST") {
           return new Response(
             JSON.stringify({
@@ -2652,17 +2090,9 @@ describe("App eager section greeting (#318)", () => {
           submitCalls += 1;
           return new Response(JSON.stringify({}), { status: 200 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     await screen.findByText(/Where would you like to start\?/);
 
@@ -2677,24 +2107,10 @@ describe("App eager section greeting (#318)", () => {
 });
 
 describe("App section conversationId stays live after mid-session creation (#271, #272)", () => {
-  const TWO_SECTION_NO_CONVO_FIXTURE = {
-    homeworks: [
-      {
-        id: "hw-1",
-        courseId: "course-a",
-        courseName: "STATS 311",
-        title: "HW 3",
-        description: "d",
-        dueDate: "2099-01-01T00:00:00.000Z",
-        completedPercentage: 0,
-        inProgressPercentage: 0,
-        sections: [
-          { id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null },
-          { id: "s2", title: "Sec 2", order: 2, status: "not_started", conversationId: null },
-        ],
-      },
-    ],
-  };
+  const TWO_SECTIONS_NO_CONVO = [
+    { id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null },
+    { id: "s2", title: "Sec 2", order: 2, status: "not_started", conversationId: null },
+  ];
 
   // #271: previously, a section's conversationId learned mid-session (via
   // the x-conversation-id response header on its first turn) was written
@@ -2705,23 +2121,11 @@ describe("App section conversationId stays live after mid-session creation (#271
   // with conversationId: null, gets one, survives a switch-away-and-back,
   // and Submit actually fires against the right id.
   it("keeps a section's transcript and Submit working after its first-ever turn mints a conversationId", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     const submitCalls: string[] = [];
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") {
-          return new Response(JSON.stringify(TWO_SECTION_NO_CONVO_FIXTURE), { status: 200 });
-        }
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+    renderApp({
+      homeworks: homeworkFixture({ sections: TWO_SECTIONS_NO_CONVO }),
+      routes: (url, init) => {
         if (url === "/api/chat") {
           const body = JSON.parse(String(init?.body)) as { conversationId?: string; kind?: string };
           // Only Sec 1's very first turn should ever reach here without a
@@ -2745,17 +2149,9 @@ describe("App section conversationId stays live after mid-session creation (#271
           submitCalls.push(url);
           return new Response(JSON.stringify({}), { status: 200 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     const composer = await screen.findByLabelText("Message input");
     const user = userEvent.setup();
@@ -2795,21 +2191,9 @@ describe("App section conversationId stays live after mid-session creation (#271
   // path: one turn, no section switch, and asserts the greeting is visible
   // afterward.
   it("shows the section's greeting in the transcript right after its first-ever turn, with no section switch (#272)", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") {
-          return new Response(JSON.stringify(TWO_SECTION_NO_CONVO_FIXTURE), { status: 200 });
-        }
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+    renderApp({
+      homeworks: homeworkFixture({ sections: TWO_SECTIONS_NO_CONVO }),
+      routes: (url, init) => {
         if (url === "/api/chat") {
           const body = JSON.parse(String(init?.body)) as { conversationId?: string };
           if (!body.conversationId) return chatStreamResponse("new-conv-1", "reply to sec 1");
@@ -2825,17 +2209,9 @@ describe("App section conversationId stays live after mid-session creation (#271
             { status: 200 },
           );
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     const composer = await screen.findByLabelText("Message input");
     const user = userEvent.setup();
@@ -2855,55 +2231,21 @@ describe("App section conversationId stays live after mid-session creation (#271
 // leave the message list alone, surface a retryable error, and disable the
 // composer while it's broken.
 describe("App history hydration fails closed on fetch failure (#276)", () => {
-  const HOMEWORK_FIXTURE = {
-    homeworks: [
-      {
-        id: "hw-1",
-        courseId: "course-a",
-        courseName: "STATS 311",
-        title: "HW 3",
-        description: "d",
-        dueDate: "2099-01-01T00:00:00.000Z",
-        completedPercentage: 0,
-        inProgressPercentage: 0,
-        sections: [
-          { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
-        ],
-      },
-    ],
-  };
+  const SEC1_IN_PROGRESS = [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }];
 
   it("section chat: a failed history fetch does not clear the transcript, surfaces a retryable error, and disables the composer", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     let messagesCallCount = 0;
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+    renderApp({
+      homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
+      routes: (url) => {
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           messagesCallCount += 1;
           return new Response(JSON.stringify({ error: "server unavailable" }), { status: 503 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     // Retryable error surfaced, not a silent empty thread.
     expect(await screen.findByText(/Couldn't load this section's conversation/i)).toBeTruthy();
@@ -2921,22 +2263,9 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
   });
 
   it("tutor chat: a failed history fetch surfaces a retryable error and disables the composer instead of a silent empty thread", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
-    const tutorFixture = {
-      homeworks: [{ ...HOMEWORK_FIXTURE.homeworks[0], sections: [] }],
-    };
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(tutorFixture), { status: 200 });
+    renderApp({
+      homeworks: homeworkFixture({ sections: [] }),
+      routes: (url) => {
         if (url.startsWith("/api/conversations?courseId=")) {
           return new Response(
             JSON.stringify({
@@ -2951,17 +2280,9 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
         if (url.startsWith("/api/conversations/t1/messages")) {
           return new Response(JSON.stringify({ error: "server unavailable" }), { status: 503 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     const user = userEvent.setup();
     await user.click(await screen.findByText("Existing tutor chat"));
@@ -2985,22 +2306,9 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
        had failed left the brand-new conversation rendered with t1's stale
        error: composer disabled (isSending checks tutorHydrationError) and a
        Retry that closes over t1's id, not t2's. */
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
-    const tutorFixture = {
-      homeworks: [{ ...HOMEWORK_FIXTURE.homeworks[0], sections: [] }],
-    };
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(tutorFixture), { status: 200 });
+    renderApp({
+      homeworks: homeworkFixture({ sections: [] }),
+      routes: (url, init) => {
         if (url === "/api/conversations" && init?.method === "POST") {
           return new Response(
             JSON.stringify({
@@ -3030,17 +2338,9 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
         if (url.startsWith("/api/conversations/t2/messages")) {
           return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     const user = userEvent.setup();
     await user.click(await screen.findByText("Existing tutor chat"));
@@ -3061,112 +2361,36 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
 // wiring to POST .../conversations/:id/restart, and hydrating the
 // replacement conversation on success. Reuses HOMEWORK_FIXTURE's shape.
 describe("App section restart affordance (#248)", () => {
-  const RESTART_HOMEWORK_FIXTURE = {
-    homeworks: [
-      {
-        id: "hw-1",
-        courseId: "course-a",
-        courseName: "STATS 311",
-        title: "HW 3",
-        description: "d",
-        dueDate: "2099-01-01T00:00:00.000Z",
-        completedPercentage: 0,
-        inProgressPercentage: 0,
-        sections: [
-          { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
-        ],
-      },
-    ],
-  };
+  const SEC1_IN_PROGRESS = [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }];
 
-  function stubBaseFetch(
-    extra: (url: string, init?: RequestInit) => Response | null,
-  ) {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-    HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
-      this.setAttribute("open", "");
-    };
-    HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
-      this.removeAttribute("open");
-      this.dispatchEvent(new Event("close"));
-    };
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") {
-          return new Response(JSON.stringify(RESTART_HOMEWORK_FIXTURE), { status: 200 });
-        }
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+  function renderRestartApp(extra: (url: string, init?: RequestInit) => Response | undefined) {
+    return renderApp({
+      homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
+      routes: (url, init) => {
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           return new Response(
             JSON.stringify([{ id: "m1", role: "user", parts: [{ type: "text", text: "sec 1 question" }] }]),
             { status: 200 },
           );
         }
-        const res = extra(url, init);
-        if (res) return res;
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
+        return extra(url, init);
+      },
+    });
   }
 
   it("does not render the restart button for a section with no active conversation", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") {
-          return new Response(
-            JSON.stringify({
-              homeworks: [
-                {
-                  ...RESTART_HOMEWORK_FIXTURE.homeworks[0],
-                  sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
-                },
-              ],
-            }),
-            { status: 200 },
-          );
-        }
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        throw new Error(`unexpected fetch to ${url}`);
+    renderApp({
+      homeworks: homeworkFixture({
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
       }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+    });
 
     await screen.findByLabelText("Message input");
     expect(screen.queryByRole("button", { name: "Restart section" })).toBeNull();
   });
 
   it("opens a confirm dialog stating the conversation won't be recoverable, and cancel leaves it untouched", async () => {
-    stubBaseFetch(() => null);
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+    renderRestartApp(() => undefined);
 
     const restartButton = await screen.findByRole("button", { name: "Restart section" });
     const user = userEvent.setup();
@@ -3184,53 +2408,20 @@ describe("App section restart affordance (#248)", () => {
   });
 
   it("shows the submission-will-be-undone line when the section is already submitted", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-    HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
-      this.setAttribute("open", "");
-    };
-    HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
-      this.removeAttribute("open");
-    };
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") {
-          return new Response(
-            JSON.stringify({
-              homeworks: [
-                {
-                  ...RESTART_HOMEWORK_FIXTURE.homeworks[0],
-                  sections: [{ id: "s1", title: "Sec 1", order: 1, status: "submitted", conversationId: "sec-conv-1" }],
-                },
-              ],
-            }),
-            { status: 200 },
-          );
-        }
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+    renderApp({
+      homeworks: homeworkFixture({
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "submitted", conversationId: "sec-conv-1" }],
+      }),
+      routes: (url) => {
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           return new Response(
             JSON.stringify([{ id: "m1", role: "user", parts: [{ type: "text", text: "sec 1 question" }] }]),
             { status: 200 },
           );
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     const restartButton = await screen.findByRole("button", { name: "Restart section" });
     const user = userEvent.setup();
@@ -3242,7 +2433,7 @@ describe("App section restart affordance (#248)", () => {
 
   it("confirming restart POSTs to the restart endpoint and hydrates the replacement conversation", async () => {
     let restartCalled = false;
-    stubBaseFetch((url) => {
+    renderRestartApp((url) => {
       if (url === "/api/courses/course-a/conversations/sec-conv-1/restart") {
         restartCalled = true;
         return new Response(
@@ -3259,16 +2450,8 @@ describe("App section restart affordance (#248)", () => {
           { status: 200 },
         );
       }
-      return null;
+      return undefined;
     });
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
 
     const restartButton = await screen.findByRole("button", { name: "Restart section" });
     const user = userEvent.setup();
@@ -3294,7 +2477,7 @@ describe("App section restart affordance (#248)", () => {
        above). */
     let restartCalled = false;
     let chatCallCount = 0;
-    stubBaseFetch((url) => {
+    renderRestartApp((url) => {
       if (url === "/api/chat") {
         chatCallCount += 1;
         return interruptedChatStreamResponse("sec-conv-1", "half an answer");
@@ -3315,16 +2498,8 @@ describe("App section restart affordance (#248)", () => {
           { status: 200 },
         );
       }
-      return null;
+      return undefined;
     });
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
@@ -3345,23 +2520,15 @@ describe("App section restart affordance (#248)", () => {
   });
 
   it("a 409 (graded submission) keeps the dialog open and shows the server's message inline", async () => {
-    stubBaseFetch((url) => {
+    renderRestartApp((url) => {
       if (url === "/api/courses/course-a/conversations/sec-conv-1/restart") {
         return new Response(
           JSON.stringify({ error: "Submission has already been graded and cannot be restarted" }),
           { status: 409 },
         );
       }
-      return null;
+      return undefined;
     });
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
 
     const restartButton = await screen.findByRole("button", { name: "Restart section" });
     const user = userEvent.setup();
@@ -3381,41 +2548,10 @@ describe("App section restart affordance (#248)", () => {
 // closed on its own) so the request stays genuinely in flight long enough
 // to assert the button, then click it.
 describe("App Stop control (#274)", () => {
-  const STOP_HOMEWORK_FIXTURE = {
-    homeworks: [
-      {
-        id: "hw-1",
-        courseId: "course-a",
-        courseName: "STATS 311",
-        title: "HW 3",
-        description: "d",
-        dueDate: "2099-01-01T00:00:00.000Z",
-        completedPercentage: 0,
-        inProgressPercentage: 0,
-        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
-      },
-    ],
-  };
-
   it("section chat: shows Stop while a turn is in flight, and clicking it aborts the request", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     let capturedSignal: AbortSignal | undefined;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") {
-          return new Response(JSON.stringify(STOP_HOMEWORK_FIXTURE), { status: 200 });
-        }
-        if (url.startsWith("/api/conversations?")) {
-          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        }
+    renderApp({
+      routes: (url, init) => {
         if (url === "/api/chat") {
           capturedSignal = init?.signal ?? undefined;
           // Never-closing stream -- chatStatus stays "streaming" until the
@@ -3436,17 +2572,9 @@ describe("App Stop control (#274)", () => {
             headers: { "content-type": "text/event-stream", "x-conversation-id": "conv-1" },
           });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     const composer = await screen.findByLabelText("Message input");
     const user = userEvent.setup();
@@ -3477,24 +2605,9 @@ describe("App Stop control (#274)", () => {
   // visible transcript must say so instead of the fragment quietly reading
   // as an ordinary, complete, remembered reply.
   it("section chat: marks the partial reply as stopped/not-saved once Stop is clicked mid-stream", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     let capturedSignal: AbortSignal | undefined;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") {
-          return new Response(JSON.stringify(STOP_HOMEWORK_FIXTURE), { status: 200 });
-        }
-        if (url.startsWith("/api/conversations?")) {
-          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        }
+    renderApp({
+      routes: (url, init) => {
         if (url === "/api/chat") {
           capturedSignal = init?.signal ?? undefined;
           const stream = new ReadableStream({
@@ -3521,17 +2634,9 @@ describe("App Stop control (#274)", () => {
             headers: { "content-type": "text/event-stream", "x-conversation-id": "conv-1" },
           });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     const composer = await screen.findByLabelText("Message input");
     const user = userEvent.setup();
@@ -3556,49 +2661,20 @@ describe("App Stop control (#274)", () => {
   // isStopActionable decouples the two: Stop stays aria-disabled while a
   // hydration error is the only thing "sending".
   it("section chat: Stop stays inactive when only a hydration error (not a genuine send) makes the composer disabled", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
-    const homeworkWithStartedSection = {
-      homeworks: [
-        {
-          ...STOP_HOMEWORK_FIXTURE.homeworks[0],
-          sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "conv-1" }],
-        },
-      ],
-    };
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") {
-          return new Response(JSON.stringify(homeworkWithStartedSection), { status: 200 });
-        }
-        if (url.startsWith("/api/conversations?")) {
-          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        }
+    renderApp({
+      homeworks: homeworkFixture({
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "conv-1" }],
+      }),
+      routes: (url) => {
         // The section already has a conversationId, so App.tsx eagerly
         // hydrates its history on mount -- failing that fetch is what sets
         // sectionHydrationError without any chat turn ever having been sent.
         if (url === "/api/conversations/conv-1/messages?limit=200") {
           return new Response(JSON.stringify({ error: "boom" }), { status: 503 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     const composer = await screen.findByLabelText("Message input");
     // The hydration failure disables the composer -- confirms isSending
@@ -3618,41 +2694,15 @@ describe("App Stop control (#274)", () => {
 // reads from the server (replacing the #20 fixture), and the "Give me a
 // hint" button (Composer.tsx) sends a chat turn flagged isHintRequest.
 describe("App hint state (#80)", () => {
-  const HOMEWORK_FIXTURE = {
-    homeworks: [
-      {
-        id: "hw-1",
-        courseId: "course-a",
-        courseName: "STATS 311",
-        title: "HW 3",
-        description: "d",
-        dueDate: "2099-01-01T00:00:00.000Z",
-        completedPercentage: 0,
-        inProgressPercentage: 0,
-        sections: [
-          { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
-        ],
-      },
-    ],
-  };
+  const SEC1_IN_PROGRESS = [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }];
 
   it("Sidebar's hint count comes from GET .../hints, not a fixture, and updates after a granted hint request", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     let hintsGetCount = 0;
     const chatCalls: Array<{ isHintRequest?: boolean }> = [];
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+    renderApp({
+      homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
+      routes: (url, init) => {
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           return new Response(JSON.stringify([]), { status: 200 });
         }
@@ -3667,17 +2717,9 @@ describe("App hint state (#80)", () => {
           chatCalls.push(body);
           return chatStreamResponse("sec-conv-1", "scaffolded nudge");
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     // Real server state (1), not the old fixture's hardcoded 3.
     await waitFor(() => expect(screen.getByLabelText("1 hints used")).toBeTruthy());
@@ -3696,21 +2738,11 @@ describe("App hint state (#80)", () => {
   });
 
   it("rapid double-clicks on 'Give me a hint' send only one chat request (client-side suppression)", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     const chatCalls: unknown[] = [];
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
-        if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+    renderApp({
+      homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
+      routes: (url, init) => {
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           return new Response(JSON.stringify([]), { status: 200 });
         }
@@ -3721,17 +2753,9 @@ describe("App hint state (#80)", () => {
           chatCalls.push(JSON.parse(String(init?.body)));
           return chatStreamResponse("sec-conv-1", "reply");
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     const hintButton = await screen.findByRole("button", { name: "Give me a hint" });
     const user = userEvent.setup();
@@ -3755,25 +2779,7 @@ describe("App hint state (#80)", () => {
    just been deleted.
    -------------------------------------------------------------------------- */
 describe("App delete during a pending selection (#392)", () => {
-  const HOMEWORK_FIXTURE = {
-    homeworks: [
-      {
-        id: "hw-1",
-        courseId: "course-a",
-        // #304 (merge): App reads StudentHomeworkSummary.courseName for the
-        // top nav's course label. Every other fixture in this file carries
-        // it; these two were written against the pre-#304 App, where the
-        // label was a hardcoded stand-in, so omitting it crashed TopNav.
-        courseName: "STATS 311",
-        title: "HW 3",
-        description: "d",
-        dueDate: "2099-01-01T00:00:00.000Z",
-        completedPercentage: 0,
-        inProgressPercentage: 0,
-        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
-      },
-    ],
-  };
+  const SEC1_IN_PROGRESS = [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }];
   const CONV_B = {
     id: "conv-b",
     kind: "tutor",
@@ -3790,30 +2796,14 @@ describe("App delete during a pending selection (#392)", () => {
        a value captured before it -- so a conversation that became current
        mid-delete was never torn down. Fixed by invalidating the selection
        BEFORE awaiting, which removes the race rather than detecting it. */
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-    HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
-      this.setAttribute("open", "");
-    };
-    HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
-      this.removeAttribute("open");
-      this.dispatchEvent(new Event("close"));
-    };
-
     let releaseHistory!: (r: Response) => void;
     let releaseDelete!: (r: Response) => void;
     const hangingHistory = new Promise<Response>((r) => (releaseHistory = r));
     const hangingDelete = new Promise<Response>((r) => (releaseDelete = r));
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+    renderApp({
+      homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
+      routes: (url, init) => {
         if (url.startsWith("/api/conversations?")) {
           return new Response(JSON.stringify({ items: [CONV_B], nextCursor: null }), { status: 200 });
         }
@@ -3822,17 +2812,9 @@ describe("App delete during a pending selection (#392)", () => {
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           return new Response(JSON.stringify([]), { status: 200 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     await userEvent.click(await screen.findByRole("button", { name: `Select conversation: ${CONV_B.title}` }));
     await userEvent.click(screen.getByRole("button", { name: `Delete conversation: ${CONV_B.title}` }));
@@ -3849,28 +2831,12 @@ describe("App delete during a pending selection (#392)", () => {
   });
 
   it("does not open a deleted conversation when its in-flight history lands", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-    HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
-      this.setAttribute("open", "");
-    };
-    HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
-      this.removeAttribute("open");
-      this.dispatchEvent(new Event("close"));
-    };
-
     let releaseHistory!: (r: Response) => void;
     const historyPromise = new Promise<Response>((r) => (releaseHistory = r));
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+    renderApp({
+      homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
+      routes: (url, init) => {
         if (url.startsWith("/api/conversations?")) {
           return new Response(JSON.stringify({ items: [CONV_B], nextCursor: null }), { status: 200 });
         }
@@ -3881,17 +2847,9 @@ describe("App delete during a pending selection (#392)", () => {
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           return new Response(JSON.stringify([]), { status: 200 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     // Select conversation B -- its history request hangs, so selection is
     // pending and tutorConversationId is still undefined.
@@ -3930,25 +2888,6 @@ describe("App delete during a pending selection (#392)", () => {
    guard then refused to reselect it, until reload.
    -------------------------------------------------------------------------- */
 describe("App superseded tutor selection (#398)", () => {
-  const HOMEWORK_FIXTURE = {
-    homeworks: [
-      {
-        id: "hw-1",
-        courseId: "course-a",
-        // #304 (merge): App reads StudentHomeworkSummary.courseName for the
-        // top nav's course label. Every other fixture in this file carries
-        // it; these two were written against the pre-#304 App, where the
-        // label was a hardcoded stand-in, so omitting it crashed TopNav.
-        courseName: "STATS 311",
-        title: "HW 3",
-        description: "d",
-        dueDate: "2099-01-01T00:00:00.000Z",
-        completedPercentage: 0,
-        inProgressPercentage: 0,
-        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
-      },
-    ],
-  };
   const CONV_B = {
     id: "conv-b",
     kind: "tutor",
@@ -3959,21 +2898,14 @@ describe("App superseded tutor selection (#398)", () => {
   };
 
   it("clears the pending row when the student navigates to a section instead", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     let releaseHistory!: (r: Response) => void;
     const hanging = new Promise<Response>((r) => (releaseHistory = r));
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+    renderApp({
+      homeworks: homeworkFixture({
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
+      }),
+      routes: (url) => {
         if (url.startsWith("/api/conversations?")) {
           return new Response(JSON.stringify({ items: [CONV_B], nextCursor: null }), { status: 200 });
         }
@@ -3981,17 +2913,9 @@ describe("App superseded tutor selection (#398)", () => {
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
           return new Response(JSON.stringify([]), { status: 200 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     // Select B -- its history hangs, so the row goes pending.
     await userEvent.click(await screen.findByRole("button", { name: `Select conversation: ${CONV_B.title}` }));
@@ -4019,21 +2943,7 @@ describe("App superseded tutor selection (#398)", () => {
 describe("App tutor transcript load-older (#280)", () => {
   // No sections -- this covers the tutor surface, which is reached by
   // clicking a rail row rather than by section auto-selection.
-  const TUTOR_ONLY_FIXTURE = {
-    homeworks: [
-      {
-        id: "hw-1",
-        courseId: "course-a",
-        courseName: "STATS 311",
-        title: "HW 3",
-        description: "d",
-        dueDate: "2099-01-01T00:00:00.000Z",
-        completedPercentage: 0,
-        inProgressPercentage: 0,
-        sections: [],
-      },
-    ],
-  };
+  const TUTOR_ONLY_FIXTURE = homeworkFixture({ sections: [] });
   const PAGE_SIZE = 200;
   // Page 1 is the most recent PAGE_SIZE messages, oldest-first, seq
   // 201..400. A full page is what makes `hasMoreHistory` true, which is
@@ -4056,22 +2966,11 @@ describe("App tutor transcript load-older (#280)", () => {
   ];
 
   it("pages back with before=<oldest loaded seq> and PREPENDS the result", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     const messagesUrls: string[] = [];
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") {
-          return new Response(JSON.stringify(TUTOR_ONLY_FIXTURE), { status: 200 });
-        }
+    renderApp({
+      homeworks: TUTOR_ONLY_FIXTURE,
+      routes: (url) => {
         if (url.startsWith("/api/conversations?courseId=")) {
           return new Response(
             JSON.stringify({
@@ -4088,17 +2987,9 @@ describe("App tutor transcript load-older (#280)", () => {
           const isOlderPage = url.includes("before=");
           return new Response(JSON.stringify(isOlderPage ? OLDER_PAGE : PAGE_ONE), { status: 200 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     const user = userEvent.setup();
     await user.click(await screen.findByText("Long tutor chat"));
@@ -4139,22 +3030,11 @@ describe("App tutor transcript load-older (#280)", () => {
        claimed history exists for a thread that has none, and clicking the
        button sent the OLD conversation's cursor at the NEW conversation's
        endpoint. */
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     const messagesUrls: string[] = [];
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") {
-          return new Response(JSON.stringify(TUTOR_ONLY_FIXTURE), { status: 200 });
-        }
+    renderApp({
+      homeworks: TUTOR_ONLY_FIXTURE,
+      routes: (url, init) => {
         if (url === "/api/conversations" && init?.method === "POST") {
           return new Response(
             JSON.stringify({
@@ -4182,17 +3062,9 @@ describe("App tutor transcript load-older (#280)", () => {
           messagesUrls.push(url);
           return new Response(JSON.stringify(url.includes("before=") ? OLDER_PAGE : PAGE_ONE), { status: 200 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     const user = userEvent.setup();
     await user.click(await screen.findByText("Long tutor chat"));
@@ -4217,21 +3089,6 @@ describe("App tutor transcript load-older (#280)", () => {
    failed hydration; the second test here is that specific defect. */
 describe("App section transcript load-older", () => {
   const PAGE_SIZE = 200;
-  const homeworkFixture = (sections: unknown[]) => ({
-    homeworks: [
-      {
-        id: "hw-1",
-        courseId: "course-a",
-        courseName: "STATS 311",
-        title: "HW 3",
-        description: "d",
-        dueDate: "2099-01-01T00:00:00.000Z",
-        completedPercentage: 0,
-        inProgressPercentage: 0,
-        sections,
-      },
-    ],
-  });
   // Full page => hasMore, which is what renders the control. seq 201..400.
   const pageOne = (label: string) =>
     Array.from({ length: PAGE_SIZE }, (_, i) => ({
@@ -4243,9 +3100,6 @@ describe("App section transcript load-older", () => {
     }));
 
   it("pages back with before=<oldest loaded seq> and PREPENDS the result", async () => {
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     const messagesUrls: string[] = [];
     const olderPage = [
       {
@@ -4257,25 +3111,11 @@ describe("App section transcript load-older", () => {
       },
     ];
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") {
-          return new Response(
-            JSON.stringify(
-              homeworkFixture([{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }]),
-            ),
-            { status: 200 },
-          );
-        }
-        if (url.startsWith("/api/conversations?")) {
-          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        }
+    renderApp({
+      homeworks: homeworkFixture({
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
+      }),
+      routes: (url) => {
         if (url.endsWith("/hints")) {
           return new Response(JSON.stringify({ count: 0, limit: null, remaining: null }), { status: 200 });
         }
@@ -4283,17 +3123,9 @@ describe("App section transcript load-older", () => {
           messagesUrls.push(url);
           return new Response(JSON.stringify(url.includes("before=") ? olderPage : pageOne("s1")), { status: 200 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     // Sec 1 auto-selects on mount and hydrates a full page, so older
     // messages exist and the control renders.
@@ -4333,33 +3165,16 @@ describe("App section transcript load-older", () => {
        correctly checks the new section) and prepended sec 2's older page onto
        sec 1's still-rendered transcript. The tutor surface's own failure path
        has always cleared its cursor; this was the asymmetry. */
-    vi.stubGlobal("CSS", { supports: () => true });
-    Element.prototype.scrollIntoView = vi.fn();
-
     const messagesUrls: string[] = [];
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
-        if (url === "/api/hello") {
-          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
-        }
-        if (url === "/api/student/homeworks") {
-          return new Response(
-            JSON.stringify(
-              homeworkFixture([
-                { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
-                { id: "s2", title: "Sec 2", order: 2, status: "in_progress", conversationId: "sec-conv-2" },
-              ]),
-            ),
-            { status: 200 },
-          );
-        }
-        if (url.startsWith("/api/conversations?")) {
-          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
-        }
+    renderApp({
+      homeworks: homeworkFixture({
+        sections: [
+          { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+          { id: "s2", title: "Sec 2", order: 2, status: "in_progress", conversationId: "sec-conv-2" },
+        ],
+      }),
+      routes: (url) => {
         if (url.endsWith("/hints")) {
           return new Response(JSON.stringify({ count: 0, limit: null, remaining: null }), { status: 200 });
         }
@@ -4387,17 +3202,9 @@ describe("App section transcript load-older", () => {
           }
           return new Response(JSON.stringify({ error: "server unavailable" }), { status: 503 });
         }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </MemoryRouter>,
-    );
+        return undefined;
+      },
+    });
 
     // Sec 1 hydrates a full page -- cursor set, control offered.
     expect(await screen.findByRole("button", { name: /load older messages/i })).toBeTruthy();
@@ -4418,5 +3225,99 @@ describe("App section transcript load-older", () => {
     // And nothing ever asked sec 2 for a page it would have spliced in.
     expect(messagesUrls.some((u) => u.includes("before="))).toBe(false);
     expect(screen.queryByText("SEC 2 OLDER MESSAGE")).toBeNull();
+  });
+});
+
+/* #309: a count-shaped regression guard for the per-token re-render cost
+   Message.tsx's own doc comment names (MessageMarkdown's memo()) --
+   "App.tsx rebuilds EVERY turn's `content` from scratch on every render, and
+   a streaming reply re-renders the column once per token, so without this,
+   every token arriving re-parses the markdown ... of all 200 hydrated
+   messages above it." That memo has no dedicated test anywhere (confirmed:
+   grepping Message.test.tsx and App.streaming.test.tsx for it turns up
+   nothing) -- App.streaming.test.tsx's own doc comment explicitly says so
+   ("The memoization half of #277 is not asserted here").
+
+   This drives it end-to-end through the real App and real streaming (many
+   small text-delta chunks, not one big one) rather than reaching into
+   Message.tsx's module-private buildMessageData, using the counting
+   react-markdown wrapper installed at the top of this file. The invariant:
+   re-rendering markdown for a batch of ALREADY-hydrated, unchanged messages
+   must not scale with how many chunks the ACTIVELY streaming reply takes to
+   arrive -- only the growing reply's own markdown should re-render per
+   chunk.
+
+   Verified this actually catches the regression it's for by temporarily
+   changing MessageMarkdown's `memo(...)` wrapper to a plain function call
+   (`(function MessageMarkdown(...) {...})` in place of
+   `memo(function MessageMarkdown(...) {...})`) and re-running just this
+   test: the tracked count went from 2 (memoized, current code) to 20
+   (unmemoized) against the exact HYDRATED_COUNT/CHUNK_COUNT below --
+   `experimental_throttle` (#277) coalesces most of the streamed deltas into
+   fewer React commits than one-per-chunk, so the two numbers are not simply
+   HYDRATED_COUNT-scaled, but every commit that does happen re-renders every
+   hydrated message's markdown without the memo, not just the growing one.
+   Restored before committing; the threshold below (10) sits cleanly between
+   the two measured values. */
+describe("App markdown render cost does not scale with hydrated history per streamed chunk (#309)", () => {
+  it("does not re-render earlier, unchanged messages' markdown once per streamed chunk of a new reply", async () => {
+    const HYDRATED_COUNT = 12;
+    const hydratedMessages = Array.from({ length: HYDRATED_COUNT }, (_, i) => ({
+      id: `hist-${i}`,
+      role: i % 2 === 0 ? "user" : "assistant",
+      parts: [{ type: "text", text: `hydrated turn ${i}` }],
+    }));
+    const CHUNK_COUNT = 6;
+
+    renderApp({
+      homeworks: homeworkFixture({
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
+      }),
+      routes: (url) => {
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
+          return new Response(JSON.stringify(hydratedMessages), { status: 200 });
+        }
+        if (url === "/api/chat") {
+          // Streamed as CHUNK_COUNT separate text-delta events, not one --
+          // the whole point is to give a broken (unmemoized) implementation
+          // CHUNK_COUNT separate opportunities to re-render every hydrated
+          // message, not just one.
+          const chunks: unknown[] = [{ type: "start" }, { type: "start-step" }, { type: "text-start", id: "t1" }];
+          for (let i = 0; i < CHUNK_COUNT; i++) {
+            chunks.push({ type: "text-delta", id: "t1", delta: `word${i} ` });
+          }
+          chunks.push({ type: "text-end", id: "t1" }, { type: "finish-step" }, { type: "finish" });
+          const body =
+            (chunks as Array<Record<string, unknown>>).map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") +
+            "data: [DONE]\n\n";
+          return new Response(body, {
+            status: 200,
+            headers: { "content-type": "text/event-stream", "x-conversation-id": "sec-conv-1" },
+          });
+        }
+        return undefined;
+      },
+    });
+
+    // Wait for all hydrated turns to actually be on screen before resetting
+    // the counter -- otherwise the initial-mount renders would be wrongly
+    // attributed to the streaming phase this test is actually about.
+    expect(await screen.findByText(`hydrated turn ${HYDRATED_COUNT - 1}`)).toBeTruthy();
+    markdownRenderTracker.count = 0;
+
+    const composer = await screen.findByLabelText("Message input");
+    const user = userEvent.setup();
+    await user.type(composer, "a new question{Enter}");
+
+    await screen.findByText("word0 word1 word2 word3 word4 word5", { exact: false });
+
+    // Empirically verified (see this describe's doc comment above): with
+    // MessageMarkdown's memo() in place this lands at 2; with it removed,
+    // the AI SDK's own experimental_throttle (#277) still coalesces most of
+    // the CHUNK_COUNT deltas into fewer React commits than one-render-per-
+    // chunk would suggest, but every commit that DOES happen re-renders
+    // every hydrated message's markdown instead of just the growing one,
+    // landing at 20. 10 sits cleanly between the two.
+    expect(markdownRenderTracker.count).toBeLessThan(10);
   });
 });

@@ -78,10 +78,6 @@ export interface EditableTitleProps {
   maxLength?: number;
   /** False hides the rename affordance entirely (non-owner). Default true. */
   isEditable?: boolean;
-  /** Optional externally-supplied error, shown alongside (behind) any
-   *  locally-generated one -- for a caller that wants to surface a error
-   *  from somewhere other than this component's own onSave call. */
-  error?: string;
   className?: string;
   /** aria-label prefix for the pencil rename trigger, e.g. "Rename". */
   renameLabel?: string;
@@ -111,7 +107,6 @@ export function EditableTitle({
   onSave,
   maxLength = 100,
   isEditable = true,
-  error,
   className = "",
   renameLabel = "Rename",
   onActivateValue,
@@ -276,8 +271,6 @@ export function EditableTitle({
     }
   };
 
-  const displayError = localError ?? error;
-
   if (!isEditing) {
     return (
       <span className={`editable-title ${className}`.trim()}>
@@ -329,9 +322,9 @@ export function EditableTitle({
             aria-hidden="true"
           />
         </button>
-        {displayError && (
+        {localError && (
           <span className="editable-title__error" role="alert">
-            {displayError}
+            {localError}
           </span>
         )}
       </span>
@@ -425,9 +418,9 @@ export function EditableTitle({
           {remaining >= 0 ? `${remaining} left` : `${-remaining} over`}
         </span>
       )}
-      {displayError && (
+      {localError && (
         <span className="editable-title__error" role="alert">
-          {displayError}
+          {localError}
         </span>
       )}
     </span>

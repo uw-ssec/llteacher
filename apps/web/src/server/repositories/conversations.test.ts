@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
+import { makeBatchCapableDb } from "../testing/batchCapableDb";
 import type { Db } from "../../db/client";
 import { organizations, courses, users, courseMemberships, homeworks, sections, conversations, messages, llmCallLogs, llmConfigs } from "../../db/schema";
 import { unsafeCourseScope } from "./scope";
@@ -169,7 +170,11 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     expect(await countActiveConversationsForOwner(db, unsafeCourseScope(courseAId), userId, "tutor")).toBe(beforeA);
   });
 
-  it("excludes soft-deleted conversations by default, includes them with includeDeleted", async () => {
+  // #311: `includeDeleted` was dropped from listConversationsForOwner's
+  // opts -- no route ever passed it, only this test did, purely to prove
+  // the default filter it toggled. The filter itself (soft-deleted rows
+  // never appear) is now unconditional, so this only proves that.
+  it("excludes soft-deleted conversations", async () => {
     const created = await createConversation(db, unsafeCourseScope(courseAId), {
       ownerUserId: userId,
       sectionId: null,
@@ -178,13 +183,8 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     });
     await softDeleteConversation(db, unsafeCourseScope(courseAId), created.id);
 
-    const defaultRows = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId);
-    expect(defaultRows.map((r) => r.id)).not.toContain(created.id);
-
-    const withDeleted = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId, {
-      includeDeleted: true,
-    });
-    expect(withDeleted.map((r) => r.id)).toContain(created.id);
+    const rows = await listConversationsForOwner(db, unsafeCourseScope(courseAId), userId);
+    expect(rows.map((r) => r.id)).not.toContain(created.id);
   });
 
   it("appendMessage adds a message to a conversation within the given scope", async () => {
@@ -618,39 +618,61 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     ).rejects.toThrow(TenancyMismatchError);
   });
 
+  // #309: appendMessage's atomic write branches on `typeof db.batch ===
+  // "function"` -- true in production (neon-http), false for every plain
+  // `makeNodeDb` handle these tests otherwise use, so the batch branch has
+  // never actually run. Running this whole duplicate-resolution suite
+  // against both a plain handle (db.transaction fallback) and a
+  // batch-capable one (makeBatchCapableDb, see its doc comment) exercises
+  // the production branch's behavior for real, not just its sibling.
+  const dbVariants: Array<{
+    name: string;
+    getDb: () => Promise<{ db: Db; teardown: () => Promise<void> }>;
+  }> = [
+    { name: "db.transaction fallback (node-postgres, no db.batch)", getDb: async () => ({ db, teardown: async () => {} }) },
+    { name: "db.batch (production atomicity path, stubbed)", getDb: () => makeBatchCapableDb(DATABASE_URL!) },
+  ];
+
   // #213: clientMessageId round-trips through appendMessage/getLastMessages,
   // and Postgres's unique index tolerates multiple NULLs (assistant rows)
   // without colliding against each other.
-  describe("#213 clientMessageId", () => {
+  describe.each(dbVariants)("#213 clientMessageId ($name)", ({ getDb }) => {
+    let scopedDb: Db;
+    let teardown: () => Promise<void>;
+    beforeAll(async () => {
+      ({ db: scopedDb, teardown } = await getDb());
+    });
+    afterAll(async () => teardown());
+
     it("persists and round-trips a user row's clientMessageId", async () => {
-      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      const created = await createConversation(scopedDb, unsafeCourseScope(courseAId), {
         ownerUserId: userId,
         sectionId: null,
         kind: "tutor",
         title: "clientMessageId round-trip",
       });
-      await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      await appendMessage(scopedDb, unsafeCourseScope(courseAId), created.id, {
         role: "user",
         parts: [{ type: "text", text: "hi" }],
         clientMessageId: "client-abc",
       });
-      const [last] = await getLastMessages(db, unsafeCourseScope(courseAId), created.id, 1);
+      const [last] = await getLastMessages(scopedDb, unsafeCourseScope(courseAId), created.id, 1);
       expect(last?.clientMessageId).toBe("client-abc");
     });
 
     it("allows multiple assistant rows with a null clientMessageId in the same conversation (unique index tolerates NULLs)", async () => {
-      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      const created = await createConversation(scopedDb, unsafeCourseScope(courseAId), {
         ownerUserId: userId,
         sectionId: null,
         kind: "tutor",
         title: "Multiple null clientMessageId rows",
       });
-      await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      await appendMessage(scopedDb, unsafeCourseScope(courseAId), created.id, {
         role: "assistant",
         parts: [{ type: "text", text: "one" }],
       });
       await expect(
-        appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+        appendMessage(scopedDb, unsafeCourseScope(courseAId), created.id, {
           role: "assistant",
           parts: [{ type: "text", text: "two" }],
         }),
@@ -665,20 +687,20 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     // successful retry, PROVIDED the content actually matches (#266 below
     // covers the case where it doesn't).
     it("resolves with the existing row (not a throw) on a sequential duplicate clientMessageId with identical content", async () => {
-      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      const created = await createConversation(scopedDb, unsafeCourseScope(courseAId), {
         ownerUserId: userId,
         sectionId: null,
         kind: "tutor",
         title: "Duplicate clientMessageId, same content",
       });
-      const first = await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      const first = await appendMessage(scopedDb, unsafeCourseScope(courseAId), created.id, {
         role: "user",
         parts: [{ type: "text", text: "same text both times" }],
         clientMessageId: "dupe-id",
       });
       expect(first.created).toBe(true);
 
-      const second = await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      const second = await appendMessage(scopedDb, unsafeCourseScope(courseAId), created.id, {
         role: "user",
         parts: [{ type: "text", text: "same text both times" }],
         clientMessageId: "dupe-id",
@@ -689,7 +711,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       expect(second.created).toBe(false);
       expect(second.row.id).toBe(first.row.id);
 
-      const all = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id);
+      const all = await getMessagesForConversation(scopedDb, unsafeCourseScope(courseAId), created.id);
       expect(all.filter((m) => m.clientMessageId === "dupe-id")).toHaveLength(1);
     });
 
@@ -700,20 +722,20 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     // to the content it claims to identify, so a reused id with genuinely
     // different content is now a hard refusal instead of a silent drop.
     it("throws IdempotencyKeyConflictError (not a silent drop) on a sequential duplicate clientMessageId with DIFFERENT content", async () => {
-      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      const created = await createConversation(scopedDb, unsafeCourseScope(courseAId), {
         ownerUserId: userId,
         sectionId: null,
         kind: "tutor",
         title: "Duplicate clientMessageId, different content",
       });
-      await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      await appendMessage(scopedDb, unsafeCourseScope(courseAId), created.id, {
         role: "user",
         parts: [{ type: "text", text: "first" }],
         clientMessageId: "dupe-id-mismatch",
       });
 
       await expect(
-        appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+        appendMessage(scopedDb, unsafeCourseScope(courseAId), created.id, {
           role: "user",
           parts: [{ type: "text", text: "second, genuinely different" }],
           clientMessageId: "dupe-id-mismatch",
@@ -721,7 +743,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       ).rejects.toBeInstanceOf(IdempotencyKeyConflictError);
 
       // Not an orphan: exactly the first row survives, "second" never lands.
-      const all = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id);
+      const all = await getMessagesForConversation(scopedDb, unsafeCourseScope(courseAId), created.id);
       const matching = all.filter((m) => m.clientMessageId === "dupe-id-mismatch");
       expect(matching).toHaveLength(1);
       expect(matching[0]?.parts).toEqual([{ type: "text", text: "first" }]);
@@ -733,7 +755,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     // silently resolve with the winner's row -- and exactly one row (the
     // winner's) must survive either way.
     it("under a concurrent race with DIFFERENT content for the same clientMessageId, the loser rejects and exactly one row persists", async () => {
-      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      const created = await createConversation(scopedDb, unsafeCourseScope(courseAId), {
         ownerUserId: userId,
         sectionId: null,
         kind: "tutor",
@@ -741,12 +763,12 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       });
 
       const results = await Promise.allSettled([
-        appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+        appendMessage(scopedDb, unsafeCourseScope(courseAId), created.id, {
           role: "user",
           parts: [{ type: "text", text: "version A" }],
           clientMessageId: "concurrent-mismatch-id",
         }),
-        appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+        appendMessage(scopedDb, unsafeCourseScope(courseAId), created.id, {
           role: "user",
           parts: [{ type: "text", text: "version B" }],
           clientMessageId: "concurrent-mismatch-id",
@@ -759,7 +781,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       expect(rejected).toHaveLength(1);
       expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(IdempotencyKeyConflictError);
 
-      const all = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id);
+      const all = await getMessagesForConversation(scopedDb, unsafeCourseScope(courseAId), created.id);
       expect(all.filter((m) => m.clientMessageId === "concurrent-mismatch-id")).toHaveLength(1);
     });
 
@@ -772,7 +794,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     // wrong). Both promises must resolve (neither may reject/500), and
     // exactly one row survives.
     it("two concurrent appendMessage calls with the same clientMessageId both resolve, exactly one row persists", async () => {
-      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      const created = await createConversation(scopedDb, unsafeCourseScope(courseAId), {
         ownerUserId: userId,
         sectionId: null,
         kind: "tutor",
@@ -780,12 +802,12 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       });
 
       const [a, b] = await Promise.all([
-        appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+        appendMessage(scopedDb, unsafeCourseScope(courseAId), created.id, {
           role: "user",
           parts: [{ type: "text", text: "concurrent send" }],
           clientMessageId: "concurrent-id",
         }),
-        appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+        appendMessage(scopedDb, unsafeCourseScope(courseAId), created.id, {
           role: "user",
           parts: [{ type: "text", text: "concurrent send" }],
           clientMessageId: "concurrent-id",
@@ -800,7 +822,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       // concurrency, not just in the sequential case above.
       expect([a.created, b.created].sort()).toEqual([false, true]);
 
-      const all = await getMessagesForConversation(db, unsafeCourseScope(courseAId), created.id);
+      const all = await getMessagesForConversation(scopedDb, unsafeCourseScope(courseAId), created.id);
       expect(all.filter((m) => m.clientMessageId === "concurrent-id")).toHaveLength(1);
     });
   });
@@ -1144,15 +1166,27 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
   // db.batch()/transaction -- real Postgres proves the lock genuinely
   // clears and both the message and the llm_call_logs row genuinely land,
   // not just that the mocked route test (chat.test.ts) called the function.
-  describe("finalizeAssistantTurn (#346)", () => {
+  //
+  // #309: run against both db variants (see dbVariants above) -- the same
+  // gap applies here as to appendMessage: only the db.transaction fallback
+  // branch had ever actually executed, including the "real atomicity"
+  // rollback test below, which is the whole point of this describe block.
+  describe.each(dbVariants)("finalizeAssistantTurn (#346) ($name)", ({ getDb }) => {
+    let scopedDb: Db;
+    let teardown: () => Promise<void>;
+    beforeAll(async () => {
+      ({ db: scopedDb, teardown } = await getDb());
+    });
+    afterAll(async () => teardown());
+
     async function makeLockedConversation() {
-      const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      const created = await createConversation(scopedDb, unsafeCourseScope(courseAId), {
         ownerUserId: userId,
         sectionId: null,
         kind: "tutor",
         title: "finalizeAssistantTurn test conversation",
       });
-      await acquireConversationTurnLock(db, created.id, 90_000);
+      await acquireConversationTurnLock(scopedDb, created.id, 90_000);
       return created;
     }
 
@@ -1177,36 +1211,36 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       const assistantMessageId = crypto.randomUUID();
 
       await finalizeAssistantTurn(
-        db,
+        scopedDb,
         conv.id,
         { id: assistantMessageId, parts: [{ type: "text", text: "the answer" }] },
         llmLogFixture(),
       );
 
-      const [messageRow] = await db.select().from(messages).where(eq(messages.id, assistantMessageId));
+      const [messageRow] = await scopedDb.select().from(messages).where(eq(messages.id, assistantMessageId));
       expect(messageRow).toBeDefined();
       expect(messageRow!.role).toBe("assistant");
       expect(messageRow!.conversationId).toBe(conv.id);
       expect(messageRow!.clientMessageId).toBeNull();
 
-      const [logRow] = await db.select().from(llmCallLogs).where(eq(llmCallLogs.messageId, assistantMessageId));
+      const [logRow] = await scopedDb.select().from(llmCallLogs).where(eq(llmCallLogs.messageId, assistantMessageId));
       expect(logRow).toBeDefined();
       expect(logRow!.conversationId).toBe(conv.id);
       expect(logRow!.errorFlag).toBe(false);
 
       // Lock released, atomically with the persist above.
-      await expect(acquireConversationTurnLock(db, conv.id, 90_000)).resolves.toBe(true);
+      await expect(acquireConversationTurnLock(scopedDb, conv.id, 90_000)).resolves.toBe(true);
     });
 
     it("releases the lock and writes a null-messageId log row when assistantMessage is null (error/aborted turn)", async () => {
       const conv = await makeLockedConversation();
 
-      await finalizeAssistantTurn(db, conv.id, null, llmLogFixture({ errorFlag: true }));
+      await finalizeAssistantTurn(scopedDb, conv.id, null, llmLogFixture({ errorFlag: true }));
 
-      const rowsForConv = await db.select().from(messages).where(eq(messages.conversationId, conv.id));
+      const rowsForConv = await scopedDb.select().from(messages).where(eq(messages.conversationId, conv.id));
       expect(rowsForConv).toHaveLength(0);
 
-      const [logRow] = await db
+      const [logRow] = await scopedDb
         .select()
         .from(llmCallLogs)
         .where(eq(llmCallLogs.conversationId, conv.id));
@@ -1214,7 +1248,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       expect(logRow!.messageId).toBeNull();
       expect(logRow!.errorFlag).toBe(true);
 
-      await expect(acquireConversationTurnLock(db, conv.id, 90_000)).resolves.toBe(true);
+      await expect(acquireConversationTurnLock(scopedDb, conv.id, 90_000)).resolves.toBe(true);
     });
 
     // conversations.updatedAt (schema/runtime.ts) carries its own
@@ -1226,28 +1260,28 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     it("bumps conversations.updatedAt on every call, persisted message or not (pre-existing $onUpdate, not new here)", async () => {
       const withMessage = await makeLockedConversation();
       const beforeWithMessage = (
-        await db.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, withMessage.id))
+        await scopedDb.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, withMessage.id))
       )[0]!.updatedAt;
       await new Promise((r) => setTimeout(r, 5));
       await finalizeAssistantTurn(
-        db,
+        scopedDb,
         withMessage.id,
         { id: crypto.randomUUID(), parts: [{ type: "text", text: "hi" }] },
         llmLogFixture(),
       );
       const afterWithMessage = (
-        await db.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, withMessage.id))
+        await scopedDb.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, withMessage.id))
       )[0]!.updatedAt;
       expect(afterWithMessage.getTime()).toBeGreaterThan(beforeWithMessage.getTime());
 
       const noMessage = await makeLockedConversation();
       const beforeNoMessage = (
-        await db.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, noMessage.id))
+        await scopedDb.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, noMessage.id))
       )[0]!.updatedAt;
       await new Promise((r) => setTimeout(r, 5));
-      await finalizeAssistantTurn(db, noMessage.id, null, llmLogFixture({ errorFlag: true }));
+      await finalizeAssistantTurn(scopedDb, noMessage.id, null, llmLogFixture({ errorFlag: true }));
       const afterNoMessage = (
-        await db.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, noMessage.id))
+        await scopedDb.select({ updatedAt: conversations.updatedAt }).from(conversations).where(eq(conversations.id, noMessage.id))
       )[0]!.updatedAt;
       expect(afterNoMessage.getTime()).toBeGreaterThan(beforeNoMessage.getTime());
     });
@@ -1266,18 +1300,18 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
 
       await expect(
         finalizeAssistantTurn(
-          db,
+          scopedDb,
           conv.id,
           { id: assistantMessageId, parts: [{ type: "text", text: "should not survive" }] },
           llmLogFixture({ organizationId: bogusOrgId }),
         ),
       ).rejects.toThrow();
 
-      const [messageRow] = await db.select().from(messages).where(eq(messages.id, assistantMessageId));
+      const [messageRow] = await scopedDb.select().from(messages).where(eq(messages.id, assistantMessageId));
       expect(messageRow).toBeUndefined();
 
       // Lock still held -- release was rolled back along with the persist.
-      await expect(acquireConversationTurnLock(db, conv.id, 90_000)).resolves.toBe(false);
+      await expect(acquireConversationTurnLock(scopedDb, conv.id, 90_000)).resolves.toBe(false);
     });
   });
 

@@ -2834,6 +2834,72 @@ describe("POST /api/chat", () => {
     const callArgs = streamTextMock.mock.calls[0]![0] as { messages: Array<{ content?: unknown }> };
     expect(callArgs.messages.length).toBe(40);
     expect(JSON.stringify(callArgs.messages)).not.toContain("the answer is 42");
+    // #309: length alone would stay green even if the chronological reversal
+    // (chat.ts's `[...persistedHistory].reverse()`) were dropped or applied
+    // twice -- both produce a 40-element array either way. Pin content at
+    // both ends instead: getLastMessages returns newest-first, so "turn 38"
+    // (persistedRows' last, oldest element) must be the FIRST thing the
+    // model sees, and this request's own brand-new message ("hi there")
+    // must be the LAST -- the exact inverse of what an un-reversed (or
+    // double-reversed) order would produce.
+    expect(JSON.stringify(callArgs.messages[0])).toContain("turn 38");
+    expect(JSON.stringify(callArgs.messages[callArgs.messages.length - 1])).toContain("hi there");
+  });
+
+  // #309: the test above only ever sees plain-text history rows -- a
+  // regression that special-cased text parts (e.g. mapping only `parts`
+  // entries of type "text", or dropping anything else while reversing)
+  // would still pass every assertion above. Asserts a persisted row
+  // carrying a real tool call survives the same reverse-and-map into the
+  // model's context, in the right chronological position, using substring
+  // search (not an exact count) because the real, unmocked
+  // convertToModelMessages may split one tool-bearing UIMessage into more
+  // than one ModelMessage.
+  it("carries a persisted tool-call-bearing history row through to the model in chronological order, not just plain text turns", async () => {
+    createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+    // Newest-first (getLastMessages' own order): the most recent prior turn
+    // used a tool, the turn before that was plain text.
+    getLastMessagesMock.mockResolvedValueOnce([
+      {
+        id: "hist-tool",
+        role: "assistant",
+        parts: [
+          { type: "text", text: "the definition is..." },
+          {
+            type: "tool-showDefinition",
+            toolCallId: "call-1",
+            state: "output-available",
+            input: { term: "p-value" },
+            output: { status: "displayed", term: "p-value" },
+          },
+        ],
+        clientMessageId: null,
+      },
+      { id: "hist-earlier", role: "user", parts: [{ type: "text", text: "what does p-value mean" }], clientMessageId: null },
+    ]);
+
+    await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+
+    expect(streamTextMock).toHaveBeenCalledTimes(1);
+    const callArgs = streamTextMock.mock.calls[0]![0] as { messages: unknown[] };
+    const serialized = callArgs.messages.map((m) => JSON.stringify(m));
+    const earlierIdx = serialized.findIndex((s) => s.includes("what does p-value mean"));
+    const toolIdx = serialized.findIndex((s) => s.includes("call-1"));
+    const newestIdx = serialized.findIndex((s) => s.includes("hi there"));
+    // Every expected turn actually made it through -- a dropped tool part or
+    // a mis-mapped role would leave one of these missing (-1).
+    expect(earlierIdx).toBeGreaterThanOrEqual(0);
+    expect(toolIdx).toBeGreaterThanOrEqual(0);
+    expect(newestIdx).toBeGreaterThanOrEqual(0);
+    // Chronological order: the oldest persisted turn first, the tool turn
+    // next, and this request's own new message last -- the exact reverse of
+    // getLastMessages' own newest-first order. A silently-dropped `.reverse()`
+    // would put "hi there" first instead of last.
+    expect(earlierIdx).toBeLessThan(toolIdx);
+    expect(toolIdx).toBeLessThan(newestIdx);
   });
 
   /* #88: the token-aware INNER bound, on top of the MAX_HISTORY_MESSAGES

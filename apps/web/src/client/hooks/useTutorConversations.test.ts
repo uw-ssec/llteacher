@@ -740,7 +740,7 @@ describe("useTutorConversations", () => {
         result.current.refetch();
       });
       await act(async () => {
-        await result.current.createConversation("Brand new");
+        await result.current.createConversation();
       });
       expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-new"]);
 

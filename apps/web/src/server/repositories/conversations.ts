@@ -20,15 +20,16 @@ export async function listConversationsForOwner(
   db: Db,
   scope: CourseScope,
   ownerUserId: string,
-  opts?: { includeDeleted?: boolean; kind?: ConversationKind; limit?: number; before?: { updatedAt: Date; id: string } },
+  opts?: { kind?: ConversationKind; limit?: number; before?: { updatedAt: Date; id: string } },
 ) {
   const conditions = [
     eq(conversations.courseId, scope),
     eq(conversations.ownerUserId, ownerUserId),
+    // #311: `includeDeleted` was dropped -- no route ever passed it (only
+    // a repository test did, purely to prove this default filter exists),
+    // so soft-deleted conversations are unconditionally excluded here now.
+    eq(conversations.isDeleted, false),
   ];
-  if (!opts?.includeDeleted) {
-    conditions.push(eq(conversations.isDeleted, false));
-  }
   // Optional: #5's GET /api/conversations?kind=tutor route always passes
   // this (defaulting to "tutor" itself, not here -- this function stays a
   // no-op filter when omitted so the #3-era repo tests that call it without
