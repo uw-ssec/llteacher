@@ -250,6 +250,15 @@ function renderApp(
       if (url.startsWith("/api/conversations?")) {
         return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
       }
+      // #303 consolidation: every section-rendering test triggers App.tsx's
+      // own GET .../hints fetch (see hintCount's doc comment above its
+      // effect) whether or not the test cares about hint counts -- without
+      // a baseline default here, every one of those tests logged
+      // "[App] failed to load hint count Error: unexpected fetch to
+      // .../hints" to stderr. A no-hints-used default keeps that noise out
+      // of every test that isn't specifically exercising hints (those
+      // still override it via `options.routes`, which runs first above).
+      if (url.endsWith("/hints")) return new Response(JSON.stringify({ used: 0, limit: null }), { status: 200 });
       throw new Error(`unexpected fetch to ${url}`);
     }),
   );
@@ -2000,22 +2009,35 @@ describe("App eager section greeting (#318)", () => {
     expect(screen.getByRole("button", { name: /Sec 1/ }).getAttribute("aria-current")).toBe("step");
   });
 
-  it("shows the eager greeting even when its own POST resolves AFTER React has already applied sectionChatKey's first-ever transition (#302 review fix, Important #1c)", async () => {
+  it("shows the eager greeting via the live setMessages write when its own POST resolves AFTER React has already applied sectionChatKey's first-ever transition (#302 review fix, Important #1c)", async () => {
     /* startFreshSectionConversation kicks off this POST in the SAME
        synchronous tick as loadSectionConversation's own FIRST-EVER
        sectionChatKey assignment (undefined -> a real key) -- by the time
        an awaited fetch resolves, React may or may not have already
-       flushed that queued render. A first #302 draft only wrote the
-       greeting through the LIVE `setMessages`, which is lost the moment a
-       still-pending key change lands afterward (it recreates the Chat
-       instance, reseeding from whatever `sectionInitialMessages` was at
-       THAT render -- still empty). The fix also updates the seed
-       (`sectionInitialMessages`) so a recreation landing after this point
-       still seeds correctly. Deferring the POST past a macrotask boundary
-       (a plain immediately-resolving mock, as the sibling test above uses,
-       already tends to resolve BEFORE the render flushes -- this test
-       forces the opposite, slower ordering deterministically) exercises
-       the other half of that "regardless of which order" claim. */
+       flushed that queued render. Deferring the POST past a macrotask
+       boundary (setTimeout) deterministically forces THIS ordering: the
+       key transition has already landed by the time the greeting write
+       runs, so the Chat instance `sectionSurface.setMessages(...)` writes
+       into is already the recreated (post-key-change) one. No recreation
+       happens AFTER the greeting lands, so this ordering is satisfied by
+       the LIVE write alone -- it does NOT exercise the seed update
+       (`setSectionInitialMessages`) at all. (Final-review fix: an earlier
+       version of this comment claimed this test "exercises the other half"
+       of the #302 fix, i.e. pins the seed-update path -- that was wrong;
+       reverting the seed-update call would not fail this test.)
+
+       The ordering that DOES need the seed -- the POST resolving BEFORE
+       React flushes the still-pending key transition, so a recreation
+       lands AFTER the greeting write and must reseed from
+       `sectionInitialMessages` rather than the stale empty array -- is
+       what the sibling test above (a plain immediately-resolving mock)
+       exercises, non-deterministically: an immediately-resolved mock
+       response tends to win the race against React's render flush, but
+       nothing pins that ordering the way this test pins its own. There is
+       no known way to force it deterministically from a test written
+       against the public component tree, so that half of the "regardless
+       of which order" claim stays covered as highly-likely-but-not-
+       guaranteed rather than pinned. */
     let startCalls = 0;
     renderApp({
       routes: (url, init) => {

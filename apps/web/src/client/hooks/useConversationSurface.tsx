@@ -283,13 +283,22 @@ export interface UseConversationSurfaceOptions {
    *  because message ids are globally unique so a stale id could never
    *  coincidentally match a message in a different conversation. Using
    *  `surfaceKey` here for the section surface reproduces that same
-   *  "effectively never, in practice" behavior: `surfaceKey` does NOT
-   *  change on an ordinary section switch (it only changes once that
-   *  section's OWN history fetch resolves, or is a no-op re-fetch of an
-   *  unchanged conversation) -- it is not `resetKey` (`currentSection`),
-   *  which changes on every switch. Do not fold this into `resetKey`: that
-   *  would give the section surface a switch-triggered reset it never had,
-   *  an undisclosed behavior change flagged in review. */
+   *  "effectively never matters" behavior, but NOT because `surfaceKey`
+   *  fails to change on an ordinary section switch -- it does (see
+   *  App.tsx's `sectionChatKey`, `${sectionNumber}:${conversationId}`,
+   *  which updates once that section's OWN history fetch resolves). It is
+   *  simply LATE relative to the switch: `resetKey` (`currentSection`)
+   *  changes synchronously the instant the switch is requested, while this
+   *  reset doesn't fire until the new section's key lands afterward. That
+   *  lag is exactly why the timing is harmless: a stopped turn is never
+   *  persisted server-side, so the stale `stoppedMessageId` this key would
+   *  clear can never coincidentally match a message id that shows up in
+   *  the newly-loaded section's history, whether or not this reset has
+   *  fired yet -- the same "can't coincidentally match" guarantee the
+   *  pre-#302 code relied on, just via non-persistence here instead of
+   *  global id uniqueness. Do not fold this into `resetKey`: that would
+   *  give the section surface a switch-triggered reset it never had, an
+   *  undisclosed behavior change flagged in review. */
   stoppedMessageResetKey: string | number | undefined;
   /** Seed for the Chat instance whenever `surfaceKey` changes -- mirrors
    *  the tutor surface's pre-existing `tutorInitialMessages` pattern.
