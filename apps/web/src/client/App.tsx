@@ -350,12 +350,12 @@ export default function App() {
      this empty on resume would mean the LLM receives zero prior context). */
   const [tutorInitialMessages, setTutorInitialMessages] = useState<UIMessage[]>([]);
 
-  /** #292 (review fix): holds the CURRENT bumpTutorConversation so
+  /** #292, #438: holds the CURRENT reconcileTutorConversationCount so
    *  tutorChatFetch/trackTutorTurnCompletion below (both defined before
    *  useTutorConversations runs later in this function) can call it once a
    *  turn's stream actually finishes, at whatever later, asynchronous point
    *  that happens to be. */
-  const bumpTutorConversationRef = useRef<(id: string, delta: number) => void>(() => {});
+  const reconcileTutorConversationCountRef = useRef<(id: string) => void>(() => {});
   // #276: set when a tutor conversation's history fetch fails -- declared
   // before the tutorSurface useConversationSurface call below, which takes
   // it as a parameter.
@@ -382,7 +382,7 @@ export default function App() {
       }
       if (requestConversationId) {
         const [forSdk, forBump] = res.body.tee();
-        trackTutorTurnCompletion(requestConversationId, forBump, bumpTutorConversationRef);
+        trackTutorTurnCompletion(requestConversationId, forBump, reconcileTutorConversationCountRef);
         return new Response(forSdk, { status: res.status, statusText: res.statusText, headers: res.headers });
       }
     }
@@ -436,15 +436,20 @@ export default function App() {
     createConversation: createTutorConversationRow,
     deleteConversation: deleteTutorConversationRow,
     renameConversation: renameTutorConversationRow,
-    bumpConversation: bumpTutorConversation,
+    reconcileConversationCount: reconcileTutorConversationCount,
     recentlyMovedId: recentlyMovedTutorConversationId,
   } = useTutorConversations(courseId);
 
-  // #292: tutorChatFetch (defined earlier) needs to call the CURRENT
-  // bumpTutorConversation -- assigned here, on every render, so an async
-  // callback firing later always reads whichever bumpTutorConversation is
-  // current at that moment.
-  bumpTutorConversationRef.current = bumpTutorConversation;
+  // #292, #438: tutorChatFetch (defined earlier) needs to call the CURRENT
+  // reconcileTutorConversationCount -- assigned here, on every render, so an
+  // async callback firing later always reads whichever
+  // reconcileTutorConversationCount is current at that moment. Wrapped in a
+  // sync `void`-returning function: reconcileTutorConversationCount itself
+  // returns a Promise (it awaits a fetch), but trackTutorTurnCompletion
+  // calls this fire-and-forget, with nothing to await or catch a rejection.
+  reconcileTutorConversationCountRef.current = (id: string) => {
+    void reconcileTutorConversationCount(id);
+  };
 
   const tutorSurface = useConversationSurface({
     surfaceKey: tutorConversationId,

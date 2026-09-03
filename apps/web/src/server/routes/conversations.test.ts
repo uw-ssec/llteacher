@@ -19,6 +19,7 @@ const updateConversationTitleMock = vi.fn();
 const softDeleteConversationMock = vi.fn();
 const getOwnedConversationOrNullMock = vi.fn();
 const getMessagesForConversationMock = vi.fn();
+const getConversationMessageCountMock = vi.fn();
 vi.mock("../repositories/conversations", () => ({
   listConversationsForOwner: (...args: unknown[]) => listConversationsForOwnerMock(...args),
   createConversation: (...args: unknown[]) => createConversationMock(...args),
@@ -28,6 +29,8 @@ vi.mock("../repositories/conversations", () => ({
   softDeleteConversation: (...args: unknown[]) => softDeleteConversationMock(...args),
   getOwnedConversationOrNull: (...args: unknown[]) => getOwnedConversationOrNullMock(...args),
   getMessagesForConversation: (...args: unknown[]) => getMessagesForConversationMock(...args),
+  // #438: backs GET /api/conversations/:id's messageCount field.
+  getConversationMessageCount: (...args: unknown[]) => getConversationMessageCountMock(...args),
   // #281: the route imports this real value (not just a mocked function) to
   // resolve the default page size when `limit` is omitted.
   DEFAULT_CONVERSATIONS_PAGE_SIZE: 50,
@@ -102,6 +105,7 @@ beforeEach(() => {
   softDeleteConversationMock.mockReset();
   getOwnedConversationOrNullMock.mockReset();
   getMessagesForConversationMock.mockReset();
+  getConversationMessageCountMock.mockReset();
   reserveRateLimitSlotMock.mockReset().mockResolvedValue(1);
 });
 
@@ -407,6 +411,66 @@ describe("POST /api/conversations", () => {
 
     expect(res.status).toBe(201);
     expect(createConversationMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// #438: the targeted reconciliation read the tutor rail's client asks for
+// once a chat turn's stream settles (useTutorConversations.ts's
+// reconcileConversationCount), instead of guessing whether the server
+// persisted one row or two for that turn. Ownership tests mirror
+// PATCH/DELETE/GET-messages' 404-not-403 pattern exactly (same
+// getOwnedConversationOrNull helper), not a new one.
+describe("GET /api/conversations/:id", () => {
+  it("returns 401 when there is no authContext", async () => {
+    const res = await request(buildApp(undefined), "/api/conversations/22222222-2222-2222-2222-222222222222");
+    expect(res.status).toBe(401);
+    expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
+  });
+
+  // #267
+  it("404s (not 503) on a malformed id, without reaching the repository layer", async () => {
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/not-a-uuid");
+    expect(res.status).toBe(404);
+    expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
+  });
+
+  it("404s when getOwnedConversationOrNull returns null (not found, not owned, or soft-deleted)", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(null);
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222");
+    expect(res.status).toBe(404);
+    expect(getConversationMessageCountMock).not.toHaveBeenCalled();
+  });
+
+  it("returns the conversation's summary plus its real messageCount", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+    getConversationMessageCountMock.mockResolvedValue(7);
+
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222");
+
+    expect(res.status).toBe(200);
+    expect(getConversationMessageCountMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "22222222-2222-2222-2222-222222222222",
+    );
+    expect(await res.json()).toEqual({
+      id: "22222222-2222-2222-2222-222222222222",
+      kind: "tutor",
+      title: "New Conversation",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:05:00.000Z",
+      messageCount: 7,
+    });
+  });
+
+  it("returns messageCount 0 (not undefined/missing) for a conversation with no messages yet", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+    getConversationMessageCountMock.mockResolvedValue(0);
+
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222");
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { messageCount: number };
+    expect(body.messageCount).toBe(0);
   });
 });
 

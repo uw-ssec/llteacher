@@ -100,6 +100,21 @@ export async function listConversationsForOwner(
   return rows.map((r) => ({ ...r, messageCount: countByConversationId.get(r.id) ?? 0 }));
 }
 
+// #438: backs GET /api/conversations/:id, the targeted reconciliation read
+// the tutor rail's client asks for once a chat turn's stream settles
+// (useTutorConversations.ts's reconcileConversationCount) instead of
+// guessing whether the server persisted one row or two for that turn. A
+// single-conversation counterpart to listConversationsForOwner's own
+// per-page counts query above -- same aggregate, scoped to exactly the one
+// id a caller already knows it wants rather than a whole page's worth.
+export async function getConversationMessageCount(db: Db, conversationId: string): Promise<number> {
+  const [row] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(messages)
+    .where(eq(messages.conversationId, conversationId));
+  return row?.count ?? 0;
+}
+
 export async function createConversation(
   db: Db,
   scope: CourseScope,

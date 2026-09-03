@@ -383,6 +383,12 @@ describe("App tutor-conversations rail (#4)", () => {
       onConversationsPost?: (body: unknown) => Response;
       onConversationMessagesGet?: (conversationId: string) => Response | Promise<Response>;
       onConversationPatch?: (id: string, body: unknown) => Response;
+      /** #438: GET /api/conversations/:id -- the reconciliation read
+       *  reconcileConversationCount issues once a tutor turn's stream
+       *  settles. Defaults to a 500 (not a silent 200) so a test that
+       *  forgets to stub this sees its count-related assertions fail loudly
+       *  instead of quietly no-op'ing on a swallowed fetch error. */
+      onConversationGet?: (conversationId: string) => Response | Promise<Response>;
       onChat?: (body: unknown, init?: RequestInit) => Response | Promise<Response>;
     } = {},
   ) {
@@ -420,6 +426,15 @@ describe("App tutor-conversations rail (#4)", () => {
           return extra.onConversationPatch
             ? extra.onConversationPatch(patchMatch[1]!, body)
             : new Response(JSON.stringify({ error: "unexpected PATCH" }), { status: 500 });
+        }
+        // #438: the single-conversation GET (no trailing /messages, no
+        // method override -- a plain GET) reconcileConversationCount issues.
+        // Checked AFTER the PATCH branch above so a PATCH to the same URL
+        // shape isn't shadowed by this.
+        if (patchMatch && (!init?.method || init.method === "GET")) {
+          return extra.onConversationGet
+            ? extra.onConversationGet(patchMatch[1]!)
+            : new Response(JSON.stringify({ error: "unexpected GET" }), { status: 500 });
         }
         return undefined;
       },
@@ -914,7 +929,7 @@ describe("App tutor-conversations rail (#4)", () => {
   // an instant, spurious "ready" transition for whatever conversation is
   // selected NEXT, indistinguishable from a real completion to anything
   // watching `tutorChatStatus`. This drives that exact timing to prove the
-  // fix (tying the bump to the turn's own response stream, not to
+  // fix (tying reconciliation to the turn's own response stream, not to
   // `useChat`'s status) doesn't fall into that trap: A's turn is left
   // genuinely unfinished when the switch happens, and only completes well
   // afterward.
@@ -933,6 +948,16 @@ describe("App tutor-conversations rail (#4)", () => {
           { status: 200 },
         ),
       onConversationMessagesGet: () => new Response(JSON.stringify([]), { status: 200 }),
+      // #438: the server's authoritative count once A's turn settles --
+      // reconcileConversationCount's own GET, replacing the old
+      // client-guessed +2.
+      onConversationGet: (id) => {
+        expect(id).toBe("conv-a");
+        return new Response(
+          JSON.stringify({ messageCount: 4, updatedAt: "2026-01-03T00:00:00.000Z" }),
+          { status: 200 },
+        );
+      },
       onChat: (body) => {
         const parsed = body as { conversationId?: string };
         if (parsed.conversationId !== "conv-a") {
@@ -994,9 +1019,10 @@ describe("App tutor-conversations rail (#4)", () => {
     controllerA!.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
     controllerA!.close();
 
-    // A's row is credited +2 (2 -> 4, the two rows a completed turn writes
-    // server-side: the student's message, then the reply) even though it
-    // is no longer selected; B, which received nothing, stays at 5.
+    // A's row reconciles to the server's real count (2 -> 4, the two rows a
+    // completed turn writes server-side: the student's message, then the
+    // reply) even though it is no longer selected; B, which received
+    // nothing, stays at 5.
     await waitFor(() => {
       const rowA = screen
         .getByRole("button", { name: "Select conversation: Chat A" })
@@ -1009,15 +1035,20 @@ describe("App tutor-conversations rail (#4)", () => {
     expect(rowB?.querySelector(".tutor-conversation-item__count")?.textContent).toBe("5 messages");
   });
 
-  // #292: the server counts message ROWS, and a completed turn writes two
-  // (the student's message, then the reply) while a turn that reaches the
-  // server but produces no persistable reply (chat.ts's
+  // #292, #438: the server counts message ROWS, and a completed turn writes
+  // two (the student's message, then the reply) while a turn that reaches
+  // the server but produces no persistable reply (chat.ts's
   // hasRenderableContent/finishReason gate) writes only the first --
-  // asserted here against the REAL App-level bump path (tutorChatFetch's
-  // tee'd-stream tracking), not just the isolated useTutorConversations
-  // hook.
-  it("credits +2 for a completed turn and +1 for a response-half failure (server row counts, not turns)", async () => {
+  // asserted here against the REAL App-level reconciliation path
+  // (tutorChatFetch's tee'd-stream tracking + reconcileConversationCount's
+  // GET /api/conversations/:id), not just the isolated
+  // useTutorConversations hook. Since #438, this is no longer the client
+  // GUESSING 2 vs. 1 from the stream's own shape -- both counts below come
+  // from `onConversationGet`, i.e. from what the "server" says actually
+  // happened, which is the whole point of the fix.
+  it("reconciles to +2 for a completed turn and +1 for a response-half failure (server row counts, not turns)", async () => {
     let chatCallCount = 0;
+    let getCallCount = 0;
     renderTutorRailApp({
       onConversationsGet: () =>
         new Response(
@@ -1036,6 +1067,13 @@ describe("App tutor-conversations rail (#4)", () => {
         // "response was accepted but produced nothing persistable" case.
         return interruptedChatStreamResponse("conv-a", "a partial reply");
       },
+      onConversationGet: (id) => {
+        expect(id).toBe("conv-a");
+        getCallCount += 1;
+        // Turn 1 (completed): 2 -> 4. Turn 2 (response-half failure): 4 -> 5.
+        const messageCount = getCallCount === 1 ? 4 : 5;
+        return new Response(JSON.stringify({ messageCount, updatedAt: "2026-01-02T00:00:00.000Z" }), { status: 200 });
+      },
     });
 
     const user = userEvent.setup();
@@ -1053,6 +1091,55 @@ describe("App tutor-conversations rail (#4)", () => {
 
     await user.type(composer, "second question{Enter}");
     await screen.findByRole("alert");
+    await waitFor(() => {
+      const row = screen
+        .getByRole("button", { name: "Select conversation: Chat A" })
+        .closest(".tutor-conversation-item");
+      expect(row?.querySelector(".tutor-conversation-item__count")?.textContent).toBe("5 messages");
+    });
+  });
+
+  // #438's own regression requirement: a turn whose stream looks like an
+  // ordinary completion (a real `finish` chunk, no `error` chunk --
+  // chatStreamResponse's normal shape) can still have its assistant row
+  // declined by chat.ts's persistence gate (hasRenderableContent + a
+  // finish-reason allowlist, e.g. a "content-filter" finish reason). The
+  // client cannot tell that apart from a genuine 2-row completion just by
+  // reading the stream (see trackTutorTurnCompletion.ts's own doc comment)
+  // -- this proves the rail ends up agreeing with the server's real
+  // count(*) regardless, because it now asks rather than guesses.
+  it("agrees with the server's real count(*) when a turn's stream looks complete but the server persisted no assistant row", async () => {
+    renderTutorRailApp({
+      onConversationsGet: () =>
+        new Response(
+          JSON.stringify({
+            items: [{ id: "conv-a", title: "Chat A", updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 4 }],
+            nextCursor: null,
+          }),
+          { status: 200 },
+        ),
+      onConversationMessagesGet: () => new Response(JSON.stringify([]), { status: 200 }),
+      // An ordinary-looking completed stream -- start/text/finish, no error
+      // chunk -- indistinguishable to the client from a turn that persisted
+      // both rows.
+      onChat: () => chatStreamResponse("conv-a", "a reply that looked fine but wasn't persisted"),
+      onConversationGet: (id) => {
+        expect(id).toBe("conv-a");
+        // The server actually wrote only the student's row for this turn:
+        // 4 -> 5, not the 6 the completed-looking stream would suggest
+        // under the old delta-guessing scheme.
+        return new Response(JSON.stringify({ messageCount: 5, updatedAt: "2026-01-02T00:00:00.000Z" }), {
+          status: 200,
+        });
+      },
+    });
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Select conversation: Chat A" }));
+    const composer = await screen.findByLabelText("Message input");
+    await user.type(composer, "a question{Enter}");
+    await screen.findByText("a reply that looked fine but wasn't persisted");
+
     await waitFor(() => {
       const row = screen
         .getByRole("button", { name: "Select conversation: Chat A" })

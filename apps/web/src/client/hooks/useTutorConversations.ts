@@ -93,28 +93,31 @@ export interface UseTutorConversationsResult {
    *  renameConversation makes, where an optimistic update is cheap because
    *  a failed rename rolls back to a value the student can still see. */
   deleteConversation: (id: string) => Promise<boolean>;
-  /** #216, #292: optimistically bumps a conversation's messageCount by
-   *  `delta` and updatedAt (and re-sorts by updatedAt desc, matching
-   *  listConversationsForOwner's server-side ordering) -- called by App.tsx
-   *  once a chat turn in this conversation settles. `/api/chat` writes
-   *  bypass this hook entirely (it only knows about the CRUD routes), so
-   *  without an explicit bump the rail's message count and position never
-   *  reflect actual chat activity until a full reload re-fetches the list.
+  /** #216, #292, #438: reconciles a conversation's messageCount and
+   *  updatedAt against the server's authoritative row (and re-sorts by
+   *  updatedAt desc, matching listConversationsForOwner's server-side
+   *  ordering) -- called by App.tsx once a chat turn in this conversation
+   *  settles. `/api/chat` writes bypass this hook entirely (it only knows
+   *  about the CRUD routes), so without this the rail's message count and
+   *  position never reflect actual chat activity until a full reload
+   *  re-fetches the list.
    *
-   *  #292: `delta` is required, not defaulted to 1 -- the server counts
-   *  MESSAGE ROWS (`count(*)` in repositories/conversations.ts), and a
-   *  completed turn writes TWO (chatHandler's appendMessage for the
-   *  student's message, then onFinish -> finalizeAssistantTurn for the
-   *  reply) -- a hardcoded +1 here meant the rail read half the server's
-   *  own count after every turn. A turn that errors out or produces no
-   *  renderable content writes only the first of those two rows (or, if
-   *  the send itself was refused before appendMessage ever ran, neither)
-   *  -- the caller is expected to pass 1 or 0 for those cases, never a
-   *  hardcoded constant. Forcing an explicit argument (no default) is
-   *  deliberate: a bare `bumpConversation(id)` compiling at all would
-   *  silently reintroduce a guessed constant the next time this is
-   *  touched. */
-  bumpConversation: (id: string, delta: number) => void;
+   *  #438: replaces the former `bumpConversation(id, delta)`, which applied
+   *  a client-guessed delta (1 or 2, depending on how the turn's SSE stream
+   *  read) instead of asking the server. That guess was wrong whenever
+   *  chat.ts's persistence gate (hasRenderableContent + a finish-reason
+   *  allowlist) wrote only the student's row for a turn whose stream still
+   *  looked like an ordinary completion to the client -- an "unrenderable
+   *  content" or truncated-multi-part turn, neither of which the client can
+   *  detect from the stream alone. This fetches GET /api/conversations/:id
+   *  and sets the real count directly, so the rail can never assert a
+   *  number the server doesn't back.
+   *
+   *  Fails silently (logged) on a fetch error: this runs fire-and-forget
+   *  from a stream-completion callback with no caller able to react to a
+   *  thrown rejection, and a dropped reconciliation still self-heals on the
+   *  next full `refetch` or reload. */
+  reconcileConversationCount: (id: string) => Promise<void>;
   /** #310: the id of a conversation that was just moved to the front of the
    *  list by a REAL reorder (it was not already first) -- null the rest of
    *  the time, including the overwhelmingly common case where a bump is a
@@ -480,30 +483,39 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     }
   }, []);
 
-  const bumpConversation = useCallback((id: string, delta: number) => {
-    // #292: a zero-delta bump (a send-half failure that never wrote
-    // anything server-side) still nothing to do -- no-op rather than
-    // touching mutationSeqRef/setConversations for a change that isn't
-    // one, which would otherwise invalidate an in-flight refetch for
-    // nothing.
-    if (delta === 0) return;
+  const reconcileConversationCount = useCallback(async (id: string): Promise<void> => {
+    let updated: ConversationListItemResponse;
+    try {
+      const res = await fetch(`/api/conversations/${id}`);
+      if (!res.ok) throw new Error(`failed to refetch conversation ${id}: ${res.status}`);
+      updated = (await res.json()) as ConversationListItemResponse;
+    } catch (err: unknown) {
+      // #438: see this function's own doc comment -- a failed reconciliation
+      // is not surfaced to the caller (trackTutorTurnCompletion has nothing
+      // to do with a rejection anyway); it just leaves the rail's count
+      // wherever it last was until the next refetch or reload corrects it.
+      console.error("[useTutorConversations.reconcileConversationCount]", err);
+      return;
+    }
+
     mutationSeqRef.current += 1;
-    /* #310: whether THIS bump will be a real reorder is decided off the
-       same conversationsRef snapshot renameConversation's rollback already
-       relies on (see its own doc comment) -- not inside the setConversations
-       updater below, which React can invoke outside the normal render
-       timing and which must stay free of side effects like scheduling a
-       timeout. The updater still does its own index lookup against `prev`
-       for the actual mutation, so a same-tick update from another source
-       can't desync the two; this snapshot only ever needs to be right
-       about "index 0 or not", not the exact array. */
+    /* #310: whether THIS reconciliation will be a real reorder is decided
+       off the same conversationsRef snapshot renameConversation's rollback
+       already relies on (see its own doc comment) -- not inside the
+       setConversations updater below, which React can invoke outside the
+       normal render timing and which must stay free of side effects like
+       scheduling a timeout. The updater still does its own index lookup
+       against `prev` for the actual mutation, so a same-tick update from
+       another source can't desync the two; this snapshot only ever needs to
+       be right about "index 0 or not", not the exact array. */
     const willReorder = conversationsRef.current.findIndex((c) => c.id === id) > 0;
     setConversations((prev) => {
       const index = prev.findIndex((c) => c.id === id);
       if (index === -1) return prev;
 
-      const now = new Date().toISOString();
-      const next = prev.map((c) => (c.id === id ? { ...c, messageCount: c.messageCount + delta, updatedAt: now } : c));
+      const next = prev.map((c) =>
+        c.id === id ? { ...c, messageCount: updated.messageCount, updatedAt: updated.updatedAt } : c,
+      );
 
       /* #310: two problems with re-sorting here, both fixed by not doing it
          in the usual case.
@@ -513,18 +525,13 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
          the top, because talking to it is what put it there -- but it
          reordered rows underneath a student who might be reading them.
 
-         And the comparator mixed sources: this optimistic `now` is the
-         CLIENT's clock, while every other row's updatedAt came from the
-         server. A client running even slightly behind produced a row that
-         sorted below conversations it had just overtaken, so a turn could
-         push the active conversation DOWN the list.
-
-         Moving the bumped row to the front directly sidesteps both: it is
-         what desc(updatedAt) would have produced anyway (this row was just
-         touched, so it is the most recently updated by definition), it
-         leaves every other row's relative order exactly as the server sent
-         it, and it never compares a client timestamp against a server one.
-         When the row is already first -- the overwhelmingly common case --
+         Moving the reconciled row to the front directly sidesteps that: it
+         is what desc(updatedAt) would have produced anyway (this row was
+         just touched server-side, so `updated.updatedAt` is already the
+         most recent by definition -- a real server timestamp now, not the
+         client-clock stand-in the old delta-based bump used), it leaves
+         every other row's relative order exactly as the server sent it. When
+         the row is already first -- the overwhelmingly common case --
          nothing moves at all. */
       if (index === 0) return next;
       const bumped = next[index]!;
@@ -555,7 +562,7 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     createConversation,
     deleteConversation,
     renameConversation,
-    bumpConversation,
+    reconcileConversationCount,
     recentlyMovedId,
   };
 }

@@ -18,6 +18,7 @@ import { workosWebhookHandler } from "./routes/webhooksWorkos";
 import {
   listConversationsHandler,
   createConversationHandler,
+  getConversationHandler,
   updateConversationHandler,
   deleteConversationHandler,
   listConversationMessagesHandler,
@@ -196,6 +197,9 @@ app.post("/api/conversations", createConversationHandler);
 // #4: message-history hydration for the tutor-conversations rail
 // (see conversations.ts's doc comment above listConversationMessagesHandler).
 app.get("/api/conversations/:id/messages", listConversationMessagesHandler);
+// #438: single-conversation reconciliation read -- see
+// getConversationHandler's own doc comment (routes/conversations.ts).
+app.get("/api/conversations/:id", getConversationHandler);
 app.patch("/api/conversations/:id", updateConversationHandler);
 app.delete("/api/conversations/:id", deleteConversationHandler);
 app.post("/api/conversations/:id/submit", requireRole(["student"])(submitSectionHandler));

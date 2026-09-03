@@ -16,6 +16,7 @@ import {
   getOwnedConversationOrNull,
   getLastMessages,
   getMessagesForConversation,
+  getConversationMessageCount,
   updateConversationTitle,
   acquireConversationTurnLock,
   releaseConversationTurnLock,
@@ -570,6 +571,36 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
     const withoutMessagesRow = rows.find((r) => r.id === withoutMessages.id);
     expect(withMessagesRow?.messageCount).toBe(2);
     expect(withoutMessagesRow?.messageCount).toBe(0);
+  });
+
+  // #438: GET /api/conversations/:id's own count query -- a
+  // single-conversation counterpart to listConversationsForOwner's
+  // per-page counts above, backing reconcileConversationCount's
+  // reconciliation read.
+  it("getConversationMessageCount reports the real row count for one conversation, and 0 for none", async () => {
+    const withMessages = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "getConversationMessageCount: has messages",
+    });
+    await appendMessage(db, unsafeCourseScope(courseAId), withMessages.id, {
+      role: "user",
+      parts: [{ type: "text", text: "one" }],
+    });
+    await appendMessage(db, unsafeCourseScope(courseAId), withMessages.id, {
+      role: "assistant",
+      parts: [{ type: "text", text: "two" }],
+    });
+    const withoutMessages = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "getConversationMessageCount: no messages",
+    });
+
+    expect(await getConversationMessageCount(db, withMessages.id)).toBe(2);
+    expect(await getConversationMessageCount(db, withoutMessages.id)).toBe(0);
   });
 
   it("updateConversationTitle updates and returns the row within scope", async () => {

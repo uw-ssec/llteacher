@@ -161,11 +161,18 @@ export interface StudentHomeworkListResponse {
    carries ownerUserId/courseId/sectionId/isDeleted/deletedAt, none of which
    any client reads -- every row returned is already scoped to the caller's
    own, so this was never a cross-tenant leak, but it needlessly widened the
-   public wire contract). GET/POST/PATCH /api/conversations all project to
-   this shape server-side (routes/conversations.ts's toConversationSummary).
-   POST's response has no messageCount key at all -- a brand-new conversation
-   never has messages yet -- callers (useTutorConversations) default it to 0
-   rather than treating its absence as a fetch bug. */
+   public wire contract). GET/POST/PATCH /api/conversations (list, create,
+   rename) and #438's single-conversation GET /api/conversations/:id all
+   project to this shape server-side (routes/conversations.ts's
+   toConversationSummary). POST's response has no messageCount key at all --
+   a brand-new conversation never has messages yet -- callers
+   (useTutorConversations) default it to 0 rather than treating its absence
+   as a fetch bug. #438: GET /api/conversations/:id is the one route in this
+   family that DOES include messageCount on every response (like the list
+   route, unlike POST/PATCH) -- it exists specifically to answer "what is
+   this one conversation's real count right now"
+   (useTutorConversations.ts's reconcileConversationCount), so a response
+   missing that field would defeat the route's entire purpose. */
 export interface ConversationSummary {
   id: string;
   kind: ConversationKind;

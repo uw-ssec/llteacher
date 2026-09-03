@@ -52,9 +52,10 @@ export interface ConversationListItemProps {
    *  matching `isEditable`'s reasoning. */
   onRequestDelete?: () => void;
   /** #310: true immediately after this row was moved to the front of the
-   *  list by a real reorder (see useTutorConversations' bumpConversation).
-   *  Renders a brief highlight so the shuffle is noticeable rather than
-   *  just discovered after the fact. Defaults to false. */
+   *  list by a real reorder (see useTutorConversations'
+   *  reconcileConversationCount, #438). Renders a brief highlight so the
+   *  shuffle is noticeable rather than just discovered after the fact.
+   *  Defaults to false. */
   isRecentlyMoved?: boolean;
   /** #310: "now", for `formatUpdatedAt`'s today/not-today check. Optional,
    *  defaulting to `new Date()` at call time below purely so existing
@@ -97,8 +98,8 @@ function formatUpdatedAt(iso: string, now: Date): string {
  *  and before this every row re-rendered with it regardless of whether
  *  that row's own data had moved at all. Only pays off because its props
  *  are now actually stable across those re-renders: `conversation` keeps
- *  its object identity for every row `bumpConversation`/rename don't touch
- *  (see useTutorConversations' own immutable-update comments), and
+ *  its object identity for every row `reconcileConversationCount`/rename
+ *  don't touch (see useTutorConversations' own immutable-update comments), and
  *  `onSelect`/`onRename`/`onRequestDelete`/`now` are supplied by
  *  TutorConversationsList as per-id-cached, referentially stable callbacks
  *  and a single hoisted Date rather than fresh closures/Dates created

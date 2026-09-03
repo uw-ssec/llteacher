@@ -74,9 +74,9 @@ export interface TutorConversationsListProps {
   /** #290: the row whose history is being fetched right now, if any. */
   pendingConversationId?: string | undefined;
   /** #310: the id of a conversation just moved to the front of the list by
-   *  a real reorder (see useTutorConversations' bumpConversation and its
-   *  recentlyMovedId doc comment). Renders a brief highlight on that row;
-   *  omitted or null renders no highlight at all. */
+   *  a real reorder (see useTutorConversations' reconcileConversationCount,
+   *  #438, and its recentlyMovedId doc comment). Renders a brief highlight
+   *  on that row; omitted or null renders no highlight at all. */
   recentlyMovedId?: string | null;
   /** Fired when an existing row is clicked. */
   onSelectConversation: (conversationId: string) => void;

@@ -1,8 +1,8 @@
 /** #292 (review fix, replacing the original `useChat`-status-based
- *  approach): reads a TEE'D copy of a tutor turn's own SSE response
- *  stream to completion and bumps the rail's message count off THAT,
- *  entirely independent of whichever `useChat` instance the component
- *  happens to have mounted by the time this resolves.
+ *  approach): reads a TEE'D copy of a tutor turn's own SSE response stream
+ *  to completion and, once it settles, tells the caller this conversation's
+ *  turn is done -- entirely independent of whichever `useChat` instance the
+ *  component happens to have mounted by the time this resolves.
  *
  *  Why the original status-based version was wrong: `@ai-sdk/react`'s
  *  `useChat` recreates a brand-new `Chat` instance whenever `id` changes
@@ -23,89 +23,58 @@
  *  #292 reports, still present after the first version of this fix (which
  *  only corrected WHICH conversation gets credited, not WHEN).
  *
- *  Tying the bump to the response stream itself sidesteps the entire
+ *  Tying completion to the response stream itself sidesteps the entire
  *  useChat-instance lifecycle: `tutorChatFetch` (App.tsx) tees `res.body`
  *  before handing one half to the SDK, and this function reads the OTHER
  *  half on its own, to completion, regardless of what's mounted or
  *  selected by the time it gets there.
  *
- *  Classification is deliberately conservative rather than an exact
- *  replica of chat.ts's own persistence gate (hasRenderableContent +
- *  TERMINAL_FINISH_REASONS, apps/web/src/server/routes/chat.ts's
- *  `onFinish`): a `finish` chunk with no `error` chunk means the model
- *  produced and completed a real turn -- the overwhelming common case,
- *  matching what that allowlist exists to recognize -- credited as 2 rows
- *  (the student's message, then the reply). Anything else (an `error`
- *  chunk, the stream ending without ever seeing `finish`, or the read
- *  itself throwing -- a dropped connection or an aborted Stop) is
- *  credited as 1: this function only ever runs after `res.ok`, so the
- *  student's own message row was already persisted before the stream
- *  even started (chatHandler's appendMessage runs before it opens the
- *  stream) -- only the reply is in question.
+ *  #438: this used to also CLASSIFY the turn from the stream's own SSE
+ *  chunks (a `finish` chunk with no `error` chunk -> credit +2, anything
+ *  else -> credit +1) and hand that guessed delta to the rail. That was
+ *  deliberately conservative, not exact: chat.ts's real persistence gate is
+ *  `hasRenderableContent` plus a finish-reason allowlist, and a turn whose
+ *  finish reason isn't on that allowlist (e.g. "content-filter") still
+ *  reaches the client as an ordinary-looking `finish` chunk in today's
+ *  protocol -- credited as +2 here when the server actually wrote only the
+ *  student's row. The client cannot tell those two cases apart from the
+ *  stream alone, which is exactly why guessing was the wrong shape for this
+ *  function: it can only ever narrow the odds of being wrong, never close
+ *  them.
  *
- *  Known gap, left deliberately rather than papered over: a finish reason
- *  chat.ts treats as NOT persist-worthy (e.g. "content-filter") still
- *  reaches the client as an ordinary `finish` chunk in today's protocol,
- *  which this would credit as 2 when the server actually wrote 1.
- *  Closing that precisely needs the server to say authoritatively what it
- *  persisted -- the issue's own alternative ("have /api/chat return the
- *  authoritative count") -- which is server-side surgery out of scope for
- *  this batched client-side-defects task. That finish reason is rare
- *  (a content-filter trip), and reload always shows the true count
- *  regardless, matching the issue's own "a reload silently corrects
- *  both" framing of the ORIGINAL bug -- so this is a narrower, rarer
- *  residual than the bug being fixed, not a reintroduction of it. */
+ *  So this no longer inspects the stream's content at all -- it only reads
+ *  the tee'd half to completion (success, an in-stream `error` chunk, a
+ *  dropped connection, or an aborted Stop all end the same way: the read
+ *  loop stops, one way or another) and then asks the CALLER to reconcile
+ *  against the server's own authoritative count
+ *  (useTutorConversations.ts's `reconcileConversationCount`, via
+ *  `GET /api/conversations/:id`) instead of asserting a number the client
+ *  computed itself. This function only ever runs after `res.ok` (see
+ *  tutorChatFetch, App.tsx), so the student's own message row was already
+ *  persisted before the stream even started (chatHandler's appendMessage
+ *  runs before it opens the stream) -- reconciling is always safe to call
+ *  here, whatever happened to the reply. */
 export function trackTutorTurnCompletion(
   conversationId: string,
   stream: ReadableStream<Uint8Array>,
-  bumpRef: { current: (id: string, delta: number) => void },
+  reconcileRef: { current: (id: string) => void },
 ): void {
   void (async () => {
-    let sawFinish = false;
-    let sawError = false;
+    const reader = stream.getReader();
     try {
-      // Decoded manually (not via `pipeThrough(new TextDecoderStream())`)
-      // -- lib.dom's TextDecoderStream is typed as a
-      // ReadableWritablePair<string, BufferSource>, and BufferSource is
-      // wider than the Uint8Array `pipeThrough` on a
-      // ReadableStream<Uint8Array> requires, so TS refuses the pipe even
-      // though it's correct at runtime. `{ stream: true }` keeps a
-      // multi-byte UTF-8 character that lands across two chunks from
-      // being decoded (and silently corrupted) before its second half
-      // arrives.
-      const decoder = new TextDecoder();
-      const reader = stream.getReader();
-      let buffer = "";
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            const payload = line.slice("data: ".length);
-            if (payload === "[DONE]") continue;
-            try {
-              const chunk = JSON.parse(payload) as { type?: unknown };
-              if (chunk.type === "finish") sawFinish = true;
-              if (chunk.type === "error") sawError = true;
-            } catch {
-              /* an unparseable line changes neither flag -- the
-                 conservative "no finish observed" classification below
-                 already covers it */
-            }
-          }
-        }
-      } finally {
-        reader.releaseLock();
+      for (;;) {
+        const { done } = await reader.read();
+        if (done) break;
       }
     } catch {
-      /* the stream itself errored or was aborted (a dropped connection, a
-         client-initiated Stop) -- sawFinish stays false, which is exactly
-         the right classification: no confirmed completion. */
+      /* The stream itself errored or was aborted (a dropped connection, a
+         client-initiated Stop) -- nothing to classify: whatever the server
+         did or didn't persist before that happened is already final by the
+         time this catches, and the reconciliation call below asks it
+         directly rather than guessing from here. */
+    } finally {
+      reader.releaseLock();
     }
-    bumpRef.current(conversationId, sawFinish && !sawError ? 2 : 1);
+    reconcileRef.current(conversationId);
   })();
 }

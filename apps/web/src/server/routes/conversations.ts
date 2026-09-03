@@ -38,6 +38,7 @@ import {
   softDeleteConversation,
   getOwnedConversationOrNull,
   getMessagesForConversation,
+  getConversationMessageCount,
   DEFAULT_CONVERSATIONS_PAGE_SIZE,
 } from "../repositories/conversations";
 import type { ConversationKind } from "../../db/schema";
@@ -269,6 +270,39 @@ export async function createConversationHandler(c: Context<AppEnv>) {
   return c.json(toConversationSummary(created), 201);
 }
 
+// #438: GET /api/conversations/:id -- returns this ONE conversation's
+// current summary + messageCount. This is the reconciliation read
+// trackTutorTurnCompletion's caller (App.tsx) triggers once a tutor chat
+// turn's stream has fully settled: the client cannot tell, from the stream
+// alone, whether chat.ts's onFinish persisted one row (the student's
+// message only) or two (plus a reply) for that turn, so instead of
+// guessing a delta it asks this route for the real count
+// (useTutorConversations.ts's reconcileConversationCount). Same ownership
+// pattern as PATCH/DELETE/GET-messages below (getOwnedConversationOrNull ->
+// 404, never 403, on "doesn't exist or isn't yours").
+export async function getConversationHandler(c: Context<AppEnv>) {
+  const authContext = c.get("authContext") as AuthContext | undefined;
+  if (!authContext) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const id = c.req.param("id");
+  // #267: same reasoning as updateConversationHandler's guard below.
+  if (!id || !UUID_RE.test(id)) {
+    return c.json({ error: "Conversation not found" }, 404);
+  }
+  const db = makeDb(c.env.DATABASE_URL);
+
+  const existing = await getOwnedConversationOrNull(db, id, authContext.session.userId, authContext.isMemberOf);
+  if (!existing) {
+    return c.json({ error: "Conversation not found" }, 404);
+  }
+
+  const messageCount = await getConversationMessageCount(db, id);
+  const body: ConversationListItemResponse = { ...toConversationSummary(existing), messageCount };
+  return c.json(body);
+}
+
 export async function updateConversationHandler(c: Context<AppEnv>) {
   const authContext = c.get("authContext") as AuthContext | undefined;
   if (!authContext) {
@@ -434,5 +468,6 @@ export const conversationsRoutes = new Hono<AppEnv>();
 conversationsRoutes.get("/", listConversationsHandler);
 conversationsRoutes.post("/", createConversationHandler);
 conversationsRoutes.get("/:id/messages", listConversationMessagesHandler);
+conversationsRoutes.get("/:id", getConversationHandler);
 conversationsRoutes.patch("/:id", updateConversationHandler);
 conversationsRoutes.delete("/:id", deleteConversationHandler);
