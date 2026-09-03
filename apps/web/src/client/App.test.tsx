@@ -1568,7 +1568,15 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
   function renderResilienceApp(
     chatFetch: typeof fetch,
     homeworks?: unknown,
-    messagesFor?: () => Response,
+    // `Promise<Response>` too (not just `Response`) -- the #418/#420
+    // switch-beats-failure tests below need to hold a section's own
+    // history fetch PENDING across the release of a hung /api/chat
+    // request, so that `sectionChatKey` genuinely hasn't caught up yet
+    // when the rejection lands (see those tests' own doc comments for why
+    // an immediately-resolved history fetch lets the Chat instance
+    // recreate before the rejection arrives, silently discarding the
+    // exact state these bugs are about).
+    messagesFor?: () => Response | Promise<Response>,
   ) {
     return renderApp({
       homeworks,
@@ -1736,39 +1744,120 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
     });
   }
 
+  /* #302 review fix (Important #1): a dedicated render helper for the
+     switch-beats-failure ordering these three tests are about. Routes
+     each section's OWN `/messages` fetch by its conversationId --
+     deliberately NOT `renderResilienceApp`'s single shared `messagesFor`
+     slot above, because that slot answers EVERY `/messages` URL
+     identically. Section 1's OWN on-mount history fetch goes through that
+     same slot too -- holding section 2's fetch pending via a shared slot
+     would leave section 1's OWN initial load stuck pending as well
+     (its resolver silently overwritten by section 2's later call before
+     the test ever releases it), so section 1 would never actually finish
+     mounting its own history and the whole scenario would be testing
+     something other than what it claims to. Routing by conversationId
+     keeps section 1 loading normally (synchronously) while section 2's
+     fetch is the only one under the test's control. */
+  function renderSwitchBeatsFailureApp(
+    chatFetch: typeof fetch,
+    sectionTwoMessages: () => Response | Promise<Response>,
+  ) {
+    return renderApp({
+      homeworks: twoSectionFixture(),
+      routes: (url, init) => {
+        if (url.endsWith("/hints")) return new Response(JSON.stringify({ used: 0, limit: null }), { status: 200 });
+        if (url.includes("/conversations/sec-conv-1/messages")) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        if (url.includes("/conversations/sec-conv-2/messages")) return sectionTwoMessages();
+        if (url === "/api/chat") return chatFetch(url, init);
+        return undefined;
+      },
+    });
+  }
+
   it("#418: a send that fails after a section switch does not touch the section now on screen", async () => {
     let releaseHungSend: (() => void) | null = null;
-    renderResilienceApp(
+    let releaseSectionTwoHistory: (() => void) | null = null;
+    renderSwitchBeatsFailureApp(
       async () =>
         new Promise((_resolve, reject) => {
           // Hangs, exactly like a dead connection, until the test releases it.
           releaseHungSend = () => reject(new TypeError("Load failed"));
         }),
-      twoSectionFixture(),
-      // Section 2 already has a persisted question with no answer -- the
-      // state #268's onFinish gate leaves after an interrupted reply, and
-      // precisely the shape the old effect mistook for its own failed send.
+      // #302 review fix (Important #1): held PENDING, not resolved
+      // immediately -- post-#302, the section surface IS keyed
+      // (`surfaceKey: sectionChatKey`), so an immediately-resolved history
+      // fetch would let `sectionChatKey` advance and recreate the Chat
+      // instance BEFORE the hung send's rejection ever lands. Once that
+      // happens, `@ai-sdk/react`'s `useSyncExternalStore` subscriptions
+      // have already moved on to the NEW instance, so the OLD instance's
+      // later status/error change is never even observed by the
+      // component -- the bug's own window closes on its own, for reasons
+      // that have nothing to do with whether the fix under test is
+      // present, and the test would pass against a pre-fix hook too. Only
+      // resolving this AFTER the hung send is released reproduces the
+      // real window: `currentSection` (resetKey) has moved on, but
+      // `sectionChatKey` (surfaceKey) has not caught up yet, so the SAME
+      // useChat instance section 1's send is hanging against is still the
+      // one mounted when the rejection lands.
       () =>
-        new Response(
-          JSON.stringify([
-            { id: "m1", role: "user", parts: [{ type: "text", text: "section two's persisted question" }], seq: 1 },
-          ]),
-          { status: 200 },
-        ),
+        new Promise((resolve) => {
+          releaseSectionTwoHistory = () =>
+            resolve(
+              // Section 2 already has a persisted question with no answer
+              // -- the state #268's onFinish gate leaves after an
+              // interrupted reply, and precisely the shape the old effect
+              // mistook for its own failed send.
+              new Response(
+                JSON.stringify([
+                  {
+                    id: "m1",
+                    role: "user",
+                    parts: [{ type: "text", text: "section two's persisted question" }],
+                    seq: 1,
+                  },
+                ]),
+                { status: 200 },
+              ),
+            );
+        }),
     );
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
     await user.type(composer, "section one's doomed question{Enter}");
 
-    // Switch away while section 1's send is still in flight.
+    // Switch away while section 1's send is still in flight, AND while
+    // section 2's own history fetch is ALSO still pending.
     await user.click(screen.getByRole("button", { name: /Sec 2/ }));
-    await screen.findByText(/Section 2: Sec 2/);
-    await screen.findByText("section two's persisted question");
+    await waitFor(() => expect(releaseSectionTwoHistory).not.toBeNull());
 
-    // Now section 1's request finally dies.
+    // Now section 1's request finally dies -- section 2's history STILL
+    // hasn't loaded, so `sectionChatKey` still points at section 1's Chat
+    // instance, which is exactly the one this rejection lands on.
     await waitFor(() => expect(releaseHungSend).not.toBeNull());
     releaseHungSend!();
+    /* Let the rejection's own catch/effect chain fully settle (a genuine
+       macrotask tick, not a magic number -- matches the established idiom
+       elsewhere in this file for sequencing two independently-releasable
+       fetches, e.g. "does not leave a conversation displayed when it opens
+       mid-delete") BEFORE releasing section 2's history. A bare
+       `waitFor(() => expect(composer.value).toBe(""))` immediately after
+       is not a safe substitute for this: `waitFor` resolves the INSTANT
+       its callback stops throwing, and on an early poll the composer can
+       still legitimately read "" because the leak hasn't landed YET -- an
+       earlier draft of this test relied on exactly that race and passed
+       against a pre-fix hook for the wrong reason (it never observed the
+       leak that lands a tick later). Settling explicitly here, then
+       reading the composer's final value directly below, checks the
+       actually-settled state instead of whichever one a poll happens to
+       catch first. */
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Only now let section 2's real transcript load.
+    releaseSectionTwoHistory!();
+    await screen.findByText(/Section 2: Sec 2/);
 
     const sectionTwoComposer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     // Section 2's PERSISTED message must still be on screen. The old effect
@@ -1808,30 +1897,70 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
   });
 
   it("#420: a send-half error row does not follow the student into the next section", async () => {
-    renderResilienceApp(
-      async () => new Response("gateway timeout", { status: 504 }),
-      twoSectionFixture(),
-      () => new Response(JSON.stringify([]), { status: 200 }),
+    let releaseHungSend: (() => void) | null = null;
+    let releaseSectionTwoHistory: (() => void) | null = null;
+    renderSwitchBeatsFailureApp(
+      async () =>
+        new Promise((_resolve, reject) => {
+          // Hangs, exactly like a dead connection, until the test releases
+          // it -- see #418's own test for why the send must still be
+          // IN FLIGHT (not already failed) at the moment of the switch:
+          // this reproduces the actual `resetKey`-moved-on-but-`surfaceKey`
+          // -hasn't-caught-up window, rather than a failure that already
+          // happened while section 1 was still on screen.
+          releaseHungSend = () => reject(new TypeError("Load failed"));
+        }),
+      // #302 review fix (Important #1): held PENDING, not resolved
+      // immediately -- see #418's own test for the full reasoning. An
+      // immediately-resolved history fetch recreates the Chat instance
+      // before the rejection lands, which closes this bug's window for
+      // reasons unrelated to whether the fix is present and makes this
+      // test pass against a pre-fix hook too.
+      () => new Promise((resolve) => (releaseSectionTwoHistory = () => resolve(new Response("[]", { status: 200 })))),
     );
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
     await user.type(composer, "fails in section one{Enter}");
-    await screen.findByRole("alert");
-    // Precondition: the send-half row is showing, with Retry suppressed.
+
+    // Switch away WHILE section 1's send is still in flight AND section 2's
+    // own history fetch is still pending.
+    await user.click(screen.getByRole("button", { name: /Sec 2/ }));
+    await waitFor(() => expect(releaseSectionTwoHistory).not.toBeNull());
+
+    // Now section 1's send finally dies -- while still viewing section 2,
+    // and section 2's OWN history hasn't loaded yet, so `sectionChatKey`
+    // still points at section 1's (still-mounted) Chat instance.
+    await waitFor(() => expect(releaseHungSend).not.toBeNull());
+    releaseHungSend!();
+    /* Let the rejection's own catch/effect chain fully settle (see #418's
+       own test for why this explicit macrotask tick, not a bare `waitFor`
+       on the assertion below, is required): `screen.queryByRole("alert")`
+       reads `null` on the very FIRST poll regardless of whether the fix is
+       present, simply because nothing has re-rendered from the rejection
+       yet -- a `waitFor` immediately below without this would resolve on
+       that same false-negative first poll and never observe an alert that
+       lands (and stays) a tick later. */
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    /* Section 2 had no failure of its own. Before this fix, `stage`/
+       `onRetry` were derived from the KEY-GATED `sendFailure` (`null` here,
+       since `currentSection` is already 2) rather than the record's own
+       unconditional presence -- misclassifying this as a "response"-half
+       failure and resurrecting a Retry wired to `regenerate({ body:
+       buildRetryBody() })`, which reads `conversationId` -- already
+       "sec-conv-2" (set synchronously the instant the switch was
+       requested, well before section 2's history has even loaded).
+       Clicking it would have regenerated a turn against section 2's
+       conversation for a send that never reached the server at all. */
+    expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: /Sec 2/ }));
+    // Let section 2's real history load, and confirm the surface stays
+    // clean once it settles too.
+    releaseSectionTwoHistory!();
     await screen.findByText(/Section 2: Sec 2/);
-
-    /* Section 2 had no failure of its own. Before #420's fix, neither
-       useChat instance had anything that reset its status/error on a
-       surface switch until `surfaceKey` eventually caught up (late, for the
-       section surface) -- so `status` stayed at "error", and because
-       `sendFailure` is now correctly gated to section 1 only, `stage`
-       flipped from "send" to "response" and resurrected a Retry wired to
-       regenerate section 2's conversation, for a turn that never failed. */
-    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
   });
 

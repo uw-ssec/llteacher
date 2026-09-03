@@ -409,9 +409,24 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
      "the server accepted this send" are the same event regardless of which
      surface-specific work happens inside `fetchImpl` first. */
   const acceptedRef = useRef(true);
+  /* #418: what the in-flight send actually was, and which `resetKey` it was
+     typed under. Written by `send` below at the moment of sending -- not
+     reconstructed in the failure-detection effect below from whatever
+     `aiMessages`/`resetKey` happen to hold when the request finally rejects,
+     which can be arbitrarily later than the send itself (a hanging fetch
+     outlives a switch). Read and cleared by the failure-detection effect on
+     the failure path; cleared here on the SUCCESS path too (#420 review fix,
+     Minor) -- not currently reachable as a live bug (the failure effect
+     already requires `acceptedRef.current === false`, and `send()`
+     unconditionally overwrites this ref before every subsequent send
+     regardless), but leaving a stale reference to already-accepted, already
+     -persisted text around for longer than it's needed is a footgun for
+     whoever next reads or extends this file. */
+  const pendingSendRef = useRef<{ text: string; key: typeof resetKey } | null>(null);
   const wrappedFetch: typeof fetch = async (input, init) => {
     const res = await fetchImpl(input, init);
     acceptedRef.current = true;
+    pendingSendRef.current = null;
     return res;
   };
 
@@ -482,6 +497,37 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
      exposes the exact same object again. */
   const sendFailure = sendFailureRecord && sendFailureRecord.recordedAtKey === resetKey ? sendFailureRecord.failure : null;
 
+  /* #420 review fix (Critical): the ERROR-ROW classification below
+     (`stage`/`onRetry`) must NOT key off the same key-gated `sendFailure`
+     that `restoredDraft` uses. Upstream kept these as two SEPARATE
+     consumers of the failure record for a reason: `sendFailure` (the
+     composer restore) is correctly key-gated to `null` the moment a switch
+     happens, but `errorRow`'s job is different -- classifying whichever
+     error is CURRENTLY live on this useChat instance as "send" vs
+     "response" so `onRetry` is never offered for a send-half failure. Once
+     a switch moves `resetKey` on, `sendFailure` derives to `null` -- and
+     reusing that as the classification signal would make a STILL-LIVE
+     send-half failure (from the surface just left, on the SAME useChat
+     instance, still showing "error" until `surfaceKey` catches up) get
+     misclassified as "response", silently re-enabling `onRetry` pointed at
+     whatever `buildRetryBody`/`conversationId` the CURRENT surface now
+     resolves to -- i.e. regenerating a turn that never failed, in someone
+     else's conversation. `hasSendFailure` is deliberately UNGATED (reads
+     `sendFailureRecord` directly, ignoring `recordedAtKey`) so the
+     send-half classification survives a switch exactly as long as the
+     underlying `useChat` status does -- which the effect below now keeps
+     in sync via `clearError()` the moment it detects the record no longer
+     belongs to the current surface, so this is a belt-and-suspenders
+     defense, not the only thing standing between here and that bug: even
+     if some future change added a render where `status` were still
+     "error" for a beat after a key-mismatched failure, `onRetry` could
+     still never be resurrected against the wrong surface. Safe against
+     misclassifying a LATER surface's own genuine response-half failure --
+     `send()` unconditionally retires `sendFailureRecord` before every new
+     send, so `hasSendFailure` can never be stale-true for a turn that
+     hasn't itself failed on the send half. */
+  const hasSendFailure = sendFailureRecord !== null;
+
   /* #420: clears a stale chat-stream error the instant `resetKey` changes.
      Mirrors the pre-#302 code's own `useEffect(() => clearChatError(),
      [currentSection, clearChatError])` exactly -- an EFFECT, not a
@@ -511,14 +557,6 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
     lastStoppedMessageResetKeyRef.current = stoppedMessageResetKey;
     setStoppedMessageId(null);
   }
-
-  /* #418: what the in-flight send actually was, and which `resetKey` it was
-     typed under. Written by `send` below at the moment of sending -- not
-     reconstructed here from whatever `aiMessages`/`resetKey` happen to hold
-     when the request finally rejects, which can be arbitrarily later than
-     the send itself (a hanging fetch outlives a switch). Read and cleared by
-     the failure-detection effect below. */
-  const pendingSendRef = useRef<{ text: string; key: typeof resetKey } | null>(null);
 
   /* #96/#418: detects a send-half failure -- the request never reached the
      server, or the server refused it outright -- and hands the student's
@@ -557,8 +595,28 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
       // append an assistant message, so the tail is the student's own
       // message.
       if (last?.role === "user") setMessages(aiMessages.slice(0, -1));
+    } else {
+      /* #420 review fix (Important #2): the switch-beats-failure ordering
+         all of #418/#419/#420 are about -- this rejection is landing on a
+         surface the student has already left. `surfaceKey` (and the Chat
+         instance recreation that comes with it) won't catch up until the
+         NEW surface's own history fetch resolves, which can be arbitrarily
+         later than this moment -- so without an explicit clear here, this
+         still-mounted useChat instance's `status`/`error` would otherwise
+         sit at "error" over the new surface until then. Clearing it HERE,
+         the instant the mismatch is detected (rather than only on the
+         `resetKey`-keyed effect above, which already ran once for THIS
+         switch and won't fire again until the NEXT one), closes that
+         window immediately: the same effect invocation that records the
+         failure (for #419's later restore) also retires the stale error
+         row and its Retry it would otherwise render for the wrong
+         conversation. Batched with `setSendFailureRecord` above into the
+         same commit, so there is no intermediate render where `status` is
+         still "error" for a `hasSendFailure`-classified-but-orphaned row to
+         flash on screen. */
+      clearError();
     }
-  }, [status, aiMessages, setMessages, resetKey]);
+  }, [status, aiMessages, setMessages, resetKey, clearError]);
 
   /* #286 (review fix): a stable id per DISTINCT error object, so
      ConversationView's Retry-After cooldown can tell "a genuinely new
@@ -588,14 +646,16 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
     (status === "error"
       ? {
           message: error?.message || "Something went wrong. Please try again.",
-          stage: sendFailure !== null ? "send" : "response",
+          // #420 review fix (Critical): `hasSendFailure` (ungated), not
+          // `sendFailure` (key-gated) -- see that field's own doc comment.
+          stage: hasSendFailure ? "send" : "response",
           // #286: only ChatResponseError (a non-2xx /api/chat response) ever
           // carries this; an in-stream failure or a dropped connection never
           // does, and neither has a cooldown to enforce.
           retryAfterSeconds:
             error instanceof ChatResponseError && error.status === 429 ? error.retryAfterSeconds : undefined,
           retryAttemptId: errorAttemptRef.current,
-          onRetry: sendFailure !== null ? undefined : () => regenerate({ body: buildRetryBody() }),
+          onRetry: hasSendFailure ? undefined : () => regenerate({ body: buildRetryBody() }),
         }
       : null);
 
