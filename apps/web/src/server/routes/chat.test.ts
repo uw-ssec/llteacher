@@ -2353,6 +2353,74 @@ describe("POST /api/chat", () => {
       expect(logged.costCents).toBeNull();
     });
 
+    it("#431: a fallback config keyed off the same missing platform secret degrades too, instead of silently having no failover", async () => {
+      /* Before #431, the failover hop keyed itself through raw resolveApiKey
+         -- a different primitive than the primary's resolveProviderCredential.
+         A fallback config backed by the SAME missing platform secret as the
+         primary simply threw LLMCredentialMissingError, caught by
+         chatHandler's best-effort catch around fallback resolution, and
+         logged as "fallbackConfig.unusable": the turn quietly had no
+         failover on precisely the outage degradation exists to cover.
+
+         This pins the fix: routing the fallback hop through
+         resolveProviderCredential too means the SAME missing secret now
+         degrades the fallback instead of failing it, exactly as it would for
+         a primary in the same situation. */
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      createConversationMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      resolveFallbackLLMConfigMock.mockResolvedValueOnce({
+        id: "llm-config-fallback",
+        provider: "llmoxie",
+        modelName: "some-llmoxie-model",
+        temperature: 0.5,
+        maxCompletionTokens: 500,
+        credentialId: null,
+        fallbackLlmConfigId: null,
+        basePrompt: "",
+        pricePerMillionInputTokens: 5,
+        pricePerMillionOutputTokens: 10,
+        markCompleteInstruction: null,
+      });
+      // First resolveProviderCredential call keys the PRIMARY (default
+      // config, non-degraded). Second call keys the FALLBACK above -- its
+      // own provider's key is the one missing, so THIS is the call under
+      // test.
+      degradeNextCredentialMock.mockReturnValueOnce(null).mockReturnValueOnce({
+        provider: "openrouter",
+        apiKey: "or-key",
+        modelName: "vendor/degraded-fallback",
+        degradedFrom: "llmoxie",
+      });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      expect(res.status).toBe(200);
+
+      const lines = warnSpy.mock.calls.map((c) => String(c[0]));
+      // The old failure mode: caught, logged as unusable, no failover at all.
+      expect(lines.find((l) => l.includes("chatHandler.fallbackConfig.unusable"))).toBeUndefined();
+      // The fixed behaviour: the fallback resolves, keyed via degradation,
+      // and that degradation is itself logged loudly (same posture as the
+      // primary's own degradation log).
+      const degraded = lines.find((l) => l.includes("chatHandler.fallbackConfig.degraded"));
+      expect(degraded).toBeDefined();
+      expect(JSON.parse(degraded!)).toMatchObject({
+        level: "warn",
+        degradedFrom: "llmoxie",
+        servingProvider: "openrouter",
+      });
+
+      warnSpy.mockRestore();
+    });
+
     it("passes a null assistantMessage (and errorFlag true) when the turn is aborted", async () => {
       createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
       getLastMessagesMock.mockResolvedValue([]);
