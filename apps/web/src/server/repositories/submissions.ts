@@ -1,7 +1,7 @@
-import { and, asc, eq, exists, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, exists, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { submissions, grades, conversations, courses, courseMemberships, homeworks, messages, sections, users, sectionAnswers, type SubmissionSource } from "../../db/schema";
-import type { OrgScope, CourseScope } from "./scope";
+import { unsafeOrgScope, type OrgScope, type CourseScope } from "./scope";
 import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { deriveHomeworkStatus, isHomeworkHidden, type HomeworkStatus } from "./homeworks";
 
@@ -632,16 +632,26 @@ export const OVERDUE_SUBMISSION_CANDIDATE_LIMIT = 500;
  *    - conversations with no message the student wrote (#167 review) -- see
  *      the EXISTS clause below; "opened the section" is not "did the work"
  *    - anything already submitted for that (user, section) */
-export async function findOverdueSubmissionCandidates(
-  db: Db,
-  scope: OrgScope,
-  limit: number = OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
-): Promise<OverdueSubmissionCandidate[]> {
-  const rows = await db
+/** The join, predicates and ordering every candidate query shares --
+ *  factored out so the single-org and multi-org (batched, #437) entry points
+ *  below cannot drift from each other on the structural conditions, which
+ *  are the tenancy- and release-state-sensitive part. `orgFilter` is the one
+ *  thing that differs: `eq(courses.organizationId, scope)` for one org, or
+ *  `inArray(courses.organizationId, scopes)` for a batch -- everything else,
+ *  including the release-state filtering that happens after this returns,
+ *  is identical either way. Returns raw rows (including `organizationId`,
+ *  unused by the single-org caller but load-bearing for the batched one,
+ *  which has to know which org each row came from) -- the release-state
+ *  filter and the `limit` bound are applied by each caller separately,
+ *  because a single org and a batch of them bound the result differently
+ *  (see findOverdueSubmissionCandidatesForOrgs's own comment). */
+async function selectOverdueCandidateRows(db: Db, orgFilter: SQL) {
+  return db
     .select({
       conversationId: conversations.id,
       userId: conversations.ownerUserId,
       sectionId: conversations.sectionId,
+      organizationId: courses.organizationId,
       dueDate: homeworks.dueDate,
       publishedAt: homeworks.publishedAt,
       releasedAt: homeworks.releasedAt,
@@ -668,7 +678,7 @@ export async function findOverdueSubmissionCandidates(
     )
     .where(
       and(
-        eq(courses.organizationId, scope),
+        orgFilter,
         eq(conversations.kind, "section"),
         eq(conversations.isDeleted, false),
         eq(conversations.isTeacherTest, false),
@@ -715,8 +725,19 @@ export async function findOverdueSubmissionCandidates(
     )
     // Oldest backlog first, so the bound below drains a backlog in a
     // predictable order rather than an arbitrary one, and so the same run
-    // twice over the same data picks the same rows.
+    // twice over the same data picks the same rows. For the batched query
+    // this orders GLOBALLY across every org in the batch, which is what
+    // lets findOverdueSubmissionCandidatesForOrgs's per-org cap keep "oldest
+    // first" true within each org despite the rows arriving interleaved.
     .orderBy(asc(homeworks.dueDate));
+}
+
+export async function findOverdueSubmissionCandidates(
+  db: Db,
+  scope: OrgScope,
+  limit: number = OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
+): Promise<OverdueSubmissionCandidate[]> {
+  const rows = await selectOverdueCandidateRows(db, eq(courses.organizationId, scope));
 
   return rows
     .filter((row) => deriveHomeworkStatus(row) === "past_due")
@@ -726,6 +747,70 @@ export async function findOverdueSubmissionCandidates(
       userId: row.userId,
       sectionId: row.sectionId!,
     }));
+}
+
+/* --------------------------------------------------------------------------
+   #437: the same candidate read, batched across many organizations.
+
+   Before this, the scheduled sweep (jobs/autoSubmitOverdue.ts) spent one
+   subrequest on findOverdueSubmissionCandidates PER organization, whether or
+   not that organization had any backlog at all. AUTO_SUBMIT_RUN_SUBREQUEST_
+   BUDGET (900) was therefore actually a cap on organizations swept per run,
+   not on backlog processed -- a platform past ~899 orgs deferred the tail of
+   the org list every single hour before any candidate was even read.
+
+   This function answers one query for a whole BATCH of organizations at
+   once (`organization_id IN (...)` in place of `= scope`), so the run loop
+   can spend a single subrequest covering AUTO_SUBMIT_ORG_BATCH_SIZE orgs
+   instead of one each. The budget now scales with backlog (inserts) plus
+   the number of BATCHES, not the number of tenants.
+   -------------------------------------------------------------------------- */
+
+/** Every scoped candidate the current, deliberately unbounded, matching set
+ *  produces, grouped by the organization it belongs to, each group capped
+ *  at `perOrgLimit` -- the same per-tenant fairness cap the single-org query
+ *  enforces, so one org's backlog cannot crowd another org sharing this
+ *  batch out of the result entirely just because its due dates happen to
+ *  sort later. The caller (autoSubmitOverdueSectionsForScopes) sizes both
+ *  the batch and this limit together so the batch's total worst case still
+ *  fits the run's remaining subrequest budget -- see its own comment for
+ *  that math; this function only needs to guarantee the per-org half of it.
+ *
+ *  Grouped by scope (not a flat list) because the run loop's insert phase is
+ *  still per-organization -- AutoSubmitOrgSummary, and #414's per-org
+ *  failure isolation for the write side, both depend on that shape. Only
+ *  the SELECT itself is batched; nothing about the insert loop changes. */
+export async function findOverdueSubmissionCandidatesForOrgs(
+  db: Db,
+  scopes: OrgScope[],
+  perOrgLimit: number = OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
+): Promise<Map<OrgScope, OverdueSubmissionCandidate[]>> {
+  const result = new Map<OrgScope, OverdueSubmissionCandidate[]>();
+  if (scopes.length === 0) return result;
+
+  const rows = await selectOverdueCandidateRows(db, inArray(courses.organizationId, scopes));
+
+  const perOrgCount = new Map<string, number>();
+  for (const row of rows) {
+    if (deriveHomeworkStatus(row) !== "past_due") continue;
+
+    const countSoFar = perOrgCount.get(row.organizationId) ?? 0;
+    if (countSoFar >= perOrgLimit) continue;
+    perOrgCount.set(row.organizationId, countSoFar + 1);
+
+    // Verified, not taken on the caller's word: this row came back from the
+    // `IN (...scopes)` filter above, so minting an OrgScope from it is the
+    // same sanctioned pattern listAllOrgScopes uses (scope.ts's own doc
+    // comment) -- a value just read back from the DB under an
+    // already-verified filter, not an unvalidated one.
+    const scope = unsafeOrgScope(row.organizationId);
+    const forOrg = result.get(scope);
+    const candidate = { conversationId: row.conversationId, userId: row.userId, sectionId: row.sectionId! };
+    if (forOrg) forOrg.push(candidate);
+    else result.set(scope, [candidate]);
+  }
+
+  return result;
 }
 
 /** Writes one `source: 'auto'` submission, or reports that one already

@@ -66,12 +66,17 @@
 
    The epic's cross-cutting invariant (#30) is that every query is org- or
    course-scoped. A "sweep the whole platform" job is the one shape that can
-   quietly violate it, so the sweep is not one global query: it enumerates
-   organizations (listAllOrgScopes, the single platform-wide read, which
-   hands back OrgScopes rather than raw ids) and runs
-   autoSubmitOverdueSectionsForOrg once per org. Every statement that
-   follows takes that scope and is filtered by it, so no query can return or
-   write a row belonging to another tenant, and one org's failure cannot
+   quietly violate it, so the sweep is not one global, unscoped query: it
+   enumerates organizations (listAllOrgScopes, the single platform-wide
+   read, which hands back OrgScopes rather than raw ids) and every candidate
+   SELECT after it still takes an explicit organization filter -- `= scope`
+   for one org (autoSubmitOverdueSectionsForOrg), or `IN (...scopes)` for a
+   batch of them (#437, findOverdueSubmissionCandidatesForOrgs, used by the
+   run-level loop). Batching which organizations share one SELECT is an
+   optimization on top of this invariant, not a relaxation of it: the WHERE
+   clause still names every org it may touch, so no query can return or
+   write a row belonging to a tenant outside that explicit list, and the
+   insert phase remains per-organization, so one org's failure still cannot
    abort another org's work.
 
    The data access itself lives in repositories/ (findOverdueSubmissionCandidates,
@@ -87,8 +92,10 @@ import type { Db } from "../../db/client";
 import { listAllOrgScopes } from "../repositories/organizations";
 import {
   findOverdueSubmissionCandidates,
+  findOverdueSubmissionCandidatesForOrgs,
   insertAutoSubmission,
   OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
+  type OverdueSubmissionCandidate,
 } from "../repositories/submissions";
 import type { OrgScope } from "../repositories/scope";
 import { logServerError, logServerInfo } from "../utils/errors";
@@ -120,9 +127,11 @@ export interface AutoSubmitOrgSummary {
  *  at run level. */
 export interface AutoSubmitRunSummary extends AutoSubmitOrgSummary {
   /** #414: organizations whose sweep threw before producing a summary --
-   *  a failed candidate SELECT, not a failed row. Each is logged
-   *  individually and the sweep moves to the next org. Non-zero means this
-   *  run covered less than the platform. */
+   *  a failed candidate SELECT, not a failed row. #437: the SELECT is now
+   *  batched, so a failure here counts every organization sharing that
+   *  batch's SELECT, not just one; each failure is logged (with the whole
+   *  batch's org ids) and the sweep moves to the next batch. Non-zero means
+   *  this run covered less than the platform. */
   orgsFailed: number;
   /** #416: organizations this run did not reach, because the run-level
    *  subrequest budget was exhausted first. They are not skipped
@@ -144,7 +153,7 @@ function emptyRunSummary(): AutoSubmitRunSummary {
 
    Why a run-level budget is needed at all, given the per-org candidate cap:
    that cap bounds one org's inserts, but every org in the platform is swept
-   in a SINGLE invocation, so the costs add. The cost model is
+   in a SINGLE invocation, so the costs add. The cost model (pre-#437) was
 
        1 (listAllOrgScopes) + 1 per org attempted (its candidate SELECT)
          + 1 per candidate (its insert)
@@ -156,24 +165,64 @@ function emptyRunSummary(): AutoSubmitRunSummary {
    Starvation, which is why the per-org cap was per-org in the first place:
    a shared budget consumed by whichever orgs come back first would
    permanently starve the tail. Answered by rotation rather than by dropping
-   the budget -- see the offset in autoSubmitOverdueSections. */
+   the budget -- see the offset in autoSubmitOverdueSections.
+
+   #437: that cost model had a second-order consequence nobody had stated --
+   "1 per org attempted" made the SELECT cost scale with TENANT COUNT, so a
+   platform above ~899 organizations deferred the tail of the org list every
+   run before any backlog was even considered, regardless of whether those
+   orgs had a single candidate between them. The candidate SELECT is now
+   batched across AUTO_SUBMIT_ORG_BATCH_SIZE organizations at once (one
+   subrequest covers the whole batch -- findOverdueSubmissionCandidatesForOrgs),
+   so the cost model is
+
+       1 (listAllOrgScopes) + 1 per BATCH attempted (its candidate SELECT)
+         + 1 per candidate (its insert, unchanged)
+
+   which is what actually protects the budget now: it scales with backlog
+   PER BATCH (at most AUTO_SUBMIT_ORG_BATCH_SIZE orgs' worth of inserts
+   sharing one SELECT), not with how many tenants exist. A healthy platform
+   of mostly-idle orgs now covers AUTO_SUBMIT_ORG_BATCH_SIZE times as many
+   organizations per run as before, for the same budget -- the ~899-org
+   ceiling this issue found is now, at the chosen batch size, an
+   ~89,900-org one, and reaching it at all requires that many orgs to be
+   idle for their SELECT cost to stay at 1-per-batch; a real backlog spends
+   the same insert subrequests either way, so the two problems this budget
+   protects against (a single invocation exceeding Cloudflare's cap, and one
+   busy tenant starving the rest) are both still bounded exactly as before. */
 export const AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET = 900;
 
-/** Runs the sweep for exactly one organization. Exported so the tenancy
- *  boundary is directly testable, and so a future operator-triggered
- *  single-org run has something to call.
+/* #437: how many organizations one candidate SELECT covers.
  *
- *  `limit` caps how many candidates this call may submit for; the default
- *  is the production one. It is a parameter rather than a constant read
- *  inside so that the bound's actual consequence -- that the remainder is
- *  still there for the next run -- is testable without seeding the
- *  production limit's worth of fixtures. */
-export async function autoSubmitOverdueSectionsForOrg(
+ * The tradeoff: larger raises the ceiling in the doc comment above (fewer
+ * batches needed to cover the whole platform) but also raises the worst
+ * case a single batch can commit to before its actual backlog is known --
+ * see the per-batch limit math in autoSubmitOverdueSections, which caps
+ * each batch's candidates at floor(remaining-budget / batch-size) precisely
+ * so a batch full of busy orgs still cannot overspend the run budget. A
+ * batch size in the high tens to low hundreds keeps that worst-case
+ * reservation from collapsing to an unusably small per-org limit long
+ * before the budget is actually exhausted, while still moving the org-count
+ * ceiling by two orders of magnitude. 100 is chosen as a round number in
+ * that range -- there is no existing batch-size convention elsewhere in
+ * this codebase to match (checked: no other job or repository function
+ * batches a query this way), and nothing here is sensitive to the exact
+ * value; it can move if a real platform's org count or backlog shape
+ * argues for a different one. */
+export const AUTO_SUBMIT_ORG_BATCH_SIZE = 100;
+
+/** The insert phase, shared by the single-org entry point below and by
+ *  autoSubmitOverdueSections's batched loop: given candidates already read
+ *  (by whichever query fetched them), attempt one insert each and count the
+ *  outcomes. Factored out by #437 so batching the SELECT (one query can now
+ *  return candidates for many orgs at once) does not have to duplicate the
+ *  per-candidate insert/error handling below, which is unchanged from
+ *  before batching existed. */
+async function submitCandidates(
   db: Db,
   scope: OrgScope,
-  limit: number = OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
+  candidates: OverdueSubmissionCandidate[],
 ): Promise<AutoSubmitOrgSummary> {
-  const candidates = await findOverdueSubmissionCandidates(db, scope, limit);
   const summary = { ...emptyOrgSummary(), candidates: candidates.length };
 
   for (const candidate of candidates) {
@@ -205,21 +254,68 @@ export async function autoSubmitOverdueSectionsForOrg(
   return summary;
 }
 
-/** The whole sweep: every organization, each scoped to itself.
+/** Runs the sweep for exactly one organization. Exported so the tenancy
+ *  boundary is directly testable, and so a future operator-triggered
+ *  single-org run has something to call.
+ *
+ *  `limit` caps how many candidates this call may submit for; the default
+ *  is the production one. It is a parameter rather than a constant read
+ *  inside so that the bound's actual consequence -- that the remainder is
+ *  still there for the next run -- is testable without seeding the
+ *  production limit's worth of fixtures.
+ *
+ *  Still backed by the single-org candidate query (#437's batched sibling,
+ *  findOverdueSubmissionCandidatesForOrgs, is used only by the run-level
+ *  loop below) -- this function's whole purpose is to be callable for one
+ *  organization in isolation, so batching its own query would buy it
+ *  nothing. */
+export async function autoSubmitOverdueSectionsForOrg(
+  db: Db,
+  scope: OrgScope,
+  limit: number = OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
+): Promise<AutoSubmitOrgSummary> {
+  const candidates = await findOverdueSubmissionCandidates(db, scope, limit);
+  return submitCandidates(db, scope, candidates);
+}
+
+/** The whole sweep's loop, over a CALLER-SUPPLIED list of organizations
+ *  (#437). Split out of autoSubmitOverdueSections so a test can hand it a
+ *  small, deliberately-chosen `orgScopes` instead of whatever
+ *  listAllOrgScopes(db) happens to return against a real, shared database --
+ *  see that function's own doc comment for why the real query's result
+ *  (org count, and therefore rotation) is not something a test should
+ *  depend on. Production has exactly one caller: autoSubmitOverdueSections
+ *  below, immediately after the platform-wide read.
+ *
+ *  `rotationOffset`, if given, replaces the clock-derived starting offset.
+ *  The offset decides which organization the rotation starts from, and
+ *  deriving it from `Date.now()` -- necessary in production, since the job
+ *  holds no state between runs -- makes the platform-level sweep depend on
+ *  both wall-clock time AND how many organizations exist, neither of which
+ *  a test controls. Injecting the offset directly lets a test put a
+ *  specific organization at the front of the rotation deterministically,
+ *  independent of org count and independent of when the test happens to
+ *  run.
  *
  *  Emits exactly one structured summary line (#275's logging pattern), so a
  *  run is countable and greppable without parsing per-row output. Per-row
- *  failures have already been logged individually at error level by the
- *  per-org pass. */
-export async function autoSubmitOverdueSections(db: Db): Promise<AutoSubmitRunSummary> {
+ *  failures have already been logged individually at error level by
+ *  submitCandidates. */
+export async function autoSubmitOverdueSectionsForScopes(
+  db: Db,
+  orgScopes: OrgScope[],
+  opts: { rotationOffset?: number } = {},
+): Promise<AutoSubmitRunSummary> {
   const startedAt = Date.now();
-  // The one platform-wide read in the whole job, and it returns scopes
-  // rather than ids -- so everything past this line is per-tenant by
-  // construction, not by remembering to add a WHERE clause.
-  const orgScopes = await listAllOrgScopes(db);
 
   const total = emptyRunSummary();
-  /* Spent on the org read above. Everything below decrements from the same
+  /* Spent on the org-list read that produced `orgScopes` -- listAllOrgScopes
+     in production (autoSubmitOverdueSections below), nothing at all when a
+     test calls this function directly with a hand-built list. Charged
+     unconditionally anyway: this function's budget accounting is meant to
+     model the real invocation's cost, and the one production caller always
+     pays it, so a test bypassing the query should still see the same
+     accounting production would. Everything below decrements from the same
      pool, so the bound is on the INVOCATION, which is what Cloudflare
      actually meters. */
   let subrequestsSpent = 1;
@@ -230,61 +326,96 @@ export async function autoSubmitOverdueSections(db: Db): Promise<AutoSubmitRunSu
      first eventually, so a backlog anywhere on the platform drains instead
      of only the backlog at the front of the list.
 
-     Derived from the clock rather than persisted, because the job holds no
-     state between runs and a cron that fires hourly gives a naturally
-     advancing offset for free. */
-  const rotation = orgScopes.length > 0 ? Math.floor(startedAt / 3_600_000) % orgScopes.length : 0;
+     Derived from the clock by default, because the job holds no state
+     between runs and a cron that fires hourly gives a naturally advancing
+     offset for free -- but a caller (a test, per #437) may supply the
+     offset directly instead, e.g. to force a specific org to the front of
+     the rotation without depending on org count or wall-clock time. Modulo
+     twice (`((x % n) + n) % n`) so a negative offset still lands in range. */
+  const rotation =
+    orgScopes.length === 0
+      ? 0
+      : opts.rotationOffset !== undefined
+        ? ((opts.rotationOffset % orgScopes.length) + orgScopes.length) % orgScopes.length
+        : Math.floor(startedAt / 3_600_000) % orgScopes.length;
+  const rotatedScopes = orgScopes.map((_, i) => orgScopes[(i + rotation) % orgScopes.length]!);
 
-  for (let i = 0; i < orgScopes.length; i++) {
-    const scope = orgScopes[(i + rotation) % orgScopes.length]!;
-
-    /* The budget is spent BEFORE the org runs, by narrowing its candidate
-       limit to what is left, rather than by reserving a full window and
-       refusing the org outright. Reserving the worst case would defer
-       healthy orgs that were going to cost one subrequest each: on a
-       platform of 400 idle organizations the sweep would stop around the
-       400th despite having spent almost nothing.
-
-       This shape cannot overspend either. The org costs at most
-       `1 + limit`, and limit is `remaining - 1`, so the post-call total is
-       at most `spent + remaining` -- exactly the budget. */
+  /* #437: the candidate SELECT is issued once per BATCH of
+     AUTO_SUBMIT_ORG_BATCH_SIZE organizations, not once per organization --
+     see that constant's doc comment for why. The insert phase below stays
+     per-organization, so #414's per-org failure isolation still applies to
+     every WRITE; what changes is that a single SELECT failure now takes
+     down the whole batch it covered (still logged, still non-fatal to the
+     rest of the run) rather than just one org, which is the batching
+     tradeoff stated on AUTO_SUBMIT_ORG_BATCH_SIZE. */
+  let i = 0;
+  while (i < rotatedScopes.length) {
     const remaining = AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET - subrequestsSpent;
-    // One for the SELECT, one for at least a single insert; below that
-    // there is no useful work left to start.
+    // One for the batch's SELECT, one for at least a single insert; below
+    // that there is no useful work left to start.
     if (remaining < 2) {
-      total.orgsDeferred = orgScopes.length - i;
+      total.orgsDeferred = rotatedScopes.length - i;
       break;
     }
-    const orgLimit = Math.min(OVERDUE_SUBMISSION_CANDIDATE_LIMIT, remaining - 1);
+
+    /* The batch, and each org's share of this batch's candidate budget, are
+       both sized so the batch cannot overspend `remaining` even in the
+       worst case (every org in it maxed out at `perOrgLimit`):
+       `1 (select) + batchSize * perOrgLimit <= remaining`. This is the same
+       reasoning the pre-#437 per-org loop used (`orgLimit = remaining - 1`),
+       generalized from "one org" to "batchSize orgs sharing one query". */
+    let batchSize = Math.min(AUTO_SUBMIT_ORG_BATCH_SIZE, rotatedScopes.length - i);
+    let perOrgLimit = Math.min(OVERDUE_SUBMISSION_CANDIDATE_LIMIT, Math.floor((remaining - 1) / batchSize));
+    if (perOrgLimit < 1) {
+      // The budget left is too tight for every org in a full batch to get
+      // even one candidate slot -- shrink the batch itself (rather than
+      // refuse it outright) so whatever budget remains still gets spent on
+      // real work: every org that fits gets exactly one candidate's worth
+      // of headroom. `remaining - 1` cannot be negative here since the
+      // `remaining < 2` check above already returned before this point.
+      batchSize = remaining - 1;
+      perOrgLimit = 1;
+    }
+    const batchScopes = rotatedScopes.slice(i, i + batchSize);
 
     try {
-      const orgSummary = await autoSubmitOverdueSectionsForOrg(db, scope, orgLimit);
-      total.candidates += orgSummary.candidates;
-      total.submitted += orgSummary.submitted;
-      total.skipped += orgSummary.skipped;
-      total.failed += orgSummary.failed;
-      // The SELECT, plus one insert attempted per candidate. Candidates the
-      // org did not have cost nothing, so a healthy platform of mostly-idle
-      // orgs spends ~1 per org and reaches all of them.
-      subrequestsSpent += 1 + orgSummary.candidates;
-    } catch (err) {
-      /* #414: per-ORG isolation, not just per-row. Only insertAutoSubmission
-         was wrapped before, so a failure in findOverdueSubmissionCandidates
-         -- a transient neon-http error, a statement timeout on a slow
-         backlog SELECT -- escaped this loop entirely and re-threw out of
-         scheduled(). Every organization after it was silently skipped and
-         the summary line below never emitted, so the run reported only
-         "scheduled failed" while 28 of 30 tenants went unswept. Worse, a
-         deterministic failure for one org (a SELECT that always times out)
-         killed the sweep at the same place every hour, forever.
+      // One subrequest, whatever the batch size -- this is the entire point
+      // of #437's batching. `perOrgLimit` alone already bounds this batch's
+      // worst case to fit `remaining` (see the math above), so there is no
+      // separate run-level cap to pass here.
+      const candidatesByOrg = await findOverdueSubmissionCandidatesForOrgs(db, batchScopes, perOrgLimit);
+      subrequestsSpent += 1;
 
-         This restores what the file's tenancy note has claimed all along:
-         one org's failure cannot abort another org's work. */
-      total.orgsFailed++;
+      for (const scope of batchScopes) {
+        const orgSummary = await submitCandidates(db, scope, candidatesByOrg.get(scope) ?? []);
+        total.candidates += orgSummary.candidates;
+        total.submitted += orgSummary.submitted;
+        total.skipped += orgSummary.skipped;
+        total.failed += orgSummary.failed;
+        // One insert attempted per candidate. Candidates the org did not
+        // have cost nothing, so a healthy platform of mostly-idle orgs
+        // spends ~1 per BATCH (not per org) and reaches all of them.
+        subrequestsSpent += orgSummary.candidates;
+      }
+    } catch (err) {
+      /* #414's per-org isolation is now per-BATCH for the SELECT: a failure
+         here (a transient neon-http error, a statement timeout on a slow
+         backlog SELECT) takes out every org in this batch's coverage for
+         this run, but -- as before -- does not escape the loop, so the next
+         batch is still attempted and the summary line below still emits.
+         Smaller batches trade some of this run's coverage-per-failure for a
+         higher org-count ceiling; AUTO_SUBMIT_ORG_BATCH_SIZE is the knob if
+         that tradeoff needs to move. */
+      total.orgsFailed += batchScopes.length;
       // The SELECT was still attempted and still cost a subrequest.
       subrequestsSpent += 1;
-      logServerError(AUTO_SUBMIT_LOG_CONTEXT, err, { organizationId: scope });
+      logServerError(AUTO_SUBMIT_LOG_CONTEXT, err, {
+        organizationIds: batchScopes,
+        batchSize: batchScopes.length,
+      });
     }
+
+    i += batchSize;
   }
 
   /* Emitted unconditionally, including on a partial run. A sweep that
@@ -300,4 +431,20 @@ export async function autoSubmitOverdueSections(db: Db): Promise<AutoSubmitRunSu
     durationMs: Date.now() - startedAt,
   });
   return total;
+}
+
+/** The production entry point: the whole platform, resolved from the
+ *  database. A thin wrapper over autoSubmitOverdueSectionsForScopes -- the
+ *  one platform-wide read lives here (and only here) so that everything
+ *  past it, including every test of the loop's own behavior, is per-tenant
+ *  by construction rather than by remembering to add a WHERE clause. See
+ *  autoSubmitOverdueSectionsForScopes's doc comment for `rotationOffset` and
+ *  for why the loop itself takes `orgScopes` as a parameter instead of
+ *  querying internally. */
+export async function autoSubmitOverdueSections(
+  db: Db,
+  opts: { rotationOffset?: number } = {},
+): Promise<AutoSubmitRunSummary> {
+  const orgScopes = await listAllOrgScopes(db);
+  return autoSubmitOverdueSectionsForScopes(db, orgScopes, opts);
 }
