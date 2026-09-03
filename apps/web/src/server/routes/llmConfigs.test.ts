@@ -470,6 +470,21 @@ describe("POST test (#31)", () => {
     expect(JSON.stringify(await res.json())).not.toMatch(/LLMOXIE_API_KEY/);
   });
 
+  it("#425: 503s rather than 500s when the credential read itself fails transiently", async () => {
+    /* resolveApiKey queries organization_credentials, so a Neon blip lands in
+       the same catch as the typed errors. Narrowing that catch to
+       LLMCredentialMissingError / UnsupportedLLMProviderError let a transient
+       DB failure escape to Hono's default handler as a bare 500 with no
+       actionable copy -- on a button whose entire purpose is to report a
+       diagnosable result. */
+    resolveApiKeyMock.mockRejectedValue(new Error("neon: connection reset"));
+    const res = await test({ message: "hi" });
+    expect(res.status).toBe(503);
+    expect(generateTextMock).not.toHaveBeenCalled();
+    // Still no server internals in the console copy.
+    expect(JSON.stringify(await res.json())).not.toMatch(/neon/i);
+  });
+
   it("503s rather than misrouting when the provider has no client factory", async () => {
     buildProviderClientMock.mockImplementation(() => {
       throw new UnsupportedLLMProviderError("anthropic");

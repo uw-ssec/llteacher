@@ -30,7 +30,7 @@ import {
   recordAiDraft,
   recordHumanGrade,
 } from "../repositories/grades";
-import { getOrgScopeForCourse } from "../repositories/organizations";
+import { getOrgScopeForCourse, getOrgScopeAndLlmConfigForCourse } from "../repositories/organizations";
 import { resolveLlmConfig } from "../repositories/llmConfigs";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import { draftGrade } from "../../lib/services/GradingEvaluator";
@@ -271,9 +271,17 @@ export async function draftGradeHandler(c: Context<AppEnv>) {
     return c.json({ error: "This conversation has no content to assess." }, 409);
   }
 
-  const orgScope = await getOrgScopeForCourse(db, ctx.courseId);
+  /* #421: the course's own llm_config_id comes back with the scope, in the
+     same round-trip, and is passed into the walk -- otherwise this path skips
+     the course tier and can draft a grade on a different model than the one
+     that produced the conversation being graded. */
+  const courseScope = await getOrgScopeAndLlmConfigForCourse(db, ctx.courseId);
+  const orgScope = courseScope?.orgScope ?? null;
   const config = orgScope
-    ? await resolveLlmConfig(db, orgScope, { sectionId: context.sectionId })
+    ? await resolveLlmConfig(db, orgScope, {
+        sectionId: context.sectionId,
+        courseLlmConfigId: courseScope?.courseLlmConfigId ?? null,
+      })
     : null;
 
   // #365: build the client from the resolved config's OWN provider and
@@ -311,7 +319,12 @@ export async function draftGradeHandler(c: Context<AppEnv>) {
       logServerError("draftGradeHandler", err);
       return c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503);
     }
-    throw err;
+    /* #425: same reasoning as testLlmConfigHandler -- resolveApiKey reads
+       organization_credentials, so a transient DB failure is reachable here
+       and should not escape as an unhandled 500 on an instructor-initiated
+       action. */
+    logServerError("draftGradeHandler", err);
+    return c.json({ error: "The model gateway could not be reached. Try again shortly." }, 503);
   }
 
   const draft = await draftGrade({

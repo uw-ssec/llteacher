@@ -393,7 +393,7 @@ export async function cloneLlmConfig(
 export async function resolveLlmConfig(
   db: Db,
   scope: OrgScope,
-  target: { sectionId?: string; homeworkId?: string },
+  target: { sectionId?: string; homeworkId?: string; courseLlmConfigId?: string | null },
 ): Promise<LlmConfigRecord | null> {
   let homeworkId = target.homeworkId;
 
@@ -421,6 +421,34 @@ export async function resolveLlmConfig(
         ),
       );
     if (pinned) return toRecord(pinned);
+  }
+
+  /* #421: the COURSE tier, between the homework pin and the org default.
+
+     #325 gave `courses` an llm_config_id and this walk was never updated --
+     its doc comment above still asserted the column does not exist. The chat
+     path (lib/llm-config.resolveLLMConfig) has always walked homework ->
+     course -> org default, so with a course-level config set, a student's
+     conversation ran on the course's model while the instructor's draft grade
+     for that same conversation ran on the ORG DEFAULT: a different model,
+     billed to a different credential, recorded under a different config id.
+
+     Passed in rather than read here, because every caller already holds it
+     from the course row it had to load anyway (getOrgScopeAndLlmConfigForCourse
+     returns both in one round-trip), and re-reading it would add a query to
+     the one path this function serves. */
+  if (target.courseLlmConfigId) {
+    const [courseConfig] = await db
+      .select(CONFIG_COLUMNS)
+      .from(llmConfigs)
+      .where(
+        and(
+          eq(llmConfigs.id, target.courseLlmConfigId),
+          eq(llmConfigs.organizationId, scope),
+          eq(llmConfigs.isActive, true),
+        ),
+      );
+    if (courseConfig) return toRecord(courseConfig);
   }
 
   const [orgDefault] = await db
@@ -452,4 +480,10 @@ export async function resolveLlmConfig(
 
    `resolveLlmConfig` (#170) above is NOT dead and stays -- routes/grades.ts's
    draft-grade path is a live caller, so #364's "remove them if the rewire
-   makes them dead" applies to this one function, not the pair. */
+   makes them dead" applies to this one function, not the pair.
+
+   #421: it now walks the same three tiers as lib/llm-config.ts's resolver
+   (homework -> course -> org default). Two resolvers over one policy is
+   still the underlying problem -- #431 tracks collapsing them -- but until
+   then they agree on WHICH config a section resolves to, which is what the
+   draft-grade path was silently getting wrong. */

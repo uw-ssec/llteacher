@@ -168,16 +168,38 @@ export function isRetryableProviderError(err: unknown): boolean {
  *  no-op, which is precisely the bug a bare `parts.length` check caused in
  *  chat.ts's own `hasRenderableContent` (see its #268 doc comment). */
 const COMMITTING_CHUNK_TYPES: ReadonlySet<string> = new Set([
-  "text-start",
   "text-delta",
-  "reasoning-start",
   "reasoning-delta",
-  "tool-input-start",
   "tool-input-delta",
   "tool-call",
   "tool-result",
   "file",
   "source",
+]);
+
+/* #422: the `*-start` markers are deliberately NOT in the set above.
+
+   They OPEN a part; they carry none of its bytes. A gateway that emits
+   `text-start` and then 500s -- the ordinary shape of an upstream failure on
+   an OpenAI-compatible proxy such as LLMoxie/LiteLLM -- had already
+   "committed" the turn under the old set, so the error chunk that arrived
+   immediately after was never inspected, isRetryableProviderError was never
+   called, and a healthy configured fallback went unused while the student got
+   `tutor_stopped`.
+
+   Nothing had reached the student at that moment: this module's own header
+   records that the HTTP response is not constructed until the probe returns,
+   so switching models there is still completely invisible. The boundary this
+   module documents is "before the first content chunk", and a part-opening
+   marker is not content.
+
+   Kept as a named set rather than deleted so the distinction stays legible:
+   these are the chunks that prove a part EXISTS, and the ones above are the
+   chunks that prove it has CONTENT. */
+const PART_OPENING_CHUNK_TYPES: ReadonlySet<string> = new Set([
+  "text-start",
+  "reasoning-start",
+  "tool-input-start",
 ]);
 
 type ProbeOutcome = { committed: true } | { committed: false; error: unknown };
@@ -200,8 +222,41 @@ async function probeUntilCommitted(result: StreamTextResult): Promise<ProbeOutco
       const { value, done } = await reader.read();
       if (done) return { committed: true };
       if (value.type === "error") return { committed: false, error: value.error };
+      /* #424: a hang that runs out the turn's abortSignal. ai@5.0.195 does
+         NOT surface that as an `error` chunk -- it discards the AbortError
+         and enqueues `{type:"abort"}`, then closes -- so this matched
+         nothing, fell through to `done`, and was reported as COMMITTED.
+         A provider that accepts the connection and never answers is the
+         single most common outage shape, and it was the one shape that
+         could never fail over, despite zero bytes reaching the student.
+
+         Not folded into the `done` case: "the stream ended" and "the stream
+         was aborted" are different facts, and only the second is a failure.
+         An empty-but-successful turn still commits (see the doc comment). */
+      if (value.type === "abort") {
+        /* Named AbortError so isRetryableProviderError's EXISTING, documented
+           policy applies to it on purpose: a turn that ran out
+           chat.ts's STREAM_TIMEOUT_MS has spent a budget that is per-TURN,
+           not per-attempt, so a second hop would blow the same deadline for a
+           student who has already waited it out. #424 does not change that
+           decision -- it makes the turn reach it.
+
+           What does change: the turn is now classified as a FAILURE rather
+           than a commitment, so it is logged as one (streamWithFallback.
+           primaryFailed) instead of passing silently as an empty-but-
+           successful turn. A provider that accepts connections and never
+           answers was previously the one outage shape that produced no
+           failover signal at all. */
+        return {
+          committed: false,
+          error: Object.assign(new Error("provider aborted before producing any content"), { name: "AbortError" }),
+        };
+      }
       if (value.type === "finish") return { committed: true };
       if (COMMITTING_CHUNK_TYPES.has(value.type)) return { committed: true };
+      // #422: part-opening markers explicitly do not commit; keep reading
+      // until real content or a failure arrives.
+      if (PART_OPENING_CHUNK_TYPES.has(value.type)) continue;
     }
   } catch (err) {
     // A genuine stream rejection rather than an in-band `error` chunk. Both
@@ -267,6 +322,29 @@ export async function streamWithFallback(
       attribution: { servedBy: attempt.primaryModelName, usedFallback: false },
     };
   }
+
+  /* #423: drain the primary that is being abandoned.
+
+     probeUntilCommitted cancelled only its OWN tee branch, and in ai@5.0.195
+     cancelling one branch of a `.tee()` does not cancel the source while
+     another branch is uncancelled. The branch toUIMessageStreamResponse would
+     have taken is never read again -- this function returns `backup` -- so
+     without this the failed primary's pipeline, and the provider response
+     body behind it, stay open for the rest of the request.
+
+     DRAINED, not cancelled, and the distinction is worth stating: every
+     `fullStream` access calls teeStream() and hands back a NEW branch (the
+     getter is `createAsyncIterableStream(this.teeStream()...)`), so
+     cancelling `result.fullStream` cancels a freshly-minted branch and does
+     nothing to the source. Reading one branch to completion DOES pull the
+     source to completion, which is what releases the upstream fetch. That is
+     what the old `drain()` achieved incidentally by awaiting `result.text`,
+     and nothing replaced it when it was removed.
+
+     Not awaited: the fallback should start immediately, and the drain is
+     bookkeeping. Errors are swallowed -- the primary already failed, and its
+     error is reported above. */
+  void primary.consumeStream({ onError: () => {} });
 
   const backup = streamText(attempt.fallback);
   const backupOutcome = await probeUntilCommitted(backup);

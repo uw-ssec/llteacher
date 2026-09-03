@@ -314,6 +314,53 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
       expect((await resolveLlmConfig(db, unsafeOrgScope(orgId), {}))!.id).toBe(orgDefault.id);
     });
 
+    it("#421: prefers the course's config over the org default, and the homework's over the course's", async () => {
+      await reset();
+      await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Org default", isDefault: true }));
+      const courseConfig = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Course" }));
+      const pinned = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Pinned" }));
+      const homeworkId = await makeHomework(pinned.id);
+
+      /* #325 gave `courses` an llm_config_id and this walk was never updated,
+         so a course-level override resolved to the ORG DEFAULT here while the
+         chat path resolved it to the course's config -- the instructor's
+         draft grade ran on a different model than the conversation it was
+         grading. */
+      expect(
+        (await resolveLlmConfig(db, unsafeOrgScope(orgId), { courseLlmConfigId: courseConfig.id }))!.id,
+      ).toBe(courseConfig.id);
+
+      // The homework pin still wins over the course, matching lib/llm-config's
+      // homework -> course -> org-default order exactly.
+      expect(
+        (await resolveLlmConfig(db, unsafeOrgScope(orgId), { homeworkId, courseLlmConfigId: courseConfig.id }))!.id,
+      ).toBe(pinned.id);
+    });
+
+    it("#421: ignores a course config that is inactive or belongs to another org", async () => {
+      await reset();
+      const orgDefault = await createLlmConfig(
+        db,
+        unsafeOrgScope(orgId),
+        input({ name: "Org default", isDefault: true }),
+      );
+      const inactive = await createLlmConfig(
+        db,
+        unsafeOrgScope(orgId),
+        input({ name: "Retired course config", isActive: false }),
+      );
+
+      // Same is_active and org predicates the other tiers apply -- a course
+      // pointing at a retired config falls through rather than resolving to
+      // something the admin has switched off.
+      expect(
+        (await resolveLlmConfig(db, unsafeOrgScope(orgId), { courseLlmConfigId: inactive.id }))!.id,
+      ).toBe(orgDefault.id);
+      expect(
+        (await resolveLlmConfig(db, unsafeOrgScope(orgId), { courseLlmConfigId: crypto.randomUUID() }))!.id,
+      ).toBe(orgDefault.id);
+    });
+
     it("falls through to the org default when the pinned config was deactivated", async () => {
       await reset();
       const orgDefault = await createLlmConfig(

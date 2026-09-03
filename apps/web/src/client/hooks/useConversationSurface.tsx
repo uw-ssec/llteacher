@@ -12,10 +12,11 @@ import type { MessageData, RCodeResult } from "@llteacher/ui";
 
    What this file owns: the useChat instance itself, the response-accepted
    tracking that classifies a failure as "send" vs "response" half (#96),
-   the stopped-message-id / send-failure UI state and its reset-on-switch
-   semantics, the retryable error-row derivation (#144/#276/#286), and the
-   translation of UIMessage[] into the design system's MessageData[]
-   (#28/#317/#397).
+   the stopped-message-id UI state and its reset-on-switch semantics, the
+   send-half failure record and its retained-but-key-gated semantics across a
+   switch (#418/#419/#420), the retryable error-row derivation
+   (#144/#276/#286), and the translation of UIMessage[] into the design
+   system's MessageData[] (#28/#317/#397).
 
    What deliberately stays OUTSIDE this file, in App.tsx, because it is
    genuinely per-surface rather than incidentally duplicated:
@@ -115,18 +116,6 @@ function prepareSendMessagesRequest({
   body: Record<string, unknown> | undefined;
 }) {
   return { body: { ...body, messages: messages.slice(-1) } };
-}
-
-/* #96: the plain text a student actually typed, recovered from the UIMessage
-   useChat optimistically appended for it. Used only on the send-failure path
-   below, to hand those words back to the composer before dropping the bubble
-   the server never stored. Tool/file parts are ignored: a student message is
-   text parts only. */
-function studentTextOf(message: UIMessage): string {
-  return message.parts
-    .filter((p): p is { type: "text"; text: string } => p.type === "text")
-    .map((p) => p.text)
-    .join("");
 }
 
 /** #277: cap on how often a streamed response re-renders the chat surface. */
@@ -256,23 +245,29 @@ export interface UseConversationSurfaceOptions {
    *  explicit restart) -- never as a side effect of a fetch wrapper
    *  observing a new id mid-stream. */
   surfaceKey: string | undefined;
-  /** #96/#317 (review fix): the key that resets a pending send-half
-   *  failure's restored draft. For the tutor surface this is the same as
-   *  `surfaceKey` (its ConversationView remount and its useChat `id` both
-   *  update together, in the same `selectTutorConversation` call). For the
-   *  section surface it deliberately is NOT `surfaceKey`: the section's
-   *  ConversationView remounts on `currentSection` alone, synchronously,
-   *  the instant a switch is requested -- but `surfaceKey` only updates
-   *  once that section's history fetch resolves (see App.tsx's
-   *  loadSectionConversation). A restored-draft leak from the OLD section
-   *  would otherwise have a real window to land in the freshly-remounted
-   *  (but not yet re-keyed) child before this hook's own state catches up
-   *  -- resetting on the section number directly, at the same instant the
-   *  remount happens, closes that window. This exactly matches the
-   *  pre-#302 code's own `useEffect(() => setSectionSendFailure(null),
-   *  [currentSection])` / `useEffect(() => setTutorSendFailure(null),
-   *  [tutorConversationId])` pair -- see `send`'s own doc comment for why a
-   *  render-time reset replaces (rather than reintroduces) that effect. */
+  /** #96/#317 (review fix); #418/#419/#420 (retained-but-gated, not reset):
+   *  the key a pending send-half failure's restored draft is recorded
+   *  against, and the key an error row is cleared on. For the tutor surface
+   *  this is the same as `surfaceKey` (its ConversationView remount and its
+   *  useChat `id` both update together, in the same
+   *  `selectTutorConversation` call). For the section surface it
+   *  deliberately is NOT `surfaceKey`: the section's ConversationView
+   *  remounts on `currentSection` alone, synchronously, the instant a switch
+   *  is requested -- but `surfaceKey` only updates once that section's
+   *  history fetch resolves (see App.tsx's loadSectionConversation). A
+   *  restored-draft leak from the OLD section would otherwise have a real
+   *  window to land in the freshly-remounted (but not yet re-keyed) child
+   *  before this hook's own state catches up -- gating the exposed
+   *  `sendFailure` on the section number directly, at the same instant the
+   *  remount happens, closes that window (see `sendFailure`'s own doc
+   *  comment for why this is a gate on exposure, not a clear of the
+   *  underlying record: #419 requires the record to survive a switch so
+   *  returning to it still hands the words back).
+   *
+   *  #420: also the key the error row is cleared on (see this hook's own
+   *  `useEffect(() => clearError(), [resetKey, clearError])`) -- an error
+   *  row from a surface the student has switched away from must not survive
+   *  until `surfaceKey` eventually catches up. */
   resetKey: string | number | undefined;
   /** #317 review, #352 (review fix): the key that resets the "you stopped
    *  this response" note left on a stopped turn. Deliberately `surfaceKey`
@@ -352,13 +347,23 @@ export interface ConversationSurface {
   canSend: boolean;
   errorRow: ConversationSurfaceErrorRow | null;
   /** Non-null exactly when the last failure was a send-half failure (#96)
-   *  -- handed back to the composer as ConversationView's own
-   *  `restoredDraft` prop DIRECTLY (its shape, `{ text: string }`, is
-   *  exactly what that prop wants). Reset synchronously the moment
-   *  `resetKey` changes (see this hook's own render-time reset below),
-   *  which is what makes it safe for a caller to read this straight
-   *  through as `restoredDraft` without separately tagging it by
-   *  section/conversation the way the pre-#302 code had to.
+   *  AND it was recorded under the CURRENT `resetKey` -- handed back to the
+   *  composer as ConversationView's own `restoredDraft` prop DIRECTLY (its
+   *  shape, `{ text: string }`, is exactly what that prop wants).
+   *
+   *  #418/#419: this is a GATE on exposure, not a clear of the underlying
+   *  record. Before #419, a `resetKey` change nulled the failure outright --
+   *  which meant a send-half failure's words, which exist nowhere else (the
+   *  un-persisted bubble was already dropped from the transcript, and the
+   *  server never stored them), were destroyed the instant the student
+   *  looked away, with no way back. The record now survives a `resetKey`
+   *  change; only ITS EXPOSURE here is gated by a match against the current
+   *  `resetKey` (computed during render, before any child of this render
+   *  exists -- see this hook's own `sendFailureRecord` for why that timing
+   *  needs no race-avoidance the way the pre-#419 stateful reset did),
+   *  which is what keeps a stale-section failure from leaking into a
+   *  DIFFERENT section's composer while still letting a return to the SAME
+   *  section hand the words back.
    *
    *  #302 review fix (Critical #1): this MUST stay an object allocated
    *  fresh per failure, not a string re-wrapped in a new object literal at
@@ -369,13 +374,13 @@ export interface ConversationSurface {
    *  reinjected by the next unrelated App re-render (a sidebar collapse, a
    *  hint-count refetch, anything) -- a literal built fresh every render
    *  would have a NEW identity every render and re-fire that restore on
-   *  every single one, undoing the student's own deletion. This is also
-   *  why the reset above sets this to `null` rather than, say, a
-   *  memoized-by-value object: two consecutive failures with IDENTICAL
-   *  text must each independently restore (see
-   *  ConversationView.test.tsx's own coverage of that), which a
-   *  value-keyed memo would collapse into a single identity and only fire
-   *  once. */
+   *  every single one, undoing the student's own deletion. This is also why
+   *  the gate above exposes the SAME stored object on every render where the
+   *  key still matches, rather than wrapping `sendFailureRecord.failure.text`
+   *  in a new literal each time: two consecutive failures with IDENTICAL
+   *  text must each independently restore (see ConversationView.test.tsx's
+   *  own coverage of that), which a value-keyed memo would collapse into a
+   *  single identity and only fire once. */
   sendFailure: { text: string } | null;
   send: (text: string, extraBody?: Record<string, unknown>) => void;
   stop: () => void;
@@ -432,6 +437,12 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
     status,
     error,
     regenerate,
+    // #420: neither useChat instance has anything else that resets its
+    // status/error on a surface switch until `surfaceKey` eventually catches
+    // up (late, for the section surface -- see `stoppedMessageResetKey`'s own
+    // doc comment) -- without this, an error row from the surface just left
+    // renders over the next one. See the `resetKey`-keyed effect below.
+    clearError,
     stop: stopChat,
   } = useChat({
     ...(surfaceKey !== undefined ? { id: surfaceKey } : {}),
@@ -441,24 +452,54 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
   });
 
   const [stoppedMessageId, setStoppedMessageId] = useState<string | null>(null);
-  const [sendFailure, setSendFailure] = useState<{ text: string } | null>(null);
 
-  /* #302: reset the restored-draft state the INSTANT `resetKey` changes --
-     synchronously, during this render, rather than in a `useEffect`. This
-     closes a real race the pre-#302 tutor code needed a second, external
-     defense for: both ConversationViews are keyed and therefore REMOUNT on
-     a surface switch, and React runs a freshly-mounted child's own effects
-     before a PARENT's effect -- so an effect-based reset here alone could
-     still lose to a child's mount effect reading the stale value first.
-     Doing it inline during render (React's own sanctioned "adjust state
-     when a prop changes" pattern) runs before any child of this render
-     exists at all, which is strictly earlier than either defense the
-     pre-#302 code had. */
-  const lastResetKeyRef = useRef(resetKey);
-  if (lastResetKeyRef.current !== resetKey) {
-    lastResetKeyRef.current = resetKey;
-    setSendFailure(null);
-  }
+  /* #419: the send-half failure record. Deliberately NOT cleared when
+     `resetKey` changes (see below) -- it's a `{ failure, recordedAtKey }`
+     pair kept alive across a switch so that returning to the surface it was
+     recorded under still hands the student's words back (the pre-#419
+     behavior nulled this the instant `resetKey` changed, which meant
+     leaving and returning destroyed an un-persisted, un-recoverable message
+     outright). `failure` is the exact object identity exposed as
+     `sendFailure` below -- see that field's own doc comment (#302 review fix,
+     Critical #1) for why this must stay a single stable object per failure,
+     not one rebuilt fresh on every render that happens to still match. */
+  const [sendFailureRecord, setSendFailureRecord] = useState<{
+    failure: { text: string };
+    recordedAtKey: typeof resetKey;
+  } | null>(null);
+
+  /* #419: exposed to the caller ONLY when the failure's own `recordedAtKey`
+     still matches the CURRENT `resetKey` -- this is the render-site gate
+     that replaces the old unconditional clear-on-switch, and it does so
+     with no race to win: unlike the pre-#419 stateful reset (which had to
+     beat a freshly-remounted ConversationView's own mount effect to null
+     the value before that child read it), this is a pure derivation
+     computed during THIS render, before any child of this render exists --
+     a remounted child's very first render already sees the correctly-gated
+     value. A stale-key record derives to `null` (closing the cross-surface
+     leak #418/#419 both cared about); the record itself, and the object
+     identity inside it, survive untouched so a later return to the same key
+     exposes the exact same object again. */
+  const sendFailure = sendFailureRecord && sendFailureRecord.recordedAtKey === resetKey ? sendFailureRecord.failure : null;
+
+  /* #420: clears a stale chat-stream error the instant `resetKey` changes.
+     Mirrors the pre-#302 code's own `useEffect(() => clearChatError(),
+     [currentSection, clearChatError])` exactly -- an EFFECT, not a
+     render-time call like the reset below, because (unlike the restored
+     draft) nothing here needs to win a race against a freshly-mounted
+     child's own effects: the error row is read straight from this hook's
+     return value, not gated by a child's mount-time ref. Keyed on
+     `resetKey` rather than `surfaceKey` for the same reason #418/#419 care
+     about the distinction -- for the section surface `surfaceKey` only
+     catches up once the new section's history fetch resolves, and an error
+     row from the section just left must not survive until then. A no-op
+     when there is no error (`clearError`'s own internal guard) and a no-op
+     for the tutor surface's ordinary switch, where `resetKey === surfaceKey`
+     already recreates the Chat instance (and so already clears status/error
+     that way) -- this firing too is harmless. */
+  useEffect(() => {
+    clearError();
+  }, [resetKey, clearError]);
 
   /* #302 review fix (Important #2): the stopped-note reset is deliberately
      a SEPARATE render-time check, keyed on `stoppedMessageResetKey` (see
@@ -471,16 +512,18 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
     setStoppedMessageId(null);
   }
 
-  /* #96: detects a send-half failure -- the request never reached the
+  /* #418: what the in-flight send actually was, and which `resetKey` it was
+     typed under. Written by `send` below at the moment of sending -- not
+     reconstructed here from whatever `aiMessages`/`resetKey` happen to hold
+     when the request finally rejects, which can be arbitrarily later than
+     the send itself (a hanging fetch outlives a switch). Read and cleared by
+     the failure-detection effect below. */
+  const pendingSendRef = useRef<{ text: string; key: typeof resetKey } | null>(null);
+
+  /* #96/#418: detects a send-half failure -- the request never reached the
      server, or the server refused it outright -- and hands the student's
      words back rather than leaving an un-persisted bubble on screen (see
-     sendFailure's own doc comment above for the full contract). A FRESH
-     object every time this fires (#302 review fix, Critical #1) -- never
-     re-derived from a memo or recomputed at a render call site -- so that
-     two consecutive failures with the same text each independently
-     restore, and so ConversationView's own identity-keyed "restore once"
-     guard can't be defeated by an unrelated re-render minting a new-looking
-     object for the SAME failure. */
+     sendFailure's own doc comment above for the full contract). */
   const prevStatusRef = useRef(status);
   useEffect(() => {
     const previous = prevStatusRef.current;
@@ -488,15 +531,34 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
     // Only the moment a turn FAILS, not every render while it stays failed.
     if (status !== "error" || previous === "error") return;
     if (acceptedRef.current) return; // response half: the question is persisted, leave it on screen
-    const last = aiMessages[aiMessages.length - 1];
-    // Defensive: a send-half failure never gets far enough for the SDK to
-    // append an assistant message, so the tail is the student's own message.
-    if (last?.role !== "user") return;
-    setSendFailure({ text: studentTextOf(last) });
-    // The bubble is dropped, not merely marked: it was never persisted, so
-    // leaving it would show a message that a reload makes vanish.
-    setMessages(aiMessages.slice(0, -1));
-  }, [status, aiMessages, setMessages]);
+    const pending = pendingSendRef.current;
+    // No record of a send means nothing to hand back -- a turn that reached
+    // "error" without `send` having started it is not a send-half failure
+    // this can recover.
+    if (!pending) return;
+    pendingSendRef.current = null;
+    // A FRESH object every time this fires (#302 review fix, Critical #1) --
+    // never re-derived from a memo or recomputed at a render call site -- so
+    // that two consecutive failures with the same text each independently
+    // restore, and so ConversationView's own identity-keyed "restore once"
+    // guard can't be defeated by an unrelated re-render minting a
+    // new-looking object for the SAME failure.
+    setSendFailureRecord({ failure: { text: pending.text }, recordedAtKey: pending.key });
+    /* #418: only mutate the transcript on screen when it's still the one
+       that failed -- i.e. `resetKey` hasn't moved on since the send. After a
+       switch, `aiMessages` belongs to a different surface and slicing its
+       tail would delete that surface's real, persisted message; that
+       surface needs no cleanup in that case, since its transcript is
+       unmounted and returning re-hydrates it from the server, which never
+       stored the failed message in the first place. */
+    if (pending.key === resetKey) {
+      const last = aiMessages[aiMessages.length - 1];
+      // Defensive: a send-half failure never gets far enough for the SDK to
+      // append an assistant message, so the tail is the student's own
+      // message.
+      if (last?.role === "user") setMessages(aiMessages.slice(0, -1));
+    }
+  }, [status, aiMessages, setMessages, resetKey]);
 
   /* #286 (review fix): a stable id per DISTINCT error object, so
      ConversationView's Retry-After cooldown can tell "a genuinely new
@@ -552,7 +614,24 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
      any of that work. */
   const send = (text: string, extraBody?: Record<string, unknown>) => {
     acceptedRef.current = false;
-    setSendFailure(null);
+    // A fresh send supersedes any previous failure -- its text is either
+    // being re-sent right now or was deliberately replaced by the student.
+    // Unlike a `resetKey` change (#419), a fresh send genuinely retires the
+    // old record rather than merely gating its display.
+    setSendFailureRecord(null);
+    /* #418: the words, and the `resetKey` they belong to, recorded HERE, at
+       the moment of sending -- not reconstructed in the failure-detection
+       effect above from whatever `aiMessages`/`resetKey` happen to hold when
+       the request finally rejects.
+
+       A hanging send outlives a switch: the caller's `initialMessages`/
+       `setMessages` replace `aiMessages` with the new surface's history on a
+       switch, so reading the tail of `aiMessages` at failure time could read
+       the WRONG surface's last message, stamp the failure with the wrong
+       key, drop a PERSISTED message out of that surface's transcript, and
+       pre-fill its composer one Enter away from sending it twice. The failed
+       surface's actual text would be lost either way. */
+    pendingSendRef.current = { text, key: resetKey };
     sendMessage({ text }, { body: { ...buildSendBody(), ...extraBody } });
     setStoppedMessageId(null);
   };

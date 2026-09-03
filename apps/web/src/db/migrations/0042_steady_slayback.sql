@@ -23,9 +23,24 @@
 --
 -- This is a column rewrite, not a backfill script -- Postgres re-writes
 -- existing values as part of the type change, rounding each to the nearest
--- millisecond. That is the intended outcome (it is the value the
--- application has always read), and it cannot reorder rows relative to each
--- other by more than the sub-millisecond noise the cursor could not
--- represent anyway. Two rows that round to the SAME millisecond become a
--- genuine tie, which the (updated_at, id) tiebreaker already handles.
+-- millisecond.
+--
+-- #429: NOT "the value the application has always read", as this comment
+-- previously claimed. Postgres ROUNDS to timestamp(3); the JS Date round-trip
+-- TRUNCATED. A row stored ...:00.000615 was read by the app as .000 and is
+-- rewritten here as .001. Roughly half of all existing rows therefore move
+-- FORWARD by up to 1ms rather than staying put.
+--
+-- The consequence is narrow and one-deploy-only, but real: a client holding a
+-- nextCursor derived from a truncated value across this deploy asks for
+-- (updated_at, id) < (T, id). A sibling that was T.000615 -- previously equal
+-- to T, so it matched the eq(updated_at) AND lt(id) branch and belonged on
+-- page 2 -- is now T+1ms, strictly greater than the cursor, and is skipped on
+-- page 2 having never appeared on page 1. It reappears on the client's next
+-- refetch from the top.
+--
+-- Recorded rather than fixed: the migration has already run, and the rounding
+-- direction must not be relied on by anything written later. Two rows that
+-- round to the SAME millisecond become a genuine tie, which the
+-- (updated_at, id) tiebreaker already handles.
 ALTER TABLE "conversations" ALTER COLUMN "updated_at" SET DATA TYPE timestamp (3) with time zone;

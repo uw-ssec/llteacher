@@ -39,6 +39,9 @@ vi.mock("@ai-sdk/react", () => ({
       stop: vi.fn(),
       setMessages: vi.fn(),
       regenerate: vi.fn(),
+      // #420: App clears the section chat's error on a section switch, so
+      // the stub has to offer the same surface the real hook does.
+      clearError: vi.fn(),
     };
   },
 }));

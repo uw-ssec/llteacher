@@ -117,7 +117,14 @@ export async function submitSection(
   if (existing) {
     const [updated] = await db
       .update(submissions)
-      .set({ submittedAt: new Date() })
+      /* #415: `source` is reset, not just `submittedAt`. The sweep may have
+         auto-submitted this section between the due date and the student
+         pressing Submit; without this the row keeps `source: 'auto'` and
+         the student's own deliberate submission is reported as automatic in
+         both their sidebar (SectionItem's `autoSubmitted` label) and the
+         instructor's matrix. Reaching this line means a student-initiated
+         submit, which is exactly what the column is meant to record. */
+      .set({ submittedAt: new Date(), source: "student" })
       .where(eq(submissions.id, existing.id))
       .returning();
     return { id: updated!.id, conversationId, submittedAt: updated!.submittedAt, isResubmission: true };
@@ -573,11 +580,16 @@ export interface OverdueSubmissionCandidate {
  *  hourly run picks it up. A backlog drains at this rate per org per hour
  *  instead of failing whole.
  *
- *  Per-org rather than per-run deliberately. A per-run budget shared across
- *  organizations would be consumed by whichever orgs listAllOrgScopes
- *  happens to return first, every run, permanently starving the rest -- a
- *  worse failure than the one being fixed. The run-level ceiling is
- *  therefore orgs x this. */
+ *  Per-org, and deliberately NOT the only bound. The starvation objection
+ *  that motivated a per-org cap is real -- a shared budget consumed by
+ *  whichever orgs listAllOrgScopes returns first would permanently starve
+ *  the rest -- but "orgs x this" is not a ceiling the platform can actually
+ *  pay: each candidate is one neon-http subrequest and Cloudflare allows
+ *  1000 per invocation, so two orgs carrying a full backlog exceed it (see
+ *  #416). The job therefore ALSO enforces a run-level subrequest budget,
+ *  and answers the starvation objection by rotating which org the sweep
+ *  starts from rather than by removing the bound. See
+ *  AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET in jobs/autoSubmitOverdue.ts. */
 export const OVERDUE_SUBMISSION_CANDIDATE_LIMIT = 500;
 
 /** Every section in `scope` that is past due, has a live conversation the
@@ -739,22 +751,57 @@ export async function insertAutoSubmission(
   scope: OrgScope,
   candidate: OverdueSubmissionCandidate,
 ): Promise<boolean> {
+  /* #417: INSERT ... SELECT, not INSERT ... VALUES, so the "conversation is
+     still live" condition is evaluated by the same statement that writes.
+
+     findOverdueSubmissionCandidates already filters `is_deleted = false`,
+     but that read is separated from this write by every other candidate's
+     insert -- tens of seconds on a large org. A student who restarts their
+     section inside that window gets conv A soft-deleted and conv B created;
+     a VALUES insert would still write a submission for conv A, because the
+     composite FK resolves against a soft-deleted row and there is nothing
+     to conflict with. That row then occupies the submissions_user_section_uq
+     slot, and the student's later submit on conv B fails the unique index
+     forever -- restart only clears the submission whose conversation_id
+     matches the CURRENT conversation, so it never recovers.
+
+     Re-reading the conversation first and then inserting would only narrow
+     the window, not close it, and would double the job's dominant
+     subrequest cost (see #416). The guard belongs in the write. */
   const [created] = await db
     .insert(submissions)
-    .values({
-      conversationId: candidate.conversationId,
-      userId: candidate.userId,
-      sectionId: candidate.sectionId,
-      // Verified, not taken on the caller's word: the candidate query
-      // joined through `courses` and filtered on this exact
-      // organization_id, so the denormalized column cannot be written with
-      // another tenant's id.
-      organizationId: scope,
-      source: "auto",
-      // submittedAt left to the column's defaultNow(): the row records when
-      // the submission was made. Back-dating it to the due date would claim
-      // the student submitted on time, the opposite of what it means.
-    })
+    .select(
+      /* Every column of `submissions`, in table order. Drizzle's
+         INSERT ... SELECT requires the full column list -- a partial select
+         is rejected at build time with "selected fields are not the same or
+         are in a different order compared to the table definition" -- so
+         `id` and `submitted_at` restate the defaults the schema declares
+         (defaultRandom / defaultNow) rather than being omitted. They are
+         the only two, and the assertion below pins them to the schema so a
+         changed default cannot drift silently. */
+      db
+        .select({
+          id: sql<string>`gen_random_uuid()`.as("id"),
+          // The guard: this is the conversation row itself, so the insert
+          // writes a conversationId only when the WHERE below matched.
+          conversationId: conversations.id,
+          userId: sql<string>`${candidate.userId}::uuid`.as("user_id"),
+          sectionId: sql<string>`${candidate.sectionId}::uuid`.as("section_id"),
+          // Verified, not taken on the caller's word: the candidate query
+          // joined through `courses` and filtered on this exact
+          // organization_id, so the denormalized column cannot be written
+          // with another tenant's id.
+          organizationId: sql<string>`${scope}::uuid`.as("organization_id"),
+          // now(), matching the column's defaultNow(): the row records when
+          // the submission was made. Back-dating it to the due date would
+          // claim the student submitted on time, the opposite of what it
+          // means.
+          submittedAt: sql<Date>`now()`.as("submitted_at"),
+          source: sql<SubmissionSource>`'auto'::submission_source`.as("source"),
+        })
+        .from(conversations)
+        .where(and(eq(conversations.id, candidate.conversationId), eq(conversations.isDeleted, false))),
+    )
     .onConflictDoNothing()
     .returning({ id: submissions.id });
   return created !== undefined;

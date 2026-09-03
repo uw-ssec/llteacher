@@ -30,10 +30,21 @@ type Chunk = { type: string; error?: unknown };
  *  provides and the reason peeking is safe at all. */
 function fakeResult(chunks: Chunk[], marker: string) {
   let branches = 0;
+  let drained = 0;
   return {
     marker,
     get branchCount() {
       return branches;
+    },
+    /** #423: how many times the abandoned primary was drained. The real
+     *  SDK's consumeStream is what pulls the source to completion and lets
+     *  the provider response body go; the module calls it on the failover
+     *  path, so the double has to offer it. */
+    get drainCount() {
+      return drained;
+    },
+    consumeStream: async (_opts?: { onError?: (e: unknown) => void }) => {
+      drained += 1;
     },
     get fullStream() {
       branches += 1;
@@ -151,12 +162,85 @@ describe("streamWithFallback (#98/#364)", () => {
   });
 
   it("treats a tool call as committed content, not as silence", async () => {
+    // #422: `tool-call`, not `tool-input-start`. The start marker only opens
+    // the part -- this asserts that real tool CONTENT commits the turn, which
+    // is what the test's name has always claimed.
     streamTextMock.mockReturnValueOnce(
-      fakeResult([...PREAMBLE, { type: "tool-input-start" }, { type: "finish" }], "tool"),
+      fakeResult([...PREAMBLE, { type: "tool-call" }, { type: "error", error: status(503) }], "tool"),
     );
     const { attribution } = await streamWithFallback(attempt());
     expect(attribution.usedFallback).toBe(false);
     expect(streamTextMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("#422: a part-opening marker followed by a provider error still fails over", async () => {
+    /* The ordinary shape of an upstream failure on an OpenAI-compatible
+       gateway: the part is opened, then the upstream 500s. `text-start`
+       carries none of the part's bytes, and the HTTP response is not
+       constructed until this probe returns, so nothing had reached the
+       student and the switch is still invisible. Before #422 this counted as
+       committed and a healthy configured fallback went unused. */
+    streamTextMock
+      .mockReturnValueOnce(
+        fakeResult([...PREAMBLE, { type: "text-start" }, { type: "error", error: status(503) }], "opened-then-died"),
+      )
+      .mockReturnValueOnce(okStream());
+
+    const { result, attribution } = await streamWithFallback(attempt());
+
+    expect((result as unknown as { marker: string }).marker).toBe("ok");
+    expect(attribution.usedFallback).toBe(true);
+    expect(streamTextMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("#422: an opened part that goes on to produce content still commits", async () => {
+    // The other half of the boundary: text-start does not commit, but the
+    // text-delta right after it does -- so an ordinary successful turn is
+    // unaffected and TTFT is unchanged.
+    streamTextMock.mockReturnValueOnce(
+      fakeResult(
+        [...PREAMBLE, { type: "text-start" }, { type: "text-delta" }, { type: "error", error: status(503) }],
+        "real-content",
+      ),
+    );
+    const { attribution } = await streamWithFallback(attempt());
+    expect(attribution.usedFallback).toBe(false);
+    expect(streamTextMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("#424: a hung provider is reported as a failure, and still does not fail over", async () => {
+    /* ai@5.0.195 does not deliver an aborted stream as an `error` chunk -- it
+       discards the AbortError and enqueues `{type:"abort"}`, then closes.
+       That matched nothing in the probe, fell through to `done`, and was
+       reported as COMMITTED: the single most common outage shape (connection
+       accepted, no answer) produced no failure signal whatsoever.
+
+       It still must not fail over -- STREAM_TIMEOUT_MS is a per-TURN budget
+       and the second hop would blow the same deadline -- so this pins BOTH
+       halves: the decision is unchanged, and it is now reached deliberately
+       rather than by falling through a gap. */
+    streamTextMock.mockReturnValueOnce(fakeResult([...PREAMBLE, { type: "abort" }], "hung"));
+
+    const { result, attribution } = await streamWithFallback(attempt());
+
+    expect((result as unknown as { marker: string }).marker).toBe("hung");
+    expect(attribution.usedFallback).toBe(false);
+    expect(streamTextMock).toHaveBeenCalledTimes(1);
+    // The half that actually changed: an operator can now see the hang.
+    expect(console.error).toHaveBeenCalled();
+  });
+
+  it("#423: drains the abandoned primary so its provider body is released", async () => {
+    const primary = fakeResult([...PREAMBLE, { type: "error", error: status(503) }], "abandoned");
+    streamTextMock.mockReturnValueOnce(primary).mockReturnValueOnce(okStream());
+
+    await streamWithFallback(attempt());
+
+    /* Cancelling the probe's own tee branch does not cancel the source while
+       another branch is live, and the branch toUIMessageStreamResponse would
+       have taken is never read -- so without an explicit drain the primary's
+       pipeline stays open for the rest of the request. */
+    expect(primary.drainCount).toBe(1);
   });
 
   it("does not fail over for an empty-but-successful turn", async () => {

@@ -95,7 +95,12 @@ import { logServerError, logServerInfo } from "../utils/errors";
 
 export const AUTO_SUBMIT_LOG_CONTEXT = "job.autoSubmitOverdue";
 
-export interface AutoSubmitRunSummary {
+/** What one ORGANIZATION's sweep produced. Run-level facts (which orgs
+ *  failed, which were deferred) are deliberately not on this shape -- a
+ *  single org has no opinion about them, and folding them in here is what
+ *  made `autoSubmitOverdueSectionsForOrg`'s own return value start
+ *  describing things it does not know. */
+export interface AutoSubmitOrgSummary {
   /** Rows that satisfied every structural condition AND whose homework is
    *  currently `past_due` -- i.e. what this run tried to submit. */
   candidates: number;
@@ -111,9 +116,48 @@ export interface AutoSubmitRunSummary {
   failed: number;
 }
 
-function emptySummary(): AutoSubmitRunSummary {
+/** The whole sweep: every org's totals, plus the two facts that only exist
+ *  at run level. */
+export interface AutoSubmitRunSummary extends AutoSubmitOrgSummary {
+  /** #414: organizations whose sweep threw before producing a summary --
+   *  a failed candidate SELECT, not a failed row. Each is logged
+   *  individually and the sweep moves to the next org. Non-zero means this
+   *  run covered less than the platform. */
+  orgsFailed: number;
+  /** #416: organizations this run did not reach, because the run-level
+   *  subrequest budget was exhausted first. They are not skipped
+   *  permanently -- the next run starts from a rotated offset. */
+  orgsDeferred: number;
+}
+
+function emptyOrgSummary(): AutoSubmitOrgSummary {
   return { candidates: 0, submitted: 0, skipped: 0, failed: 0 };
 }
+
+function emptyRunSummary(): AutoSubmitRunSummary {
+  return { ...emptyOrgSummary(), orgsFailed: 0, orgsDeferred: 0 };
+}
+
+/* #416: how many neon-http subrequests one invocation of the whole sweep may
+   spend. Cloudflare allows 1000 per Worker invocation; this leaves headroom
+   for the request's own overhead and for the platform-wide org read.
+
+   Why a run-level budget is needed at all, given the per-org candidate cap:
+   that cap bounds one org's inserts, but every org in the platform is swept
+   in a SINGLE invocation, so the costs add. The cost model is
+
+       1 (listAllOrgScopes) + 1 per org attempted (its candidate SELECT)
+         + 1 per candidate (its insert)
+
+   Two orgs each carrying a full 500-row first-run backlog already exceed
+   1000. Without this the 1001st fetch throws mid-loop, and -- before #414's
+   per-org isolation -- killed the entire sweep, identically, every hour.
+
+   Starvation, which is why the per-org cap was per-org in the first place:
+   a shared budget consumed by whichever orgs come back first would
+   permanently starve the tail. Answered by rotation rather than by dropping
+   the budget -- see the offset in autoSubmitOverdueSections. */
+export const AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET = 900;
 
 /** Runs the sweep for exactly one organization. Exported so the tenancy
  *  boundary is directly testable, and so a future operator-triggered
@@ -128,9 +172,9 @@ export async function autoSubmitOverdueSectionsForOrg(
   db: Db,
   scope: OrgScope,
   limit: number = OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
-): Promise<AutoSubmitRunSummary> {
+): Promise<AutoSubmitOrgSummary> {
   const candidates = await findOverdueSubmissionCandidates(db, scope, limit);
-  const summary = { ...emptySummary(), candidates: candidates.length };
+  const summary = { ...emptyOrgSummary(), candidates: candidates.length };
 
   for (const candidate of candidates) {
     try {
@@ -174,17 +218,84 @@ export async function autoSubmitOverdueSections(db: Db): Promise<AutoSubmitRunSu
   // construction, not by remembering to add a WHERE clause.
   const orgScopes = await listAllOrgScopes(db);
 
-  const total = emptySummary();
-  for (const scope of orgScopes) {
-    const orgSummary = await autoSubmitOverdueSectionsForOrg(db, scope);
-    total.candidates += orgSummary.candidates;
-    total.submitted += orgSummary.submitted;
-    total.skipped += orgSummary.skipped;
-    total.failed += orgSummary.failed;
+  const total = emptyRunSummary();
+  /* Spent on the org read above. Everything below decrements from the same
+     pool, so the bound is on the INVOCATION, which is what Cloudflare
+     actually meters. */
+  let subrequestsSpent = 1;
+
+  /* #416 starvation guard: a fixed iteration order plus a shared budget
+     would sweep the same prefix of organizations every hour and never reach
+     the tail. Rotating the start offset by the hour means every org is
+     first eventually, so a backlog anywhere on the platform drains instead
+     of only the backlog at the front of the list.
+
+     Derived from the clock rather than persisted, because the job holds no
+     state between runs and a cron that fires hourly gives a naturally
+     advancing offset for free. */
+  const rotation = orgScopes.length > 0 ? Math.floor(startedAt / 3_600_000) % orgScopes.length : 0;
+
+  for (let i = 0; i < orgScopes.length; i++) {
+    const scope = orgScopes[(i + rotation) % orgScopes.length]!;
+
+    /* The budget is spent BEFORE the org runs, by narrowing its candidate
+       limit to what is left, rather than by reserving a full window and
+       refusing the org outright. Reserving the worst case would defer
+       healthy orgs that were going to cost one subrequest each: on a
+       platform of 400 idle organizations the sweep would stop around the
+       400th despite having spent almost nothing.
+
+       This shape cannot overspend either. The org costs at most
+       `1 + limit`, and limit is `remaining - 1`, so the post-call total is
+       at most `spent + remaining` -- exactly the budget. */
+    const remaining = AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET - subrequestsSpent;
+    // One for the SELECT, one for at least a single insert; below that
+    // there is no useful work left to start.
+    if (remaining < 2) {
+      total.orgsDeferred = orgScopes.length - i;
+      break;
+    }
+    const orgLimit = Math.min(OVERDUE_SUBMISSION_CANDIDATE_LIMIT, remaining - 1);
+
+    try {
+      const orgSummary = await autoSubmitOverdueSectionsForOrg(db, scope, orgLimit);
+      total.candidates += orgSummary.candidates;
+      total.submitted += orgSummary.submitted;
+      total.skipped += orgSummary.skipped;
+      total.failed += orgSummary.failed;
+      // The SELECT, plus one insert attempted per candidate. Candidates the
+      // org did not have cost nothing, so a healthy platform of mostly-idle
+      // orgs spends ~1 per org and reaches all of them.
+      subrequestsSpent += 1 + orgSummary.candidates;
+    } catch (err) {
+      /* #414: per-ORG isolation, not just per-row. Only insertAutoSubmission
+         was wrapped before, so a failure in findOverdueSubmissionCandidates
+         -- a transient neon-http error, a statement timeout on a slow
+         backlog SELECT -- escaped this loop entirely and re-threw out of
+         scheduled(). Every organization after it was silently skipped and
+         the summary line below never emitted, so the run reported only
+         "scheduled failed" while 28 of 30 tenants went unswept. Worse, a
+         deterministic failure for one org (a SELECT that always times out)
+         killed the sweep at the same place every hour, forever.
+
+         This restores what the file's tenancy note has claimed all along:
+         one org's failure cannot abort another org's work. */
+      total.orgsFailed++;
+      // The SELECT was still attempted and still cost a subrequest.
+      subrequestsSpent += 1;
+      logServerError(AUTO_SUBMIT_LOG_CONTEXT, err, { organizationId: scope });
+    }
   }
 
+  /* Emitted unconditionally, including on a partial run. A sweep that
+     covered 2 of 30 orgs and one that covered all 30 have to be
+     distinguishable from the logs alone -- `orgsFailed` and `orgsDeferred`
+     are what make a partial run visible rather than inferred from a
+     suspiciously low `submitted`. */
   logServerInfo(AUTO_SUBMIT_LOG_CONTEXT, "auto-submit sweep complete", {
     organizations: orgScopes.length,
+    organizationsSwept: orgScopes.length - total.orgsDeferred,
+    subrequestsSpent,
     ...total,
     durationMs: Date.now() - startedAt,
   });

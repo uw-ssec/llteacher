@@ -1717,6 +1717,124 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
     expect(sectionTwoComposer.value).not.toContain("section one");
   });
 
+  /* #418/#419/#420: what happens when the SWITCH beats the FAILURE.
+
+     The tests above all fail the send while the student is still looking at
+     the section they sent from. The defects here only appear in the other
+     ordering -- a dead connection leaves `fetch` hanging, the student gives
+     up and clicks another section, and the rejection lands afterwards, with
+     `aiMessages` and `currentSection` already describing somewhere else.
+     Both sections are `in_progress` (not the default `not_started`) so that
+     switching to section 2 hydrates a real transcript instead of showing an
+     eagerly-started empty greeting. */
+  function twoSectionFixture() {
+    return homeworkFixture({
+      sections: [
+        { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+        { id: "s2", title: "Sec 2", order: 2, status: "in_progress", conversationId: "sec-conv-2" },
+      ],
+    });
+  }
+
+  it("#418: a send that fails after a section switch does not touch the section now on screen", async () => {
+    let releaseHungSend: (() => void) | null = null;
+    renderResilienceApp(
+      async () =>
+        new Promise((_resolve, reject) => {
+          // Hangs, exactly like a dead connection, until the test releases it.
+          releaseHungSend = () => reject(new TypeError("Load failed"));
+        }),
+      twoSectionFixture(),
+      // Section 2 already has a persisted question with no answer -- the
+      // state #268's onFinish gate leaves after an interrupted reply, and
+      // precisely the shape the old effect mistook for its own failed send.
+      () =>
+        new Response(
+          JSON.stringify([
+            { id: "m1", role: "user", parts: [{ type: "text", text: "section two's persisted question" }], seq: 1 },
+          ]),
+          { status: 200 },
+        ),
+    );
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "section one's doomed question{Enter}");
+
+    // Switch away while section 1's send is still in flight.
+    await user.click(screen.getByRole("button", { name: /Sec 2/ }));
+    await screen.findByText(/Section 2: Sec 2/);
+    await screen.findByText("section two's persisted question");
+
+    // Now section 1's request finally dies.
+    await waitFor(() => expect(releaseHungSend).not.toBeNull());
+    releaseHungSend!();
+
+    const sectionTwoComposer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    // Section 2's PERSISTED message must still be on screen. The old effect
+    // sliced it off this transcript, because it read the tail of whatever
+    // aiMessages held at failure time.
+    await waitFor(() => expect(screen.queryByText("section two's persisted question")).toBeTruthy());
+    // ...and must not have been pre-filled into section 2's composer, one
+    // Enter from being sent a second time into graded work.
+    expect(sectionTwoComposer.value).toBe("");
+    expect(sectionTwoComposer.value).not.toContain("section one");
+  });
+
+  it("#419: returning to the section hands back the words the failed send was carrying", async () => {
+    renderResilienceApp(
+      async () => new Response("gateway timeout", { status: 504 }),
+      twoSectionFixture(),
+      () => new Response(JSON.stringify([]), { status: 200 }),
+    );
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "words worth keeping{Enter}");
+    await screen.findByRole("alert");
+    await waitFor(() => expect(composer.value).toBe("words worth keeping"));
+
+    // Leave without reading the composer, then come back.
+    await user.click(screen.getByRole("button", { name: /Sec 2/ }));
+    await screen.findByText(/Section 2: Sec 2/);
+    await user.click(screen.getByRole("button", { name: /Sec 1/ }));
+    await screen.findByText(/Section 1: Sec 1/);
+
+    /* The message exists nowhere else: the bubble was dropped from the
+       transcript and the server never stored it. Nulling the failure on a
+       section change destroyed it outright. */
+    const backAgain = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    await waitFor(() => expect(backAgain.value).toBe("words worth keeping"));
+  });
+
+  it("#420: a send-half error row does not follow the student into the next section", async () => {
+    renderResilienceApp(
+      async () => new Response("gateway timeout", { status: 504 }),
+      twoSectionFixture(),
+      () => new Response(JSON.stringify([]), { status: 200 }),
+    );
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "fails in section one{Enter}");
+    await screen.findByRole("alert");
+    // Precondition: the send-half row is showing, with Retry suppressed.
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /Sec 2/ }));
+    await screen.findByText(/Section 2: Sec 2/);
+
+    /* Section 2 had no failure of its own. Before #420's fix, neither
+       useChat instance had anything that reset its status/error on a
+       surface switch until `surfaceKey` eventually caught up (late, for the
+       section surface) -- so `status` stayed at "error", and because
+       `sendFailure` is now correctly gated to section 1 only, `stage`
+       flipped from "send" to "response" and resurrected a Retry wired to
+       regenerate section 2's conversation, for a turn that never failed. */
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
   it("does not resurrect a restored draft the student has deliberately cleared, across an unrelated App re-render (#302 review fix, Critical #1)", async () => {
     /* ConversationView keys its "restore once" behavior on OBJECT IDENTITY
        (`restoredDraft === lastRestoredDraftRef.current`), not on the text
