@@ -1798,6 +1798,73 @@ describe("POST /api/chat", () => {
     });
   });
 
+  /* #433: the defect behind #426. The race-fallback re-check above only ever
+     answered two ways -- "replay" (a completed, renderable turn) or 409
+     in_progress (everything else) -- treating "a turn already ran but its
+     reply isn't replayable" (#307/#342's requestHint-only shape) the same as
+     "a turn is genuinely still running." readErrorMessage renders in_progress
+     as retryable, so a student hit this 409 forever: retrying re-runs this
+     exact re-check, which finds the same non-replayable row every time. */
+  describe("#433 completed-but-non-replayable turn is not a genuine race", () => {
+    it("produces a model call, not a 409, when the user row is persisted and a non-replayable assistant row already exists", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      appendMessageMock.mockResolvedValueOnce({ row: { id: "msg-1" }, created: false });
+      const raceRows = [
+        // A turn already ran for this exact user message and produced an
+        // assistant row -- but its only content is a resolved requestHint
+        // call, which hasRenderableContent (#307/#342) does not treat as
+        // replayable. Nothing is in flight: the fix is a real model call,
+        // not another 409.
+        {
+          role: "assistant",
+          parts: [{ type: "tool-requestHint", toolCallId: "call-1", state: "output-available", input: {}, output: { status: "recorded" } }],
+          clientMessageId: null,
+        },
+        { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+      ];
+      getLastMessagesMock
+        .mockResolvedValueOnce([]) // the top-of-handler idempotency read: no prior rows yet
+        .mockResolvedValueOnce(raceRows) // the race re-check (limit 2)
+        .mockResolvedValueOnce(raceRows); // the fresh full-context re-fetch for the model call
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(200);
+      expect(streamTextMock).toHaveBeenCalledTimes(1);
+      // The lock must not be released on this path -- it stays held for the
+      // model call that is about to run, and is released exactly once by
+      // finalizeAssistantTurn's onFinish (or the outer catch, on a setup
+      // failure), never here.
+      expect(releaseConversationTurnLockMock).not.toHaveBeenCalled();
+    });
+
+    it("a genuine in-flight turn (winner's user row persisted, no assistant reply yet) still 409s", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      appendMessageMock.mockResolvedValueOnce({ row: { id: "msg-1" }, created: false });
+      getLastMessagesMock
+        .mockResolvedValueOnce([]) // the top-of-handler idempotency read: no prior rows yet
+        .mockResolvedValueOnce([
+          // the winner has only written its own user row so far -- the
+          // turn is genuinely still running, not completed.
+          { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+        ]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe("in_progress");
+      expect(streamTextMock).not.toHaveBeenCalled();
+      expect(releaseConversationTurnLockMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
   /* #96 requirement 4: two tabs on one conversation. The v1 contract is
      last-writer-wins with the persisted transcript as truth on reload, and
      the explicit NON-GOALS are realtime sync and any cross-tab merge (see

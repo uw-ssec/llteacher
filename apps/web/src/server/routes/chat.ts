@@ -2027,39 +2027,80 @@ export async function chatHandler(c: Context<AppEnv>) {
         const [raceLast, raceSecondLast] = await getLastMessages(db, scope, conv.id, 2, {
           skipOwnershipCheck: true,
         });
-        // #317 review, #350 (requirement 1): logged, not swallowed -- both
-        // branches below return a normal response with nothing else to
-        // surface a release failure, same reasoning as the top-level replay
-        // release above.
+        // #317 review, #350 (requirement 1): logged, not swallowed -- every
+        // early-return below leaves nothing else to surface a release
+        // failure, same reasoning as the top-level replay release above.
         if (classifyTurn(raceLast, raceSecondLast, parsedInbound.data.id) === "replay") {
           await releaseConversationTurnLock(db, conv.id).catch((err) => {
             logServerError("chatHandler.releaseLock.raceReplay", err);
           });
           return replayResponse(conv.id, raceLast!.parts);
         }
-        await releaseConversationTurnLock(db, conv.id).catch((err) => {
-          logServerError("chatHandler.releaseLock.raceConflict", err);
+        // #433: classifyTurn's remaining two outcomes here ("skip-insert" or
+        // "insert") used to be treated as one thing -- "not a replay, so a
+        // concurrent turn must still be running" -- and both answered 409
+        // in_progress. That conflated two genuinely different row shapes.
+        //
+        // A real race (the winner hasn't finished yet) has the winner's user
+        // row as the LAST row with no assistant reply after it yet
+        // (classifyTurn's own "skip-insert"), or no assistant row at all --
+        // waiting and retrying is the correct answer there, so this case
+        // still 409s below.
+        //
+        // But `created: false` only proves the inbound user message is
+        // persisted -- it says nothing about whether a turn also already RAN
+        // for it. When the second-to-last row IS this exact user message and
+        // the last row is an assistant reply, a turn already completed; the
+        // only reason classifyTurn didn't call that "replay" is that
+        // hasRenderableContent rejected the stored reply (e.g. a #307/#342
+        // requestHint-only turn -- see that function's own doc comment).
+        // Nothing is in flight there, so 409 in_progress is simply false: the
+        // student would retry into it forever (#433, the defect behind
+        // #426). The fix is to run a real model call instead, exactly as
+        // "skip-insert" already does for the ordinary case above -- the user
+        // row is already persisted, so nothing more is inserted here; only
+        // persistedHistory needs a genuine re-fetch, since this request's own
+        // `recentMessages` snapshot (taken before the race) doesn't include
+        // the winner's rows.
+        const turnAlreadyCompleted =
+          raceLast?.role === "assistant" &&
+          raceSecondLast?.role === "user" &&
+          raceSecondLast?.clientMessageId === parsedInbound.data.id;
+        if (!turnAlreadyCompleted) {
+          await releaseConversationTurnLock(db, conv.id).catch((err) => {
+            logServerError("chatHandler.releaseLock.raceConflict", err);
+          });
+          // #317 review, #344: same code as the lock-acquisition 409 above --
+          // both are "a turn is already in flight for this conversation",
+          // just detected at different points.
+          return c.json(
+            { error: "This message is already being processed. Please wait a moment.", code: "in_progress" },
+            409,
+          );
+        }
+        // Deliberately NOT releasing the lock here: this falls through to a
+        // real model call below (the streamText try block, further down),
+        // exactly like the "insert" branch's own persistedHistory assignment
+        // does -- the lock is released exactly once, on that path, either by
+        // finalizeAssistantTurn (success, inside onFinish) or by the outer
+        // catch a few lines below (setup throws before streamText starts).
+        persistedHistory = await getLastMessages(db, scope, conv.id, MAX_HISTORY_MESSAGES, {
+          skipOwnershipCheck: true,
         });
-        // #317 review, #344: same code as the lock-acquisition 409 above --
-        // both are "a turn is already in flight for this conversation",
-        // just detected at different points.
-        return c.json(
-          { error: "This message is already being processed. Please wait a moment.", code: "in_progress" },
-          409,
-        );
+      } else {
+        // #317 review, #326: the row this call just wrote, prepended ahead of
+        // the pre-insert snapshot -- exactly what a fresh
+        // `getLastMessages(MAX_HISTORY_MESSAGES)` read would return post-insert
+        // (newest-first, capped at the same limit), without actually
+        // re-reading it from Postgres. role/parts come from the input this
+        // handler itself constructed the insert from (already known, not
+        // re-derived from appendMessage's returned row) -- only `id` is
+        // server-generated and genuinely needs the DB round-trip's result.
+        persistedHistory = [
+          { id: insertedRow.id, role: "user", parts: inboundMessage.parts },
+          ...recentMessages.slice(0, MAX_HISTORY_MESSAGES - 1),
+        ];
       }
-      // #317 review, #326: the row this call just wrote, prepended ahead of
-      // the pre-insert snapshot -- exactly what a fresh
-      // `getLastMessages(MAX_HISTORY_MESSAGES)` read would return post-insert
-      // (newest-first, capped at the same limit), without actually
-      // re-reading it from Postgres. role/parts come from the input this
-      // handler itself constructed the insert from (already known, not
-      // re-derived from appendMessage's returned row) -- only `id` is
-      // server-generated and genuinely needs the DB round-trip's result.
-      persistedHistory = [
-        { id: insertedRow.id, role: "user", parts: inboundMessage.parts },
-        ...recentMessages.slice(0, MAX_HISTORY_MESSAGES - 1),
-      ];
     } catch (err) {
       // #317 review, #350 (requirement 1): `.catch(() => {})`, matching the
       // outer catch's own release below -- this catch can re-throw `err`
