@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Flag } from "@phosphor-icons/react";
 import { AlertDialog } from "@llteacher/ui";
 import type { FeedbackReason } from "../../shared/types";
@@ -57,6 +57,29 @@ export function ResponseFeedback({ conversationId, messageId }: ResponseFeedback
   const [comment, setComment] = useState("");
   const [error, setError] = useState<string | null>(null);
   const commentId = useId();
+  // Minor #7 (final-review fix): useId(), matching commentId above, instead
+  // of a module-level string constant -- harmless today since only one of
+  // these dialogs can be open at a time, but a module-level `name` stops
+  // being safe the moment that assumption changes, and useId() costs
+  // nothing to use consistently now.
+  const reasonGroupName = useId();
+  // Important #2 (final-review fix): #298 closed this exact defect class
+  // for ErrorBoundary's fallback and App.tsx's HomeworkLoadError -- a state
+  // transition that unmounts BOTH a dialog and its trigger button in the
+  // same commit leaves the native <dialog>'s focus restoration with
+  // nowhere to land, so focus falls to <body>. That transition is exactly
+  // what "open"/"submitting" -> "flagged" does here (the AlertDialog closes
+  // and the trigger button is replaced by the flagged badge, together).
+  // Mirrors HomeworkLoadError's own ref-plus-effect pattern: a `tabIndex={-1}`
+  // element the confirmation itself, focused the instant the transition
+  // happens.
+  const flaggedRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (status === "flagged") {
+      flaggedRef.current?.focus();
+    }
+  }, [status]);
 
   const closeDialog = () => {
     setStatus("idle");
@@ -102,7 +125,12 @@ export function ResponseFeedback({ conversationId, messageId }: ResponseFeedback
 
   if (status === "flagged") {
     return (
-      <span className="response-feedback response-feedback--flagged" title="You flagged this response">
+      <span
+        ref={flaggedRef}
+        tabIndex={-1}
+        className="response-feedback response-feedback--flagged"
+        title="You flagged this response"
+      >
         <Flag size={13} weight="fill" aria-hidden="true" />
         <span className="sr-only">You flagged this response</span>
       </span>
@@ -153,7 +181,7 @@ export function ResponseFeedback({ conversationId, messageId }: ResponseFeedback
                   <label key={opt.value} className="response-feedback__reason-option">
                     <input
                       type="radio"
-                      name="response-feedback-reason"
+                      name={reasonGroupName}
                       value={opt.value}
                       checked={reason === opt.value}
                       onChange={() => setReason(opt.value)}

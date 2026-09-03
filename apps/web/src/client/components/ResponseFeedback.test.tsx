@@ -98,6 +98,26 @@ describe("ResponseFeedback (#90)", () => {
     expect(screen.queryByRole("button", { name: "Flag this response" })).toBeNull();
   });
 
+  // Important #2 (final-review fix): the "flagged" transition unmounts BOTH
+  // the AlertDialog and the trigger button in the same commit -- the exact
+  // defect class #298 closed for ErrorBoundary's fallback and App.tsx's
+  // HomeworkLoadError, where a native <dialog>'s focus restoration targets
+  // an element that no longer exists and focus falls to <body> instead.
+  it("focuses the flagged confirmation (not <body>) after a successful flag", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      jsonResponse(201, { id: "flag-1", reason: "confusing", flaggedAt: "2026-08-01T00:00:00.000Z" }),
+    );
+    const user = userEvent.setup();
+    render(<ResponseFeedback conversationId={CONVERSATION_ID} messageId={MESSAGE_ID} />);
+    await user.click(screen.getByRole("button", { name: "Flag this response" }));
+    await user.click(screen.getByLabelText("Confusing"));
+    await user.click(screen.getByRole("button", { name: "Submit" }));
+
+    await waitFor(() => expect(screen.getByTitle("You flagged this response")).toBeTruthy());
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(screen.getByTitle("You flagged this response"));
+  });
+
   it("treats a 409 already_flagged response the same as a fresh success", async () => {
     vi.mocked(fetch).mockResolvedValue(jsonResponse(409, { error: "You've already flagged this response", code: "already_flagged" }));
     const user = userEvent.setup();
