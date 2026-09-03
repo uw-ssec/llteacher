@@ -145,6 +145,15 @@ function formatRExecutionMessage(code: string, result: RCodeResult): string {
    one conversation -- by 409ing the second tab's overlapping send; each tab
    otherwise just shows its own stale view until it reloads. */
 
+/** localStorage key for the sidebar collapsed preference. Namespaced so it
+    doesn't collide with future preference keys (`llteacher:*`). */
+const SIDEBAR_COLLAPSED_KEY = "llteacher:sidebar-collapsed";
+
+/** #4: separate key for the tutor-conversations rail's own collapse state --
+    a distinct zone from the homework Sidebar, so it gets its own preference
+    rather than sharing (and fighting over) SIDEBAR_COLLAPSED_KEY. */
+const TUTOR_SIDEBAR_COLLAPSED_KEY = "llteacher:tutor-sidebar-collapsed";
+
 /* ==========================================================================
    App — the root component
    ========================================================================== */
@@ -215,23 +224,19 @@ export default function App() {
      wanted -- the "gains a reset path" reconciliation this task calls for. */
   const [sectionChatKey, setSectionChatKey] = useState<string | undefined>(undefined);
   const [sectionInitialMessages, setSectionInitialMessages] = useState<UIMessage[]>([]);
-  const selectSectionConversation = (
-    sectionNumber: number,
-    targetConversationId: string | undefined,
-    initialMessages: UIMessage[],
-  ) => {
-    setSectionInitialMessages(initialMessages);
-    setSectionChatKey(`${sectionNumber}:${targetConversationId ?? "new"}`);
-  };
 
   /* Wraps fetch to read the x-conversation-id response header before handing
      the (untouched) Response back to useConversationSurface's own stream
      parsing -- DefaultChatTransport otherwise has no way to surface response
      headers to the caller.
 
-     #271: this function is captured ONCE by DefaultChatTransport at first
-     render -- reading `currentSection`/`sectionMetaByOrder` directly here
-     would freeze both at whatever they were on that first render forever.
+     #271: a given DefaultChatTransport instance only ever captures its own
+     `fetch` option once, at construction -- reading `currentSection`/
+     `sectionMetaByOrder` directly here would freeze both at whatever they
+     were on whichever render constructed the transport that's currently
+     mounted (#302: no longer necessarily the very first render, now that
+     `sectionChatKey` changing recreates the Chat instance -- and with it,
+     a fresh DefaultChatTransport -- on a section switch or restart).
      currentSectionRef/sectionMetaByOrderRef (kept current via their own
      effects above) are how this stays correct across every later render
      without recreating the transport. */
@@ -283,6 +288,12 @@ export default function App() {
     // resolves, which would otherwise leave a window for a stale restored
     // draft to land in the freshly-remounted (but not yet re-keyed) child.
     resetKey: currentSection,
+    // #302 review fix (Important #2): deliberately `sectionChatKey` here,
+    // NOT `currentSection` -- see stoppedMessageResetKey's own doc comment.
+    // The pre-#302 section surface never reset its stopped-note on a
+    // switch at all; keying this on `currentSection` (like resetKey above)
+    // would have silently given it a reset it never had.
+    stoppedMessageResetKey: sectionChatKey,
     initialMessages: sectionInitialMessages,
     fetchImpl: chatFetch,
     buildSendBody: () =>
@@ -300,20 +311,33 @@ export default function App() {
     hydrationError: sectionHydrationError,
     runRCode,
   });
-  /* #302: a live-updated ref onto the CURRENT sectionSurface.setMessages.
-     Needed specifically because startFreshSectionConversation below starts
-     its fetch synchronously inside the SAME loadSectionConversation call
-     that also sets `sectionChatKey` for the first time (undefined -> a real
-     key) -- by the time that fetch resolves, the key change has already
-     caused useConversationSurface to recreate its Chat instance on a LATER
-     render, so a `setMessages` captured in startFreshSectionConversation's
-     own closure (from the render before the key changed) would silently
-     write into the now-discarded instance instead of the one on screen.
-     Reading through a ref that's reassigned every render always resolves
-     to whichever instance is actually current by the time the async
-     callback runs. */
-  const sectionSetMessagesRef = useRef(sectionSurface.setMessages);
-  sectionSetMessagesRef.current = sectionSurface.setMessages;
+
+  /* #302: the single place that switches the section surface's underlying
+     Chat identity, mirroring the tutor surface's own selectTutorConversation
+     below -- sets the seed (`sectionInitialMessages`, read only at Chat
+     construction time) AND the key together, then ALSO applies the same
+     messages to the LIVE instance via `setMessages`.
+     #302 review fix (Critical #2): that trailing `setMessages` call is not
+     redundant. `useConversationSurface`'s own `messages` option only seeds
+     a NEWLY (re)constructed Chat instance -- when `sectionChatKey` comes out
+     unchanged (re-selecting the section already on screen, which Sidebar's
+     onSelect has no guard against), no recreation happens, and a fetch's
+     freshly-hydrated history would otherwise be silently discarded while
+     `setSectionHistoryHasMore`/`setSectionOldestSeq` (loadSectionConversation)
+     still advance the pagination cursor against a transcript that was never
+     actually replaced. Calling `setMessages` unconditionally here fixes
+     that: it's a harmless no-op immediately after a genuine key change (the
+     freshly-constructed instance already shows this exact content; writing
+     it again is a no-op), and load-bearing when the key didn't change. */
+  const selectSectionConversation = (
+    sectionNumber: number,
+    targetConversationId: string | undefined,
+    initialMessages: UIMessage[],
+  ) => {
+    setSectionInitialMessages(initialMessages);
+    setSectionChatKey(`${sectionNumber}:${targetConversationId ?? "new"}`);
+    sectionSurface.setMessages(initialMessages);
+  };
 
   /* #4: the tutor-conversations rail. Undefined = the homework section chat
      is showing (default); set = the selected/created tutor conversation is
@@ -430,6 +454,11 @@ export default function App() {
     // handler pass), so resetKey and surfaceKey coincide here -- unlike
     // the section surface above.
     resetKey: tutorConversationId,
+    // #302 review fix (Important #2): same as `surfaceKey`/`resetKey` here
+    // -- the pre-#302 tutor surface always reset its stopped-note on
+    // `tutorConversationId` change too (its own `useEffect`), so this
+    // reproduces that exactly.
+    stoppedMessageResetKey: tutorConversationId,
     initialMessages: tutorInitialMessages,
     fetchImpl: tutorChatFetch,
     buildSendBody: () => ({ conversationId: tutorConversationId, courseId }),
@@ -635,13 +664,9 @@ export default function App() {
      conversation server-side -- this calls the same start endpoint
      chatHandler already uses internally, eagerly, so the greeting shows
      the moment the student opens the section. Deliberately does NOT touch
-     sectionChatKey/sectionInitialMessages -- this updates the CURRENT
-     surface's live content in place (via sectionSetMessagesRef.current,
-     not sectionSurface.setMessages directly -- see that ref's own doc
-     comment for why: this function's fetch starts in the same tick as
-     loadSectionConversation's own first-ever key assignment), exactly the
-     "mint a new id mid-turn must not reset the Chat instance" case
-     surfaceKey's own doc comment warns about. */
+     `sectionChatKey` -- this updates the CURRENT surface's live content in
+     place, exactly the "mint a new id mid-turn must not reset the Chat
+     instance" case surfaceKey's own doc comment warns about. */
   const startFreshSectionConversation = async (sectionNumber: number, sectionId: string) => {
     if (!courseId) return;
     try {
@@ -660,16 +685,20 @@ export default function App() {
          function was kicked off) queued `sectionChatKey`'s FIRST-ever
          transition away from `undefined` -- and React may not have applied
          that queued render yet by the time this awaited fetch resolves.
-         Writing only through sectionSetMessagesRef would be lost the
-         moment that still-pending key change finally lands (it recreates
-         the Chat instance, reseeding from whatever sectionInitialMessages
-         was at THAT render). Updating sectionInitialMessages here too means
-         that even a recreation landing after this point seeds correctly
-         from the greeting -- and since this call is unambiguously LATER
-         than the earlier `[]` one, it always wins regardless of which
-         render actually applies the key change. */
+         `setMessages` (from `@ai-sdk/react`) is a permanently stable
+         callback that reads the CURRENT chat instance internally at call
+         time (see App.tsx's own note near selectSectionConversation above
+         -- it can never go stale), so it always lands on whichever
+         instance is live right now. What genuinely needs BOTH calls is the
+         seed: if that still-pending key change hasn't rendered yet, it
+         will recreate the Chat from whatever `sectionInitialMessages` is
+         AT THAT LATER RENDER -- updating it here too means a recreation
+         landing after this point still seeds correctly from the greeting,
+         and since this call is unambiguously LATER than the earlier `[]`
+         one, it always wins regardless of which render actually applies
+         the key change. */
       setSectionInitialMessages(greetingMessages);
-      sectionSetMessagesRef.current(greetingMessages);
+      sectionSurface.setMessages(greetingMessages);
       setSectionMetaByOrder((prev) => {
         const prevMeta = prev.get(sectionNumber);
         if (!prevMeta) return prev;
@@ -738,6 +767,14 @@ export default function App() {
       try {
         const history = await fetchConversationHistory(pendingId);
         if (latestSectionConversationRef.current === pendingId) {
+          // #302 review fix (Important #4): pairs the live write with the
+          // seed, matching startFreshSectionConversation's own pairing --
+          // `sectionChatKey` isn't expected to change here (this re-fetches
+          // the SAME conversation `chatFetch` just created), so this is a
+          // defensive consistency measure rather than a fix for a reachable
+          // bug today; kept anyway so this writer can't silently regress
+          // the same way Critical #2 did if that assumption ever changes.
+          setSectionInitialMessages(history.messages);
           sectionSurface.setMessages(history.messages);
           setSectionHistoryHasMore(history.hasMore);
           setSectionOldestSeq(history.oldestSeq);
@@ -810,9 +847,9 @@ export default function App() {
   const [restartError, setRestartError] = useState<string | null>(null);
 
   /* Sidebar collapse and the tutor rail's own collapse preference each
-     persist across reloads via localStorage (#302: useLocalStoragePreference). */
-  const SIDEBAR_COLLAPSED_KEY = "llteacher:sidebar-collapsed";
-  const TUTOR_SIDEBAR_COLLAPSED_KEY = "llteacher:tutor-sidebar-collapsed";
+     persist across reloads via localStorage (#302: useLocalStoragePreference).
+     Key constants are module-level (below the component) -- they're plain
+     string literals with no dependency on anything in this render. */
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useLocalStoragePreference(SIDEBAR_COLLAPSED_KEY);
   const [isTutorSidebarCollapsed, setIsTutorSidebarCollapsed] = useLocalStoragePreference(
     TUTOR_SIDEBAR_COLLAPSED_KEY,
@@ -1071,7 +1108,7 @@ export default function App() {
               isSending={tutorSurface.isSending}
               isStopActionable={tutorSurface.isStopActionable}
               error={tutorSurface.errorRow}
-              restoredDraft={tutorSurface.sendFailureText !== null ? { text: tutorSurface.sendFailureText } : null}
+              restoredDraft={tutorSurface.sendFailure}
               autoFocusComposer={tutorConversationId === justCreatedTutorConversationId}
               hasMoreHistory={tutorHistoryHasMore}
               onLoadOlderMessages={() => void handleLoadOlderTutorMessages()}
@@ -1096,9 +1133,7 @@ export default function App() {
               isSending={sectionSurface.isSending}
               isStopActionable={sectionSurface.isStopActionable}
               error={sectionSurface.errorRow}
-              restoredDraft={
-                sectionSurface.sendFailureText !== null ? { text: sectionSurface.sendFailureText } : null
-              }
+              restoredDraft={sectionSurface.sendFailure}
               hasMoreHistory={sectionHistoryHasMore}
               onLoadOlderMessages={() => void handleLoadOlderSectionMessages()}
               isLoadingOlderMessages={loadingOlderSectionMessages}

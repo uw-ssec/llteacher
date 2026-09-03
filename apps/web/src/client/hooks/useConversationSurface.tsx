@@ -256,9 +256,8 @@ export interface UseConversationSurfaceOptions {
    *  explicit restart) -- never as a side effect of a fetch wrapper
    *  observing a new id mid-stream. */
   surfaceKey: string | undefined;
-  /** #96/#317: the key that should reset the per-conversation UI-only
-   *  state -- the stopped-message note, and a pending send-half failure's
-   *  restored draft. For the tutor surface this is the same as
+  /** #96/#317 (review fix): the key that resets a pending send-half
+   *  failure's restored draft. For the tutor surface this is the same as
    *  `surfaceKey` (its ConversationView remount and its useChat `id` both
    *  update together, in the same `selectTutorConversation` call). For the
    *  section surface it deliberately is NOT `surfaceKey`: the section's
@@ -269,8 +268,29 @@ export interface UseConversationSurfaceOptions {
    *  would otherwise have a real window to land in the freshly-remounted
    *  (but not yet re-keyed) child before this hook's own state catches up
    *  -- resetting on the section number directly, at the same instant the
-   *  remount happens, closes that window. */
+   *  remount happens, closes that window. This exactly matches the
+   *  pre-#302 code's own `useEffect(() => setSectionSendFailure(null),
+   *  [currentSection])` / `useEffect(() => setTutorSendFailure(null),
+   *  [tutorConversationId])` pair -- see `send`'s own doc comment for why a
+   *  render-time reset replaces (rather than reintroduces) that effect. */
   resetKey: string | number | undefined;
+  /** #317 review, #352 (review fix): the key that resets the "you stopped
+   *  this response" note left on a stopped turn. Deliberately `surfaceKey`
+   *  for BOTH surfaces -- reproducing the pre-#302 asymmetry exactly: the
+   *  tutor surface always reset this on `tutorConversationId` change (an
+   *  effect); the section surface NEVER reset it on any key at all (only
+   *  ever cleared by its own `stop`/`send`), which was harmless only
+   *  because message ids are globally unique so a stale id could never
+   *  coincidentally match a message in a different conversation. Using
+   *  `surfaceKey` here for the section surface reproduces that same
+   *  "effectively never, in practice" behavior: `surfaceKey` does NOT
+   *  change on an ordinary section switch (it only changes once that
+   *  section's OWN history fetch resolves, or is a no-op re-fetch of an
+   *  unchanged conversation) -- it is not `resetKey` (`currentSection`),
+   *  which changes on every switch. Do not fold this into `resetKey`: that
+   *  would give the section surface a switch-triggered reset it never had,
+   *  an undisclosed behavior change flagged in review. */
+  stoppedMessageResetKey: string | number | undefined;
   /** Seed for the Chat instance whenever `surfaceKey` changes -- mirrors
    *  the tutor surface's pre-existing `tutorInitialMessages` pattern.
    *  Content changes that do NOT accompany a `surfaceKey` change (loading
@@ -323,13 +343,31 @@ export interface ConversationSurface {
   canSend: boolean;
   errorRow: ConversationSurfaceErrorRow | null;
   /** Non-null exactly when the last failure was a send-half failure (#96)
-   *  -- the text is handed back to the composer via ConversationView's own
-   *  `restoredDraft`. Reset synchronously the moment `surfaceKey` changes
-   *  (see this hook's own render-time reset below), which is what makes it
-   *  safe for a caller to read this directly as `restoredDraft` without
-   *  separately tagging it by section/conversation the way the pre-#302
-   *  code had to (see this hook's inline comment on that reset). */
-  sendFailureText: string | null;
+   *  -- handed back to the composer as ConversationView's own
+   *  `restoredDraft` prop DIRECTLY (its shape, `{ text: string }`, is
+   *  exactly what that prop wants). Reset synchronously the moment
+   *  `resetKey` changes (see this hook's own render-time reset below),
+   *  which is what makes it safe for a caller to read this straight
+   *  through as `restoredDraft` without separately tagging it by
+   *  section/conversation the way the pre-#302 code had to.
+   *
+   *  #302 review fix (Critical #1): this MUST stay an object allocated
+   *  fresh per failure, not a string re-wrapped in a new object literal at
+   *  the call site every render. ConversationView keys its "restore once"
+   *  behavior on OBJECT IDENTITY (`restoredDraft === lastRestoredDraftRef
+   *  .current`) specifically so that a student who deliberately clears a
+   *  restored draft (select-all, delete) does not have it silently
+   *  reinjected by the next unrelated App re-render (a sidebar collapse, a
+   *  hint-count refetch, anything) -- a literal built fresh every render
+   *  would have a NEW identity every render and re-fire that restore on
+   *  every single one, undoing the student's own deletion. This is also
+   *  why the reset above sets this to `null` rather than, say, a
+   *  memoized-by-value object: two consecutive failures with IDENTICAL
+   *  text must each independently restore (see
+   *  ConversationView.test.tsx's own coverage of that), which a
+   *  value-keyed memo would collapse into a single identity and only fire
+   *  once. */
+  sendFailure: { text: string } | null;
   send: (text: string, extraBody?: Record<string, unknown>) => void;
   stop: () => void;
   stoppedMessageId: string | null;
@@ -338,12 +376,21 @@ export interface ConversationSurface {
 /** #302: the extracted shared hook. See this file's top-of-file comment for
  *  the extraction's scope and what deliberately stays in App.tsx. */
 export function useConversationSurface(options: UseConversationSurfaceOptions): ConversationSurface {
-  const { surfaceKey, resetKey, initialMessages, fetchImpl, buildSendBody, buildRetryBody, hydrationError, runRCode } =
-    options;
+  const {
+    surfaceKey,
+    resetKey,
+    stoppedMessageResetKey,
+    initialMessages,
+    fetchImpl,
+    buildSendBody,
+    buildRetryBody,
+    hydrationError,
+    runRCode,
+  } = options;
 
   /* #96: false from the moment a fresh send is dispatched until the server
-     answers 2xx for it -- see UseConversationSurfaceOptions.sendFailureText
-     for what that implies. `fetchImpl` already throws (ChatResponseError)
+     answers 2xx for it -- see ConversationSurface.sendFailure for what
+     that implies. `fetchImpl` already throws (ChatResponseError)
      on a non-2xx response before returning, so "fetchImpl resolved" and
      "the server accepted this send" are the same event regardless of which
      surface-specific work happens inside `fetchImpl` first. */
@@ -385,31 +432,46 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
   });
 
   const [stoppedMessageId, setStoppedMessageId] = useState<string | null>(null);
-  const [sendFailureText, setSendFailureText] = useState<string | null>(null);
+  const [sendFailure, setSendFailure] = useState<{ text: string } | null>(null);
 
-  /* #302: reset both pieces of per-conversation UI state the INSTANT
-     `resetKey` changes -- synchronously, during this render, rather than
-     in a `useEffect`. This closes a real race the pre-#302 tutor code
-     needed a second, external defense for: both ConversationViews are
-     keyed and therefore REMOUNT on a surface switch, and React runs a
-     freshly-mounted child's own effects before a PARENT's effect -- so an
-     effect-based reset here alone could still lose to a child's mount
-     effect reading the stale value first. Doing it inline during render
-     (React's own sanctioned "adjust state when a prop changes" pattern)
-     runs before any child of this render exists at all, which is strictly
-     earlier than either defense the pre-#302 code had -- see `resetKey`'s
-     own doc comment for why this is keyed separately from `surfaceKey`. */
+  /* #302: reset the restored-draft state the INSTANT `resetKey` changes --
+     synchronously, during this render, rather than in a `useEffect`. This
+     closes a real race the pre-#302 tutor code needed a second, external
+     defense for: both ConversationViews are keyed and therefore REMOUNT on
+     a surface switch, and React runs a freshly-mounted child's own effects
+     before a PARENT's effect -- so an effect-based reset here alone could
+     still lose to a child's mount effect reading the stale value first.
+     Doing it inline during render (React's own sanctioned "adjust state
+     when a prop changes" pattern) runs before any child of this render
+     exists at all, which is strictly earlier than either defense the
+     pre-#302 code had. */
   const lastResetKeyRef = useRef(resetKey);
   if (lastResetKeyRef.current !== resetKey) {
     lastResetKeyRef.current = resetKey;
+    setSendFailure(null);
+  }
+
+  /* #302 review fix (Important #2): the stopped-note reset is deliberately
+     a SEPARATE render-time check, keyed on `stoppedMessageResetKey` (see
+     that option's own doc comment for why it must not share `resetKey` --
+     folding the two together silently gave the section surface a
+     switch-triggered reset it never had before this extraction). */
+  const lastStoppedMessageResetKeyRef = useRef(stoppedMessageResetKey);
+  if (lastStoppedMessageResetKeyRef.current !== stoppedMessageResetKey) {
+    lastStoppedMessageResetKeyRef.current = stoppedMessageResetKey;
     setStoppedMessageId(null);
-    setSendFailureText(null);
   }
 
   /* #96: detects a send-half failure -- the request never reached the
      server, or the server refused it outright -- and hands the student's
      words back rather than leaving an un-persisted bubble on screen (see
-     sendFailureText's own doc comment above for the full contract). */
+     sendFailure's own doc comment above for the full contract). A FRESH
+     object every time this fires (#302 review fix, Critical #1) -- never
+     re-derived from a memo or recomputed at a render call site -- so that
+     two consecutive failures with the same text each independently
+     restore, and so ConversationView's own identity-keyed "restore once"
+     guard can't be defeated by an unrelated re-render minting a new-looking
+     object for the SAME failure. */
   const prevStatusRef = useRef(status);
   useEffect(() => {
     const previous = prevStatusRef.current;
@@ -421,7 +483,7 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
     // Defensive: a send-half failure never gets far enough for the SDK to
     // append an assistant message, so the tail is the student's own message.
     if (last?.role !== "user") return;
-    setSendFailureText(studentTextOf(last));
+    setSendFailure({ text: studentTextOf(last) });
     // The bubble is dropped, not merely marked: it was never persisted, so
     // leaving it would show a message that a reload makes vanish.
     setMessages(aiMessages.slice(0, -1));
@@ -455,14 +517,14 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
     (status === "error"
       ? {
           message: error?.message || "Something went wrong. Please try again.",
-          stage: sendFailureText !== null ? "send" : "response",
+          stage: sendFailure !== null ? "send" : "response",
           // #286: only ChatResponseError (a non-2xx /api/chat response) ever
           // carries this; an in-stream failure or a dropped connection never
           // does, and neither has a cooldown to enforce.
           retryAfterSeconds:
             error instanceof ChatResponseError && error.status === 429 ? error.retryAfterSeconds : undefined,
           retryAttemptId: errorAttemptRef.current,
-          onRetry: sendFailureText !== null ? undefined : () => regenerate({ body: buildRetryBody() }),
+          onRetry: sendFailure !== null ? undefined : () => regenerate({ body: buildRetryBody() }),
         }
       : null);
 
@@ -481,7 +543,7 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
      any of that work. */
   const send = (text: string, extraBody?: Record<string, unknown>) => {
     acceptedRef.current = false;
-    setSendFailureText(null);
+    setSendFailure(null);
     sendMessage({ text }, { body: { ...buildSendBody(), ...extraBody } });
     setStoppedMessageId(null);
   };
@@ -514,7 +576,7 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
     isStopActionable,
     canSend,
     errorRow,
-    sendFailureText,
+    sendFailure,
     send,
     stop,
     stoppedMessageId,

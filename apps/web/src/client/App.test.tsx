@@ -198,6 +198,68 @@ describe("App chat conversationId propagation (#3 follow-up)", () => {
   });
 });
 
+// #302 review fix (Important #1b): a zero-section homework leaves
+// `sectionChatKey` permanently `undefined` -- the exact state a first #302
+// draft broke. @ai-sdk/react's own `shouldRecreateChat` fires on `"id" in
+// options` being true even when the VALUE is `undefined` (and a missing id
+// defaults to a freshly-generated one internally), so always including
+// `id: sectionChatKey` in useChat's options -- rather than omitting the key
+// entirely while it's `undefined` -- recreated the Chat instance on EVERY
+// single render for as long as the key stayed undefined: not a one-time
+// reset, a permanent per-render one. Typing (each keystroke its own render)
+// and sending twice exercises many renders while the key never becomes
+// defined at all.
+describe("App section chat surface is not recreated every render while it has no key yet (#302 review fix)", () => {
+  it("does not lose earlier turns to a per-render Chat-instance reset when the homework has zero sections", async () => {
+    let chatCallCount = 0;
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
+        if (url === "/api/chat") {
+          chatCallCount += 1;
+          return chatStreamResponse("conv-1", `reply-${chatCallCount}`);
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    // Typed character-by-character -- each keystroke is its own render,
+    // all while sectionChatKey stays undefined the entire time.
+    await user.type(composer, "first message with several keystrokes{Enter}");
+    await screen.findByText("reply-1");
+
+    await user.type(composer, "second message{Enter}");
+    await screen.findByText("reply-2");
+
+    // Both turns must still be on screen simultaneously -- a per-render
+    // Chat-instance reset would have wiped turn 1's content the moment ANY
+    // later render occurred (e.g. while typing turn 2's text).
+    expect(screen.getByText("first message with several keystrokes")).toBeTruthy();
+    expect(screen.getByText("reply-1")).toBeTruthy();
+    expect(screen.getByText("second message")).toBeTruthy();
+    expect(screen.getByText("reply-2")).toBeTruthy();
+    expect(chatCallCount).toBe(2);
+  });
+});
+
 /* #4: the tutor-conversations rail. Renders the real App (not a mocked
    TutorConversationsList) against a fake backend, exercising the same
    integration points the #3 follow-up test above does -- these cover the
@@ -1641,6 +1703,13 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
    leaves the question with no answer, which is what the reload test below
    asserts against the transcript the server actually returns. */
 describe("App streaming resilience: send-half vs response-half failures (#96)", () => {
+  // The Critical #1 regression test below toggles the real (localStorage-
+  // backed) sidebar collapse preference as its "unrelated re-render"
+  // trigger -- cleared after every test in this block so it can't leak
+  // into another describe (e.g. "App tutor sidebar collapse persistence
+  // (#4)", which asserts exact localStorage values).
+  afterEach(() => window.localStorage.clear());
+
   const HOMEWORK_FIXTURE = {
     homeworks: [
       {
@@ -1839,6 +1908,46 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
     expect(sectionTwoComposer.value).not.toContain("section one");
   });
 
+  it("does not resurrect a restored draft the student has deliberately cleared, across an unrelated App re-render (#302 review fix, Critical #1)", async () => {
+    /* ConversationView keys its "restore once" behavior on OBJECT IDENTITY
+       (`restoredDraft === lastRestoredDraftRef.current`), not on the text
+       value -- a first #302 draft rebuilt `{ text: ... }` as a fresh object
+       literal at the App.tsx render call site every render, instead of
+       reading a stable per-failure object out of hook state. That gave the
+       restored draft a NEW identity on every unrelated re-render (a sidebar
+       collapse, a hint-count refetch, anything), which re-fires
+       ConversationView's restore effect every time -- and its only guard
+       against clobbering an in-progress edit is `current.trim()`, which is
+       false once the student has select-all-deleted the restored text. So a
+       student who deliberately abandoned the restored draft would find it
+       silently reinjected by the next re-render, one Enter from being sent
+       into their graded conversation. Toggling the (unrelated) sidebar
+       collapse button here stands in for "any re-render" -- it touches
+       localStorage-backed state that has nothing to do with the chat
+       surface at all. */
+    stubFetch(async () => new Response("gateway timeout", { status: 504 }));
+
+    renderApp();
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "a question that will fail to send{Enter}");
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    await waitFor(() => expect(composer.value).toBe("a question that will fail to send"));
+
+    // The student deliberately abandons the restored draft.
+    await user.clear(composer);
+    expect(composer.value).toBe("");
+
+    // An unrelated re-render -- collapsing the homework sidebar touches
+    // App-level state with no relationship to the chat surface at all.
+    await user.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+
+    // The cleared draft must stay cleared.
+    expect(composer.value).toBe("");
+  });
+
   it("keeps the question on screen for a RESPONSE-half failure, and does not pre-fill the composer", async () => {
     stubFetch(async () => interruptedChatStreamResponse("conv-1", "A p-value is the probability of"));
 
@@ -1903,6 +2012,96 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
     const user = userEvent.setup();
     await user.type(composer, "what does 0.03 mean?{Enter}");
     await screen.findByText("the answer, this time in full");
+    expect(chatCallCount).toBe(1);
+  });
+});
+
+// #302 review fix (Important #1a): the authorized behavior change this task
+// made -- keying the section surface by `${sectionNumber}:${conversationId}`
+// -- exists specifically to give the section chat a reset path an errored
+// (or stopped) turn never had before: previously ALL sections shared one
+// unkeyed useChat instance, so its status/error never cleared on a switch
+// or a restart, only on sending a fresh message. These pin that the reset
+// actually happens now.
+describe("App section chat gains a reset path on switch/restart (#302 review fix)", () => {
+  it("clears a section's stale chat-stream error when the student switches away and back, with no new message sent", async () => {
+    const twoSections = {
+      homeworks: [
+        {
+          id: "hw-1",
+          courseId: "course-a",
+          courseName: "STATS 311",
+          title: "HW 3",
+          description: "d",
+          dueDate: "2099-01-01T00:00:00.000Z",
+          completedPercentage: 0,
+          inProgressPercentage: 0,
+          sections: [
+            { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
+            { id: "s2", title: "Sec 2", order: 2, status: "in_progress", conversationId: "sec-conv-2" },
+          ],
+        },
+      ],
+    };
+    const historyByConversation: Record<string, unknown[]> = {
+      "sec-conv-1": [{ id: "m1", role: "user", parts: [{ type: "text", text: "sec 1 question" }] }],
+      "sec-conv-2": [{ id: "m2", role: "user", parts: [{ type: "text", text: "sec 2 question" }] }],
+    };
+    let chatCallCount = 0;
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(twoSections), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url.endsWith("/hints")) return new Response(JSON.stringify({ used: 0, limit: null }), { status: 200 });
+        const messagesMatch = url.match(/^\/api\/conversations\/([^/]+)\/messages/);
+        if (messagesMatch) {
+          return new Response(JSON.stringify(historyByConversation[messagesMatch[1]!] ?? []), { status: 200 });
+        }
+        if (url === "/api/chat") {
+          chatCallCount += 1;
+          // A response-half failure -- the server accepted the send, so
+          // nothing about it should be recoverable by merely switching
+          // surfaces (see the streaming-resilience describe above); the
+          // point here is only whether the ERROR ROW itself persists.
+          return interruptedChatStreamResponse("sec-conv-1", "half an answer");
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("sec 1 question")).toBeTruthy();
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "will this error?{Enter}");
+    expect(await screen.findByRole("alert")).toBeTruthy();
+
+    // Switch away, then back -- no new message sent into section 1 at all.
+    await user.click(screen.getByRole("button", { name: /Sec 2/ }));
+    await screen.findByText("sec 2 question");
+    await user.click(screen.getByRole("button", { name: /Sec 1/ }));
+    await screen.findByText("sec 1 question");
+
+    // Before #302, the section useChat was one unkeyed instance shared by
+    // every section -- this stale error would still be showing here.
+    expect(screen.queryByRole("alert")).toBeNull();
     expect(chatCallCount).toBe(1);
   });
 });
@@ -2157,6 +2356,79 @@ describe("App section chat resumes with hydrated history (#252)", () => {
     // Back on sec 1 -- re-hydrated, not left empty from sec 2's clear.
     expect(await screen.findByText("sec 1 question")).toBeTruthy();
   });
+
+  it("re-selecting the section already on screen still applies freshly fetched history, not the stale transcript it already had (#302 review fix, Critical #2)", async () => {
+    /* Sidebar's onSelect has no already-current guard (App.tsx's
+       handleSectionSelect always runs loadSectionConversation, even for the
+       section already showing) -- clicking the SAME section twice produces
+       the IDENTICAL sectionChatKey both times (`${sectionNumber}:
+       ${conversationId}` is unchanged, since neither the section nor its
+       conversationId changed). useConversationSurface's `messages` option
+       is only consulted when the key ACTUALLY changes (that's what makes a
+       genuine switch reset the Chat instance); with an unchanged key, a
+       first #302 draft's `selectSectionConversation` wrote only the seed
+       state and never the LIVE instance, so this second fetch's content
+       was silently dropped and the stale first-fetch transcript stayed on
+       screen forever. */
+    const homework = {
+      homeworks: [
+        {
+          id: "hw-1",
+          courseId: "course-a",
+          courseName: "STATS 311",
+          title: "HW 3",
+          description: "d",
+          dueDate: "2099-01-01T00:00:00.000Z",
+          completedPercentage: 0,
+          inProgressPercentage: 0,
+          sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
+        },
+      ],
+    };
+    let messagesCallCount = 0;
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(homework), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url.endsWith("/hints")) return new Response(JSON.stringify({ used: 0, limit: null }), { status: 200 });
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
+          messagesCallCount += 1;
+          const text = messagesCallCount === 1 ? "first fetch content" : "second fetch content, added since";
+          return new Response(
+            JSON.stringify([{ id: `m${messagesCallCount}`, role: "user", parts: [{ type: "text", text }] }]),
+            { status: 200 },
+          );
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("first fetch content")).toBeTruthy();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Sec 1/ }));
+
+    expect(await screen.findByText("second fetch content, added since")).toBeTruthy();
+    expect(messagesCallCount).toBe(2);
+  });
 });
 
 describe("App eager section greeting (#318)", () => {
@@ -2235,6 +2507,70 @@ describe("App eager section greeting (#318)", () => {
     // "not_started" until a reload -- SectionItem marks the current section
     // aria-current="step" only once its status flips to "current".
     expect(screen.getByRole("button", { name: /Sec 1/ }).getAttribute("aria-current")).toBe("step");
+  });
+
+  it("shows the eager greeting even when its own POST resolves AFTER React has already applied sectionChatKey's first-ever transition (#302 review fix, Important #1c)", async () => {
+    /* startFreshSectionConversation kicks off this POST in the SAME
+       synchronous tick as loadSectionConversation's own FIRST-EVER
+       sectionChatKey assignment (undefined -> a real key) -- by the time
+       an awaited fetch resolves, React may or may not have already
+       flushed that queued render. A first #302 draft only wrote the
+       greeting through the LIVE `setMessages`, which is lost the moment a
+       still-pending key change lands afterward (it recreates the Chat
+       instance, reseeding from whatever `sectionInitialMessages` was at
+       THAT render -- still empty). The fix also updates the seed
+       (`sectionInitialMessages`) so a recreation landing after this point
+       still seeds correctly. Deferring the POST past a macrotask boundary
+       (a plain immediately-resolving mock, as the sibling test above uses,
+       already tends to resolve BEFORE the render flushes -- this test
+       forces the opposite, slower ordering deterministically) exercises
+       the other half of that "regardless of which order" claim. */
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+
+    let startCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/profile") return new Response(JSON.stringify({}), { status: 200 });
+        if (url === "/api/hello") {
+          return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
+        }
+        if (url === "/api/student/homeworks") return new Response(JSON.stringify(HOMEWORK_FIXTURE), { status: 200 });
+        if (url.startsWith("/api/conversations?")) {
+          return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+        }
+        if (url === "/api/courses/course-a/sections/s1/conversations" && init?.method === "POST") {
+          startCalls += 1;
+          // A macrotask boundary always runs after any microtasks (and
+          // React's own render flush) already queued in this tick.
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          return new Response(
+            JSON.stringify({
+              id: "sec-conv-new",
+              title: "Section 1: Sec 1",
+              greetingMessageId: "g1",
+              greetingParts: [{ type: "text", text: "Where would you like to start?" }],
+              promptTemplateId: null,
+            }),
+            { status: 201 },
+          );
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/Where would you like to start\?/)).toBeTruthy();
+    expect(startCalls).toBe(1);
   });
 
   it("leaves the composer empty (no crash) when the eager-start call 409s", async () => {
@@ -2944,6 +3280,68 @@ describe("App section restart affordance (#248)", () => {
     expect(restartCalled).toBe(true);
     expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(screen.queryByText("sec 1 question")).toBeNull();
+  });
+
+  it("clears an errored section chat's error row after a restart (#302 review fix, Important #1a)", async () => {
+    /* Restart mints a genuinely different conversation for the SAME section
+       number -- before #302, the section useChat was one unkeyed instance
+       shared by all sections, so restart re-hydrated its MESSAGES but never
+       reset its status/error: a stale error from before the restart would
+       still show alongside the fresh greeting. #302's sectionChatKey is
+       derived from `${sectionNumber}:${conversationId}`, so restart (a new
+       conversationId for the same section) changes the key too, giving this
+       the same reset a plain section switch gets (see the describe block
+       above). */
+    let restartCalled = false;
+    let chatCallCount = 0;
+    stubBaseFetch((url) => {
+      if (url === "/api/chat") {
+        chatCallCount += 1;
+        return interruptedChatStreamResponse("sec-conv-1", "half an answer");
+      }
+      if (url === "/api/courses/course-a/conversations/sec-conv-1/restart") {
+        restartCalled = true;
+        return new Response(
+          JSON.stringify({
+            conversation: { id: "sec-conv-2", title: "Section 1: Sec 1", greetingMessageId: "g1" },
+            voidedSubmission: null,
+          }),
+          { status: 201 },
+        );
+      }
+      if (url.startsWith("/api/conversations/sec-conv-2/messages")) {
+        return new Response(
+          JSON.stringify([{ id: "g1", role: "assistant", parts: [{ type: "text", text: "fresh greeting" }] }]),
+          { status: 200 },
+        );
+      }
+      return null;
+    });
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "will this error?{Enter}");
+    expect(await screen.findByRole("alert")).toBeTruthy();
+
+    const restartButton = await screen.findByRole("button", { name: "Restart section" });
+    await user.click(restartButton);
+    const dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Restart section" }));
+
+    expect(await screen.findByText("fresh greeting")).toBeTruthy();
+    expect(restartCalled).toBe(true);
+    // Before #302, this stale alert would still be showing next to the
+    // fresh greeting.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(chatCallCount).toBe(1);
   });
 
   it("a 409 (graded submission) keeps the dialog open and shows the server's message inline", async () => {
