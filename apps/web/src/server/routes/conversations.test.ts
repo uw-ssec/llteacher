@@ -448,8 +448,12 @@ describe("GET /api/conversations/:id", () => {
     const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222");
 
     expect(res.status).toBe(200);
+    // #438 review: scope (the conversation's own courseId) is now passed
+    // through, not just the id -- matching getMessagesForConversation's
+    // call shape.
     expect(getConversationMessageCountMock).toHaveBeenCalledWith(
       expect.anything(),
+      "course-a",
       "22222222-2222-2222-2222-222222222222",
     );
     expect(await res.json()).toEqual({

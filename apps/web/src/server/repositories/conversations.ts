@@ -107,7 +107,28 @@ export async function listConversationsForOwner(
 // single-conversation counterpart to listConversationsForOwner's own
 // per-page counts query above -- same aggregate, scoped to exactly the one
 // id a caller already knows it wants rather than a whole page's worth.
-export async function getConversationMessageCount(db: Db, conversationId: string): Promise<number> {
+//
+// #438 review: takes a `scope: CourseScope` and checks
+// assertConversationInScope itself, matching getMessagesForConversation/
+// getLastMessages' own defense-in-depth convention -- both require a scope
+// and re-verify it internally even though their current callers have
+// already checked ownership upstream too. This function had neither
+// originally; its one call site (getConversationHandler) already calls
+// getOwnedConversationOrNull first, so it wasn't exploitable, but a
+// scope-less repository function of this shape is exactly the "safe only by
+// caller discipline, not by construction" pattern this codebase avoids for
+// its siblings. A wrong-scope/nonexistent conversationId now returns 0
+// (matching getMessagesForConversation's "not owned -> empty" convention)
+// rather than silently counting rows for an id the caller never proved it
+// owns.
+export async function getConversationMessageCount(
+  db: Db,
+  scope: CourseScope,
+  conversationId: string,
+): Promise<number> {
+  const owned = await assertConversationInScope(db, scope, conversationId);
+  if (!owned) return 0;
+
   const [row] = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(messages)

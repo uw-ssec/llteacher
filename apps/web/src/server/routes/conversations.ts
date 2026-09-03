@@ -298,7 +298,11 @@ export async function getConversationHandler(c: Context<AppEnv>) {
     return c.json({ error: "Conversation not found" }, 404);
   }
 
-  const messageCount = await getConversationMessageCount(db, id);
+  // Row just read back and ownership-checked -- the sanctioned case for
+  // this cast per scope.ts's unsafeCourseScope docstring (same pattern as
+  // updateConversationHandler below).
+  const scope = unsafeCourseScope(existing.courseId);
+  const messageCount = await getConversationMessageCount(db, scope, id);
   const body: ConversationListItemResponse = { ...toConversationSummary(existing), messageCount };
   return c.json(body);
 }

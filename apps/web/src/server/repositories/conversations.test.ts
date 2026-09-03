@@ -577,7 +577,7 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
   // single-conversation counterpart to listConversationsForOwner's
   // per-page counts above, backing reconcileConversationCount's
   // reconciliation read.
-  it("getConversationMessageCount reports the real row count for one conversation, and 0 for none", async () => {
+  it("getConversationMessageCount reports the real row count for one conversation, 0 for none, and never leaks another conversation's rows", async () => {
     const withMessages = await createConversation(db, unsafeCourseScope(courseAId), {
       ownerUserId: userId,
       sectionId: null,
@@ -592,6 +592,19 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       role: "assistant",
       parts: [{ type: "text", text: "two" }],
     });
+    // #438 review: a SECOND conversation with its own messages -- proves
+    // the count is scoped to exactly the conversationId asked about, not
+    // e.g. every message this owner has across conversations.
+    const otherWithMessages = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "getConversationMessageCount: a different conversation, also has messages",
+    });
+    await appendMessage(db, unsafeCourseScope(courseAId), otherWithMessages.id, {
+      role: "user",
+      parts: [{ type: "text", text: "unrelated question" }],
+    });
     const withoutMessages = await createConversation(db, unsafeCourseScope(courseAId), {
       ownerUserId: userId,
       sectionId: null,
@@ -599,8 +612,29 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
       title: "getConversationMessageCount: no messages",
     });
 
-    expect(await getConversationMessageCount(db, withMessages.id)).toBe(2);
-    expect(await getConversationMessageCount(db, withoutMessages.id)).toBe(0);
+    expect(await getConversationMessageCount(db, unsafeCourseScope(courseAId), withMessages.id)).toBe(2);
+    expect(await getConversationMessageCount(db, unsafeCourseScope(courseAId), otherWithMessages.id)).toBe(1);
+    expect(await getConversationMessageCount(db, unsafeCourseScope(courseAId), withoutMessages.id)).toBe(0);
+  });
+
+  // #438 review: matches getMessagesForConversation's own "wrong scope ->
+  // empty" convention (same test above, `getMessagesForConversation returns
+  // an empty array for a conversation scoped to a different course`) --
+  // this function checks assertConversationInScope itself rather than
+  // trusting the caller to have done so, so a scope/conversationId mismatch
+  // returns 0 instead of the real count.
+  it("getConversationMessageCount returns 0 for a conversation scoped to a different course", async () => {
+    const created = await createConversation(db, unsafeCourseScope(courseAId), {
+      ownerUserId: userId,
+      sectionId: null,
+      kind: "tutor",
+      title: "Wrong-scope message-count target",
+    });
+    await appendMessage(db, unsafeCourseScope(courseAId), created.id, {
+      role: "user",
+      parts: [{ type: "text", text: "hello" }],
+    });
+    expect(await getConversationMessageCount(db, unsafeCourseScope(courseBId), created.id)).toBe(0);
   });
 
   it("updateConversationTitle updates and returns the row within scope", async () => {
