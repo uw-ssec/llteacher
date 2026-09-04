@@ -52,7 +52,10 @@
    Design decision 3 -- bounded per invocation (final review).
 
    Each org's candidate read is capped at OVERDUE_SUBMISSION_CANDIDATE_LIMIT
-   (repositories/submissions.ts). On the neon-http driver every statement is
+   for the single-org path, or the smaller OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT
+   for the batched path this file now uses (repositories/submissions.ts --
+   see that constant's own doc comment for why the batched path needs a
+   separate, smaller cap). On the neon-http driver every statement is
    a Cloudflare subrequest and the loop below inserts one at a time, so the
    candidate count is the invocation's subrequest count; the first
    production run, which has no lower bound on due date, would otherwise

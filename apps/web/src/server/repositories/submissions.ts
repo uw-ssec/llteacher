@@ -791,10 +791,30 @@ export async function findOverdueSubmissionCandidates(
  *  #2) -- so this cap is fixed and budget-independent, exactly as that
  *  fix's budget allocation is now row-count-independent.
  *
- *  50 * AUTO_SUBMIT_ORG_BATCH_SIZE (100) = 5,000 rows worst case per batch:
- *  an order of magnitude below the naive 50,000, and about 10x a single
- *  org's own already-accepted 500-row worst case -- comfortably one
- *  Postgres round trip and well within a Worker's memory budget. The
+ *  IMPORTANT -- this bounds the returned, per-org-grouped result this
+ *  function hands back, NOT the underlying SELECT's own row count.
+ *  selectOverdueCandidateRows (below) has no SQL-level LIMIT -- it never
+ *  did, for either this path or the single-org one -- so for a batch of
+ *  organizations that are ALL genuinely over 50 candidates, Postgres still
+ *  returns every matching row for the batch, and this function truncates
+ *  to 50/org only after that full result set has already been fetched
+ *  into the Worker. This constant therefore bounds Worker-side memory
+ *  and downstream processing (the "5,000 rows retained" arithmetic below),
+ *  not the Postgres round-trip payload or query latency an adversarial
+ *  batch could still produce. Closing that gap for real would need a
+ *  SQL-level per-org bound (e.g. a ROW_NUMBER() OVER (PARTITION BY
+ *  organization_id ...) window, filtered in a subquery/CTE) -- not
+ *  attempted here, since it would mean forking selectOverdueCandidateRows
+ *  away from the single-org path it deliberately shares with (see that
+ *  function's own doc comment on why one shared query body matters for
+ *  scoping-drift safety), and the single-org path already accepts the
+ *  identical no-SQL-LIMIT characteristic today without a window function.
+ *  Filed as a follow-up rather than expanded here.
+ *
+ *  50 * AUTO_SUBMIT_ORG_BATCH_SIZE (100) = 5,000 rows retained/processed
+ *  worst case per batch, after the fetch: an order of magnitude below the
+ *  naive 50,000 a fully-unbounded per-org grouping would keep, and about
+ *  10x a single org's own already-accepted 500-row worst case. The
  *  tradeoff: a genuinely first-run-backlogged organization swept through
  *  the BATCHED path now drains at up to 50/run instead of up to 500/run --
  *  slower than autoSubmitOverdueSectionsForOrg's single-org path would give
