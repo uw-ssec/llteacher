@@ -422,22 +422,30 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
     const batchOrgs = await Promise.all(
       Array.from({ length: orgCount }, async (_, i) => {
         const org = await seedOrg(`batch-${i}`);
-        const student = await seedStudent(org.courseId, `batch-${i}-${crypto.randomUUID()}@test.example`);
+        const studentId = await seedStudent(org.courseId, `batch-${i}-${crypto.randomUUID()}@test.example`);
         const { sectionId } = await seedHomeworkWithSection(org);
-        await seedConversation({ userId: student, courseId: org.courseId, sectionId });
-        return org;
+        const conversationId = await seedConversation({ userId: studentId, courseId: org.courseId, sectionId });
+        return { ...org, studentId, conversationId };
       }),
     );
     const scopes = batchOrgs.map((o) => o.scope);
 
     // The batched query itself: every one of these orgs comes back with
-    // its own single candidate, and (the tenancy assertion that matters
-    // most for a query spanning many orgs in one round trip) no org's
-    // candidate leaks into another org's entry in the returned map.
+    // its own single candidate. Review finding (#437, Important #1): a
+    // count-only assertion here (`toHaveLength(1)`) cannot distinguish
+    // "correct" from "a bug swapped two orgs' single candidate with each
+    // other" -- every count would still be exactly 1 either way, since
+    // each org has exactly one student. Asserting the candidate's OWN
+    // userId/conversationId against the org it's supposed to belong to is
+    // what actually catches a cross-tenant mixup in the batched `IN (...)`
+    // query's grouping, not just its counting.
     const candidatesByOrg = await findOverdueSubmissionCandidatesForOrgs(db, scopes);
     expect(candidatesByOrg.size).toBe(orgCount);
     for (const org of batchOrgs) {
-      expect(candidatesByOrg.get(org.scope)).toHaveLength(1);
+      const candidates = candidatesByOrg.get(org.scope);
+      expect(candidates).toHaveLength(1);
+      expect(candidates![0]!.userId).toBe(org.studentId);
+      expect(candidates![0]!.conversationId).toBe(org.conversationId);
     }
 
     // And the run loop built on it: crossing the batch boundary (this run's
@@ -452,7 +460,13 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
       orgsDeferred: 0,
     });
     for (const org of batchOrgs) {
-      expect(await submissionsForOrg(org.orgId)).toHaveLength(1);
+      const rows = await submissionsForOrg(org.orgId);
+      expect(rows).toHaveLength(1);
+      // Same identity check on the written row: a submission recorded
+      // under the wrong org, or for the wrong student/conversation, would
+      // still leave every org's row COUNT at 1.
+      expect(rows[0]!.userId).toBe(org.studentId);
+      expect(rows[0]!.conversationId).toBe(org.conversationId);
     }
   }, 30_000);
 

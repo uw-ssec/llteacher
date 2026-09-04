@@ -189,26 +189,55 @@ function emptyRunSummary(): AutoSubmitRunSummary {
    idle for their SELECT cost to stay at 1-per-batch; a real backlog spends
    the same insert subrequests either way, so the two problems this budget
    protects against (a single invocation exceeding Cloudflare's cap, and one
-   busy tenant starving the rest) are both still bounded exactly as before. */
+   busy tenant starving the rest) are both still bounded exactly as before.
+
+   #437 review (Important #2): an earlier version of this batching queried
+   each batch with a PRE-DIVIDED per-org limit
+   (floor(remaining-budget / batch-size)) so the batch's absolute worst case
+   -- every org in it maxed out -- could never overspend. That protected the
+   budget but silently gutted single-org throughput for the realistic mixed
+   case this file's own docs describe ("two orgs each carrying a full
+   500-row first-run backlog"): at defaults, the very first batch's
+   pre-divided limit was floor(898/100) = 8, so a genuinely backlogged org
+   sharing a batch with 99 idle ones now drained at ~8/run instead of the
+   up-to-500/run the pre-#437 per-org loop gave whichever org came first --
+   an unstated ~60x throughput regression for exactly the scenario the
+   budget was introduced to handle safely, not to slow down. Fixed by
+   allocating the budget PER CANDIDATE ACTUALLY CONSUMED, in org order,
+   after the batch's SELECT returns each org's real (not pre-guessed)
+   candidates -- see autoSubmitOverdueSectionsForScopes. An idle org ahead
+   of a busy one in the same batch costs nothing, so the busy org still gets
+   up to its full OVERDUE_SUBMISSION_CANDIDATE_LIMIT (500) worth of the
+   remaining budget, exactly as a lone org would pre-#437; only once the
+   budget for inserts is actually exhausted does the rest of that batch (and
+   every later one) get deferred. */
 export const AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET = 900;
 
 /* #437: how many organizations one candidate SELECT covers.
  *
- * The tradeoff: larger raises the ceiling in the doc comment above (fewer
- * batches needed to cover the whole platform) but also raises the worst
- * case a single batch can commit to before its actual backlog is known --
- * see the per-batch limit math in autoSubmitOverdueSections, which caps
- * each batch's candidates at floor(remaining-budget / batch-size) precisely
- * so a batch full of busy orgs still cannot overspend the run budget. A
- * batch size in the high tens to low hundreds keeps that worst-case
- * reservation from collapsing to an unusably small per-org limit long
- * before the budget is actually exhausted, while still moving the org-count
- * ceiling by two orders of magnitude. 100 is chosen as a round number in
- * that range -- there is no existing batch-size convention elsewhere in
- * this codebase to match (checked: no other job or repository function
- * batches a query this way), and nothing here is sensitive to the exact
- * value; it can move if a real platform's org count or backlog shape
- * argues for a different one. */
+ * The tradeoff is narrower than it first looks, because #437 review's
+ * Important #2 removed the other half of it: the query itself is no longer
+ * shrunk by remaining run budget (see AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET's
+ * doc comment), so a larger batch does not reserve a larger worst-case
+ * budget commitment up front -- the budget is spent per candidate actually
+ * consumed, not per batch capacity. What batch size actually trades off:
+ *
+ * - Larger raises the org-reach ceiling (fewer batches needed to cover the
+ *   whole platform, so fewer SELECT subrequests on a healthy, mostly-idle
+ *   platform).
+ * - Larger also raises the blast radius of one SELECT failure (#414/#437:
+ *   a batch's candidate-read failure now takes out every org sharing that
+ *   query, counted in orgsFailed) and the size of a single query's `IN
+ *   (...)` list and pre-release-state-filter result set.
+ *
+ * A batch size in the high tens to low hundreds keeps both of those
+ * secondary costs modest while still moving the org-count ceiling by two
+ * orders of magnitude. 100 is chosen as a round number in that range --
+ * there is no existing batch-size convention elsewhere in this codebase to
+ * match (checked: no other job or repository function batches a query this
+ * way), and nothing here is sensitive to the exact value; it can move if a
+ * real platform's org count, failure-blast-radius tolerance, or backlog
+ * shape argues for a different one. */
 export const AUTO_SUBMIT_ORG_BATCH_SIZE = 100;
 
 /** The insert phase, shared by the single-org entry point below and by
@@ -347,9 +376,21 @@ export async function autoSubmitOverdueSectionsForScopes(
      every WRITE; what changes is that a single SELECT failure now takes
      down the whole batch it covered (still logged, still non-fatal to the
      rest of the run) rather than just one org, which is the batching
-     tradeoff stated on AUTO_SUBMIT_ORG_BATCH_SIZE. */
+     tradeoff stated on AUTO_SUBMIT_ORG_BATCH_SIZE.
+
+     #437 review (Important #2): the batch's SELECT is NOT shrunk by
+     remaining budget -- it always asks for up to each org's standing
+     OVERDUE_SUBMISSION_CANDIDATE_LIMIT, regardless of how much run budget
+     is left. Only the INSERT side is budget-limited, and it's limited per
+     CANDIDATE ACTUALLY CONSUMED as the inner loop below walks the batch in
+     order, not per org upfront -- see AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET's
+     doc comment for why an earlier, pre-divided version of this silently
+     regressed single-org throughput. The SELECT's own result-set size is
+     unaffected by run budget either way (it was always "unbounded query,
+     bounded in JS", per findOverdueSubmissionCandidates's doc comment; this
+     is the same shape at batch granularity). */
   let i = 0;
-  while (i < rotatedScopes.length) {
+  outer: while (i < rotatedScopes.length) {
     const remaining = AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET - subrequestsSpent;
     // One for the batch's SELECT, one for at least a single insert; below
     // that there is no useful work left to start.
@@ -358,36 +399,41 @@ export async function autoSubmitOverdueSectionsForScopes(
       break;
     }
 
-    /* The batch, and each org's share of this batch's candidate budget, are
-       both sized so the batch cannot overspend `remaining` even in the
-       worst case (every org in it maxed out at `perOrgLimit`):
-       `1 (select) + batchSize * perOrgLimit <= remaining`. This is the same
-       reasoning the pre-#437 per-org loop used (`orgLimit = remaining - 1`),
-       generalized from "one org" to "batchSize orgs sharing one query". */
-    let batchSize = Math.min(AUTO_SUBMIT_ORG_BATCH_SIZE, rotatedScopes.length - i);
-    let perOrgLimit = Math.min(OVERDUE_SUBMISSION_CANDIDATE_LIMIT, Math.floor((remaining - 1) / batchSize));
-    if (perOrgLimit < 1) {
-      // The budget left is too tight for every org in a full batch to get
-      // even one candidate slot -- shrink the batch itself (rather than
-      // refuse it outright) so whatever budget remains still gets spent on
-      // real work: every org that fits gets exactly one candidate's worth
-      // of headroom. `remaining - 1` cannot be negative here since the
-      // `remaining < 2` check above already returned before this point.
-      batchSize = remaining - 1;
-      perOrgLimit = 1;
-    }
+    const batchSize = Math.min(AUTO_SUBMIT_ORG_BATCH_SIZE, rotatedScopes.length - i);
     const batchScopes = rotatedScopes.slice(i, i + batchSize);
 
     try {
       // One subrequest, whatever the batch size -- this is the entire point
-      // of #437's batching. `perOrgLimit` alone already bounds this batch's
-      // worst case to fit `remaining` (see the math above), so there is no
-      // separate run-level cap to pass here.
-      const candidatesByOrg = await findOverdueSubmissionCandidatesForOrgs(db, batchScopes, perOrgLimit);
+      // of #437's batching. Requested at the full per-org cap (the
+      // function's own default), not narrowed by remaining run budget: see
+      // the comment above this loop for why that narrowing was removed.
+      const candidatesByOrg = await findOverdueSubmissionCandidatesForOrgs(db, batchScopes);
       subrequestsSpent += 1;
 
-      for (const scope of batchScopes) {
-        const orgSummary = await submitCandidates(db, scope, candidatesByOrg.get(scope) ?? []);
+      // Walk the batch IN ORDER, spending the run's remaining insert budget
+      // on whichever org needs it, as it's actually needed -- not divided
+      // evenly up front. An idle org ahead of a busy one costs nothing, so
+      // the busy one still gets up to the full remaining budget, exactly as
+      // a lone org would have pre-#437.
+      for (let j = 0; j < batchScopes.length; j++) {
+        const budgetForInserts = AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET - subrequestsSpent;
+        if (budgetForInserts < 1) {
+          // Nothing left to spend on an insert. Everything from here on --
+          // the rest of THIS batch, and every batch after it -- is
+          // deferred to the next run, same as the outer `remaining < 2`
+          // check above but discovered mid-batch instead of between them.
+          total.orgsDeferred = rotatedScopes.length - (i + j);
+          break outer;
+        }
+        const scope = batchScopes[j]!;
+        // Sliced to what the run can still afford, not to a pre-guessed
+        // share -- an org whose real backlog exceeds this is not "deferred"
+        // (its SELECT already ran, and this run genuinely worked some of
+        // it); the untouched remainder is simply still there, unconsumed,
+        // for the next run, same as OVERDUE_SUBMISSION_CANDIDATE_LIMIT
+        // itself already truncates one org's backlog across runs.
+        const candidates = (candidatesByOrg.get(scope) ?? []).slice(0, budgetForInserts);
+        const orgSummary = await submitCandidates(db, scope, candidates);
         total.candidates += orgSummary.candidates;
         total.submitted += orgSummary.submitted;
         total.skipped += orgSummary.skipped;

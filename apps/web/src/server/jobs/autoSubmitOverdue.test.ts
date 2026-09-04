@@ -120,19 +120,22 @@ describe("#414 / #437: one batch's failure does not abort the sweep", () => {
 });
 
 describe("#416 / #437: the run-level subrequest budget", () => {
-  it("stops before exceeding the invocation budget instead of failing mid-loop", async () => {
+  it("stops before exceeding the invocation budget instead of failing mid-loop, draining a heavy backlog fast rather than throttling it (#437 review, Important #2)", async () => {
     // Several batches' worth of organizations, every one carrying a full
-    // first-run backlog (perOrgLimit candidates -- whatever the run loop
-    // actually asks for) -- the failure shape this budget exists for, now
-    // expressed per-batch instead of per-org.
+    // first-run backlog (OVERDUE_SUBMISSION_CANDIDATE_LIMIT candidates each)
+    // -- the failure shape this budget exists for. The SELECT is no longer
+    // narrowed by remaining budget (see AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET's
+    // doc comment on Important #2), so every org's mock response is the
+    // same full backlog regardless of what the run loop could still afford
+    // to insert -- exactly the real repository's behavior.
     const orgCount = AUTO_SUBMIT_ORG_BATCH_SIZE * 3;
     listAllOrgScopesMock.mockResolvedValue(orgs(orgCount));
     findOverdueSubmissionCandidatesForOrgsMock.mockImplementation(
-      async (_db: unknown, scopes: OrgScope[], perOrgLimit: number) =>
-        new Map(scopes.map((scope) => [scope, candidates(Math.min(perOrgLimit, OVERDUE_SUBMISSION_CANDIDATE_LIMIT))])),
+      async (_db: unknown, scopes: OrgScope[]) =>
+        new Map(scopes.map((scope) => [scope, candidates(OVERDUE_SUBMISSION_CANDIDATE_LIMIT)])),
     );
 
-    const summary = await autoSubmitOverdueSections(db);
+    const summary = await autoSubmitOverdueSections(db, { rotationOffset: 0 });
 
     // The invariant that matters, counted the way Cloudflare counts it: one
     // fetch for the org list, one per candidate SELECT (now per BATCH, not
@@ -141,16 +144,54 @@ describe("#416 / #437: the run-level subrequest budget", () => {
       1 + findOverdueSubmissionCandidatesForOrgsMock.mock.calls.length + insertAutoSubmissionMock.mock.calls.length;
     expect(spent).toBeLessThanOrEqual(AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET);
 
-    // And the orgs it could not afford are reported as deferred, not
-    // silently dropped and not attempted-then-crashed. "Covered" is summed
-    // from the actual batch calls rather than assumed, since a batch can be
-    // shrunk below AUTO_SUBMIT_ORG_BATCH_SIZE near the budget's edge.
-    const covered = findOverdueSubmissionCandidatesForOrgsMock.mock.calls.reduce(
-      (n: number, call: unknown[]) => n + (call[1] as OrgScope[]).length,
-      0,
-    );
-    expect(summary.orgsDeferred).toBeGreaterThan(0);
-    expect(summary.orgsDeferred).toBe(orgCount - covered);
+    // The point of the fix: the first org(s) drain up to their own FULL
+    // candidate limit -- not a pre-divided ~8-candidate share of the batch
+    // -- so at least one org's entire backlog clears in this single run,
+    // exactly as a lone backlogged org would have pre-#437.
+    expect(summary.submitted).toBeGreaterThanOrEqual(OVERDUE_SUBMISSION_CANDIDATE_LIMIT);
+    // Only the first batch's SELECT was worth issuing: two heavily-backlogged
+    // orgs already exhaust the budget on inserts before a second batch's
+    // SELECT would have any room left to spend.
+    expect(findOverdueSubmissionCandidatesForOrgsMock).toHaveBeenCalledTimes(1);
+    // And, because so much of the budget went to draining real backlog
+    // (not spread thin across idle SELECTs), most of the platform is
+    // genuinely deferred to the next run -- the org-reach/throughput
+    // tradeoff the review flagged, now on the "still bounded, still
+    // correct" side of it rather than silently regressed.
+    expect(summary.orgsDeferred).toBeGreaterThan(orgCount - 5);
+  });
+
+  it("a heavy-backlog org sharing a batch with mostly-idle ones still drains at full per-org throughput (#437 review, Important #2)", async () => {
+    // The exact scenario the review flagged: one fully-backlogged org
+    // sharing ONE batch with 99 idle ones. An earlier version of this loop
+    // divided the whole remaining budget by batch size before querying,
+    // so this org would have gotten floor(898/100) = 8 candidates'
+    // headroom regardless of the other 99 orgs having nothing -- an ~60x
+    // throughput regression versus what a lone backlogged org got
+    // pre-#437. Fixed by spending the budget per candidate actually
+    // consumed, in order, so an idle org ahead of or behind the busy one
+    // costs nothing and the busy one gets whatever budget is left.
+    const idleCount = AUTO_SUBMIT_ORG_BATCH_SIZE - 1;
+    const [heavy, ...idle] = orgs(1 + idleCount);
+    const allOrgs = [heavy!, ...idle];
+    listAllOrgScopesMock.mockResolvedValue(allOrgs);
+    findOverdueSubmissionCandidatesForOrgsMock.mockImplementation(async (_db: unknown, scopes: OrgScope[]) => {
+      const map = new Map<OrgScope, OverdueSubmissionCandidate[]>();
+      for (const scope of scopes) {
+        map.set(scope, scope === heavy ? candidates(OVERDUE_SUBMISSION_CANDIDATE_LIMIT) : []);
+      }
+      return map;
+    });
+
+    // rotationOffset: 0 puts the heavy org first in this single batch --
+    // the worst case for the OLD pre-divided design (it would have been
+    // capped at ~8 regardless of position) and the case this fix restores
+    // full throughput for.
+    const summary = await autoSubmitOverdueSections(db, { rotationOffset: 0 });
+
+    expect(summary.submitted).toBe(OVERDUE_SUBMISSION_CANDIDATE_LIMIT);
+    expect(summary.orgsDeferred).toBe(0);
+    expect(findOverdueSubmissionCandidatesForOrgsMock).toHaveBeenCalledTimes(1);
   });
 
   it("reaches every org on a healthy, large platform -- the ~899-org ceiling #437 found is gone", async () => {
