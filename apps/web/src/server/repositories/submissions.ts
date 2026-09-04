@@ -577,8 +577,14 @@ export interface OverdueSubmissionCandidate {
  *
  *  The bound is what makes the job's existing self-draining design actually
  *  work: a candidate this run does not reach is not consumed, so the next
- *  hourly run picks it up. A backlog drains at this rate per org per hour
- *  instead of failing whole.
+ *  hourly run picks it up, instead of failing whole. This constant is the
+ *  single-org path's own cap -- production no longer runs that path (see
+ *  autoSubmitOverdueSectionsForOrg's own doc comment); the batched path
+ *  production actually runs drains under its OWN, smaller cap instead,
+ *  OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT (below) -- see that constant's
+ *  own doc comment for the batched path's drain-rate tradeoff, rather than
+ *  restating an absolute rate here that would go stale the next time either
+ *  cap moves independently of the other.
  *
  *  Per-org, and deliberately NOT the only bound. The starvation objection
  *  that motivated a per-org cap is real -- a shared budget consumed by
@@ -890,12 +896,13 @@ export async function findOverdueSubmissionCandidatesForOrgs(
  *  later sweep.
  *
  *  Idempotency lives here, in the database, not in a caller's prior
- *  existence check. findOverdueSubmissionCandidates has already filtered
- *  out anything submitted, but that read and this write are not one
- *  transaction -- a student pressing submit in between, or two overlapping
- *  cron invocations, would make a check-then-insert produce either a
- *  duplicate or a crash. ON CONFLICT DO NOTHING makes the insert itself the
- *  check. Same class of fix as #266/#273 elsewhere.
+ *  existence check. findOverdueSubmissionCandidatesForOrgs (the production
+ *  caller) has already filtered out anything submitted, but that read and
+ *  this write are not one transaction -- a student pressing submit in
+ *  between, or two overlapping cron invocations, would make a
+ *  check-then-insert produce either a duplicate or a crash. ON CONFLICT DO
+ *  NOTHING makes the insert itself the check. Same class of fix as
+ *  #266/#273 elsewhere.
  *
  *  Untargeted deliberately: `submissions` has two unique constraints that
  *  mean the same thing here -- UNIQUE(conversation_id) and
@@ -909,9 +916,10 @@ export async function insertAutoSubmission(
   /* #417: INSERT ... SELECT, not INSERT ... VALUES, so the "conversation is
      still live" condition is evaluated by the same statement that writes.
 
-     findOverdueSubmissionCandidates already filters `is_deleted = false`,
-     but that read is separated from this write by every other candidate's
-     insert -- tens of seconds on a large org. A student who restarts their
+     findOverdueSubmissionCandidatesForOrgs (the production caller) already
+     filters `is_deleted = false`, but that read is separated from this
+     write by every other candidate's insert -- tens of seconds on a large
+     org. A student who restarts their
      section inside that window gets conv A soft-deleted and conv B created;
      a VALUES insert would still write a submission for conv A, because the
      composite FK resolves against a soft-deleted row and there is nothing
@@ -942,11 +950,19 @@ export async function insertAutoSubmission(
           conversationId: conversations.id,
           userId: sql<string>`${candidate.userId}::uuid`.as("user_id"),
           sectionId: sql<string>`${candidate.sectionId}::uuid`.as("section_id"),
-          // Verified, not taken on the caller's word: the candidate query
-          // joined through `courses` and filtered on this exact
-          // organization_id, so the denormalized column cannot be written
-          // with another tenant's id.
-          organizationId: sql<string>`${scope}::uuid`.as("organization_id"),
+          // Verified, not taken on the caller's word: this inner join
+          // resolves the org through the SAME row the INSERT is keyed to
+          // (conversation -> course), and the WHERE below filters on this
+          // exact organization_id -- so a mis-paired `scope` (the batched
+          // path's candidate SELECT filters on an org LIST, and this
+          // function's own `scope` argument comes from the caller's loop
+          // pairing, not from a query that filtered on this one id) makes
+          // the WHERE match nothing and the insert writes zero rows,
+          // instead of silently writing this row under the wrong tenant.
+          // `submissions_conversation_owner_section_fk` covers
+          // (conversation_id, user_id, section_id), not organization_id, so
+          // nothing else at the DB layer would have caught a mis-pairing.
+          organizationId: courses.organizationId,
           // now(), matching the column's defaultNow(): the row records when
           // the submission was made. Back-dating it to the due date would
           // claim the student submitted on time, the opposite of what it
@@ -955,7 +971,14 @@ export async function insertAutoSubmission(
           source: sql<SubmissionSource>`'auto'::submission_source`.as("source"),
         })
         .from(conversations)
-        .where(and(eq(conversations.id, candidate.conversationId), eq(conversations.isDeleted, false))),
+        .innerJoin(courses, eq(conversations.courseId, courses.id))
+        .where(
+          and(
+            eq(conversations.id, candidate.conversationId),
+            eq(conversations.isDeleted, false),
+            eq(courses.organizationId, scope),
+          ),
+        ),
     )
     .onConflictDoNothing()
     .returning({ id: submissions.id });

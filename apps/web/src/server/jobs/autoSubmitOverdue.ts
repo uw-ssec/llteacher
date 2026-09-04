@@ -421,48 +421,25 @@ export async function autoSubmitOverdueSectionsForScopes(
     const batchSize = Math.min(AUTO_SUBMIT_ORG_BATCH_SIZE, rotatedScopes.length - i);
     const batchScopes = rotatedScopes.slice(i, i + batchSize);
 
+    /* Minor review fix: this try now wraps ONLY the SELECT, not the insert
+       loop below it. Previously both lived in one try, and the catch
+       unconditionally attributed the WHOLE batch to `orgsFailed` --
+       correct only because nothing in the insert loop can currently throw
+       (submitCandidates already catches every per-candidate error
+       internally, see its own doc comment), so in practice every throw
+       reaching that catch really did come from the SELECT. Narrowing here
+       makes that true by construction rather than by accident: if the
+       insert loop ever DID start throwing, the old shape would have
+       double-counted already-successfully-submitted orgs in this batch as
+       failed, silently overspending the run's failure budget. */
+    let candidatesByOrg: Awaited<ReturnType<typeof findOverdueSubmissionCandidatesForOrgs>>;
     try {
       // One subrequest, whatever the batch size -- this is the entire point
       // of #437's batching. Requested at the full per-org cap (the
       // function's own default), not narrowed by remaining run budget: see
       // the comment above this loop for why that narrowing was removed.
-      const candidatesByOrg = await findOverdueSubmissionCandidatesForOrgs(db, batchScopes);
+      candidatesByOrg = await findOverdueSubmissionCandidatesForOrgs(db, batchScopes);
       subrequestsSpent += 1;
-
-      // Walk the batch IN ORDER, spending the run's remaining insert budget
-      // on whichever org needs it, as it's actually needed -- not divided
-      // evenly up front. An idle org ahead of a busy one costs nothing, so
-      // the busy one still gets up to the full remaining budget, exactly as
-      // a lone org would have pre-#437.
-      for (let j = 0; j < batchScopes.length; j++) {
-        const budgetForInserts = AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET - subrequestsSpent;
-        if (budgetForInserts < 1) {
-          // Nothing left to spend on an insert. Everything from here on --
-          // the rest of THIS batch, and every batch after it -- is
-          // deferred to the next run, same as the outer `remaining < 2`
-          // check above but discovered mid-batch instead of between them.
-          total.orgsDeferred = rotatedScopes.length - (i + j);
-          break outer;
-        }
-        const scope = batchScopes[j]!;
-        // Sliced to what the run can still afford, not to a pre-guessed
-        // share -- an org whose real candidates (already capped at
-        // OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT by the query itself)
-        // exceed this is not "deferred" (its SELECT already ran, and this
-        // run genuinely worked some of it); the untouched remainder is
-        // simply still there, unconsumed, for the next run -- the same
-        // self-draining property both candidate-limit constants rely on.
-        const candidates = (candidatesByOrg.get(scope) ?? []).slice(0, budgetForInserts);
-        const orgSummary = await submitCandidates(db, scope, candidates);
-        total.candidates += orgSummary.candidates;
-        total.submitted += orgSummary.submitted;
-        total.skipped += orgSummary.skipped;
-        total.failed += orgSummary.failed;
-        // One insert attempted per candidate. Candidates the org did not
-        // have cost nothing, so a healthy platform of mostly-idle orgs
-        // spends ~1 per BATCH (not per org) and reaches all of them.
-        subrequestsSpent += orgSummary.candidates;
-      }
     } catch (err) {
       /* #414's per-org isolation is now per-BATCH for the SELECT: a failure
          here (a transient neon-http error, a statement timeout on a slow
@@ -475,10 +452,57 @@ export async function autoSubmitOverdueSectionsForScopes(
       total.orgsFailed += batchScopes.length;
       // The SELECT was still attempted and still cost a subrequest.
       subrequestsSpent += 1;
+      // #437 field rename, same AUTO_SUBMIT_LOG_CONTEXT: this used to log a
+      // single `organizationId` per per-org failure. It's now
+      // `organizationIds` (plural, an array) plus `batchSize`, since one
+      // failure now covers a whole batch of orgs, not one. Anything
+      // external (a dashboard, an alert rule) still keyed on the old
+      // singular field name will silently stop matching -- flagging here
+      // for whoever owns observability for this job; no dual-logging added,
+      // that's out of scope for this pass.
       logServerError(AUTO_SUBMIT_LOG_CONTEXT, err, {
         organizationIds: batchScopes,
         batchSize: batchScopes.length,
       });
+      i += batchSize;
+      continue;
+    }
+
+    // Walk the batch IN ORDER, spending the run's remaining insert budget
+    // on whichever org needs it, as it's actually needed -- not divided
+    // evenly up front. An idle org ahead of a busy one costs nothing, so
+    // the busy one still gets up to the full remaining budget, exactly as
+    // a lone org would have pre-#437. Deliberately OUTSIDE the try above
+    // (see this loop's own preceding comment) -- submitCandidates isolates
+    // its own per-candidate failures, so nothing here is expected to throw.
+    for (let j = 0; j < batchScopes.length; j++) {
+      const budgetForInserts = AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET - subrequestsSpent;
+      if (budgetForInserts < 1) {
+        // Nothing left to spend on an insert. Everything from here on --
+        // the rest of THIS batch, and every batch after it -- is
+        // deferred to the next run, same as the outer `remaining < 2`
+        // check above but discovered mid-batch instead of between them.
+        total.orgsDeferred = rotatedScopes.length - (i + j);
+        break outer;
+      }
+      const scope = batchScopes[j]!;
+      // Sliced to what the run can still afford, not to a pre-guessed
+      // share -- an org whose real candidates (already capped at
+      // OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT by the query itself)
+      // exceed this is not "deferred" (its SELECT already ran, and this
+      // run genuinely worked some of it); the untouched remainder is
+      // simply still there, unconsumed, for the next run -- the same
+      // self-draining property both candidate-limit constants rely on.
+      const candidates = (candidatesByOrg.get(scope) ?? []).slice(0, budgetForInserts);
+      const orgSummary = await submitCandidates(db, scope, candidates);
+      total.candidates += orgSummary.candidates;
+      total.submitted += orgSummary.submitted;
+      total.skipped += orgSummary.skipped;
+      total.failed += orgSummary.failed;
+      // One insert attempted per candidate. Candidates the org did not
+      // have cost nothing, so a healthy platform of mostly-idle orgs
+      // spends ~1 per BATCH (not per org) and reaches all of them.
+      subrequestsSpent += orgSummary.candidates;
     }
 
     i += batchSize;

@@ -509,9 +509,14 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
       // whichever one happened to be queried in isolation.
       expect(candidatesByOrg.get(org.scope)).toHaveLength(OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT);
     }
-    // The point of the fix, stated as a single number: the query's TOTAL
-    // result set stays bounded at batchSize * the per-org cap even though
-    // the real backlog behind it (3 * overCap) is larger.
+    // The point of the fix, stated as a single number: the returned,
+    // per-org-grouped Map this function hands back stays bounded at
+    // batchSize * the per-org cap even though the real backlog behind it
+    // (3 * overCap) is larger -- NOT a claim about the underlying SELECT's
+    // own row count, which has no SQL-level LIMIT and still fetches every
+    // matching row before this truncation runs (see
+    // OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT's own doc comment,
+    // repositories/submissions.ts).
     const totalReturned = [...candidatesByOrg.values()].reduce((n, c) => n + c.length, 0);
     expect(totalReturned).toBe(3 * OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT);
   }, 60_000);

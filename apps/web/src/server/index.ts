@@ -409,11 +409,16 @@ app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));
  *  sweep was still running or already dead.
  *
  *  Failures are logged and re-thrown rather than swallowed: the sweep
- *  already isolates per-row and per-org failures internally
- *  (autoSubmitOverdueSectionsForOrg), so anything reaching here is the
- *  whole run failing -- a DB outage, a missing binding -- and the next
- *  scheduled run picks the same candidates up again, since nothing about a
- *  candidate is consumed by a failed attempt. */
+ *  already isolates failures internally, at whatever granularity each
+ *  phase batches at -- per-candidate for an insert, per-BATCH of
+ *  organizations for the shared candidate SELECT (#437,
+ *  autoSubmitOverdueSectionsForScopes/submitCandidates in
+ *  jobs/autoSubmitOverdue.ts; production no longer calls the older,
+ *  strictly-per-org autoSubmitOverdueSectionsForOrg) -- so anything
+ *  reaching here is the whole run failing -- a DB outage, a missing
+ *  binding -- and the next scheduled run picks the same candidates up
+ *  again, since nothing about a candidate is consumed by a failed
+ *  attempt. */
 async function scheduled(
   _controller: ScheduledController,
   env: Env,
