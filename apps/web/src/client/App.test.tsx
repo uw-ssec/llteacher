@@ -1964,6 +1964,95 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
   });
 
+  it("#441: a response-half failure after a section switch does not surface an error row or a live Retry over the new section", async () => {
+    /* The RESPONSE-half twin of #420's test directly above -- same
+       switch-beats-failure ordering, but the send already succeeded (the
+       server persisted the turn and opened a stream) and it's the STREAM
+       itself that dies after the switch, not the initial fetch. #420's own
+       fix only closed this window on the send half: the failure-detection
+       effect returned at `if (acceptedRef.current) return;` BEFORE ever
+       comparing keys for a response-half failure, so `clearError()` never
+       ran for this case, and this still-mounted useChat instance's
+       `status`/`error` would sit at "error" over section 2 until ITS OWN
+       history eventually loaded -- rendering a live Retry
+       (`errorRow.onRetry`, since a response-half failure is never
+       `hasSendFailure`) wired to `regenerate({ body: buildRetryBody() })`,
+       which reads section 2's OWN conversationId. One click regenerates a
+       turn into section 2's conversation -- a durable button sitting on
+       screen, not a sub-frame timing window, so MORE reachable than the
+       Critical #420 fixed. */
+    let releaseSectionTwoHistory: (() => void) | null = null;
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    renderSwitchBeatsFailureApp(
+      async () => {
+        // The send half succeeds -- a real 200 with a real stream -- but
+        // the stream is held open (never closed, no finish chunk) until the
+        // test kills it below, deliberately after the switch has already
+        // happened. See #418/#420's own tests for why "still in flight at
+        // the moment of the switch" (not "already failed") is required to
+        // actually reach the resetKey-moved-on-but-surfaceKey-hasn't
+        // -caught-up window this test is about.
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamController = controller;
+            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "start" })}\n\n`));
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream", "x-conversation-id": "sec-conv-1" },
+        });
+      },
+      // #302 review fix (Important #1)/#420's own test: held PENDING, not
+      // resolved immediately -- an immediately-resolved history fetch would
+      // let `sectionChatKey` (surfaceKey) advance and recreate the Chat
+      // instance BEFORE the response-half failure below ever lands, closing
+      // this bug's actual window for reasons that have nothing to do with
+      // whether the fix under test is present.
+      () =>
+        new Promise((resolve) => (releaseSectionTwoHistory = () => resolve(new Response("[]", { status: 200 })))),
+    );
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "fails after I've already left{Enter}");
+
+    // The send half succeeded -- wait for the stream to actually open
+    // (chatStatus: "streaming") before switching away.
+    await waitFor(() => expect(streamController).toBeTruthy());
+
+    // Switch away WHILE section 1's reply is still streaming AND section
+    // 2's own history fetch is still pending -- `currentSection` (resetKey)
+    // moves on synchronously, but `sectionChatKey` (surfaceKey) doesn't
+    // catch up until section 2's history resolves, so the SAME useChat
+    // instance section 1's stream is still open against is still the one
+    // mounted.
+    await user.click(screen.getByRole("button", { name: /Sec 2/ }));
+    await waitFor(() => expect(releaseSectionTwoHistory).not.toBeNull());
+
+    // NOW the connection dies -- well after the switch. A plain Error (not
+    // an AbortError) is what a genuinely dropped connection looks like to
+    // the SDK, distinct from the Stop button's own AbortError path (which
+    // resolves to "ready", never "error", and is covered by the separate
+    // #274 Stop-control tests).
+    streamController!.error(new Error("connection dropped"));
+    // Let the rejection's own catch/effect chain fully settle (see #418's
+    // own test for why this explicit macrotask tick, not a bare `waitFor`
+    // on the assertion below, is required to actually observe a leak that
+    // lands a tick later, rather than a false negative on the first poll).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+
+    // Let section 2's real history load, and confirm the surface stays
+    // clean once it settles too.
+    releaseSectionTwoHistory!();
+    await screen.findByText(/Section 2: Sec 2/);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
   it("does not resurrect a restored draft the student has deliberately cleared, across an unrelated App re-render (#302 review fix, Critical #1)", async () => {
     /* ConversationView keys its "restore once" behavior on OBJECT IDENTITY
        (`restoredDraft === lastRestoredDraftRef.current`), not on the text

@@ -14,9 +14,10 @@ import type { MessageData, RCodeResult } from "@llteacher/ui";
    tracking that classifies a failure as "send" vs "response" half (#96),
    the stopped-message-id UI state and its reset-on-switch semantics, the
    send-half failure record and its retained-but-key-gated semantics across a
-   switch (#418/#419/#420), the retryable error-row derivation
-   (#144/#276/#286), and the translation of UIMessage[] into the design
-   system's MessageData[] (#28/#317/#397).
+   switch (#418/#419/#420), the response-half failure's OWN switch-vs-failure
+   race (#441 -- the same hazard as #420, on the other half of a turn), the
+   retryable error-row derivation (#144/#276/#286), and the translation of
+   UIMessage[] into the design system's MessageData[] (#28/#317/#397).
 
    What deliberately stays OUTSIDE this file, in App.tsx, because it is
    genuinely per-surface rather than incidentally duplicated:
@@ -430,6 +431,22 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
     return res;
   };
 
+  /* #441 (response-half twin of #420's send-half fix): the `resetKey` that
+     was current at the moment the turn NOW in flight was dispatched -- for
+     EVERY turn, a fresh send or a retry, not just the send-half case
+     `pendingSendRef` already tracks. Deliberately NOT cleared on acceptance
+     (unlike `pendingSendRef`, which the whole point of #420's fix was to
+     stop needing past that point) -- a send-half failure is already fully
+     handled by the time `wrappedFetch` resolves, but a response-half
+     failure (the stream itself dying) can only be detected LATER, arbitrarily
+     long after acceptance, which is exactly the window a switch can land in.
+     Only overwritten by a fresh dispatch (`send` below, or the retry
+     handler in `errorRow.onRetry`) or cleared once the current turn
+     resolves (success via "ready", or failure -- see the failure-detection
+     effect below) -- so a stale key from the turn before can never be
+     mistaken for the one now in flight. */
+  const dispatchedKeyRef = useRef<typeof resetKey>(resetKey);
+
   /* #302: @ai-sdk/react's own `shouldRecreateChat` (use-chat.ts) is
      `"id" in options && chat.id !== options.id` -- note the `"id" in
      options` half fires as soon as the KEY is present at all, even with
@@ -566,9 +583,45 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
   useEffect(() => {
     const previous = prevStatusRef.current;
     prevStatusRef.current = status;
+
+    /* #441: a turn that finished successfully needs no dispatch-key record
+       any more. Defensive, mirroring `pendingSendRef`'s own success-path
+       clear in `wrappedFetch` above -- not currently reachable as a live
+       bug (a fresh dispatch always overwrites `dispatchedKeyRef` before it
+       is next read), but leaving a stale key around for longer than
+       needed is the same footgun that comment already warns about. */
+    if (status === "ready" && previous !== "ready") {
+      dispatchedKeyRef.current = undefined;
+    }
+
     // Only the moment a turn FAILS, not every render while it stays failed.
     if (status !== "error" || previous === "error") return;
-    if (acceptedRef.current) return; // response half: the question is persisted, leave it on screen
+    if (acceptedRef.current) {
+      /* #441 (response-half twin of #420's send-half fix): the send was
+         already accepted -- the server persisted the student's turn, and
+         either the reply stream itself died, or this is a `regenerate`
+         retry (which never routes through `send` below, so `acceptedRef`
+         never goes false for it either) -- so there is no un-persisted
+         text to hand back, unlike the send-half branch below. But #420's
+         OWN fix only closed this window on the send half: `surfaceKey`
+         (and the Chat instance recreation with it) doesn't catch up until
+         the NEW surface's history fetch resolves, so if the turn that just
+         failed was dispatched under a DIFFERENT `resetKey` than the one
+         current right now, the student has already switched away from the
+         surface this failure belongs to -- and without clearing here, this
+         still-mounted instance's `status`/`error` would sit at "error" over
+         the new surface, rendering an error row with a live Retry
+         (`errorRow.onRetry`, since `hasSendFailure` is false here) pointed
+         at the OLD surface's `buildRetryBody`/conversationId. One click
+         regenerates a turn into a DIFFERENT section's conversation --
+         reachable more easily than the Critical #420 fixed, since this is
+         a durable button sitting on screen, not a sub-frame timing window. */
+      if (dispatchedKeyRef.current !== resetKey) {
+        clearError();
+      }
+      dispatchedKeyRef.current = undefined;
+      return;
+    }
     const pending = pendingSendRef.current;
     // No record of a send means nothing to hand back -- a turn that reached
     // "error" without `send` having started it is not a send-half failure
@@ -616,6 +669,9 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
          flash on screen. */
       clearError();
     }
+    // #441: this turn's failure has now been fully handled (send-half) --
+    // same resolution-clear as the response-half branch above.
+    dispatchedKeyRef.current = undefined;
   }, [status, aiMessages, setMessages, resetKey, clearError]);
 
   /* #286 (review fix): a stable id per DISTINCT error object, so
@@ -655,7 +711,17 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
           retryAfterSeconds:
             error instanceof ChatResponseError && error.status === 429 ? error.retryAfterSeconds : undefined,
           retryAttemptId: errorAttemptRef.current,
-          onRetry: hasSendFailure ? undefined : () => regenerate({ body: buildRetryBody() }),
+          onRetry: hasSendFailure
+            ? undefined
+            : () => {
+                // #441: `regenerate` dispatches a turn exactly like `send`
+                // does, but bypasses `send` entirely -- record the key it's
+                // dispatched under here too, so the failure-detection
+                // effect's response-half branch has an accurate answer if
+                // THIS retry's own stream later dies after another switch.
+                dispatchedKeyRef.current = resetKey;
+                regenerate({ body: buildRetryBody() });
+              },
         }
       : null);
 
@@ -692,6 +758,9 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
        pre-fill its composer one Enter away from sending it twice. The failed
        surface's actual text would be lost either way. */
     pendingSendRef.current = { text, key: resetKey };
+    // #441: this send's dispatch key, unconditionally overwritten here --
+    // see dispatchedKeyRef's own doc comment above.
+    dispatchedKeyRef.current = resetKey;
     sendMessage({ text }, { body: { ...buildSendBody(), ...extraBody } });
     setStoppedMessageId(null);
   };
