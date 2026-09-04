@@ -206,11 +206,25 @@ function emptyRunSummary(): AutoSubmitRunSummary {
    allocating the budget PER CANDIDATE ACTUALLY CONSUMED, in org order,
    after the batch's SELECT returns each org's real (not pre-guessed)
    candidates -- see autoSubmitOverdueSectionsForScopes. An idle org ahead
-   of a busy one in the same batch costs nothing, so the busy org still gets
-   up to its full OVERDUE_SUBMISSION_CANDIDATE_LIMIT (500) worth of the
+   of a busy one in the same batch costs nothing, so the busy one still gets
+   up to whatever the batch's query actually returned for it worth of the
    remaining budget, exactly as a lone org would pre-#437; only once the
    budget for inserts is actually exhausted does the rest of that batch (and
-   every later one) get deferred. */
+   every later one) get deferred.
+
+   #437 review (a further, separate finding on the same fix): removing the
+   budget-derived narrowing above also removed the only thing that had been
+   bounding the batched SELECT's own result-set size -- see
+   OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT (repositories/submissions.ts)
+   for that fixed, budget-independent cap, and why it is deliberately
+   smaller than the single-org path's OVERDUE_SUBMISSION_CANDIDATE_LIMIT.
+   The two bounds are intentionally separate concerns: this constant caps
+   INSERTS one invocation may attempt (a Cloudflare-subrequest-count bound,
+   spent per candidate actually consumed); that one caps ROWS one SELECT may
+   return (a query-payload/Worker-memory bound, fixed regardless of how much
+   insert budget remains). Deriving either from the other is exactly what
+   caused the two regressions found in review -- keeping them independent is
+   the fix, not a coincidence of how the code happens to be organized. */
 export const AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET = 900;
 
 /* #437: how many organizations one candidate SELECT covers.
@@ -380,15 +394,17 @@ export async function autoSubmitOverdueSectionsForScopes(
 
      #437 review (Important #2): the batch's SELECT is NOT shrunk by
      remaining budget -- it always asks for up to each org's standing
-     OVERDUE_SUBMISSION_CANDIDATE_LIMIT, regardless of how much run budget
-     is left. Only the INSERT side is budget-limited, and it's limited per
-     CANDIDATE ACTUALLY CONSUMED as the inner loop below walks the batch in
-     order, not per org upfront -- see AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET's
-     doc comment for why an earlier, pre-divided version of this silently
-     regressed single-org throughput. The SELECT's own result-set size is
-     unaffected by run budget either way (it was always "unbounded query,
-     bounded in JS", per findOverdueSubmissionCandidates's doc comment; this
-     is the same shape at batch granularity). */
+     per-BATCH candidate cap (findOverdueSubmissionCandidatesForOrgs's own
+     default, OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT -- deliberately
+     smaller than the single-org path's OVERDUE_SUBMISSION_CANDIDATE_LIMIT;
+     see that constant's doc comment for why), regardless of how much run
+     budget is left. Only the INSERT side is budget-limited, and it's
+     limited per CANDIDATE ACTUALLY CONSUMED as the inner loop below walks
+     the batch in order, not per org upfront -- see
+     AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET's doc comment for why an earlier,
+     pre-divided version of this silently regressed single-org throughput,
+     and for why the SELECT's own result-set size is a separate bound from
+     the insert budget rather than derived from it. */
   let i = 0;
   outer: while (i < rotatedScopes.length) {
     const remaining = AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET - subrequestsSpent;
@@ -427,11 +443,12 @@ export async function autoSubmitOverdueSectionsForScopes(
         }
         const scope = batchScopes[j]!;
         // Sliced to what the run can still afford, not to a pre-guessed
-        // share -- an org whose real backlog exceeds this is not "deferred"
-        // (its SELECT already ran, and this run genuinely worked some of
-        // it); the untouched remainder is simply still there, unconsumed,
-        // for the next run, same as OVERDUE_SUBMISSION_CANDIDATE_LIMIT
-        // itself already truncates one org's backlog across runs.
+        // share -- an org whose real candidates (already capped at
+        // OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT by the query itself)
+        // exceed this is not "deferred" (its SELECT already ran, and this
+        // run genuinely worked some of it); the untouched remainder is
+        // simply still there, unconsumed, for the next run -- the same
+        // self-draining property both candidate-limit constants rely on.
         const candidates = (candidatesByOrg.get(scope) ?? []).slice(0, budgetForInserts);
         const orgSummary = await submitCandidates(db, scope, candidates);
         total.candidates += orgSummary.candidates;

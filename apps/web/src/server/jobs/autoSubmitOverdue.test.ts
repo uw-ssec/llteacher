@@ -42,7 +42,15 @@ const {
   AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET,
   AUTO_SUBMIT_ORG_BATCH_SIZE,
 } = await import("./autoSubmitOverdue");
-const { OVERDUE_SUBMISSION_CANDIDATE_LIMIT } = await import("../repositories/submissions");
+// #437 review (the follow-up finding): the batched path's real per-org
+// candidate cap is OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT, a fixed,
+// budget-independent value deliberately smaller than the single-org path's
+// own limit (repositories/submissions.ts's OVERDUE_SUBMISSION_CANDIDATE_LIMIT
+// -- see that constant's sibling doc comment for why). Tests below that
+// stand in for "a fully-backlogged org, as the batched query would actually
+// return it" use this one, so a reader can't mistake a mocked "heavy org"
+// here for something the real repository would ever hand the run loop.
+const { OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT } = await import("../repositories/submissions");
 
 const db = {} as never;
 
@@ -122,7 +130,7 @@ describe("#414 / #437: one batch's failure does not abort the sweep", () => {
 describe("#416 / #437: the run-level subrequest budget", () => {
   it("stops before exceeding the invocation budget instead of failing mid-loop, draining a heavy backlog fast rather than throttling it (#437 review, Important #2)", async () => {
     // Several batches' worth of organizations, every one carrying a full
-    // first-run backlog (OVERDUE_SUBMISSION_CANDIDATE_LIMIT candidates each)
+    // first-run backlog (OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT candidates each)
     // -- the failure shape this budget exists for. The SELECT is no longer
     // narrowed by remaining budget (see AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET's
     // doc comment on Important #2), so every org's mock response is the
@@ -132,7 +140,7 @@ describe("#416 / #437: the run-level subrequest budget", () => {
     listAllOrgScopesMock.mockResolvedValue(orgs(orgCount));
     findOverdueSubmissionCandidatesForOrgsMock.mockImplementation(
       async (_db: unknown, scopes: OrgScope[]) =>
-        new Map(scopes.map((scope) => [scope, candidates(OVERDUE_SUBMISSION_CANDIDATE_LIMIT)])),
+        new Map(scopes.map((scope) => [scope, candidates(OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT)])),
     );
 
     const summary = await autoSubmitOverdueSections(db, { rotationOffset: 0 });
@@ -144,21 +152,31 @@ describe("#416 / #437: the run-level subrequest budget", () => {
       1 + findOverdueSubmissionCandidatesForOrgsMock.mock.calls.length + insertAutoSubmissionMock.mock.calls.length;
     expect(spent).toBeLessThanOrEqual(AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET);
 
-    // The point of the fix: the first org(s) drain up to their own FULL
-    // candidate limit -- not a pre-divided ~8-candidate share of the batch
-    // -- so at least one org's entire backlog clears in this single run,
-    // exactly as a lone backlogged org would have pre-#437.
-    expect(summary.submitted).toBeGreaterThanOrEqual(OVERDUE_SUBMISSION_CANDIDATE_LIMIT);
-    // Only the first batch's SELECT was worth issuing: two heavily-backlogged
-    // orgs already exhaust the budget on inserts before a second batch's
-    // SELECT would have any room left to spend.
+    // The point of the fix: each covered org drains up to its own FULL
+    // per-batch candidate limit -- not a pre-divided ~8-candidate share of
+    // the batch -- so several orgs' entire (batched-path-sized) backlog
+    // clears in this single run, exactly as a lone backlogged org would
+    // have pre-#437.
+    //
+    // Exact numbers, verified against this test's own run (900 budget, 100
+    // batch size, 50-candidate cap): 2 subrequests are spent before any org
+    // (org list + this batch's SELECT), then org 0..16 (17 orgs) each take
+    // their full 50 (850 total, spent reaches 852), org 17 takes whatever's
+    // left (48, spent reaches exactly 900), and org 18 onward -- 300 - 18 =
+    // 282 orgs -- gets deferred. Hardcoded rather than left as a loose
+    // bound because this run is fully deterministic given the constants
+    // above; a future change to any of them should make this assertion
+    // fail loudly rather than silently stop checking anything.
+    expect(summary.submitted).toBe(898);
+    // Only the first batch's SELECT was worth issuing: the budget is spent
+    // entirely on batch 1's own 100 orgs before a second batch would have
+    // any room left.
     expect(findOverdueSubmissionCandidatesForOrgsMock).toHaveBeenCalledTimes(1);
-    // And, because so much of the budget went to draining real backlog
-    // (not spread thin across idle SELECTs), most of the platform is
-    // genuinely deferred to the next run -- the org-reach/throughput
-    // tradeoff the review flagged, now on the "still bounded, still
-    // correct" side of it rather than silently regressed.
-    expect(summary.orgsDeferred).toBeGreaterThan(orgCount - 5);
+    // And the majority of the platform is genuinely deferred to the next
+    // run -- the org-reach/throughput tradeoff the review flagged, now on
+    // the "still bounded, still correct" side of it rather than silently
+    // regressed.
+    expect(summary.orgsDeferred).toBe(282);
   });
 
   it("a heavy-backlog org sharing a batch with mostly-idle ones still drains at full per-org throughput (#437 review, Important #2)", async () => {
@@ -178,7 +196,7 @@ describe("#416 / #437: the run-level subrequest budget", () => {
     findOverdueSubmissionCandidatesForOrgsMock.mockImplementation(async (_db: unknown, scopes: OrgScope[]) => {
       const map = new Map<OrgScope, OverdueSubmissionCandidate[]>();
       for (const scope of scopes) {
-        map.set(scope, scope === heavy ? candidates(OVERDUE_SUBMISSION_CANDIDATE_LIMIT) : []);
+        map.set(scope, scope === heavy ? candidates(OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT) : []);
       }
       return map;
     });
@@ -189,7 +207,7 @@ describe("#416 / #437: the run-level subrequest budget", () => {
     // full throughput for.
     const summary = await autoSubmitOverdueSections(db, { rotationOffset: 0 });
 
-    expect(summary.submitted).toBe(OVERDUE_SUBMISSION_CANDIDATE_LIMIT);
+    expect(summary.submitted).toBe(OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT);
     expect(summary.orgsDeferred).toBe(0);
     expect(findOverdueSubmissionCandidatesForOrgsMock).toHaveBeenCalledTimes(1);
   });

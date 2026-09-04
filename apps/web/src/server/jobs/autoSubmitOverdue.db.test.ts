@@ -28,6 +28,7 @@ import {
   findOverdueSubmissionCandidatesForOrgs,
   insertAutoSubmission,
   submitSection,
+  OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT,
 } from "../repositories/submissions";
 import { getStudentHomeworksForUser } from "../repositories/studentHomeworks";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
@@ -469,6 +470,51 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
       expect(rows[0]!.conversationId).toBe(org.conversationId);
     }
   }, 30_000);
+
+  it("caps each org's candidates at OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT even when multiple orgs in the same batch are simultaneously over it (#437 review, safety cap on batch query size)", async () => {
+    // #437 review: OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT bounds the
+    // batched query's OWN result-set size (Postgres round-trip payload,
+    // Worker memory) -- a FIXED cap, independent of the run's subrequest
+    // budget (that's a separate concern, exercised at the mocked-loop
+    // level in autoSubmitOverdue.test.ts). The test above proves the cap
+    // doesn't get in the way of a healthy batch's org-reach; this one
+    // proves the cap actually holds against real Postgres when MULTIPLE
+    // organizations in the SAME batch are simultaneously over it -- the
+    // realistic worst case the cap exists for (every org in a batch
+    // carrying a full first-run backlog), not just one heavy org among
+    // idle ones.
+    const overCap = OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT + 10;
+    const heavyOrgs = await Promise.all(
+      Array.from({ length: 3 }, async (_, i) => {
+        const org = await seedOrg(`heavy-${i}`);
+        const { sectionId } = await seedHomeworkWithSection(org);
+        await Promise.all(
+          Array.from({ length: overCap }, async (_, s) => {
+            const studentId = await seedStudent(org.courseId, `heavy-${i}-${s}-${crypto.randomUUID()}@test.example`);
+            await seedConversation({ userId: studentId, courseId: org.courseId, sectionId });
+          }),
+        );
+        return org;
+      }),
+    );
+    const scopes = heavyOrgs.map((o) => o.scope);
+
+    const candidatesByOrg = await findOverdueSubmissionCandidatesForOrgs(db, scopes);
+
+    expect(candidatesByOrg.size).toBe(3);
+    for (const org of heavyOrgs) {
+      // Each org genuinely has MORE than the cap's worth of real candidates
+      // (overCap of them), but what the query hands back for it is bounded
+      // at the cap -- for every org in the batch at once, not just
+      // whichever one happened to be queried in isolation.
+      expect(candidatesByOrg.get(org.scope)).toHaveLength(OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT);
+    }
+    // The point of the fix, stated as a single number: the query's TOTAL
+    // result set stays bounded at batchSize * the per-org cap even though
+    // the real backlog behind it (3 * overCap) is larger.
+    const totalReturned = [...candidatesByOrg.values()].reduce((n, c) => n + c.length, 0);
+    expect(totalReturned).toBe(3 * OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT);
+  }, 60_000);
 
   it("counts submitted, skipped and failed accurately across a mixed batch, and logs one summary line", async () => {
     const org = await seedOrg("counts");

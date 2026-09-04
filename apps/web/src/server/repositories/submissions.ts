@@ -766,15 +766,65 @@ export async function findOverdueSubmissionCandidates(
    the number of BATCHES, not the number of tenants.
    -------------------------------------------------------------------------- */
 
+/** #437 review: a SEPARATE safety cap from OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
+ *  and deliberately smaller, for the reason a single org's own cap cannot
+ *  cover: this one bounds a query that can cover MANY organizations at once.
+ *
+ *  findOverdueSubmissionCandidatesForOrgs answers one SELECT for a whole
+ *  batch of organizations (AUTO_SUBMIT_ORG_BATCH_SIZE of them,
+ *  jobs/autoSubmitOverdue.ts). If that query capped each org's rows at the
+ *  single-org limit (500), the realistic worst case -- every organization
+ *  in a batch simultaneously carrying a full first-run backlog, which is
+ *  exactly the scenario OVERDUE_SUBMISSION_CANDIDATE_LIMIT's own doc
+ *  comment says this job must survive, not a hypothetical one -- would ask
+ *  Postgres to return up to `AUTO_SUBMIT_ORG_BATCH_SIZE * 500` = 50,000 rows
+ *  in a single round trip, and hand that result set to a Cloudflare Worker
+ *  to hold in memory and iterate over in JS. That is a real resource cost
+ *  (query latency, response payload size over the neon-http driver's HTTP
+ *  transport, Worker memory) that exists independent of whether any of
+ *  those rows end up inserted this run -- so it cannot be bounded by the
+ *  run's subrequest budget (AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET), which is a
+ *  count of INSERTS attempted, not a bound on SELECT payload size. An
+ *  earlier version of this code conflated the two (narrowed this query by
+ *  remaining budget), which is what caused the throughput regression
+ *  documented on AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET (#437 review, Important
+ *  #2) -- so this cap is fixed and budget-independent, exactly as that
+ *  fix's budget allocation is now row-count-independent.
+ *
+ *  50 * AUTO_SUBMIT_ORG_BATCH_SIZE (100) = 5,000 rows worst case per batch:
+ *  an order of magnitude below the naive 50,000, and about 10x a single
+ *  org's own already-accepted 500-row worst case -- comfortably one
+ *  Postgres round trip and well within a Worker's memory budget. The
+ *  tradeoff: a genuinely first-run-backlogged organization swept through
+ *  the BATCHED path now drains at up to 50/run instead of up to 500/run --
+ *  slower than autoSubmitOverdueSectionsForOrg's single-org path would give
+ *  it, but not starved. Nothing here marks a candidate "seen" (see this
+ *  file's own idempotency notes), so the untouched remainder is simply
+ *  still there, unconsumed, for the next scheduled run -- the same
+ *  self-draining property OVERDUE_SUBMISSION_CANDIDATE_LIMIT already relies
+ *  on for a single org's backlog exceeding 500. */
+export const OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT = 50;
+
 /** Every scoped candidate the current, deliberately unbounded, matching set
  *  produces, grouped by the organization it belongs to, each group capped
- *  at `perOrgLimit` -- the same per-tenant fairness cap the single-org query
- *  enforces, so one org's backlog cannot crowd another org sharing this
- *  batch out of the result entirely just because its due dates happen to
- *  sort later. The caller (autoSubmitOverdueSectionsForScopes) sizes both
- *  the batch and this limit together so the batch's total worst case still
- *  fits the run's remaining subrequest budget -- see its own comment for
- *  that math; this function only needs to guarantee the per-org half of it.
+ *  at `perOrgLimit` (default OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT, NOT
+ *  OVERDUE_SUBMISSION_CANDIDATE_LIMIT -- see that constant's own doc comment
+ *  for why the batched path needs a smaller, separate one) -- the same
+ *  per-tenant fairness cap the single-org query enforces, so one org's
+ *  backlog cannot crowd another org sharing this batch out of the result
+ *  entirely just because its due dates happen to sort later.
+ *
+ *  #437 review (Important): this is a FIXED safety cap on the query's own
+ *  result-set size, independent of the caller's remaining run budget. An
+ *  earlier version narrowed `perOrgLimit` by whatever subrequest budget the
+ *  run had left, which conflated "how many rows may this SELECT return"
+ *  (a resource-cost bound) with "how many inserts may this run afford"
+ *  (a Cloudflare-subrequest-count bound) and caused a throughput regression
+ *  when fixed naively -- see OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT's doc
+ *  comment. The caller (autoSubmitOverdueSectionsForScopes) now allocates
+ *  its insert budget entirely separately, per candidate actually consumed
+ *  from whatever this function returns; it does not pass a budget-derived
+ *  value here.
  *
  *  Grouped by scope (not a flat list) because the run loop's insert phase is
  *  still per-organization -- AutoSubmitOrgSummary, and #414's per-org
@@ -783,7 +833,7 @@ export async function findOverdueSubmissionCandidates(
 export async function findOverdueSubmissionCandidatesForOrgs(
   db: Db,
   scopes: OrgScope[],
-  perOrgLimit: number = OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
+  perOrgLimit: number = OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT,
 ): Promise<Map<OrgScope, OverdueSubmissionCandidate[]>> {
   const result = new Map<OrgScope, OverdueSubmissionCandidate[]>();
   if (scopes.length === 0) return result;
