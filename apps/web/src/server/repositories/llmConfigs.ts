@@ -484,6 +484,6 @@ export async function resolveLlmConfig(
 
    #421: it now walks the same three tiers as lib/llm-config.ts's resolver
    (homework -> course -> org default). Two resolvers over one policy is
-   still the underlying problem -- #431 tracks collapsing them -- but until
+   still the underlying problem -- #443 tracks collapsing them -- but until
    then they agree on WHICH config a section resolves to, which is what the
    draft-grade path was silently getting wrong. */
