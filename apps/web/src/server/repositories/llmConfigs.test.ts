@@ -11,7 +11,7 @@ import {
   sections,
   users,
 } from "../../db/schema";
-import { unsafeOrgScope } from "./scope";
+import { unsafeCourseScope, unsafeOrgScope } from "./scope";
 import {
   cloneLlmConfig,
   createLlmConfig,
@@ -28,7 +28,7 @@ import {
 // `resolveFallbackConfig` used to be) -- these tests moved with it rather
 // than being deleted, since what they pin is a database behaviour, not a
 // module boundary.
-import { resolveFallbackLLMConfig } from "../../lib/llm-config";
+import { resolveFallbackLLMConfig, resolveLLMConfig } from "../../lib/llm-config";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -377,6 +377,99 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
       expect((await resolveLlmConfig(db, unsafeOrgScope(orgId), { homeworkId }))!.id).toBe(
         orgDefault.id,
       );
+    });
+
+    it("#443: agrees with the chat resolver across every valid homework/course override combination", async () => {
+      await reset();
+      const orgDefault = await createLlmConfig(
+        db,
+        unsafeOrgScope(orgId),
+        input({ name: "Org default", isDefault: true }),
+      );
+      const courseOverride = await createLlmConfig(
+        db,
+        unsafeOrgScope(orgId),
+        input({ name: "Course override" }),
+      );
+      const homeworkOverride = await createLlmConfig(
+        db,
+        unsafeOrgScope(orgId),
+        input({ name: "Homework override" }),
+      );
+      const homeworkId = await makeHomework(homeworkOverride.id);
+
+      const cases = [
+        {
+          name: "no homework, no course override",
+          targetHomeworkId: undefined,
+          homeworkLlmConfigId: null,
+          courseLlmConfigId: null,
+          homeworkRowLlmConfigId: null,
+          expectedId: orgDefault.id,
+        },
+        {
+          name: "homework without a pin, no course override",
+          targetHomeworkId: homeworkId,
+          homeworkLlmConfigId: null,
+          courseLlmConfigId: null,
+          homeworkRowLlmConfigId: null,
+          expectedId: orgDefault.id,
+        },
+        {
+          name: "no homework, course override",
+          targetHomeworkId: undefined,
+          homeworkLlmConfigId: null,
+          courseLlmConfigId: courseOverride.id,
+          homeworkRowLlmConfigId: null,
+          expectedId: courseOverride.id,
+        },
+        {
+          name: "homework without a pin, course override",
+          targetHomeworkId: homeworkId,
+          homeworkLlmConfigId: null,
+          courseLlmConfigId: courseOverride.id,
+          homeworkRowLlmConfigId: null,
+          expectedId: courseOverride.id,
+        },
+        {
+          name: "homework pin, no course override",
+          targetHomeworkId: homeworkId,
+          homeworkLlmConfigId: homeworkOverride.id,
+          courseLlmConfigId: null,
+          homeworkRowLlmConfigId: homeworkOverride.id,
+          expectedId: homeworkOverride.id,
+        },
+        {
+          name: "homework pin wins over course override",
+          targetHomeworkId: homeworkId,
+          homeworkLlmConfigId: homeworkOverride.id,
+          courseLlmConfigId: courseOverride.id,
+          homeworkRowLlmConfigId: homeworkOverride.id,
+          expectedId: homeworkOverride.id,
+        },
+      ] as const;
+
+      for (const testCase of cases) {
+        await db
+          .update(homeworks)
+          .set({ llmConfigId: testCase.homeworkRowLlmConfigId })
+          .where(eq(homeworks.id, homeworkId));
+
+        const draftGradeResult = await resolveLlmConfig(db, unsafeOrgScope(orgId), {
+          ...(testCase.targetHomeworkId ? { homeworkId: testCase.targetHomeworkId } : {}),
+          courseLlmConfigId: testCase.courseLlmConfigId,
+        });
+        const chatResult = await resolveLLMConfig(
+          db,
+          unsafeOrgScope(orgId),
+          unsafeCourseScope(courseId),
+          testCase.homeworkLlmConfigId,
+          testCase.courseLlmConfigId,
+        );
+
+        expect(draftGradeResult?.id, testCase.name).toBe(testCase.expectedId);
+        expect(chatResult.id, testCase.name).toBe(testCase.expectedId);
+      }
     });
 
     it("resolves from a section by way of its homework", async () => {
