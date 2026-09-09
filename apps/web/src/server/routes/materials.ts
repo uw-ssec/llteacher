@@ -118,6 +118,14 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
   // Insert first: the row's id is part of the storage key, so a stored
   // object always has a row that names it. The reverse order can strand an
   // object nothing references.
+  //
+  // The row starts PESSIMISTIC -- `pending` even for a format that converted
+  // cleanly -- and is upgraded to `ready` only once the bytes are stored and
+  // the document exists. Writing `ready` up front and rolling back on
+  // failure is only correct while the rollback is: if that delete throws,
+  // the row survives claiming the tutor can use content that was never
+  // stored. Any interruption here instead leaves `pending`, which is
+  // honest, because pending means "not ready" and that is true.
   const material = await insertMaterial(db, scope, {
     title: file.name.replace(/\.[^.]+$/, ""),
     sourceType: sourceTypeFor(file.name),
@@ -126,7 +134,7 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
     byteSize: file.size,
     contentType: file.type || null,
     checksum,
-    status: converted ? "ready" : "pending",
+    status: "pending",
     errorDetail: converted
       ? null
       : `Text extraction for .${extension} is not implemented yet (#40). Upload stored; author a document manually to ground on it.`,
@@ -166,6 +174,9 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
       sourceMaterialId: material.id,
       editedById: membershipId,
     });
+    // Everything the status asserts is now true: the bytes are stored and
+    // the document exists. Only now does it claim `ready`.
+    await setMaterialStatus(db, scope, material.id, "ready", null);
   }
 
   return c.json({ id: material.id, status: converted ? "ready" : "pending" }, 201);
