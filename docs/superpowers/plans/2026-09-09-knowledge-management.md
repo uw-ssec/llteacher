@@ -3422,7 +3422,7 @@ Add `and` to the `drizzle-orm` import.
 import type { Context } from "hono";
 import { makeDb } from "../../db/client";
 import type { AppEnv } from "../context";
-import { courseScopeFromAuthContext } from "../repositories/scope";
+import { courseScopeFromAuthContext, type CourseScope } from "../repositories/scope";
 import {
   deleteMaterial,
   insertMaterial,
@@ -3442,10 +3442,25 @@ import {
 import { logServerError } from "../utils/errors";
 import type { MaterialListPayload } from "@llteacher/ui/api";
 
-function scopeOf(c: Context<AppEnv>) {
+/** Mints through courseScopeFromAuthContext -- the sanctioned path, never
+ *  unsafeCourseScope -- but supplies isInstructorOf as the predicate.
+ *  courseScopeFromAuthContext checks isMemberOf, which a STUDENT satisfies,
+ *  and these routes read a course's entire material library.
+ *
+ *  The registered routes are also wrapped in requireInstructorOf(). That is
+ *  deliberate belt-and-braces: a handler relying on its registration for
+ *  authorization fails open the first time someone registers it without the
+ *  wrapper, and nothing about the handler itself says so.
+ *
+ *  Task 15 extracts this into utils/guards.ts so there is one copy. */
+function scopeOf(c: Context<AppEnv>): CourseScope | null {
   const authContext = c.get("authContext");
   const courseId = c.req.param("courseId");
-  return authContext ? courseScopeFromAuthContext(authContext, courseId) : null;
+  if (!authContext || !courseId) return null;
+  return courseScopeFromAuthContext(
+    { isMemberOf: (id) => authContext.isInstructorOf(id) },
+    courseId,
+  );
 }
 
 async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
@@ -3456,7 +3471,7 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
 }
 
 export async function listMaterialsHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const db = makeDb(c.env.DATABASE_URL);
@@ -3465,7 +3480,7 @@ export async function listMaterialsHandler(c: Context<AppEnv>) {
 }
 
 export async function uploadMaterialHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const form = await c.req.formData();
@@ -3564,7 +3579,7 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
 }
 
 export async function deleteMaterialHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const db = makeDb(c.env.DATABASE_URL);
@@ -3650,7 +3665,7 @@ and to `routes/materials.ts`:
  *  `pending` with the same reason rather than pretending a retry helped,
  *  which is why the response says which happened. */
 export async function reingestMaterialHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const db = makeDb(c.env.DATABASE_URL);
@@ -3759,6 +3774,43 @@ Invoke the `/commit` skill to stage and commit. Suggested message:
 **Interfaces:**
 - Consumes: Task 6's repository, Task 13's `renderIndex`/`appendLogEntry`/`parentDirectories`.
 - Produces: `listDocumentsHandler`, `createDocumentHandler`, `getDocumentHandler`, `updateDocumentHandler`, `deleteDocumentHandler`, `documentLinksHandler`. Task 17 registers them.
+
+- [ ] **Step 0: Extract the instructor-scope guard so there is exactly one**
+
+Task 14 found that the `scopeOf` helper this plan hands to every route file mints a `CourseScope` via `courseScopeFromAuthContext(authContext, courseId)`, which checks only `isMemberOf` — a **student** enrolled in the course satisfies that and would receive a valid scope over the course's whole knowledge base.
+
+The plan then repeated that helper in three route files. Three private copies of a security guard is how one gets fixed and the other two ship broken, which is exactly what nearly happened here. So it lives in one place.
+
+Add to `apps/web/src/server/utils/guards.ts`, beside `requireInstructorOf`, which already owns this concern:
+
+```ts
+/** The instructor-scoped course id for a request, or null.
+ *
+ *  Mints through `courseScopeFromAuthContext` -- the sanctioned path, never
+ *  `unsafeCourseScope` -- but supplies `isInstructorOf` as the predicate.
+ *  That function checks `isMemberOf`, which a STUDENT satisfies; a route
+ *  reading a course's entire knowledge base needs authoring authority.
+ *
+ *  Registered routes are ALSO wrapped in requireInstructorOf(). That is
+ *  deliberate belt-and-braces: a handler that depends on its registration for
+ *  authorization fails open the first time someone registers it without the
+ *  wrapper, and nothing about the handler itself says so. */
+export function instructorScope(c: Context<AppEnv>): CourseScope | null {
+  const authContext = getAuthContext(c);
+  const courseId = c.req.param("courseId");
+  if (!authContext || !courseId) return null;
+  return courseScopeFromAuthContext(
+    { isMemberOf: (id) => authContext.isInstructorOf(id) },
+    courseId,
+  );
+}
+```
+
+Import `CourseScope` and `courseScopeFromAuthContext` from `../repositories/scope`.
+
+Then **migrate `routes/materials.ts`** to import `instructorScope` and delete its private copy, leaving one implementation in the codebase. Its existing tests must pass unchanged — including the ones asserting a student is refused. If they do not, the extraction changed behaviour, and that is a finding to report rather than a test to adjust.
+
+This is a deliberate cross-file change, named here with its reason.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3943,7 +3995,7 @@ import type { Context } from "hono";
 import { z } from "zod";
 import { makeDb } from "../../db/client";
 import type { AppEnv } from "../context";
-import { courseScopeFromAuthContext } from "../repositories/scope";
+import { instructorScope } from "../utils/guards";
 import {
   createDocument,
   deleteDocument,
@@ -3977,18 +4029,12 @@ const updateSchema = z.object({
   body: z.string(),
 });
 
-function scopeOf(c: Context<AppEnv>) {
-  const authContext = c.get("authContext");
-  const courseId = c.req.param("courseId");
-  return authContext ? courseScopeFromAuthContext(authContext, courseId) : null;
-}
-
 function membershipIdOf(c: Context<AppEnv>, courseId: string): string | null {
   return c.get("authContext")?.memberships.find((m) => m.courseId === courseId)?.id ?? null;
 }
 
 export async function listDocumentsHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const documents = await listDocuments(makeDb(c.env.DATABASE_URL), scope);
@@ -3996,7 +4042,7 @@ export async function listDocumentsHandler(c: Context<AppEnv>) {
 }
 
 export async function createDocumentHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const parsed = createSchema.safeParse(await c.req.json().catch(() => null));
@@ -4048,7 +4094,7 @@ export async function createDocumentHandler(c: Context<AppEnv>) {
 }
 
 export async function getDocumentHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const document = await getDocument(
@@ -4060,7 +4106,7 @@ export async function getDocumentHandler(c: Context<AppEnv>) {
 }
 
 export async function updateDocumentHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const parsed = updateSchema.safeParse(await c.req.json().catch(() => null));
@@ -4076,7 +4122,7 @@ export async function updateDocumentHandler(c: Context<AppEnv>) {
 }
 
 export async function deleteDocumentHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const removed = await deleteDocument(
@@ -4088,7 +4134,7 @@ export async function deleteDocumentHandler(c: Context<AppEnv>) {
 }
 
 export async function documentLinksHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const links = await getDocumentLinks(
@@ -4381,7 +4427,7 @@ import type { Context } from "hono";
 import { z } from "zod";
 import { makeDb } from "../../db/client";
 import type { AppEnv } from "../context";
-import { courseScopeFromAuthContext } from "../repositories/scope";
+import { instructorScope } from "../utils/guards";
 import {
   attachCollection,
   createCollection,
@@ -4427,25 +4473,19 @@ const scopeSchema = z.object({
   ]),
 });
 
-function scopeOf(c: Context<AppEnv>) {
-  const authContext = c.get("authContext");
-  const courseId = c.req.param("courseId");
-  return authContext ? courseScopeFromAuthContext(authContext, courseId) : null;
-}
-
 function membershipIdOf(c: Context<AppEnv>, courseId: string): string | null {
   return c.get("authContext")?.memberships.find((m) => m.courseId === courseId)?.id ?? null;
 }
 
 export async function listCollectionsHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
   const collections = await listCollections(makeDb(c.env.DATABASE_URL), scope);
   return c.json({ collections } satisfies CollectionListPayload);
 }
 
 export async function createCollectionHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const parsed = writeSchema.safeParse(await c.req.json().catch(() => null));
@@ -4467,7 +4507,7 @@ export async function createCollectionHandler(c: Context<AppEnv>) {
 }
 
 export async function updateCollectionHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const parsed = writeSchema.partial().safeParse(await c.req.json().catch(() => null));
@@ -4483,7 +4523,7 @@ export async function updateCollectionHandler(c: Context<AppEnv>) {
 }
 
 export async function deleteCollectionHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const removed = await deleteCollection(
@@ -4495,7 +4535,7 @@ export async function deleteCollectionHandler(c: Context<AppEnv>) {
 }
 
 export async function setCollectionItemsHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const parsed = itemsSchema.safeParse(await c.req.json().catch(() => null));
@@ -4513,14 +4553,14 @@ export async function setCollectionItemsHandler(c: Context<AppEnv>) {
 }
 
 export async function listAttachmentsHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
   const attachments = await listAttachments(makeDb(c.env.DATABASE_URL), scope);
   return c.json({ attachments } satisfies AttachmentListPayload);
 }
 
 export async function attachCollectionHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const parsed = scopeSchema.safeParse(await c.req.json().catch(() => null));
@@ -4544,7 +4584,7 @@ export async function attachCollectionHandler(c: Context<AppEnv>) {
 }
 
 export async function detachCollectionHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const ok = await detachCollection(
@@ -4556,7 +4596,7 @@ export async function detachCollectionHandler(c: Context<AppEnv>) {
 }
 
 export async function resolveKnowledgeHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const db = makeDb(c.env.DATABASE_URL);
