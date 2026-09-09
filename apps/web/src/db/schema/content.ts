@@ -63,6 +63,34 @@ export const sectionTypeEnum = pgEnum("section_type", [
 // need a column-type migration to add.
 export const hintActionEnum = pgEnum("hint_action", ["request_hint"]);
 
+// Extraction lifecycle of an uploaded artifact: has this file been turned
+// into knowledge documents yet? Distinct from a document's index_status,
+// which asks whether that document has been chunked. A hand-authored
+// document has the second and not the first.
+export const materialStatusEnum = pgEnum("material_status", [
+  "pending",
+  "processing",
+  "ready",
+  "failed",
+]);
+
+// OKF reserves index.md (directory listing) and log.md (update history);
+// every other .md file is a concept. Storing the kind lets the CHECK
+// constraints below reject a concept named `index` or `log`.
+export const knowledgeDocumentKindEnum = pgEnum("knowledge_document_kind", [
+  "concept",
+  "index",
+  "log",
+]);
+
+// Chunking lifecycle of one document. #40 owns the transition to `indexed`;
+// until then every document sits at `pending`.
+export const knowledgeIndexStatusEnum = pgEnum("knowledge_index_status", [
+  "pending",
+  "indexed",
+  "failed",
+]);
+
 // ---------- LLMConfig ----------
 // Per-Organization pool of model configurations. is_default is per-org; at
 // most one row per org may have is_default = true (enforced via partial
@@ -693,6 +721,91 @@ export const agentDefinitionsRelations = relations(
     defaultLlmConfig: one(llmConfigs, {
       fields: [agentDefinitions.defaultLlmConfigId],
       references: [llmConfigs.id],
+    }),
+  }),
+);
+
+// ---------- KnowledgeDocument ----------
+// One .md file in the course's OKF bundle. `path` is the OKF concept ID --
+// the file path with the .md suffix removed -- and is therefore identity:
+// `stats/regression.md` is stored as `stats/regression`. Directories are
+// implicit in paths, exactly as the format has them, so creating a folder
+// means creating its `<dir>/index` row; that is what keeps an empty folder
+// alive across a reload.
+
+export const knowledgeDocuments = pgTable(
+  "knowledge_documents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    kind: knowledgeDocumentKindEnum("kind").notNull().default("concept"),
+    /** The one always-required OKF frontmatter key. Null only on index/log
+     *  rows, which are not concepts; the CHECK below enforces that. */
+    type: text("type"),
+    title: text("title"),
+    description: text("description"),
+    tags: jsonb("tags").$type<string[] | null>(),
+    /** Non-reserved frontmatter keys, preserved verbatim so a round-trip
+     *  through this console does not silently drop a producer's metadata. */
+    frontmatter: jsonb("frontmatter"),
+    body: text("body").notNull().default(""),
+    /** The extractor's output, kept so "revert to extraction" is possible
+     *  after an instructor edits. Null for hand-authored documents. */
+    bodyOriginal: text("body_original"),
+    indexStatus: knowledgeIndexStatusEnum("index_status")
+      .notNull()
+      .default("pending"),
+    sourceMaterialId: uuid("source_material_id").references(
+      () => courseMaterials.id,
+      { onDelete: "set null" },
+    ),
+    editedById: uuid("edited_by_id").references(() => courseMemberships.id, {
+      onDelete: "set null",
+    }),
+    editedAt: timestamp("edited_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    // Paths are identity. This index also serves the prefix queries that
+    // back directory listing and subtree selection (`path LIKE 'dir/%'`):
+    // course_id equality narrows to one course's bundle first, which is a
+    // few hundred rows at most, so a plain btree is enough and a
+    // text_pattern_ops index would be machinery for nothing.
+    uniqueIndex("knowledge_documents_course_path_uq").on(t.courseId, t.path),
+    index("knowledge_documents_source_material_idx").on(t.sourceMaterialId),
+    check(
+      "knowledge_documents_concept_type_chk",
+      sql`${t.kind} <> 'concept' OR ${t.type} IS NOT NULL`,
+    ),
+    // OKF: index.md and log.md "MUST NOT be used for concept documents".
+    // split_part with a negative index requires PG 14+; Neon is 17.
+    check(
+      "knowledge_documents_reserved_basename_chk",
+      sql`(${t.kind} = 'concept' AND split_part(${t.path}, '/', -1) NOT IN ('index', 'log'))
+       OR (${t.kind} = 'index'   AND split_part(${t.path}, '/', -1) = 'index')
+       OR (${t.kind} = 'log'     AND ${t.path} = 'log')`,
+    ),
+  ],
+);
+
+export const knowledgeDocumentsRelations = relations(
+  knowledgeDocuments,
+  ({ one }) => ({
+    course: one(courses, {
+      fields: [knowledgeDocuments.courseId],
+      references: [courses.id],
+    }),
+    sourceMaterial: one(courseMaterials, {
+      fields: [knowledgeDocuments.sourceMaterialId],
+      references: [courseMaterials.id],
     }),
   }),
 );
