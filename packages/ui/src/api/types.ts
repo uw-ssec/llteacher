@@ -222,3 +222,127 @@ export interface ExportRequestBody {
    *  grade-dispute case. */
   studentId?: string;
 }
+
+/* ---------- Knowledge management (#42) ---------- */
+
+export type MaterialStatus = "pending" | "processing" | "ready" | "failed";
+export type MaterialSourceType = "pdf" | "slides" | "transcript" | "syllabus" | "other";
+export type KnowledgeIndexStatus = "pending" | "indexed" | "failed";
+export type KnowledgeDocumentKind = "concept" | "index" | "log";
+
+export interface MaterialPayload {
+  id: string;
+  title: string;
+  sourceType: MaterialSourceType;
+  originalFilename: string | null;
+  byteSize: number | null;
+  contentType: string | null;
+  status: MaterialStatus;
+  errorDetail: string | null;
+  uploadedAt: IsoDateTime;
+}
+
+export interface MaterialListPayload {
+  materials: MaterialPayload[];
+}
+
+export interface KnowledgeDocumentSummaryPayload {
+  id: string;
+  path: string;
+  kind: KnowledgeDocumentKind;
+  type: string | null;
+  title: string | null;
+  description: string | null;
+  tags: string[] | null;
+  indexStatus: KnowledgeIndexStatus;
+  sourceMaterialId: string | null;
+  updatedAt: IsoDateTime;
+}
+
+export interface KnowledgeDocumentListPayload {
+  documents: KnowledgeDocumentSummaryPayload[];
+}
+
+export interface KnowledgeDocumentPayload extends KnowledgeDocumentSummaryPayload {
+  body: string;
+  bodyOriginal: string | null;
+  frontmatter: unknown;
+  editedAt: IsoDateTime | null;
+}
+
+export interface KnowledgeDocumentWriteBody {
+  path?: string;
+  type?: string | null;
+  title?: string | null;
+  description?: string | null;
+  tags?: string[] | null;
+  body?: string;
+}
+
+export interface DocumentLinksPayload {
+  outbound: Array<{
+    rawHref: string;
+    targetPath: string;
+    resolvedDocumentId: string | null;
+    isBroken: boolean;
+  }>;
+  backlinks: Array<{ sourceDocumentId: string; sourcePath: string }>;
+}
+
+export interface CollectionPayload {
+  id: string;
+  name: string;
+  description: string | null;
+  documentCount: number;
+  directoryCount: number;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+}
+
+export interface CollectionListPayload {
+  collections: CollectionPayload[];
+}
+
+export interface CollectionWriteBody {
+  name: string;
+  description?: string | null;
+}
+
+/** Exactly one field set, mirroring the collection_items CHECK. */
+export type CollectionItemBody =
+  | { documentId: string; directoryPath?: never }
+  | { directoryPath: string; documentId?: never };
+
+export interface CollectionItemsWriteBody {
+  items: CollectionItemBody[];
+}
+
+export type AttachmentScopePayload =
+  | { kind: "course"; courseId: string }
+  | { kind: "homework"; homeworkId: string }
+  | { kind: "section"; sectionId: string }
+  | { kind: "llmConfig"; llmConfigId: string };
+
+export interface AttachmentPayload {
+  id: string;
+  collectionId: string;
+  scope: AttachmentScopePayload;
+}
+
+export interface AttachmentListPayload {
+  attachments: AttachmentPayload[];
+}
+
+export interface AttachmentWriteBody {
+  scope: AttachmentScopePayload;
+}
+
+/** What the tutor will actually retrieve from, and which level decided it.
+ *  `level` is surfaced in the UI so an instructor can see *why* — an
+ *  override that silently drops course readings is the failure mode this
+ *  field exists to prevent. */
+export interface ResolutionPayload {
+  level: "section" | "homework" | "course" | "llmConfig" | "none";
+  collectionIds: string[];
+  documents: Array<{ id: string; path: string; indexStatus: KnowledgeIndexStatus }>;
+}
