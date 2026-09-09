@@ -24,10 +24,12 @@ import {
   createCollection,
   deleteCollection,
   detachCollection,
+  homeworkBelongsToCourse,
   listAttachments,
   listCollections,
   listDocumentsInCollections,
   resolveForTarget,
+  sectionBelongsToCourse,
   setCollectionItems,
   updateCollection,
 } from "../repositories/knowledgeCollections";
@@ -161,6 +163,8 @@ export async function attachCollectionHandler(c: Context<AppEnv>) {
   if (!parsed.success) return c.json({ error: "Invalid attachment scope." }, 400);
   const attachmentScope = parsed.data.scope;
 
+  const db = makeDb(c.env.DATABASE_URL);
+
   // A course-scoped attachment may only name THIS course. Without this the
   // scope column would be a caller-supplied course id that the tenancy guard
   // on course_id never sees.
@@ -168,7 +172,28 @@ export async function attachCollectionHandler(c: Context<AppEnv>) {
     return c.json({ error: "A course attachment must name this course." }, 400);
   }
 
-  const ok = await attachCollection(makeDb(c.env.DATABASE_URL), scope, collectionId, attachmentScope);
+  // homework and section ids are foreign keys, but a foreign key only
+  // proves the row exists SOMEWHERE -- not that it belongs to this course.
+  // Every read path today filters by collection_attachments.course_id (the
+  // acting course), so a mis-scoped row is inert rather than exposed -- but
+  // it is still wrong data sitting in an authorization-adjacent table, and
+  // the day something resolves by homeworkId/sectionId alone, that row
+  // activates.
+  if (attachmentScope.kind === "homework") {
+    const belongs = await homeworkBelongsToCourse(db, scope, attachmentScope.homeworkId);
+    if (!belongs) return c.json({ error: "That homework does not belong to this course." }, 400);
+  }
+  if (attachmentScope.kind === "section") {
+    const belongs = await sectionBelongsToCourse(db, scope, attachmentScope.sectionId);
+    if (!belongs) return c.json({ error: "That section does not belong to this course." }, 400);
+  }
+  // llmConfig is deliberately NOT checked here: llm_configs is scoped by
+  // organization_id, not course_id -- it has no course to belong to. A
+  // tutor config is meant to be shared across a course's siblings, so a
+  // course-equality check would be encoding a misunderstanding of the data
+  // model, not closing a gap.
+
+  const ok = await attachCollection(db, scope, collectionId, attachmentScope);
   return ok ? c.body(null, 204) : c.json({ error: "No such collection." }, 404);
 }
 

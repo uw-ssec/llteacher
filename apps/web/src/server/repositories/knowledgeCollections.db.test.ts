@@ -1,16 +1,18 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
-import { courseMemberships, courses, organizations, users } from "../../db/schema";
+import { courseMemberships, courses, homeworks, organizations, sections, users } from "../../db/schema";
 import { unsafeCourseScope, type CourseScope } from "./scope";
 import { createDocument } from "./knowledgeDocuments";
 import {
   attachCollection,
   createCollection,
   deleteCollection,
+  homeworkBelongsToCourse,
   listCollections,
   listDocumentsInCollections,
   resolveForTarget,
+  sectionBelongsToCourse,
   setCollectionItems,
 } from "./knowledgeCollections";
 
@@ -30,6 +32,9 @@ describe.skipIf(!DATABASE_URL)("knowledgeCollections repository", () => {
   let courseA: CourseScope;
   let courseB: CourseScope;
   let membershipA: string;
+  let homeworkA: string;
+  let homeworkB: string;
+  let sectionA: string;
 
   beforeAll(async () => {
     db = makeNodeDb(DATABASE_URL!);
@@ -60,6 +65,34 @@ describe.skipIf(!DATABASE_URL)("knowledgeCollections repository", () => {
       .values({ userId: user.id, courseId: courseA, role: "instructor" })
       .returning({ id: courseMemberships.id });
     membershipA = m.id;
+
+    const [hwA, hwB] = await db
+      .insert(homeworks)
+      .values([
+        {
+          courseId: courseA,
+          createdById: membershipA,
+          title: "HW A",
+          description: "",
+          dueDate: new Date(),
+        },
+        {
+          courseId: courseB,
+          createdById: membershipA,
+          title: "HW B",
+          description: "",
+          dueDate: new Date(),
+        },
+      ])
+      .returning({ id: homeworks.id });
+    homeworkA = hwA.id;
+    homeworkB = hwB.id;
+
+    const [secA] = await db
+      .insert(sections)
+      .values({ homeworkId: homeworkA, order: 1, title: "Sec A", content: "" })
+      .returning({ id: sections.id });
+    sectionA = secA.id;
   });
 
   it("creates and lists a collection", async () => {
@@ -149,5 +182,21 @@ describe.skipIf(!DATABASE_URL)("knowledgeCollections repository", () => {
       createdById: membershipA,
     });
     expect(await deleteCollection(db, courseB, inA.id)).toBe(false);
+  });
+
+  it("confirms a homework that belongs to the acting course", async () => {
+    expect(await homeworkBelongsToCourse(db, courseA, homeworkA)).toBe(true);
+  });
+
+  it("refuses a homework that belongs to a different course", async () => {
+    expect(await homeworkBelongsToCourse(db, courseA, homeworkB)).toBe(false);
+  });
+
+  it("confirms a section whose homework belongs to the acting course", async () => {
+    expect(await sectionBelongsToCourse(db, courseA, sectionA)).toBe(true);
+  });
+
+  it("refuses a section whose homework belongs to a different course", async () => {
+    expect(await sectionBelongsToCourse(db, courseB, sectionA)).toBe(false);
   });
 });

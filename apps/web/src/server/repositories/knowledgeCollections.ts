@@ -13,8 +13,10 @@ import type { Db } from "../../db/client";
 import {
   collectionAttachments,
   collectionItems,
+  homeworks,
   knowledgeDocuments,
   materialCollections,
+  sections,
 } from "../../db/schema";
 import {
   resolveCollections,
@@ -301,6 +303,41 @@ export async function listAttachments(
     collectionId: r.collectionId,
     scope: rowToScope(r),
   }));
+}
+
+/** Tenancy check for a homework-scoped attachment. `homeworks` carries its
+ *  own `course_id`, so this is a direct lookup: does the referenced
+ *  homework belong to the acting course? The foreign key on
+ *  collection_attachments.scope_homework_id only proves the homework
+ *  exists SOMEWHERE -- never that it belongs here. */
+export async function homeworkBelongsToCourse(
+  db: Db,
+  scope: CourseScope,
+  homeworkId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: homeworks.id })
+    .from(homeworks)
+    .where(and(eq(homeworks.id, homeworkId), eq(homeworks.courseId, scope)))
+    .limit(1);
+  return !!row;
+}
+
+/** Tenancy check for a section-scoped attachment. `sections` has no
+ *  `course_id` of its own -- only `homework_id` -- so the course is reached
+ *  through the one join to `homeworks`, which does carry it. */
+export async function sectionBelongsToCourse(
+  db: Db,
+  scope: CourseScope,
+  sectionId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: sections.id })
+    .from(sections)
+    .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
+    .where(and(eq(sections.id, sectionId), eq(homeworks.courseId, scope)))
+    .limit(1);
+  return !!row;
 }
 
 export async function attachCollection(

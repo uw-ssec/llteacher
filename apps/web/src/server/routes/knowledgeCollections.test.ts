@@ -31,6 +31,8 @@ const COL_ID = "33333333-2222-4333-8444-555555555555";
 const ATTACHMENT_ID = "44444444-2222-4333-8444-555555555555";
 const DOC_ID = "55555555-2222-4333-8444-555555555555";
 const HOMEWORK_ID = "66666666-2222-4333-8444-555555555555";
+const SECTION_ID = "77777777-2222-4333-8444-555555555555";
+const LLM_CONFIG_ID = "88888888-2222-4333-8444-555555555555";
 const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
 
 const repo = {
@@ -42,6 +44,8 @@ const repo = {
   listAttachments: vi.fn(),
   attachCollection: vi.fn(),
   detachCollection: vi.fn(),
+  homeworkBelongsToCourse: vi.fn(),
+  sectionBelongsToCourse: vi.fn(),
   resolveForTarget: vi.fn(),
   listDocumentsInCollections: vi.fn(),
 };
@@ -55,6 +59,8 @@ vi.mock("../repositories/knowledgeCollections", () => ({
   listAttachments: (...a: unknown[]) => repo.listAttachments(...a),
   attachCollection: (...a: unknown[]) => repo.attachCollection(...a),
   detachCollection: (...a: unknown[]) => repo.detachCollection(...a),
+  homeworkBelongsToCourse: (...a: unknown[]) => repo.homeworkBelongsToCourse(...a),
+  sectionBelongsToCourse: (...a: unknown[]) => repo.sectionBelongsToCourse(...a),
   resolveForTarget: (...a: unknown[]) => repo.resolveForTarget(...a),
   listDocumentsInCollections: (...a: unknown[]) => repo.listDocumentsInCollections(...a),
 }));
@@ -104,6 +110,8 @@ beforeEach(() => {
   repo.listAttachments.mockResolvedValue([]);
   repo.attachCollection.mockResolvedValue(true);
   repo.detachCollection.mockResolvedValue(true);
+  repo.homeworkBelongsToCourse.mockResolvedValue(true);
+  repo.sectionBelongsToCourse.mockResolvedValue(true);
   repo.resolveForTarget.mockResolvedValue({ level: "course", collectionIds: [COL_ID] });
   repo.listDocumentsInCollections.mockResolvedValue([
     { id: "d1", path: "a", indexStatus: "pending" },
@@ -246,13 +254,73 @@ describe("collection routes", () => {
     });
   });
 
-  it("accepts a homework-scoped attachment without a course-id check", async () => {
+  it("accepts a homework-scoped attachment when the homework belongs to this course", async () => {
     const res = await app().request(
       `${base}/collections/${COL_ID}/attachments`,
       json({ scope: { kind: "homework", homeworkId: HOMEWORK_ID } }),
       TEST_ENV,
     );
     expect(res.status).toBe(204);
+    expect(repo.homeworkBelongsToCourse).toHaveBeenCalledWith({}, COURSE_ID, HOMEWORK_ID);
+    expect(repo.attachCollection).toHaveBeenCalledWith({}, COURSE_ID, COL_ID, {
+      kind: "homework",
+      homeworkId: HOMEWORK_ID,
+    });
+  });
+
+  it("rejects a homework-scoped attachment when the homework belongs to a different course, without writing", async () => {
+    repo.homeworkBelongsToCourse.mockResolvedValue(false);
+    const res = await app().request(
+      `${base}/collections/${COL_ID}/attachments`,
+      json({ scope: { kind: "homework", homeworkId: HOMEWORK_ID } }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+    expect(repo.attachCollection).not.toHaveBeenCalled();
+  });
+
+  it("accepts a section-scoped attachment when the section belongs to this course", async () => {
+    const res = await app().request(
+      `${base}/collections/${COL_ID}/attachments`,
+      json({ scope: { kind: "section", sectionId: SECTION_ID } }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(204);
+    expect(repo.sectionBelongsToCourse).toHaveBeenCalledWith({}, COURSE_ID, SECTION_ID);
+    expect(repo.attachCollection).toHaveBeenCalledWith({}, COURSE_ID, COL_ID, {
+      kind: "section",
+      sectionId: SECTION_ID,
+    });
+  });
+
+  it("rejects a section-scoped attachment when the section belongs to a different course, without writing", async () => {
+    repo.sectionBelongsToCourse.mockResolvedValue(false);
+    const res = await app().request(
+      `${base}/collections/${COL_ID}/attachments`,
+      json({ scope: { kind: "section", sectionId: SECTION_ID } }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+    expect(repo.attachCollection).not.toHaveBeenCalled();
+  });
+
+  // Pinned deliberately: llm_configs is organization-scoped, not
+  // course-scoped, and a shared org-level tutor config legitimately attaches
+  // to many courses. This must keep succeeding with NO course check -- a
+  // "fix" that made this symmetric with homework/section would be wrong.
+  it("accepts an llmConfig-scoped attachment with no course check at all", async () => {
+    const res = await app().request(
+      `${base}/collections/${COL_ID}/attachments`,
+      json({ scope: { kind: "llmConfig", llmConfigId: LLM_CONFIG_ID } }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(204);
+    expect(repo.homeworkBelongsToCourse).not.toHaveBeenCalled();
+    expect(repo.sectionBelongsToCourse).not.toHaveBeenCalled();
+    expect(repo.attachCollection).toHaveBeenCalledWith({}, COURSE_ID, COL_ID, {
+      kind: "llmConfig",
+      llmConfigId: LLM_CONFIG_ID,
+    });
   });
 
   it("rejects an attachment scope of an unknown kind", async () => {
