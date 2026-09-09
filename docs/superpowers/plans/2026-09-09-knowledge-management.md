@@ -2637,6 +2637,32 @@ Second line.`;
     expect(convertToOkf("syllabus.txt", bytes("Week 1"))?.type).toBe("note");
   });
 
+  /* The four cases below are regressions. The first two were silently deleting
+     an instructor's words: a bare /-->/ test matched a spoken "A --> B", and
+     /^\d+$/ matched a cue whose entire spoken text was a number. Losing a
+     lecturer's sentence is a far worse failure than keeping a stray timestamp,
+     so these pin the direction as much as the behaviour. */
+
+  it("keeps a spoken line that happens to contain an arrow", () => {
+    const vtt = "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nthe process goes A --> B";
+    expect(convertToOkf("a.vtt", bytes(vtt))?.markdown).toBe("the process goes A --> B");
+  });
+
+  it("keeps a spoken line that is only a number", () => {
+    const srt = "1\n00:00:01,000 --> 00:00:04,000\n42\n\n2\n00:00:04,000 --> 00:00:07,000\nThat was the answer.";
+    expect(convertToOkf("a.srt", bytes(srt))?.markdown).toBe("42\n\nThat was the answer.");
+  });
+
+  it("drops WebVTT NOTE blocks rather than reading them as speech", () => {
+    const vtt = "WEBVTT\n\nNOTE a translator comment\n\n00:00:01.000 --> 00:00:04.000\nWelcome.";
+    expect(convertToOkf("a.vtt", bytes(vtt))?.markdown).toBe("Welcome.");
+  });
+
+  it("drops a named WebVTT cue identifier, not just a numeric one", () => {
+    const vtt = "WEBVTT\n\nintro\n00:00:01.000 --> 00:00:04.000\nWelcome.";
+    expect(convertToOkf("a.vtt", bytes(vtt))?.markdown).toBe("Welcome.");
+  });
+
   it("returns null for formats the pipeline cannot extract yet", () => {
     expect(convertToOkf("paper.pdf", bytes("%PDF-1.7"))).toBeNull();
     expect(convertToOkf("deck.pptx", bytes("PK"))).toBeNull();
@@ -2728,33 +2754,60 @@ export function sourceTypeFor(
   }
 }
 
-const TIMESTAMP_RE = /-->/;
-const CUE_NUMBER_RE = /^\d+$/;
+/** A real cue-timing line, anchored at line start: `00:00:01.000 --> 00:00:04.000`
+ *  with optional hours and optional trailing cue settings. WebVTT uses `.` for
+ *  the fraction, SubRip uses `,`.
+ *
+ *  Anchoring is the whole point. A bare /-->/ test also matches an instructor
+ *  SAYING "the process goes A --> B", and that sentence was being deleted from
+ *  the transcript with no error and no trace. Dropping a lecturer's words is a
+ *  far worse failure than keeping a stray timestamp, so this errs toward
+ *  keeping text. */
+const TIMESTAMP_RE =
+  /^\s*(?:\d{1,3}:)?\d{1,2}:\d{2}[.,]\d{1,3}\s*-->\s*(?:\d{1,3}:)?\d{1,2}:\d{2}[.,]\d{1,3}/;
+
+/** WebVTT blocks that are metadata, not speech. Their contents are notes,
+ *  styling, or region definitions and must not reach the prose. */
+const METADATA_BLOCK_RE = /^(?:NOTE|STYLE|REGION)\b/;
+
 /** WebVTT speaker voice spans: <v Sara>text</v>. */
 const VOICE_RE = /<\/?v[^>]*>/g;
 
-/** Both WebVTT and SubRip are: optional cue id, a timestamp line, then text,
- *  separated by blank lines. Dropping the machinery and keeping the text is
- *  the whole conversion. */
+/** Both WebVTT and SubRip are blocks of: an OPTIONAL cue identifier, a timing
+ *  line, then the spoken text.
+ *
+ *  A cue identifier is recognised STRUCTURALLY -- it is whatever sits directly
+ *  above a timing line -- rather than by pattern. Matching /^\d+$/ instead was
+ *  deleting a cue whose entire spoken text was a number ("42"), and it could
+ *  never have handled WebVTT's named identifiers at all. Position identifies a
+ *  cue id; shape does not. */
 function transcriptToProse(raw: string): string {
   const blocks = raw.replace(/\r\n/g, "\n").split(/\n{2,}/);
   const paragraphs: string[] = [];
 
   for (const block of blocks) {
-    const lines = block
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(
-        (line) =>
-          line !== "" &&
-          line !== "WEBVTT" &&
-          !TIMESTAMP_RE.test(line) &&
-          !CUE_NUMBER_RE.test(line),
-      )
+    let lines = block.split("\n").map((line) => line.trim()).filter((l) => l !== "");
+    if (lines.length === 0) continue;
+
+    // The file header, with or without a title: `WEBVTT` / `WEBVTT - Lecture 1`.
+    if (/^WEBVTT\b/.test(lines[0])) lines = lines.slice(1);
+    if (lines.length === 0) continue;
+
+    // NOTE / STYLE / REGION blocks are metadata; drop the whole block.
+    if (METADATA_BLOCK_RE.test(lines[0])) continue;
+
+    // Strip the timing line, plus a cue identifier if one sits above it.
+    if (TIMESTAMP_RE.test(lines[0])) {
+      lines = lines.slice(1);
+    } else if (lines.length > 1 && TIMESTAMP_RE.test(lines[1])) {
+      lines = lines.slice(2);
+    }
+
+    const text = lines
       .map((line) => line.replace(VOICE_RE, "").trim())
       .filter((line) => line !== "");
 
-    if (lines.length > 0) paragraphs.push(lines.join(" "));
+    if (text.length > 0) paragraphs.push(text.join(" "));
   }
 
   return paragraphs.join("\n\n");
@@ -2793,7 +2846,7 @@ export function convertToOkf(
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `cd apps/web && npm test -- src/server/knowledge/convert.test.ts`
-Expected: PASS, 13 tests.
+Expected: PASS, 17 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -2863,6 +2916,27 @@ describe("appendLogEntry", () => {
     expect(appendLogEntry(existing, "2026-09-09", "**Update** Edited a.")).toBe(
       "# Log\n\n## 2026-09-09\n\n**Update** Edited a.\n\n## 2026-09-08\n\n**Creation** Added a.\n",
     );
+  });
+
+  /* The two cases below are the ones the original splice implementation got
+     wrong. They are latent while entries arrive in real time, and reachable the
+     moment anything backfills a historical date. */
+
+  it("files a middle date in order rather than assuming it is newest", () => {
+    const existing =
+      "# Log\n\n## 2026-09-09\n\nnewest.\n\n## 2026-09-07\n\noldest.\n";
+    expect(appendLogEntry(existing, "2026-09-08", "middle.")).toBe(
+      "# Log\n\n## 2026-09-09\n\nnewest.\n\n## 2026-09-08\n\nmiddle.\n\n## 2026-09-07\n\noldest.\n",
+    );
+  });
+
+  it("keeps the blank line before the next heading when appending to a middle section", () => {
+    const existing =
+      "# Log\n\n## 2026-09-09\n\nfirst.\n\n## 2026-09-07\n\noldest.\n";
+    const result = appendLogEntry(existing, "2026-09-09", "second.");
+    expect(result).toContain("first.\nsecond.\n\n## 2026-09-07");
+    // Malformed markdown would run the entry straight into the next heading.
+    expect(result).not.toContain("second.\n## 2026-09-07");
   });
 });
 
@@ -2938,40 +3012,67 @@ export function renderIndex(directoryPath: string, entries: IndexEntry[]): strin
   return `## ${heading}\n\n${lines.join("\n")}\n`;
 }
 
-const LOG_HEADER = "# Log\n";
+const LOG_HEADER = "# Log";
+
+interface LogSection {
+  date: string;
+  entries: string[];
+}
+
+/** Parsed rather than spliced. The previous implementation inserted a new
+ *  heading directly beneath "# Log" on the assumption that an unseen date must
+ *  be the newest — so backfilling 09-08 into a log holding 09-09 and 09-07
+ *  produced 09-08, 09-09, 09-07, violating OKF's newest-first rule. A
+ *  same-date append also ate the blank line before the following heading.
+ *
+ *  Both were splice bugs, so the splice is gone: parse to sections, edit the
+ *  structure, re-render. Ordering and spacing then hold by construction rather
+ *  than by getting an index right. */
+function parseLog(existing: string): LogSection[] {
+  const sections: LogSection[] = [];
+  let current: LogSection | null = null;
+
+  for (const line of existing.split("\n")) {
+    const heading = /^##\s+(\d{4}-\d{2}-\d{2})\s*$/.exec(line);
+    if (heading) {
+      current = { date: heading[1], entries: [] };
+      sections.push(current);
+      continue;
+    }
+    if (current && line.trim() !== "") current.entries.push(line.trim());
+  }
+  return sections;
+}
+
+function renderLog(sections: LogSection[]): string {
+  // ISO-8601 dates sort correctly as plain strings, which is most of why the
+  // format is worth insisting on.
+  const ordered = [...sections].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  const body = ordered
+    .map((section) => `## ${section.date}\n\n${section.entries.join("\n")}\n`)
+    .join("\n");
+  return `${LOG_HEADER}\n\n${body}`;
+}
 
 export function appendLogEntry(
   existing: string,
   isoDate: string,
   message: string,
 ): string {
-  const heading = `## ${isoDate}`;
+  const sections = parseLog(existing);
+  const section = sections.find((s) => s.date === isoDate);
 
-  if (existing.trim() === "") {
-    return `${LOG_HEADER}\n${heading}\n\n${message}\n`;
-  }
+  if (section) section.entries.push(message);
+  else sections.push({ date: isoDate, entries: [message] });
 
-  // Today's section already exists: append inside it, before the next
-  // date heading (or at the end if it is the newest).
-  if (existing.includes(`${heading}\n`)) {
-    const start = existing.indexOf(`${heading}\n`) + heading.length + 1;
-    const nextHeading = existing.indexOf("\n## ", start);
-    const insertAt = nextHeading === -1 ? existing.length : nextHeading + 1;
-    const before = existing.slice(0, insertAt).replace(/\n*$/, "\n");
-    return `${before}${message}\n${existing.slice(insertAt)}`;
-  }
-
-  // A newer date goes directly under the header — newest first.
-  const afterHeader = existing.indexOf("\n", existing.indexOf(LOG_HEADER)) + 1;
-  const body = existing.slice(afterHeader).replace(/^\n+/, "");
-  return `${LOG_HEADER}\n${heading}\n\n${message}\n\n${body}`;
+  return renderLog(sections);
 }
 ```
 
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `cd apps/web && npm test -- src/server/knowledge/bundle.test.ts`
-Expected: PASS, 8 tests.
+Expected: PASS, 10 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -3000,7 +3101,7 @@ import { Hono } from "hono";
 import { listMaterialsHandler, uploadMaterialHandler } from "./materials";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
-import { memoryObjectStore } from "../storage/objectStore";
+import { memoryObjectStore, StorageError } from "../storage/objectStore";
 
 const COURSE_ID = "11111111-2222-4333-8444-555555555555";
 const TEST_ENV = { DATABASE_URL: "ignored" } as unknown as Env;
@@ -3130,6 +3231,33 @@ describe("materials routes", () => {
     expect(createDocument).not.toHaveBeenCalled();
   });
 
+  it("reports a retryable storage failure as 503, not a dead end", async () => {
+    // Neon answers 503 SlowDown when throttling. An instructor who sees
+    // "could not store the uploaded file" has no reason to retry; this
+    // asserts the distinction StorageError exists to carry.
+    const busy = new StorageError("put", 503);
+    vi.spyOn(store, "put").mockRejectedValueOnce(busy);
+
+    const res = await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials`,
+      upload("lecture1.vtt", "WEBVTT", "text/vtt"),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(/try uploading again/i);
+  });
+
+  it("reports a permanent storage failure as 502", async () => {
+    vi.spyOn(store, "put").mockRejectedValueOnce(new StorageError("put", 403));
+
+    const res = await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials`,
+      upload("lecture1.vtt", "WEBVTT", "text/vtt"),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(502);
+  });
+
   it("does not admit a student", async () => {
     const res = await appWith("student").request(
       `/api/courses/${COURSE_ID}/materials`,
@@ -3234,7 +3362,7 @@ import {
   listMaterialsForCourse,
 } from "../repositories/materials";
 import { createDocument } from "../repositories/knowledgeDocuments";
-import { materialStorageKey, storageFromEnv } from "../storage/objectStore";
+import { materialStorageKey, storageFromEnv, StorageError } from "../storage/objectStore";
 import {
   ALLOWED_EXTENSIONS,
   MAX_UPLOAD_BYTES,
@@ -3326,6 +3454,16 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
   } catch (error) {
     logServerError("materials.upload", error);
     await deleteMaterial(db, scope, material.id);
+    // StorageError carries the status structurally so a throttle is not
+    // reported as a dead end. Neon answers 503 SlowDown under load; telling
+    // an instructor "could not store the uploaded file" when trying again
+    // would have worked is the failure this distinction exists to prevent.
+    if (error instanceof StorageError && error.retryable) {
+      return c.json(
+        { error: "Storage is busy right now. Try uploading again in a moment." },
+        503,
+      );
+    }
     return c.json({ error: "Could not store the uploaded file." }, 502);
   }
 
@@ -3523,7 +3661,7 @@ Scope note: this task owns only `routes/materials.ts` and `repositories/material
 - [ ] **Step 6: Run to verify it passes, then commit**
 
 Run: `cd apps/web && npm test -- src/server/routes/materials.test.ts && npm run typecheck`
-Expected: PASS, 9 tests.
+Expected: PASS, 11 tests.
 
 Invoke the `/commit` skill to stage and commit. Suggested message:
 
