@@ -63,6 +63,34 @@ export const sectionTypeEnum = pgEnum("section_type", [
 // need a column-type migration to add.
 export const hintActionEnum = pgEnum("hint_action", ["request_hint"]);
 
+// Extraction lifecycle of an uploaded artifact: has this file been turned
+// into knowledge documents yet? Distinct from a document's index_status,
+// which asks whether that document has been chunked. A hand-authored
+// document has the second and not the first.
+export const materialStatusEnum = pgEnum("material_status", [
+  "pending",
+  "processing",
+  "ready",
+  "failed",
+]);
+
+// OKF reserves index.md (directory listing) and log.md (update history);
+// every other .md file is a concept. Storing the kind lets the CHECK
+// constraints below reject a concept named `index` or `log`.
+export const knowledgeDocumentKindEnum = pgEnum("knowledge_document_kind", [
+  "concept",
+  "index",
+  "log",
+]);
+
+// Chunking lifecycle of one document. #40 owns the transition to `indexed`;
+// until then every document sits at `pending`.
+export const knowledgeIndexStatusEnum = pgEnum("knowledge_index_status", [
+  "pending",
+  "indexed",
+  "failed",
+]);
+
 // ---------- LLMConfig ----------
 // Per-Organization pool of model configurations. is_default is per-org; at
 // most one row per org may have is_default = true (enforced via partial
@@ -482,6 +510,15 @@ export const courseMaterials = pgTable(
     title: text("title").notNull(),
     originalFilename: text("original_filename"),
     uploadMetadata: jsonb("upload_metadata"),
+    storageKey: text("storage_key"),
+    byteSize: integer("byte_size"),
+    contentType: text("content_type"),
+    /** SHA-256 of the uploaded bytes. Makes re-ingest idempotent per epic
+     *  #44's invariant: the same file uploaded twice is recognised rather
+     *  than duplicated. */
+    checksum: text("checksum"),
+    status: materialStatusEnum("status").notNull().default("pending"),
+    errorDetail: text("error_detail"),
     uploadedAt: timestamp("uploaded_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -496,18 +533,23 @@ export const courseMaterials = pgTable(
 );
 
 // ---------- MaterialChunk ----------
-// Chunked + embedded text from a CourseMaterial. Vector embedding via pgvector
-// (extension must be enabled; see apps/web/src/db/init/01_extensions.sql).
-// Default dimension = 1536 (OpenAI text-embedding-3-small); changing requires
-// a migration.
+// Chunked + embedded text from a KnowledgeDocument. Vector embedding via
+// pgvector (extension must be enabled; see
+// apps/web/src/db/init/01_extensions.sql). Default dimension = 1536 (OpenAI
+// text-embedding-3-small); changing requires a migration.
+//
+// Points at the document, not the upload it came from: the chunkable unit is
+// the document, because one PDF can yield several OKF concepts and a
+// hand-authored concept has no upload at all -- material_id could express
+// neither.
 
 export const materialChunks = pgTable(
   "material_chunks",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    materialId: uuid("material_id")
+    documentId: uuid("document_id")
       .notNull()
-      .references(() => courseMaterials.id, { onDelete: "cascade" }),
+      .references(() => knowledgeDocuments.id, { onDelete: "cascade" }),
     ordinal: integer("ordinal").notNull(),
     text: text("text").notNull(),
     embedding: vector("embedding", { dimensions: 1536 }),
@@ -517,11 +559,11 @@ export const materialChunks = pgTable(
       .defaultNow(),
   },
   (t) => [
-    uniqueIndex("material_chunks_material_ordinal_uq").on(
-      t.materialId,
+    uniqueIndex("material_chunks_document_ordinal_uq").on(
+      t.documentId,
       t.ordinal,
     ),
-    index("material_chunks_material_idx").on(t.materialId),
+    index("material_chunks_document_idx").on(t.documentId),
   ],
 );
 
@@ -659,7 +701,7 @@ export const sectionSolutionsRelations = relations(
 
 export const courseMaterialsRelations = relations(
   courseMaterials,
-  ({ one, many }) => ({
+  ({ one }) => ({
     course: one(courses, {
       fields: [courseMaterials.courseId],
       references: [courses.id],
@@ -668,14 +710,13 @@ export const courseMaterialsRelations = relations(
       fields: [courseMaterials.uploadedById],
       references: [courseMemberships.id],
     }),
-    chunks: many(materialChunks),
   }),
 );
 
 export const materialChunksRelations = relations(materialChunks, ({ one }) => ({
-  material: one(courseMaterials, {
-    fields: [materialChunks.materialId],
-    references: [courseMaterials.id],
+  document: one(knowledgeDocuments, {
+    fields: [materialChunks.documentId],
+    references: [knowledgeDocuments.id],
   }),
 }));
 
@@ -694,5 +735,290 @@ export const agentDefinitionsRelations = relations(
       fields: [agentDefinitions.defaultLlmConfigId],
       references: [llmConfigs.id],
     }),
+  }),
+);
+
+// ---------- KnowledgeDocument ----------
+// One .md file in the course's OKF bundle. `path` is the OKF concept ID --
+// the file path with the .md suffix removed -- and is therefore identity:
+// `stats/regression.md` is stored as `stats/regression`. Directories are
+// implicit in paths, exactly as the format has them, so creating a folder
+// means creating its `<dir>/index` row; that is what keeps an empty folder
+// alive across a reload.
+
+export const knowledgeDocuments = pgTable(
+  "knowledge_documents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    kind: knowledgeDocumentKindEnum("kind").notNull().default("concept"),
+    /** The one always-required OKF frontmatter key. Null only on index/log
+     *  rows, which are not concepts; the CHECK below enforces that. */
+    type: text("type"),
+    title: text("title"),
+    description: text("description"),
+    tags: jsonb("tags").$type<string[] | null>(),
+    /** Non-reserved frontmatter keys, preserved verbatim so a round-trip
+     *  through this console does not silently drop a producer's metadata. */
+    frontmatter: jsonb("frontmatter"),
+    body: text("body").notNull().default(""),
+    /** The extractor's output, kept so "revert to extraction" is possible
+     *  after an instructor edits. Null for hand-authored documents. */
+    bodyOriginal: text("body_original"),
+    indexStatus: knowledgeIndexStatusEnum("index_status")
+      .notNull()
+      .default("pending"),
+    sourceMaterialId: uuid("source_material_id").references(
+      () => courseMaterials.id,
+      { onDelete: "set null" },
+    ),
+    editedById: uuid("edited_by_id").references(() => courseMemberships.id, {
+      onDelete: "set null",
+    }),
+    editedAt: timestamp("edited_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    // Paths are identity. This index also serves the prefix queries that
+    // back directory listing and subtree selection (`path LIKE 'dir/%'`):
+    // course_id equality narrows to one course's bundle first, which is a
+    // few hundred rows at most, so a plain btree is enough and a
+    // text_pattern_ops index would be machinery for nothing.
+    uniqueIndex("knowledge_documents_course_path_uq").on(t.courseId, t.path),
+    index("knowledge_documents_source_material_idx").on(t.sourceMaterialId),
+    check(
+      "knowledge_documents_concept_type_chk",
+      sql`${t.kind} <> 'concept' OR ${t.type} IS NOT NULL`,
+    ),
+    // OKF: index.md and log.md "MUST NOT be used for concept documents".
+    // split_part with a negative index requires PG 14+; Neon is 17.
+    check(
+      "knowledge_documents_reserved_basename_chk",
+      sql`(${t.kind} = 'concept' AND split_part(${t.path}, '/', -1) NOT IN ('index', 'log'))
+       OR (${t.kind} = 'index'   AND split_part(${t.path}, '/', -1) = 'index')
+       OR (${t.kind} = 'log'     AND ${t.path} = 'log')`,
+    ),
+  ],
+);
+
+export const knowledgeDocumentsRelations = relations(
+  knowledgeDocuments,
+  ({ one, many }) => ({
+    course: one(courses, {
+      fields: [knowledgeDocuments.courseId],
+      references: [courses.id],
+    }),
+    sourceMaterial: one(courseMaterials, {
+      fields: [knowledgeDocuments.sourceMaterialId],
+      references: [courseMaterials.id],
+    }),
+    outboundLinks: many(knowledgeLinks),
+    chunks: many(materialChunks),
+  }),
+);
+
+// ---------- KnowledgeLink ----------
+// The traversable graph. OKF expresses relationships as ordinary markdown
+// links, and says "the specific kind ... is conveyed by the surrounding
+// prose, not by the link itself" -- so there is no relationship-type column
+// here, deliberately. Rebuilt wholesale from a document's body on every
+// save; never edited directly.
+//
+// Broken links are STORED, not dropped. The spec says consumers "MUST
+// tolerate broken links"; tolerating them is not the same as hiding them,
+// and an instructor who has renamed a document needs to see what it broke.
+
+export const knowledgeLinks = pgTable(
+  "knowledge_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceDocumentId: uuid("source_document_id")
+      .notNull()
+      .references(() => knowledgeDocuments.id, { onDelete: "cascade" }),
+    /** The href exactly as written, before resolution. Kept so the UI can
+     *  show an instructor what they typed, not what we guessed. */
+    rawHref: text("raw_href").notNull(),
+    /** The bundle-relative path the href resolves to, with .md and any
+     *  anchor stripped. Null for external links, which are not stored. */
+    targetPath: text("target_path").notNull(),
+    resolvedDocumentId: uuid("resolved_document_id").references(
+      () => knowledgeDocuments.id,
+      { onDelete: "set null" },
+    ),
+    isBroken: boolean("is_broken").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("knowledge_links_source_idx").on(t.sourceDocumentId),
+    // Backlinks are a query on this column -- no second table.
+    index("knowledge_links_resolved_idx").on(t.resolvedDocumentId),
+    index("knowledge_links_target_path_idx").on(t.targetPath),
+  ],
+);
+
+export const knowledgeLinksRelations = relations(knowledgeLinks, ({ one }) => ({
+  source: one(knowledgeDocuments, {
+    fields: [knowledgeLinks.sourceDocumentId],
+    references: [knowledgeDocuments.id],
+    relationName: "outboundLinks",
+  }),
+}));
+
+// ---------- MaterialCollection ----------
+// A named selection over the course's bundle. The unit an instructor
+// attaches to an assignment.
+
+export const materialCollections = pgTable(
+  "material_collections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    createdById: uuid("created_by_id")
+      .notNull()
+      .references(() => courseMemberships.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [uniqueIndex("material_collections_course_name_uq").on(t.courseId, t.name)],
+);
+
+// ---------- CollectionItem ----------
+// Exactly one of document_id (a single file) or directory_path (a subtree).
+// A directory item resolves LIVE -- `path LIKE directory_path || '/%'` -- so
+// a file added to that folder tomorrow is in the collection tomorrow. That
+// is what "select the folders that make up a collection" means, and it is
+// why this is not a materialised list of document ids.
+
+export const collectionItems = pgTable(
+  "collection_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    collectionId: uuid("collection_id")
+      .notNull()
+      .references(() => materialCollections.id, { onDelete: "cascade" }),
+    documentId: uuid("document_id").references(() => knowledgeDocuments.id, {
+      onDelete: "cascade",
+    }),
+    directoryPath: text("directory_path"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check(
+      "collection_items_exactly_one_target_chk",
+      sql`num_nonnulls(${t.documentId}, ${t.directoryPath}) = 1`,
+    ),
+    // Postgres never treats two NULLs as a conflict, so each of these only
+    // constrains rows that actually use that column -- same reasoning as
+    // prompt_templates' per-scope unique indexes.
+    uniqueIndex("collection_items_collection_document_uq").on(
+      t.collectionId,
+      t.documentId,
+    ),
+    uniqueIndex("collection_items_collection_directory_uq").on(
+      t.collectionId,
+      t.directoryPath,
+    ),
+    index("collection_items_collection_idx").on(t.collectionId),
+  ],
+);
+
+// ---------- CollectionAttachment ----------
+// Deliberately mirrors prompt_templates' scope shape so resolution code
+// reads like lib/prompts.ts.
+//
+// course_id and scope_course_id are different fields doing different jobs
+// and both are needed: course_id is the denormalised tenancy guard present
+// on EVERY row, so a listing filters by course without joining through four
+// possible scope targets; scope_course_id is set only on rows whose
+// attachment target IS the course, and is null on homework-, section-, and
+// config-scoped rows.
+
+export const collectionAttachments = pgTable(
+  "collection_attachments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    collectionId: uuid("collection_id")
+      .notNull()
+      .references(() => materialCollections.id, { onDelete: "cascade" }),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    scopeCourseId: uuid("scope_course_id").references(() => courses.id, {
+      onDelete: "cascade",
+    }),
+    scopeHomeworkId: uuid("scope_homework_id").references(() => homeworks.id, {
+      onDelete: "cascade",
+    }),
+    scopeSectionId: uuid("scope_section_id").references(() => sections.id, {
+      onDelete: "cascade",
+    }),
+    scopeLlmConfigId: uuid("scope_llm_config_id").references(
+      () => llmConfigs.id,
+      { onDelete: "cascade" },
+    ),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check(
+      "collection_attachments_exactly_one_scope_chk",
+      sql`num_nonnulls(${t.scopeCourseId}, ${t.scopeHomeworkId}, ${t.scopeSectionId}, ${t.scopeLlmConfigId}) = 1`,
+    ),
+    index("collection_attachments_course_idx").on(t.courseId),
+    index("collection_attachments_scope_course_idx").on(t.scopeCourseId),
+    index("collection_attachments_scope_homework_idx").on(t.scopeHomeworkId),
+    index("collection_attachments_scope_section_idx").on(t.scopeSectionId),
+    index("collection_attachments_scope_llm_config_idx").on(t.scopeLlmConfigId),
+    // Multiple DISTINCT collections may attach to one target; the same
+    // collection may not attach to the same target twice.
+    uniqueIndex("collection_attachments_course_uq").on(
+      t.collectionId,
+      t.scopeCourseId,
+    ),
+    uniqueIndex("collection_attachments_homework_uq").on(
+      t.collectionId,
+      t.scopeHomeworkId,
+    ),
+    uniqueIndex("collection_attachments_section_uq").on(
+      t.collectionId,
+      t.scopeSectionId,
+    ),
+    uniqueIndex("collection_attachments_llm_config_uq").on(
+      t.collectionId,
+      t.scopeLlmConfigId,
+    ),
+  ],
+);
+
+export const materialCollectionsRelations = relations(
+  materialCollections,
+  ({ one, many }) => ({
+    course: one(courses, {
+      fields: [materialCollections.courseId],
+      references: [courses.id],
+    }),
+    items: many(collectionItems),
+    attachments: many(collectionAttachments),
   }),
 );
