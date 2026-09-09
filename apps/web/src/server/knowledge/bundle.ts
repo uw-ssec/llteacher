@@ -49,31 +49,58 @@ export function renderIndex(directoryPath: string, entries: IndexEntry[]): strin
   return `## ${heading}\n\n${lines.join("\n")}\n`;
 }
 
-const LOG_HEADER = "# Log\n";
+const LOG_HEADER = "# Log";
+
+interface LogSection {
+  date: string;
+  entries: string[];
+}
+
+/** Parsed rather than spliced. The previous implementation inserted a new
+ *  heading directly beneath "# Log" on the assumption that an unseen date must
+ *  be the newest — so backfilling 09-08 into a log holding 09-09 and 09-07
+ *  produced 09-08, 09-09, 09-07, violating OKF's newest-first rule. A
+ *  same-date append also ate the blank line before the following heading.
+ *
+ *  Both were splice bugs, so the splice is gone: parse to sections, edit the
+ *  structure, re-render. Ordering and spacing then hold by construction rather
+ *  than by getting an index right. */
+function parseLog(existing: string): LogSection[] {
+  const sections: LogSection[] = [];
+  let current: LogSection | null = null;
+
+  for (const line of existing.split("\n")) {
+    const heading = /^##\s+(\d{4}-\d{2}-\d{2})\s*$/.exec(line);
+    if (heading) {
+      current = { date: heading[1], entries: [] };
+      sections.push(current);
+      continue;
+    }
+    if (current && line.trim() !== "") current.entries.push(line.trim());
+  }
+  return sections;
+}
+
+function renderLog(sections: LogSection[]): string {
+  // ISO-8601 dates sort correctly as plain strings, which is most of why the
+  // format is worth insisting on.
+  const ordered = [...sections].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  const body = ordered
+    .map((section) => `## ${section.date}\n\n${section.entries.join("\n")}\n`)
+    .join("\n");
+  return `${LOG_HEADER}\n\n${body}`;
+}
 
 export function appendLogEntry(
   existing: string,
   isoDate: string,
   message: string,
 ): string {
-  const heading = `## ${isoDate}`;
+  const sections = parseLog(existing);
+  const section = sections.find((s) => s.date === isoDate);
 
-  if (existing.trim() === "") {
-    return `${LOG_HEADER}\n${heading}\n\n${message}\n`;
-  }
+  if (section) section.entries.push(message);
+  else sections.push({ date: isoDate, entries: [message] });
 
-  // Today's section already exists: append inside it, before the next
-  // date heading (or at the end if it is the newest).
-  if (existing.includes(`${heading}\n`)) {
-    const start = existing.indexOf(`${heading}\n`) + heading.length + 1;
-    const nextHeading = existing.indexOf("\n## ", start);
-    const insertAt = nextHeading === -1 ? existing.length : nextHeading + 1;
-    const before = existing.slice(0, insertAt).replace(/\n*$/, "\n");
-    return `${before}${message}\n${existing.slice(insertAt)}`;
-  }
-
-  // A newer date goes directly under the header — newest first.
-  const afterHeader = existing.indexOf("\n", existing.indexOf(LOG_HEADER)) + 1;
-  const body = existing.slice(afterHeader).replace(/^\n+/, "");
-  return `${LOG_HEADER}\n${heading}\n\n${message}\n\n${body}`;
+  return renderLog(sections);
 }
