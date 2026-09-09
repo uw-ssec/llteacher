@@ -13,15 +13,20 @@
 
    These are instructor-authoring routes (plan invariant: every course route
    nests under requireInstructorOf()). Task 17 wraps registration in that
-   guard too, but scopeOf() below checks isInstructorOf directly rather than
-   relying solely on that wrapper, so a handler called on its own -- as this
-   file's own tests do -- still refuses a student.
+   guard too, but instructorScope() (utils/guards.ts) checks isInstructorOf
+   directly rather than relying solely on that wrapper, so a handler called
+   on its own -- as this file's own tests do -- still refuses a student.
+
+   instructorScope() used to be a private copy here (`scopeOf`). Task 15
+   extracted the one true implementation into utils/guards.ts, beside
+   requireInstructorOf which already owns this concern -- see that file's
+   doc comment for why bare `isMemberOf` was the wrong predicate.
    -------------------------------------------------------------------------- */
 
 import type { Context } from "hono";
 import { makeDb } from "../../db/client";
 import type { AppEnv } from "../context";
-import { courseScopeFromAuthContext, type CourseScope } from "../repositories/scope";
+import { instructorScope } from "../utils/guards";
 import {
   deleteMaterial,
   getMaterialForReingest,
@@ -42,22 +47,6 @@ import {
 import { logServerError } from "../utils/errors";
 import type { MaterialListPayload } from "@llteacher/ui/api";
 
-/** Mints the CourseScope only through the sanctioned path
- *  (courseScopeFromAuthContext), but checks instructor authority rather
- *  than bare membership: these routes author course content, and a student
- *  membership must not be enough to reach them even when a handler is
- *  exercised without the requireInstructorOf() wrapper Task 17 adds at
- *  registration. */
-function scopeOf(c: Context<AppEnv>): CourseScope | null {
-  const authContext = c.get("authContext");
-  const courseId = c.req.param("courseId");
-  if (!authContext || !courseId) return null;
-  return courseScopeFromAuthContext(
-    { isMemberOf: (id) => authContext.isInstructorOf(id) },
-    courseId,
-  );
-}
-
 function membershipIdOf(c: Context<AppEnv>, courseId: string): string | null {
   return c.get("authContext")?.memberships.find((m) => m.courseId === courseId)?.id ?? null;
 }
@@ -70,7 +59,7 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
 }
 
 export async function listMaterialsHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const db = makeDb(c.env.DATABASE_URL);
@@ -79,7 +68,7 @@ export async function listMaterialsHandler(c: Context<AppEnv>) {
 }
 
 export async function uploadMaterialHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const form = await c.req.formData();
@@ -183,7 +172,7 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
 }
 
 export async function deleteMaterialHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const materialId = c.req.param("materialId");
@@ -210,7 +199,7 @@ export async function deleteMaterialHandler(c: Context<AppEnv>) {
  *  `pending` with the same reason rather than pretending a retry helped,
  *  which is why the response says which happened. */
 export async function reingestMaterialHandler(c: Context<AppEnv>) {
-  const scope = scopeOf(c);
+  const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
 
   const materialId = c.req.param("materialId");
