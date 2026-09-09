@@ -6779,6 +6779,100 @@ body {
   color: var(--color-error);
 }
 
+/* -- CollectionEditView — the contents picker (#42) -------------------------
+   Two panes: a picker of folders and documents on the left, and a resolved
+   preview on the right that mirrors the server's own live-subtree
+   resolution exactly (trailing-slash prefix match included) -- it previews
+   what the tutor will retrieve, so it must never disagree with the server. */
+
+.admin-collection-edit {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: var(--space-5);
+  align-items: start;
+  margin-block-start: var(--space-4);
+}
+
+.admin-collection-edit__picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.admin-collection-edit__picker legend {
+  padding: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-block: var(--space-3) var(--space-2);
+}
+
+.admin-collection-edit__picker legend:first-of-type {
+  margin-block-start: 0;
+}
+
+.admin-collection-edit__picker label {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding-block: 4px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.admin-collection-edit__resolved {
+  position: sticky;
+  top: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+}
+
+.admin-collection-edit__resolved h2 {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 var(--space-2);
+}
+
+.admin-collection-edit__resolved > p {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.admin-collection-edit__resolved ul {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 24rem;
+  overflow-y: auto;
+}
+
+.admin-collection-edit__resolved li {
+  padding-block: 2px;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  word-break: break-all;
+}
+
 /* -------------------------------------------------------------------------
    .alert-dialog — AlertDialog (#248): labelled, focus-trapped,
    Escape-dismissible confirm dialog for destructive actions. Built on the
