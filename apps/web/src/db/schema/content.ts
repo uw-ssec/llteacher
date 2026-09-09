@@ -510,6 +510,15 @@ export const courseMaterials = pgTable(
     title: text("title").notNull(),
     originalFilename: text("original_filename"),
     uploadMetadata: jsonb("upload_metadata"),
+    storageKey: text("storage_key"),
+    byteSize: integer("byte_size"),
+    contentType: text("content_type"),
+    /** SHA-256 of the uploaded bytes. Makes re-ingest idempotent per epic
+     *  #44's invariant: the same file uploaded twice is recognised rather
+     *  than duplicated. */
+    checksum: text("checksum"),
+    status: materialStatusEnum("status").notNull().default("pending"),
+    errorDetail: text("error_detail"),
     uploadedAt: timestamp("uploaded_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -524,18 +533,23 @@ export const courseMaterials = pgTable(
 );
 
 // ---------- MaterialChunk ----------
-// Chunked + embedded text from a CourseMaterial. Vector embedding via pgvector
-// (extension must be enabled; see apps/web/src/db/init/01_extensions.sql).
-// Default dimension = 1536 (OpenAI text-embedding-3-small); changing requires
-// a migration.
+// Chunked + embedded text from a KnowledgeDocument. Vector embedding via
+// pgvector (extension must be enabled; see
+// apps/web/src/db/init/01_extensions.sql). Default dimension = 1536 (OpenAI
+// text-embedding-3-small); changing requires a migration.
+//
+// Points at the document, not the upload it came from: the chunkable unit is
+// the document, because one PDF can yield several OKF concepts and a
+// hand-authored concept has no upload at all -- material_id could express
+// neither.
 
 export const materialChunks = pgTable(
   "material_chunks",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    materialId: uuid("material_id")
+    documentId: uuid("document_id")
       .notNull()
-      .references(() => courseMaterials.id, { onDelete: "cascade" }),
+      .references(() => knowledgeDocuments.id, { onDelete: "cascade" }),
     ordinal: integer("ordinal").notNull(),
     text: text("text").notNull(),
     embedding: vector("embedding", { dimensions: 1536 }),
@@ -545,11 +559,11 @@ export const materialChunks = pgTable(
       .defaultNow(),
   },
   (t) => [
-    uniqueIndex("material_chunks_material_ordinal_uq").on(
-      t.materialId,
+    uniqueIndex("material_chunks_document_ordinal_uq").on(
+      t.documentId,
       t.ordinal,
     ),
-    index("material_chunks_material_idx").on(t.materialId),
+    index("material_chunks_document_idx").on(t.documentId),
   ],
 );
 
@@ -687,7 +701,7 @@ export const sectionSolutionsRelations = relations(
 
 export const courseMaterialsRelations = relations(
   courseMaterials,
-  ({ one, many }) => ({
+  ({ one }) => ({
     course: one(courses, {
       fields: [courseMaterials.courseId],
       references: [courses.id],
@@ -696,14 +710,13 @@ export const courseMaterialsRelations = relations(
       fields: [courseMaterials.uploadedById],
       references: [courseMemberships.id],
     }),
-    chunks: many(materialChunks),
   }),
 );
 
 export const materialChunksRelations = relations(materialChunks, ({ one }) => ({
-  material: one(courseMaterials, {
-    fields: [materialChunks.materialId],
-    references: [courseMaterials.id],
+  document: one(knowledgeDocuments, {
+    fields: [materialChunks.documentId],
+    references: [knowledgeDocuments.id],
   }),
 }));
 
@@ -798,7 +811,7 @@ export const knowledgeDocuments = pgTable(
 
 export const knowledgeDocumentsRelations = relations(
   knowledgeDocuments,
-  ({ one }) => ({
+  ({ one, many }) => ({
     course: one(courses, {
       fields: [knowledgeDocuments.courseId],
       references: [courses.id],
@@ -807,5 +820,56 @@ export const knowledgeDocumentsRelations = relations(
       fields: [knowledgeDocuments.sourceMaterialId],
       references: [courseMaterials.id],
     }),
+    outboundLinks: many(knowledgeLinks),
+    chunks: many(materialChunks),
   }),
 );
+
+// ---------- KnowledgeLink ----------
+// The traversable graph. OKF expresses relationships as ordinary markdown
+// links, and says "the specific kind ... is conveyed by the surrounding
+// prose, not by the link itself" -- so there is no relationship-type column
+// here, deliberately. Rebuilt wholesale from a document's body on every
+// save; never edited directly.
+//
+// Broken links are STORED, not dropped. The spec says consumers "MUST
+// tolerate broken links"; tolerating them is not the same as hiding them,
+// and an instructor who has renamed a document needs to see what it broke.
+
+export const knowledgeLinks = pgTable(
+  "knowledge_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceDocumentId: uuid("source_document_id")
+      .notNull()
+      .references(() => knowledgeDocuments.id, { onDelete: "cascade" }),
+    /** The href exactly as written, before resolution. Kept so the UI can
+     *  show an instructor what they typed, not what we guessed. */
+    rawHref: text("raw_href").notNull(),
+    /** The bundle-relative path the href resolves to, with .md and any
+     *  anchor stripped. Null for external links, which are not stored. */
+    targetPath: text("target_path").notNull(),
+    resolvedDocumentId: uuid("resolved_document_id").references(
+      () => knowledgeDocuments.id,
+      { onDelete: "set null" },
+    ),
+    isBroken: boolean("is_broken").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("knowledge_links_source_idx").on(t.sourceDocumentId),
+    // Backlinks are a query on this column -- no second table.
+    index("knowledge_links_resolved_idx").on(t.resolvedDocumentId),
+    index("knowledge_links_target_path_idx").on(t.targetPath),
+  ],
+);
+
+export const knowledgeLinksRelations = relations(knowledgeLinks, ({ one }) => ({
+  source: one(knowledgeDocuments, {
+    fields: [knowledgeLinks.sourceDocumentId],
+    references: [knowledgeDocuments.id],
+    relationName: "outboundLinks",
+  }),
+}));
