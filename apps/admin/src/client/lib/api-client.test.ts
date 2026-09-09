@@ -297,6 +297,17 @@ describe("apiClient.knowledge", () => {
     );
   });
 
+  it("GETs a collection's items and returns them as-is (documents and directories, not resolved documents)", async () => {
+    const items = [{ documentId: "d1" }, { directoryPath: "week1" }];
+    const fetchMock = stub(() => json({ items }));
+
+    const result = await apiClient.knowledge.getCollectionItems("c1", "col1", opts);
+
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/courses/c1/knowledge/collections/col1/items");
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({ method: "GET" });
+    expect(result.items).toEqual(items);
+  });
+
   it("PUTs the collection items as a body object keyed by 'items'", async () => {
     const fetchMock = stub(() => new Response(null, { status: 204 }));
 

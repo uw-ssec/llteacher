@@ -36,6 +36,7 @@ import type {
   AttachmentListPayload,
   AttachmentScopePayload,
   CollectionItemBody,
+  CollectionItemsPayload,
   CollectionListPayload,
   CollectionPayload,
   CollectionWriteBody,
@@ -466,6 +467,17 @@ export const apiClient = {
       request<null>(
         `/api/courses/${encode(courseId)}/knowledge/collections/${encode(collectionId)}`,
         { method: "DELETE" },
+        opts,
+      ),
+    /** The read half of setCollectionItems. Returns items, not resolved
+     *  documents -- a directory item comes back as a directoryPath, not the
+     *  documents currently under it, so the editor can restore exactly what
+     *  was selected rather than reconstructing a live subtree as a frozen
+     *  list of files. */
+    getCollectionItems: (courseId: string, collectionId: string, opts: RequestOptions) =>
+      request<CollectionItemsPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/collections/${encode(collectionId)}/items`,
+        { method: "GET" },
         opts,
       ),
     setCollectionItems: (
