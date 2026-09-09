@@ -8,9 +8,12 @@
 
    Not a full markdown parser on purpose: the only construct that matters is
    `[text](href)`, and pulling in a parser to find it would mean loading a
-   markdown AST in a Worker for a regex's worth of work. The one place a
-   regex is genuinely wrong is inside fenced code blocks, where a link is a
-   literal rather than a reference -- so those are stripped first.
+   markdown AST in a Worker for a regex's worth of work. The two places a
+   regex is genuinely wrong are fenced code blocks and inline code spans --
+   in both, a link is a literal being shown to a reader, not a reference --
+   so both are stripped before matching. Fences are stripped first: a fence
+   body can contain stray backticks that would otherwise get misread as
+   inline-span delimiters.
    -------------------------------------------------------------------------- */
 
 export interface ParsedLink {
@@ -21,6 +24,11 @@ export interface ParsedLink {
 }
 
 const FENCE_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~/g;
+/** Inline code spans: a run of N backticks, content, then the same run of N
+ *  backticks -- the CommonMark delimiter shape. The backreference to the
+ *  captured run (rather than a hardcoded single backtick) covers the
+ *  `` `code with ` inside` `` form along with the plain `` `code` `` one. */
+const INLINE_CODE_RE = /(`+)[\s\S]*?\1/g;
 const LINK_RE = /\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
 /** Anything with a scheme, a protocol-relative prefix, or a pure anchor is
  *  not a concept reference. */
@@ -39,7 +47,7 @@ function normalise(segments: string[]): string {
 }
 
 export function parseLinks(body: string, fromPath: string): ParsedLink[] {
-  const prose = body.replace(FENCE_RE, "");
+  const prose = body.replace(FENCE_RE, "").replace(INLINE_CODE_RE, "");
   const fromDir = fromPath.split("/").slice(0, -1);
 
   const seen = new Set<string>();

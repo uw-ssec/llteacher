@@ -40,6 +40,16 @@ describe("parseLinks", () => {
     ]);
   });
 
+  it("ignores a link inside an inline code span", () => {
+    const body = "See `[a](/x)` for the syntax.";
+    expect(parseLinks(body, "intro")).toEqual([]);
+  });
+
+  it("still extracts a real link on a line that also has an unrelated inline code span", () => {
+    const body = "See `code` and then [a](/x) for the real reference.";
+    expect(parseLinks(body, "intro")).toEqual([{ rawHref: "/x", targetPath: "x" }]);
+  });
+
   it("deduplicates repeated links to the same target", () => {
     expect(parseLinks("[a](/x) and [again](/x)", "intro")).toHaveLength(1);
   });
