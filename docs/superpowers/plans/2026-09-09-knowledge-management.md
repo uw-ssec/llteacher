@@ -5056,7 +5056,7 @@ export function KnowledgeView({ courseId, onOpenDocument }: KnowledgeViewProps) 
 
   return (
     <div className="admin-view">
-      <div className="admin-sr-only" role="status" aria-live="polite">
+      <div className="admin-visually-hidden" role="status" aria-live="polite">
         {announcement}
       </div>
 
