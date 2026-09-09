@@ -44,6 +44,10 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
     ENCRYPTION_KEY: "unused",
     BLIND_INDEX_KEY: "unused",
     WORKOS_WEBHOOK_SECRET: "unused",
+    STORAGE_ENDPOINT: "unused",
+    STORAGE_BUCKET: "unused",
+    STORAGE_ACCESS_KEY_ID: "unused",
+    STORAGE_SECRET_ACCESS_KEY: "unused",
     ...overrides,
   };
 }
