@@ -6527,6 +6527,114 @@ body {
   outline-offset: 2px;
 }
 
+/* -- Knowledge base bundle browser (#42) -----------------------------------
+   Two-pane layout: a directory rail derived from OKF paths (there is no
+   directory table -- see apps/admin/src/client/lib/documentTree.ts) beside
+   the selected directory's documents. The uploaded-files strip sits below,
+   full width, because it is a different subject (raw materials) from the
+   documents pane (their processed OKF output) and conflating the two into
+   one grid would blur that distinction. */
+
+.admin-knowledge {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: var(--space-4);
+  margin-block-start: var(--space-4);
+}
+
+.admin-knowledge__tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-inline-end: var(--space-3);
+  border-inline-end: 1px solid var(--color-border);
+}
+
+.admin-knowledge__folder {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding-block: 6px;
+  padding-inline-end: var(--space-2);
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  text-align: start;
+  cursor: pointer;
+}
+
+.admin-knowledge__folder:hover,
+.admin-knowledge__folder:focus-visible {
+  background-color: rgba(133, 117, 77, 0.06);
+  color: var(--color-text);
+  outline: none;
+}
+
+.admin-knowledge__folder--active {
+  background-color: rgba(133, 117, 77, 0.1);
+  color: var(--color-text);
+  font-weight: var(--weight-medium);
+}
+
+.admin-knowledge__listing {
+  min-inline-size: 0;
+}
+
+/* -- Uploaded-files strip ---------------------------------------------------
+   Deliberately plain, not another catalog table: these are raw uploads, not
+   OKF records, and a PDF sitting at `pending` with its reason showing is the
+   honest-status design (#40 does not exist yet) -- it should read as a
+   status list, not as content the console is proud of. */
+
+.admin-knowledge__materials {
+  margin-block-start: var(--space-6);
+}
+
+.admin-knowledge__materials h2 {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 var(--space-3);
+}
+
+.admin-knowledge__material-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-knowledge__material {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+
+.admin-knowledge__material-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.admin-knowledge__material-note {
+  flex-basis: 100%;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
 /* -------------------------------------------------------------------------
    .alert-dialog — AlertDialog (#248): labelled, focus-trapped,
    Escape-dismissible confirm dialog for destructive actions. Built on the
