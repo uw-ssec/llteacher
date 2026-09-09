@@ -3258,6 +3258,73 @@ describe("materials routes", () => {
     expect(res.status).toBe(502);
   });
 
+  it("only claims ready once the bytes are stored and the document exists", async () => {
+    // The row is written pending first and upgraded afterwards, so a failure
+    // anywhere in between leaves a status that is still true.
+    const res = await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials`,
+      upload("lecture1.vtt", "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nHello.", "text/vtt"),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(201);
+    expect(insertMaterial).toHaveBeenCalledWith(
+      expect.anything(),
+      COURSE_ID,
+      expect.objectContaining({ status: "pending" }),
+    );
+    expect(setMaterialStatus).toHaveBeenCalledWith(
+      expect.anything(), COURSE_ID, "mat-1", "ready", null,
+    );
+  });
+
+  it("leaves the material pending when storing the bytes fails", async () => {
+    // The upgrade to ready must not have happened: nothing may claim the
+    // tutor can use content that was never stored.
+    vi.spyOn(store, "put").mockRejectedValueOnce(new StorageError("put", 403));
+
+    await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials`,
+      upload("lecture1.vtt", "WEBVTT", "text/vtt"),
+      TEST_ENV,
+    );
+    expect(setMaterialStatus).not.toHaveBeenCalledWith(
+      expect.anything(), COURSE_ID, expect.anything(), "ready", null,
+    );
+  });
+
+  it("refuses to delete a material belonging to another course", async () => {
+    deleteMaterial.mockResolvedValue(null);
+    const res = await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials/${OTHER_MATERIAL_ID}`,
+      { method: "DELETE" },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("deletes a material and removes its stored object", async () => {
+    deleteMaterial.mockResolvedValue({ storageKey: "courses/c/materials/m/a.pdf" });
+    const removed = vi.spyOn(store, "delete");
+
+    const res = await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials/mat-1`,
+      { method: "DELETE" },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(204);
+    expect(removed).toHaveBeenCalledWith("courses/c/materials/m/a.pdf");
+  });
+
+  it("does not admit a student to delete", async () => {
+    const res = await appWith("student").request(
+      `/api/courses/${COURSE_ID}/materials/mat-1`,
+      { method: "DELETE" },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(403);
+    expect(deleteMaterial).not.toHaveBeenCalled();
+  });
+
   it("does not admit a student", async () => {
     const res = await appWith("student").request(
       `/api/courses/${COURSE_ID}/materials`,
@@ -3360,6 +3427,8 @@ import {
   deleteMaterial,
   insertMaterial,
   listMaterialsForCourse,
+  setMaterialStatus,
+  setMaterialStorageKey,
 } from "../repositories/materials";
 import { createDocument } from "../repositories/knowledgeDocuments";
 import { materialStorageKey, storageFromEnv, StorageError } from "../storage/objectStore";
@@ -3431,6 +3500,14 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
   // Insert first: the row's id is part of the storage key, so a stored
   // object always has a row that names it. The reverse order can strand an
   // object nothing references.
+  //
+  // The row starts PESSIMISTIC -- `pending` even for a format that converted
+  // cleanly -- and is upgraded to `ready` only once the bytes are stored and
+  // the document exists. Writing `ready` up front and rolling back on failure
+  // is only correct while the rollback is: if that delete throws, the row
+  // survives claiming the tutor can use content that was never stored. Any
+  // interruption here instead leaves `pending`, which is honest, because
+  // pending means "not ready" and that is true.
   const material = await insertMaterial(db, scope, {
     title: file.name.replace(/\.[^.]+$/, ""),
     sourceType: sourceTypeFor(file.name),
@@ -3439,7 +3516,7 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
     byteSize: file.size,
     contentType: file.type || null,
     checksum,
-    status: converted ? "ready" : "pending",
+    status: "pending",
     errorDetail: converted
       ? null
       : `Text extraction for .${extension} is not implemented yet (#40). Upload stored; author a document manually to ground on it.`,
@@ -3478,6 +3555,9 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
       sourceMaterialId: material.id,
       editedById: membership.id,
     });
+    // Everything the status asserts is now true: the bytes are stored and the
+    // document exists. Only now does it claim `ready`.
+    await setMaterialStatus(db, scope, material.id, "ready", null);
   }
 
   return c.json({ id: material.id, status: converted ? "ready" : "pending" }, 201);
@@ -3661,7 +3741,7 @@ Scope note: this task owns only `routes/materials.ts` and `repositories/material
 - [ ] **Step 6: Run to verify it passes, then commit**
 
 Run: `cd apps/web && npm test -- src/server/routes/materials.test.ts && npm run typecheck`
-Expected: PASS, 11 tests.
+Expected: PASS, 16 tests.
 
 Invoke the `/commit` skill to stage and commit. Suggested message:
 
