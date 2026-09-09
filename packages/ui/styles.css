@@ -6635,6 +6635,150 @@ body {
   color: var(--color-text-muted);
 }
 
+/* -- KnowledgeDocumentView — one OKF concept, edited by hand (#42) --------
+   The editor is the escape hatch for a format #40 cannot extract yet, and
+   the links panel is why this is a full view rather than a modal: broken
+   links are listed and marked, not filtered out, per OKF's "MUST tolerate
+   broken links". */
+
+.admin-knowledge-doc__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  margin: var(--space-4) 0;
+  padding: 0;
+}
+
+.admin-knowledge-doc__meta > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.admin-knowledge-doc__meta dt {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-variant: small-caps;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.admin-knowledge-doc__meta dd {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+/* Saving re-queues indexing -- said out loud rather than left silent, so an
+   instructor does not wonder why an edit has not reached the tutor yet. */
+.admin-inline-note {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-inline-start: 2px solid var(--color-accent-warm);
+  background-color: rgba(183, 165, 122, 0.08);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.admin-knowledge-doc__editor {
+  width: 100%;
+  min-height: 24rem;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  color: var(--color-text);
+  resize: vertical;
+}
+
+.admin-knowledge-doc__editor:focus,
+.admin-knowledge-doc__editor:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+  border-color: var(--color-accent);
+  background-color: var(--color-bg);
+}
+
+.admin-knowledge-doc__preview {
+  min-height: 24rem;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  color: var(--color-text);
+}
+
+.admin-knowledge-doc__preview :first-child {
+  margin-block-start: 0;
+}
+
+.admin-knowledge-doc__links {
+  margin-block-start: var(--space-6);
+}
+
+.admin-knowledge-doc__links h2 {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: var(--space-5) 0 var(--space-3);
+}
+
+.admin-knowledge-doc__links h2:first-child {
+  margin-block-start: 0;
+}
+
+.admin-knowledge-doc__links ul {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-knowledge-doc__links li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.admin-knowledge-doc__links code {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+}
+
+/* Broken, not hidden -- OKF says consumers must tolerate a broken link, not
+   pretend it isn't there. */
+.admin-knowledge-doc__broken {
+  margin-inline-start: auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background-color: rgba(255, 135, 135, 0.12);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant: small-caps;
+  letter-spacing: 0.04em;
+  color: var(--color-error);
+}
+
 /* -------------------------------------------------------------------------
    .alert-dialog — AlertDialog (#248): labelled, focus-trapped,
    Escape-dismissible confirm dialog for destructive actions. Built on the
