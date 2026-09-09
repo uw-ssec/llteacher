@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { s3ObjectStore } from "./objectStore";
+import { s3ObjectStore, StorageError } from "./objectStore";
 
 const S3_ENDPOINT = process.env.S3_TEST_ENDPOINT;
 
@@ -57,5 +57,26 @@ describe.skipIf(!S3_ENDPOINT)("s3ObjectStore against a real S3 endpoint", () => 
     const key = `courses/c/materials/m/a b+c${crypto.randomUUID()}.txt`;
     await s.put(key, new TextEncoder().encode("x").buffer, {});
     expect(await s.get(key)).not.toBeNull();
+  });
+
+  it("throws a StorageError carrying the real status when the bucket does not exist", async () => {
+    const s = s3ObjectStore({
+      endpoint: S3_ENDPOINT!,
+      bucket: "llteacher-materials-does-not-exist",
+      accessKeyId: process.env.S3_TEST_KEY ?? "minioadmin",
+      secretAccessKey: process.env.S3_TEST_SECRET ?? "minioadmin",
+    });
+    const key = `courses/c/materials/m/no-bucket-${crypto.randomUUID()}.txt`;
+
+    let error: unknown;
+    try {
+      await s.put(key, new TextEncoder().encode("x").buffer, {});
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(StorageError);
+    expect((error as StorageError).operation).toBe("put");
+    expect((error as StorageError).status).toBe(404);
   });
 });

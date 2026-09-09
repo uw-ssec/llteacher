@@ -33,6 +33,24 @@ export interface ObjectStore {
   head(key: string): Promise<StoredObject | null>;
 }
 
+/** Carries the HTTP status structurally rather than in a message string, so a
+ *  caller can branch on it. Neon returns 503 SlowDown when throttling, which
+ *  is worth retrying; a 403 never is. Without this, both read as "failed". */
+export class StorageError extends Error {
+  constructor(
+    readonly operation: "put" | "get" | "delete" | "head",
+    readonly status: number,
+  ) {
+    super(`storage ${operation} failed: ${status}`);
+    this.name = "StorageError";
+  }
+  /** 503 is Neon's documented throttle; 5xx generally is worth another attempt.
+   *  4xx is the caller's problem and will fail identically next time. */
+  get retryable(): boolean {
+    return this.status >= 500;
+  }
+}
+
 /** Course-prefixed on purpose: deleting a course becomes a prefix sweep, and
  *  a key that crosses courses is visibly wrong in a log line rather than
  *  needing a database lookup to notice. */
@@ -76,12 +94,12 @@ export function s3ObjectStore(config: S3StoreConfig): ObjectStore {
         body,
         headers: opts.contentType ? { "content-type": opts.contentType } : {},
       });
-      if (!res.ok) throw new Error(`storage put failed: ${res.status}`);
+      if (!res.ok) throw new StorageError("put", res.status);
     },
     async get(key) {
       const res = await client.fetch(url(key), { method: "GET" });
       if (res.status === 404) return null;
-      if (!res.ok) throw new Error(`storage get failed: ${res.status}`);
+      if (!res.ok) throw new StorageError("get", res.status);
       return await res.arrayBuffer();
     },
     async delete(key) {
@@ -89,13 +107,13 @@ export function s3ObjectStore(config: S3StoreConfig): ObjectStore {
       // S3 returns 204 for a delete of a key that was never there. Treat 404
       // the same way so callers can delete idempotently.
       if (!res.ok && res.status !== 404) {
-        throw new Error(`storage delete failed: ${res.status}`);
+        throw new StorageError("delete", res.status);
       }
     },
     async head(key) {
       const res = await client.fetch(url(key), { method: "HEAD" });
       if (res.status === 404) return null;
-      if (!res.ok) throw new Error(`storage head failed: ${res.status}`);
+      if (!res.ok) throw new StorageError("head", res.status);
       const size = Number(res.headers.get("content-length") ?? "0");
       return { key, size, contentType: res.headers.get("content-type") };
     },
