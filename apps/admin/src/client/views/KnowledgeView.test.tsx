@@ -3,6 +3,13 @@ import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/re
 import { KnowledgeView } from "./KnowledgeView";
 
 afterEach(cleanup);
+// Belt-and-suspenders: if a fake-timer test's assertion throws before it
+// reaches its own `vi.useRealTimers()`, real timers never get restored and
+// every subsequent test's `waitFor` (which polls on real timers) hangs until
+// its own timeout -- turning one clear failure into a wall of unrelated
+// ones. Restoring here every time makes that impossible regardless of where
+// a test fails.
+afterEach(() => vi.useRealTimers());
 
 const DOCUMENTS = [
   {
@@ -213,5 +220,74 @@ describe("KnowledgeView", () => {
       expect(fetchMock.mock.calls.some(([u, i]) => String(u).endsWith("/materials") && (i as RequestInit)?.method === "POST")).toBe(true),
     );
     expect(screen.queryByText(/Unsupported file type/i)).toBeNull();
+  });
+
+  it("stops polling once nothing is pending", async () => {
+    vi.useFakeTimers();
+    const fetchMock = stubFetch({
+      materials: { materials: [{ ...MATERIALS[0], status: "ready" }] },
+    });
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await vi.advanceTimersByTimeAsync(12_000);
+    // Two initial loads (documents + materials) and nothing more.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  // Beyond the brief: the negative case above proves polling stops when
+  // idle, but not that it ever ran at all -- a `pending` check that always
+  // evaluated false would pass that test too. This is the positive half.
+  //
+  // Advanced in 1s steps rather than one 12s jump: this environment's fake
+  // timers only let one microtask "layer" of the fetch -> setState -> render
+  // -> effect chain drain per advance call, so a single large jump under-
+  // counts how many layers actually resolved. Stepping (matching how a real
+  // clock would tick) is what lets the initial load, then the poll tick's
+  // own reload, each actually land before the assertion runs.
+  it("keeps polling while a material is pending", async () => {
+    vi.useFakeTimers();
+    const fetchMock = stubFetch({
+      materials: { materials: [MATERIALS[1]] }, // status: "pending"
+    });
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    for (let i = 0; i < 10; i++) {
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    // Two initial loads, plus at least one poll tick's reload of both.
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4);
+    vi.useRealTimers();
+  });
+
+  // Beyond the brief: navigating away and back re-mounts this view fresh --
+  // the folder selection must be restorable from outside, since it is no
+  // longer purely internal state once App.tsx carries it across that gap.
+  it("opens the folder passed in via initialDirectory rather than root", async () => {
+    stubFetch({
+      documents: {
+        documents: [
+          ...DOCUMENTS,
+          { ...DOCUMENTS[0], id: "d3", path: "week2/lecture", title: "Lecture 2" },
+        ],
+      },
+    });
+    render(
+      <KnowledgeView courseId="c1" initialDirectory="week1" onOpenDocument={vi.fn()} />,
+    );
+    await waitFor(() => screen.getByText("Lecture 1"));
+    // Root-level and the other week's documents are not shown -- only
+    // week1's -- confirming the tree opened on week1, not root.
+    expect(screen.queryByText("Syllabus")).toBeNull();
+    expect(screen.queryByText("Lecture 2")).toBeNull();
+  });
+
+  it("reports folder changes via onDirectoryChange as the instructor browses", async () => {
+    const onDirectoryChange = vi.fn();
+    stubFetch();
+    render(
+      <KnowledgeView courseId="c1" onOpenDocument={vi.fn()} onDirectoryChange={onDirectoryChange} />,
+    );
+    await waitFor(() => screen.getByText("Syllabus"));
+    fireEvent.click(screen.getByRole("button", { name: /week1/i }));
+    expect(onDirectoryChange).toHaveBeenCalledWith("week1");
   });
 });

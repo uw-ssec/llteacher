@@ -31,12 +31,32 @@ const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export type KnowledgeViewProps = {
   courseId: string;
   onOpenDocument: (documentId: string) => void;
+  /** #23: the folder to open on mount. Threaded from App.tsx's own `View`
+   *  state so navigating away (e.g. into a document) and back via `onBack`
+   *  restores the exact folder the instructor was in, rather than resetting
+   *  to root -- this view is unmounted and remounted on that round trip, so
+   *  its own useState alone can't survive it. Undefined means root, same as
+   *  the bare `useState("")` this replaced. */
+  initialDirectory?: string;
+  /** Fired whenever the selected folder changes, so the caller can carry it
+   *  forward into whatever state needs to reconstruct this screen later. */
+  onDirectoryChange?: (directory: string) => void;
 };
 
-export function KnowledgeView({ courseId, onOpenDocument }: KnowledgeViewProps) {
-  const [directory, setDirectory] = useState("");
+export function KnowledgeView({
+  courseId,
+  onOpenDocument,
+  initialDirectory,
+  onDirectoryChange,
+}: KnowledgeViewProps) {
+  const [directory, setDirectoryState] = useState(initialDirectory ?? "");
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
+
+  function setDirectory(next: string) {
+    setDirectoryState(next);
+    onDirectoryChange?.(next);
+  }
 
   const documents = useApiResource<KnowledgeDocumentListPayload>(
     (opts) => apiClient.knowledge.listDocuments(courseId, opts),
@@ -63,6 +83,28 @@ export function KnowledgeView({ courseId, onOpenDocument }: KnowledgeViewProps) 
   const directories = useMemo(() => directoriesOf(all), [all]);
   const visible = useMemo(() => documentsIn(all, directory), [all, directory]);
   const materialList = materials.data?.materials ?? [];
+
+  /* Poll only while something is actually in flight, and stop when nothing
+     is: a blanket timer would keep an idle console requesting forever, and
+     the request is a full listing.
+
+     Deliberately depends on `materials.reload`/`documents.reload` (each a
+     stable `useCallback` from useApiResource), not on the `materials`/
+     `documents` objects themselves -- those are new object literals every
+     render, which would tear down and recreate this interval on every
+     unrelated re-render (e.g. the announcement effect above firing) and
+     could starve it indefinitely under frequent renders. */
+  const pending = materialList.some(
+    (m) => m.status === "pending" || m.status === "processing",
+  );
+  useEffect(() => {
+    if (!pending) return;
+    const timer = setInterval(() => {
+      materials.reload();
+      documents.reload();
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [pending, materials.reload, documents.reload]);
 
   /** Client-side validation is for a fast error only; the server re-checks
    *  both of these and is the authority. */

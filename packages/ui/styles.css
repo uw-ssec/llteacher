@@ -6527,6 +6527,44 @@ body {
   outline-offset: 2px;
 }
 
+/* -- Knowledge sub-nav (#23) -------------------------------------------------
+   The sidebar has one Knowledge entry, not two: this segmented control is
+   how the console distinguishes the bundle browser from collections without
+   a second nav item. Underline-style tabs, not another sidebar rail --
+   collections is a view within Knowledge, not a sibling section of the
+   console. */
+
+.admin-subnav {
+  display: flex;
+  gap: var(--space-4);
+  margin-block-end: var(--space-4);
+  border-block-end: 1px solid var(--color-border);
+}
+
+.admin-subnav__tab {
+  padding-block: var(--space-2);
+  background: none;
+  border: none;
+  border-block-end: 2px solid transparent;
+  margin-block-end: -1px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.admin-subnav__tab:hover,
+.admin-subnav__tab:focus-visible {
+  color: var(--color-text);
+  outline: none;
+}
+
+.admin-subnav__tab--active {
+  color: var(--color-text);
+  border-block-end-color: var(--color-accent-warm);
+}
+
 /* -- Knowledge base bundle browser (#42) -----------------------------------
    Two-pane layout: a directory rail derived from OKF paths (there is no
    directory table -- see apps/admin/src/client/lib/documentTree.ts) beside
