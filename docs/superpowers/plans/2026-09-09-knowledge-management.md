@@ -1440,6 +1440,15 @@ import {
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
+/** `users.email` and `.email_blind_index` are NOT NULL encrypted columns
+ *  (AES-256-GCM ciphertext and an HMAC blind index). This suite never reads
+ *  them back, so random bytes of the right shape satisfy the branded types
+ *  without dragging IdentityCipher into a collections test. Same helper, same
+ *  reasoning, as courseMemberships.db.test.ts and submissions.db.test.ts. */
+function randomBytes(): never {
+  return crypto.getRandomValues(new Uint8Array(16)) as never;
+}
+
 describe.skipIf(!DATABASE_URL)("knowledgeCollections repository", () => {
   let db: Db;
   let courseA: CourseScope;
@@ -1468,7 +1477,7 @@ describe.skipIf(!DATABASE_URL)("knowledgeCollections repository", () => {
 
     const [user] = await db
       .insert(users)
-      .values({ workosUserId: `wu-${crypto.randomUUID()}` })
+      .values({ email: randomBytes(), emailBlindIndex: randomBytes() })
       .returning({ id: users.id });
     const [m] = await db
       .insert(courseMemberships)
