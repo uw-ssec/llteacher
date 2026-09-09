@@ -203,6 +203,36 @@ export async function setCollectionItems(
   return true;
 }
 
+/** The raw item selection backing a collection -- documents and directories,
+ *  distinguishably -- so an editor can restore exactly what was checked.
+ *  This is deliberately NOT listDocumentsInCollections: a folder selection
+ *  is not the same as the documents it currently happens to contain, and
+ *  resolving it away here would make it impossible for the console to
+ *  re-check the right boxes. Guarded on scope first: null (not an empty
+ *  array) tells the route a foreign collection id was named, so it can
+ *  answer 404 rather than "an empty collection". */
+export async function getCollectionItems(
+  db: Db,
+  scope: CourseScope,
+  collectionId: string,
+): Promise<CollectionItemInput[] | null> {
+  const owned = await getCollection(db, scope, collectionId);
+  if (!owned) return null;
+
+  const rows = await db
+    .select({
+      documentId: collectionItems.documentId,
+      directoryPath: collectionItems.directoryPath,
+    })
+    .from(collectionItems)
+    .where(eq(collectionItems.collectionId, collectionId))
+    .orderBy(collectionItems.createdAt);
+
+  return rows.map((r) =>
+    r.documentId ? { documentId: r.documentId } : { directoryPath: r.directoryPath! },
+  );
+}
+
 /** Every document in any of the given collections, deduplicated. A document
  *  selected both directly and through its folder appears once. */
 export async function listDocumentsInCollections(

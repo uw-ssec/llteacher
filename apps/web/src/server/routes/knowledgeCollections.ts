@@ -24,6 +24,7 @@ import {
   createCollection,
   deleteCollection,
   detachCollection,
+  getCollectionItems,
   homeworkBelongsToCourse,
   listAttachments,
   listCollections,
@@ -35,6 +36,7 @@ import {
 } from "../repositories/knowledgeCollections";
 import type {
   AttachmentListPayload,
+  CollectionItemsPayload,
   CollectionListPayload,
   ResolutionPayload,
 } from "@llteacher/ui/api";
@@ -122,6 +124,21 @@ export async function deleteCollectionHandler(c: Context<AppEnv>) {
 
   const removed = await deleteCollection(makeDb(c.env.DATABASE_URL), scope, collectionId);
   return removed ? c.body(null, 204) : c.json({ error: "No such collection." }, 404);
+}
+
+/** The read half of setCollectionItemsHandler. The editor needs this to
+ *  restore exactly what was selected before it can safely PUT again --
+ *  without it, a save that only meant to add one folder would wholesale
+ *  replace the collection's contents with just that folder. */
+export async function getCollectionItemsHandler(c: Context<AppEnv>) {
+  const scope = instructorScope(c);
+  if (!scope) return c.json({ error: "Not permitted." }, 403);
+
+  const collectionId = c.req.param("collectionId");
+  if (!collectionId) return c.json({ error: "No such collection." }, 404);
+
+  const items = await getCollectionItems(makeDb(c.env.DATABASE_URL), scope, collectionId);
+  return items ? c.json({ items } satisfies CollectionItemsPayload) : c.json({ error: "No such collection." }, 404);
 }
 
 export async function setCollectionItemsHandler(c: Context<AppEnv>) {

@@ -16,6 +16,7 @@ import {
   createCollectionHandler,
   deleteCollectionHandler,
   detachCollectionHandler,
+  getCollectionItemsHandler,
   listAttachmentsHandler,
   listCollectionsHandler,
   resolveKnowledgeHandler,
@@ -41,6 +42,7 @@ const repo = {
   updateCollection: vi.fn(),
   deleteCollection: vi.fn(),
   setCollectionItems: vi.fn(),
+  getCollectionItems: vi.fn(),
   listAttachments: vi.fn(),
   attachCollection: vi.fn(),
   detachCollection: vi.fn(),
@@ -56,6 +58,7 @@ vi.mock("../repositories/knowledgeCollections", () => ({
   updateCollection: (...a: unknown[]) => repo.updateCollection(...a),
   deleteCollection: (...a: unknown[]) => repo.deleteCollection(...a),
   setCollectionItems: (...a: unknown[]) => repo.setCollectionItems(...a),
+  getCollectionItems: (...a: unknown[]) => repo.getCollectionItems(...a),
   listAttachments: (...a: unknown[]) => repo.listAttachments(...a),
   attachCollection: (...a: unknown[]) => repo.attachCollection(...a),
   detachCollection: (...a: unknown[]) => repo.detachCollection(...a),
@@ -81,6 +84,7 @@ function appWith(role: "instructor" | "student") {
   a.post("/api/courses/:courseId/knowledge/collections", createCollectionHandler);
   a.put("/api/courses/:courseId/knowledge/collections/:collectionId", updateCollectionHandler);
   a.delete("/api/courses/:courseId/knowledge/collections/:collectionId", deleteCollectionHandler);
+  a.get("/api/courses/:courseId/knowledge/collections/:collectionId/items", getCollectionItemsHandler);
   a.put("/api/courses/:courseId/knowledge/collections/:collectionId/items", setCollectionItemsHandler);
   a.get("/api/courses/:courseId/knowledge/attachments", listAttachmentsHandler);
   a.post("/api/courses/:courseId/knowledge/collections/:collectionId/attachments", attachCollectionHandler);
@@ -107,6 +111,7 @@ beforeEach(() => {
   repo.updateCollection.mockResolvedValue({ id: COL_ID, name: "Week 1 (edited)" });
   repo.deleteCollection.mockResolvedValue(true);
   repo.setCollectionItems.mockResolvedValue(true);
+  repo.getCollectionItems.mockResolvedValue([{ documentId: DOC_ID }, { directoryPath: "wk" }]);
   repo.listAttachments.mockResolvedValue([]);
   repo.attachCollection.mockResolvedValue(true);
   repo.detachCollection.mockResolvedValue(true);
@@ -174,6 +179,21 @@ describe("collection routes", () => {
   it("404s deleting a collection that does not exist in this course", async () => {
     repo.deleteCollection.mockResolvedValue(false);
     const res = await app().request(`${base}/collections/${COL_ID}`, { method: "DELETE" }, TEST_ENV);
+    expect(res.status).toBe(404);
+  });
+
+  it("gets a collection's items, documents and directories distinguished", async () => {
+    const res = await app().request(`${base}/collections/${COL_ID}/items`, {}, TEST_ENV);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      items: [{ documentId: DOC_ID }, { directoryPath: "wk" }],
+    });
+    expect(repo.getCollectionItems).toHaveBeenCalledWith({}, COURSE_ID, COL_ID);
+  });
+
+  it("404s getting items for a collection belonging to another course", async () => {
+    repo.getCollectionItems.mockResolvedValue(null);
+    const res = await app().request(`${base}/collections/${COL_ID}/items`, {}, TEST_ENV);
     expect(res.status).toBe(404);
   });
 
@@ -410,6 +430,7 @@ describe("collection routes reject non-instructors", () => {
     ["POST", `${base}/collections`, { name: "x" }],
     ["PUT", `${base}/collections/${COL_ID}`, { name: "x" }],
     ["DELETE", `${base}/collections/${COL_ID}`],
+    ["GET", `${base}/collections/${COL_ID}/items`],
     ["PUT", `${base}/collections/${COL_ID}/items`, { items: [] }],
     ["GET", `${base}/attachments`],
     ["POST", `${base}/collections/${COL_ID}/attachments`, { scope: { kind: "course", courseId: COURSE_ID } }],

@@ -268,6 +268,7 @@ describe("knowledge management routes are wrapped in requireInstructorOf (#42, T
     { method: "POST", path: `/api/courses/${COURSE_ID}/knowledge/collections` },
     { method: "PATCH", path: `/api/courses/${COURSE_ID}/knowledge/collections/${OTHER_ID}` },
     { method: "DELETE", path: `/api/courses/${COURSE_ID}/knowledge/collections/${OTHER_ID}` },
+    { method: "GET", path: `/api/courses/${COURSE_ID}/knowledge/collections/${OTHER_ID}/items` },
     { method: "PUT", path: `/api/courses/${COURSE_ID}/knowledge/collections/${OTHER_ID}/items` },
     { method: "GET", path: `/api/courses/${COURSE_ID}/knowledge/attachments` },
     { method: "POST", path: `/api/courses/${COURSE_ID}/knowledge/collections/${OTHER_ID}/attachments` },
@@ -275,8 +276,8 @@ describe("knowledge management routes are wrapped in requireInstructorOf (#42, T
     { method: "GET", path: `/api/courses/${COURSE_ID}/knowledge/resolve` },
   ];
 
-  it("registers exactly 19 knowledge-management routes -- this list must grow with the route table", () => {
-    expect(ROUTES).toHaveLength(19);
+  it("registers exactly 20 knowledge-management routes -- this list must grow with the route table", () => {
+    expect(ROUTES).toHaveLength(20);
   });
 
   it.each(ROUTES)(

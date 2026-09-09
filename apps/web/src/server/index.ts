@@ -85,6 +85,7 @@ import {
   createCollectionHandler,
   updateCollectionHandler,
   deleteCollectionHandler,
+  getCollectionItemsHandler,
   setCollectionItemsHandler,
   listAttachmentsHandler,
   attachCollectionHandler,
@@ -435,6 +436,10 @@ app.patch(
 app.delete(
   "/api/courses/:courseId/knowledge/collections/:collectionId",
   requireInstructorOf()(deleteCollectionHandler),
+);
+app.get(
+  "/api/courses/:courseId/knowledge/collections/:collectionId/items",
+  requireInstructorOf()(getCollectionItemsHandler),
 );
 app.put(
   "/api/courses/:courseId/knowledge/collections/:collectionId/items",

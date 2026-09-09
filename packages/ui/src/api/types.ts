@@ -317,6 +317,13 @@ export interface CollectionItemsWriteBody {
   items: CollectionItemBody[];
 }
 
+/** The read side of CollectionItemsWriteBody: what is currently selected,
+ *  document-vs-directory preserved, so the editor can restore its checkboxes
+ *  rather than reconstructing state from the resolved document list. */
+export interface CollectionItemsPayload {
+  items: CollectionItemBody[];
+}
+
 export type AttachmentScopePayload =
   | { kind: "course"; courseId: string }
   | { kind: "homework"; homeworkId: string }

@@ -8,6 +8,7 @@ import {
   attachCollection,
   createCollection,
   deleteCollection,
+  getCollectionItems,
   homeworkBelongsToCourse,
   listCollections,
   listDocumentsInCollections,
@@ -157,6 +158,39 @@ describe.skipIf(!DATABASE_URL)("knowledgeCollections repository", () => {
       { documentId: doc.id },
     ]);
     expect(await listDocumentsInCollections(db, courseA, [collection.id])).toHaveLength(1);
+  });
+
+  it("round-trips a mixed selection of one document and one directory", async () => {
+    const collection = await createCollection(db, courseA, {
+      name: "Roundtrip",
+      createdById: membershipA,
+    });
+    const doc = await createDocument(db, courseA, {
+      path: "rt/a",
+      kind: "concept",
+      type: "n",
+      body: "",
+    });
+    await setCollectionItems(db, courseA, collection.id, [
+      { documentId: doc.id },
+      { directoryPath: "rt/sub" },
+    ]);
+
+    const items = await getCollectionItems(db, courseA, collection.id);
+    expect(items).toEqual(
+      expect.arrayContaining([{ documentId: doc.id }, { directoryPath: "rt/sub" }]),
+    );
+    expect(items).toHaveLength(2);
+  });
+
+  it("returns nothing for a foreign collection id", async () => {
+    const collection = await createCollection(db, courseA, {
+      name: "Foreign",
+      createdById: membershipA,
+    });
+    await setCollectionItems(db, courseA, collection.id, [{ directoryPath: "x" }]);
+
+    expect(await getCollectionItems(db, courseB, collection.id)).toBeNull();
   });
 
   it("resolves attachments most-specific-wins", async () => {
