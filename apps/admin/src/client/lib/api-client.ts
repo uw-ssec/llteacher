@@ -33,14 +33,26 @@
 
 import type {
   AddTaResultPayload,
+  AttachmentListPayload,
+  AttachmentScopePayload,
+  CollectionItemBody,
+  CollectionListPayload,
+  CollectionPayload,
+  CollectionWriteBody,
   CourseTaPayload,
+  DocumentLinksPayload,
   ExportRequestBody,
   GradeDraftPayload,
   GradeListPayload,
+  KnowledgeDocumentListPayload,
+  KnowledgeDocumentPayload,
   LlmConfigListPayload,
   LlmConfigPayload,
   LlmConfigTestPayload,
   LlmConfigWriteBody,
+  MaterialListPayload,
+  MaterialStatus,
+  ResolutionPayload,
   RosterImportPayload,
   RosterListPayload,
 } from "@llteacher/ui/api";
@@ -159,7 +171,12 @@ async function request<T>(
       // the default omits credentials on a cross-origin request.
       credentials: "same-origin",
       headers: {
-        ...(init.body ? { "content-type": "application/json" } : {}),
+        // A FormData body carries its own multipart content-type INCLUDING the
+        // boundary, which only the browser can generate. Stamping JSON here
+        // produced a body the Worker could not parse (#42).
+        ...(init.body && !(init.body instanceof FormData)
+          ? { "content-type": "application/json" }
+          : {}),
         ...init.headers,
       },
     });
@@ -349,5 +366,160 @@ export const apiClient = {
         { method: "POST", body: JSON.stringify(body) },
         { timeoutMs: 60_000, ...opts },
       ),
+  },
+
+  knowledge: {
+    listMaterials: (courseId: string, opts: RequestOptions) =>
+      request<MaterialListPayload>(
+        `/api/courses/${encode(courseId)}/materials`,
+        { method: "GET" },
+        opts,
+      ),
+    /** Multipart, and deliberately without a content-type header: the
+     *  browser must set the multipart boundary itself, and an explicit
+     *  header here produces a body the server cannot parse. `request`
+     *  skips its JSON default when the body is FormData. */
+    uploadMaterial: (courseId: string, file: File, opts: RequestOptions) => {
+      const form = new FormData();
+      form.set("file", file);
+      return request<{ id: string; status: MaterialStatus }>(
+        `/api/courses/${encode(courseId)}/materials`,
+        { method: "POST", body: form },
+        opts,
+      );
+    },
+    deleteMaterial: (courseId: string, materialId: string, opts: RequestOptions) =>
+      request<null>(
+        `/api/courses/${encode(courseId)}/materials/${encode(materialId)}`,
+        { method: "DELETE" },
+        opts,
+      ),
+    /** Re-runs tier-1 conversion server-side. Honest about the no-op case: for a
+     *  format the pipeline still cannot extract, the response comes back
+     *  `pending` with `documentCreated: false` rather than pretending it worked. */
+    reingestMaterial: (courseId: string, materialId: string, opts: RequestOptions) =>
+      request<{ status: MaterialStatus; documentCreated: boolean }>(
+        `/api/courses/${encode(courseId)}/materials/${encode(materialId)}/reingest`,
+        { method: "POST" },
+        opts,
+      ),
+
+    listDocuments: (courseId: string, opts: RequestOptions) =>
+      request<KnowledgeDocumentListPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/documents`,
+        { method: "GET" },
+        opts,
+      ),
+    getDocument: (courseId: string, documentId: string, opts: RequestOptions) =>
+      request<KnowledgeDocumentPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/documents/${encode(documentId)}`,
+        { method: "GET" },
+        opts,
+      ),
+    createDocument: (
+      courseId: string,
+      body: { path: string; kind: "concept" | "index"; type?: string; title?: string; body?: string },
+      opts: RequestOptions,
+    ) =>
+      request<KnowledgeDocumentPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/documents`,
+        { method: "POST", body: JSON.stringify(body) },
+        opts,
+      ),
+    updateDocument: (
+      courseId: string,
+      documentId: string,
+      body: { body: string },
+      opts: RequestOptions,
+    ) =>
+      request<KnowledgeDocumentPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/documents/${encode(documentId)}`,
+        { method: "PUT", body: JSON.stringify(body) },
+        opts,
+      ),
+    deleteDocument: (courseId: string, documentId: string, opts: RequestOptions) =>
+      request<null>(
+        `/api/courses/${encode(courseId)}/knowledge/documents/${encode(documentId)}`,
+        { method: "DELETE" },
+        opts,
+      ),
+    documentLinks: (courseId: string, documentId: string, opts: RequestOptions) =>
+      request<DocumentLinksPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/documents/${encode(documentId)}/links`,
+        { method: "GET" },
+        opts,
+      ),
+
+    listCollections: (courseId: string, opts: RequestOptions) =>
+      request<CollectionListPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/collections`,
+        { method: "GET" },
+        opts,
+      ),
+    createCollection: (courseId: string, body: CollectionWriteBody, opts: RequestOptions) =>
+      request<CollectionPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/collections`,
+        { method: "POST", body: JSON.stringify(body) },
+        opts,
+      ),
+    deleteCollection: (courseId: string, collectionId: string, opts: RequestOptions) =>
+      request<null>(
+        `/api/courses/${encode(courseId)}/knowledge/collections/${encode(collectionId)}`,
+        { method: "DELETE" },
+        opts,
+      ),
+    setCollectionItems: (
+      courseId: string,
+      collectionId: string,
+      items: CollectionItemBody[],
+      opts: RequestOptions,
+    ) =>
+      request<null>(
+        `/api/courses/${encode(courseId)}/knowledge/collections/${encode(collectionId)}/items`,
+        { method: "PUT", body: JSON.stringify({ items }) },
+        opts,
+      ),
+
+    listAttachments: (courseId: string, opts: RequestOptions) =>
+      request<AttachmentListPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/attachments`,
+        { method: "GET" },
+        opts,
+      ),
+    attach: (
+      courseId: string,
+      collectionId: string,
+      scope: AttachmentScopePayload,
+      opts: RequestOptions,
+    ) =>
+      request<null>(
+        `/api/courses/${encode(courseId)}/knowledge/collections/${encode(collectionId)}/attachments`,
+        { method: "POST", body: JSON.stringify({ scope }) },
+        opts,
+      ),
+    detach: (courseId: string, attachmentId: string, opts: RequestOptions) =>
+      request<null>(
+        `/api/courses/${encode(courseId)}/knowledge/attachments/${encode(attachmentId)}`,
+        { method: "DELETE" },
+        opts,
+      ),
+
+    /** Query params, not path segments: every id here is optional, and a
+     *  path with holes in it is not a path. */
+    resolve: (
+      courseId: string,
+      target: { homeworkId?: string; sectionId?: string; llmConfigId?: string },
+      opts: RequestOptions,
+    ) => {
+      const query = new URLSearchParams(
+        Object.entries(target).filter(([, v]) => !!v) as [string, string][],
+      );
+      const suffix = query.toString() ? `?${query}` : "";
+      return request<ResolutionPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/resolve${suffix}`,
+        { method: "GET" },
+        opts,
+      );
+    },
   },
 };
