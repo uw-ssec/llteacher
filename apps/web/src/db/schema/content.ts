@@ -873,3 +873,152 @@ export const knowledgeLinksRelations = relations(knowledgeLinks, ({ one }) => ({
     relationName: "outboundLinks",
   }),
 }));
+
+// ---------- MaterialCollection ----------
+// A named selection over the course's bundle. The unit an instructor
+// attaches to an assignment.
+
+export const materialCollections = pgTable(
+  "material_collections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    createdById: uuid("created_by_id")
+      .notNull()
+      .references(() => courseMemberships.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [uniqueIndex("material_collections_course_name_uq").on(t.courseId, t.name)],
+);
+
+// ---------- CollectionItem ----------
+// Exactly one of document_id (a single file) or directory_path (a subtree).
+// A directory item resolves LIVE -- `path LIKE directory_path || '/%'` -- so
+// a file added to that folder tomorrow is in the collection tomorrow. That
+// is what "select the folders that make up a collection" means, and it is
+// why this is not a materialised list of document ids.
+
+export const collectionItems = pgTable(
+  "collection_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    collectionId: uuid("collection_id")
+      .notNull()
+      .references(() => materialCollections.id, { onDelete: "cascade" }),
+    documentId: uuid("document_id").references(() => knowledgeDocuments.id, {
+      onDelete: "cascade",
+    }),
+    directoryPath: text("directory_path"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check(
+      "collection_items_exactly_one_target_chk",
+      sql`num_nonnulls(${t.documentId}, ${t.directoryPath}) = 1`,
+    ),
+    // Postgres never treats two NULLs as a conflict, so each of these only
+    // constrains rows that actually use that column -- same reasoning as
+    // prompt_templates' per-scope unique indexes.
+    uniqueIndex("collection_items_collection_document_uq").on(
+      t.collectionId,
+      t.documentId,
+    ),
+    uniqueIndex("collection_items_collection_directory_uq").on(
+      t.collectionId,
+      t.directoryPath,
+    ),
+    index("collection_items_collection_idx").on(t.collectionId),
+  ],
+);
+
+// ---------- CollectionAttachment ----------
+// Deliberately mirrors prompt_templates' scope shape so resolution code
+// reads like lib/prompts.ts.
+//
+// course_id and scope_course_id are different fields doing different jobs
+// and both are needed: course_id is the denormalised tenancy guard present
+// on EVERY row, so a listing filters by course without joining through four
+// possible scope targets; scope_course_id is set only on rows whose
+// attachment target IS the course, and is null on homework-, section-, and
+// config-scoped rows.
+
+export const collectionAttachments = pgTable(
+  "collection_attachments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    collectionId: uuid("collection_id")
+      .notNull()
+      .references(() => materialCollections.id, { onDelete: "cascade" }),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    scopeCourseId: uuid("scope_course_id").references(() => courses.id, {
+      onDelete: "cascade",
+    }),
+    scopeHomeworkId: uuid("scope_homework_id").references(() => homeworks.id, {
+      onDelete: "cascade",
+    }),
+    scopeSectionId: uuid("scope_section_id").references(() => sections.id, {
+      onDelete: "cascade",
+    }),
+    scopeLlmConfigId: uuid("scope_llm_config_id").references(
+      () => llmConfigs.id,
+      { onDelete: "cascade" },
+    ),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check(
+      "collection_attachments_exactly_one_scope_chk",
+      sql`num_nonnulls(${t.scopeCourseId}, ${t.scopeHomeworkId}, ${t.scopeSectionId}, ${t.scopeLlmConfigId}) = 1`,
+    ),
+    index("collection_attachments_course_idx").on(t.courseId),
+    index("collection_attachments_scope_course_idx").on(t.scopeCourseId),
+    index("collection_attachments_scope_homework_idx").on(t.scopeHomeworkId),
+    index("collection_attachments_scope_section_idx").on(t.scopeSectionId),
+    index("collection_attachments_scope_llm_config_idx").on(t.scopeLlmConfigId),
+    // Multiple DISTINCT collections may attach to one target; the same
+    // collection may not attach to the same target twice.
+    uniqueIndex("collection_attachments_course_uq").on(
+      t.collectionId,
+      t.scopeCourseId,
+    ),
+    uniqueIndex("collection_attachments_homework_uq").on(
+      t.collectionId,
+      t.scopeHomeworkId,
+    ),
+    uniqueIndex("collection_attachments_section_uq").on(
+      t.collectionId,
+      t.scopeSectionId,
+    ),
+    uniqueIndex("collection_attachments_llm_config_uq").on(
+      t.collectionId,
+      t.scopeLlmConfigId,
+    ),
+  ],
+);
+
+export const materialCollectionsRelations = relations(
+  materialCollections,
+  ({ one, many }) => ({
+    course: one(courses, {
+      fields: [materialCollections.courseId],
+      references: [courses.id],
+    }),
+    items: many(collectionItems),
+    attachments: many(collectionAttachments),
+  }),
+);
