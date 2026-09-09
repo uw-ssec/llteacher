@@ -2,6 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to execute this plan issue-by-issue (one fresh subagent per GitHub issue, task review after each, whole-branch review per PR). Scope: GitHub milestone 4 (21 issues as of the 2026-08-11 sync — see below) + the M3 issues that are blocked on M4 work. Broken into 4 sequential, independently-mergeable PRs. Ends with a full epic acceptance pass against issue #30's own checklist.
 
+## 2026-09-09 sync check (PR #440 — 11-dimension audit fix pass, post-closeout)
+
+With the closeout batch (below) done and pushed, ran this project's own established 11-dimension review methodology (security/functionality/reliability/maintainability/performance/scalability/compatibility/flexibility/usability/accessibility, security examined first and last) against PR #440's full diff — 10 parallel single-dimension audits, 0 Critical, 5 Major (2 of them independently found by 2 different lenses each). Fixed all 5 Majors plus ~20 real Minor/Enhancement findings via 5 parallel implementer subagents, 2 independent scoped reviewers, and a round-2 fix pass for the 3 real regressions the reviewers caught in round 1's own fixes (a page-turn-failure UX dead-end in the new admin dashboard, a memo-defeating unmemoized closure, and an over-broad eval-scoring demotion). Full details in the SDD ledger's "11-dimension audit" and "Fix pass" entries. Final verification: typecheck clean across all 4 packages, 2503 tests passed / 14 skipped (both pre-existing, gated-by-design) / 0 failed, including the DB-gated suites run against the local Docker Postgres.
+
 ## 2026-09-03 sync check (PR5 closeout — the last 5 M4 issues, epic close)
 
 **Start here if you're picking up the tail end of M4.** PR5's original 23-issue scope (below) is done and reviewed clean — see the 2026-09-01 entry. What's left before epic #30 can close: **5 issues**, all filed 2026-09-01/02 as fallout from PR4's own follow-up PRs (#412, #413), none of them in this plan doc's original scope. Folding them into this same PR5 branch/PR (#440) since the user wants this to be the literal last PR of M4.

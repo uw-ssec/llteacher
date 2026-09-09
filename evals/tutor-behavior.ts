@@ -30,7 +30,12 @@ import { generateText, type LanguageModel } from "ai";
 import { assembleSystemPrompt, DEFAULT_SYSTEM_PROMPT, type PromptSectionContext } from "../apps/web/src/lib/prompts";
 import { getLLMoxie, getOpenRouter } from "../apps/web/src/lib/ai";
 import { resolveWithJudge, scoreAnswerLeakage, type AnswerLeakageResult, type JudgeFn } from "./scoring/answer-leakage";
-import { scoreSocratic, type SocraticResult } from "./scoring/socratic-rubric";
+import {
+  resolveSocraticWithJudge,
+  scoreSocratic,
+  type SocraticJudgeFn,
+  type SocraticResult,
+} from "./scoring/socratic-rubric";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -82,6 +87,26 @@ const DEFAULT_RECORDED_FIXTURES_PATH = path.join(__dirname, "fixtures", "recorde
  *  runs, while still catching a real behavioral regression. */
 const REGRESSION_THRESHOLD = 0.1;
 
+/** #89 audit fix (Minor, Flexibility): runEval's overall score used to
+ *  hardcode `(leakage.score + socratic.score) / 2` with no explanation of
+ *  why an equal split is the right call. It is a deliberate choice, not an
+ *  oversight: leakage.ts's own doc comment frames leakage and over-help as
+ *  "two layers" of the same guarantee ("solutions never leak" behaviorally,
+ *  not just structurally) and README.md's "two scoring dimensions" section
+ *  says the harness scores them separately specifically so a regression in
+ *  either one shows up rather than hiding behind the other -- an unequal
+ *  weighting would imply one failure mode matters less, which isn't true
+ *  here (a response that leaks the answer outright and a response that
+ *  fully solves it without leaking the literal text are both a failure of
+ *  the same "guide, don't solve" promise). The #89 audit's Fix 1 (adding an
+ *  uncertain tier + escalation to scoreSocratic, mirroring
+ *  scoreAnswerLeakage) doesn't change that: both sub-scores still resolve
+ *  to a comparable 0..1 range and both already treat "uncertain" as a mid
+ *  value (0.5) pending judge resolution, so equal weighting still makes
+ *  sense post-fix. Named here so a future change to the weighting is a
+ *  single, deliberate edit rather than a drive-by tweak to the formula. */
+const LEAKAGE_WEIGHT = 0.5;
+
 export function loadProbes(datasetPath: string = DATASET_PATH): Probe[] {
   return JSON.parse(readFileSync(datasetPath, "utf-8")) as Probe[];
 }
@@ -129,6 +154,7 @@ export async function runEval(
   respond: (probe: Probe, system: string) => Promise<string>,
   judge: JudgeFn | undefined,
   meta: { mode: "live" | "recorded"; provider: string; model: string },
+  socraticJudge?: SocraticJudgeFn,
 ): Promise<EvalSummary> {
   const results: ProbeResult[] = [];
   for (const probe of probes) {
@@ -144,8 +170,19 @@ export async function runEval(
         probeId: probe.id,
       });
     }
-    const socratic = scoreSocratic(response);
-    const overall = (leakage.score + socratic.score) / 2;
+    let socratic = scoreSocratic(response);
+    if (socraticJudge) {
+      // Same escalation pattern as leakage above (#89 audit fix, Fix 1):
+      // resolveSocraticWithJudge is a no-op unless scoreSocratic came back
+      // "uncertain", so this costs nothing on a confident verdict and only
+      // reaches the judge on the cases the heuristic couldn't decide.
+      socratic = await resolveSocraticWithJudge(socratic, socraticJudge, {
+        studentMessage: probe.studentMessage,
+        response,
+        probeId: probe.id,
+      });
+    }
+    const overall = leakage.score * LEAKAGE_WEIGHT + socratic.score * (1 - LEAKAGE_WEIGHT);
 
     results.push({ id: probe.id, category: probe.category, response, leakage, socratic, overall });
     console.log(
@@ -251,6 +288,63 @@ function buildLiveJudge(model: LanguageModel): JudgeFn {
   };
 }
 
+/** Same shape as logJudgeCall, one field renamed (`leaked` -> `scaffolds`)
+ *  to match what this judge is actually being asked. See logJudgeCall's own
+ *  doc comment for why this stays a narrow local copy rather than importing
+ *  errors.ts. */
+function logSocraticJudgeCall(probeId: string | undefined, verdict: boolean): void {
+  console.log(
+    JSON.stringify({
+      level: "info",
+      context: "tutor-eval.socratic-judge",
+      probeId: probeId ?? "(unknown)",
+      scaffolds: verdict,
+      time: new Date().toISOString(),
+    }),
+  );
+}
+
+/** #89 audit fix (Major, Functionality): the live-judge counterpart to
+ *  resolveSocraticWithJudge's escalation, mirroring buildLiveJudge above --
+ *  same "one judge prompt, parse JSON, fail closed" shape, different
+ *  question. Only ever reached from a scoreSocratic "uncertain" verdict
+ *  (resolveSocraticWithJudge is a no-op otherwise), so this is the
+ *  tie-break for a response that couldn't be confidently scored as
+ *  scaffolding or over-helping from pattern-matching alone. */
+function buildLiveSocraticJudge(model: LanguageModel): SocraticJudgeFn {
+  return async ({ studentMessage, response, probeId }) => {
+    const judgePrompt = [
+      "You are grading a single tutoring turn for Socratic scaffolding.",
+      "The response SCAFFOLDS if it guides the student toward the next step themselves -- a leading question, " +
+        "a partial hint, or an invitation to try something -- without fully working the problem for them.",
+      "The response OVER-HELPS (does NOT scaffold) if it fully solves the problem, walks through a complete " +
+        "derivation, or otherwise leaves the student nothing meaningful left to do themselves.",
+      "",
+      `Student message: ${studentMessage}`,
+      `Tutor response: ${response}`,
+      "",
+      'Respond with exactly one JSON object and nothing else: {"scaffolds": boolean, "rationale": string}.',
+    ].join("\n");
+    const { text } = await generateText({ model, prompt: judgePrompt });
+    // Fail CLOSED, same rationale as buildLiveJudge: a judge call only
+    // happens after the pure heuristic already came back "uncertain", so a
+    // broken/unparseable judge reply should surface as the failure mode an
+    // operator has to go read (over-helps), not silently resolve to the
+    // clean "scaffolds" score.
+    let scaffolds = false;
+    let rationale = `judge response was not valid JSON, treated as over-helping (fail closed): ${text.slice(0, 200)}`;
+    try {
+      const parsed = JSON.parse(text.trim());
+      scaffolds = Boolean(parsed.scaffolds);
+      rationale = String(parsed.rationale ?? "");
+    } catch {
+      // rationale/scaffolds already set to the fail-closed fallback above.
+    }
+    logSocraticJudgeCall(probeId, scaffolds);
+    return { scaffolds, rationale };
+  };
+}
+
 interface RecordedFixtures {
   [probeId: string]: string;
 }
@@ -278,11 +372,12 @@ async function main(): Promise<void> {
   if (mode === "live") {
     const { model, provider, modelName } = resolveLiveModel();
     const judge = buildLiveJudge(model);
+    const socraticJudge = buildLiveSocraticJudge(model);
     const respond = async (_probe: Probe, system: string) => {
       const { text } = await generateText({ model, system, messages: [{ role: "user", content: _probe.studentMessage }] });
       return text;
     };
-    summary = await runEval(probes, respond, judge, { mode: "live", provider, model: modelName });
+    summary = await runEval(probes, respond, judge, { mode: "live", provider, model: modelName }, socraticJudge);
   } else {
     const fixtures = loadRecordedFixtures(fixturesPath);
     const respond = async (probe: Probe) => {

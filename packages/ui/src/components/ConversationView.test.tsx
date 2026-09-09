@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, act } from "@testing-library/react";
+import { memo } from "react";
+import { render, screen, cleanup, fireEvent, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConversationView } from "./ConversationView";
 import type { MessageData } from "./ConversationView";
@@ -350,6 +351,33 @@ describe("ConversationView send-failure recovery (#96)", () => {
       "words I am still writing",
     );
     expect(screen.getByText("why is my p-value 0.03?")).toBeTruthy();
+  });
+
+  it("client-feedback-ui audit, Fix 3: the unrestored-text note is inside the same role=\"alert\" region as the error message, not a silent sibling", () => {
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} />,
+    );
+    const composer = screen.getByLabelText("Message input") as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "words I am still writing" } });
+
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        restoredDraft={{ text: "why is my p-value 0.03?" }}
+        error={{ message: "Load failed", stage: "send" }}
+      />,
+    );
+
+    // Before this fix, the unrestored-text block was a SIBLING of the
+    // role="alert" div further down .conversation-error-row -- visible, but
+    // outside the one thing on that row a screen reader actually announces.
+    // A blind student was told their message was "back in the box below"
+    // (the alert) but never told it in fact was NOT, because that correction
+    // lived outside the live region entirely.
+    const alert = screen.getByRole("alert");
+    expect(within(alert).getByText("why is my p-value 0.03?")).toBeTruthy();
   });
 
   it("#427: says nothing extra when the restore actually succeeded", () => {
@@ -1514,5 +1542,120 @@ describe("ConversationView header title naming", () => {
     // The heading's name must still be the title, not the title plus its
     // own editing affordances.
     expect(screen.getByRole("heading", { level: 1, name: "Original title" })).toBeTruthy();
+  });
+});
+
+/* --------------------------------------------------------------------------
+   client-feedback-ui audit round 2, Fix 1: renderMessageRow's `onRun={
+   onRunRCode}` (student rows) forwards the caller-supplied handler straight
+   through to `Message` with no caching of its own -- unlike `feedbackSlot`
+   (AI rows, see `getFeedbackSlot`'s cache above), its stability across an
+   unrelated re-render depends ENTIRELY on the caller (App.tsx) passing a
+   referentially stable `onRunRCode`. That was the actual bug: App.tsx's
+   `runRCodeForSection`/`runRCodeForTutor` were plain arrow functions
+   recreated on every App render, so a student row with an R-code run
+   affordance never benefited from Message's `React.memo` the way an AI
+   row's feedbackSlot did. App.tsx now wraps both in `useCallback` with a
+   stable dependency (see its own doc comment there); the fix that lives in
+   this package's own file is confirming ConversationView still forwards
+   whatever it's given verbatim (nothing here re-wraps it in a fresh
+   closure), so a stable `onRunRCode` from the caller actually reaches
+   Message unchanged.
+
+   Can't drive App.tsx's own half of the fix from this package (App.tsx
+   lives in apps/web), so this test pins what's testable here: given a
+   STABLE `onRunRCode` reference, an unrelated re-render must not re-invoke
+   Message's memoized render function for a student row -- and, to prove
+   the render-count spy below is actually sensitive rather than silently
+   broken (the same concern App.tsx's own #309 markdown-render-cost test
+   raises about its counting mechanism), that an UNSTABLE reference (the
+   exact pre-Fix-1 shape) DOES trip it.
+
+   `Message` is a plain `memo()` export with nothing to attach a counter to
+   without changing production code just for a test. Instead, this unwraps
+   the REAL inner render function via `.type` (the standard way to read the
+   function inside a memo() object) and re-wraps IT in a fresh memo() using
+   the same default (no custom comparator) Message.tsx itself uses -- see
+   its own `export const Message = memo(function Message(...))`, no second
+   argument -- so the spy observes exactly the bailout behavior production
+   code gets. Scoped to this one test via `vi.doMock` + a dynamic
+   re-import, not the file-level `vi.mock` (which would replace Message for
+   every other test in this file that depends on its real rendered
+   output). */
+describe("ConversationView onRun prop stability (client-feedback-ui audit round 2, Fix 1)", () => {
+  afterEach(() => {
+    vi.doUnmock("./Message");
+    vi.resetModules();
+  });
+
+  it("does not re-render a student R-code row when onRunRCode is stable across an unrelated re-render, but does when it isn't", async () => {
+    vi.resetModules();
+    const renderSpy = vi.fn();
+    vi.doMock("./Message", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("./Message")>();
+      const inner = (actual.Message as unknown as { type: (props: unknown) => React.ReactNode }).type;
+      const spied = (props: unknown): React.ReactNode => {
+        renderSpy();
+        return inner(props);
+      };
+      return { ...actual, Message: memo(spied) };
+    });
+
+    const { ConversationView: MockedConversationView } = await import("./ConversationView");
+
+    const studentMessage = {
+      id: "s1",
+      role: "student" as const,
+      content: "```r\n1 + 1\n```",
+      createdAt: "2026-08-26T09:00:00.000Z",
+    };
+    const runA = vi.fn(async () => ({ status: "success" as const, executionTimeMs: 1 }));
+    const runB = vi.fn(async () => ({ status: "success" as const, executionTimeMs: 1 }));
+
+    const { rerender } = render(
+      <MockedConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[studentMessage]}
+        onRunRCode={runA}
+      />,
+    );
+    expect(await screen.findByRole("button", { name: "Run" })).toBeTruthy();
+    const afterMount = renderSpy.mock.calls.length;
+    expect(afterMount).toBeGreaterThan(0);
+
+    // Unrelated re-render, same onRunRCode reference -- stands in for a
+    // composer keystroke or the retry-cooldown tick elsewhere in
+    // ConversationView causing ITS OWN render function to run again, with
+    // this message and its run handler untouched. Post Fix 1, App.tsx's
+    // runRCodeForSection/runRCodeForTutor never change identity across a
+    // render like this (see their own doc comment) -- proven here by
+    // passing the very same `runA` reference again.
+    rerender(
+      <MockedConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[studentMessage]}
+        onRunRCode={runA}
+        isSending={true}
+      />,
+    );
+    expect(renderSpy.mock.calls.length).toBe(afterMount);
+
+    // Same shape of re-render, but with a FRESH onRunRCode reference -- the
+    // exact defect Fix 1 removed from App.tsx (a plain arrow function
+    // recreated on every render). Confirms the spy actually detects a real
+    // change instead of trivially reporting zero delta regardless of input
+    // -- the same "is the counting mechanism actually firing" concern
+    // App.tsx's own #309 markdown-render-cost test raises about itself.
+    rerender(
+      <MockedConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[studentMessage]}
+        onRunRCode={runB}
+      />,
+    );
+    expect(renderSpy.mock.calls.length).toBeGreaterThan(afterMount);
   });
 });

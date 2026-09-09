@@ -809,6 +809,72 @@ describe("App tutor-conversations rail (#4)", () => {
     expect(chatCalls[0]!.messages.map((m) => m.role)).toEqual(["user"]);
   });
 
+  // client-feedback-ui audit, Fix 1: the Flag button (#90,
+  // ResponseFeedback.tsx, rendered via ConversationView's
+  // renderAiFeedbackSlot slot) only ever appeared on the homework-section
+  // chat -- App.tsx never wired the prop on the tutor ConversationView call
+  // at all, so a student flagging a bad answer had no way to do so from a
+  // tutor conversation. Pins that App.tsx now wires it there too, scoped by
+  // `tutorConversationId` the same way the section surface scopes it by its
+  // own `conversationId`.
+  it("renders the flag-response affordance on a persisted assistant turn in the tutor chat (#90)", async () => {
+    renderTutorRailApp({
+      onConversationsGet: () =>
+        new Response(
+          JSON.stringify({
+            items: [
+              {
+                id: "tutor-conv-1",
+                ownerUserId: "u1",
+                courseId: "course-a",
+                sectionId: null,
+                kind: "tutor",
+                title: "Existing tutor chat",
+                isDeleted: false,
+                deletedAt: null,
+                createdAt: "2026-08-01T00:00:00.000Z",
+                updatedAt: "2026-08-01T00:00:00.000Z",
+                messageCount: 2,
+              },
+            ],
+            nextCursor: null,
+          }),
+          { status: 200 },
+        ),
+      onConversationMessagesGet: () =>
+        new Response(
+          JSON.stringify([
+            {
+              id: "m1",
+              role: "user",
+              parts: [{ type: "text", text: "prior question" }],
+              seq: 1,
+              createdAt: "2026-08-01T00:00:00.000Z",
+            },
+            // #90: the feedback slot only ever renders for a message that
+            // has round-tripped through the persisted history (a real
+            // `createdAt`, see ConversationView's renderAiFeedbackSlot doc
+            // comment) -- exactly the shape a real GET .../messages
+            // response has, unlike a still-streaming turn.
+            {
+              id: "m2",
+              role: "assistant",
+              parts: [{ type: "text", text: "prior answer" }],
+              seq: 2,
+              createdAt: "2026-08-01T00:00:05.000Z",
+            },
+          ]),
+          { status: 200 },
+        ),
+    });
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
+    await screen.findByText("prior answer");
+
+    expect(screen.getByRole("button", { name: "Flag this response" })).toBeTruthy();
+  });
+
   // #4: because hydration is async (fetch /messages, then apply), tutor
   // selection is racy in a way a synchronous setState was not. Pins the
   // losing interleaving: select conversation A, then B before A's /messages

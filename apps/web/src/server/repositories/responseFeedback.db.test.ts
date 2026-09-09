@@ -204,6 +204,7 @@ describe.skipIf(!RAW_DATABASE_URL)("response feedback (real DB, #90)", () => {
     it("inserts a flag with the given responseSnapshot", async () => {
       const flag = await flagResponse(db, {
         conversationId: conversationAId,
+        courseId: courseAId,
         messageId: assistantMessageAId,
         studentId: studentAId,
         reason: "incorrect",
@@ -235,6 +236,7 @@ describe.skipIf(!RAW_DATABASE_URL)("response feedback (real DB, #90)", () => {
         );
       await flagResponse(db, {
         conversationId: conversationAId,
+        courseId: courseAId,
         messageId: assistantMessageAId,
         studentId: studentAId,
         reason: "incorrect",
@@ -244,6 +246,7 @@ describe.skipIf(!RAW_DATABASE_URL)("response feedback (real DB, #90)", () => {
       await expect(
         flagResponse(db, {
           conversationId: conversationAId,
+          courseId: courseAId,
           messageId: assistantMessageAId,
           studentId: studentAId,
           reason: "confusing",
@@ -261,6 +264,7 @@ describe.skipIf(!RAW_DATABASE_URL)("response feedback (real DB, #90)", () => {
       // second student in course A.
       const flag = await flagResponse(db, {
         conversationId: conversationAId,
+        courseId: courseAId,
         messageId: assistantMessageAId,
         studentId: studentBId,
         reason: "other",
@@ -280,6 +284,7 @@ describe.skipIf(!RAW_DATABASE_URL)("response feedback (real DB, #90)", () => {
       await resetFeedback();
       await flagResponse(db, {
         conversationId: conversationAId,
+        courseId: courseAId,
         messageId: assistantMessageAId,
         studentId: studentAId,
         reason: "gave_away_answer",
@@ -288,6 +293,7 @@ describe.skipIf(!RAW_DATABASE_URL)("response feedback (real DB, #90)", () => {
       });
       await flagResponse(db, {
         conversationId: conversationBId,
+        courseId: courseBId,
         messageId: assistantMessageBId,
         studentId: studentBId,
         reason: "incorrect",
@@ -332,6 +338,129 @@ describe.skipIf(!RAW_DATABASE_URL)("response feedback (real DB, #90)", () => {
       expect(result.total).toBe(1);
       expect(result.items[0]!.messageId).toBeNull();
       expect(result.items[0]!.responseSnapshot).toEqual([{ type: "text", text: "A: the answer is 42" }]);
+    });
+  });
+
+  /* ------------------------------------------------------------------------
+     Server-hardening audit fix, Minor #2 (Security+Scalability+Usability,
+     found independently by all three dimensions): regression coverage for
+     the exact mismatch the finding named -- `total` used to be computed
+     from the pre-filter query, while `items` was filtered afterward in the
+     route (routes/feedback.ts), so a draft-blind TA saw `total: 1` but
+     `items: []`. canViewDrafts is now a SQL-level WHERE-clause input to
+     listCourseFeedback itself (see that function's own doc comment), so
+     this asserts against the real join/filter, not a mocked route -- the
+     class of coverage this file's own top-of-suite doc comment reserves for
+     `.db.test.ts`. Seeds its own isolated course (own draft homework, own
+     flag) rather than reusing course A/B above, so this regression's
+     assertions don't depend on those describe blocks' own seed/mutation
+     ordering. ---------------------------------------------------------- */
+  describe("listCourseFeedback canViewDrafts (Minor #2 regression)", () => {
+    let draftCourseId: string;
+    let draftFlagId: string;
+    let activeFlagId: string;
+
+    beforeAll(async () => {
+      const [course] = await db
+        .insert(courses)
+        .values({ organizationId: orgId, code: `C-${crypto.randomUUID().slice(0, 8)}`, term: "T", title: "Draft" })
+        .returning({ id: courses.id });
+      draftCourseId = course!.id;
+
+      const [student] = await db
+        .insert(users)
+        .values({ email: randomBytes(), emailBlindIndex: randomBytes() })
+        .returning({ id: users.id });
+      const [instructorMembership] = await db
+        .insert(courseMemberships)
+        .values({ userId: student!.id, courseId: draftCourseId, role: "student" })
+        .returning({ id: courseMemberships.id });
+
+      // A never-published (draft) homework and an active one, both in the
+      // SAME course, each with their own flagged response -- so a filter
+      // that (incorrectly) excluded by course rather than by release
+      // status, or vice versa, would be caught by the counts below.
+      const [draftHw] = await db
+        .insert(homeworks)
+        .values({
+          courseId: draftCourseId,
+          createdById: instructorMembership!.id,
+          title: "Draft HW",
+          description: "d",
+          dueDate: new Date(Date.now() + 86_400_000),
+          publishedAt: null,
+        })
+        .returning({ id: homeworks.id });
+      const [activeHw] = await db
+        .insert(homeworks)
+        .values({
+          courseId: draftCourseId,
+          createdById: instructorMembership!.id,
+          title: "Active HW",
+          description: "d",
+          dueDate: new Date(Date.now() + 86_400_000),
+          publishedAt: new Date(Date.now() - 86_400_000),
+        })
+        .returning({ id: homeworks.id });
+
+      async function seedFlag(homeworkId: string, label: string) {
+        const [section] = await db
+          .insert(sections)
+          .values({ homeworkId, title: `${label} section`, content: "c", order: 1 })
+          .returning({ id: sections.id });
+        const [conversation] = await db
+          .insert(conversations)
+          .values({ ownerUserId: student!.id, courseId: draftCourseId, sectionId: section!.id, kind: "section", title: "t" })
+          .returning({ id: conversations.id });
+        const [assistantMessage] = await db
+          .insert(messages)
+          .values({
+            conversationId: conversation!.id,
+            role: "assistant",
+            parts: [{ type: "text", text: `${label}: the answer is 42` }],
+          })
+          .returning({ id: messages.id });
+        const flag = await flagResponse(db, {
+          conversationId: conversation!.id,
+          courseId: draftCourseId,
+          messageId: assistantMessage!.id,
+          studentId: student!.id,
+          reason: "other",
+          comment: null,
+          responseSnapshot: [{ type: "text", text: `${label}: the answer is 42` }],
+        });
+        return flag.id;
+      }
+
+      draftFlagId = await seedFlag(draftHw!.id, "Draft");
+      activeFlagId = await seedFlag(activeHw!.id, "Active");
+    });
+
+    it("canViewDrafts: false excludes the draft-homework flag from BOTH items and total", async () => {
+      const result = await listCourseFeedback(db, unsafeCourseScope(draftCourseId), cipher, { canViewDrafts: false });
+      expect(result.total).toBe(1);
+      expect(result.items).toHaveLength(1);
+      // `total` matches the visible row count exactly -- the regression
+      // this finding is about.
+      expect(result.total).toBe(result.items.length);
+      expect(result.items[0]!.id).toBe(activeFlagId);
+      expect(result.items.some((i) => i.id === draftFlagId)).toBe(false);
+    });
+
+    it("canViewDrafts: true includes both flags, total still matches the visible count", async () => {
+      const result = await listCourseFeedback(db, unsafeCourseScope(draftCourseId), cipher, { canViewDrafts: true });
+      expect(result.total).toBe(2);
+      expect(result.items).toHaveLength(2);
+      expect(result.total).toBe(result.items.length);
+      const ids = result.items.map((i) => i.id);
+      expect(ids).toContain(draftFlagId);
+      expect(ids).toContain(activeFlagId);
+    });
+
+    it("defaults to excluding drafts when canViewDrafts is omitted (fail-closed default)", async () => {
+      const result = await listCourseFeedback(db, unsafeCourseScope(draftCourseId), cipher);
+      expect(result.total).toBe(1);
+      expect(result.items[0]!.id).toBe(activeFlagId);
     });
   });
 });

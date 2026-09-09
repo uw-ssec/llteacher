@@ -448,6 +448,26 @@ export default function App() {
   // returns a Promise (it awaits a fetch), but trackTutorTurnCompletion
   // calls this fire-and-forget, with nothing to await or catch a rejection.
   reconcileTutorConversationCountRef.current = (id: string) => {
+    /* client-feedback-ui audit, Fix 2: reconcileConversationCount
+       (useTutorConversations.ts) silently no-ops when `id` isn't in the
+       currently-loaded rail page (its own `setConversations` updater does
+       `if (index === -1) return prev`) -- correct behavior (there is
+       nothing on screen to update), but invisible in production with no
+       log at all. Logged here rather than inside useTutorConversations.ts
+       itself, which this task does not touch: `tutorConversations` is
+       already the exact snapshot that updater's `findIndex` check runs
+       against, read at the same synchronous instant this ref is invoked
+       (trackTutorTurnCompletion calls it the moment a turn's stream
+       finishes) -- before the reconciling fetch's own network latency, not
+       after, so a rail page that finishes loading WHILE that fetch is in
+       flight can make this warn on a call that turns out to land after
+       all. A false-positive warning in that narrow window is an acceptable
+       trade for finally being able to see this failure mode at all. */
+    if (!tutorConversations.some((c) => c.id === id)) {
+      console.warn(
+        `[App] reconcileTutorConversationCount(${id}) skipped -- conversation isn't in the currently-loaded rail page`,
+      );
+    }
     void reconcileTutorConversationCount(id);
   };
 
@@ -910,16 +930,45 @@ export default function App() {
     tutorSurface.send(text);
   };
 
-  const runRCodeForSection = (code: string) =>
-    runRCode(code).then((result) => {
-      handleSendMessage(formatRExecutionMessage(code, result));
-      return result;
-    });
-  const runRCodeForTutor = (code: string) =>
-    runRCode(code).then((result) => {
-      handleSendTutorMessage(formatRExecutionMessage(code, result));
-      return result;
-    });
+  /* client-feedback-ui audit round 2, Fix 1: handleSendMessage/
+     handleSendTutorMessage are plain functions recreated on every App
+     render -- they close over sectionSurface/tutorSurface, and
+     useConversationSurface returns a fresh object (including a fresh
+     `send` closure) on every call, so there is no stable function to
+     depend on directly here. runRCodeForSection/runRCodeForTutor instead
+     read the latest handler through a ref, kept current inline on every
+     render exactly like this file's other latest-value refs above (e.g.
+     displayedTutorConversationRef, reconcileTutorConversationCountRef) --
+     so wrapping them in useCallback below with `[runRCode]` as the only
+     dependency is both correct (always calls the CURRENT handler, never a
+     stale one) and minimal (`runRCode` is itself a stable useCallback --
+     see useRExecution.ts's `run`, whose only dep is useWebR.ts's own
+     []-dep `ensureReady` -- so this identity never changes after mount).
+     This is what makes ConversationView.tsx's `onRun={onRunRCode}` prop
+     (renderMessageRow) referentially stable across an unrelated App
+     re-render, which is what Message.tsx's React.memo needs to actually
+     skip re-rendering a student row with an R-code run affordance. */
+  const handleSendMessageRef = useRef(handleSendMessage);
+  handleSendMessageRef.current = handleSendMessage;
+  const handleSendTutorMessageRef = useRef(handleSendTutorMessage);
+  handleSendTutorMessageRef.current = handleSendTutorMessage;
+
+  const runRCodeForSection = useCallback(
+    (code: string) =>
+      runRCode(code).then((result) => {
+        handleSendMessageRef.current(formatRExecutionMessage(code, result));
+        return result;
+      }),
+    [runRCode],
+  );
+  const runRCodeForTutor = useCallback(
+    (code: string) =>
+      runRCode(code).then((result) => {
+        handleSendTutorMessageRef.current(formatRExecutionMessage(code, result));
+        return result;
+      }),
+    [runRCode],
+  );
 
   /* Selecting a homework section always means "I want the section chat" --
      switches back out of the tutor surface if one was showing. */
@@ -1121,6 +1170,22 @@ export default function App() {
               loadOlderMessagesError={tutorOlderMessagesError}
               contextWindowSize={MAX_HISTORY_MESSAGES}
               onStop={tutorSurface.stop}
+              /* client-feedback-ui audit, Fix 1: the tutor surface never
+                 wired this at all, so the Flag button (#90) only ever
+                 existed on the homework-section chat below -- a tutor
+                 conversation still belongs to a course/section (the rail is
+                 scoped by `courseId`, see useTutorConversations(courseId)
+                 above), it just has no per-section conversationId of its
+                 own. `tutorConversationId` is this surface's equivalent of
+                 the section surface's `conversationId` below -- the id
+                 ResponseFeedback needs to scope its POST -- and is always
+                 defined in this branch (the ternary above only renders this
+                 ConversationView when it is truthy), so no `undefined`
+                 guard is needed here the way the section call below needs
+                 one. */
+              renderAiFeedbackSlot={(messageId) => (
+                <ResponseFeedback conversationId={tutorConversationId} messageId={messageId} />
+              )}
             />
           </ErrorBoundary>
         ) : (

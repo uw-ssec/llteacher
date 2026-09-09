@@ -116,6 +116,10 @@ export function EditableTitle({
 }: EditableTitleProps) {
   const counterId = useId();
   const hintId = useId();
+  // client-feedback-ui audit, Fix 5: id target for the failed-save error,
+  // referenced from the input's own aria-describedby below (only while an
+  // error is actually showing) -- see that prop's own doc comment.
+  const errorId = useId();
   const [isEditing, setIsEditing] = useState(false);
   const [pendingValue, setPendingValue] = useState(value);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -361,8 +365,22 @@ export function EditableTitle({
 
            Order matters: hint first, then the counter when present.
            aria-describedby is announced on focus, so the static hint should
-           lead; the counter is appended only when it is close to relevant. */
-        aria-describedby={showCounter ? `${hintId} ${counterId}` : hintId}
+           lead; the counter is appended only when it is close to relevant.
+
+           client-feedback-ui audit, Fix 5: `errorId` is appended the same
+           way -- only while `localError` is actually showing, so a
+           screen-reader user focused on this input (or refocused onto it
+           after a failed save; see the isSubmitting effect above) is told
+           about the failure instead of it being sighted-only, and the input
+           never carries a dangling reference to an error span that isn't
+           rendered. Placed right after the hint, before the counter: it's
+           the more urgent of the two when both are present (a save just
+           failed), and the counter is rarely relevant at the same moment
+           (an over-length title is caught by its own dedicated error
+           branch below, not usually alongside a fresh in-flight failure). */
+        aria-describedby={[hintId, localError ? errorId : null, showCounter ? counterId : null]
+          .filter(Boolean)
+          .join(" ")}
         disabled={isSubmitting}
       />
       {/* #310: the native `maxLength` attribute is gone. It clamped typing
@@ -419,7 +437,7 @@ export function EditableTitle({
         </span>
       )}
       {localError && (
-        <span className="editable-title__error" role="alert">
+        <span id={errorId} className="editable-title__error" role="alert">
           {localError}
         </span>
       )}

@@ -39,16 +39,26 @@
        genuinely fits one of the six.
 
    Usage:
-     DATABASE_URL=... npx tsx scripts/exportFlaggedFeedback.ts [--course <courseId>]
+     DATABASE_URL=... npx tsx scripts/exportFlaggedFeedback.ts [--course <courseId>] [--limit <n>] [--since <ISO date>]
 
    Idempotent: re-running only appends flags not already present in the
    staging file (keyed by `flagged-<response_feedback.id>`), so this can be
    run repeatedly (e.g. weekly) without producing duplicate entries.
+
+   Server-hardening audit fix, Minor #5 (Performance+Scalability, found
+   independently by both dimensions): the main query used to have no LIMIT
+   at all -- fine the day #90 shipped with a handful of flags, not as a
+   forever assumption for a script meant to be re-run "e.g. weekly" against
+   a growing table. `--limit` (default DEFAULT_EXPORT_LIMIT below) and
+   `--since` bound it, same optional-flag shape `--course` above already
+   established. This is an offline/manual script (not a hot request path,
+   no Worker subrequest budget to respect), so both are simple `indexOf`
+   flag parsing, not a real CLI parser.
    -------------------------------------------------------------------------- */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, eq, lt, desc, isNotNull } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import type { Db } from "../src/db/client";
@@ -79,26 +89,11 @@ interface ExportedProbe {
   notes: string;
 }
 
-/** The message directly preceding the flagged one, in conversation order --
- *  the "studentMessage" a Probe needs. Returns "" (not a throw) when the
- *  flagged message itself has already been cleared (messageId is null,
- *  response_feedback's own ON DELETE SET NULL) or there is no earlier user
- *  turn to find -- either way the export still proceeds with an empty
- *  field a human fills in, rather than dropping the flag from the export
- *  entirely. */
-async function findPrecedingStudentMessage(
-  db: Db,
-  conversationId: string,
-  beforeSeq: number,
-): Promise<string> {
-  const [row] = await db
-    .select({ parts: messages.parts })
-    .from(messages)
-    .where(and(eq(messages.conversationId, conversationId), eq(messages.role, "user"), lt(messages.seq, beforeSeq)))
-    .orderBy(desc(messages.seq))
-    .limit(1);
-  if (!row) return "";
-  const parts = row.parts;
+/** Shared by both `responseSnapshot` (the flagged tutor reply) and each
+ *  preceding user message below -- both are the same jsonb `parts` shape
+ *  (messages.parts / response_feedback.response_snapshot), and used to be
+ *  extracted via two separately hand-copied filter/map chains. */
+export function extractText(parts: unknown): string {
   if (!Array.isArray(parts)) return "";
   return parts
     .filter(
@@ -110,9 +105,94 @@ async function findPrecedingStudentMessage(
     .join("\n");
 }
 
-async function exportFlaggedFeedback(db: Db, courseId: string | undefined): Promise<ExportedProbe[]> {
+/** The message directly preceding each flagged one, in conversation order --
+ *  the "studentMessage" a Probe needs. A row with no earlier user turn to
+ *  find keys to "" (not a throw) -- the export still proceeds with an empty
+ *  field a human fills in, rather than dropping the flag from the export
+ *  entirely.
+ *
+ *  Server-hardening audit fix, Minor #5: replaces the old N+1 (one
+ *  `findPrecedingStudentMessage` round trip PER flagged row) with a single
+ *  batched query, the same convention repositories/submissions.ts's
+ *  findOverdueSubmissionCandidatesForOrgs already established for this
+ *  repo's other "many rows, one lookup each" shape -- fetch the full
+ *  candidate set for every conversation this export touches in ONE query
+ *  (`conversationId IN (...)`), then do the actual per-row "closest
+ *  preceding" selection in memory instead of asking Postgres once per row.
+ *  Offline/manual script, not a hot path -- and this run's own row set is
+ *  already bounded by DEFAULT_EXPORT_LIMIT/`--limit`, so "every user
+ *  message in every touched conversation, held in memory" is a small,
+ *  acceptable cost next to N separate round trips. Keyed by
+ *  response_feedback.id (each flagged row is unique -- see ExportedProbe's
+ *  own `id`), not by (conversationId, seq): simpler, and side-steps having
+ *  to reason about whether that pair could ever collide. */
+/** The actual "batching logic" Minor #5 is about, pulled out as a pure
+ *  function (no `db`, no `await`) so it's directly unit-testable without a
+ *  real or mocked database connection: given the flat, ALREADY-FETCHED
+ *  batch of every user message across every touched conversation (ordered
+ *  ascending by seq, as findPrecedingStudentMessages's own query below
+ *  fetches it), pick each row's own immediately-preceding message and
+ *  return the per-row map. Exported for exportFlaggedFeedback.test.ts. */
+export function selectPrecedingMessages(
+  rows: { id: string; conversationId: string; messageSeq: number }[],
+  userMessagesByConversationAsc: { conversationId: string; seq: number; parts: unknown }[],
+): Map<string, string> {
+  const byConversation = new Map<string, { seq: number; parts: unknown }[]>();
+  for (const m of userMessagesByConversationAsc) {
+    const list = byConversation.get(m.conversationId);
+    if (list) list.push(m);
+    else byConversation.set(m.conversationId, [m]);
+  }
+
+  const out = new Map<string, string>();
+  for (const row of rows) {
+    const candidates = byConversation.get(row.conversationId) ?? [];
+    // Ascending by seq -- the last candidate strictly before this row's own
+    // messageSeq is the immediately preceding student turn.
+    let preceding: { seq: number; parts: unknown } | undefined;
+    for (const m of candidates) {
+      if (m.seq >= row.messageSeq) break;
+      preceding = m;
+    }
+    out.set(row.id, preceding ? extractText(preceding.parts) : "");
+  }
+  return out;
+}
+
+async function findPrecedingStudentMessages(
+  db: Db,
+  rows: { id: string; conversationId: string; messageSeq: number }[],
+): Promise<Map<string, string>> {
+  const conversationIds = [...new Set(rows.map((r) => r.conversationId))];
+  if (conversationIds.length === 0) return new Map();
+
+  const userMessages = await db
+    .select({ conversationId: messages.conversationId, seq: messages.seq, parts: messages.parts })
+    .from(messages)
+    .where(and(inArray(messages.conversationId, conversationIds), eq(messages.role, "user")))
+    .orderBy(asc(messages.seq));
+
+  return selectPrecedingMessages(rows, userMessages);
+}
+
+/** Server-hardening audit fix, Minor #5: DEFAULT_EXPORT_LIMIT bounds the
+ *  main query the same way OVERDUE_SUBMISSION_CANDIDATE_LIMIT bounds
+ *  submissions.ts's own unbounded-until-now candidate read -- a safety cap
+ *  on this script's own result-set size, not a real product limit (a
+ *  weekly export of the most recent 1000 flags comfortably covers this
+ *  pilot's actual volume; `--since`/`--limit` exist for the rare run that
+ *  needs more or a narrower window). */
+const DEFAULT_EXPORT_LIMIT = 1000;
+
+async function exportFlaggedFeedback(
+  db: Db,
+  courseId: string | undefined,
+  opts: { limit?: number; since?: Date } = {},
+): Promise<ExportedProbe[]> {
+  const limit = opts.limit ?? DEFAULT_EXPORT_LIMIT;
   const conditions = [isNotNull(responseFeedback.messageId)];
   if (courseId) conditions.push(eq(conversations.courseId, courseId));
+  if (opts.since) conditions.push(gte(responseFeedback.flaggedAt, opts.since));
 
   const rows = await db
     .select({
@@ -139,21 +219,20 @@ async function exportFlaggedFeedback(db: Db, courseId: string | undefined): Prom
     .innerJoin(sections, eq(conversations.sectionId, sections.id))
     .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
     .leftJoin(sectionSolutions, eq(sections.id, sectionSolutions.sectionId))
-    .where(and(...conditions));
+    .where(and(...conditions))
+    // Most-recently-flagged first, same "newest first" convention the
+    // instructor dashboard's own listCourseFeedback query uses -- and the
+    // one that makes `--limit` mean "the N most recent flags" rather than
+    // an arbitrary, unordered N.
+    .orderBy(desc(responseFeedback.flaggedAt))
+    .limit(limit);
+
+  const precedingByRowId = await findPrecedingStudentMessages(db, rows);
 
   const out: ExportedProbe[] = [];
   for (const row of rows) {
-    const studentMessage = await findPrecedingStudentMessage(db, row.conversationId, row.messageSeq);
-    const responseText = Array.isArray(row.responseSnapshot)
-      ? row.responseSnapshot
-          .filter(
-            (p): p is { type: "text"; text: string } =>
-              typeof p === "object" && p !== null && (p as { type?: unknown }).type === "text" &&
-              typeof (p as { text?: unknown }).text === "string",
-          )
-          .map((p) => p.text)
-          .join("\n")
-      : "";
+    const studentMessage = precedingByRowId.get(row.id) ?? "";
+    const responseText = extractText(row.responseSnapshot);
     out.push({
       id: `flagged-${row.id}`,
       category: "student_flagged",
@@ -181,6 +260,24 @@ async function main() {
   const courseArgIndex = process.argv.indexOf("--course");
   const courseId = courseArgIndex !== -1 ? process.argv[courseArgIndex + 1] : undefined;
 
+  const limitArgIndex = process.argv.indexOf("--limit");
+  const limit = limitArgIndex !== -1 ? Number(process.argv[limitArgIndex + 1]) : DEFAULT_EXPORT_LIMIT;
+  if (!Number.isInteger(limit) || limit < 1) {
+    console.error("--limit must be a positive integer");
+    process.exit(1);
+  }
+
+  const sinceArgIndex = process.argv.indexOf("--since");
+  const sinceArg = sinceArgIndex !== -1 ? process.argv[sinceArgIndex + 1] : undefined;
+  let since: Date | undefined;
+  if (sinceArg !== undefined) {
+    since = new Date(sinceArg);
+    if (Number.isNaN(since.getTime())) {
+      console.error("--since must be a valid ISO date");
+      process.exit(1);
+    }
+  }
+
   // #90 review (Minor #8): owns the Pool directly (mirrors scripts/
   // migrate.ts's runMigrations) rather than going through makeNodeDb, which
   // returns only the opaque `Db` wrapper with no exposed close -- a
@@ -191,7 +288,7 @@ async function main() {
   const pool = new Pool({ connectionString: databaseUrl });
   const db = drizzle(pool, { schema }) as unknown as Db;
   try {
-    const exported = await exportFlaggedFeedback(db, courseId);
+    const exported = await exportFlaggedFeedback(db, courseId, { limit, since });
 
     const existing: ExportedProbe[] = existsSync(STAGING_PATH)
       ? (JSON.parse(readFileSync(STAGING_PATH, "utf-8")) as ExportedProbe[])
@@ -218,7 +315,16 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+// Only run when invoked directly (`npm run export-flagged-feedback` / `npx
+// tsx scripts/exportFlaggedFeedback.ts`) -- same guard scripts/migrate.ts
+// uses, needed now that exportFlaggedFeedback.test.ts imports this module's
+// pure helpers (extractText, selectPrecedingMessages) directly. Without it,
+// merely importing the file for its exports would also run `main()`, which
+// exits the process when DATABASE_URL isn't set -- exactly the environment
+// a unit test runs in.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}

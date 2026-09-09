@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, gt, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import {
   responseFeedback,
@@ -77,6 +77,12 @@ export async function getFlaggableAssistantMessage(
 
 export interface FlagResponseInput {
   conversationId: string;
+  /** The flagged conversation's own courseId (routes/feedback.ts already
+   *  has this from getOwnedConversationOrNull) -- denormalized onto the row
+   *  here rather than re-derived. See responseFeedback's courseId column
+   *  doc comment (db/schema/runtime.ts) for why this table carries it at
+   *  all. */
+  courseId: string;
   messageId: string;
   studentId: string;
   reason: FeedbackReason;
@@ -98,6 +104,7 @@ export async function flagResponse(
       .insert(responseFeedback)
       .values({
         conversationId: input.conversationId,
+        courseId: input.courseId,
         messageId: input.messageId,
         studentId: input.studentId,
         reason: input.reason,
@@ -163,18 +170,41 @@ const DEFAULT_FEEDBACK_LIST_PAGE_SIZE = 50;
  *  the same way listInstructorTranscripts is (this dashboard's own "Testing
  *  Strategy" requirement is a strict org/course filter, not an infinite-
  *  scroll shape). Scoped by `scope` (a CourseScope, minted only via
- *  courseScopeFromAuthContext -- see scope.ts) joining
- *  response_feedback -> conversations.course_id, the same course-scoping
- *  path every other conversation-adjacent table in this schema uses
- *  (conversations itself carries no organization_id, by design). */
+ *  courseScopeFromAuthContext -- see scope.ts) via responseFeedback's own
+ *  denormalized courseId column (see that column's doc comment,
+ *  db/schema/runtime.ts, for why it's carried directly rather than only
+ *  reached through conversations.course_id -- this is what lets
+ *  response_feedback_course_flagged_idx serve this query's filter+order in
+ *  one index scan).
+ *
+ *  `canViewDrafts` (server-hardening audit fix, Minor #2 -- Security,
+ *  Scalability and Usability all independently flagged the same root
+ *  cause): a grader without course-wide draft-viewing rights (a TA lacking
+ *  canViewDraftsIn) must not see a flag whose homework is still
+ *  draft/scheduled/hidden (#208/#366's own "unreleased content" gate, the
+ *  same one listInstructorTranscripts applies). This USED to be filtered
+ *  by the route, AFTER this function returned `total` computed from the
+ *  unfiltered query -- so a TA's `total` counted rows they never actually
+ *  saw (a small info leak: the raw count of unreleased flags), and the
+ *  dashboard's per-page item count silently didn't match the stated total
+ *  (confusing pagination math, and the visible symptom of a "reason
+ *  breakdown that doesn't add up"). Pushed into the WHERE clause instead --
+ *  `total` (and the page itself) now always reflect exactly the rows the
+ *  caller is allowed to see. isUnreleased's own three statuses
+ *  (repositories/homeworks.ts) translate directly to columns already
+ *  selected below: "hidden" is isHomeworkHidden's own condition, "draft" is
+ *  publishedAt IS NULL, "scheduled" is releasedAt in the future --
+ *  `undefined` when `canViewDrafts` is true, matching every other
+ *  optional-AND-branch in this file. */
 export async function listCourseFeedback(
   db: Db,
   scope: CourseScope,
   cipher: IdentityCipher,
-  opts: { limit?: number; offset?: number } = {},
+  opts: { limit?: number; offset?: number; canViewDrafts?: boolean } = {},
 ): Promise<CourseFeedbackListResult> {
   const limit = opts.limit ?? DEFAULT_FEEDBACK_LIST_PAGE_SIZE;
   const offset = opts.offset ?? 0;
+  const now = new Date();
 
   // #90 review (Minor #4): excludes a teacher-test conversation's flags,
   // mirroring listInstructorTranscripts' own
@@ -187,7 +217,23 @@ export async function listCourseFeedback(
   // there is no "the viewer's own teacher-test conversation" case here to
   // preserve: nothing this route does ever needs to show a grader their
   // OWN flags, only the course's.
-  const where = and(eq(conversations.courseId, scope), eq(conversations.isTeacherTest, false))!;
+  const releaseFilter = opts.canViewDrafts
+    ? undefined
+    : and(
+        // Mirrors isHomeworkHidden's own condition (repositories/
+        // homeworks.ts): not manually hidden, and not past its expiry.
+        eq(homeworks.isHidden, false),
+        or(isNull(homeworks.expiresAt), gt(homeworks.expiresAt, now)),
+        // Not "draft" (never published).
+        isNotNull(homeworks.publishedAt),
+        // Not "scheduled" (released in the future).
+        or(isNull(homeworks.releasedAt), lte(homeworks.releasedAt, now)),
+      );
+  const where = and(
+    eq(responseFeedback.courseId, scope),
+    eq(conversations.isTeacherTest, false),
+    releaseFilter,
+  )!;
 
   // #90 review (Minor #3): the count and the row queries now join through
   // the identical table set (conversations -> sections -> homeworks) --

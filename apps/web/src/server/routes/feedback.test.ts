@@ -39,6 +39,18 @@ vi.mock("../repositories/conversations", async (importOriginal) => {
   return { ...actual, getOwnedConversationOrNull: (...a: unknown[]) => getOwnedConversationOrNullMock(...a) };
 });
 
+// Server-hardening audit fix, Minor #1: flagResponseHandler now reserves a
+// rate-limit slot before doing any real work, the same mocking shape
+// routes/conversations.test.ts already established for the identical
+// repository call -- makeDb above returns `{}`, which a real
+// reserveRateLimitSlot (an INSERT ... ON CONFLICT) would throw against.
+const reserveRateLimitSlotMock = vi.fn();
+vi.mock("../repositories/rateLimits", () => ({
+  reserveRateLimitSlot: (...args: unknown[]) => reserveRateLimitSlotMock(...args),
+  RATE_LIMIT_MAX_PER_MINUTE: 20,
+  RATE_LIMIT_WINDOW_MS: 60_000,
+}));
+
 // isStudentInCourse is NOT mocked -- it is the enrollment rule under test
 // here, same reasoning transcripts.test.ts gives for leaving
 // canReadSectionConversation real: stubbing it would let this route wire
@@ -136,6 +148,7 @@ beforeEach(() => {
   listCourseFeedbackMock.mockReset().mockResolvedValue({ items: [], total: 0 });
   getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
   recordTranscriptAccessMock.mockReset().mockResolvedValue(undefined);
+  reserveRateLimitSlotMock.mockReset().mockResolvedValue(1);
 });
 
 describe("POST /api/conversations/:conversationId/messages/:messageId/feedback (#90)", () => {
@@ -149,6 +162,23 @@ describe("POST /api/conversations/:conversationId/messages/:messageId/feedback (
     );
     expect(res.status).toBe(401);
     expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
+  });
+
+  // Server-hardening audit fix, Minor #1: previously no rate limit at all
+  // on this route -- a student could spam-flag messages. Reuses #219/#308's
+  // exact per-user budget (RATE_LIMIT_MAX_PER_MINUTE), same test shape as
+  // conversations.test.ts's own "429s (with Retry-After)" case.
+  it("429s (with Retry-After) when this request's reservation pushes the count over budget, without flagging", async () => {
+    reserveRateLimitSlotMock.mockResolvedValue(21);
+    const res = await buildApp(student()).request(
+      `/api/conversations/${CONV}/messages/${MSG}/feedback`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBeTruthy();
+    expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
+    expect(flagResponseMock).not.toHaveBeenCalled();
   });
 
   it.each(["not-a-uuid", "1"])("404s on a malformed conversationId %j", async (bad) => {
@@ -304,6 +334,12 @@ describe("POST /api/conversations/:conversationId/messages/:messageId/feedback (
       expect.anything(),
       expect.objectContaining({
         conversationId: CONV,
+        // Server-hardening audit fix, Minor #3: the flagged conversation's
+        // own courseId now flows through to flagResponse, so it can be
+        // denormalized onto the response_feedback row (see that column's
+        // doc comment, db/schema/runtime.ts) -- fakeConversationRow's
+        // default courseId is COURSE.
+        courseId: COURSE,
         messageId: MSG,
         studentId: "student-1",
         reason: "gave_away_answer",
@@ -399,36 +435,34 @@ describe("GET /api/courses/:courseId/instructor/feedback (#90)", () => {
     );
   });
 
-  it("filters out a flag on a currently-unreleased homework for a TA without canViewDrafts", async () => {
-    listCourseFeedbackMock.mockResolvedValue({
-      items: [
-        {
-          id: "flag-draft",
-          conversationId: CONV,
-          messageId: MSG,
-          studentId: "student-1",
-          studentName: "A Student",
-          reason: "other",
-          comment: null,
-          responseSnapshot: [],
-          isDeleted: false,
-          sectionId: "section-1",
-          sectionTitle: "Draft section",
-          homeworkId: "hw-draft",
-          homeworkTitle: "Draft HW",
-          homeworkStatus: "draft",
-          flaggedAt: new Date("2026-08-01T00:00:00.000Z"),
-        },
-      ],
-      total: 1,
-    });
+  // Server-hardening audit fix, Minor #2 (Security+Scalability+Usability):
+  // the unreleased-homework exclusion used to be a POST-query filter here,
+  // on the mocked `items` array, which is exactly why `total` could
+  // mismatch the visible row count -- this route no longer filters at all;
+  // it now passes `canViewDrafts` into listCourseFeedback and trusts the
+  // repository's own WHERE clause. So these two tests changed from
+  // asserting the ROUTE's filtering behavior to asserting the route passes
+  // the right `canViewDrafts` value through -- the actual exclusion is
+  // covered at the SQL level by responseFeedback.db.test.ts instead (real
+  // join/filter semantics, per this file's own top-of-file convention
+  // note).
+  it("passes canViewDrafts: false for a TA without draft rights", async () => {
     const res = await buildApp(ta("ta-1")).request(`/api/courses/${COURSE}/instructor/feedback`, {}, TEST_ENV);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { items: unknown[] };
-    expect(body.items).toHaveLength(0);
+    expect(listCourseFeedbackMock.mock.calls[0]![3]).toMatchObject({ canViewDrafts: false });
   });
 
-  it("shows an instructor (who always has draft rights) an unreleased-homework flag", async () => {
+  it("passes canViewDrafts: true for an instructor (who always has draft rights)", async () => {
+    const res = await buildApp(instructor("instructor-1")).request(
+      `/api/courses/${COURSE}/instructor/feedback`,
+      {},
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+    expect(listCourseFeedbackMock.mock.calls[0]![3]).toMatchObject({ canViewDrafts: true });
+  });
+
+  it("returns exactly what listCourseFeedback returns, unfiltered, for an unreleased-homework flag (instructor case)", async () => {
     listCourseFeedbackMock.mockResolvedValue({
       items: [
         {

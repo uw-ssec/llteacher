@@ -2463,6 +2463,27 @@ export async function chatHandler(c: Context<AppEnv>) {
     // too, it hands back the corresponding result and everything below runs
     // on it exactly as it did before this existed. See that module's header
     // for the boundary it detects and why it is not `await result.response`.
+    // #440 audit, Fix 3: `c.executionCtx.waitUntil`, threaded through so
+    // streamWithFallback's own un-awaited primary-drain call (see its doc
+    // comment on `void primary.consumeStream(...)`) is guaranteed to run to
+    // completion on Cloudflare Workers, not merely left floating once this
+    // handler's response has gone out -- the same bug class chat.ts's own
+    // `pinConversationPromptTemplate` call site above already documents
+    // fixing (that one awaits instead; this drain cannot, since the whole
+    // point is that the fallback starts immediately rather than waiting on
+    // it). Hono's `c.executionCtx` getter THROWS when this request has no
+    // real `ExecutionContext` behind it (every `app.request(...)` call in
+    // this app's test suite, which never passes one) -- guarded here, not
+    // left to throw, so streamWithFallback still gets `undefined` and falls
+    // back to its pre-fix bare `void` for exactly those callers.
+    let waitUntil: ((promise: Promise<unknown>) => void) | undefined;
+    try {
+      const executionCtx = c.executionCtx;
+      waitUntil = (promise) => executionCtx.waitUntil(promise);
+    } catch {
+      waitUntil = undefined;
+    }
+
     const { result, attribution } = await streamWithFallback({
       primary: buildTurnParams(primaryConfig, providerClient),
       fallback:
@@ -2472,6 +2493,7 @@ export async function chatHandler(c: Context<AppEnv>) {
       primaryModelName: primaryConfig.modelName,
       fallbackModelName: fallbackConfig?.modelName ?? null,
       logContext: `chatHandler.streamWithFallback conversation=${conv.id}`,
+      waitUntil,
     });
 
     // #364 (requirement 3): the config whose provider/model/id the turn's
@@ -2523,8 +2545,63 @@ export async function chatHandler(c: Context<AppEnv>) {
       });
     }
 
+    // #440 audit, Fix 1 (Functionality+Usability root cause -- server half):
+    // generated HERE, before the stream is ever consumed, rather than inside
+    // onFinish below (where it lived until this fix) -- messageMetadata's
+    // callback runs on the underlying model stream's `finish` TextStreamPart
+    // (verified against the installed ai@5.0.195: toUIMessageStream computes
+    // `messageMetadata({ part })` synchronously while piping `fullStream`,
+    // and enqueues its result on the "finish" UI-stream chunk), which is
+    // consumed and folded into `state.message.metadata` by
+    // handleUIMessageStreamFinish's `processUIMessageStream` stage BEFORE
+    // that same stage's `flush()` calls onFinish with `responseMessage`.
+    // messageMetadata therefore always runs strictly before onFinish for a
+    // given turn -- generating this id inside onFinish (as before) would
+    // make it unavailable at the moment messageMetadata needs it. One id,
+    // shared by both closures below, is what keeps the metadata sent to the
+    // client and the row actually persisted (assistantMessage.id in onFinish
+    // further down) the same identifier.
+    const assistantMessageId = crypto.randomUUID();
+
     return result.toUIMessageStreamResponse({
       headers: { "x-conversation-id": conv.id },
+      // #440 audit, Fix 1: the client's flag/feedback affordance
+      // (ConversationView, packages/ui) gates on `msg.createdAt` being set --
+      // previously populated only by fetchConversationHistory's full-history
+      // refetch (App.tsx), never by a live in-session turn, so the Flag
+      // button never appeared for an answer the student was looking at right
+      // now. `messageMetadata` is the AI SDK v5 hook for exactly this: it is
+      // invoked once per stream part. #440 round-2 audit fix: verified
+      // against the installed ai@5.0.195 source (node_modules/ai/dist/
+      // index.js, ~L5580 and ~L5785-5790) -- for ANY part type, a non-null
+      // return value is NOT discarded by the SDK; it's forwarded as a
+      // `{ type: "message-metadata", ... }` stream chunk that the client
+      // folds into `state.message.metadata`, same as a finish-chunk's
+      // metadata would be. This callback below only returns metadata for
+      // the "finish" part (`undefined` for every other part type) because
+      // of this callback's OWN body, not because the SDK throws non-finish
+      // values away -- returning a value for another part type here would
+      // start emitting real, client-visible chunks. `createdAt` matches the
+      // exact field name/shape
+      // fetchConversationHistory already populates (`metadata: { createdAt:
+      // r.createdAt }`, App.tsx) so both hydration paths produce the same
+      // client-side shape. `id` carries the REAL row id this turn will
+      // persist as (assistantMessageId, shared with onFinish below) --
+      // needed because the live-streamed UIMessage's own top-level `id` is
+      // whatever the client/AI SDK assigned when the turn started (no
+      // `generateMessageId` is passed to this call), which is NOT the id
+      // onFinish mints for the persisted row; ConversationView's own doc
+      // comment on AIMessageData.createdAt already anticipates exactly this
+      // gap. Fires on every terminal stream outcome, including one onFinish
+      // goes on to decide NOT to persist (a provider error, an aborted turn,
+      // or a turn with no renderable content) -- messageMetadata has no way
+      // to see onFinish's shouldPersist verdict, since it runs first; this
+      // mirrors `sendFinish`'s own always-fires-at-stream-end behavior
+      // (default true) elsewhere in this same options object, and an
+      // unpersisted turn's message is never shown as complete to begin with
+      // (ConversationView's isStreaming/error handling, not this gate).
+      messageMetadata: ({ part }) =>
+        part.type === "finish" ? { createdAt: new Date().toISOString(), id: assistantMessageId } : undefined,
       // #317 review, #321 + "strongly recommend" item, #334: previously
       // absent, so the SDK's default error-to-string conversion reached the
       // client unfiltered -- combined with App.tsx rendering chatError.message
@@ -2568,115 +2645,148 @@ export async function chatHandler(c: Context<AppEnv>) {
       // needed. See the isErrorOutcome/hasRenderableContent doc comments
       // inside this callback for the persistence gate itself.
       onFinish: async ({ responseMessage, isAborted, finishReason }) => {
-        // #268, #342: NOT persisted unless the turn reached a real terminal
-        // state. Originally this was `isAborted || finishReason === "error"`
-        // -- a denylist that let anything else through, including
-        // `finishReason === undefined` and `"unknown"`. #342 found the gap
-        // that denylist left: a client-side Stop or disconnect (not a
-        // server-side abort -- ai@5.0.195's `isAborted` is set only by an
-        // in-stream `abort` chunk, which the server emits only when its OWN
-        // `abortSignal` (STREAM_TIMEOUT_MS) trips, never on a client reader
-        // cancel) produces `isAborted: false` and `finishReason: undefined`,
-        // which the denylist waved through as "success." An allowlist of
-        // the finish reasons that actually mean "the model produced a real,
-        // complete-as-far-as-it-went answer" closes that: "stop" (normal
-        // completion), "length" (hit its token budget -- still a real
-        // answer, not a truncation, so deliberately included), and
-        // "tool-calls" (the model's last of the up-to-5 steps this route
-        // allows ended on a tool call). Everything else -- undefined,
-        // "unknown", "content-filter", "other", and "error" itself -- is
-        // treated as not-a-real-answer and falls through to the same
-        // not-persisted path an aborted/provider-error turn already took.
-        const TERMINAL_FINISH_REASONS = new Set(["stop", "length", "tool-calls"]);
-        const isErrorOutcome = isAborted || !finishReason || !TERMINAL_FINISH_REASONS.has(finishReason);
-
-        // Persisting a rejected turn anyway would write a row the
-        // idempotency replay path above (classifyTurn) would then treat as
-        // "already answered" on every future retry -- for the finishReason
-        // gate above, permanently serving the same half-sentence back with
-        // no error and no way out except Restart (which voids the
-        // submission); for hasRenderableContent's own gate (its own doc
-        // comment), a permanently-empty assistant row. Not persisting
-        // instead leaves nothing for this turn, so a retry's idempotency
-        // check falls through to a genuine model call again.
+        // #440 audit, Fix 2 (Reliability, Minor): `timeoutHandle` lives here,
+        // ahead of the try below, so both the try body (which assigns it)
+        // and the catch (which clears it) can reach it -- unchanged from
+        // before this fix, just hoisted one line higher so the try itself
+        // can start above the persistence-gate logic that follows.
         //
-        // best-effort, not double-write-proof: if the *worker process* dies
-        // before onFinish runs (vs. the client just disconnecting), the
-        // assistant message is lost and the client's retry will only re-send
-        // the user message (already deduped above), so no response ever gets
-        // generated for that turn. That gap is a documented limitation (#3
-        // pitfall 2), not fixed here -- tracked as #96 (streaming resilience).
-        //
-        // #317 review, #346 (requirement 3): the assistant message's id is
-        // generated here rather than read back from an INSERT -- see
-        // finalizeAssistantTurn's own doc comment for why that's what lets
-        // the lock release, the message persist, and the llm_call_logs
-        // write (previously three serialized round-trips, all directly
-        // perceived as tail latency since the SDK awaits onFinish inside
-        // the stream's flush) collapse into one db.batch()/transaction.
-        const shouldPersist = !isErrorOutcome && hasRenderableContent(responseMessage.parts);
-        // #275: the current equivalent of the old "hasRenderableContent
-        // false -> bare return, nothing logged" branch -- that separate
-        // early return doesn't exist anymore (#268/#342 folded it into this
-        // one shouldPersist gate, above), so this is the single place that
-        // now knows a turn is about to go unpersisted, for either reason
-        // (isErrorOutcome, or a `stop`/`tool-calls` finish that still
-        // produced no renderable content). Warn, not error: nothing threw --
-        // this is the system correctly refusing to write a truncated/blank
-        // row, but an operator debugging "the tutor showed my student an
-        // error" needs to see it happened and why (finishReason/isAborted),
-        // not infer it from a gap in the transcript.
-        if (!shouldPersist) {
-          logServerWarn("chatHandler.onFinish.noRenderableContent", "turn produced no persistable content", {
-            conversationId: conv.id,
-            userId: authContext.session.userId,
-            model: servingConfig.modelName,
-            finishReason: finishReason ?? null,
-            isAborted: Boolean(isAborted),
-          });
-        }
-        const assistantMessage = shouldPersist
-          ? { id: crypto.randomUUID(), parts: responseMessage.parts }
-          : null;
-
-        // #364 (requirement 3): still ONE row per turn after a failover, not
-        // one per attempt. There is exactly one finalizeAssistantTurn call
-        // site pair in this callback and streamWithFallback returns exactly
-        // one result, so a failed-over turn cannot produce a second row --
-        // and `servingConfig` (above) means the one row it does produce names
-        // the provider/model/config that actually answered, never the primary
-        // that didn't. `latencyMs` deliberately still measures from
-        // turnStartedAt, i.e. the whole model-call window including the
-        // failed first attempt: that is what the student actually waited.
-        //
-        // #317 review, #321: one llm_call_logs row per turn -- including the
-        // error/aborted/no-content cases above, which previously early-
-        // returned with nothing written anywhere. This was the operational
-        // gap #321 names: a provider outage or a rotated key produced
-        // "zero evidence" -- no error rate, no per-provider breakdown, no
-        // latency, no cost.
-        // #317 review, #349 (requirement 3): result.totalUsage, not
-        // result.usage -- the AI SDK documents result.usage as "the token
-        // usage of the LAST STEP" only. stopWhen: stepCountIs(5) above
-        // makes multi-step turns (a tool call, then a follow-up text
-        // step) a designed path, and providers bill per call: result.usage
-        // alone silently dropped every earlier step's tokens from cost
-        // and usage reporting on any turn that used a tool.
-        //
-        // #317 review, #350 (requirement 2): raced against
-        // USAGE_FETCH_TIMEOUT_MS -- see that constant's own doc comment for
-        // why this Promise.all can hang forever on a genuinely cancelled
-        // stream instead of merely resolving slowly. `finalizeAssistantTurn`
-        // still runs on timeout (with null usage/cost fields, errorFlag
-        // true), rather than onFinish just hanging and never reaching it at
-        // all -- the lock still releases and a row still lands, even though
-        // this specific turn's token/cost numbers are unknowable.
+        // The try/catch that used to start only at the usage-fetch race
+        // further down now wraps this callback's ENTIRE body, including the
+        // persistence-gate logic (isErrorOutcome/shouldPersist/
+        // assistantMessage, immediately below) that previously ran BEFORE
+        // any try/catch in this function at all. Nothing there throws
+        // today -- this is a defensive widening, not a behavior change for
+        // any currently-passing path -- but a future edit that adds a
+        // throwable statement to that section would previously have
+        // propagated out of onFinish uncaught by anything here, leaving the
+        // conversation turn lock un-released with no log line naming what
+        // happened (worse than the accepted "self-heals via LOCK_STALE_MS"
+        // trade-off the catch below already documents for every other
+        // throw in this callback). The catch's own lock-release/
+        // error-classification behavior is unchanged: it still only logs
+        // and lets a stuck lock self-heal via staleness, exactly as it did
+        // before this fix -- this only widens what it guards.
         let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-        const timedOut = Symbol("usage-fetch-timed-out");
-        const timeoutPromise = new Promise<typeof timedOut>((resolve) => {
-          timeoutHandle = setTimeout(() => resolve(timedOut), USAGE_FETCH_TIMEOUT_MS);
-        });
         try {
+          // #268, #342: NOT persisted unless the turn reached a real terminal
+          // state. Originally this was `isAborted || finishReason === "error"`
+          // -- a denylist that let anything else through, including
+          // `finishReason === undefined` and `"unknown"`. #342 found the gap
+          // that denylist left: a client-side Stop or disconnect (not a
+          // server-side abort -- ai@5.0.195's `isAborted` is set only by an
+          // in-stream `abort` chunk, which the server emits only when its OWN
+          // `abortSignal` (STREAM_TIMEOUT_MS) trips, never on a client reader
+          // cancel) produces `isAborted: false` and `finishReason: undefined`,
+          // which the denylist waved through as "success." An allowlist of
+          // the finish reasons that actually mean "the model produced a real,
+          // complete-as-far-as-it-went answer" closes that: "stop" (normal
+          // completion), "length" (hit its token budget -- still a real
+          // answer, not a truncation, so deliberately included), and
+          // "tool-calls" (the model's last of the up-to-5 steps this route
+          // allows ended on a tool call). Everything else -- undefined,
+          // "unknown", "content-filter", "other", and "error" itself -- is
+          // treated as not-a-real-answer and falls through to the same
+          // not-persisted path an aborted/provider-error turn already took.
+          const TERMINAL_FINISH_REASONS = new Set(["stop", "length", "tool-calls"]);
+          const isErrorOutcome = isAborted || !finishReason || !TERMINAL_FINISH_REASONS.has(finishReason);
+
+          // Persisting a rejected turn anyway would write a row the
+          // idempotency replay path above (classifyTurn) would then treat as
+          // "already answered" on every future retry -- for the finishReason
+          // gate above, permanently serving the same half-sentence back with
+          // no error and no way out except Restart (which voids the
+          // submission); for hasRenderableContent's own gate (its own doc
+          // comment), a permanently-empty assistant row. Not persisting
+          // instead leaves nothing for this turn, so a retry's idempotency
+          // check falls through to a genuine model call again.
+          //
+          // best-effort, not double-write-proof: if the *worker process* dies
+          // before onFinish runs (vs. the client just disconnecting), the
+          // assistant message is lost and the client's retry will only re-send
+          // the user message (already deduped above), so no response ever gets
+          // generated for that turn. That gap is a documented limitation (#3
+          // pitfall 2), not fixed here -- tracked as #96 (streaming resilience).
+          //
+          // #317 review, #346 (requirement 3): the assistant message's id is
+          // generated up front (not read back from an INSERT) -- see
+          // finalizeAssistantTurn's own doc comment for why that's what lets
+          // the lock release, the message persist, and the llm_call_logs
+          // write (previously three serialized round-trips, all directly
+          // perceived as tail latency since the SDK awaits onFinish inside
+          // the stream's flush) collapse into one db.batch()/transaction.
+          //
+          // #440 audit, Fix 1: that generation moved from here to
+          // `assistantMessageId` above (this callback's outer closure) --
+          // messageMetadata's `finish`-part callback needs the SAME id, and it
+          // runs before onFinish ever does (see assistantMessageId's own doc
+          // comment for why), so onFinish can no longer be the place that
+          // mints it. Reused here rather than generated twice so the id the
+          // client was just told to expect (via metadata.id) is the exact id
+          // this turn persists under.
+          const shouldPersist = !isErrorOutcome && hasRenderableContent(responseMessage.parts);
+          // #275: the current equivalent of the old "hasRenderableContent
+          // false -> bare return, nothing logged" branch -- that separate
+          // early return doesn't exist anymore (#268/#342 folded it into this
+          // one shouldPersist gate, above), so this is the single place that
+          // now knows a turn is about to go unpersisted, for either reason
+          // (isErrorOutcome, or a `stop`/`tool-calls` finish that still
+          // produced no renderable content). Warn, not error: nothing threw --
+          // this is the system correctly refusing to write a truncated/blank
+          // row, but an operator debugging "the tutor showed my student an
+          // error" needs to see it happened and why (finishReason/isAborted),
+          // not infer it from a gap in the transcript.
+          if (!shouldPersist) {
+            logServerWarn("chatHandler.onFinish.noRenderableContent", "turn produced no persistable content", {
+              conversationId: conv.id,
+              userId: authContext.session.userId,
+              model: servingConfig.modelName,
+              finishReason: finishReason ?? null,
+              isAborted: Boolean(isAborted),
+            });
+          }
+          const assistantMessage = shouldPersist ? { id: assistantMessageId, parts: responseMessage.parts } : null;
+
+          // #364 (requirement 3): still ONE row per turn after a failover, not
+          // one per attempt. There is exactly one finalizeAssistantTurn call
+          // site pair in this callback and streamWithFallback returns exactly
+          // one result, so a failed-over turn cannot produce a second row --
+          // and `servingConfig` (above) means the one row it does produce names
+          // the provider/model/config that actually answered, never the primary
+          // that didn't. `latencyMs` deliberately still measures from
+          // turnStartedAt, i.e. the whole model-call window including the
+          // failed first attempt: that is what the student actually waited.
+          //
+          // #317 review, #321: one llm_call_logs row per turn -- including the
+          // error/aborted/no-content cases above, which previously early-
+          // returned with nothing written anywhere. This was the operational
+          // gap #321 names: a provider outage or a rotated key produced
+          // "zero evidence" -- no error rate, no per-provider breakdown, no
+          // latency, no cost.
+          // #317 review, #349 (requirement 3): result.totalUsage, not
+          // result.usage -- the AI SDK documents result.usage as "the token
+          // usage of the LAST STEP" only. stopWhen: stepCountIs(5) above
+          // makes multi-step turns (a tool call, then a follow-up text
+          // step) a designed path, and providers bill per call: result.usage
+          // alone silently dropped every earlier step's tokens from cost
+          // and usage reporting on any turn that used a tool.
+          //
+          // #317 review, #350 (requirement 2): raced against
+          // USAGE_FETCH_TIMEOUT_MS -- see that constant's own doc comment for
+          // why this Promise.all can hang forever on a genuinely cancelled
+          // stream instead of merely resolving slowly. `finalizeAssistantTurn`
+          // still runs on timeout (with null usage/cost fields, errorFlag
+          // true), rather than onFinish just hanging and never reaching it at
+          // all -- the lock still releases and a row still lands, even though
+          // this specific turn's token/cost numbers are unknowable.
+          // #440 audit, Fix 2: `timeoutHandle` itself is declared once, above
+          // (this callback's outer try/catch doc comment explains why) -- only
+          // assigned here, inside the now-single try this section shares with
+          // the persistence-gate logic above it.
+          const timedOut = Symbol("usage-fetch-timed-out");
+          const timeoutPromise = new Promise<typeof timedOut>((resolve) => {
+            timeoutHandle = setTimeout(() => resolve(timedOut), USAGE_FETCH_TIMEOUT_MS);
+          });
           const usageResult = await Promise.race([
             Promise.all([result.totalUsage, result.response, result.warnings]),
             timeoutPromise,

@@ -101,6 +101,12 @@ type FakeOnFinishEvent = {
 };
 let capturedOnFinish: ((event: FakeOnFinishEvent) => void | Promise<void>) | undefined;
 let capturedStreamResponseOnError: ((error: unknown) => string) | undefined;
+// #440 audit, Fix 1: captures the `messageMetadata` callback chat.ts now
+// passes to toUIMessageStreamResponse, so a test can drive it directly with
+// a fake stream part (the same shape the AI SDK's own `TextStreamPart`
+// union carries) the way capturedOnFinish is already driven with a fake
+// responseMessage above.
+let capturedMessageMetadata: ((event: { part: { type: string } }) => unknown) | undefined;
 // #317 review, #321: chat.ts's own onFinish awaits result.totalUsage/
 // result.response/result.warnings to build the llm_call_logs row --
 // individual tests override these via mockUsage/mockResponseMeta/
@@ -157,9 +163,11 @@ const streamTextMock = vi.fn((_args: Record<string, unknown>) => {
       headers?: Record<string, string>;
       onFinish?: (event: FakeOnFinishEvent) => void | Promise<void>;
       onError?: (error: unknown) => string;
+      messageMetadata?: (event: { part: { type: string } }) => unknown;
     }) => {
       capturedOnFinish = opts?.onFinish;
       capturedStreamResponseOnError = opts?.onError;
+      capturedMessageMetadata = opts?.messageMetadata;
       return new Response("stream-body", { status: 200, headers: opts?.headers });
     },
   };
@@ -393,6 +401,7 @@ describe("POST /api/chat", () => {
     streamTextMock.mockClear();
     capturedOnFinish = undefined;
     capturedStreamResponseOnError = undefined;
+    capturedMessageMetadata = undefined;
     // #219/#265: under the rate limit by default -- individual rate-limit
     // tests override this. 1 is the post-increment count for "the first
     // request in the window," not a pre-increment 0.
@@ -2350,6 +2359,62 @@ describe("POST /api/chat", () => {
         errorFlag: false,
       });
       expect(typeof logged.latencyMs).toBe("number");
+    });
+
+    it("#440 audit, Fix 1: attaches {createdAt, id} via messageMetadata only on the stream's finish part, and that id matches the row onFinish persists", async () => {
+      /* Root cause this closes: the client's Flag button (ConversationView)
+         gates on `msg.createdAt` being set, which was previously populated
+         only by a full history refetch (fetchConversationHistory) -- never
+         by a message that streams in and completes within the SAME browser
+         session. `messageMetadata` is the AI SDK v5 hook chat.ts now uses to
+         attach `{ createdAt, id }` to the live-streamed message itself, so
+         the gate can open without a refetch. This test drives that callback
+         directly (the way capturedOnFinish is already driven above) rather
+         than only eyeballing the source, per this task's own "When done"
+         requirement. */
+      createConversationMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      expect(capturedMessageMetadata).toBeDefined();
+
+      // Every non-"finish" part -- including the high-frequency per-token
+      // "text-delta" chunk -- must NOT get metadata attached. Fix 1's own
+      // brief is explicit about this: "only attach metadata on the
+      // finish-message / final part, not on every streamed delta."
+      expect(capturedMessageMetadata!({ part: { type: "start" } })).toBeUndefined();
+      expect(capturedMessageMetadata!({ part: { type: "text-start" } })).toBeUndefined();
+      expect(capturedMessageMetadata!({ part: { type: "text-delta" } })).toBeUndefined();
+
+      const metadata = capturedMessageMetadata!({ part: { type: "finish" } }) as
+        | { createdAt?: unknown; id?: unknown }
+        | undefined;
+      expect(metadata).toBeDefined();
+      // Truthy and ISO-8601-shaped -- the exact field name/shape
+      // fetchConversationHistory (App.tsx) already populates from a
+      // persisted row's `createdAt`, so both hydration paths produce the
+      // same client-side shape.
+      expect(typeof metadata!.createdAt).toBe("string");
+      expect(new Date(metadata!.createdAt as string).toString()).not.toBe("Invalid Date");
+      expect(typeof metadata!.id).toBe("string");
+
+      // The id this test just observed via messageMetadata must be the SAME
+      // id the persisted row ends up with -- not merely "a string" -- since
+      // the live-streamed UIMessage's own top-level `id` is NOT the id
+      // onFinish mints for the row (see assistantMessageId's own doc
+      // comment in chat.ts), and the client needs metadata.id specifically
+      // because of that mismatch.
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+        finishReason: "stop",
+      });
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledTimes(1);
+      const [, , assistantMessage] = finalizeAssistantTurnMock.mock.calls[0]! as [unknown, unknown, { id: string } | null];
+      expect(assistantMessage?.id).toBe(metadata!.id);
     });
 
     it("#430: a degraded turn is logged under the provider that actually served it, and is not costed at the original model's rate", async () => {

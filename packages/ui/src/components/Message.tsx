@@ -1044,7 +1044,29 @@ function renderStudentBody(text: ReactNode, onRun?: (code: string) => Promise<RC
   );
 }
 
-export function Message(props: MessageProps) {
+/** client-feedback-ui audit, Fix 4: `React.memo`'d so a message row skips
+ *  re-rendering when neither its own props nor its own message have
+ *  changed -- the same #310 treatment ConversationListItem already got for
+ *  the tutor rail (see that component's own doc comment). The transcript
+ *  re-renders on every composer keystroke, every retry-cooldown tick, and
+ *  every "load older messages" state change, none of which touch most rows
+ *  on screen -- up to 200 hydrated messages, before this, re-rendered on
+ *  every one of those regardless.
+ *
+ *  Default shallow prop comparison (no custom comparator), matching
+ *  ConversationListItem's own plain `memo(Component)` call -- deliberately
+ *  NOT re-deriving equality by hand here, which would drift out of step
+ *  the moment a new prop is added to AIMessageProps/StudentMessageProps.
+ *  This only pays off because ConversationView.tsx's own renderMessageRow
+ *  call site keeps its props stable across those unrelated re-renders:
+ *  `children`/`createdAt`/`isStreaming` are read straight off the `msg`
+ *  object (stable for as long as the underlying message itself hasn't
+ *  changed), and `feedbackSlot` is now a per-id-cached value rather than a
+ *  freshly-constructed element on every call (see that file's own doc
+ *  comment on `getFeedbackSlot`, right above where this component is
+ *  rendered, for the full reasoning and its one known, deliberate gap
+ *  during active streaming). */
+export const Message = memo(function Message(props: MessageProps) {
   if (props.role === "ai") {
     return (
       <AIMessage isStreaming={props.isStreaming} createdAt={props.createdAt} feedbackSlot={props.feedbackSlot}>
@@ -1098,4 +1120,4 @@ export function Message(props: MessageProps) {
       </span>
     </div>
   );
-}
+});

@@ -596,7 +596,13 @@ function renderMessageRow(
   msg: MessageData,
   onRunRCode?: (code: string) => Promise<RCodeResult>,
   onRevertToMessage?: (messageId: string) => void,
-  renderAiFeedbackSlot?: (messageId: string) => React.ReactNode,
+  /* client-feedback-ui audit, Fix 4: an already-resolved, per-id-cached
+     getter rather than the raw `renderAiFeedbackSlot` prop -- see the call
+     site's own doc comment (ConversationView, just above `return`) for why
+     that caching is what lets Message's React.memo actually skip an
+     unrelated re-render instead of being defeated by a fresh element
+     identity every time this function runs. */
+  getFeedbackSlot?: (messageId: string) => React.ReactNode,
 ) {
   if (msg.role === "ai") {
     return (
@@ -612,7 +618,7 @@ function renderMessageRow(
            whatever id the stream itself used, see this task's own report),
            so offering to flag it here would be flagging an id the server
            may not recognize as this message once persisted. */
-        feedbackSlot={!msg.isStreaming && msg.createdAt ? renderAiFeedbackSlot?.(msg.id) : undefined}
+        feedbackSlot={!msg.isStreaming && msg.createdAt ? getFeedbackSlot?.(msg.id) : undefined}
       >
         {msg.content}
       </Message>
@@ -624,6 +630,12 @@ function renderMessageRow(
         role="student"
         createdAt={msg.createdAt}
         onRun={onRunRCode}
+        // client-feedback-ui audit round 2, Fix 1 note: this inline arrow is a
+        // fresh closure on every call to renderMessageRow, same defect class as
+        // `onRun` above -- currently harmless only because `onRevertToMessage`
+        // is never actually wired to a real function anywhere in the app (see
+        // `grep -rn "onRevertToMessage" apps/`); it will defeat Message's memo
+        // for student rows the moment a caller wires one in.
         onRevert={onRevertToMessage ? () => onRevertToMessage(msg.id) : undefined}
       >
         {msg.content}
@@ -997,6 +1009,77 @@ export function ConversationView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cooldownRemainingSec > 0]);
 
+  /* client-feedback-ui audit, Fix 4: `Message` (this directory's own
+     message-row component) is now `React.memo`'d, mirroring
+     ConversationListItem's own #310 memoization for the rail -- but that
+     only pays off when the props renderMessageRow builds for an unchanged
+     message are themselves stable across a re-render that had nothing to
+     do with that message. Before this, `feedbackSlot` was built by calling
+     `renderAiFeedbackSlot(msg.id)` INLINE inside renderMessageRow on every
+     single render of this component -- a composer keystroke (`draft` is
+     local state here), the retry cooldown's 1s tick above, or
+     "load older messages" settling all manufactured a brand-new
+     <ResponseFeedback> element identity for every AI row that has one,
+     which would fail Message's memo comparison every time regardless of
+     whether that row's own message had changed at all.
+
+     Cached per message id here instead, the same per-id-Map-in-a-ref shape
+     TutorConversationsList.tsx uses for its own onSelect/onRename/
+     onRequestDelete handlers (see that file's own doc comment) -- built
+     once per id and reused for the rest of this component's mounted
+     lifetime. `renderAiFeedbackSlot` itself is read through a ref rather
+     than closed over directly, exactly like TutorConversationsList's
+     onSelectConversationRef: App.tsx does not (and need not) wrap it in
+     its own useCallback, since the cache below is what actually neutralizes
+     an unstable function identity here.
+
+     Safe to cache indefinitely (never invalidated) because
+     renderMessageRow only ever calls this for a message that already has
+     `createdAt` -- i.e. one the server has already persisted -- and by
+     that point the conversation/course context `renderAiFeedbackSlot`
+     closes over (App.tsx) is already the final one for that id; a
+     genuinely different conversation remounts this whole component (App.tsx
+     keys ConversationView by section/tutorConversationId), so a stale
+     entry from a previous conversation can never be read here.
+
+     Known, deliberate gap this does NOT close: while a turn is actively
+     STREAMING, useConversationSurface's buildMessageData (outside this
+     task's file scope) rebuilds EVERY message's `content` from scratch
+     whenever the underlying `aiMessages` array changes at all -- which is
+     every token, for the whole array, not just the message being streamed
+     to -- so Message's memo has no effect on per-token re-renders today.
+     What this DOES eliminate is the more common case: the numerous
+     per-keystroke/per-tick re-renders of this component that touch none
+     of the messages at all, the same category of win #310 delivered for
+     the rail -- for AI rows, via feedbackSlot's cache above.
+
+     That claim did NOT actually extend to student rows until round 2's
+     own audit Fix 1 (App.tsx): renderMessageRow forwards `onRun`
+     straight through to Message with no caching of its own (unlike
+     feedbackSlot), so it is only as stable as whatever App.tsx passes as
+     `onRunRCode`. Before Fix 1, App.tsx's runRCodeForSection/
+     runRCodeForTutor were plain functions recreated on every App render,
+     so every one of these same keystroke/tick re-renders still defeated
+     Message's memo for any student row with an R-code run affordance --
+     exactly the class of re-render this paragraph claims to eliminate.
+     App.tsx now wraps both in `useCallback` (see its own doc comment
+     there) with a genuinely stable identity, so `onRun` now gets the
+     same guarantee `getFeedbackSlot` gives AI rows. The one remaining,
+     currently-dormant exception is `onRevert` in renderMessageRow below
+     -- see its own inline comment: still a fresh closure per render, but
+     inert today because `onRevertToMessage` is never wired to a real
+     function anywhere in the app. */
+  const feedbackSlotCacheRef = useRef(new Map<string, React.ReactNode>());
+  const renderAiFeedbackSlotRef = useRef(renderAiFeedbackSlot);
+  renderAiFeedbackSlotRef.current = renderAiFeedbackSlot;
+  const getFeedbackSlot = useCallback((messageId: string): React.ReactNode => {
+    const cache = feedbackSlotCacheRef.current;
+    if (cache.has(messageId)) return cache.get(messageId);
+    const slot = renderAiFeedbackSlotRef.current?.(messageId);
+    cache.set(messageId, slot);
+    return slot;
+  }, []);
+
   return (
     <div className="conversation-column">
       {/* Scrollable message area */}
@@ -1207,7 +1290,7 @@ export function ConversationView({
                 return label === "" ? null : label;
               })();
 
-              const row = renderMessageRow(msg, onRunRCode, onRevertToMessage, renderAiFeedbackSlot);
+              const row = renderMessageRow(msg, onRunRCode, onRevertToMessage, getFeedbackSlot);
               if (!boundary && !dayLabel) return <Fragment key={msg.id}>{row}</Fragment>;
               return (
                 <Fragment key={msg.id}>
@@ -1252,6 +1335,27 @@ export function ConversationView({
               <div role="alert">
                 <span className="conversation-error-row__label">{errorCopy.label}</span>
                 <p className="conversation-error-row__message">{errorCopy.message}</p>
+
+                {/* client-feedback-ui audit, Fix 3: this used to render as a
+                    SIBLING of this role="alert" div, further down this same
+                    .conversation-error-row -- outside the one thing on this
+                    row an AT actually announces. `unrestoredText` can only
+                    ever be non-null while `error`/`errorCopy` are also
+                    truthy (it is set from the `restoredDraft` effect below,
+                    which only fires alongside a send-stage failure this row
+                    is already showing), so there is no bare-unrestoredText
+                    case that would need its own separate live region --
+                    moving it in here, inside the SAME alert, is what makes a
+                    screen-reader user actually told "your unsent text was
+                    recovered" instead of that being sighted-only. */}
+                {unrestoredText && (
+                  <div className="conversation-error-row__unrestored">
+                    <p className="conversation-error-row__message">
+                      Your composer already had text, so we left it alone. The message that didn&rsquo;t send was:
+                    </p>
+                    <pre className="conversation-error-row__unrestored-text">{unrestoredText}</pre>
+                  </div>
+                )}
               </div>
 
               {/* Before the detail, not after. A gateway error body pushed the
@@ -1280,18 +1384,6 @@ export function ConversationView({
                     →
                   </span>
                 </button>
-              )}
-
-              {/* #427: only when the restore was declined. The ordinary case
-                  puts the text in the composer and says so; this is the
-                  branch where that sentence would otherwise be false. */}
-              {unrestoredText && (
-                <div className="conversation-error-row__unrestored">
-                  <p className="conversation-error-row__message">
-                    Your composer already had text, so we left it alone. The message that didn&rsquo;t send was:
-                  </p>
-                  <pre className="conversation-error-row__unrestored-text">{unrestoredText}</pre>
-                </div>
               )}
 
               {errorCopy.detail && (

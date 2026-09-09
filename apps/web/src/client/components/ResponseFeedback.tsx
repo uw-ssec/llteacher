@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { Flag } from "@phosphor-icons/react";
 import { AlertDialog } from "@llteacher/ui";
 import type { FeedbackReason } from "../../shared/types";
+import { MAX_COMMENT_CHARS } from "../../shared/chat-limits";
 
 /* --------------------------------------------------------------------------
    ResponseFeedback — the student's "flag this response" affordance (#90).
@@ -42,7 +43,18 @@ const REASON_OPTIONS: { value: FeedbackReason; label: string }[] = [
   { value: "other", label: "Other" },
 ];
 
-const MAX_COMMENT_CHARS = 2000;
+// Server-hardening audit fix, Minor #4: was a second, independently-
+// hardcoded `= 2000` here -- moved to the one shared/chat-limits.ts source
+// of truth both this component and routes/feedback.ts's zod schema now
+// import, so the two can never silently desync.
+
+/** client-feedback-ui audit, Fix 6: how close to `MAX_COMMENT_CHARS` the
+ *  comment gets before the counter shows -- the same "silent until nearly
+ *  relevant" convention EditableTitle's own `COUNTER_VISIBLE_WITHIN`
+ *  (#310) uses for its title-rename counter, so this pilot-scale comment
+ *  box reads the same way as the rest of the app instead of introducing a
+ *  second counter convention. */
+const COUNTER_VISIBLE_WITHIN = 20;
 
 export interface ResponseFeedbackProps {
   conversationId: string;
@@ -57,6 +69,10 @@ export function ResponseFeedback({ conversationId, messageId }: ResponseFeedback
   const [comment, setComment] = useState("");
   const [error, setError] = useState<string | null>(null);
   const commentId = useId();
+  // client-feedback-ui audit, Fix 6: id target for the counter, referenced
+  // from the textarea's own aria-describedby below (only while it's
+  // showing) -- mirrors EditableTitle's counterId/showCounter pairing.
+  const commentCounterId = useId();
   // Minor #7 (final-review fix): useId(), matching commentId above, instead
   // of a module-level string constant -- harmless today since only one of
   // these dialogs can be open at a time, but a module-level `name` stops
@@ -80,6 +96,15 @@ export function ResponseFeedback({ conversationId, messageId }: ResponseFeedback
       flaggedRef.current?.focus();
     }
   }, [status]);
+
+  // client-feedback-ui audit, Fix 6: same shape as EditableTitle's own
+  // `remaining`/`showCounter` -- silent until the last COUNTER_VISIBLE_WITHIN
+  // characters, then present before the cap bites. `comment` can never
+  // exceed MAX_COMMENT_CHARS (the textarea's onChange below already slices
+  // to it), so `remaining` can never go negative here the way EditableTitle's
+  // title counter can -- there is no "N over" state to render for this field.
+  const remaining = MAX_COMMENT_CHARS - comment.length;
+  const showCounter = remaining <= COUNTER_VISIBLE_WITHIN;
 
   const closeDialog = () => {
     setStatus("idle");
@@ -200,7 +225,13 @@ export function ResponseFeedback({ conversationId, messageId }: ResponseFeedback
                 onChange={(e) => setComment(e.target.value.slice(0, MAX_COMMENT_CHARS))}
                 maxLength={MAX_COMMENT_CHARS}
                 rows={3}
+                aria-describedby={showCounter ? commentCounterId : undefined}
               />
+              {showCounter && (
+                <span id={commentCounterId} className="response-feedback__comment-counter">
+                  {remaining} left
+                </span>
+              )}
               {error && (
                 <p className="response-feedback__error" role="alert">
                   {error}

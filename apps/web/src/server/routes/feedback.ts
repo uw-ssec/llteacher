@@ -11,7 +11,8 @@ import {
   listCourseFeedback,
   ResponseAlreadyFlaggedError,
 } from "../repositories/responseFeedback";
-import { isUnreleased } from "../repositories/homeworks";
+import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from "../repositories/rateLimits";
+import { MAX_COMMENT_CHARS } from "../../shared/chat-limits";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
@@ -48,8 +49,6 @@ import type { AppEnv } from "../context";
    student names and flagged tutor content for a whole course, the same
    class of student-record access the transcript list already audits.
    -------------------------------------------------------------------------- */
-
-const MAX_COMMENT_CHARS = 2000;
 
 const flagResponseSchema = z.object({
   reason: z.enum(feedbackReasonEnum.enumValues),
@@ -91,6 +90,22 @@ export async function flagResponseHandler(c: Context<AppEnv>) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
+
+  // Server-hardening audit fix, Minor #1 (Security): this route had no
+  // rate limit at all -- a student could spam-flag messages. Reuses the
+  // exact same per-user counter/budget #219/#308 already share (routes/
+  // chat.ts, routes/conversations.ts) rather than standing up a second
+  // one -- a flag is a rare, deliberate action next to chat's per-message
+  // volume, so sharing one generous per-minute budget costs a normal user
+  // nothing while still bounding a scripted flag-loop.
+  const requestCount = await reserveRateLimitSlot(db, authContext.session.userId, new Date(), RATE_LIMIT_WINDOW_MS);
+  if (requestCount > RATE_LIMIT_MAX_PER_MINUTE) {
+    return c.json(
+      { error: "You're sending requests too quickly. Please wait a moment and try again." },
+      429,
+      { "Retry-After": String(Math.ceil(RATE_LIMIT_WINDOW_MS / 1000)) },
+    );
+  }
 
   // The exact "not found or not owned" primitive PATCH/DELETE
   // /api/conversations/:id already use -- covers a nonexistent
@@ -137,6 +152,7 @@ export async function flagResponseHandler(c: Context<AppEnv>) {
   try {
     const flag = await flagResponse(db, {
       conversationId,
+      courseId: conversation.courseId,
       messageId,
       studentId: authContext.session.userId,
       reason: parsed.data.reason,
@@ -191,20 +207,26 @@ export async function listCourseFeedbackHandler(c: Context<AppEnv>) {
 
   const db = makeDb(c.env.DATABASE_URL);
   const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
-  const result = await listCourseFeedback(db, scope, cipher, { limit, offset });
 
   // #208/#366: the same unreleased-content gate the transcript list applies
   // to its own rows -- a flag's section/homework titles (and, via the
   // dashboard's transcript link, the conversation itself) are unreleased
   // content once the underlying homework is currently draft/scheduled/
   // hidden. A TA without canViewDraftsIn(courseId) must not see the row at
-  // all. Filtered post-query, matching listInstructorTranscriptsHandler's
-  // own precedent -- `total`/pagination stay keyed to the unfiltered page,
-  // the same accepted tradeoff that precedent already makes.
+  // all.
+  //
+  // Server-hardening audit fix, Minor #2 (Security+Scalability+Usability,
+  // found independently by all three dimensions): this used to be filtered
+  // HERE, on the already-fetched `result.items`, after listCourseFeedback
+  // had already computed `total` from the unfiltered query -- so `total`
+  // (and the dashboard's own reason-breakdown counts, keyed off it) counted
+  // rows a draft-blind TA never actually saw in `items`. Now passed into
+  // the repository as `canViewDrafts` instead, so the SQL WHERE clause
+  // itself excludes unreleased-homework rows and `total` is exactly
+  // `items.length` summed across pages -- see listCourseFeedback's own doc
+  // comment (repositories/responseFeedback.ts) for the full mechanism.
   const canSeeUnreleased = authContext.canViewDraftsIn(courseId);
-  const visibleItems = canSeeUnreleased
-    ? result.items
-    : result.items.filter((item) => !isUnreleased(item.homeworkStatus));
+  const result = await listCourseFeedback(db, scope, cipher, { limit, offset, canViewDrafts: canSeeUnreleased });
 
   // #90 review (Important #1): FERPA -- this read returns decrypted student
   // names plus flagged tutor content for a whole course, the identical
@@ -222,7 +244,7 @@ export async function listCourseFeedbackHandler(c: Context<AppEnv>) {
   });
 
   return c.json({
-    items: visibleItems.map((item) => ({
+    items: result.items.map((item) => ({
       id: item.id,
       conversationId: item.conversationId,
       messageId: item.messageId,

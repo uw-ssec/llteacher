@@ -1,5 +1,6 @@
 /* --------------------------------------------------------------------------
-   Bounds on a chat turn that more than one module has to agree on.
+   Bounds on a chat turn -- and on adjacent client+server surfaces -- that
+   more than one module has to agree on.
 
    Separate from shared/types.ts because that module is types-only -- every
    one of its imports is `import type` and erases, so it costs the client
@@ -8,8 +9,12 @@
    reserves against must be ONE number, not two that happen to match today
    (#288). Two such pairs live here: MAX_HISTORY_MESSAGES (the server
    enforces it, the client discloses it) and MAX_TURN_STEPS (the route
-   enforces it, lib/context-window.ts reserves window space for it). This
-   module imports nothing, so either side can depend on it.
+   enforces it, lib/context-window.ts reserves window space for it).
+   MAX_COMMENT_CHARS (server-hardening audit fix, Minor #4) is the same
+   shape one level removed from chat proper -- the #90 feedback-flag
+   comment cap, enforced by routes/feedback.ts's zod schema and disclosed by
+   client/components/ResponseFeedback.tsx's char counter. This module
+   imports nothing, so either side can depend on it.
    -------------------------------------------------------------------------- */
 
 /** How many trailing messages of a conversation the model actually sees on
@@ -57,3 +62,14 @@ export const MAX_HISTORY_MESSAGES = 40;
  *  basis; if this number ever changes, the reservation has to change with
  *  it, and two copies of a 5 in two files is exactly how it wouldn't. */
 export const MAX_TURN_STEPS = 5;
+
+/** The #90 feedback-flag comment length cap. Enforced server-side by
+ *  routes/feedback.ts's flagResponseSchema (a comment over this is a 400,
+ *  never silently truncated); disclosed client-side by
+ *  ResponseFeedback.tsx's remaining-characters counter, the same
+ *  enforce/disclose split MAX_HISTORY_MESSAGES above already establishes.
+ *  Previously hardcoded independently at both sites -- server-hardening
+ *  audit fix, Minor #4 (Flexibility): a future edit to one without the
+ *  other would have silently desynced what the client promises from what
+ *  the server actually accepts. */
+export const MAX_COMMENT_CHARS = 2000;

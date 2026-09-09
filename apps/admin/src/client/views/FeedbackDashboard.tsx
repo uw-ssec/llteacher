@@ -29,6 +29,7 @@
    SubmissionsDataLoader, TranscriptListView/TranscriptListDataLoader).
    -------------------------------------------------------------------------- */
 
+import { useEffect, useRef } from "react";
 import { ArrowLeft, CaretLeft, CaretRight, ClipboardText, Flag } from "@phosphor-icons/react";
 import { PageHeader } from "../components/PageHeader";
 
@@ -77,6 +78,12 @@ export type FeedbackDashboardProps = {
   onBack: () => void;
   onOpenTranscript: (item: FeedbackListItem) => void;
   onChangeOffset: (offset: number) => void;
+  /** #440 audit fix (Major, Accessibility): true while App.tsx's
+   *  FeedbackDashboardDataLoader has a page fetch in flight. The loader no
+   *  longer unmounts this whole view between pages (it keeps rendering the
+   *  previous page's `data`), so this drives a small, non-disruptive "still
+   *  here" indicator instead -- the DOM (and any focus in it) stays put. */
+  isFetching?: boolean;
 };
 
 /** Plain-text preview of a flagged response's snapshot -- same "text parts
@@ -114,11 +121,19 @@ function formatTimestamp(iso: string): string {
   });
 }
 
-export function FeedbackDashboard({ data, onBack, onOpenTranscript, onChangeOffset }: FeedbackDashboardProps) {
+export function FeedbackDashboard({
+  data,
+  onBack,
+  onOpenTranscript,
+  onChangeOffset,
+  isFetching = false,
+}: FeedbackDashboardProps) {
   const pageStart = data.total === 0 ? 0 : data.offset + 1;
   const pageEnd = Math.min(data.offset + data.limit, data.total);
   const canPrev = data.offset > 0;
   const canNext = pageEnd < data.total;
+  const currentPage = Math.floor(data.offset / data.limit) + 1;
+  const totalPages = Math.max(1, Math.ceil(data.total / data.limit));
 
   const reasonCounts: Record<FeedbackReason, number> = {
     incorrect: 0,
@@ -127,6 +142,50 @@ export function FeedbackDashboard({ data, onBack, onOpenTranscript, onChangeOffs
     other: 0,
   };
   for (const item of data.items) reasonCounts[item.reason] += 1;
+
+  /* #440 audit fix (Major, Accessibility) — Fix 2. Same defect class #298
+   *  closed for ResponseFeedback (apps/web/src/client/components/
+   *  ResponseFeedback.tsx) and App.tsx's HomeworkLoadError: a state
+   *  transition that drops the focused element out of the accessibility
+   *  tree in the same commit leaves nothing for focus to land on, so it
+   *  falls back to <body>. There, the whole element unmounted; here, Fix 1
+   *  (App.tsx's FeedbackDashboardDataLoader) stops that from happening at
+   *  the view level, but a narrower version of the same defect survives at
+   *  the button level: Previous/Next are `disabled={!canPrev}` /
+   *  `disabled={!canNext}`, and a native `disabled` button cannot hold
+   *  focus. Paging onto a boundary page (first or last) with the very
+   *  button that caused the page turn still focused disables that button
+   *  the instant the new page's data lands.
+   *
+   *  Mirrored fix, same *shape* as ResponseFeedback's: a stable, otherwise
+   *  inert element (`tabIndex={-1}`) that an effect explicitly `.focus()`es
+   *  the moment the boundary flips underneath the focused button. Unlike
+   *  ResponseFeedback -- which detects the loss by checking whether focus
+   *  has already fallen to `<body>` -- this tracks, per button, whether IT
+   *  was the one last focused (via onFocus/onBlur), and reacts the instant
+   *  that specific button's own `disabled` prop flips from false to true.
+   *  That's deliberately independent of what the DOM's `document.
+   *  activeElement` happens to read at effect time: a native `disabled`
+   *  button losing focus to `<body>` is a real, spec'd browser behavior,
+   *  but it isn't something every DOM implementation performs synchronously
+   *  in step with React's own commit -- tying the fix to "was THIS button
+   *  focused when it became disabled" holds regardless of exactly when (or
+   *  whether, in a given environment) the browser gets around to blurring
+   *  it. */
+  const pageIndicatorRef = useRef<HTMLSpanElement>(null);
+  const wasPrevFocusedRef = useRef(false);
+  const wasNextFocusedRef = useRef(false);
+  const prevCanPrevRef = useRef(canPrev);
+  const prevCanNextRef = useRef(canNext);
+  useEffect(() => {
+    const prevJustDisabled = prevCanPrevRef.current && !canPrev;
+    const nextJustDisabled = prevCanNextRef.current && !canNext;
+    prevCanPrevRef.current = canPrev;
+    prevCanNextRef.current = canNext;
+    if ((prevJustDisabled && wasPrevFocusedRef.current) || (nextJustDisabled && wasNextFocusedRef.current)) {
+      pageIndicatorRef.current?.focus();
+    }
+  }, [canPrev, canNext]);
 
   return (
     <div className="admin-view">
@@ -146,7 +205,26 @@ export function FeedbackDashboard({ data, onBack, onOpenTranscript, onChangeOffs
       />
 
       {data.items.length > 0 && (
-        <div className="admin-filter-row" aria-label="Reason breakdown (this page)">
+        /* #440 audit fix (Minor, Usability+Accessibility) — Fix 3.
+           `role="group"` (not `role="region"` -- this is a cluster of
+           related counts, not a page-level landmark) so the `aria-label`
+           below is reliably exposed to AT: a bare <div> with only
+           `aria-label` and no role is not guaranteed to be announced as a
+           group by every screen reader.
+           The "(this page)" qualifier used to live ONLY in that aria-label
+           -- a sighted user had no visual cue these counts are scoped to
+           the current page rather than course-wide totals. The leading
+           "This page:" chip below says the same thing visibly, so sighted
+           and AT users get identical information; the aria-label is
+           shortened to match rather than repeating the qualifier twice in
+           two different wordings for AT users alone. */
+        <div className="admin-filter-row" role="group" aria-label="Reason breakdown">
+          {/* Plain style prop, not a new CSS class -- this task's brief scopes
+              edits to this file and App.tsx only, so a modifier class with no
+              stylesheet to back it isn't an option here. */}
+          <span className="admin-record-row__meta-chip" style={{ opacity: 0.7 }}>
+            This page:
+          </span>
           {(Object.keys(REASON_LABELS) as FeedbackReason[]).map((reason) => (
             <span key={reason} className="admin-record-row__meta-chip">
               {REASON_LABELS[reason]}: {reasonCounts[reason]}
@@ -214,17 +292,39 @@ export function FeedbackDashboard({ data, onBack, onOpenTranscript, onChangeOffs
         <nav className="admin-filter-row" aria-label="Feedback pages">
           <button
             type="button"
+            data-testid="feedback-prev-page"
             className="admin-button admin-button--ghost"
             onClick={() => onChangeOffset(Math.max(0, data.offset - data.limit))}
+            onFocus={() => { wasPrevFocusedRef.current = true; }}
+            onBlur={() => { wasPrevFocusedRef.current = false; }}
             disabled={!canPrev}
           >
             <CaretLeft size={14} weight="regular" aria-hidden="true" />
             Previous
           </button>
+          {/* Fix 2's focus-restoration target (see the effect above) --
+              doubles as a small visible "Page N of M" indicator, which this
+              nav had no equivalent of before (only the two buttons). */}
+          <span ref={pageIndicatorRef} data-testid="feedback-page-indicator" tabIndex={-1} className="admin-record-row__meta-chip">
+            Page {currentPage} of {totalPages}
+          </span>
+          {/* Fix 1: a subtle, non-disruptive "still here" signal for a page
+              fetch in flight -- NOT a disabled/opacity change on the buttons
+              themselves, which would reintroduce the very focus-loss problem
+              Fix 1/Fix 2 exist to remove if the button a click just fired
+              from happens to still be focused. `aria-live="polite"` so a
+              screen-reader user hears it without anything being forced into
+              focus. */}
+          <span role="status" aria-live="polite" className="admin-record-row__meta-chip" style={{ opacity: isFetching ? 1 : 0 }}>
+            {isFetching ? "Loading…" : ""}
+          </span>
           <button
             type="button"
+            data-testid="feedback-next-page"
             className="admin-button admin-button--ghost"
             onClick={() => onChangeOffset(data.offset + data.limit)}
+            onFocus={() => { wasNextFocusedRef.current = true; }}
+            onBlur={() => { wasNextFocusedRef.current = false; }}
             disabled={!canNext}
           >
             Next

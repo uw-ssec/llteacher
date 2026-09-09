@@ -440,6 +440,21 @@ export const hintEvents = pgTable(
 // needs `messages` as a mandatory join, which matters once messageId can be
 // null (see below).
 //
+// courseId (below), however, IS denormalized directly onto this table --
+// server-hardening audit fix, Minor #3 (Scalability): the instructor
+// dashboard's real query shape is "flagged feedback for course X, most
+// recent first, paginated" (listCourseFeedback, repositories/
+// responseFeedback.ts), and reaching courseId only via the conversations
+// join gave Postgres no way to serve that filter+order as a single index
+// scan -- it had to sort every matching row after the join. Same tradeoff
+// llm_call_logs.organizationId and audit_events.organizationId already make
+// for the identical "scope + time, paginated" shape (see
+// response_feedback_course_flagged_idx below, matching llm_call_logs_org_time_idx's
+// (scope, time) column order). Set once at insert time (flagResponse,
+// repositories/responseFeedback.ts, from the already-verified conversation's
+// own courseId) and never revised -- a conversation's course never changes
+// after creation, so there is no sync-drift risk this duplicates.
+//
 // messageId is nullable, ON DELETE SET NULL -- the same choice llm_call_logs
 // makes for the identical shape (a per-message row that must be able to
 // outlive the message it is about). responseSnapshot below is what makes a
@@ -459,6 +474,14 @@ export const responseFeedback = pgTable(
     conversationId: uuid("conversation_id")
       .notNull()
       .references(() => conversations.id, { onDelete: "cascade" }),
+    // Denormalized from conversations.courseId -- see this table's own doc
+    // comment above (server-hardening audit fix, Minor #3) for why. CASCADE
+    // matches conversationId's own onDelete: a course deletion cascades
+    // through conversations to this table already, so this FK just gives
+    // the DB the same guarantee directly rather than only transitively.
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
     messageId: uuid("message_id").references(() => messages.id, {
       onDelete: "set null",
     }),
@@ -481,6 +504,12 @@ export const responseFeedback = pgTable(
     index("response_feedback_conversation_idx").on(t.conversationId),
     index("response_feedback_student_idx").on(t.studentId),
     index("response_feedback_message_idx").on(t.messageId),
+    // Server-hardening audit fix, Minor #3: the dashboard's actual query
+    // (listCourseFeedback) filters on course + orders on flaggedAt DESC,
+    // paginated -- (courseId, flaggedAt) column order matches
+    // llm_call_logs_org_time_idx / audit_events_org_time_idx's own (scope,
+    // time) convention for this exact access pattern.
+    index("response_feedback_course_flagged_idx").on(t.courseId, t.flaggedAt),
     // One flag per (message, student) enforced at the DB level, not just an
     // application check -- a race between two requests from the same
     // student for the same message must not double-insert (the issue's own
@@ -546,6 +575,10 @@ export const responseFeedbackRelations = relations(responseFeedback, ({ one }) =
   conversation: one(conversations, {
     fields: [responseFeedback.conversationId],
     references: [conversations.id],
+  }),
+  course: one(courses, {
+    fields: [responseFeedback.courseId],
+    references: [courses.id],
   }),
   message: one(messages, {
     fields: [responseFeedback.messageId],
