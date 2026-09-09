@@ -163,4 +163,57 @@ describe.skipIf(!DATABASE_URL)("knowledgeDocuments repository", () => {
     });
     expect(await deleteDocument(db, courseA, doc.id)).toEqual({ path: "removable" });
   });
+
+  it("resolves a previously broken link once its target is created", async () => {
+    const source = await createDocument(db, courseA, {
+      path: "reresolve/source",
+      kind: "concept",
+      type: "note",
+      body: "see [later](/reresolve/target)",
+    });
+
+    const before = await getDocumentLinks(db, courseA, source.id);
+    expect(before.outbound).toEqual([
+      { rawHref: "/reresolve/target", targetPath: "reresolve/target", resolvedDocumentId: null, isBroken: true },
+    ]);
+
+    const target = await createDocument(db, courseA, {
+      path: "reresolve/target",
+      kind: "concept",
+      type: "note",
+      body: "",
+    });
+
+    const after = await getDocumentLinks(db, courseA, source.id);
+    expect(after.outbound).toEqual([
+      { rawHref: "/reresolve/target", targetPath: "reresolve/target", resolvedDocumentId: target.id, isBroken: false },
+    ]);
+  });
+
+  it("breaks a previously resolved link once its target is deleted", async () => {
+    const target = await createDocument(db, courseA, {
+      path: "unresolve/target",
+      kind: "concept",
+      type: "note",
+      body: "",
+    });
+    const source = await createDocument(db, courseA, {
+      path: "unresolve/source",
+      kind: "concept",
+      type: "note",
+      body: "see [gone-soon](/unresolve/target)",
+    });
+
+    const before = await getDocumentLinks(db, courseA, source.id);
+    expect(before.outbound).toEqual([
+      { rawHref: "/unresolve/target", targetPath: "unresolve/target", resolvedDocumentId: target.id, isBroken: false },
+    ]);
+
+    await deleteDocument(db, courseA, target.id);
+
+    const after = await getDocumentLinks(db, courseA, source.id);
+    expect(after.outbound).toEqual([
+      { rawHref: "/unresolve/target", targetPath: "unresolve/target", resolvedDocumentId: null, isBroken: true },
+    ]);
+  });
 });
