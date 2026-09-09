@@ -23,6 +23,7 @@
 - Upload cap **25 MB**. Allowlist: `pdf, docx, pptx, txt, md, vtt, srt`.
 - DB-backed tests use `describe.skipIf(!DATABASE_URL)` and `makeNodeDb`, following `repositories/llmConfigs.test.ts`.
 - All commands run from `apps/web` unless stated. Tests: `npm test -- <path>`. Migrations: `npm run db:generate` then `npm run db:migrate`.
+- **Never run `git commit`, `git push`, or `gh pr create` directly.** Commits go through the `/commit` skill and pull requests through `/create-pr`. Task implementers leave their work uncommitted in the working tree and report what they changed; the orchestrator commits at each checkpoint. No `Co-Authored-By` trailers on anything.
 
 ---
 
@@ -182,10 +183,10 @@ Expected: a new `src/db/migrations/00XX_*.sql` creating three enums and `knowled
 
 - [ ] **Step 5: Commit**
 
-```bash
-git add apps/web/src/db/schema/content.ts apps/web/src/db/migrations
-git commit -m "feat(db): knowledge_documents table for OKF bundles (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(db): knowledge_documents table for OKF bundles (#42)
+
 
 ---
 
@@ -303,10 +304,10 @@ Expected: typecheck PASSES; migration renames `material_chunks.material_id` to `
 
 - [ ] **Step 5: Commit**
 
-```bash
-git add apps/web/src/db/schema/content.ts apps/web/src/db/migrations
-git commit -m "feat(db): knowledge_links graph; repoint material_chunks at documents (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(db): knowledge_links graph; repoint material_chunks at documents (#42)
+
 
 ---
 
@@ -480,10 +481,10 @@ Expected: typecheck PASSES, three tables created. `db:migrate` needs `DATABASE_U
 
 - [ ] **Step 3: Commit**
 
-```bash
-git add apps/web/src/db/schema/content.ts apps/web/src/db/migrations
-git commit -m "feat(db): material collections, items, and scoped attachments (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(db): material collections, items, and scoped attachments (#42)
+
 
 ---
 
@@ -637,10 +638,10 @@ Expected: PASS, 9 tests.
 
 - [ ] **Step 5: Commit**
 
-```bash
-git add apps/web/src/server/knowledge/parseLinks.ts apps/web/src/server/knowledge/parseLinks.test.ts
-git commit -m "feat(knowledge): parse OKF markdown links into concept targets (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(knowledge): parse OKF markdown links into concept targets (#42)
+
 
 ---
 
@@ -859,10 +860,10 @@ Expected: PASS, 10 tests.
 
 - [ ] **Step 5: Commit**
 
-```bash
-git add apps/web/src/server/knowledge/resolveCollections.ts apps/web/src/server/knowledge/resolveCollections.test.ts
-git commit -m "feat(knowledge): most-specific-wins collection resolution (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(knowledge): most-specific-wins collection resolution (#42)
+
 
 ---
 
@@ -1386,10 +1387,10 @@ Expected: PASS, 10 tests.
 
 - [ ] **Step 5: Commit**
 
-```bash
-git add apps/web/src/server/repositories/knowledgeDocuments.ts apps/web/src/server/repositories/knowledgeDocuments.db.test.ts
-git commit -m "feat(knowledge): documents repository with link graph maintenance (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(knowledge): documents repository with link graph maintenance (#42)
+
 
 ---
 
@@ -1918,10 +1919,10 @@ Expected: PASS, 8 tests.
 
 - [ ] **Step 5: Commit**
 
-```bash
-git add apps/web/src/server/repositories/knowledgeCollections.ts apps/web/src/server/repositories/knowledgeCollections.db.test.ts
-git commit -m "feat(knowledge): collections repository with live subtree resolution (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(knowledge): collections repository with live subtree resolution (#42)
+
 
 ---
 
@@ -2029,10 +2030,10 @@ Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
-```bash
-git add apps/web/src/server/repositories/materials.ts apps/web/src/server/repositories/materials.test.ts
-git commit -m "refactor(materials): explicit column projection instead of SELECT * (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> refactor(materials): explicit column projection instead of SELECT * (#42)
+
 
 ---
 
@@ -2055,14 +2056,14 @@ Expected: all pending migrations apply with no error. If `material_chunks` fails
 
 - [ ] **Step 3: Open the PR**
 
-```bash
-git push -u origin feat/knowledge-model
-gh pr create -R uw-ssec/llteacher \
-  --title "M-KM PR1: knowledge model — OKF documents, links, collections, resolution (#42)" \
-  --body "Phase 1 of docs/superpowers/specs/2026-09-09-knowledge-management-design.md. Schema, migration, pure link parser and resolution function, documents and collections repositories. No storage, routes, or UI yet.
+Invoke the `/create-pr` skill. Suggested title and body:
 
-Supersedes #42's per-course grounding toggle and resolves epic #44 design question 4 in favour of per-homework/section granularity."
-```
+> **M-KM PR1: knowledge model — OKF documents, links, collections, resolution (#42)**
+>
+> Phase 1 of docs/superpowers/specs/2026-09-09-knowledge-management-design.md. Schema, migration, pure link parser and resolution function, documents and collections repositories. No storage, routes, or UI yet.
+>
+> Supersedes #42's per-course grounding toggle and resolves epic #44 design question 4 in favour of per-homework/section granularity.
+
 
 ---
 
@@ -2258,10 +2259,10 @@ Create the bucket once per environment: `npx wrangler r2 bucket create llteacher
 Run: `cd apps/web && npm test -- src/server/storage/objectStore.test.ts && npm run typecheck`
 Expected: PASS, 6 tests.
 
-```bash
-git add apps/web/src/server/storage apps/web/src/shared/types.ts apps/web/wrangler.jsonc
-git commit -m "feat(storage): ObjectStore abstraction over R2 for course materials (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(storage): ObjectStore abstraction over R2 for course materials (#42)
+
 
 ---
 
@@ -2409,10 +2410,10 @@ export interface ResolutionPayload {
 Run: `cd packages/ui && npm run typecheck`
 Expected: PASS.
 
-```bash
-git add packages/ui/src/api/types.ts
-git commit -m "feat(api): wire types for knowledge management (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(api): wire types for knowledge management (#42)
+
 
 ---
 
@@ -2639,10 +2640,10 @@ Expected: PASS, 13 tests.
 
 - [ ] **Step 5: Commit**
 
-```bash
-git add apps/web/src/server/knowledge/convert.ts apps/web/src/server/knowledge/convert.test.ts
-git commit -m "feat(knowledge): tier-1 conversion for transcripts, markdown, and text (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(knowledge): tier-1 conversion for transcripts, markdown, and text (#42)
+
 
 ---
 
@@ -2817,10 +2818,10 @@ Expected: PASS, 8 tests.
 
 - [ ] **Step 5: Commit**
 
-```bash
-git add apps/web/src/server/knowledge/bundle.ts apps/web/src/server/knowledge/bundle.test.ts
-git commit -m "feat(knowledge): OKF index.md and log.md maintenance (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(knowledge): OKF index.md and log.md maintenance (#42)
+
 
 ---
 
@@ -3383,10 +3384,10 @@ In `KnowledgeView` (Task 19), render a "Retry" button beside any material whose 
 Run: `cd apps/web && npm test -- src/server/routes/materials.test.ts && npm run typecheck`
 Expected: PASS, 9 tests.
 
-```bash
-git add apps/web/src/server/routes/materials.ts apps/web/src/server/routes/materials.test.ts apps/web/src/server/repositories/materials.ts
-git commit -m "feat(api): material upload with validation and tiered ingestion (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(api): material upload with validation and tiered ingestion (#42)
+
 
 ---
 
@@ -3840,10 +3841,10 @@ it("does not fail a create when the bundle has no index document", async () => {
 Run: `cd apps/web && npm test -- src/server/routes/knowledgeDocuments.test.ts && npm run typecheck`
 Expected: PASS, 12 tests.
 
-```bash
-git add apps/web/src/server/routes/knowledgeDocuments.ts apps/web/src/server/routes/knowledgeDocuments.test.ts
-git commit -m "feat(api): knowledge document routes with OKF path validation (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(api): knowledge document routes with OKF path validation (#42)
+
 
 ---
 
@@ -4220,10 +4221,10 @@ export async function resolveKnowledgeHandler(c: Context<AppEnv>) {
 Run: `cd apps/web && npm test -- src/server/routes/knowledgeCollections.test.ts && npm run typecheck`
 Expected: PASS, 7 tests.
 
-```bash
-git add apps/web/src/server/routes/knowledgeCollections.ts apps/web/src/server/routes/knowledgeCollections.test.ts
-git commit -m "feat(api): collection CRUD, attachments, and the resolve endpoint (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(api): collection CRUD, attachments, and the resolve endpoint (#42)
+
 
 ---
 
@@ -4330,14 +4331,15 @@ Expected: the third call lists a `transcript` document created from the upload, 
 
 - [ ] **Step 4: Commit and open the PR**
 
-```bash
-git add apps/web/src/server/index.ts
-git commit -m "feat(api): register knowledge management routes (#42)"
-git push -u origin feat/knowledge-api
-gh pr create -R uw-ssec/llteacher \
-  --title "M-KM PR2: knowledge storage, ingestion, and API (#42)" \
-  --body "Phase 2 of docs/superpowers/specs/2026-09-09-knowledge-management-design.md. R2-backed ObjectStore, tier-1 transcript/markdown conversion, OKF index.md and log.md maintenance, and the full route surface including /knowledge/resolve. No UI yet."
-```
+Invoke the `/commit` skill. Suggested message:
+
+> feat(api): register knowledge management routes (#42)
+
+Then invoke the `/create-pr` skill. Suggested title and body:
+
+> **M-KM PR2: knowledge storage, ingestion, and API (#42)**
+>
+> Phase 2 of docs/superpowers/specs/2026-09-09-knowledge-management-design.md. R2-backed ObjectStore, tier-1 transcript/markdown conversion, OKF index.md and log.md maintenance, and the full route surface including /knowledge/resolve. No UI yet.
 
 ---
 
@@ -4601,10 +4603,10 @@ Import `Books` from `@phosphor-icons/react`. `authorOnly: true` matters: a TA ma
 Run: `cd apps/admin && npm test && npm run typecheck`
 Expected: PASS, including the existing `AdminSidebar.test.tsx`.
 
-```bash
-git add apps/admin/src/client/lib/api-client.ts apps/admin/src/client/lib/api-client.test.ts apps/admin/src/client/components/RecordId.tsx apps/admin/src/client/components/AdminSidebar.tsx
-git commit -m "feat(admin): knowledge api-client, DOC/COL record ids, sidebar entry (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(admin): knowledge api-client, DOC/COL record ids, sidebar entry (#42)
+
 
 ---
 
@@ -5028,10 +5030,10 @@ Add the CSS for `.admin-knowledge*` to the `ADMIN CONSOLE` block in `packages/ui
 Run: `cd apps/admin && npm test -- src/client/views/KnowledgeView.test.tsx && npm run typecheck`
 Expected: PASS, 7 tests.
 
-```bash
-git add apps/admin/src/client/views/KnowledgeView.tsx apps/admin/src/client/views/KnowledgeView.test.tsx apps/admin/src/client/lib/documentTree.ts apps/admin/src/client/lib/documentTree.test.ts packages/ui/styles.css
-git commit -m "feat(admin): knowledge bundle browser with folder tree (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(admin): knowledge bundle browser with folder tree (#42)
+
 
 ---
 
@@ -5341,10 +5343,10 @@ export function KnowledgeDocumentView({
 Run: `cd apps/admin && npm test -- src/client/views/KnowledgeDocumentView.test.tsx && npm run typecheck`
 Expected: PASS, 7 tests.
 
-```bash
-git add apps/admin/src/client/views/KnowledgeDocumentView.tsx apps/admin/src/client/views/KnowledgeDocumentView.test.tsx
-git commit -m "feat(admin): OKF document editor with link and backlink panel (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(admin): OKF document editor with link and backlink panel (#42)
+
 
 ---
 
@@ -5778,10 +5780,10 @@ Import only `depthOf`, `directoriesOf`, and `nameOf` from `documentTree` — `do
 Run: `cd apps/admin && npm test -- src/client/views/Collection && npm run typecheck`
 Expected: PASS, 8 tests.
 
-```bash
-git add apps/admin/src/client/views/CollectionsView.tsx apps/admin/src/client/views/CollectionsView.test.tsx apps/admin/src/client/views/CollectionEditView.tsx apps/admin/src/client/views/CollectionEditView.test.tsx packages/ui/styles.css
-git commit -m "feat(admin): collection list and contents picker (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(admin): collection list and contents picker (#42)
+
 
 ---
 
@@ -5928,10 +5930,10 @@ and in the returned JSX:
 Run: `cd apps/admin && npm test -- src/client/components/HomeworkForm.test.tsx && npm run typecheck`
 Expected: PASS, including every pre-existing test in that file.
 
-```bash
-git add apps/admin/src/client/components/HomeworkForm.tsx apps/admin/src/client/components/HomeworkForm.test.tsx
-git commit -m "feat(admin): attach knowledge collections from the homework form (#42)"
-```
+Invoke the `/commit` skill to stage and commit. Suggested message:
+
+> feat(admin): attach knowledge collections from the homework form (#42)
+
 
 ---
 
@@ -6073,16 +6075,17 @@ Walk the acceptance path as an instructor:
 
 - [ ] **Step 7: Commit and open the PR**
 
-```bash
-git add apps/admin/src/client/App.tsx apps/admin/src/client/App.test.tsx apps/admin/src/client/views/KnowledgeView.tsx apps/admin/src/client/views/KnowledgeView.test.tsx
-git commit -m "feat(admin): wire knowledge views into the console shell (#42)"
-git push -u origin feat/knowledge-ui
-gh pr create -R uw-ssec/llteacher \
-  --title "M-KM PR3: knowledge management console (#42)" \
-  --body "Phase 3 of docs/superpowers/specs/2026-09-09-knowledge-management-design.md. Bundle browser, OKF document editor with link/backlink panel, collection list and picker, and homework-form attachment.
+Invoke the `/commit` skill. Suggested message:
 
-Closes #42, and resolves epic #44 open design question 4 in favour of per-homework/section grounding rather than a per-course toggle."
-```
+> feat(admin): wire knowledge views into the console shell (#42)
+
+Then invoke the `/create-pr` skill. Suggested title and body:
+
+> **M-KM PR3: knowledge management console (#42)**
+>
+> Phase 3 of docs/superpowers/specs/2026-09-09-knowledge-management-design.md. Bundle browser, OKF document editor with link/backlink panel, collection list and picker, and homework-form attachment.
+>
+> Closes #42, and resolves epic #44 open design question 4 in favour of per-homework/section grounding rather than a per-course toggle.
 
 ---
 
