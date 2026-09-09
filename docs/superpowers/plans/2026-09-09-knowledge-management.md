@@ -4587,13 +4587,28 @@ Append to the `apiClient` object in `api-client.ts`:
   },
 ```
 
-In `request()`, make the JSON content-type conditional so FormData bodies keep their boundary:
+In `request()`, the headers block currently reads (api-client.ts, inside the `fetch` call):
 
 ```ts
-  const isFormData = init.body instanceof FormData;
-  const headers = isFormData
-    ? init.headers
-    : { "content-type": "application/json", ...init.headers };
+      headers: {
+        ...(init.body ? { "content-type": "application/json" } : {}),
+        ...init.headers,
+      },
+```
+
+A `FormData` body is truthy, so this stamps `application/json` on the upload and
+the server cannot parse the multipart boundary. Change exactly that one line:
+
+```ts
+      headers: {
+        // A FormData body carries its own multipart content-type INCLUDING the
+        // boundary, which only the browser can generate. Stamping JSON here
+        // produced a body the Worker could not parse (#42).
+        ...(init.body && !(init.body instanceof FormData)
+          ? { "content-type": "application/json" }
+          : {}),
+        ...init.headers,
+      },
 ```
 
 Add the imports for every payload type used above.
@@ -5016,8 +5031,8 @@ export function KnowledgeView({ courseId, onOpenDocument }: KnowledgeViewProps) 
     }
     setUploadError(null);
     await apiClient.knowledge.uploadMaterial(courseId, file, { signal: null });
-    documents.refetch();
-    materials.refetch();
+    documents.reload();
+    materials.reload();
   }
 
   /* #42: the retry affordance for a material the pipeline could not extract.
@@ -5026,8 +5041,8 @@ export function KnowledgeView({ courseId, onOpenDocument }: KnowledgeViewProps) 
      rather than the button implying the next press might differ. */
   async function retry(materialId: string) {
     await apiClient.knowledge.reingestMaterial(courseId, materialId, { signal: null });
-    materials.refetch();
-    documents.refetch();
+    materials.reload();
+    documents.reload();
   }
 
   return (
@@ -5060,7 +5075,7 @@ export function KnowledgeView({ courseId, onOpenDocument }: KnowledgeViewProps) 
       {documents.error && (
         <ViewError
           message="Failed to load the knowledge base."
-          onRetry={documents.error.retryable ? documents.refetch : undefined}
+          onRetry={documents.canRetry ? documents.reload : undefined}
         />
       )}
 
@@ -5355,7 +5370,7 @@ export function KnowledgeDocumentView({
     return (
       <ViewError
         message="Failed to load this document."
-        onRetry={document.error?.retryable ? document.refetch : undefined}
+        onRetry={document.canRetry ? document.reload : undefined}
       />
     );
   }
@@ -5368,8 +5383,8 @@ export function KnowledgeDocumentView({
     setSaving(true);
     try {
       await apiClient.knowledge.updateDocument(courseId, documentId, { body: draft }, { signal: null });
-      document.refetch();
-      links.refetch();
+      document.reload();
+      links.reload();
     } finally {
       setSaving(false);
     }
@@ -5696,7 +5711,7 @@ export function CollectionsView({ courseId, onEditCollection }: CollectionsViewP
       {collections.error && (
         <ViewError
           message="Failed to load collections."
-          onRetry={collections.error.retryable ? collections.refetch : undefined}
+          onRetry={collections.canRetry ? collections.reload : undefined}
         />
       )}
 
@@ -5828,7 +5843,7 @@ export function CollectionEditView({ courseId, collectionId, onBack }: Collectio
     return (
       <ViewError
         message="Failed to load the knowledge base."
-        onRetry={documents.error.retryable ? documents.refetch : undefined}
+        onRetry={documents.canRetry ? documents.reload : undefined}
       />
     );
   }
@@ -6035,8 +6050,8 @@ Add to `HomeworkForm.tsx`, after the LLM-config field:
         { signal: null },
       );
     }
-    attachments.refetch();
-    resolution.refetch();
+    attachments.reload();
+    resolution.reload();
   }
 ```
 
@@ -6187,8 +6202,8 @@ In `KnowledgeView`, poll only while work is outstanding:
   useEffect(() => {
     if (!pending) return;
     const timer = setInterval(() => {
-      materials.refetch();
-      documents.refetch();
+      materials.reload();
+      documents.reload();
     }, 4000);
     return () => clearInterval(timer);
   }, [pending, materials, documents]);
