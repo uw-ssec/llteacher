@@ -4742,6 +4742,68 @@ export function nameOf(directory: string): string {
 }
 ```
 
+Also create `apps/admin/src/client/lib/knowledgeStatus.ts` — the knowledge views
+render statuses `StatusBadge` has never seen:
+
+```ts
+/* --------------------------------------------------------------------------
+   Knowledge statuses as StatusBadge kinds (#42).
+
+   StatusBadge's `kind` is a closed union driving one CSS class each, and none
+   of its members are `pending`/`ready`/`indexed`. Mapping onto the existing
+   kinds rather than widening the union keeps a shared component free of a new
+   domain's vocabulary and needs no new CSS -- and costs nothing legible,
+   because the exact status word is the badge's visible text either way.
+   -------------------------------------------------------------------------- */
+
+import type { StatusKind } from "../components/StatusBadge";
+import type { KnowledgeIndexStatus, MaterialStatus } from "@llteacher/ui/api";
+
+const KIND: Record<MaterialStatus | KnowledgeIndexStatus, StatusKind> = {
+  pending: "scheduled",
+  processing: "in_progress",
+  ready: "active",
+  indexed: "active",
+  failed: "missing",
+};
+
+const LABEL: Record<MaterialStatus | KnowledgeIndexStatus, string> = {
+  pending: "Pending",
+  processing: "Processing",
+  ready: "Ready",
+  indexed: "Indexed",
+  failed: "Failed",
+};
+
+export function statusKind(status: MaterialStatus | KnowledgeIndexStatus): StatusKind {
+  return KIND[status];
+}
+
+export function statusLabel(status: MaterialStatus | KnowledgeIndexStatus): string {
+  return LABEL[status];
+}
+```
+
+with tests:
+
+```ts
+import { describe, it, expect } from "vitest";
+import { statusKind, statusLabel } from "./knowledgeStatus";
+
+describe("knowledgeStatus", () => {
+  it.each([
+    ["pending", "scheduled", "Pending"],
+    ["processing", "in_progress", "Processing"],
+    ["ready", "active", "Ready"],
+    ["indexed", "active", "Indexed"],
+    ["failed", "missing", "Failed"],
+  ] as const)("maps %s to kind %s labelled %s", (status, kind, label) => {
+    expect(statusKind(status)).toBe(kind);
+    expect(statusLabel(status)).toBe(label);
+  });
+});
+```
+
 - [ ] **Step 4: Run the helper test**
 
 Run: `cd apps/admin && npm test -- src/client/lib/documentTree.test.ts`
@@ -4904,6 +4966,7 @@ import { ViewLoading, ViewError, ViewEmpty } from "../components/ViewState";
 import { apiClient } from "../lib/api-client";
 import { useApiResource } from "../lib/useApiResource";
 import { depthOf, directoriesOf, documentsIn, nameOf } from "../lib/documentTree";
+import { statusKind, statusLabel } from "../lib/knowledgeStatus";
 import type {
   KnowledgeDocumentListPayload,
   MaterialListPayload,
@@ -5043,7 +5106,7 @@ export function KnowledgeView({ courseId, onOpenDocument }: KnowledgeViewProps) 
                       <td>{document.title ?? document.path}</td>
                       <td>{document.type}</td>
                       <td>
-                        <StatusBadge status={document.indexStatus} />
+                        <StatusBadge kind={statusKind(document.indexStatus)}>{statusLabel(document.indexStatus)}</StatusBadge>
                       </td>
                     </tr>
                   ))}
@@ -5061,7 +5124,7 @@ export function KnowledgeView({ courseId, onOpenDocument }: KnowledgeViewProps) 
             {materials.data!.materials.map((material) => (
               <li key={material.id}>
                 <span>{material.originalFilename}</span>
-                <StatusBadge status={material.status} />
+                <StatusBadge kind={statusKind(material.status)}>{statusLabel(material.status)}</StatusBadge>
                 {material.errorDetail && (
                   <span className="admin-knowledge__material-note">{material.errorDetail}</span>
                 )}
@@ -5254,6 +5317,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { ViewError, ViewLoading } from "../components/ViewState";
 import { apiClient } from "../lib/api-client";
 import { useApiResource } from "../lib/useApiResource";
+import { statusKind, statusLabel } from "../lib/knowledgeStatus";
 import type { DocumentLinksPayload, KnowledgeDocumentPayload } from "@llteacher/ui/api";
 
 export type KnowledgeDocumentViewProps = {
@@ -5351,7 +5415,9 @@ export function KnowledgeDocumentView({
         <div>
           <dt>Indexing</dt>
           <dd>
-            <StatusBadge status={record.indexStatus} />
+            <StatusBadge kind={statusKind(record.indexStatus)}>
+              {statusLabel(record.indexStatus)}
+            </StatusBadge>
           </dd>
         </div>
       </dl>
@@ -5858,18 +5924,38 @@ Invoke the `/commit` skill to stage and commit. Suggested message:
 
 **Interfaces:**
 - Consumes: `apiClient.knowledge.listCollections/listAttachments/attach/detach/resolve`.
-- Produces: a `Knowledge` fieldset in the homework form. No new exported symbols.
+- Produces: two new `HomeworkFormProps` members, `courseId: string` and `homeworkId?: string`. No other exported symbols.
 
 This is the discoverable path — an instructor setting up an assignment will look here, not in a separate collections screen. It is also where the override rule needs to be visible: attaching at homework level while a section overrides it is exactly the confusion most-specific-wins produces.
+
+**Read `HomeworkForm.tsx` before you start.** Its current props are exactly
+`{ initialData?, onSubmit, llmConfigs, isLoading? }` (line 73) — it has **no
+`courseId` and no `homeworkId`**, so both must be added to `HomeworkFormProps`
+and threaded from the two call sites, `HomeworkCreateView.tsx` and
+`HomeworkEditView.tsx`.
+
+**The fieldset renders only when `homeworkId` is set.** In create mode there is
+no homework yet, so there is nothing for an attachment to point at — a
+collection cannot be attached to a homework that does not exist. Render the
+fieldset with a short line explaining that knowledge can be attached once the
+assignment is saved, rather than showing dead checkboxes. `HomeworkCreateView`
+therefore passes `courseId` only.
 
 - [ ] **Step 1: Write the failing test**
 
 Append to `HomeworkForm.test.tsx`:
 
 ```tsx
+it("explains that knowledge waits for a save when creating a new homework", async () => {
+  stubFetchWithCollections();
+  renderForm();  // no homeworkId — create mode
+  await waitFor(() => screen.getByText(/Save the assignment first/i));
+  expect(screen.queryByLabelText(/Week 1 readings/)).toBeNull();
+});
+
 it("lists the course's collections as attachable knowledge", async () => {
   stubFetchWithCollections();
-  renderForm();
+  renderForm({ homeworkId: "hw1" });
   await waitFor(() => screen.getByLabelText(/Week 1 readings/));
 });
 
@@ -5963,7 +6049,15 @@ and in the returned JSX:
           Collections the tutor grounds on for this assignment.
         </p>
 
-        {(collections.data?.collections ?? []).map((collection) => (
+        {/* Create mode: nothing exists yet for an attachment to point at, so
+            say that rather than rendering checkboxes that cannot be saved. */}
+        {!homeworkId && (
+          <p className="admin-form__hint">
+            Save the assignment first — knowledge can be attached once it exists.
+          </p>
+        )}
+
+        {homeworkId && (collections.data?.collections ?? []).map((collection) => (
           <label key={collection.id}>
             <input
               type="checkbox"
@@ -5974,13 +6068,13 @@ and in the returned JSX:
           </label>
         ))}
 
-        {resolution.data?.level === "section" && (
+        {homeworkId && resolution.data?.level === "section" && (
           <p className="admin-inline-note">
             At least one section overrides this — those sections ground on their own
             collection instead of this one.
           </p>
         )}
-        {resolution.data?.level === "none" && (
+        {homeworkId && resolution.data?.level === "none" && (
           <p className="admin-inline-note">
             Nothing attached, so the tutor answers with no course materials.
           </p>
