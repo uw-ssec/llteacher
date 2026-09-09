@@ -164,12 +164,14 @@ export const knowledgeDocumentsRelations = relations(
       fields: [knowledgeDocuments.sourceMaterialId],
       references: [courseMaterials.id],
     }),
-    outboundLinks: many(knowledgeLinks),
   }),
 );
 ```
 
-`knowledgeLinks` does not exist yet — Task 2 adds it. Add the `outboundLinks` line in Task 2, not now, so this step compiles on its own.
+Use `({ one })` rather than `({ one, many })` here: `knowledgeLinks` and the
+`material_chunks` repoint both arrive in Task 2, which adds the `many(...)`
+relations then. This block must compile on its own, and `noUnusedLocals` rejects
+an unused `many`.
 
 - [ ] **Step 3: Typecheck**
 
@@ -295,7 +297,7 @@ export const knowledgeLinksRelations = relations(knowledgeLinks, ({ one }) => ({
 }));
 ```
 
-Now add `outboundLinks: many(knowledgeLinks)` and `chunks: many(materialChunks)` to `knowledgeDocumentsRelations` from Task 1.
+Now widen `knowledgeDocumentsRelations` (Task 1) from `({ one })` to `({ one, many })` and add both `outboundLinks: many(knowledgeLinks)` and `chunks: many(materialChunks)` to it.
 
 - [ ] **Step 4: Typecheck and generate**
 
@@ -1032,8 +1034,18 @@ describe.skipIf(!DATABASE_URL)("knowledgeDocuments repository", () => {
       type: "note",
       body: "",
     });
-    expect(await deleteDocument(db, courseA, inB.id)).toBe(false);
+    expect(await deleteDocument(db, courseA, inB.id)).toBeNull();
     expect(await getDocument(db, courseB, inB.id)).not.toBeNull();
+  });
+
+  it("returns the removed path, which the route layer needs for log.md", async () => {
+    const doc = await createDocument(db, courseA, {
+      path: "removable",
+      kind: "concept",
+      type: "note",
+      body: "",
+    });
+    expect(await deleteDocument(db, courseA, doc.id)).toEqual({ path: "removable" });
   });
 });
 ```
@@ -1303,11 +1315,14 @@ export async function updateDocumentBody(
   return toIso(row) as KnowledgeDocumentRecord;
 }
 
+/** Returns the removed document's path rather than a boolean: the route layer
+ *  needs it to write the `log.md` entry, and `null` carries strictly more
+ *  information than `false` at no cost. */
 export async function deleteDocument(
   db: Db,
   scope: CourseScope,
   documentId: string,
-): Promise<boolean> {
+): Promise<{ path: string } | null> {
   const [row] = await db
     .delete(knowledgeDocuments)
     .where(
@@ -1318,11 +1333,11 @@ export async function deleteDocument(
     )
     .returning({ path: knowledgeDocuments.path });
 
-  if (!row) return false;
+  if (!row) return null;
   // Inbound links survive the delete and become broken, which is what OKF's
   // "consumers MUST tolerate broken links" means in practice.
   await reresolveInboundLinks(db, scope, row.path, null);
-  return true;
+  return { path: row.path };
 }
 
 export interface DocumentLinks {
@@ -2557,7 +2572,9 @@ export function extensionOf(filename: string): string {
 /** Maps to the existing material_source_type enum. `md`/`txt`/`docx` have no
  *  dedicated member, so they land on `other` rather than growing the enum
  *  for a distinction nothing branches on. */
-export function sourceTypeFor(filename: string): string {
+export function sourceTypeFor(
+  filename: string,
+): "pdf" | "slides" | "transcript" | "syllabus" | "other" {
   switch (extensionOf(filename)) {
     case "pdf":
       return "pdf";
@@ -2998,7 +3015,7 @@ import { courseMaterials } from "../../db/schema";
 
 export interface InsertMaterialInput {
   title: string;
-  sourceType: string;
+  sourceType: (typeof courseMaterials.$inferInsert)["sourceType"];
   originalFilename: string;
   storageKey: string;
   byteSize: number;
@@ -3019,7 +3036,7 @@ export async function insertMaterial(
     .values({
       courseId: scope,
       title: input.title,
-      sourceType: input.sourceType as never,
+      sourceType: input.sourceType,
       originalFilename: input.originalFilename,
       storageKey: input.storageKey,
       byteSize: input.byteSize,
@@ -3359,25 +3376,9 @@ it("marks a material failed when its stored file has gone missing", async () => 
 });
 ```
 
-Extend the `vi.mock("../repositories/materials", …)` factory with `getMaterialForReingest`, `setMaterialStatus`, and `setMaterialStorageKey`, and register the route in Task 17 alongside the others:
+Extend the `vi.mock("../repositories/materials", …)` factory with `getMaterialForReingest`, `setMaterialStatus`, and `setMaterialStorageKey`.
 
-```ts
-app.post(
-  "/api/courses/:courseId/materials/:materialId/reingest",
-  requireInstructorOf()(reingestMaterialHandler),
-);
-```
-
-In `KnowledgeView` (Task 19), render a "Retry" button beside any material whose `status` is `pending` or `failed`, calling `apiClient.knowledge.reingestMaterial(courseId, material.id, { signal: null })` then `materials.refetch()`. Add the matching `reingestMaterial` method to the `apiClient.knowledge` namespace in Task 18:
-
-```ts
-    reingestMaterial: (courseId: string, materialId: string, opts: RequestOptions) =>
-      request<{ status: MaterialStatus; documentCreated: boolean }>(
-        `/api/courses/${encode(courseId)}/materials/${encode(materialId)}/reingest`,
-        { method: "POST" },
-        opts,
-      ),
-```
+Scope note: this task owns only `routes/materials.ts` and `repositories/materials.ts`. Registering the route (Task 17), the client method (Task 18), and the Retry button (Task 19) are each specified in the task that owns that file — do not edit those files here.
 
 - [ ] **Step 6: Run to verify it passes, then commit**
 
@@ -3750,6 +3751,8 @@ Add to `knowledgeDocuments.ts` (the route file), and call `await maintainBundle(
 ```ts
 import { appendLogEntry, directoryOf, parentDirectories, renderIndex } from "../knowledge/bundle";
 import { listDocuments, updateDocumentBody } from "../repositories/knowledgeDocuments";
+import type { Db } from "../../db/client";
+import type { CourseScope } from "../repositories/scope";
 
 /** Regenerates the index documents a change invalidates, and appends one
  *  dated log line. Best-effort and deliberately after the response-shaping
@@ -3759,13 +3762,13 @@ import { listDocuments, updateDocumentBody } from "../repositories/knowledgeDocu
  *  `isoDate` is passed in rather than read from the clock here, matching
  *  bundle.ts — the date is data, so the whole path stays testable. */
 async function maintainBundle(
-  db: ReturnType<typeof makeDb>,
-  scope: string,
+  db: Db,
+  scope: CourseScope,
   changedPath: string,
   message: string,
   isoDate: string,
 ): Promise<void> {
-  const documents = await listDocuments(db as never, scope as never);
+  const documents = await listDocuments(db, scope);
   const byPath = new Map(documents.map((d) => [d.path, d]));
 
   // Only the ancestors of the changed path can have a stale listing.
@@ -3778,7 +3781,7 @@ async function maintainBundle(
       .filter((d) => d.kind === "concept" && directoryOf(d.path) === directory)
       .map((d) => ({ path: d.path, title: d.title, description: d.description }));
 
-    await updateDocumentBody(db as never, scope as never, indexDocument.id, {
+    await updateDocumentBody(db, scope, indexDocument.id, {
       body: renderIndex(directory, entries),
       editedById: null,
     });
@@ -3786,8 +3789,8 @@ async function maintainBundle(
 
   const log = byPath.get("log");
   if (log) {
-    const current = await getDocument(db as never, scope as never, log.id);
-    await updateDocumentBody(db as never, scope as never, log.id, {
+    const current = await getDocument(db, scope, log.id);
+    await updateDocumentBody(db, scope, log.id, {
       body: appendLogEntry(current?.body ?? "", isoDate, message),
       editedById: null,
     });
@@ -3807,7 +3810,7 @@ At the end of `createDocumentHandler`, before returning:
     );
 ```
 
-and in `deleteDocumentHandler`, after a successful delete, the same call with `**Update** Removed \`${path}\`.` — which means `deleteDocument` must return the removed path. Change its repository signature from `Promise<boolean>` to `Promise<{ path: string } | null>` and update Task 6's test assertion from `toBe(false)` to `toBeNull()`.
+and in `deleteDocumentHandler`, after a successful delete, the same call with `**Update** Removed \`${removed.path}\`.` — `deleteDocument` already returns `{ path }` (Task 6), so use that rather than re-reading the row.
 
 Add these tests to `knowledgeDocuments.test.ts`:
 
@@ -4249,6 +4252,10 @@ app.delete(
   "/api/courses/:courseId/materials/:materialId",
   requireInstructorOf()(deleteMaterialHandler),
 );
+app.post(
+  "/api/courses/:courseId/materials/:materialId/reingest",
+  requireInstructorOf()(reingestMaterialHandler),
+);
 
 app.get(
   "/api/courses/:courseId/knowledge/documents",
@@ -4448,6 +4455,15 @@ Append to the `apiClient` object in `api-client.ts`:
       request<null>(
         `/api/courses/${encode(courseId)}/materials/${encode(materialId)}`,
         { method: "DELETE" },
+        opts,
+      ),
+    /** Re-runs tier-1 conversion server-side. Honest about the no-op case: for a
+     *  format the pipeline still cannot extract, the response comes back
+     *  `pending` with `documentCreated: false` rather than pretending it worked. */
+    reingestMaterial: (courseId: string, materialId: string, opts: RequestOptions) =>
+      request<{ status: MaterialStatus; documentCreated: boolean }>(
+        `/api/courses/${encode(courseId)}/materials/${encode(materialId)}/reingest`,
+        { method: "POST" },
         opts,
       ),
 
@@ -4756,6 +4772,9 @@ function stubFetch(overrides: Record<string, unknown> = {}) {
     if (url.includes("/knowledge/documents")) {
       return new Response(JSON.stringify(overrides.documents ?? { documents: DOCUMENTS }), { status: 200 });
     }
+    if (url.includes("/reingest")) {
+      return new Response(JSON.stringify({ status: "pending", documentCreated: false }), { status: 200 });
+    }
     if (url.includes("/materials")) {
       return new Response(JSON.stringify(overrides.materials ?? { materials: MATERIALS }), { status: 200 });
     }
@@ -4806,6 +4825,31 @@ describe("KnowledgeView", () => {
 
     await waitFor(() => screen.getByText(/Unsupported file type/i));
     expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/materials")).length).toBe(1);
+  });
+
+  it("offers a retry only for materials that are not ready", async () => {
+    stubFetch();
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+
+    // MATERIALS[1] is the pending PDF; MATERIALS[0] is the ready transcript.
+    expect(screen.getByLabelText(/Retry ingestion for paper\.pdf/)).toBeTruthy();
+    expect(screen.queryByLabelText(/Retry ingestion for lecture1\.vtt/)).toBeNull();
+  });
+
+  it("posts a reingest when retry is pressed", async () => {
+    const fetchMock = stubFetch();
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+
+    fireEvent.click(screen.getByLabelText(/Retry ingestion for paper\.pdf/));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([u, i]) =>
+          String(u).endsWith("/materials/m2/reingest") && (i as RequestInit)?.method === "POST",
+        ),
+      ).toBe(true),
+    );
   });
 
   it("opens a document when its row is clicked", async () => {
@@ -4913,6 +4957,16 @@ export function KnowledgeView({ courseId, onOpenDocument }: KnowledgeViewProps) 
     materials.refetch();
   }
 
+  /* #42: the retry affordance for a material the pipeline could not extract.
+     It is honest about the no-op: re-running tier-1 conversion on a PDF comes
+     back `pending` again, and the material's own error_detail keeps saying why,
+     rather than the button implying the next press might differ. */
+  async function retry(materialId: string) {
+    await apiClient.knowledge.reingestMaterial(courseId, materialId, { signal: null });
+    materials.refetch();
+    documents.refetch();
+  }
+
   return (
     <div className="admin-view">
       <div className="admin-sr-only" role="status" aria-live="polite">
@@ -5011,6 +5065,15 @@ export function KnowledgeView({ courseId, onOpenDocument }: KnowledgeViewProps) 
                 {material.errorDetail && (
                   <span className="admin-knowledge__material-note">{material.errorDetail}</span>
                 )}
+                {(material.status === "pending" || material.status === "failed") && (
+                  <button
+                    type="button"
+                    onClick={() => void retry(material.id)}
+                    aria-label={`Retry ingestion for ${material.originalFilename}`}
+                  >
+                    Retry
+                  </button>
+                )}
               </li>
             ))}
           </ul>
@@ -5028,7 +5091,7 @@ Add the CSS for `.admin-knowledge*` to the `ADMIN CONSOLE` block in `packages/ui
 - [ ] **Step 8: Run to verify it passes, then commit**
 
 Run: `cd apps/admin && npm test -- src/client/views/KnowledgeView.test.tsx && npm run typecheck`
-Expected: PASS, 7 tests.
+Expected: PASS, 9 tests.
 
 Invoke the `/commit` skill to stage and commit. Suggested message:
 
