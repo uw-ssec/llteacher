@@ -88,4 +88,28 @@ describe.skipIf(!DATABASE_URL)("materials repository", () => {
     expect(rows).toEqual([]);
     await db.delete(organizations).where(eq(organizations.id, emptyOrg.id));
   });
+
+  it("projects an explicit column list, not the whole row", async () => {
+    const rows = await listMaterialsForCourse(db, unsafeCourseScope(courseAId));
+    // Guard against vacuous pass: if rows is empty, the loop body never runs
+    // and the assertion below never executes, silently passing even if the
+    // implementation reverted to db.select(). This guard fails fast if the
+    // fixture ever stops seeding.
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(Object.keys(row).sort()).toEqual(
+        [
+          "byteSize",
+          "contentType",
+          "errorDetail",
+          "id",
+          "originalFilename",
+          "sourceType",
+          "status",
+          "title",
+          "uploadedAt",
+        ].sort(),
+      );
+    }
+  });
 });
