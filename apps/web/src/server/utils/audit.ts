@@ -22,6 +22,12 @@ export const AUDIT_TARGET_TYPES = {
   COURSE: "course",
   /** #75: one student's submitted section. */
   SUBMISSION: "submission",
+  /** #73: the org's Canvas API token. FERPA-relevant: it's a credential
+   *  that grants access to student roster data, so its lifecycle is
+   *  audited the same as a role grant, not treated as ordinary config. */
+  CREDENTIAL: "credential",
+  /** #74: one course's Canvas connection (link + sync history). */
+  LMS_INTEGRATION: "lms_integration",
 } as const;
 
 /** The action vocabulary for audit_events (#147). One place so M3+ handlers
@@ -102,6 +108,25 @@ export const AUDIT_ACTIONS = {
    *  leaves the platform's control the moment it is downloaded, so the event
    *  records the scope of what left. */
   DATA_EXPORTED: "export.created",
+  /** #73: the org's Canvas token was entered, replaced, or removed. Never
+   *  carries the token itself -- see organizationCredentials.ts's own
+   *  module comment on why the plaintext never reaches this layer. */
+  CANVAS_TOKEN_SET: "credential.canvas_token_set",
+  /** #73: a second (or later) entry over an existing token -- distinguished
+   *  from CANVAS_TOKEN_SET so the audit log can tell "registered for the
+   *  first time" apart from "rotated" without decrypting anything. */
+  CANVAS_TOKEN_REPLACED: "credential.canvas_token_replaced",
+  CANVAS_TOKEN_DELETED: "credential.canvas_token_deleted",
+  /** #73: the "Validate" button was pressed. Audited because it's the one
+   *  action here that actually reaches Canvas with the stored token. */
+  CANVAS_TOKEN_VALIDATED: "credential.canvas_token_validated",
+  /** #74: a course was pointed at (or re-pointed at) a Canvas course id. */
+  CANVAS_COURSE_LINKED: "lms_integration.canvas_course_linked",
+  /** #74: a roster sync ran. Audited on both outcomes -- a failed sync is
+   *  exactly the kind of event an instructor debugging a stale roster
+   *  needs to find in the log. */
+  CANVAS_SYNC_COMPLETED: "lms_integration.canvas_sync_completed",
+  CANVAS_SYNC_FAILED: "lms_integration.canvas_sync_failed",
 } as const;
 
 /** Fans an audit write out across every org scope it's relevant to (a

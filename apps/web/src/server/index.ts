@@ -68,6 +68,18 @@ import {
   deleteCoursePromptTemplateHandler,
 } from "./routes/promptTemplates";
 import { listLlmModelsHandler } from "./routes/llmModels";
+import {
+  deleteCanvasCredentialHandler,
+  getCanvasCredentialHandler,
+  setCanvasCredentialHandler,
+  validateCanvasCredentialHandler,
+} from "./routes/canvasCredentials";
+import {
+  getCanvasSyncStatusHandler,
+  linkCanvasCourseHandler,
+  listCanvasCoursesHandler,
+  syncCanvasCourseHandler,
+} from "./routes/canvasSync";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireGraderOf, requireInstructorOf, requireRole } from "./utils/guards";
@@ -375,6 +387,23 @@ app.post(
   "/api/courses/:courseId/submissions/:submissionId/grades/draft",
   requireInstructorOf()(draftGradeHandler),
 );
+
+// #73/#74: Canvas integration. Instructor-of-course-gated, same widening
+// as llm-configs (courses just above) -- the credential is an ORG
+// resource, the course link/sync is per-COURSE. See canvasCredentials.ts's
+// and canvasSync.ts's own header comments for the full authorization
+// reasoning.
+app.get("/api/courses/:courseId/canvas/credential", requireInstructorOf()(getCanvasCredentialHandler));
+app.put("/api/courses/:courseId/canvas/credential", requireInstructorOf()(setCanvasCredentialHandler));
+app.delete("/api/courses/:courseId/canvas/credential", requireInstructorOf()(deleteCanvasCredentialHandler));
+app.post(
+  "/api/courses/:courseId/canvas/credential/validate",
+  requireInstructorOf()(validateCanvasCredentialHandler),
+);
+app.get("/api/courses/:courseId/canvas/courses", requireInstructorOf()(listCanvasCoursesHandler));
+app.get("/api/courses/:courseId/canvas/status", requireInstructorOf()(getCanvasSyncStatusHandler));
+app.put("/api/courses/:courseId/canvas/link", requireInstructorOf()(linkCanvasCourseHandler));
+app.post("/api/courses/:courseId/canvas/sync", requireInstructorOf()(syncCanvasCourseHandler));
 
 // #91: export. Instructor-tier: the artifact leaves the platform's control
 // the moment it is downloaded, so who may create one is a narrower question

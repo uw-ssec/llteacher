@@ -35,6 +35,7 @@ import type { FeedbackDashboardData, FeedbackListItem } from "./views/FeedbackDa
 import { TaCapabilitiesView } from "./views/TaCapabilitiesView";
 import { LLMConfigsDataLoader, type ConfigScreen } from "./views/LLMConfigsDataLoader";
 import { StudentsView } from "./views/StudentsView";
+import { CanvasIntegrationView } from "./views/CanvasIntegrationView";
 import { GradingPanel } from "./views/GradingPanel";
 import { ExportView } from "./views/ExportView";
 import { apiClient, setUnauthorizedHandler } from "./lib/api-client";
@@ -117,6 +118,7 @@ type View =
   | { kind: "edit-llm-config"; configId: string }
   | { kind: "students" }
   | { kind: "ta-permissions" }
+  | { kind: "canvas" }
   | { kind: "exports" }
   /* #75: carries the identity the panel displays alongside the id it acts
      on. Threaded through the view state rather than refetched, because the
@@ -155,6 +157,7 @@ const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "edit-llm-config":    "Instructor Console · Edit LLM Config",
   "students":           "Instructor Console · Roster",
   "ta-permissions":     "Instructor Console · TA permissions",
+  "canvas":             "Instructor Console · Canvas",
   "exports":            "Instructor Console · Export",
   "grade":              "Instructor Console · Grading",
 };
@@ -594,6 +597,23 @@ export default function App() {
                   />
                 ) : CURRENT_COURSE_ID ? (
                   <StudentsView courseId={CURRENT_COURSE_ID} courseTitle={CURRENT_COURSE.title} />
+                ) : (
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
+                )
+              )}
+
+              {/* #73/#74: Canvas token + roster sync. Instructor-only for
+                  the same reason Students/TA permissions are -- a TA reads
+                  the roster, they do not manage where it comes from or the
+                  credential it syncs with. */}
+              {view.kind === "canvas" && (
+                !canAuthor ? (
+                  <EmptyView
+                    label="Only instructors can manage this course's Canvas integration"
+                    body={NOT_INSTRUCTOR_BODY}
+                  />
+                ) : CURRENT_COURSE_ID ? (
+                  <CanvasIntegrationView courseId={CURRENT_COURSE_ID} courseTitle={CURRENT_COURSE.title} />
                 ) : (
                   <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
                 )
