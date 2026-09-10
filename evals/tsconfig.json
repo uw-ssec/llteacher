@@ -1,0 +1,43 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "types": ["node"],
+
+    /* composite + emitDeclarationOnly, same as apps/web/tsconfig.worker.json
+       and apps/admin/tsconfig.node.json -- required for the project
+       reference below to work under `tsc -b`, not because this package's
+       own output is consumed by anyone. */
+    "composite": true,
+    "noEmit": false,
+    "emitDeclarationOnly": true,
+    "outDir": "./dist/.tsbuildinfo-evals"
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules", "dist"],
+
+  /* This is the "shared tsconfig reference" this package's own README talks
+     about: tutor-behavior.ts imports apps/web/src/lib/{prompts,ai}.ts by
+     plain relative path (no package, no alias) -- but that module's own
+     import graph reaches Workers-runtime-only ambient types (CryptoKey via
+     WebWorker lib, Fetcher via @cloudflare/workers-types) through db/schema
+     -> db/schema/identity.ts -> lib/session.ts, and through server/
+     repositories/homeworks.ts -> shared/types.ts. This package's own
+     compilerOptions above (plain "node" types, no WebWorker lib) can't
+     satisfy those without also mis-typing everything else in this
+     directory. Referencing apps/web's own worker project -- the one
+     tsconfig in this repo already configured with the right lib/types for
+     that exact file set -- lets `tsc -b` type-check prompts.ts/ai.ts (and
+     everything they pull in) under ITS OWN settings and redirect to its
+     emitted declarations, instead of this package re-deriving those
+     settings and hoping they never drift from apps/web's. */
+  "references": [{ "path": "../apps/web/tsconfig.worker.json" }]
+}

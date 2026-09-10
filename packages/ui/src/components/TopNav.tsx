@@ -21,8 +21,11 @@ import { CaretRight } from "@phosphor-icons/react";
 export interface TopNavProps {
   /** Short course code, e.g. "STATS 311" */
   course: string;
-  /** Term string, e.g. "Autumn 2026" */
-  term: string;
+  /** Term string, e.g. "Autumn 2026". #294: optional -- a caller with no
+   *  real term data source should omit it rather than assert a specific
+   *  term, and the breadcrumb below drops it from the joined string
+   *  entirely rather than rendering an empty segment. */
+  term?: string;
   /** Trailing breadcrumb segment. Student app: homework name. Admin app:
       the current view label (e.g. "HOMEWORKS", "LLM CONFIGS"). */
   homework: string;
@@ -92,7 +95,15 @@ export function TopNav({
     handler?.();
   };
 
-  const breadcrumbText = `${course.toUpperCase()} · ${term.toUpperCase()} · ${homework.toUpperCase()}`;
+  // #294: `term` is optional -- a caller with no real term data source
+  // omits it rather than asserting a specific one, and this drops it from
+  // the joined string entirely so the breadcrumb reads "COURSE ·
+  // HOMEWORK" instead of "COURSE ·  · HOMEWORK" (an empty segment plus a
+  // doubled separator).
+  const breadcrumbText = [course, term, homework]
+    .filter((segment): segment is string => Boolean(segment))
+    .map((segment) => segment.toUpperCase())
+    .join(" · ");
 
   return (
     <header className="top-nav" role="banner">

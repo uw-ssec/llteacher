@@ -16,17 +16,19 @@ import { eq } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import {
-  autoSubmitOverdueSections,
   autoSubmitOverdueSectionsForOrg,
-
+  autoSubmitOverdueSectionsForScopes,
   AUTO_SUBMIT_LOG_CONTEXT,
+  AUTO_SUBMIT_ORG_BATCH_SIZE,
 } from "./autoSubmitOverdue";
 import { unsafeOrgScope, unsafeCourseScope } from "../repositories/scope";
 import {
   getHomeworkSubmissionsMatrix,
   findOverdueSubmissionCandidates,
+  findOverdueSubmissionCandidatesForOrgs,
   insertAutoSubmission,
   submitSection,
+  OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT,
 } from "../repositories/submissions";
 import { getStudentHomeworksForUser } from "../repositories/studentHomeworks";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
@@ -66,10 +68,14 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
   });
 
   afterAll(async () => {
-    for (const id of createdOrgIds) {
-      await db.delete(organizations).where(eq(organizations.id, id));
-    }
-  });
+    // Parallel, not sequential: #437's batching test alone seeds
+    // AUTO_SUBMIT_ORG_BATCH_SIZE + 7 organizations on top of every other
+    // test in this file, and each org is an independent row (every other
+    // fixture cascades off it by FK) -- a sequential delete loop over all
+    // of them risked this hook alone approaching vitest's default
+    // hookTimeout.
+    await Promise.all(createdOrgIds.map((id) => db.delete(organizations).where(eq(organizations.id, id))));
+  }, 30_000);
 
   /** One org + course + instructor, isolated from every other test in this
    *  file (and from the rest of the suite's data) so the sweep's own
@@ -404,6 +410,117 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
     expect(await submissionsForOrg(orgB.orgId)).toHaveLength(0);
   });
 
+  it("batches the candidate SELECT across more organizations than fit in one batch, scoping every row correctly (#437)", async () => {
+    // #437: the candidate SELECT is now issued once per
+    // AUTO_SUBMIT_ORG_BATCH_SIZE organizations (`organization_id IN
+    // (...)`), not once per organization. A local, freshly-migrated
+    // database (this suite's default target) starts with ~0 pre-existing
+    // orgs, so proving this against real Postgres requires seeding PAST the
+    // batch size ourselves -- fewer orgs than that would exercise only a
+    // single `IN (...)` query and never touch the batching (or the
+    // multi-batch run-loop accounting) at all.
+    const orgCount = AUTO_SUBMIT_ORG_BATCH_SIZE + 7;
+    const batchOrgs = await Promise.all(
+      Array.from({ length: orgCount }, async (_, i) => {
+        const org = await seedOrg(`batch-${i}`);
+        const studentId = await seedStudent(org.courseId, `batch-${i}-${crypto.randomUUID()}@test.example`);
+        const { sectionId } = await seedHomeworkWithSection(org);
+        const conversationId = await seedConversation({ userId: studentId, courseId: org.courseId, sectionId });
+        return { ...org, studentId, conversationId };
+      }),
+    );
+    const scopes = batchOrgs.map((o) => o.scope);
+
+    // The batched query itself: every one of these orgs comes back with
+    // its own single candidate. Review finding (#437, Important #1): a
+    // count-only assertion here (`toHaveLength(1)`) cannot distinguish
+    // "correct" from "a bug swapped two orgs' single candidate with each
+    // other" -- every count would still be exactly 1 either way, since
+    // each org has exactly one student. Asserting the candidate's OWN
+    // userId/conversationId against the org it's supposed to belong to is
+    // what actually catches a cross-tenant mixup in the batched `IN (...)`
+    // query's grouping, not just its counting.
+    const candidatesByOrg = await findOverdueSubmissionCandidatesForOrgs(db, scopes);
+    expect(candidatesByOrg.size).toBe(orgCount);
+    for (const org of batchOrgs) {
+      const candidates = candidatesByOrg.get(org.scope);
+      expect(candidates).toHaveLength(1);
+      expect(candidates![0]!.userId).toBe(org.studentId);
+      expect(candidates![0]!.conversationId).toBe(org.conversationId);
+    }
+
+    // And the run loop built on it: crossing the batch boundary (this run's
+    // orgCount spans two batches) drops nothing and double-submits nothing.
+    const summary = await autoSubmitOverdueSectionsForScopes(db, scopes);
+    expect(summary).toMatchObject({
+      candidates: orgCount,
+      submitted: orgCount,
+      skipped: 0,
+      failed: 0,
+      orgsFailed: 0,
+      orgsDeferred: 0,
+    });
+    for (const org of batchOrgs) {
+      const rows = await submissionsForOrg(org.orgId);
+      expect(rows).toHaveLength(1);
+      // Same identity check on the written row: a submission recorded
+      // under the wrong org, or for the wrong student/conversation, would
+      // still leave every org's row COUNT at 1.
+      expect(rows[0]!.userId).toBe(org.studentId);
+      expect(rows[0]!.conversationId).toBe(org.conversationId);
+    }
+  }, 30_000);
+
+  it("caps each org's candidates at OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT even when multiple orgs in the same batch are simultaneously over it (#437 review, safety cap on batch query size)", async () => {
+    // #437 review: OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT bounds the
+    // batched query's OWN result-set size (Postgres round-trip payload,
+    // Worker memory) -- a FIXED cap, independent of the run's subrequest
+    // budget (that's a separate concern, exercised at the mocked-loop
+    // level in autoSubmitOverdue.test.ts). The test above proves the cap
+    // doesn't get in the way of a healthy batch's org-reach; this one
+    // proves the cap actually holds against real Postgres when MULTIPLE
+    // organizations in the SAME batch are simultaneously over it -- the
+    // realistic worst case the cap exists for (every org in a batch
+    // carrying a full first-run backlog), not just one heavy org among
+    // idle ones.
+    const overCap = OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT + 10;
+    const heavyOrgs = await Promise.all(
+      Array.from({ length: 3 }, async (_, i) => {
+        const org = await seedOrg(`heavy-${i}`);
+        const { sectionId } = await seedHomeworkWithSection(org);
+        await Promise.all(
+          Array.from({ length: overCap }, async (_, s) => {
+            const studentId = await seedStudent(org.courseId, `heavy-${i}-${s}-${crypto.randomUUID()}@test.example`);
+            await seedConversation({ userId: studentId, courseId: org.courseId, sectionId });
+          }),
+        );
+        return org;
+      }),
+    );
+    const scopes = heavyOrgs.map((o) => o.scope);
+
+    const candidatesByOrg = await findOverdueSubmissionCandidatesForOrgs(db, scopes);
+
+    expect(candidatesByOrg.size).toBe(3);
+    for (const org of heavyOrgs) {
+      // Each org genuinely has MORE than the cap's worth of real candidates
+      // (overCap of them), but what the query hands back for it is bounded
+      // at the cap -- for every org in the batch at once, not just
+      // whichever one happened to be queried in isolation.
+      expect(candidatesByOrg.get(org.scope)).toHaveLength(OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT);
+    }
+    // The point of the fix, stated as a single number: the returned,
+    // per-org-grouped Map this function hands back stays bounded at
+    // batchSize * the per-org cap even though the real backlog behind it
+    // (3 * overCap) is larger -- NOT a claim about the underlying SELECT's
+    // own row count, which has no SQL-level LIMIT and still fetches every
+    // matching row before this truncation runs (see
+    // OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT's own doc comment,
+    // repositories/submissions.ts).
+    const totalReturned = [...candidatesByOrg.values()].reduce((n, c) => n + c.length, 0);
+    expect(totalReturned).toBe(3 * OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT);
+  }, 60_000);
+
   it("counts submitted, skipped and failed accurately across a mixed batch, and logs one summary line", async () => {
     const org = await seedOrg("counts");
     const willSubmit = await seedStudent(org.courseId, `ok-${crypto.randomUUID()}@test.example`);
@@ -454,13 +571,26 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
       const afterMixed = await submissionsForOrg(org.orgId);
       expect(afterMixed.map((r) => r.conversationId)).not.toContain(failingConv);
 
-      // The whole-platform entry point emits exactly one structured summary
-      // line per run, whatever the per-row outcomes were. Run here against
-      // the REAL db, which doubles as the recovery assertion below: nothing
+      // The whole-platform loop emits exactly one structured summary line
+      // per run, whatever the per-row outcomes were. Run here against the
+      // REAL db, which doubles as the recovery assertion below: nothing
       // about a candidate is consumed by a failed attempt, so the next
       // scheduled run picks it up again with no retry infrastructure.
+      //
+      // #437: this calls autoSubmitOverdueSectionsForScopes with an
+      // explicit, single-org scope list -- not autoSubmitOverdueSections(db)
+      // against the real listAllOrgScopes(db). This suite runs against a
+      // real, SHARED Postgres, and before #437 the shared dev database had
+      // accumulated over a thousand organizations from other work; a
+      // platform-wide call's rotation-plus-budget window depends on that
+      // real count, so whether this test's own `org` fell inside the swept
+      // window for the run's clock offset was a lottery, not a guarantee --
+      // exactly the non-determinism #437 was filed to fix. Scoping this
+      // call to just `org.scope` makes the recovery assertion below true
+      // regardless of how many other organizations exist in whatever
+      // database this suite happens to run against.
       infoSpy.mockClear();
-      await autoSubmitOverdueSections(db);
+      await autoSubmitOverdueSectionsForScopes(db, [org.scope]);
       expect(infoSpy).toHaveBeenCalledTimes(1);
       const summaryLine = JSON.parse(infoSpy.mock.calls[0]![0] as string);
       expect(summaryLine).toMatchObject({ level: "info", context: AUTO_SUBMIT_LOG_CONTEXT });

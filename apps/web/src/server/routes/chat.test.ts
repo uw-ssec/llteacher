@@ -101,6 +101,14 @@ type FakeOnFinishEvent = {
 };
 let capturedOnFinish: ((event: FakeOnFinishEvent) => void | Promise<void>) | undefined;
 let capturedStreamResponseOnError: ((error: unknown) => string) | undefined;
+// #440 audit, Fix 1: captures the `messageMetadata` callback chat.ts now
+// passes to toUIMessageStreamResponse, so a test can drive it directly with
+// a fake stream part (the same shape the AI SDK's own `TextStreamPart`
+// union carries) the way capturedOnFinish is already driven with a fake
+// responseMessage above.
+let capturedMessageMetadata:
+  | ((event: { part: { type: string; finishReason?: string } }) => unknown)
+  | undefined;
 // #317 review, #321: chat.ts's own onFinish awaits result.totalUsage/
 // result.response/result.warnings to build the llm_call_logs row --
 // individual tests override these via mockUsage/mockResponseMeta/
@@ -157,9 +165,11 @@ const streamTextMock = vi.fn((_args: Record<string, unknown>) => {
       headers?: Record<string, string>;
       onFinish?: (event: FakeOnFinishEvent) => void | Promise<void>;
       onError?: (error: unknown) => string;
+      messageMetadata?: (event: { part: { type: string } }) => unknown;
     }) => {
       capturedOnFinish = opts?.onFinish;
       capturedStreamResponseOnError = opts?.onError;
+      capturedMessageMetadata = opts?.messageMetadata;
       return new Response("stream-body", { status: 200, headers: opts?.headers });
     },
   };
@@ -208,6 +218,12 @@ const resolveApiKeyMock = vi.fn();
 // written against. The failover paths themselves are owned by
 // chat.fallback.integration.test.ts, which drives the real streamText.
 const resolveFallbackLLMConfigMock = vi.fn();
+/** #430: when set, resolveProviderCredential returns this instead of the
+ *  pass-through -- the only way to reach chatHandler's degraded branch, which
+ *  no handler test could exercise before. */
+const degradeNextCredentialMock = vi.fn<
+  () => { provider: string; apiKey: string; modelName: string; degradedFrom: string } | null
+>(() => null);
 vi.mock("../../lib/llm-config", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/llm-config")>();
   return {
@@ -215,6 +231,32 @@ vi.mock("../../lib/llm-config", async (importOriginal) => {
     resolveLLMConfig: (...args: unknown[]) => resolveLLMConfigMock(...args),
     resolveFallbackLLMConfig: (...args: unknown[]) => resolveFallbackLLMConfigMock(...args),
     resolveApiKey: (...args: unknown[]) => resolveApiKeyMock(...args),
+    /* #343: chat.ts resolves provider+key+model together now, so this is the
+       function it actually depends on. Mocking resolveApiKey alone stopped
+       working the moment resolveProviderCredential called it by direct
+       reference rather than through the module export -- the mock replaces
+       the export, not the internal binding.
+    
+       Shaped to delegate to resolveApiKeyMock so every existing test that
+       stubs a key or a rejection keeps working unchanged, and the degraded
+       path is exercised by its own tests against the REAL function in
+       llm-config.test.ts rather than through this stub. */
+    resolveProviderCredential: async (
+      _env: unknown,
+      _db: unknown,
+      _scope: unknown,
+      config: { provider: string; modelName: string },
+    ) => {
+      /* #430: the degraded shape is opt-in per test. Default is the
+         pass-through above, so every existing test is unaffected. */
+      const degraded = degradeNextCredentialMock();
+      if (degraded) return degraded;
+      return {
+        provider: config.provider,
+        apiKey: await resolveApiKeyMock(_env, _db, _scope, config),
+        modelName: config.modelName,
+      };
+    },
   };
 });
 
@@ -351,6 +393,7 @@ describe("POST /api/chat", () => {
     releaseConversationTurnLockMock.mockReset().mockResolvedValue(undefined);
     pinConversationPromptTemplateMock.mockReset().mockResolvedValue(undefined);
     finalizeAssistantTurnMock.mockReset().mockResolvedValue(undefined);
+    degradeNextCredentialMock.mockReset().mockReturnValue(null);
     mockUsage = { inputTokens: 10, outputTokens: 20 };
     mockResponseMeta = { id: "provider-resp-1" };
     mockWarnings = undefined;
@@ -360,6 +403,7 @@ describe("POST /api/chat", () => {
     streamTextMock.mockClear();
     capturedOnFinish = undefined;
     capturedStreamResponseOnError = undefined;
+    capturedMessageMetadata = undefined;
     // #219/#265: under the rate limit by default -- individual rate-limit
     // tests override this. 1 is the post-increment count for "the first
     // request in the window," not a pre-increment 0.
@@ -1765,6 +1809,73 @@ describe("POST /api/chat", () => {
     });
   });
 
+  /* #433: the defect behind #426. The race-fallback re-check above only ever
+     answered two ways -- "replay" (a completed, renderable turn) or 409
+     in_progress (everything else) -- treating "a turn already ran but its
+     reply isn't replayable" (#307/#342's requestHint-only shape) the same as
+     "a turn is genuinely still running." readErrorMessage renders in_progress
+     as retryable, so a student hit this 409 forever: retrying re-runs this
+     exact re-check, which finds the same non-replayable row every time. */
+  describe("#433 completed-but-non-replayable turn is not a genuine race", () => {
+    it("produces a model call, not a 409, when the user row is persisted and a non-replayable assistant row already exists", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      appendMessageMock.mockResolvedValueOnce({ row: { id: "msg-1" }, created: false });
+      const raceRows = [
+        // A turn already ran for this exact user message and produced an
+        // assistant row -- but its only content is a resolved requestHint
+        // call, which hasRenderableContent (#307/#342) does not treat as
+        // replayable. Nothing is in flight: the fix is a real model call,
+        // not another 409.
+        {
+          role: "assistant",
+          parts: [{ type: "tool-requestHint", toolCallId: "call-1", state: "output-available", input: {}, output: { status: "recorded" } }],
+          clientMessageId: null,
+        },
+        { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+      ];
+      getLastMessagesMock
+        .mockResolvedValueOnce([]) // the top-of-handler idempotency read: no prior rows yet
+        .mockResolvedValueOnce(raceRows) // the race re-check (limit 2)
+        .mockResolvedValueOnce(raceRows); // the fresh full-context re-fetch for the model call
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(200);
+      expect(streamTextMock).toHaveBeenCalledTimes(1);
+      // The lock must not be released on this path -- it stays held for the
+      // model call that is about to run, and is released exactly once by
+      // finalizeAssistantTurn's onFinish (or the outer catch, on a setup
+      // failure), never here.
+      expect(releaseConversationTurnLockMock).not.toHaveBeenCalled();
+    });
+
+    it("a genuine in-flight turn (winner's user row persisted, no assistant reply yet) still 409s", async () => {
+      getOwnedConversationOrNullMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+      appendMessageMock.mockResolvedValueOnce({ row: { id: "msg-1" }, created: false });
+      getLastMessagesMock
+        .mockResolvedValueOnce([]) // the top-of-handler idempotency read: no prior rows yet
+        .mockResolvedValueOnce([
+          // the winner has only written its own user row so far -- the
+          // turn is genuinely still running, not completed.
+          { role: "user", parts: userUiMessage.parts, clientMessageId: "client-1" },
+        ]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        conversationId: "22222222-2222-2222-2222-222222222222",
+      });
+
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe("in_progress");
+      expect(streamTextMock).not.toHaveBeenCalled();
+      expect(releaseConversationTurnLockMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
   /* #96 requirement 4: two tabs on one conversation. The v1 contract is
      last-writer-wins with the persisted transcript as truth on reload, and
      the explicit NON-GOALS are realtime sync and any cross-tab merge (see
@@ -2250,6 +2361,209 @@ describe("POST /api/chat", () => {
         errorFlag: false,
       });
       expect(typeof logged.latencyMs).toBe("number");
+    });
+
+    it("#440 audit, Fix 1: attaches {createdAt, id} via messageMetadata only on the stream's finish part, and that id matches the row onFinish persists", async () => {
+      /* Root cause this closes: the client's Flag button (ConversationView)
+         gates on `msg.createdAt` being set, which was previously populated
+         only by a full history refetch (fetchConversationHistory) -- never
+         by a message that streams in and completes within the SAME browser
+         session. `messageMetadata` is the AI SDK v5 hook chat.ts now uses to
+         attach `{ createdAt, id }` to the live-streamed message itself, so
+         the gate can open without a refetch. This test drives that callback
+         directly (the way capturedOnFinish is already driven above) rather
+         than only eyeballing the source, per this task's own "When done"
+         requirement. */
+      createConversationMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+      expect(capturedMessageMetadata).toBeDefined();
+
+      // Every non-"finish" part -- including the high-frequency per-token
+      // "text-delta" chunk -- must NOT get metadata attached. Fix 1's own
+      // brief is explicit about this: "only attach metadata on the
+      // finish-message / final part, not on every streamed delta."
+      expect(capturedMessageMetadata!({ part: { type: "start" } })).toBeUndefined();
+      expect(capturedMessageMetadata!({ part: { type: "text-start" } })).toBeUndefined();
+      expect(capturedMessageMetadata!({ part: { type: "text-delta" } })).toBeUndefined();
+
+      // #451 (Cordero review, PR440): a "finish" part with a NON-terminal
+      // (or absent) finishReason must NOT get metadata either -- onFinish's
+      // own `shouldPersist` gate would refuse to persist a row for this
+      // turn, so telling the client a `createdAt`/`persistedId` exists would
+      // expose a Flag control that 404s. Covers the exact aborted/errored
+      // case Cordero's review named.
+      expect(capturedMessageMetadata!({ part: { type: "finish" } })).toBeUndefined();
+      expect(capturedMessageMetadata!({ part: { type: "finish", finishReason: "error" } })).toBeUndefined();
+      expect(capturedMessageMetadata!({ part: { type: "finish", finishReason: "content-filter" } })).toBeUndefined();
+      expect(capturedMessageMetadata!({ part: { type: "finish", finishReason: "other" } })).toBeUndefined();
+
+      const metadata = capturedMessageMetadata!({ part: { type: "finish", finishReason: "stop" } }) as
+        | { createdAt?: unknown; id?: unknown }
+        | undefined;
+      expect(metadata).toBeDefined();
+      // Truthy and ISO-8601-shaped -- the exact field name/shape
+      // fetchConversationHistory (App.tsx) already populates from a
+      // persisted row's `createdAt`, so both hydration paths produce the
+      // same client-side shape.
+      expect(typeof metadata!.createdAt).toBe("string");
+      expect(new Date(metadata!.createdAt as string).toString()).not.toBe("Invalid Date");
+      expect(typeof metadata!.id).toBe("string");
+
+      // The id this test just observed via messageMetadata must be the SAME
+      // id the persisted row ends up with -- not merely "a string" -- since
+      // the live-streamed UIMessage's own top-level `id` is NOT the id
+      // onFinish mints for the row (see assistantMessageId's own doc
+      // comment in chat.ts), and the client needs metadata.id specifically
+      // because of that mismatch.
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+        finishReason: "stop",
+      });
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledTimes(1);
+      const [, , assistantMessage] = finalizeAssistantTurnMock.mock.calls[0]! as [unknown, unknown, { id: string } | null];
+      expect(assistantMessage?.id).toBe(metadata!.id);
+    });
+
+    it("#430: a degraded turn is logged under the provider that actually served it, and is not costed at the original model's rate", async () => {
+      /* The seam this pins is `degradedConfigOf` -- the one place where the
+         operator's credential-time degradation (#343) enters #364's failover
+         machinery. Nothing reached it before: the credential stub always
+         echoed the config back, so the degraded branch, buildProviderClient's
+         provider argument and every call-log field were invisible to a
+         161-test suite. Two of the three original review findings on #412
+         lived in exactly that blind spot. */
+      degradeNextCredentialMock.mockReturnValue({
+        provider: "openrouter",
+        apiKey: "or-key",
+        modelName: "vendor/fallback",
+        degradedFrom: "llmoxie",
+      });
+      // A CONFIRMED per-million rate on the org's own config -- without this
+      // the cost assertion below would pass trivially, since the shared
+      // fixture already prices at null.
+      resolveLLMConfigMock.mockResolvedValue({
+        id: "llm-config-1",
+        provider: "llmoxie",
+        modelName: "gpt-5.3-codex",
+        temperature: 0.7,
+        maxCompletionTokens: 1000,
+        credentialId: null,
+        fallbackLlmConfigId: null,
+        basePrompt: "",
+        pricePerMillionInputTokens: 250,
+        pricePerMillionOutputTokens: 1000,
+        markCompleteInstruction: null,
+      });
+      createConversationMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      mockUsage = { inputTokens: 100, outputTokens: 50 };
+      mockResponseMeta = { id: "req-degraded" };
+
+      await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "text", text: "hi" }] },
+      });
+
+      const [, , , logged] = finalizeAssistantTurnMock.mock.calls[0]! as [
+        unknown,
+        unknown,
+        unknown,
+        Record<string, unknown>,
+      ];
+      // The provider and model that RAN, not the ones the org chose. Logging
+      // the config's provider beside the credential's model produced a pair
+      // that never existed.
+      expect(logged).toMatchObject({ provider: "openrouter", model: "vendor/fallback" });
+      // llmConfigId still names the org's own choice, so a degraded turn is
+      // visible as the mismatch between them.
+      expect(logged.llmConfigId).toBe("llm-config-1");
+      /* And cost is NULL, not the configured rate. pricePerMillion* belongs
+         to the config's own model; billing an OpenRouter fallback at the
+         LLMoxie rate writes a confidently wrong number into the CDI cost
+         reporting these rows feed -- worse than no number. */
+      expect(logged.costCents).toBeNull();
+    });
+
+    it("#431: a fallback config keyed off the same missing platform secret degrades too, instead of silently having no failover", async () => {
+      /* Before #431, the failover hop keyed itself through raw resolveApiKey
+         -- a different primitive than the primary's resolveProviderCredential.
+         A fallback config backed by the SAME missing platform secret as the
+         primary simply threw LLMCredentialMissingError, caught by
+         chatHandler's best-effort catch around fallback resolution, and
+         logged as "fallbackConfig.unusable": the turn quietly had no
+         failover on precisely the outage degradation exists to cover.
+
+         This pins the fix: routing the fallback hop through
+         resolveProviderCredential too means the SAME missing secret now
+         degrades the fallback instead of failing it, exactly as it would for
+         a primary in the same situation. */
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      createConversationMock.mockResolvedValue({
+        id: "22222222-2222-2222-2222-222222222222",
+        ownerUserId: "u1",
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      getLastMessagesMock.mockResolvedValue([]);
+
+      resolveFallbackLLMConfigMock.mockResolvedValueOnce({
+        id: "llm-config-fallback",
+        provider: "llmoxie",
+        modelName: "some-llmoxie-model",
+        temperature: 0.5,
+        maxCompletionTokens: 500,
+        credentialId: null,
+        fallbackLlmConfigId: null,
+        basePrompt: "",
+        pricePerMillionInputTokens: 5,
+        pricePerMillionOutputTokens: 10,
+        markCompleteInstruction: null,
+      });
+      // First resolveProviderCredential call keys the PRIMARY (default
+      // config, non-degraded). Second call keys the FALLBACK above -- its
+      // own provider's key is the one missing, so THIS is the call under
+      // test.
+      degradeNextCredentialMock.mockReturnValueOnce(null).mockReturnValueOnce({
+        provider: "openrouter",
+        apiKey: "or-key",
+        modelName: "vendor/degraded-fallback",
+        degradedFrom: "llmoxie",
+      });
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        courseId: "55555555-5555-5555-5555-555555555555",
+      });
+      expect(res.status).toBe(200);
+
+      const lines = warnSpy.mock.calls.map((c) => String(c[0]));
+      // The old failure mode: caught, logged as unusable, no failover at all.
+      expect(lines.find((l) => l.includes("chatHandler.fallbackConfig.unusable"))).toBeUndefined();
+      // The fixed behaviour: the fallback resolves, keyed via degradation,
+      // and that degradation is itself logged loudly (same posture as the
+      // primary's own degradation log).
+      const degraded = lines.find((l) => l.includes("chatHandler.fallbackConfig.degraded"));
+      expect(degraded).toBeDefined();
+      expect(JSON.parse(degraded!)).toMatchObject({
+        level: "warn",
+        degradedFrom: "llmoxie",
+        servingProvider: "openrouter",
+      });
+
+      warnSpy.mockRestore();
     });
 
     it("passes a null assistantMessage (and errorFlag true) when the turn is aborted", async () => {
@@ -2834,6 +3148,72 @@ describe("POST /api/chat", () => {
     const callArgs = streamTextMock.mock.calls[0]![0] as { messages: Array<{ content?: unknown }> };
     expect(callArgs.messages.length).toBe(40);
     expect(JSON.stringify(callArgs.messages)).not.toContain("the answer is 42");
+    // #309: length alone would stay green even if the chronological reversal
+    // (chat.ts's `[...persistedHistory].reverse()`) were dropped or applied
+    // twice -- both produce a 40-element array either way. Pin content at
+    // both ends instead: getLastMessages returns newest-first, so "turn 38"
+    // (persistedRows' last, oldest element) must be the FIRST thing the
+    // model sees, and this request's own brand-new message ("hi there")
+    // must be the LAST -- the exact inverse of what an un-reversed (or
+    // double-reversed) order would produce.
+    expect(JSON.stringify(callArgs.messages[0])).toContain("turn 38");
+    expect(JSON.stringify(callArgs.messages[callArgs.messages.length - 1])).toContain("hi there");
+  });
+
+  // #309: the test above only ever sees plain-text history rows -- a
+  // regression that special-cased text parts (e.g. mapping only `parts`
+  // entries of type "text", or dropping anything else while reversing)
+  // would still pass every assertion above. Asserts a persisted row
+  // carrying a real tool call survives the same reverse-and-map into the
+  // model's context, in the right chronological position, using substring
+  // search (not an exact count) because the real, unmocked
+  // convertToModelMessages may split one tool-bearing UIMessage into more
+  // than one ModelMessage.
+  it("carries a persisted tool-call-bearing history row through to the model in chronological order, not just plain text turns", async () => {
+    createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
+    // Newest-first (getLastMessages' own order): the most recent prior turn
+    // used a tool, the turn before that was plain text.
+    getLastMessagesMock.mockResolvedValueOnce([
+      {
+        id: "hist-tool",
+        role: "assistant",
+        parts: [
+          { type: "text", text: "the definition is..." },
+          {
+            type: "tool-showDefinition",
+            toolCallId: "call-1",
+            state: "output-available",
+            input: { term: "p-value" },
+            output: { status: "displayed", term: "p-value" },
+          },
+        ],
+        clientMessageId: null,
+      },
+      { id: "hist-earlier", role: "user", parts: [{ type: "text", text: "what does p-value mean" }], clientMessageId: null },
+    ]);
+
+    await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+
+    expect(streamTextMock).toHaveBeenCalledTimes(1);
+    const callArgs = streamTextMock.mock.calls[0]![0] as { messages: unknown[] };
+    const serialized = callArgs.messages.map((m) => JSON.stringify(m));
+    const earlierIdx = serialized.findIndex((s) => s.includes("what does p-value mean"));
+    const toolIdx = serialized.findIndex((s) => s.includes("call-1"));
+    const newestIdx = serialized.findIndex((s) => s.includes("hi there"));
+    // Every expected turn actually made it through -- a dropped tool part or
+    // a mis-mapped role would leave one of these missing (-1).
+    expect(earlierIdx).toBeGreaterThanOrEqual(0);
+    expect(toolIdx).toBeGreaterThanOrEqual(0);
+    expect(newestIdx).toBeGreaterThanOrEqual(0);
+    // Chronological order: the oldest persisted turn first, the tool turn
+    // next, and this request's own new message last -- the exact reverse of
+    // getLastMessages' own newest-first order. A silently-dropped `.reverse()`
+    // would put "hi there" first instead of last.
+    expect(earlierIdx).toBeLessThan(toolIdx);
+    expect(toolIdx).toBeLessThan(newestIdx);
   });
 
   /* #88: the token-aware INNER bound, on top of the MAX_HISTORY_MESSAGES

@@ -1,7 +1,7 @@
-import { and, asc, eq, exists, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, exists, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { submissions, grades, conversations, courses, courseMemberships, homeworks, messages, sections, users, sectionAnswers, type SubmissionSource } from "../../db/schema";
-import type { OrgScope, CourseScope } from "./scope";
+import { unsafeOrgScope, type OrgScope, type CourseScope } from "./scope";
 import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { deriveHomeworkStatus, isHomeworkHidden, type HomeworkStatus } from "./homeworks";
 
@@ -577,8 +577,14 @@ export interface OverdueSubmissionCandidate {
  *
  *  The bound is what makes the job's existing self-draining design actually
  *  work: a candidate this run does not reach is not consumed, so the next
- *  hourly run picks it up. A backlog drains at this rate per org per hour
- *  instead of failing whole.
+ *  hourly run picks it up, instead of failing whole. This constant is the
+ *  single-org path's own cap -- production no longer runs that path (see
+ *  autoSubmitOverdueSectionsForOrg's own doc comment); the batched path
+ *  production actually runs drains under its OWN, smaller cap instead,
+ *  OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT (below) -- see that constant's
+ *  own doc comment for the batched path's drain-rate tradeoff, rather than
+ *  restating an absolute rate here that would go stale the next time either
+ *  cap moves independently of the other.
  *
  *  Per-org, and deliberately NOT the only bound. The starvation objection
  *  that motivated a per-org cap is real -- a shared budget consumed by
@@ -632,16 +638,26 @@ export const OVERDUE_SUBMISSION_CANDIDATE_LIMIT = 500;
  *    - conversations with no message the student wrote (#167 review) -- see
  *      the EXISTS clause below; "opened the section" is not "did the work"
  *    - anything already submitted for that (user, section) */
-export async function findOverdueSubmissionCandidates(
-  db: Db,
-  scope: OrgScope,
-  limit: number = OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
-): Promise<OverdueSubmissionCandidate[]> {
-  const rows = await db
+/** The join, predicates and ordering every candidate query shares --
+ *  factored out so the single-org and multi-org (batched, #437) entry points
+ *  below cannot drift from each other on the structural conditions, which
+ *  are the tenancy- and release-state-sensitive part. `orgFilter` is the one
+ *  thing that differs: `eq(courses.organizationId, scope)` for one org, or
+ *  `inArray(courses.organizationId, scopes)` for a batch -- everything else,
+ *  including the release-state filtering that happens after this returns,
+ *  is identical either way. Returns raw rows (including `organizationId`,
+ *  unused by the single-org caller but load-bearing for the batched one,
+ *  which has to know which org each row came from) -- the release-state
+ *  filter and the `limit` bound are applied by each caller separately,
+ *  because a single org and a batch of them bound the result differently
+ *  (see findOverdueSubmissionCandidatesForOrgs's own comment). */
+async function selectOverdueCandidateRows(db: Db, orgFilter: SQL) {
+  return db
     .select({
       conversationId: conversations.id,
       userId: conversations.ownerUserId,
       sectionId: conversations.sectionId,
+      organizationId: courses.organizationId,
       dueDate: homeworks.dueDate,
       publishedAt: homeworks.publishedAt,
       releasedAt: homeworks.releasedAt,
@@ -668,7 +684,7 @@ export async function findOverdueSubmissionCandidates(
     )
     .where(
       and(
-        eq(courses.organizationId, scope),
+        orgFilter,
         eq(conversations.kind, "section"),
         eq(conversations.isDeleted, false),
         eq(conversations.isTeacherTest, false),
@@ -715,8 +731,19 @@ export async function findOverdueSubmissionCandidates(
     )
     // Oldest backlog first, so the bound below drains a backlog in a
     // predictable order rather than an arbitrary one, and so the same run
-    // twice over the same data picks the same rows.
+    // twice over the same data picks the same rows. For the batched query
+    // this orders GLOBALLY across every org in the batch, which is what
+    // lets findOverdueSubmissionCandidatesForOrgs's per-org cap keep "oldest
+    // first" true within each org despite the rows arriving interleaved.
     .orderBy(asc(homeworks.dueDate));
+}
+
+export async function findOverdueSubmissionCandidates(
+  db: Db,
+  scope: OrgScope,
+  limit: number = OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
+): Promise<OverdueSubmissionCandidate[]> {
+  const rows = await selectOverdueCandidateRows(db, eq(courses.organizationId, scope));
 
   return rows
     .filter((row) => deriveHomeworkStatus(row) === "past_due")
@@ -728,6 +755,140 @@ export async function findOverdueSubmissionCandidates(
     }));
 }
 
+/* --------------------------------------------------------------------------
+   #437: the same candidate read, batched across many organizations.
+
+   Before this, the scheduled sweep (jobs/autoSubmitOverdue.ts) spent one
+   subrequest on findOverdueSubmissionCandidates PER organization, whether or
+   not that organization had any backlog at all. AUTO_SUBMIT_RUN_SUBREQUEST_
+   BUDGET (900) was therefore actually a cap on organizations swept per run,
+   not on backlog processed -- a platform past ~899 orgs deferred the tail of
+   the org list every single hour before any candidate was even read.
+
+   This function answers one query for a whole BATCH of organizations at
+   once (`organization_id IN (...)` in place of `= scope`), so the run loop
+   can spend a single subrequest covering AUTO_SUBMIT_ORG_BATCH_SIZE orgs
+   instead of one each. The budget now scales with backlog (inserts) plus
+   the number of BATCHES, not the number of tenants.
+   -------------------------------------------------------------------------- */
+
+/** #437 review: a SEPARATE safety cap from OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
+ *  and deliberately smaller, for the reason a single org's own cap cannot
+ *  cover: this one bounds a query that can cover MANY organizations at once.
+ *
+ *  findOverdueSubmissionCandidatesForOrgs answers one SELECT for a whole
+ *  batch of organizations (AUTO_SUBMIT_ORG_BATCH_SIZE of them,
+ *  jobs/autoSubmitOverdue.ts). If that query capped each org's rows at the
+ *  single-org limit (500), the realistic worst case -- every organization
+ *  in a batch simultaneously carrying a full first-run backlog, which is
+ *  exactly the scenario OVERDUE_SUBMISSION_CANDIDATE_LIMIT's own doc
+ *  comment says this job must survive, not a hypothetical one -- would ask
+ *  Postgres to return up to `AUTO_SUBMIT_ORG_BATCH_SIZE * 500` = 50,000 rows
+ *  in a single round trip, and hand that result set to a Cloudflare Worker
+ *  to hold in memory and iterate over in JS. That is a real resource cost
+ *  (query latency, response payload size over the neon-http driver's HTTP
+ *  transport, Worker memory) that exists independent of whether any of
+ *  those rows end up inserted this run -- so it cannot be bounded by the
+ *  run's subrequest budget (AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET), which is a
+ *  count of INSERTS attempted, not a bound on SELECT payload size. An
+ *  earlier version of this code conflated the two (narrowed this query by
+ *  remaining budget), which is what caused the throughput regression
+ *  documented on AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET (#437 review, Important
+ *  #2) -- so this cap is fixed and budget-independent, exactly as that
+ *  fix's budget allocation is now row-count-independent.
+ *
+ *  IMPORTANT -- this bounds the returned, per-org-grouped result this
+ *  function hands back, NOT the underlying SELECT's own row count.
+ *  selectOverdueCandidateRows (below) has no SQL-level LIMIT -- it never
+ *  did, for either this path or the single-org one -- so for a batch of
+ *  organizations that are ALL genuinely over 50 candidates, Postgres still
+ *  returns every matching row for the batch, and this function truncates
+ *  to 50/org only after that full result set has already been fetched
+ *  into the Worker. This constant therefore bounds Worker-side memory
+ *  and downstream processing (the "5,000 rows retained" arithmetic below),
+ *  not the Postgres round-trip payload or query latency an adversarial
+ *  batch could still produce. Closing that gap for real would need a
+ *  SQL-level per-org bound (e.g. a ROW_NUMBER() OVER (PARTITION BY
+ *  organization_id ...) window, filtered in a subquery/CTE) -- not
+ *  attempted here, since it would mean forking selectOverdueCandidateRows
+ *  away from the single-org path it deliberately shares with (see that
+ *  function's own doc comment on why one shared query body matters for
+ *  scoping-drift safety), and the single-org path already accepts the
+ *  identical no-SQL-LIMIT characteristic today without a window function.
+ *  Filed as a follow-up rather than expanded here.
+ *
+ *  50 * AUTO_SUBMIT_ORG_BATCH_SIZE (100) = 5,000 rows retained/processed
+ *  worst case per batch, after the fetch: an order of magnitude below the
+ *  naive 50,000 a fully-unbounded per-org grouping would keep, and about
+ *  10x a single org's own already-accepted 500-row worst case. The
+ *  tradeoff: a genuinely first-run-backlogged organization swept through
+ *  the BATCHED path now drains at up to 50/run instead of up to 500/run --
+ *  slower than autoSubmitOverdueSectionsForOrg's single-org path would give
+ *  it, but not starved. Nothing here marks a candidate "seen" (see this
+ *  file's own idempotency notes), so the untouched remainder is simply
+ *  still there, unconsumed, for the next scheduled run -- the same
+ *  self-draining property OVERDUE_SUBMISSION_CANDIDATE_LIMIT already relies
+ *  on for a single org's backlog exceeding 500. */
+export const OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT = 50;
+
+/** Every scoped candidate the current, deliberately unbounded, matching set
+ *  produces, grouped by the organization it belongs to, each group capped
+ *  at `perOrgLimit` (default OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT, NOT
+ *  OVERDUE_SUBMISSION_CANDIDATE_LIMIT -- see that constant's own doc comment
+ *  for why the batched path needs a smaller, separate one) -- the same
+ *  per-tenant fairness cap the single-org query enforces, so one org's
+ *  backlog cannot crowd another org sharing this batch out of the result
+ *  entirely just because its due dates happen to sort later.
+ *
+ *  #437 review (Important): this is a FIXED safety cap on the query's own
+ *  result-set size, independent of the caller's remaining run budget. An
+ *  earlier version narrowed `perOrgLimit` by whatever subrequest budget the
+ *  run had left, which conflated "how many rows may this SELECT return"
+ *  (a resource-cost bound) with "how many inserts may this run afford"
+ *  (a Cloudflare-subrequest-count bound) and caused a throughput regression
+ *  when fixed naively -- see OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT's doc
+ *  comment. The caller (autoSubmitOverdueSectionsForScopes) now allocates
+ *  its insert budget entirely separately, per candidate actually consumed
+ *  from whatever this function returns; it does not pass a budget-derived
+ *  value here.
+ *
+ *  Grouped by scope (not a flat list) because the run loop's insert phase is
+ *  still per-organization -- AutoSubmitOrgSummary, and #414's per-org
+ *  failure isolation for the write side, both depend on that shape. Only
+ *  the SELECT itself is batched; nothing about the insert loop changes. */
+export async function findOverdueSubmissionCandidatesForOrgs(
+  db: Db,
+  scopes: OrgScope[],
+  perOrgLimit: number = OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT,
+): Promise<Map<OrgScope, OverdueSubmissionCandidate[]>> {
+  const result = new Map<OrgScope, OverdueSubmissionCandidate[]>();
+  if (scopes.length === 0) return result;
+
+  const rows = await selectOverdueCandidateRows(db, inArray(courses.organizationId, scopes));
+
+  const perOrgCount = new Map<string, number>();
+  for (const row of rows) {
+    if (deriveHomeworkStatus(row) !== "past_due") continue;
+
+    const countSoFar = perOrgCount.get(row.organizationId) ?? 0;
+    if (countSoFar >= perOrgLimit) continue;
+    perOrgCount.set(row.organizationId, countSoFar + 1);
+
+    // Verified, not taken on the caller's word: this row came back from the
+    // `IN (...scopes)` filter above, so minting an OrgScope from it is the
+    // same sanctioned pattern listAllOrgScopes uses (scope.ts's own doc
+    // comment) -- a value just read back from the DB under an
+    // already-verified filter, not an unvalidated one.
+    const scope = unsafeOrgScope(row.organizationId);
+    const forOrg = result.get(scope);
+    const candidate = { conversationId: row.conversationId, userId: row.userId, sectionId: row.sectionId! };
+    if (forOrg) forOrg.push(candidate);
+    else result.set(scope, [candidate]);
+  }
+
+  return result;
+}
+
 /** Writes one `source: 'auto'` submission, or reports that one already
  *  existed. Returns false rather than throwing on a conflict, and never
  *  updates an existing row -- a student's own submission (or an earlier
@@ -735,12 +896,13 @@ export async function findOverdueSubmissionCandidates(
  *  later sweep.
  *
  *  Idempotency lives here, in the database, not in a caller's prior
- *  existence check. findOverdueSubmissionCandidates has already filtered
- *  out anything submitted, but that read and this write are not one
- *  transaction -- a student pressing submit in between, or two overlapping
- *  cron invocations, would make a check-then-insert produce either a
- *  duplicate or a crash. ON CONFLICT DO NOTHING makes the insert itself the
- *  check. Same class of fix as #266/#273 elsewhere.
+ *  existence check. findOverdueSubmissionCandidatesForOrgs (the production
+ *  caller) has already filtered out anything submitted, but that read and
+ *  this write are not one transaction -- a student pressing submit in
+ *  between, or two overlapping cron invocations, would make a
+ *  check-then-insert produce either a duplicate or a crash. ON CONFLICT DO
+ *  NOTHING makes the insert itself the check. Same class of fix as
+ *  #266/#273 elsewhere.
  *
  *  Untargeted deliberately: `submissions` has two unique constraints that
  *  mean the same thing here -- UNIQUE(conversation_id) and
@@ -754,9 +916,10 @@ export async function insertAutoSubmission(
   /* #417: INSERT ... SELECT, not INSERT ... VALUES, so the "conversation is
      still live" condition is evaluated by the same statement that writes.
 
-     findOverdueSubmissionCandidates already filters `is_deleted = false`,
-     but that read is separated from this write by every other candidate's
-     insert -- tens of seconds on a large org. A student who restarts their
+     findOverdueSubmissionCandidatesForOrgs (the production caller) already
+     filters `is_deleted = false`, but that read is separated from this
+     write by every other candidate's insert -- tens of seconds on a large
+     org. A student who restarts their
      section inside that window gets conv A soft-deleted and conv B created;
      a VALUES insert would still write a submission for conv A, because the
      composite FK resolves against a soft-deleted row and there is nothing
@@ -787,11 +950,19 @@ export async function insertAutoSubmission(
           conversationId: conversations.id,
           userId: sql<string>`${candidate.userId}::uuid`.as("user_id"),
           sectionId: sql<string>`${candidate.sectionId}::uuid`.as("section_id"),
-          // Verified, not taken on the caller's word: the candidate query
-          // joined through `courses` and filtered on this exact
-          // organization_id, so the denormalized column cannot be written
-          // with another tenant's id.
-          organizationId: sql<string>`${scope}::uuid`.as("organization_id"),
+          // Verified, not taken on the caller's word: this inner join
+          // resolves the org through the SAME row the INSERT is keyed to
+          // (conversation -> course), and the WHERE below filters on this
+          // exact organization_id -- so a mis-paired `scope` (the batched
+          // path's candidate SELECT filters on an org LIST, and this
+          // function's own `scope` argument comes from the caller's loop
+          // pairing, not from a query that filtered on this one id) makes
+          // the WHERE match nothing and the insert writes zero rows,
+          // instead of silently writing this row under the wrong tenant.
+          // `submissions_conversation_owner_section_fk` covers
+          // (conversation_id, user_id, section_id), not organization_id, so
+          // nothing else at the DB layer would have caught a mis-pairing.
+          organizationId: courses.organizationId,
           // now(), matching the column's defaultNow(): the row records when
           // the submission was made. Back-dating it to the due date would
           // claim the student submitted on time, the opposite of what it
@@ -800,7 +971,14 @@ export async function insertAutoSubmission(
           source: sql<SubmissionSource>`'auto'::submission_source`.as("source"),
         })
         .from(conversations)
-        .where(and(eq(conversations.id, candidate.conversationId), eq(conversations.isDeleted, false))),
+        .innerJoin(courses, eq(conversations.courseId, courses.id))
+        .where(
+          and(
+            eq(conversations.id, candidate.conversationId),
+            eq(conversations.isDeleted, false),
+            eq(courses.organizationId, scope),
+          ),
+        ),
     )
     .onConflictDoNothing()
     .returning({ id: submissions.id });

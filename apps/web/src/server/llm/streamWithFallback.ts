@@ -279,6 +279,25 @@ export interface FallbackAttempt {
   fallbackModelName: string | null;
   /** Correlation for the logs -- the conversation this turn belongs to. */
   logContext: string;
+  /** #440 audit, Fix 3: the Hono context's `c.executionCtx.waitUntil`,
+   *  threaded through so the primary-drain promise below can be registered
+   *  with it instead of merely floating. See that promise's own doc comment
+   *  for the Workers-specific failure mode this closes -- the same bug
+   *  class chat.ts's own `pinConversationPromptTemplate` call site already
+   *  documents fixing (its "#317 review, code-review follow-up: awaited,
+   *  not fire-and-forget" comment names both valid fixes: await, or
+   *  `c.executionCtx.waitUntil()`; that call site chose await because it
+   *  can block the handler for a one-time write, this one cannot, because
+   *  the whole point of not awaiting the drain is that the fallback starts
+   *  immediately rather than waiting on it).
+   *
+   *  Optional, and best-effort exactly like the drain it wraps: undefined
+   *  in any caller/test that does not have a real `ExecutionContext`
+   *  (Hono's own `c.executionCtx` getter throws when unset, e.g. every
+   *  `app.request(...)` call in this app's test suite, which never passes
+   *  one) -- falls back to the pre-fix bare `void`, unchanged for those
+   *  callers. */
+  waitUntil?: (promise: Promise<unknown>) => void;
 }
 
 /** Starts the turn on the primary, and on the fallback if the primary fails
@@ -343,8 +362,27 @@ export async function streamWithFallback(
 
      Not awaited: the fallback should start immediately, and the drain is
      bookkeeping. Errors are swallowed -- the primary already failed, and its
-     error is reported above. */
-  void primary.consumeStream({ onError: () => {} });
+     error is reported above.
+
+     #440 audit, Fix 3: registered with `attempt.waitUntil` (`c.executionCtx.
+     waitUntil`, threaded from chat.ts) when the caller has one, rather than
+     left as a bare un-awaited promise. On Cloudflare Workers, a promise that
+     is neither awaited nor registered with `ctx.waitUntil()` is not
+     guaranteed to run to completion once the handler's synchronous work (and
+     the response it returns) is done -- the exact same failure mode
+     chat.ts's own `pinConversationPromptTemplate` call site already
+     documents fixing (see FallbackAttempt.waitUntil's own doc comment for
+     why that call site could await instead, and this one cannot). Falls
+     back to the pre-fix bare `void` when no waitUntil was supplied (every
+     caller in this app's test suite today, since Hono's `c.executionCtx`
+     throws when no real `ExecutionContext` is behind the request) -- same
+     best-effort, fire-and-forget behavior those callers already exercise. */
+  const drainPrimary = primary.consumeStream({ onError: () => {} });
+  if (attempt.waitUntil) {
+    attempt.waitUntil(drainPrimary);
+  } else {
+    void drainPrimary;
+  }
 
   const backup = streamText(attempt.fallback);
   const backupOutcome = await probeUntilCommitted(backup);

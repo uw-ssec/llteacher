@@ -30,6 +30,8 @@ import { TranscriptListView } from "./views/TranscriptListView";
 import type { TranscriptListData } from "./views/TranscriptListView";
 import { TranscriptDetailView } from "./views/TranscriptDetailView";
 import type { TranscriptDetailData } from "./views/TranscriptDetailView";
+import { FeedbackDashboard } from "./views/FeedbackDashboard";
+import type { FeedbackDashboardData, FeedbackListItem } from "./views/FeedbackDashboard";
 import { TaCapabilitiesView } from "./views/TaCapabilitiesView";
 import { LLMConfigsDataLoader, type ConfigScreen } from "./views/LLMConfigsDataLoader";
 import { StudentsView } from "./views/StudentsView";
@@ -105,6 +107,11 @@ type View =
         returnToGrade?: { submissionId: string; studentName: string; sectionTitle: string };
       };
     }
+  // #90: offset lives here, not local useState in the view -- same reason
+  // transcript-list's own offset does (App.tsx's View doc comment above it):
+  // navigating away (e.g. to open a transcript) and back preserves which
+  // page of flags was showing.
+  | { kind: "feedback"; offset: number }
   | { kind: "llm-configs" }
   | { kind: "create-llm-config" }
   | { kind: "edit-llm-config"; configId: string }
@@ -140,6 +147,7 @@ const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "create-homework":    "Instructor Console · New Homework",
   "edit-homework":      "Instructor Console · Edit Homework",
   "submissions":        "Instructor Console · Submissions",
+  "feedback":           "Instructor Console · Feedback",
   "transcript-list":    "Instructor Console · Transcripts",
   "transcript-detail":  "Instructor Console · Transcript",
   "llm-configs":        "Instructor Console · LLM Configs",
@@ -258,6 +266,15 @@ export default function App() {
              the student app's own documented choice in App.tsx) -- stay
              on the current view rather than navigating to a broken one. */
         });
+    } else if (key === "feedback") {
+      // #90: unlike every other simple nav target below, this view carries
+      // required state (`offset`) -- the generic `{ kind: key } as View`
+      // cast a plain nav click takes for "students"/"llm-configs"/etc.
+      // would produce a `feedback` view with no `offset` field at all,
+      // silently relying on the render branch to paper over it. Starting a
+      // fresh visit at offset 0 explicitly is what every OTHER entry into
+      // this view (a page-forward click) already does honestly.
+      setView({ kind: "feedback", offset: 0 });
     } else {
       setView({ kind: key } as View);
     }
@@ -468,6 +485,45 @@ export default function App() {
                     offset={view.offset}
                     onBack={() => setView({ kind: "transcript-list", ...view.list })}
                     onChangeOffset={(offset) => setView({ ...view, offset })}
+                  />
+                ) : (
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
+                )
+              )}
+
+              {/* #90: student-flagged tutor responses. Grader-tier like
+                  Submissions above -- no canAuthor gate, a TA reads this
+                  the same as an instructor. */}
+              {view.kind === "feedback" && (
+                CURRENT_COURSE_ID ? (
+                  <FeedbackDashboardDataLoader
+                    courseId={CURRENT_COURSE_ID}
+                    offset={view.offset}
+                    onBack={() => setView({ kind: "homeworks" })}
+                    onChangeOffset={(offset) => setView({ ...view, offset })}
+                    onOpenTranscript={(item) =>
+                      setView({
+                        kind: "transcript-detail",
+                        conversationId: item.conversationId,
+                        offset: 0,
+                        // #90: a synthetic transcript-list context, not one
+                        // the instructor actually navigated through --
+                        // "back" from the transcript lands on that
+                        // (student, section)'s conversation list rather
+                        // than literally on the feedback dashboard.
+                        // TranscriptDetailView's own `list` field has no
+                        // "came from feedback" case to return to (it always
+                        // means transcript-list, per #29), and adding one
+                        // is more than this pilot-scale review surface
+                        // needs -- see this task's own report.
+                        list: {
+                          homeworkId: item.homeworkId,
+                          sectionId: item.sectionId,
+                          studentId: item.studentId,
+                          offset: 0,
+                        },
+                      })
+                    }
                   />
                 ) : (
                   <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
@@ -777,6 +833,163 @@ function TranscriptListDataLoader({
       onOpenTranscript={onOpenTranscript}
       onChangeOffset={onChangeOffset}
     />
+  );
+}
+
+/** #90: the instructor's course-wide flagged-response review. Same
+ *  loader/view split as every other admin{View,DataLoader} pair. */
+// #452 test: exported so App.test.tsx can drive its `offset` prop directly
+// (via rerender) rather than through the full App navigation tree -- the
+// real Previous/Next/Retry controls all compute their next target from
+// already-loaded `data`, which makes a genuinely double-dispatched,
+// out-of-order-resolving pair of requests structurally unreachable through
+// those controls alone (each re-click either targets the SAME offset the
+// effect's own dependency array already deduped, or the Retry affordance
+// itself unmounts the instant the first click's synchronous effect body
+// clears `pageError`). Driving `offset` directly is the only way to
+// reproduce the actual race #452 is about without inventing an unrelated
+// courseId-switching flow just to trigger it.
+export function FeedbackDashboardDataLoader({
+  courseId,
+  offset,
+  onBack,
+  onChangeOffset,
+  onOpenTranscript,
+}: {
+  courseId: string;
+  offset: number;
+  onBack: () => void;
+  onChangeOffset: (offset: number) => void;
+  onOpenTranscript: (item: FeedbackListItem) => void;
+}) {
+  const [data, setData] = useState<FeedbackDashboardData | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  /* Round-2 audit fix (Major, Functionality+Accessibility -- a regression
+     round 1 itself introduced): round 1 stopped clearing `data` on every
+     offset/courseId change so the previous page stays mounted (and
+     focused) while a new page fetches -- see the `isFetching` comment
+     below. But a failure on that *subsequent* fetch still shared
+     `loadError` with the *initial*-load error, and the render guard below
+     is `if (loadError && !data)` -- false once any page has ever loaded.
+     A failed page-turn therefore surfaced no error, no retry affordance,
+     and (once `isFetching` cleared) no live-region announcement: the
+     instructor was left on the same stale page with nothing saying the
+     click didn't work. Worse, clicking Previous/Next again recomputes the
+     same target offset from `data.offset`/`data.limit` -- which the failed
+     fetch never updated -- so the offset prop doesn't change, this
+     effect's `[courseId, offset, attempt]` deps don't see a change, and it
+     never re-fires. Stuck until the instructor navigates away and back.
+     `pageError` is the same split TranscriptDetailDataLoader's own
+     `loadMoreError` already makes below: a separate state that only fires
+     when `data` already holds a previous page worth keeping on screen, so
+     a page-turn failure never reaches the `!data` guard's full-page error.
+     Its own Retry button bumps `attempt` directly (the same counter the
+     initial-load retry uses), which re-fires the effect regardless of
+     whether `offset` itself changed -- sidestepping the dead-click problem
+     above entirely. */
+  const [pageError, setPageError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  /* #440 audit fix (Major, Accessibility): this effect used to call
+     setData(null) on every offset/courseId change -- i.e. every pagination
+     click and every filter change -- while the render logic below was
+     `if (!data) return null`. That unmounted the ENTIRE dashboard, including
+     whichever Previous/Next button the instructor had just clicked, on every
+     single page turn: a native-unmount focus loss (falls to <body>) far
+     broader than the boundary-page case Fix 2 (FeedbackDashboard.tsx)
+     addresses, and on the common path (paging through the *middle* of the
+     list), not just at an edge.
+     `isFetching` now carries the "a page is loading" signal instead of
+     `data === null`, so the previous page's data -- and its DOM, including
+     focus -- stays mounted and visible while the new page loads.
+     `data` is deliberately never cleared here: only the very first
+     load (no previous page ever fetched) has nothing worth keeping on
+     screen, and that's already covered by the `if (!data) return null`
+     below running before any fetch has resolved. */
+  const [isFetching, setIsFetching] = useState(false);
+  /* Round-2 audit fix: whether a page has ever loaded successfully, read
+     (not listed as an effect dependency) at the moment a fetch fails to
+     decide which error state -- `loadError` vs. `pageError` -- it belongs
+     to. A ref rather than reading `data` directly inside the effect
+     closure, so the effect's own dependency array doesn't need to (and
+     shouldn't) include `data`. */
+  const hasLoadedRef = useRef(false);
+  /* #452 (Cordero review, PR440): no request ordering meant a fast
+     Next-then-Previous click pair issues two overlapping fetches (offset=2,
+     then offset=0), and whichever RESPONSE happened to arrive last -- not
+     whichever was clicked last -- was what ended up on screen: ordinary
+     network jitter could land offset=2's data over a page the instructor
+     had already clicked back away from. `useTutorConversations.ts`'s own
+     `requestSeqRef` is the established idiom for exactly this in this
+     codebase: a monotonically-incrementing counter, bumped at DISPATCH
+     time, captured locally, and checked again before any state write --
+     so only the response belonging to the MOST RECENTLY dispatched
+     request is ever allowed to land, regardless of resolution order. */
+  const requestSeqRef = useRef(0);
+  useEffect(() => {
+    setIsFetching(true);
+    setLoadError(false);
+    setPageError(false);
+    const requestSeq = ++requestSeqRef.current;
+    const params = new URLSearchParams({ offset: String(offset) });
+    fetch(`/api/courses/${courseId}/instructor/feedback?${params}`)
+      .then((r) => {
+        if (!r.ok) throw new Error("failed");
+        return r.json();
+      })
+      .then((json: FeedbackDashboardData) => {
+        if (requestSeq !== requestSeqRef.current) return;
+        setData(json);
+        hasLoadedRef.current = true;
+      })
+      .catch(() => {
+        if (requestSeq !== requestSeqRef.current) return;
+        if (hasLoadedRef.current) setPageError(true);
+        else setLoadError(true);
+      })
+      .finally(() => {
+        if (requestSeq !== requestSeqRef.current) return;
+        setIsFetching(false);
+      });
+  }, [courseId, offset, attempt]);
+  // Only a failure with nothing already on screen to fall back to takes over
+  // the whole view -- a failed page-forward/back fetch with a previous page
+  // still loaded silently leaves that page up rather than replacing it.
+  if (loadError && !data)
+    return (
+      <AdminNotice
+        eyebrow="Could not load"
+        title="Feedback didn't load"
+        body="This course's flagged responses couldn't be fetched. Nothing has been altered — the records are intact on the server."
+        detail={`GET /api/courses/${courseId}/instructor/feedback`}
+        onRetry={() => setAttempt((n) => n + 1)}
+        secondaryAction={{ label: "Back to homeworks", onClick: onBack }}
+      />
+    );
+  if (!data) return null;
+  return (
+    <>
+      <FeedbackDashboard
+        data={data}
+        onBack={onBack}
+        onOpenTranscript={onOpenTranscript}
+        onChangeOffset={onChangeOffset}
+        isFetching={isFetching}
+      />
+      {pageError && (
+        /* Round-2 audit fix: inline, not a full-page error -- everything
+           above is still a real, valid read of a previously-loaded page,
+           so a failed page-turn fetch must not hide it. Same UI shape as
+           TranscriptDetailView's own loadMoreError alert (~lines 206-215
+           there); rendered here rather than inside FeedbackDashboard
+           itself since this task's brief scopes edits to this file. */
+        <div className="admin-alert" role="alert">
+          <span>Couldn't load that page. The page shown above hasn't changed.</span>
+          <button type="button" className="admin-link-button" onClick={() => setAttempt((n) => n + 1)}>
+            Retry
+          </button>
+        </div>
+      )}
+    </>
   );
 }
 

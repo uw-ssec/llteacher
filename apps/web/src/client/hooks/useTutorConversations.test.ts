@@ -344,6 +344,38 @@ describe("useTutorConversations", () => {
       expect(result.current.conversations[0]!.title).toBe(CONV_A.title);
     });
 
+    // #291: "Conversation not found" is updateConversationHandler's own
+    // internal vocabulary for its 404 -- it read as a system fault
+    // rendered permanently beside a rail title the student just tried to
+    // rename themselves. Translated here, the one place this route's
+    // error text reaches the student.
+    it("translates a 404's server vocabulary into student-facing copy", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+          if (init?.method === "PATCH") {
+            return new Response(JSON.stringify({ error: "Conversation not found" }), { status: 404 });
+          }
+          return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
+        }),
+      );
+
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      let caught: unknown;
+      await act(async () => {
+        try {
+          await result.current.renameConversation("conv-a", "Attempted rename");
+        } catch (err) {
+          caught = err;
+        }
+      });
+
+      expect((caught as Error).message).toBe("This conversation is no longer available.");
+      expect(result.current.conversations[0]!.title).toBe(CONV_A.title);
+    });
+
     it("rejects with a generic error on a network failure, and reverts the optimistic update", async () => {
       vi.stubGlobal(
         "fetch",
@@ -370,67 +402,169 @@ describe("useTutorConversations", () => {
     });
 
     // #223: renameConversation must not change identity when the
-    // conversations list changes for an unrelated reason (e.g. a #216
-    // bumpConversation call) -- previously it depended on `conversations`
-    // directly, so every list update (including on a completely different
-    // row) produced a new renameConversation function, which was the actual
-    // cause of TutorConversationsList's effects re-running every render.
-    it("keeps the same function identity across a bumpConversation-driven list update", async () => {
-      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 })));
+    // conversations list changes for an unrelated reason (e.g. a #216/#438
+    // reconcileConversationCount call) -- previously it depended on
+    // `conversations` directly, so every list update (including on a
+    // completely different row) produced a new renameConversation function,
+    // which was the actual cause of TutorConversationsList's effects
+    // re-running every render.
+    it("keeps the same function identity across a reconcileConversationCount-driven list update", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = typeof input === "string" ? input : input.toString();
+          if (url === "/api/conversations/conv-a") {
+            return new Response(JSON.stringify({ ...CONV_A, messageCount: CONV_A.messageCount + 2 }), { status: 200 });
+          }
+          return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
+        }),
+      );
       const { result } = renderHook(() => useTutorConversations("course-a"));
       await waitFor(() => expect(result.current.loading).toBe(false));
 
       const before = result.current.renameConversation;
-      act(() => {
-        result.current.bumpConversation("conv-a");
+      await act(async () => {
+        await result.current.reconcileConversationCount("conv-a");
       });
-      expect(result.current.conversations[0]!.messageCount).toBe(CONV_A.messageCount + 1);
+      expect(result.current.conversations[0]!.messageCount).toBe(CONV_A.messageCount + 2);
       expect(result.current.renameConversation).toBe(before);
     });
   });
 
-  // #216
-  describe("bumpConversation", () => {
-    it("increments messageCount and updates updatedAt for the given conversation", async () => {
-      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 })));
+  // #216, #292, #438
+  describe("reconcileConversationCount", () => {
+    // #438: replaces the old delta-guessing bumpConversation(id, delta) --
+    // this fetches GET /api/conversations/:id and sets messageCount/
+    // updatedAt directly from whatever that response says, rather than
+    // adding a client-computed guess to whatever count was already showing.
+    it("GETs /api/conversations/:id and sets messageCount/updatedAt from the response, not a client-computed delta", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/conversations/conv-a") {
+          return new Response(
+            JSON.stringify({ ...CONV_A, messageCount: 9, updatedAt: "2026-08-09T00:00:00.000Z" }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
       const { result } = renderHook(() => useTutorConversations("course-a"));
       await waitFor(() => expect(result.current.loading).toBe(false));
 
-      act(() => {
-        result.current.bumpConversation("conv-a");
+      await act(async () => {
+        await result.current.reconcileConversationCount("conv-a");
       });
 
-      expect(result.current.conversations[0]!.messageCount).toBe(CONV_A.messageCount + 1);
-      expect(result.current.conversations[0]!.updatedAt).not.toBe(CONV_A.updatedAt);
+      // Not CONV_A.messageCount + anything -- the server's own number,
+      // verbatim, which is exactly the point: the server may have persisted
+      // only one row for a turn the client's own SSE read would have
+      // guessed at two rows for (#438's own motivating gap).
+      expect(result.current.conversations[0]!.messageCount).toBe(9);
+      expect(result.current.conversations[0]!.updatedAt).toBe("2026-08-09T00:00:00.000Z");
+      expect(fetchMock).toHaveBeenCalledWith("/api/conversations/conv-a");
     });
 
-    it("re-sorts the bumped conversation to the top, matching the server's updatedAt-desc ordering", async () => {
+    // #438: a turn that persists no assistant row (chat.ts's persistence
+    // gate declines the reply -- unrenderable content, or a finish reason
+    // outside its allowlist) still writes the student's own row, so the
+    // authoritative count moves by exactly 1, not the 2 a completed-looking
+    // stream would have been guessed at under the old delta scheme. This is
+    // the requirement's own regression case at the hook level: the rail
+    // must agree with the server's real count(*), whatever it is.
+    it("leaves the rail agreeing with the server's count(*) when a turn persisted only the student's row", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = typeof input === "string" ? input : input.toString();
+          if (url === "/api/conversations/conv-a") {
+            // Server persisted only ONE new row for this turn: 4 -> 5, not 6.
+            return new Response(JSON.stringify({ ...CONV_A, messageCount: 5 }), { status: 200 });
+          }
+          return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
+        }),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.conversations[0]!.messageCount).toBe(4);
+
+      await act(async () => {
+        await result.current.reconcileConversationCount("conv-a");
+      });
+
+      expect(result.current.conversations[0]!.messageCount).toBe(5);
+    });
+
+    it("re-sorts the reconciled conversation to the top, matching the server's updatedAt-desc ordering", async () => {
       const CONV_B = { ...CONV_A, id: "conv-b", title: "Chat B", updatedAt: "2026-08-05T00:00:00.000Z" };
       // CONV_B is more recently updated than CONV_A, so it's returned first
       // (matches listConversationsForOwner's desc(updatedAt) ordering).
       vi.stubGlobal(
         "fetch",
-        vi.fn(async () => new Response(JSON.stringify({ items: [CONV_B, CONV_A], nextCursor: null }), { status: 200 })),
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = typeof input === "string" ? input : input.toString();
+          if (url === "/api/conversations/conv-a") {
+            return new Response(
+              JSON.stringify({ ...CONV_A, messageCount: CONV_A.messageCount + 2, updatedAt: "2026-08-06T00:00:00.000Z" }),
+              { status: 200 },
+            );
+          }
+          return new Response(JSON.stringify({ items: [CONV_B, CONV_A], nextCursor: null }), { status: 200 });
+        }),
       );
       const { result } = renderHook(() => useTutorConversations("course-a"));
       await waitFor(() => expect(result.current.loading).toBe(false));
       expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-b", "conv-a"]);
 
-      act(() => {
-        result.current.bumpConversation("conv-a");
+      await act(async () => {
+        await result.current.reconcileConversationCount("conv-a");
       });
 
       expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-a", "conv-b"]);
     });
 
     it("is a no-op for an id not currently in the list", async () => {
-      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 })));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = typeof input === "string" ? input : input.toString();
+          if (url === "/api/conversations/conv-nonexistent") {
+            return new Response(JSON.stringify({ ...CONV_A, id: "conv-nonexistent" }), { status: 200 });
+          }
+          return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
+        }),
+      );
       const { result } = renderHook(() => useTutorConversations("course-a"));
       await waitFor(() => expect(result.current.loading).toBe(false));
 
-      act(() => {
-        result.current.bumpConversation("conv-nonexistent");
+      await act(async () => {
+        await result.current.reconcileConversationCount("conv-nonexistent");
       });
+
+      expect(result.current.conversations).toEqual([CONV_A]);
+    });
+
+    // #438: a fetch failure (network error or non-2xx) must not throw into
+    // the caller -- trackTutorTurnCompletion invokes this fire-and-forget
+    // with nothing to catch a rejection -- and must leave whatever count
+    // was already showing untouched rather than corrupting it.
+    it("fails silently and leaves the count untouched on a fetch error", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = typeof input === "string" ? input : input.toString();
+          if (url === "/api/conversations/conv-a") return new Response("nope", { status: 500 });
+          return new Response(JSON.stringify({ items: [CONV_A], nextCursor: null }), { status: 200 });
+        }),
+      );
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      await expect(
+        act(async () => {
+          await result.current.reconcileConversationCount("conv-a");
+        }),
+      ).resolves.not.toThrow();
 
       expect(result.current.conversations).toEqual([CONV_A]);
     });
@@ -680,7 +814,7 @@ describe("useTutorConversations", () => {
         result.current.refetch();
       });
       await act(async () => {
-        await result.current.createConversation("Brand new");
+        await result.current.createConversation();
       });
       expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-new"]);
 
@@ -706,9 +840,16 @@ describe("useTutorConversations", () => {
   });
 
   /* ------------------------------------------------------------------------
-     #310: bump ordering.
+     #310, #438: reconciliation ordering. Each test here routes fetch by
+     URL: the initial `?courseId=...` list GET returns the seeded rows, and
+     a single-conversation `/api/conversations/conv-N` GET (reconcile's own
+     request) returns whatever that test wants the "server's real row" to
+     say -- letting these assert the reorder is driven by the SERVER's own
+     updatedAt, not a client-constructed one (the old bumpConversation used
+     `new Date().toISOString()` here; reconcileConversationCount never
+     constructs a timestamp at all).
      ---------------------------------------------------------------------- */
-  describe("bumpConversation ordering (#310)", () => {
+  describe("reconcileConversationCount ordering (#310, #438)", () => {
     const rows = (updatedAts: string[]) => ({
       items: updatedAts.map((updatedAt, i) => ({
         ...CONV_A,
@@ -719,74 +860,171 @@ describe("useTutorConversations", () => {
       nextCursor: null,
     });
 
-    it("does not reorder anything when the bumped row is already first", async () => {
+    function stubFetch(
+      listUpdatedAts: string[],
+      singleResponses: Record<string, { messageCount?: number; updatedAt?: string }>,
+    ) {
       vi.stubGlobal(
         "fetch",
-        vi.fn(async () =>
-          new Response(
-            JSON.stringify(rows(["2026-08-03T00:00:00.000Z", "2026-08-02T00:00:00.000Z", "2026-08-01T00:00:00.000Z"])),
-            { status: 200 },
-          ),
-        ),
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = typeof input === "string" ? input : input.toString();
+          const singleMatch = url.match(/^\/api\/conversations\/(conv-\d+)$/);
+          if (singleMatch) {
+            const id = singleMatch[1]!;
+            const overrides = singleResponses[id] ?? {};
+            return new Response(
+              JSON.stringify({ ...CONV_A, id, updatedAt: overrides.updatedAt ?? CONV_A.updatedAt, messageCount: overrides.messageCount ?? CONV_A.messageCount }),
+              { status: 200 },
+            );
+          }
+          return new Response(JSON.stringify(rows(listUpdatedAts)), { status: 200 });
+        }),
+      );
+    }
+
+    it("does not reorder anything when the reconciled row is already first", async () => {
+      stubFetch(
+        ["2026-08-03T00:00:00.000Z", "2026-08-02T00:00:00.000Z", "2026-08-01T00:00:00.000Z"],
+        { "conv-0": { messageCount: CONV_A.messageCount + 2, updatedAt: "2026-08-04T00:00:00.000Z" } },
       );
       const { result } = renderHook(() => useTutorConversations("course-a"));
       await waitFor(() => expect(result.current.conversations).toHaveLength(3));
       const before = result.current.conversations;
 
-      act(() => {
-        result.current.bumpConversation("conv-0");
+      await act(async () => {
+        await result.current.reconcileConversationCount("conv-0");
       });
 
       // The overwhelmingly common case: you are talking to the conversation
       // that is already at the top. Rows must not shuffle under a student
       // who might be reading them.
       expect(result.current.conversations.map((c) => c.id)).toEqual(before.map((c) => c.id));
-      expect(result.current.conversations[0]!.messageCount).toBe(before[0]!.messageCount + 1);
+      expect(result.current.conversations[0]!.messageCount).toBe(before[0]!.messageCount + 2);
     });
 
-    it("moves a bumped row to the front without disturbing the rest", async () => {
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async () =>
-          new Response(
-            JSON.stringify(rows(["2026-08-03T00:00:00.000Z", "2026-08-02T00:00:00.000Z", "2026-08-01T00:00:00.000Z"])),
-            { status: 200 },
-          ),
-        ),
+    it("moves a reconciled row to the front without disturbing the rest", async () => {
+      stubFetch(
+        ["2026-08-03T00:00:00.000Z", "2026-08-02T00:00:00.000Z", "2026-08-01T00:00:00.000Z"],
+        { "conv-2": { messageCount: CONV_A.messageCount + 2, updatedAt: "2026-08-10T00:00:00.000Z" } },
       );
       const { result } = renderHook(() => useTutorConversations("course-a"));
       await waitFor(() => expect(result.current.conversations).toHaveLength(3));
 
-      act(() => {
-        result.current.bumpConversation("conv-2");
+      await act(async () => {
+        await result.current.reconcileConversationCount("conv-2");
       });
 
       expect(result.current.conversations.map((c) => c.id)).toEqual(["conv-2", "conv-0", "conv-1"]);
     });
+  });
 
-    it("still promotes the bumped row when the client clock is behind the server's", async () => {
-      // The defect this replaces: the old comparator sorted the optimistic
-      // CLIENT timestamp against SERVER timestamps. These rows are stamped
-      // far in the future relative to the test's own clock, so a
-      // date-comparing sort would leave the bumped row at the bottom -- a
-      // completed turn pushing the active conversation DOWN the rail.
+  /* ------------------------------------------------------------------------
+     #310: recentlyMovedId -- the rail's "a real reorder happened" signal,
+     used to render a brief highlight on the row that moved. Same
+     URL-routed fetch stub as the ordering block above.
+     ---------------------------------------------------------------------- */
+  describe("recentlyMovedId (#310, #438)", () => {
+    const rows = (updatedAts: string[]) => ({
+      items: updatedAts.map((updatedAt, i) => ({
+        ...CONV_A,
+        id: `conv-${i}`,
+        title: `Chat ${i}`,
+        updatedAt,
+      })),
+      nextCursor: null,
+    });
+
+    function stubFetch(singleUpdatedAts: Record<string, string>) {
       vi.stubGlobal(
         "fetch",
-        vi.fn(async () =>
-          new Response(
-            JSON.stringify(rows(["2099-01-03T00:00:00.000Z", "2099-01-02T00:00:00.000Z", "2099-01-01T00:00:00.000Z"])),
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = typeof input === "string" ? input : input.toString();
+          const singleMatch = url.match(/^\/api\/conversations\/(conv-\d+)$/);
+          if (singleMatch) {
+            const id = singleMatch[1]!;
+            return new Response(
+              JSON.stringify({ ...CONV_A, id, updatedAt: singleUpdatedAts[id] ?? CONV_A.updatedAt, messageCount: CONV_A.messageCount + 2 }),
+              { status: 200 },
+            );
+          }
+          return new Response(
+            JSON.stringify(rows(["2026-08-03T00:00:00.000Z", "2026-08-02T00:00:00.000Z", "2026-08-01T00:00:00.000Z"])),
             { status: 200 },
-          ),
-        ),
+          );
+        }),
       );
+    }
+
+    it("stays null when the reconciled row is already first (a no-op reorder)", async () => {
+      stubFetch({ "conv-0": "2026-08-04T00:00:00.000Z" });
       const { result } = renderHook(() => useTutorConversations("course-a"));
       await waitFor(() => expect(result.current.conversations).toHaveLength(3));
 
-      act(() => {
-        result.current.bumpConversation("conv-2");
+      await act(async () => {
+        await result.current.reconcileConversationCount("conv-0");
       });
 
-      expect(result.current.conversations[0]!.id).toBe("conv-2");
+      expect(result.current.recentlyMovedId).toBeNull();
+    });
+
+    it("is set to the reconciled row's id when a real reorder happens", async () => {
+      stubFetch({ "conv-2": "2026-08-10T00:00:00.000Z" });
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toHaveLength(3));
+
+      await act(async () => {
+        await result.current.reconcileConversationCount("conv-2");
+      });
+
+      expect(result.current.recentlyMovedId).toBe("conv-2");
+    });
+
+    it("clears itself automatically after the highlight window", async () => {
+      stubFetch({ "conv-2": "2026-08-10T00:00:00.000Z" });
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      // Real timers for the initial fetch/render settling -- testing-library's
+      // waitFor polls on its own timers, which fake timers would also freeze.
+      await waitFor(() => expect(result.current.conversations).toHaveLength(3));
+
+      // Fake timers must be active BEFORE the reconcile call, not just
+      // before advancing them -- setTimeout below is scheduled the moment
+      // the reorder happens (inside reconcileConversationCount, once its
+      // fetch resolves), so enabling fake timers afterward would leave that
+      // timer registered against the real clock, immune to
+      // advanceTimersByTime. The fetch mock itself resolves via a plain
+      // microtask, not a real timer, so it still settles fine under fake
+      // timers.
+      vi.useFakeTimers();
+      try {
+        await act(async () => {
+          await result.current.reconcileConversationCount("conv-2");
+        });
+        expect(result.current.recentlyMovedId).toBe("conv-2");
+
+        act(() => {
+          vi.advanceTimersByTime(1500);
+        });
+        expect(result.current.recentlyMovedId).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a second real reorder replaces the highlighted id rather than stacking", async () => {
+      stubFetch({ "conv-2": "2026-08-10T00:00:00.000Z", "conv-1": "2026-08-11T00:00:00.000Z" });
+      const { result } = renderHook(() => useTutorConversations("course-a"));
+      await waitFor(() => expect(result.current.conversations).toHaveLength(3));
+
+      await act(async () => {
+        await result.current.reconcileConversationCount("conv-2");
+      });
+      expect(result.current.recentlyMovedId).toBe("conv-2");
+
+      await act(async () => {
+        // conv-2 is now first; conv-1 (second) is the one that moves this time.
+        await result.current.reconcileConversationCount("conv-1");
+      });
+      expect(result.current.recentlyMovedId).toBe("conv-1");
     });
   });
 });

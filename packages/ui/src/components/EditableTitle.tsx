@@ -25,19 +25,23 @@ import { PencilSimple } from "@phosphor-icons/react";
    click-to-select and this component's nested pencil button coexist
    without a nested-<button> HTML violation.
 
-   Two distinct error paths, matching the issue's two separate requirement
-   lines ("show inline guidance for invalid input" vs "on failure, revert
-   and show inline error"):
+   Two distinct error paths, both of which now STAY in edit mode (#291):
      - Client-side validation (empty-after-trim, over maxLength) never
-       calls onSave at all -- it shows an error and STAYS in edit mode so
+       calls onSave at all -- it shows an error and stays in edit mode so
        the student doesn't lose what they typed and can just fix it.
-     - A rejected onSave (network/server failure) is terminal for this
-       attempt: the input reverts to the last known-good `value` and edit
-       mode closes, with the error left visible next to the (reverted)
-       read-only title. This matches Pitfall #1 in the issue's Code
-       Framework ("on rejection, the component reverts pendingValue to
-       value") and Testing Strategy #2 ("UI reverts to the old title AND
-       shows inline error").
+     - A rejected onSave (network/server failure) used to revert
+       `pendingValue` to the last known-good `value` and close edit mode,
+       leaving the error next to a read-only title -- which discarded
+       whatever the student had just typed on a merely transient failure,
+       and left the error with no dismiss affordance other than re-opening
+       the editor (#291's "crushes the input" report). It now leaves edit
+       mode OPEN with the student's attempted text still in the input and
+       refocuses it (see the isSubmitting effect below -- the input is
+       disabled for the duration of the request, and a disabled element
+       cannot hold focus, so the refocus has to happen after that flips
+       back). `localError` itself is cleared on the next keystroke
+       (`onChange` below) rather than lingering until the editor is
+       reopened.
 
    Owner-only: when `isEditable` is false, this renders inert text with no
    pencil button at all (not a disabled one) -- a non-owner should not even
@@ -74,10 +78,6 @@ export interface EditableTitleProps {
   maxLength?: number;
   /** False hides the rename affordance entirely (non-owner). Default true. */
   isEditable?: boolean;
-  /** Optional externally-supplied error, shown alongside (behind) any
-   *  locally-generated one -- for a caller that wants to surface a error
-   *  from somewhere other than this component's own onSave call. */
-  error?: string;
   className?: string;
   /** aria-label prefix for the pencil rename trigger, e.g. "Rename". */
   renameLabel?: string;
@@ -107,7 +107,6 @@ export function EditableTitle({
   onSave,
   maxLength = 100,
   isEditable = true,
-  error,
   className = "",
   renameLabel = "Rename",
   onActivateValue,
@@ -117,6 +116,10 @@ export function EditableTitle({
 }: EditableTitleProps) {
   const counterId = useId();
   const hintId = useId();
+  // client-feedback-ui audit, Fix 5: id target for the failed-save error,
+  // referenced from the input's own aria-describedby below (only while an
+  // error is actually showing) -- see that prop's own doc comment.
+  const errorId = useId();
   const [isEditing, setIsEditing] = useState(false);
   const [pendingValue, setPendingValue] = useState(value);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -152,6 +155,29 @@ export function EditableTitle({
     wasEditingRef.current = isEditing;
   }, [isEditing]);
 
+  // #291: a failed save keeps edit mode open (see commitSave's catch
+  // branch and the doc comment above) instead of closing it, but the
+  // input was disabled for the duration of the request and a disabled
+  // element cannot hold focus -- it fell back to <body> the moment
+  // isSubmitting flipped true. Refocus once submitting ends while still
+  // editing with a fresh local error, i.e. exactly the failure path: the
+  // success path already closes edit mode (isEditing false) in the same
+  // batched update that clears isSubmitting, so this condition never
+  // fires there, and the two client-validation branches (empty/too-long)
+  // never set isSubmitting true in the first place, so this effect never
+  // fires for them either -- the input was never disabled or defocused.
+  useEffect(() => {
+    if (!isSubmitting && isEditing && localError) {
+      inputRef.current?.focus();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately
+    // keyed on isSubmitting's own true->false transition only; isEditing
+    // and localError are read for their value at that moment, not watched
+    // for their own changes (see the comment above for why including them
+    // would be wrong: entering edit mode or a client-validation error
+    // must not re-trigger this).
+  }, [isSubmitting]);
+
   if (!isEditable) {
     if (onActivateValue) {
       return (
@@ -162,12 +188,17 @@ export function EditableTitle({
           aria-label={activateLabel}
           aria-describedby={activateDescribedBy}
           aria-current={isActive ? "true" : undefined}
+          title={value}
         >
           {value}
         </button>
       );
     }
-    return <span className={`editable-title__text ${className}`.trim()}>{value}</span>;
+    return (
+      <span className={`editable-title__text ${className}`.trim()} title={value}>
+        {value}
+      </span>
+    );
   }
 
   const handleEdit = () => {
@@ -207,10 +238,13 @@ export function EditableTitle({
       suppressNextBlurRef.current = true;
       setIsEditing(false);
     } catch (err) {
-      setPendingValue(value); // revert -- see doc comment above
+      // #291: stays in edit mode with the student's typed text intact --
+      // see the doc comment above for why this no longer reverts
+      // `pendingValue` or closes the editor. Refocusing happens in the
+      // isSubmitting effect below, not here: the input is still disabled
+      // (isSubmitting hasn't flipped back to false yet) and a disabled
+      // element cannot take focus.
       setLocalError(err instanceof Error ? err.message : "Failed to save. Please try again.");
-      suppressNextBlurRef.current = true;
-      setIsEditing(false);
     } finally {
       setIsSubmitting(false);
     }
@@ -241,8 +275,6 @@ export function EditableTitle({
     }
   };
 
-  const displayError = localError ?? error;
-
   if (!isEditing) {
     return (
       <span className={`editable-title ${className}`.trim()}>
@@ -260,11 +292,19 @@ export function EditableTitle({
             aria-label={activateLabel}
             aria-describedby={activateDescribedBy}
             aria-current={isActive ? "true" : undefined}
+            title={value}
           >
             {value}
           </button>
         ) : (
-          <span className="editable-title__value">{value}</span>
+          // #287: `title` (the HTML hover-tooltip attribute, unrelated to
+          // this component's own `value`/conversation-title concept) so a
+          // rail row truncated by this span's own `text-overflow: ellipsis`
+          // (packages/ui/styles.css) can still be read in full on hover --
+          // the only way to see it otherwise was entering rename mode.
+          <span className="editable-title__value" title={value}>
+            {value}
+          </span>
         )}
         <button
           ref={pencilRef}
@@ -286,9 +326,9 @@ export function EditableTitle({
             aria-hidden="true"
           />
         </button>
-        {displayError && (
+        {localError && (
           <span className="editable-title__error" role="alert">
-            {displayError}
+            {localError}
           </span>
         )}
       </span>
@@ -302,7 +342,15 @@ export function EditableTitle({
         type="text"
         className="editable-title__input"
         value={pendingValue}
-        onChange={(e) => setPendingValue(e.target.value)}
+        onChange={(e) => {
+          setPendingValue(e.target.value);
+          // #291: a correction dismisses the error naturally, on the next
+          // keystroke -- it used to persist until the editor was reopened
+          // (localError was cleared in exactly two other places: entering
+          // edit mode and pressing Escape), so a student who had already
+          // fixed a rejected title kept reading the stale complaint.
+          if (localError) setLocalError(null);
+        }}
         onBlur={handleBlur}
         onKeyDown={handleKeyDown}
         onClick={(e) => e.stopPropagation()}
@@ -317,8 +365,22 @@ export function EditableTitle({
 
            Order matters: hint first, then the counter when present.
            aria-describedby is announced on focus, so the static hint should
-           lead; the counter is appended only when it is close to relevant. */
-        aria-describedby={showCounter ? `${hintId} ${counterId}` : hintId}
+           lead; the counter is appended only when it is close to relevant.
+
+           client-feedback-ui audit, Fix 5: `errorId` is appended the same
+           way -- only while `localError` is actually showing, so a
+           screen-reader user focused on this input (or refocused onto it
+           after a failed save; see the isSubmitting effect above) is told
+           about the failure instead of it being sighted-only, and the input
+           never carries a dangling reference to an error span that isn't
+           rendered. Placed right after the hint, before the counter: it's
+           the more urgent of the two when both are present (a save just
+           failed), and the counter is rarely relevant at the same moment
+           (an over-length title is caught by its own dedicated error
+           branch below, not usually alongside a fresh in-flight failure). */
+        aria-describedby={[hintId, localError ? errorId : null, showCounter ? counterId : null]
+          .filter(Boolean)
+          .join(" ")}
         disabled={isSubmitting}
       />
       {/* #310: the native `maxLength` attribute is gone. It clamped typing
@@ -374,9 +436,9 @@ export function EditableTitle({
           {remaining >= 0 ? `${remaining} left` : `${-remaining} over`}
         </span>
       )}
-      {displayError && (
-        <span className="editable-title__error" role="alert">
-          {displayError}
+      {localError && (
+        <span id={errorId} className="editable-title__error" role="alert">
+          {localError}
         </span>
       )}
     </span>

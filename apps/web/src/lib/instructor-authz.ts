@@ -7,6 +7,21 @@ import type { AuthContext } from "../server/middleware/roles";
 /* --------------------------------------------------------------------------
    instructor-authz — transcript-specific authorization helpers (#29).
 
+   #90 review finding (Important #1): recordTranscriptAccess's audit half is
+   reused as-is by routes/feedback.ts's listCourseFeedbackHandler --
+   browsing a course's flagged responses returns the identical class of
+   student-record content (decrypted names, response text) the transcript
+   list already audits, and the brief's own "don't fork a second authz
+   helper" invariant applies to the audit hook exactly as much as it does to
+   canReadCourseTranscripts. TranscriptAccessEvent.action grew a third
+   variant ("feedback-list") rather than a new function, since nothing
+   downstream branches on this module's name -- only on the AUDIT_ACTIONS
+   string it writes, and FEEDBACK_LIST_VIEWED (server/utils/audit.ts) is its
+   own distinct value. The module keeps its original name/doc framing below
+   (still true: transcripts are still the reason this file exists), with
+   this one addition layered on rather than a rename that would touch every
+   existing #29 call site for no behavior change.
+
    Deliberately thin. The actual role-membership machinery already lives in
    two places, both already tested, and this module reimplements neither:
 
@@ -67,9 +82,14 @@ export interface TranscriptAccessEvent {
   courseId: string;
   /** Present for a single-transcript read; absent for a list read (the
    *  audit-worthy fact for a list is "this course's roster was browsed",
-   *  not any one conversation). */
+   *  not any one conversation). Never set for "feedback-list" -- a
+   *  feedback-dashboard read has no single-conversation drill-in of its
+   *  own to name; the transcript a flag links into is a SEPARATE detail
+   *  read that audits itself when it's actually opened. */
   conversationId?: string;
-  action: "list" | "detail";
+  /** #90: "feedback-list" added alongside the original "list"/"detail" --
+   *  see this module's own #90 doc comment above. */
+  action: "list" | "detail" | "feedback-list";
 }
 
 /** FERPA: every transcript view is student-record access and must be
@@ -113,9 +133,19 @@ export async function recordTranscriptAccess(
     return;
   }
   const isDetailRead = event.action === "detail" && event.conversationId !== undefined;
+  // #90: "feedback-list" is its own AUDIT_ACTIONS value (FEEDBACK_LIST_VIEWED)
+  // -- distinct from TRANSCRIPT_LIST_VIEWED even though both are course-
+  // scoped list reads, because they name different resources being browsed
+  // (see FEEDBACK_LIST_VIEWED's own doc comment, server/utils/audit.ts).
+  const auditAction =
+    event.action === "feedback-list"
+      ? AUDIT_ACTIONS.FEEDBACK_LIST_VIEWED
+      : isDetailRead
+        ? AUDIT_ACTIONS.TRANSCRIPT_VIEWED
+        : AUDIT_ACTIONS.TRANSCRIPT_LIST_VIEWED;
   await auditBestEffort(db, [orgScope], {
     actorUserId: event.viewerId,
-    action: isDetailRead ? AUDIT_ACTIONS.TRANSCRIPT_VIEWED : AUDIT_ACTIONS.TRANSCRIPT_LIST_VIEWED,
+    action: auditAction,
     targetType: isDetailRead ? "conversation" : "course",
     targetId: isDetailRead ? event.conversationId! : event.courseId,
   });

@@ -794,6 +794,15 @@ export interface AIMessageProps {
    *  turn that has not been persisted yet (a live stream), in which case no
    *  time is rendered rather than a fabricated one. */
   createdAt?: string;
+  /** #90: an app-supplied affordance rendered in this turn's meta row,
+   *  alongside Copy and the time -- e.g. the student feedback "flag this
+   *  response" control (apps/web's ResponseFeedback.tsx). packages/ui knows
+   *  nothing about flags, courses, or an API: it only reserves the slot,
+   *  the same way ConversationView's `headerActions` reserves one for a
+   *  surface-specific control instead of this package hardcoding one.
+   *  `undefined` renders nothing, matching every other optional slot on
+   *  this component. */
+  feedbackSlot?: React.ReactNode;
   children: React.ReactNode;
 }
 
@@ -946,6 +955,7 @@ function CopyButton({ source, subject }: { source: string; subject: string }) {
 function AIMessage({
   isStreaming = false,
   createdAt,
+  feedbackSlot,
   children,
 }: Omit<AIMessageProps, "role">) {
   const source = collectTurnSource(children);
@@ -993,12 +1003,13 @@ function AIMessage({
           them reachable without a pointer; styles.css reveals them on
           :focus-within for the same reason. The TIME is not hidden with them:
           it is information, not an affordance, so it stays legible at rest. */}
-      {(source !== "" || createdAt) && (
+      {(source !== "" || createdAt || feedbackSlot) && (
         <div className="message__actions">
           {source !== "" && !isStreaming && (
             <CopyButton source={source} subject="the tutor's message" />
           )}
           <TurnTime createdAt={createdAt} />
+          {feedbackSlot}
         </div>
       )}
     </div>
@@ -1033,10 +1044,32 @@ function renderStudentBody(text: ReactNode, onRun?: (code: string) => Promise<RC
   );
 }
 
-export function Message(props: MessageProps) {
+/** client-feedback-ui audit, Fix 4: `React.memo`'d so a message row skips
+ *  re-rendering when neither its own props nor its own message have
+ *  changed -- the same #310 treatment ConversationListItem already got for
+ *  the tutor rail (see that component's own doc comment). The transcript
+ *  re-renders on every composer keystroke, every retry-cooldown tick, and
+ *  every "load older messages" state change, none of which touch most rows
+ *  on screen -- up to 200 hydrated messages, before this, re-rendered on
+ *  every one of those regardless.
+ *
+ *  Default shallow prop comparison (no custom comparator), matching
+ *  ConversationListItem's own plain `memo(Component)` call -- deliberately
+ *  NOT re-deriving equality by hand here, which would drift out of step
+ *  the moment a new prop is added to AIMessageProps/StudentMessageProps.
+ *  This only pays off because ConversationView.tsx's own renderMessageRow
+ *  call site keeps its props stable across those unrelated re-renders:
+ *  `children`/`createdAt`/`isStreaming` are read straight off the `msg`
+ *  object (stable for as long as the underlying message itself hasn't
+ *  changed), and `feedbackSlot` is now a per-id-cached value rather than a
+ *  freshly-constructed element on every call (see that file's own doc
+ *  comment on `getFeedbackSlot`, right above where this component is
+ *  rendered, for the full reasoning and its one known, deliberate gap
+ *  during active streaming). */
+export const Message = memo(function Message(props: MessageProps) {
   if (props.role === "ai") {
     return (
-      <AIMessage isStreaming={props.isStreaming} createdAt={props.createdAt}>
+      <AIMessage isStreaming={props.isStreaming} createdAt={props.createdAt} feedbackSlot={props.feedbackSlot}>
         {props.children}
       </AIMessage>
     );
@@ -1087,4 +1120,4 @@ export function Message(props: MessageProps) {
       </span>
     </div>
   );
-}
+});

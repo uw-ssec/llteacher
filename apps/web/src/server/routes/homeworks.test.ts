@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 import {
   listHomeworksHandler,
@@ -24,6 +24,13 @@ const findManySections = vi.fn();
 // every existing test (none of which cares about widgets) is unaffected;
 // tests that do care call .mockReset().mockResolvedValue([...]) themselves.
 const findManyWidgets = vi.fn().mockResolvedValue([]);
+// #303/#309: vitest.config.ts now sets `restoreMocks: true`, which restores
+// every vi.fn() (including this one) to a no-op before EACH test -- so the
+// "defaults to empty" comment above is no longer true merely by assigning it
+// once at module load; it has to be re-applied every test for it to hold.
+beforeEach(() => {
+  findManyWidgets.mockReset().mockResolvedValue([]);
+});
 // listHomeworksForCourse's section-count query (Task 23) is a plain
 // `db.select({...}).from(sections).where(...).groupBy(...)` chain, not a
 // db.query.*.findMany call -- faked separately from the two above.
@@ -1170,6 +1177,15 @@ describe("GET /api/courses/:courseId/homeworks — TA capabilities (#172)", () =
 
   async function listAs(authContext: ReturnType<typeof fakeAuthContext>) {
     findManyHomeworks.mockReset().mockResolvedValue(ROWS);
+    // #303/#309: this block never set up its own section-count query --
+    // it happened to work only because an earlier describe in file
+    // execution order left selectSectionCounts pointed at a working chain,
+    // exactly the cross-test leakage `restoreMocks: true` now closes off.
+    // These tests don't care about counts, so an empty groupBy result
+    // (matching mixedStatusHomeworks' own choice above) is a safe default.
+    selectSectionCounts.mockReset().mockReturnValue({
+      from: () => ({ where: () => ({ groupBy: async () => [] }) }),
+    });
     const res = await buildApp(authContext).request(
       "/api/courses/course-a/homeworks", {}, TEST_ENV,
     );

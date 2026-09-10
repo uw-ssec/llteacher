@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent } from "@testing-library/react";
+import { memo } from "react";
+import { render, screen, cleanup, fireEvent, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConversationView } from "./ConversationView";
 import type { MessageData } from "./ConversationView";
@@ -112,6 +113,137 @@ describe("ConversationView error row (#144)", () => {
   });
 });
 
+/* #286 (requirement 5): a rate-limited student had a Retry button that was
+   always live, even though the server had just said (via `Retry-After`)
+   that retrying for the next N seconds is certain to fail. */
+describe("ConversationView Retry-After cooldown (#286)", () => {
+  const RATE_LIMITED_MESSAGE = JSON.stringify({
+    error: "You're sending messages faster than the tutor can answer. Wait a few seconds, then send again.",
+    code: "rate_limited",
+  });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("disables Retry and counts down when retryAfterSeconds is set", () => {
+    const onRetry = vi.fn();
+    render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3, retryAttemptId: 1 }}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: /Try again in 3s/ }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    expect(onRetry).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.getByRole("button", { name: /Try again in 2s/ })).toBeTruthy();
+
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    const readyButton = screen.getByRole("button", { name: "Try again" }) as HTMLButtonElement;
+    expect(readyButton.disabled).toBe(false);
+    fireEvent.click(readyButton);
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders a live Retry button immediately when retryAfterSeconds is absent", () => {
+    const onRetry = vi.fn();
+    render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: "The response failed. Please try again.", onRetry }}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Try again" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+  });
+
+  it("does not restart the countdown for an unrelated re-render of the SAME failed attempt (same retryAttemptId)", () => {
+    const onRetry = vi.fn();
+    const { rerender } = render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3, retryAttemptId: 1 }}
+      />,
+    );
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(screen.getByRole("button", { name: /Try again in 1s/ })).toBeTruthy();
+
+    // An unrelated re-render carrying the SAME retryAttemptId (e.g. the
+    // parent re-rendering for a reason that has nothing to do with a new
+    // failure -- the student typing in an unrelated field) must not reset
+    // the countdown back to the top.
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3, retryAttemptId: 1 }}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /Try again in 1s/ })).toBeTruthy();
+  });
+
+  // #286 (review fix): the realistic repeat-offense case. chat.ts's
+  // rate-limit response is two fully static constants (RATE_LIMIT_WINDOW_MS
+  // and a fixed error string) -- every 429 it ever sends is byte-identical.
+  // A cooldown keyed on the error's own content (message + seconds) could
+  // never tell a second, later rate-limit failure apart from the first one
+  // re-rendering, so the button would stay permanently live after the
+  // FIRST cooldown ever expired. `retryAttemptId` (App.tsx derives it from
+  // the underlying error object's own identity, not its content) is what
+  // makes this distinguishable.
+  it("restarts the countdown for a genuinely new rate-limit failure even though the message and seconds are IDENTICAL to the last one", () => {
+    const onRetry = vi.fn();
+    const { rerender } = render(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3, retryAttemptId: 1 }}
+      />,
+    );
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    // First cooldown fully expired -- button live again.
+    expect((screen.getByRole("button", { name: "Try again" }) as HTMLButtonElement).disabled).toBe(false);
+
+    // A second rate-limit failure -- same message, same Retry-After
+    // seconds (the server has no other message to send), but a NEW
+    // attempt id.
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        error={{ message: RATE_LIMITED_MESSAGE, onRetry, retryAfterSeconds: 3, retryAttemptId: 2 }}
+      />,
+    );
+    const button = screen.getByRole("button", { name: /Try again in 3s/ }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+  });
+});
+
 /* #96: the send-half of a failed turn. A refused/undelivered send persisted
    nothing, so there is no turn to regenerate and the student's own words are
    what needs rescuing -- the caller omits onRetry and passes the text back
@@ -219,6 +351,33 @@ describe("ConversationView send-failure recovery (#96)", () => {
       "words I am still writing",
     );
     expect(screen.getByText("why is my p-value 0.03?")).toBeTruthy();
+  });
+
+  it("client-feedback-ui audit, Fix 3: the unrestored-text note is inside the same role=\"alert\" region as the error message, not a silent sibling", () => {
+    const { rerender } = render(
+      <ConversationView breadcrumb="b" messages={[]} onSendMessage={() => {}} />,
+    );
+    const composer = screen.getByLabelText("Message input") as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "words I am still writing" } });
+
+    rerender(
+      <ConversationView
+        breadcrumb="b"
+        messages={[]}
+        onSendMessage={() => {}}
+        restoredDraft={{ text: "why is my p-value 0.03?" }}
+        error={{ message: "Load failed", stage: "send" }}
+      />,
+    );
+
+    // Before this fix, the unrestored-text block was a SIBLING of the
+    // role="alert" div further down .conversation-error-row -- visible, but
+    // outside the one thing on that row a screen reader actually announces.
+    // A blind student was told their message was "back in the box below"
+    // (the alert) but never told it in fact was NOT, because that correction
+    // lived outside the live region entirely.
+    const alert = screen.getByRole("alert");
+    expect(within(alert).getByText("why is my p-value 0.03?")).toBeTruthy();
   });
 
   it("#427: says nothing extra when the restore actually succeeded", () => {
@@ -1284,6 +1443,108 @@ describe("ConversationView day separators (#397)", () => {
 });
 
 /* --------------------------------------------------------------------------
+   #90 review, Important #2: renderAiFeedbackSlot's own gating -- the ONLY
+   thing standing between the feedback affordance (apps/web's
+   ResponseFeedback) and a caller that could try to flag a not-yet-persisted
+   message id. chat.ts mints the assistant row's real DB id independently of
+   whatever id the streamed UIMessage itself carries, so a message is only
+   safe to flag once it has round-tripped through the persisted-history
+   fetch -- the one signal for that, on this data shape, is a real
+   `createdAt` (see AIMessageData's own doc comment: absent for a turn with
+   no persisted row yet). These pin the two states renderMessageRow's guard
+   is meant to produce.
+   -------------------------------------------------------------------------- */
+describe("ConversationView renderAiFeedbackSlot gating (#90)", () => {
+  it("does NOT offer the feedback slot for a still-streaming AI message, even with a render callback supplied", () => {
+    const renderAiFeedbackSlot = vi.fn(() => <span data-testid="feedback-slot">flag</span>);
+    render(
+      <ConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[{ id: "a", role: "ai", content: "still typing", isStreaming: true }]}
+        renderAiFeedbackSlot={renderAiFeedbackSlot}
+      />,
+    );
+    expect(renderAiFeedbackSlot).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("feedback-slot")).toBeNull();
+  });
+
+  it("does NOT offer the feedback slot for a just-completed AI message with no createdAt yet (not confirmed persisted)", () => {
+    const renderAiFeedbackSlot = vi.fn(() => <span data-testid="feedback-slot">flag</span>);
+    render(
+      <ConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[{ id: "a", role: "ai", content: "just finished", isStreaming: false }]}
+        renderAiFeedbackSlot={renderAiFeedbackSlot}
+      />,
+    );
+    expect(renderAiFeedbackSlot).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("feedback-slot")).toBeNull();
+  });
+
+  it("DOES offer the feedback slot, with the PERSISTED row id (not the React-key id), once the AI message has settled with a createdAt (#447)", () => {
+    // #447 (Cordero review, PR440): `id` and `persistedId` deliberately
+    // DIFFERENT here -- `id` is this row's React key (stable for the row's
+    // whole lifetime; for a freshly-streamed turn it's the AI SDK's own
+    // client-assigned id, not the database row id). `persistedId` is the
+    // database row id `messageMetadata` (chat.ts) stamps in once the turn
+    // finishes. Before the fix, this call site passed `msg.id` -- which
+    // would have made this assertion pass with "sdk-client-id" instead,
+    // silently proving the wrong thing. Using two DIFFERENT values is what
+    // makes this test able to catch that regression at all.
+    const renderAiFeedbackSlot = vi.fn((messageId: string) => (
+      <span data-testid="feedback-slot">{messageId}</span>
+    ));
+    render(
+      <ConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[
+          {
+            id: "sdk-client-id",
+            persistedId: "real-message-id",
+            role: "ai",
+            content: "settled",
+            createdAt: "2026-08-26T09:00:00.000Z",
+          },
+        ]}
+        renderAiFeedbackSlot={renderAiFeedbackSlot}
+      />,
+    );
+    expect(renderAiFeedbackSlot).toHaveBeenCalledWith("real-message-id");
+    expect(screen.getByTestId("feedback-slot").textContent).toBe("real-message-id");
+  });
+
+  it("does NOT offer the feedback slot for a settled AI message with no persistedId yet, even with a createdAt (#447 defensive gate)", () => {
+    const renderAiFeedbackSlot = vi.fn(() => <span data-testid="feedback-slot">flag</span>);
+    render(
+      <ConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[
+          { id: "sdk-client-id", role: "ai", content: "settled", createdAt: "2026-08-26T09:00:00.000Z" },
+        ]}
+        renderAiFeedbackSlot={renderAiFeedbackSlot}
+      />,
+    );
+    expect(renderAiFeedbackSlot).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("feedback-slot")).toBeNull();
+  });
+
+  it("renders no feedback slot at all when the caller omits renderAiFeedbackSlot, even for a settled message", () => {
+    render(
+      <ConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[{ id: "a", role: "ai", content: "settled", createdAt: "2026-08-26T09:00:00.000Z" }]}
+      />,
+    );
+    expect(screen.queryByTestId("feedback-slot")).toBeNull();
+  });
+});
+
+/* --------------------------------------------------------------------------
    #405 follow-on: making the rename hint visible to assistive technology
    put it inside the heading that wraps EditableTitle, so heading navigation
    announced the keybindings and character count as part of the conversation
@@ -1312,5 +1573,120 @@ describe("ConversationView header title naming", () => {
     // The heading's name must still be the title, not the title plus its
     // own editing affordances.
     expect(screen.getByRole("heading", { level: 1, name: "Original title" })).toBeTruthy();
+  });
+});
+
+/* --------------------------------------------------------------------------
+   client-feedback-ui audit round 2, Fix 1: renderMessageRow's `onRun={
+   onRunRCode}` (student rows) forwards the caller-supplied handler straight
+   through to `Message` with no caching of its own -- unlike `feedbackSlot`
+   (AI rows, see `getFeedbackSlot`'s cache above), its stability across an
+   unrelated re-render depends ENTIRELY on the caller (App.tsx) passing a
+   referentially stable `onRunRCode`. That was the actual bug: App.tsx's
+   `runRCodeForSection`/`runRCodeForTutor` were plain arrow functions
+   recreated on every App render, so a student row with an R-code run
+   affordance never benefited from Message's `React.memo` the way an AI
+   row's feedbackSlot did. App.tsx now wraps both in `useCallback` with a
+   stable dependency (see its own doc comment there); the fix that lives in
+   this package's own file is confirming ConversationView still forwards
+   whatever it's given verbatim (nothing here re-wraps it in a fresh
+   closure), so a stable `onRunRCode` from the caller actually reaches
+   Message unchanged.
+
+   Can't drive App.tsx's own half of the fix from this package (App.tsx
+   lives in apps/web), so this test pins what's testable here: given a
+   STABLE `onRunRCode` reference, an unrelated re-render must not re-invoke
+   Message's memoized render function for a student row -- and, to prove
+   the render-count spy below is actually sensitive rather than silently
+   broken (the same concern App.tsx's own #309 markdown-render-cost test
+   raises about its counting mechanism), that an UNSTABLE reference (the
+   exact pre-Fix-1 shape) DOES trip it.
+
+   `Message` is a plain `memo()` export with nothing to attach a counter to
+   without changing production code just for a test. Instead, this unwraps
+   the REAL inner render function via `.type` (the standard way to read the
+   function inside a memo() object) and re-wraps IT in a fresh memo() using
+   the same default (no custom comparator) Message.tsx itself uses -- see
+   its own `export const Message = memo(function Message(...))`, no second
+   argument -- so the spy observes exactly the bailout behavior production
+   code gets. Scoped to this one test via `vi.doMock` + a dynamic
+   re-import, not the file-level `vi.mock` (which would replace Message for
+   every other test in this file that depends on its real rendered
+   output). */
+describe("ConversationView onRun prop stability (client-feedback-ui audit round 2, Fix 1)", () => {
+  afterEach(() => {
+    vi.doUnmock("./Message");
+    vi.resetModules();
+  });
+
+  it("does not re-render a student R-code row when onRunRCode is stable across an unrelated re-render, but does when it isn't", async () => {
+    vi.resetModules();
+    const renderSpy = vi.fn();
+    vi.doMock("./Message", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("./Message")>();
+      const inner = (actual.Message as unknown as { type: (props: unknown) => React.ReactNode }).type;
+      const spied = (props: unknown): React.ReactNode => {
+        renderSpy();
+        return inner(props);
+      };
+      return { ...actual, Message: memo(spied) };
+    });
+
+    const { ConversationView: MockedConversationView } = await import("./ConversationView");
+
+    const studentMessage = {
+      id: "s1",
+      role: "student" as const,
+      content: "```r\n1 + 1\n```",
+      createdAt: "2026-08-26T09:00:00.000Z",
+    };
+    const runA = vi.fn(async () => ({ status: "success" as const, executionTimeMs: 1 }));
+    const runB = vi.fn(async () => ({ status: "success" as const, executionTimeMs: 1 }));
+
+    const { rerender } = render(
+      <MockedConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[studentMessage]}
+        onRunRCode={runA}
+      />,
+    );
+    expect(await screen.findByRole("button", { name: "Run" })).toBeTruthy();
+    const afterMount = renderSpy.mock.calls.length;
+    expect(afterMount).toBeGreaterThan(0);
+
+    // Unrelated re-render, same onRunRCode reference -- stands in for a
+    // composer keystroke or the retry-cooldown tick elsewhere in
+    // ConversationView causing ITS OWN render function to run again, with
+    // this message and its run handler untouched. Post Fix 1, App.tsx's
+    // runRCodeForSection/runRCodeForTutor never change identity across a
+    // render like this (see their own doc comment) -- proven here by
+    // passing the very same `runA` reference again.
+    rerender(
+      <MockedConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[studentMessage]}
+        onRunRCode={runA}
+        isSending={true}
+      />,
+    );
+    expect(renderSpy.mock.calls.length).toBe(afterMount);
+
+    // Same shape of re-render, but with a FRESH onRunRCode reference -- the
+    // exact defect Fix 1 removed from App.tsx (a plain arrow function
+    // recreated on every render). Confirms the spy actually detects a real
+    // change instead of trivially reporting zero delta regardless of input
+    // -- the same "is the counting mechanism actually firing" concern
+    // App.tsx's own #309 markdown-render-cost test raises about itself.
+    rerender(
+      <MockedConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[studentMessage]}
+        onRunRCode={runB}
+      />,
+    );
+    expect(renderSpy.mock.calls.length).toBeGreaterThan(afterMount);
   });
 });

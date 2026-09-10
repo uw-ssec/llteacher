@@ -14,6 +14,7 @@ import {
   CaretDoubleRight,
   ClipboardText,
   DownloadSimple,
+  Flag,
   ShieldCheck,
   Sparkle,
   Users,
@@ -23,6 +24,7 @@ import {
 export type AdminNavKey =
   | "homeworks"
   | "submissions"
+  | "feedback"
   | "llm-configs"
   | "students"
   | "ta-permissions"
@@ -63,6 +65,10 @@ type NavItem = {
 const NAV_ITEMS: NavItem[] = [
   { key: "homeworks",    label: "Homeworks",   icon: <BookOpen size={15} weight="regular" />,      description: "Course assignments" },
   { key: "submissions",  label: "Submissions", icon: <ClipboardText size={15} weight="regular" />, description: "Student work" },
+  // #90: grader-tier (requireGraderOf), same tier as Submissions directly
+  // above -- not authorOnly, so a TA sees it too, matching that route's own
+  // GRADER_ROLES gate.
+  { key: "feedback",     label: "Feedback",    icon: <Flag size={15} weight="regular" />,          description: "Flagged tutor responses" },
   // #31: authorOnly since the configs became real. While this list was
   // fixture-driven it was harmless static data for a TA to look at; the
   // routes behind it are requireInstructorOf, so leaving the entry visible

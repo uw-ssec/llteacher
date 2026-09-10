@@ -1039,6 +1039,34 @@ body {
     }
   }
 
+  /* #310: a real reorder (the bumped row was not already first) gets a
+     brief highlight -- useTutorConversations' reconcileConversationCount
+     only sets this when a row actually changed position, which is the
+     uncommon case
+     (the overwhelmingly common one, the active conversation staying at the
+     top, never fires it). Fades from the same accent used for
+     --selected, so it reads as "this moved" rather than introducing a new
+     color the rail hasn't used elsewhere. */
+  .tutor-conversation-item--reordered {
+    animation: tutor-conversation-item-reorder-flash 1.5s ease-out;
+  }
+
+  @keyframes tutor-conversation-item-reorder-flash {
+    0% {
+      background-color: var(--color-accent-faint);
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tutor-conversation-item--reordered {
+      animation: none;
+      background-color: var(--color-accent-faint);
+    }
+  }
+
   .tutor-conversation-item__title {
     display: flex;
     width: 100%;
@@ -1154,6 +1182,19 @@ body {
     color: var(--color-text-muted);
   }
 
+  /* #292: the message count gets a visible icon, not just an sr-only
+     word -- a bare numeral here read as unlabeled, indistinguishable from
+     any other small number in the row. */
+  .tutor-conversation-item__count {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .tutor-conversation-item__count-icon {
+    flex-shrink: 0;
+  }
+
   /* -------------------------------------------------------------------------
      .editable-title — inline click-to-rename primitive (#6). Shared by
      the tutor-conversation-item row (.tutor-conversation-item__title
@@ -1174,6 +1215,11 @@ body {
     align-items: center;
     gap: var(--space-1);
     max-width: 100%;
+    /* #291: without this, .editable-title__error (flex-basis: 100% below)
+       had nowhere to wrap TO -- a single-line inline-flex row with no
+       wrap squeezes its flex items instead, and the input (min-width: 0)
+       is the one that has nowhere else to give in a 220px rail. */
+    flex-wrap: wrap;
   }
 
   .editable-title__value {
@@ -1339,6 +1385,9 @@ body {
     font-family: var(--font-sans);
     font-size: var(--font-size-xs);
     color: var(--color-error);
+    /* #291: its own line, not a flex sibling competing with the input/value
+       for the row's width -- see .editable-title's own flex-wrap comment. */
+    flex-basis: 100%;
   }
 
   /* -------------------------------------------------------------------------
@@ -1931,6 +1980,22 @@ body {
 
   .conversation-error-row__retry:hover {
     color: var(--color-accent-hover);
+  }
+
+  /* #286 (requirement 5): the Retry-After cooldown state -- a request the
+     server has already said will fail for the next N seconds should not
+     read as an ordinary live control. */
+  .conversation-error-row__retry:disabled {
+    color: var(--color-text-muted);
+    cursor: not-allowed;
+  }
+
+  .conversation-error-row__retry:disabled:hover {
+    color: var(--color-text-muted);
+  }
+
+  .conversation-error-row__retry:disabled .conversation-error-row__retry-arrow {
+    transform: none;
   }
 
   .conversation-error-row__retry-arrow {
@@ -6542,6 +6607,110 @@ body {
   display: flex;
   justify-content: flex-end;
   gap: var(--space-3);
+}
+
+/* -------------------------------------------------------------------------
+   .response-feedback — the student "flag this response" affordance (#90).
+
+   The trigger button IS a .message__action (apps/web's ResponseFeedback.tsx
+   applies both classes), so it inherits that class's hover/focus reveal,
+   24px target size and glyph-turn animation for free -- this block only
+   adds what's specific to this control: the "already flagged" static
+   state, and the reason-picker form rendered inside AlertDialog's
+   description slot.
+   ------------------------------------------------------------------------- */
+
+/* Unlike .message__action, this state does NOT hide at rest -- a flag the
+   student already raised is a fact about the message, not a hover-reveal
+   affordance, so it stays visible the same way .message__time does. */
+.response-feedback--flagged {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 24px;
+  block-size: 24px;
+  color: var(--color-accent);   /* #32006e on #FAFAF7 = 14.8:1 */
+}
+
+.response-feedback__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.response-feedback__prompt {
+  margin: 0;
+}
+
+.response-feedback__reasons {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+
+.response-feedback__reasons legend {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  padding: 0;
+  margin: 0 0 var(--space-1) 0;
+}
+
+.response-feedback__reason-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.response-feedback__comment-label {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.response-feedback__comment {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+  background-color: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  resize: vertical;
+}
+
+.response-feedback__comment:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* client-feedback-ui audit, Fix 6: same treatment as
+   .editable-title__hint/.editable-title__counter -- muted, present only
+   when wanted, not competing with the field itself. No "--over" variant:
+   unlike EditableTitle's title input, this textarea's own onChange already
+   hard-clamps to MAX_COMMENT_CHARS, so `remaining` can never go negative. */
+.response-feedback__comment-counter {
+  display: block;
+  margin-block-start: 2px;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  line-height: 1.3;
+}
+
+.response-feedback__error {
+  margin: 0;
+  color: var(--color-error);   /* #C92A2A on #FAFAF7 = 5.22:1 */
+  font-size: var(--font-size-sm);
 }
 
 /* ==========================================================================

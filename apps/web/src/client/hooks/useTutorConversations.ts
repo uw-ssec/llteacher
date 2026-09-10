@@ -59,8 +59,17 @@ export interface UseTutorConversationsResult {
   /** POSTs a new tutor conversation and prepends it to the local list.
    *  Returns the created conversation, or null if courseId isn't loaded
    *  yet or the request failed -- callers should treat null as "nothing to
-   *  select," not throw. */
-  createConversation: (title?: string) => Promise<ConversationListItemResponse | null>;
+   *  select," not throw.
+   *
+   *  #311: no longer takes an optional title -- App.tsx's one call site
+   *  (the "New conversation" button) never passed one; #287's auto-titling
+   *  solved the "name it something useful" problem by PATCHing a title
+   *  derived from the first message instead of naming it at creation, so
+   *  this parameter was a no-op the entire time it existed. The server
+   *  route (POST /api/conversations) still accepts an optional `title` --
+   *  that half is real, validated, and covered by its own route tests, for
+   *  whatever future caller (e.g. an instructor-facing surface) needs it. */
+  createConversation: () => Promise<ConversationListItemResponse | null>;
   /** PATCHes a conversation's title, optimistically updating the local
    *  list immediately (so both the list row AND any other consumer reading
    *  from this same `conversations` array, e.g. App.tsx's tutor chat
@@ -84,14 +93,40 @@ export interface UseTutorConversationsResult {
    *  renameConversation makes, where an optimistic update is cheap because
    *  a failed rename rolls back to a value the student can still see. */
   deleteConversation: (id: string) => Promise<boolean>;
-  /** #216: optimistically bumps a conversation's messageCount and
-   *  updatedAt (and re-sorts by updatedAt desc, matching
-   *  listConversationsForOwner's server-side ordering) -- called by App.tsx
-   *  once a chat turn in this conversation completes. `/api/chat` writes
-   *  bypass this hook entirely (it only knows about the CRUD routes), so
-   *  without an explicit bump the rail's message count and position never
-   *  reflect actual chat activity until a full reload re-fetches the list. */
-  bumpConversation: (id: string) => void;
+  /** #216, #292, #438: reconciles a conversation's messageCount and
+   *  updatedAt against the server's authoritative row (and re-sorts by
+   *  updatedAt desc, matching listConversationsForOwner's server-side
+   *  ordering) -- called by App.tsx once a chat turn in this conversation
+   *  settles. `/api/chat` writes bypass this hook entirely (it only knows
+   *  about the CRUD routes), so without this the rail's message count and
+   *  position never reflect actual chat activity until a full reload
+   *  re-fetches the list.
+   *
+   *  #438: replaces the former `bumpConversation(id, delta)`, which applied
+   *  a client-guessed delta (1 or 2, depending on how the turn's SSE stream
+   *  read) instead of asking the server. That guess was wrong whenever
+   *  chat.ts's persistence gate (hasRenderableContent + a finish-reason
+   *  allowlist) wrote only the student's row for a turn whose stream still
+   *  looked like an ordinary completion to the client -- an "unrenderable
+   *  content" or truncated-multi-part turn, neither of which the client can
+   *  detect from the stream alone. This fetches GET /api/conversations/:id
+   *  and sets the real count directly, so the rail can never assert a
+   *  number the server doesn't back.
+   *
+   *  Fails silently (logged) on a fetch error: this runs fire-and-forget
+   *  from a stream-completion callback with no caller able to react to a
+   *  thrown rejection, and a dropped reconciliation still self-heals on the
+   *  next full `refetch` or reload. */
+  reconcileConversationCount: (id: string) => Promise<void>;
+  /** #310: the id of a conversation that was just moved to the front of the
+   *  list by a REAL reorder (it was not already first) -- null the rest of
+   *  the time, including the overwhelmingly common case where a bump is a
+   *  no-op reorder. Cleared automatically ~1.5s after being set, or as soon
+   *  as a newer bump replaces it. A caller (TutorConversationsList) uses
+   *  this to render a brief highlight on the row that moved, so a student
+   *  reading the rail notices the shuffle instead of just finding a
+   *  familiar row gone from where it was. */
+  recentlyMovedId: string | null;
 }
 
 export function useTutorConversations(courseId: string | undefined): UseTutorConversationsResult {
@@ -128,6 +163,19 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
   // dependency.
   const conversationsRef = useRef(conversations);
   conversationsRef.current = conversations;
+
+  /* #310: see recentlyMovedId's doc comment on UseTutorConversationsResult.
+     The timeout ref lets a second real reorder (a different row bumped
+     again before the first highlight has faded) cancel and restart the
+     clear, rather than the earlier timeout firing later and clearing a
+     highlight that belongs to a different row. */
+  const [recentlyMovedId, setRecentlyMovedId] = useState<string | null>(null);
+  const recentlyMovedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (recentlyMovedTimeoutRef.current) clearTimeout(recentlyMovedTimeoutRef.current);
+    };
+  }, []);
 
   /* #388: the course scope as of the latest render. `refetch` is a
      useCallback keyed on courseId, so the `courseId` its body closes over is
@@ -326,13 +374,13 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
   }, [courseId]);
 
   const createConversation = useCallback(
-    async (title?: string): Promise<ConversationListItemResponse | null> => {
+    async (): Promise<ConversationListItemResponse | null> => {
       if (!courseId) return null;
       try {
         const res = await fetch("/api/conversations", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(title ? { courseId, title } : { courseId }),
+          body: JSON.stringify({ courseId }),
         });
         if (!res.ok) throw new Error(`failed to create conversation: ${res.status}`);
         // POST's response is a plain ConversationSummary -- messageCount
@@ -401,6 +449,19 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
         } catch {
           /* non-JSON error body -- fall back to the generic message */
         }
+        // #291: "Conversation not found" is the server's own internal
+        // vocabulary (updateConversationHandler's 404) -- reads as a
+        // system fault rendered permanently beside a rail title the
+        // student just tried to rename themselves. Translated here, the
+        // one place this route's error text reaches the student, rather
+        // than in EditableTitle (generic, shared by callers with no
+        // knowledge of "conversation" as a concept at all). Every other
+        // message this route sends (the length/emptiness validation
+        // string) is already student-appropriate and passes through
+        // unchanged.
+        if (res.status === 404) {
+          message = "This conversation is no longer available.";
+        }
         throw new Error(message);
       }
       // PATCH's response is a plain ConversationSummary, same shape as
@@ -422,14 +483,39 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     }
   }, []);
 
-  const bumpConversation = useCallback((id: string) => {
+  const reconcileConversationCount = useCallback(async (id: string): Promise<void> => {
+    let updated: ConversationListItemResponse;
+    try {
+      const res = await fetch(`/api/conversations/${id}`);
+      if (!res.ok) throw new Error(`failed to refetch conversation ${id}: ${res.status}`);
+      updated = (await res.json()) as ConversationListItemResponse;
+    } catch (err: unknown) {
+      // #438: see this function's own doc comment -- a failed reconciliation
+      // is not surfaced to the caller (trackTutorTurnCompletion has nothing
+      // to do with a rejection anyway); it just leaves the rail's count
+      // wherever it last was until the next refetch or reload corrects it.
+      console.error("[useTutorConversations.reconcileConversationCount]", err);
+      return;
+    }
+
     mutationSeqRef.current += 1;
+    /* #310: whether THIS reconciliation will be a real reorder is decided
+       off the same conversationsRef snapshot renameConversation's rollback
+       already relies on (see its own doc comment) -- not inside the
+       setConversations updater below, which React can invoke outside the
+       normal render timing and which must stay free of side effects like
+       scheduling a timeout. The updater still does its own index lookup
+       against `prev` for the actual mutation, so a same-tick update from
+       another source can't desync the two; this snapshot only ever needs to
+       be right about "index 0 or not", not the exact array. */
+    const willReorder = conversationsRef.current.findIndex((c) => c.id === id) > 0;
     setConversations((prev) => {
       const index = prev.findIndex((c) => c.id === id);
       if (index === -1) return prev;
 
-      const now = new Date().toISOString();
-      const next = prev.map((c) => (c.id === id ? { ...c, messageCount: c.messageCount + 1, updatedAt: now } : c));
+      const next = prev.map((c) =>
+        c.id === id ? { ...c, messageCount: updated.messageCount, updatedAt: updated.updatedAt } : c,
+      );
 
       /* #310: two problems with re-sorting here, both fixed by not doing it
          in the usual case.
@@ -439,23 +525,28 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
          the top, because talking to it is what put it there -- but it
          reordered rows underneath a student who might be reading them.
 
-         And the comparator mixed sources: this optimistic `now` is the
-         CLIENT's clock, while every other row's updatedAt came from the
-         server. A client running even slightly behind produced a row that
-         sorted below conversations it had just overtaken, so a turn could
-         push the active conversation DOWN the list.
-
-         Moving the bumped row to the front directly sidesteps both: it is
-         what desc(updatedAt) would have produced anyway (this row was just
-         touched, so it is the most recently updated by definition), it
-         leaves every other row's relative order exactly as the server sent
-         it, and it never compares a client timestamp against a server one.
-         When the row is already first -- the overwhelmingly common case --
+         Moving the reconciled row to the front directly sidesteps that: it
+         is what desc(updatedAt) would have produced anyway (this row was
+         just touched server-side, so `updated.updatedAt` is already the
+         most recent by definition -- a real server timestamp now, not the
+         client-clock stand-in the old delta-based bump used), it leaves
+         every other row's relative order exactly as the server sent it. When
+         the row is already first -- the overwhelmingly common case --
          nothing moves at all. */
       if (index === 0) return next;
       const bumped = next[index]!;
       return [bumped, ...next.slice(0, index), ...next.slice(index + 1)];
     });
+
+    if (willReorder) {
+      setRecentlyMovedId(id);
+      if (recentlyMovedTimeoutRef.current) clearTimeout(recentlyMovedTimeoutRef.current);
+      recentlyMovedTimeoutRef.current = setTimeout(() => {
+        // Only clear if this is still the highlight it started -- a newer
+        // reorder (of this row or another) already replaced it.
+        setRecentlyMovedId((current) => (current === id ? null : current));
+      }, 1500);
+    }
   }, []);
 
   return {
@@ -471,6 +562,7 @@ export function useTutorConversations(courseId: string | undefined): UseTutorCon
     createConversation,
     deleteConversation,
     renameConversation,
-    bumpConversation,
+    reconcileConversationCount,
+    recentlyMovedId,
   };
 }

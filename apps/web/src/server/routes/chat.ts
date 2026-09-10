@@ -121,6 +121,7 @@ import { courseScopeFromAuthContext, unsafeCourseScope, unsafeOrgScope, type Org
 import { IdempotencyKeyConflictError } from "../repositories/errors";
 import { recordHintRequest } from "../repositories/hints";
 import { getOrgScopeAndLlmConfigForCourse } from "../repositories/organizations";
+import { deriveTutorConversationTitle, DEFAULT_TUTOR_CONVERSATION_TITLE } from "../../shared/tutorConversationTitle";
 import { logServerError, logServerWarn } from "../utils/errors";
 import {
   assembleSystemPrompt,
@@ -135,7 +136,12 @@ import {
 import {
   resolveLLMConfig,
   resolveFallbackLLMConfig,
-  resolveApiKey,
+  // #431: chat.ts has exactly ONE keying primitive now. resolveApiKey is
+  // still exported for routes/llmConfigs.ts's Test button, which should
+  // report a missing credential honestly rather than degrade past it.
+  resolveProviderCredential,
+  PROVIDER_FALLBACK_ENV_VAR_NAME,
+  type ResolvedProviderCredential,
   buildProviderClient,
   estimateCostCents,
   LLMConfigNotFoundError,
@@ -667,6 +673,18 @@ const chatEnvelopeSchema = z.object({
 // fix shipped, or a future path that doesn't go through onFinish). Now:
 // reject the WHOLE array the moment any part is still mid-flight, and only
 // then check whether at least one part actually renders.
+// #440 audit, Fix 1 / #451 (Cordero review, PR440): the finish reasons that
+// actually mean "the model produced a real, complete-as-far-as-it-went
+// answer" -- "stop" (normal completion), "length" (hit its token budget,
+// still a real answer), "tool-calls" (ended on a tool call). Everything else
+// (undefined, "unknown", "content-filter", "other", "error") is not a real
+// answer. Module-level (not a local `const` inside onFinish, as it was
+// before #451) so `messageMetadata`'s callback below -- which decides
+// whether to tell the client this turn has a persisted id at all -- can
+// check the EXACT same allowlist `onFinish`'s own `shouldPersist` gate uses,
+// rather than risk a second, independently-drifting copy.
+const TERMINAL_FINISH_REASONS = new Set(["stop", "length", "tool-calls"]);
+
 function hasRenderableContent(parts: unknown): boolean {
   if (!Array.isArray(parts)) return false;
   let sawRenderablePart = false;
@@ -823,27 +841,13 @@ function replayResponse(conversationId: string, persistedParts: unknown) {
   });
 }
 
-// #231: derives an initial title for a brand-new tutor conversation from
-// its first user message, instead of leaving every row titled "New
-// Conversation" until the student manually renames it. Only ever called at
-// creation time (the new-conversation branch below), so "only while the
-// title is still the default" is automatic: this never re-touches an
-// existing conversation's title on a later turn, whether or not the
-// student has since renamed it. Truncates the first text part; returns
-// null (falls back to "New Conversation") for a message with no text part
-// (a tool-only first message isn't a shape this app's own composer can
-// currently produce, but the fallback keeps this honest either way).
-const AUTO_TITLE_MAX_LENGTH = 60;
-function deriveTutorConversationTitle(parts: unknown): string | null {
-  if (!Array.isArray(parts)) return null;
-  const textPart = parts.find(
-    (p): p is { type: "text"; text: string } =>
-      !!p && typeof p === "object" && (p as { type?: unknown }).type === "text" && typeof (p as { text?: unknown }).text === "string",
-  );
-  const text = textPart?.text.trim();
-  if (!text) return null;
-  return text.length > AUTO_TITLE_MAX_LENGTH ? `${text.slice(0, AUTO_TITLE_MAX_LENGTH).trimEnd()}…` : text;
-}
+// #231/#287: deriveTutorConversationTitle/DEFAULT_TUTOR_CONVERSATION_TITLE
+// now live in ../../shared/tutorConversationTitle -- see that module's own
+// doc comment for the full #287 story (why this got moved out of this
+// file, and why the truncation logic itself changed). Kept as a plain
+// import rather than reimplemented here so the branch below and #287's
+// real (client-side) fix can never derive two different titles from the
+// same first message.
 
 // #265: reserveRateLimitSlot (repositories/rateLimits.ts) is a single
 // atomic upsert, called unconditionally as the FIRST thing this handler
@@ -953,6 +957,39 @@ export type TurnClassification = "replay" | "skip-insert" | "insert";
 // down. appendMessage's returned row carries more columns (conversationId,
 // seq, createdAt) that persistedHistory below never reads.
 type MessageHistoryRow = { id: string; role: string; parts: unknown };
+
+/** #343 x #364 x #431: the config a hop actually RUNS as.
+ *
+ *  `config` is what the org/instructor CHOSE; `credential` is what could
+ *  actually be keyed. They differ only when degradation fired, and then they
+ *  differ in provider AND model together -- an LLMoxie model id sent to
+ *  OpenRouter fails worse than the 500 the degradation replaced, so the two
+ *  can never be mixed.
+ *
+ *  Deriving one config rather than threading `credential` through the turn is
+ *  what keeps #364's machinery correct for free: buildTurnParams gets a
+ *  matched provider/model pair, the per-hop onError/onAbort lines name the
+ *  model that really ran, and `servingConfig` -- hence the llm_call_logs row
+ *  -- is truthful without a second code path.
+ *
+ *  Pricing is dropped when degraded ON PURPOSE: pricePerMillion* on the row
+ *  is a rate for THAT row's model. Costing an OpenRouter fallback at the
+ *  LLMoxie rate would write a confidently wrong number into the cost
+ *  reporting these rows feed, which is worse than the honest null
+ *  estimateCostCents returns for a model it has no rate for. */
+export function degradedConfigOf(
+  config: ResolvedLLMConfig,
+  credential: ResolvedProviderCredential,
+): ResolvedLLMConfig {
+  if (!credential.degradedFrom) return config;
+  return {
+    ...config,
+    provider: credential.provider,
+    modelName: credential.modelName,
+    pricePerMillionInputTokens: null,
+    pricePerMillionOutputTokens: null,
+  };
+}
 
 export function classifyTurn(
   lastMessage: { role: string; parts: unknown; clientMessageId: string | null } | undefined,
@@ -1188,7 +1225,34 @@ async function resolveConversation(
   }
 
   // #231: auto-title tutor conversations from their first message.
-  const title = deriveTutorConversationTitle(inboundMessage.parts) || "New Conversation";
+  //
+  // #287: THIS BRANCH HAS NO LIVE CALLER as of today's client. Reaching it
+  // requires a request with no `conversationId` AND `kind` resolved to
+  // "tutor" (the default when `kind` is omitted, see `kind` above) --  but
+  // every tutor turn the client actually sends (App.tsx's
+  // handleSendTutorMessage) is guarded on `tutorConversationId` already
+  // being set, and always includes it in the request body. A tutor
+  // conversation only ever comes to exist via the rail's "New conversation"
+  // button, which POSTs to /api/conversations (routes/conversations.ts)
+  // directly -- never through this route. So in the current app, nothing
+  // ever calls /api/chat with kind:"tutor" and no conversationId; this
+  // auto-titling only ever produced "New Conversation" (its own fallback),
+  // never a real derived title, for every conversation a student could
+  // actually create -- the defect #287 was filed to fix.
+  //
+  // Deliberately NOT deleted: the shape this branch handles (mint a
+  // brand-new tutor conversation directly from a /api/chat call, with no
+  // separate create-then-select round trip) is a real, documented part of
+  // this route's contract -- ChatRequestBody.courseId/.kind's own doc
+  // comments -- and a future client (or a direct API caller) that actually
+  // uses it would want auto-titling to work correctly here too, which it
+  // now does via the shared, surrogate-pair-safe implementation below. The
+  // ACTUAL fix for #287 -- the path students can reach -- is client-side:
+  // App.tsx's handleSendTutorMessage PATCHes a derived title onto an
+  // existing conversation right after sending its first message, reusing
+  // the same deriveTutorConversationTitle this branch calls (see
+  // shared/tutorConversationTitle.ts's own doc comment).
+  const title = deriveTutorConversationTitle(inboundMessage.parts) || DEFAULT_TUTOR_CONVERSATION_TITLE;
   const conv = await createConversation(db, scope, {
     ownerUserId: authContext.session.userId,
     sectionId: null,
@@ -1587,17 +1651,35 @@ export async function chatHandler(c: Context<AppEnv>) {
     throw err;
   }
   let resolvedApiKey: string;
+  let credential: ResolvedProviderCredential;
   let providerClient: ReturnType<typeof buildProviderClient>;
   try {
     // #317 review, security finding #323: c.env is passed through with its
     // real Env type now -- resolveApiKey itself confines the one genuinely
     // dynamic lookup (an allowlisted binding name) to a single scoped cast,
     // instead of this call site erasing the whole Env contract.
-    resolvedApiKey = await resolveApiKey(c.env, db, orgScope, resolvedLLMConfig);
+    // #343: resolves provider, key AND model together, because a degradation
+    // has to move all three -- an OpenRouter key against the LLMoxie gateway,
+    // or an LLMoxie model id against OpenRouter, both fail worse than the 500
+    // they would replace. Returns the config's own values unchanged unless
+    // degradation actually fires (opt-in; see resolveProviderCredential).
+    credential = await resolveProviderCredential(c.env, db, orgScope, resolvedLLMConfig);
+    resolvedApiKey = credential.apiKey;
+    if (credential.degradedFrom) {
+      // Loud on purpose: students are being served, but by a provider and
+      // model the instructor did not choose, so this must never be something
+      // an operator discovers only from a billing statement.
+      logServerError(
+        "chatHandler.llmConfig.degraded",
+        new Error(
+          `Provider "${credential.degradedFrom}" credential unavailable; serving this turn from "${credential.provider}" with model "${credential.modelName}" (LLM_DEGRADED_MODEL). Provision ${PROVIDER_FALLBACK_ENV_VAR_NAME[credential.degradedFrom] ?? "the platform credential"} to restore the configured provider.`,
+        ),
+      );
+    }
     // #333: LLMOXIE_BASE_URL overrides the gateway host (lib/ai.ts's own
     // LLMOXIE_DEFAULT_BASE_URL otherwise) -- unset for every provider that
     // isn't llmoxie, and buildProviderClient ignores it for those.
-    providerClient = buildProviderClient(resolvedLLMConfig.provider, resolvedApiKey, {
+    providerClient = buildProviderClient(credential.provider, resolvedApiKey, {
       llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL,
     });
   } catch (err) {
@@ -1614,6 +1696,40 @@ export async function chatHandler(c: Context<AppEnv>) {
     }
     throw err;
   }
+
+  /* #343 x #364: the config the PRIMARY hop actually runs as.
+     `resolvedLLMConfig` is what the org/instructor CHOSE; `credential` is
+     what could actually be keyed. They differ only when degradation fired,
+     and then they differ in provider AND model together -- an LLMoxie model
+     id sent to OpenRouter fails worse than the 500 the degradation replaced,
+     so the two can never be mixed.
+
+     Deriving one config here rather than threading `credential` through the
+     turn is what keeps #364's own machinery correct for free: buildTurnParams
+     gets a matched provider/model pair, the per-hop onError/onAbort lines
+     name the model that really ran, and `servingConfig` below -- hence the
+     llm_call_logs row -- is truthful without a second code path.
+
+     Pricing is dropped when degraded ON PURPOSE: pricePerMillion* on the
+     config row is a rate for THAT row's model. Costing an OpenRouter fallback
+     at the LLMoxie rate would write a confidently wrong number into the cost
+     reporting these rows feed, which is worse than the honest null
+     estimateCostCents returns for a model it has no rate for. */
+  /* #431, PRECEDENCE, recorded rather than left as a consequence of call
+     ordering: when a config both degrades AND names an instructor fallback,
+     DEGRADATION WINS. It has to -- degradation happens at keying time, before
+     any provider is contacted, and failover only exists once a keyed provider
+     has failed on the wire. The student is therefore served by the operator's
+     model, not the instructor's chosen fallback.
+
+     That is the right answer and not merely the reachable one: degradation
+     fires because the PLATFORM credential is missing, and an instructor's
+     fallback config is very often keyed off the same missing secret -- so
+     preferring it would trade a working turn for a second failure. The
+     fallback is still resolved and still keyed (through the same primitive,
+     see below), so it remains available for the wire failures it exists
+     for. */
+  const primaryConfig: ResolvedLLMConfig = degradedConfigOf(resolvedLLMConfig, credential);
 
   // #364 (requirement 1): the failover hop resolved through the SAME
   // resolveApiKey + buildProviderClient pair as the primary, against the
@@ -1646,12 +1762,32 @@ export async function chatHandler(c: Context<AppEnv>) {
   let fallbackConfig: ResolvedLLMConfig | null = null;
   let fallbackProviderClient: ReturnType<typeof buildProviderClient> | null = null;
   try {
-    fallbackConfig = await resolveFallbackLLMConfig(db, orgScope, resolvedLLMConfig);
-    if (fallbackConfig) {
-      const fallbackApiKey = await resolveApiKey(c.env, db, orgScope, fallbackConfig);
-      fallbackProviderClient = buildProviderClient(fallbackConfig.provider, fallbackApiKey, {
+    const rawFallback = await resolveFallbackLLMConfig(db, orgScope, resolvedLLMConfig);
+    if (rawFallback) {
+      /* #431: the fallback hop is keyed through resolveProviderCredential
+         too, not raw resolveApiKey.
+
+         The two mechanisms answer different questions -- degradation asks
+         "can this config be keyed at all", failover asks "did the keyed
+         provider fail on the wire" -- and keying is the earlier of the two.
+         Keying the fallback the old way meant a fallback config backed by
+         the SAME missing platform secret as the primary simply failed to
+         resolve, and the turn quietly had no failover on precisely the
+         outage degradation exists for. Routing both hops through one
+         primitive makes degradation a property of keying ANY config, so the
+         two compose instead of overlapping. */
+      const fallbackCredential = await resolveProviderCredential(c.env, db, orgScope, rawFallback);
+      fallbackConfig = degradedConfigOf(rawFallback, fallbackCredential);
+      fallbackProviderClient = buildProviderClient(fallbackCredential.provider, fallbackCredential.apiKey, {
         llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL,
       });
+      if (fallbackCredential.degradedFrom) {
+        logServerWarn("chatHandler.fallbackConfig.degraded", "the fallback config was itself served by degradation", {
+          conversationId: conv.id,
+          degradedFrom: fallbackCredential.degradedFrom,
+          servingProvider: fallbackCredential.provider,
+        });
+      }
     }
   } catch (err) {
     // Warn, not error: nothing is broken for this student -- the primary is
@@ -1903,39 +2039,80 @@ export async function chatHandler(c: Context<AppEnv>) {
         const [raceLast, raceSecondLast] = await getLastMessages(db, scope, conv.id, 2, {
           skipOwnershipCheck: true,
         });
-        // #317 review, #350 (requirement 1): logged, not swallowed -- both
-        // branches below return a normal response with nothing else to
-        // surface a release failure, same reasoning as the top-level replay
-        // release above.
+        // #317 review, #350 (requirement 1): logged, not swallowed -- every
+        // early-return below leaves nothing else to surface a release
+        // failure, same reasoning as the top-level replay release above.
         if (classifyTurn(raceLast, raceSecondLast, parsedInbound.data.id) === "replay") {
           await releaseConversationTurnLock(db, conv.id).catch((err) => {
             logServerError("chatHandler.releaseLock.raceReplay", err);
           });
           return replayResponse(conv.id, raceLast!.parts);
         }
-        await releaseConversationTurnLock(db, conv.id).catch((err) => {
-          logServerError("chatHandler.releaseLock.raceConflict", err);
+        // #433: classifyTurn's remaining two outcomes here ("skip-insert" or
+        // "insert") used to be treated as one thing -- "not a replay, so a
+        // concurrent turn must still be running" -- and both answered 409
+        // in_progress. That conflated two genuinely different row shapes.
+        //
+        // A real race (the winner hasn't finished yet) has the winner's user
+        // row as the LAST row with no assistant reply after it yet
+        // (classifyTurn's own "skip-insert"), or no assistant row at all --
+        // waiting and retrying is the correct answer there, so this case
+        // still 409s below.
+        //
+        // But `created: false` only proves the inbound user message is
+        // persisted -- it says nothing about whether a turn also already RAN
+        // for it. When the second-to-last row IS this exact user message and
+        // the last row is an assistant reply, a turn already completed; the
+        // only reason classifyTurn didn't call that "replay" is that
+        // hasRenderableContent rejected the stored reply (e.g. a #307/#342
+        // requestHint-only turn -- see that function's own doc comment).
+        // Nothing is in flight there, so 409 in_progress is simply false: the
+        // student would retry into it forever (#433, the defect behind
+        // #426). The fix is to run a real model call instead, exactly as
+        // "skip-insert" already does for the ordinary case above -- the user
+        // row is already persisted, so nothing more is inserted here; only
+        // persistedHistory needs a genuine re-fetch, since this request's own
+        // `recentMessages` snapshot (taken before the race) doesn't include
+        // the winner's rows.
+        const turnAlreadyCompleted =
+          raceLast?.role === "assistant" &&
+          raceSecondLast?.role === "user" &&
+          raceSecondLast?.clientMessageId === parsedInbound.data.id;
+        if (!turnAlreadyCompleted) {
+          await releaseConversationTurnLock(db, conv.id).catch((err) => {
+            logServerError("chatHandler.releaseLock.raceConflict", err);
+          });
+          // #317 review, #344: same code as the lock-acquisition 409 above --
+          // both are "a turn is already in flight for this conversation",
+          // just detected at different points.
+          return c.json(
+            { error: "This message is already being processed. Please wait a moment.", code: "in_progress" },
+            409,
+          );
+        }
+        // Deliberately NOT releasing the lock here: this falls through to a
+        // real model call below (the streamText try block, further down),
+        // exactly like the "insert" branch's own persistedHistory assignment
+        // does -- the lock is released exactly once, on that path, either by
+        // finalizeAssistantTurn (success, inside onFinish) or by the outer
+        // catch a few lines below (setup throws before streamText starts).
+        persistedHistory = await getLastMessages(db, scope, conv.id, MAX_HISTORY_MESSAGES, {
+          skipOwnershipCheck: true,
         });
-        // #317 review, #344: same code as the lock-acquisition 409 above --
-        // both are "a turn is already in flight for this conversation",
-        // just detected at different points.
-        return c.json(
-          { error: "This message is already being processed. Please wait a moment.", code: "in_progress" },
-          409,
-        );
+      } else {
+        // #317 review, #326: the row this call just wrote, prepended ahead of
+        // the pre-insert snapshot -- exactly what a fresh
+        // `getLastMessages(MAX_HISTORY_MESSAGES)` read would return post-insert
+        // (newest-first, capped at the same limit), without actually
+        // re-reading it from Postgres. role/parts come from the input this
+        // handler itself constructed the insert from (already known, not
+        // re-derived from appendMessage's returned row) -- only `id` is
+        // server-generated and genuinely needs the DB round-trip's result.
+        persistedHistory = [
+          { id: insertedRow.id, role: "user", parts: inboundMessage.parts },
+          ...recentMessages.slice(0, MAX_HISTORY_MESSAGES - 1),
+        ];
       }
-      // #317 review, #326: the row this call just wrote, prepended ahead of
-      // the pre-insert snapshot -- exactly what a fresh
-      // `getLastMessages(MAX_HISTORY_MESSAGES)` read would return post-insert
-      // (newest-first, capped at the same limit), without actually
-      // re-reading it from Postgres. role/parts come from the input this
-      // handler itself constructed the insert from (already known, not
-      // re-derived from appendMessage's returned row) -- only `id` is
-      // server-generated and genuinely needs the DB round-trip's result.
-      persistedHistory = [
-        { id: insertedRow.id, role: "user", parts: inboundMessage.parts },
-        ...recentMessages.slice(0, MAX_HISTORY_MESSAGES - 1),
-      ];
     } catch (err) {
       // #317 review, #350 (requirement 1): `.catch(() => {})`, matching the
       // outer catch's own release below -- this catch can re-throw `err`
@@ -2298,15 +2475,37 @@ export async function chatHandler(c: Context<AppEnv>) {
     // too, it hands back the corresponding result and everything below runs
     // on it exactly as it did before this existed. See that module's header
     // for the boundary it detects and why it is not `await result.response`.
+    // #440 audit, Fix 3: `c.executionCtx.waitUntil`, threaded through so
+    // streamWithFallback's own un-awaited primary-drain call (see its doc
+    // comment on `void primary.consumeStream(...)`) is guaranteed to run to
+    // completion on Cloudflare Workers, not merely left floating once this
+    // handler's response has gone out -- the same bug class chat.ts's own
+    // `pinConversationPromptTemplate` call site above already documents
+    // fixing (that one awaits instead; this drain cannot, since the whole
+    // point is that the fallback starts immediately rather than waiting on
+    // it). Hono's `c.executionCtx` getter THROWS when this request has no
+    // real `ExecutionContext` behind it (every `app.request(...)` call in
+    // this app's test suite, which never passes one) -- guarded here, not
+    // left to throw, so streamWithFallback still gets `undefined` and falls
+    // back to its pre-fix bare `void` for exactly those callers.
+    let waitUntil: ((promise: Promise<unknown>) => void) | undefined;
+    try {
+      const executionCtx = c.executionCtx;
+      waitUntil = (promise) => executionCtx.waitUntil(promise);
+    } catch {
+      waitUntil = undefined;
+    }
+
     const { result, attribution } = await streamWithFallback({
-      primary: buildTurnParams(resolvedLLMConfig, providerClient),
+      primary: buildTurnParams(primaryConfig, providerClient),
       fallback:
         fallbackConfig && fallbackProviderClient
           ? buildTurnParams(fallbackConfig, fallbackProviderClient)
           : null,
-      primaryModelName: resolvedLLMConfig.modelName,
+      primaryModelName: primaryConfig.modelName,
       fallbackModelName: fallbackConfig?.modelName ?? null,
       logContext: `chatHandler.streamWithFallback conversation=${conv.id}`,
+      waitUntil,
     });
 
     // #364 (requirement 3): the config whose provider/model/id the turn's
@@ -2317,7 +2516,7 @@ export async function chatHandler(c: Context<AppEnv>) {
     // columns come from the same row too, so cost is estimated against the
     // model that was really billed.
     const servingConfig: ResolvedLLMConfig =
-      attribution.usedFallback && fallbackConfig ? fallbackConfig : resolvedLLMConfig;
+      attribution.usedFallback && fallbackConfig ? fallbackConfig : primaryConfig;
 
     // #364 (requirement 5) -- DESIGN DECISION, recorded rather than silently
     // picked: `usedFallback` is a structured LOG LINE, not a new column.
@@ -2358,8 +2557,91 @@ export async function chatHandler(c: Context<AppEnv>) {
       });
     }
 
+    // #440 audit, Fix 1 (Functionality+Usability root cause -- server half):
+    // generated HERE, before the stream is ever consumed, rather than inside
+    // onFinish below (where it lived until this fix) -- messageMetadata's
+    // callback runs on the underlying model stream's `finish` TextStreamPart
+    // (verified against the installed ai@5.0.195: toUIMessageStream computes
+    // `messageMetadata({ part })` synchronously while piping `fullStream`,
+    // and enqueues its result on the "finish" UI-stream chunk), which is
+    // consumed and folded into `state.message.metadata` by
+    // handleUIMessageStreamFinish's `processUIMessageStream` stage BEFORE
+    // that same stage's `flush()` calls onFinish with `responseMessage`.
+    // messageMetadata therefore always runs strictly before onFinish for a
+    // given turn -- generating this id inside onFinish (as before) would
+    // make it unavailable at the moment messageMetadata needs it. One id,
+    // shared by both closures below, is what keeps the metadata sent to the
+    // client and the row actually persisted (assistantMessage.id in onFinish
+    // further down) the same identifier.
+    const assistantMessageId = crypto.randomUUID();
+
     return result.toUIMessageStreamResponse({
       headers: { "x-conversation-id": conv.id },
+      // #440 audit, Fix 1: the client's flag/feedback affordance
+      // (ConversationView, packages/ui) gates on `msg.createdAt` being set --
+      // previously populated only by fetchConversationHistory's full-history
+      // refetch (App.tsx), never by a live in-session turn, so the Flag
+      // button never appeared for an answer the student was looking at right
+      // now. `messageMetadata` is the AI SDK v5 hook for exactly this: it is
+      // invoked once per stream part. #440 round-2 audit fix: verified
+      // against the installed ai@5.0.195 source (node_modules/ai/dist/
+      // index.js, ~L5580 and ~L5785-5790) -- for ANY part type, a non-null
+      // return value is NOT discarded by the SDK; it's forwarded as a
+      // `{ type: "message-metadata", ... }` stream chunk that the client
+      // folds into `state.message.metadata`, same as a finish-chunk's
+      // metadata would be. This callback below only returns metadata for
+      // the "finish" part (`undefined` for every other part type) because
+      // of this callback's OWN body, not because the SDK throws non-finish
+      // values away -- returning a value for another part type here would
+      // start emitting real, client-visible chunks. `createdAt` matches the
+      // exact field name/shape
+      // fetchConversationHistory already populates (`metadata: { createdAt:
+      // r.createdAt }`, App.tsx) so both hydration paths produce the same
+      // client-side shape. `id` carries the REAL row id this turn will
+      // persist as (assistantMessageId, shared with onFinish below) --
+      // needed because the live-streamed UIMessage's own top-level `id` is
+      // whatever the client/AI SDK assigned when the turn started (no
+      // `generateMessageId` is passed to this call), which is NOT the id
+      // onFinish mints for the persisted row; ConversationView's own doc
+      // comment on AIMessageData.createdAt already anticipates exactly this
+      // gap.
+      //
+      // #451 (Cordero review, PR440): this callback runs BEFORE onFinish
+      // (see assistantMessageId's own doc comment above), so it structurally
+      // cannot see onFinish's own `shouldPersist` verdict -- that verdict is
+      // `!isErrorOutcome && hasRenderableContent(responseMessage.parts)`, and
+      // `responseMessage.parts` (the ASSEMBLED UIMessage parts) simply
+      // doesn't exist yet at this point in the pipeline; only the raw
+      // model-stream's own "finish" TextStreamPart does, which carries
+      // `finishReason` but no content. An earlier version of this comment
+      // argued the gap was harmless because "an unpersisted turn's message
+      // is never shown as complete to begin with" -- true for the streaming
+      // indicator, but NOT for the Flag affordance, which keys off
+      // `createdAt`/`persistedId` alone: a turn that finishes with a
+      // TERMINAL `finishReason` but happens to produce zero renderable
+      // content (`hasRenderableContent` false) would still get a Flag
+      // control that 404s when clicked, since `onFinish` never persists that
+      // row.
+      //
+      // Checking `part.finishReason` against the SAME `TERMINAL_FINISH_
+      // REASONS` allowlist `onFinish`'s own `isErrorOutcome` uses closes the
+      // large majority of this gap: any aborted, non-terminal, or error
+      // finish reason now withholds `id`/`createdAt` entirely, so the Flag
+      // control simply never renders for it (same as the existing `!isStrea
+      // ming && msg.persistedId` client-side gate already does for a turn
+      // still in flight). What this does NOT close: a TERMINAL finish
+      // reason (stop/length/tool-calls) that nonetheless produced literally
+      // no renderable content -- `hasRenderableContent` needs the assembled
+      // response text, which isn't available here at all; duplicating that
+      // check's OWN logic (not just its allowlist) against raw TextStreamParts
+      // would mean two independently-maintained "has content" implementations
+      // that could drift. That narrower case is a documented, accepted
+      // residual gap (a model finishing "normally" with an entirely empty
+      // response), not something this fix claims to eliminate.
+      messageMetadata: ({ part }) =>
+        part.type === "finish" && part.finishReason !== undefined && TERMINAL_FINISH_REASONS.has(part.finishReason)
+          ? { createdAt: new Date().toISOString(), id: assistantMessageId }
+          : undefined,
       // #317 review, #321 + "strongly recommend" item, #334: previously
       // absent, so the SDK's default error-to-string conversion reached the
       // client unfiltered -- combined with App.tsx rendering chatError.message
@@ -2403,115 +2685,151 @@ export async function chatHandler(c: Context<AppEnv>) {
       // needed. See the isErrorOutcome/hasRenderableContent doc comments
       // inside this callback for the persistence gate itself.
       onFinish: async ({ responseMessage, isAborted, finishReason }) => {
-        // #268, #342: NOT persisted unless the turn reached a real terminal
-        // state. Originally this was `isAborted || finishReason === "error"`
-        // -- a denylist that let anything else through, including
-        // `finishReason === undefined` and `"unknown"`. #342 found the gap
-        // that denylist left: a client-side Stop or disconnect (not a
-        // server-side abort -- ai@5.0.195's `isAborted` is set only by an
-        // in-stream `abort` chunk, which the server emits only when its OWN
-        // `abortSignal` (STREAM_TIMEOUT_MS) trips, never on a client reader
-        // cancel) produces `isAborted: false` and `finishReason: undefined`,
-        // which the denylist waved through as "success." An allowlist of
-        // the finish reasons that actually mean "the model produced a real,
-        // complete-as-far-as-it-went answer" closes that: "stop" (normal
-        // completion), "length" (hit its token budget -- still a real
-        // answer, not a truncation, so deliberately included), and
-        // "tool-calls" (the model's last of the up-to-5 steps this route
-        // allows ended on a tool call). Everything else -- undefined,
-        // "unknown", "content-filter", "other", and "error" itself -- is
-        // treated as not-a-real-answer and falls through to the same
-        // not-persisted path an aborted/provider-error turn already took.
-        const TERMINAL_FINISH_REASONS = new Set(["stop", "length", "tool-calls"]);
-        const isErrorOutcome = isAborted || !finishReason || !TERMINAL_FINISH_REASONS.has(finishReason);
-
-        // Persisting a rejected turn anyway would write a row the
-        // idempotency replay path above (classifyTurn) would then treat as
-        // "already answered" on every future retry -- for the finishReason
-        // gate above, permanently serving the same half-sentence back with
-        // no error and no way out except Restart (which voids the
-        // submission); for hasRenderableContent's own gate (its own doc
-        // comment), a permanently-empty assistant row. Not persisting
-        // instead leaves nothing for this turn, so a retry's idempotency
-        // check falls through to a genuine model call again.
+        // #440 audit, Fix 2 (Reliability, Minor): `timeoutHandle` lives here,
+        // ahead of the try below, so both the try body (which assigns it)
+        // and the catch (which clears it) can reach it -- unchanged from
+        // before this fix, just hoisted one line higher so the try itself
+        // can start above the persistence-gate logic that follows.
         //
-        // best-effort, not double-write-proof: if the *worker process* dies
-        // before onFinish runs (vs. the client just disconnecting), the
-        // assistant message is lost and the client's retry will only re-send
-        // the user message (already deduped above), so no response ever gets
-        // generated for that turn. That gap is a documented limitation (#3
-        // pitfall 2), not fixed here -- tracked as #96 (streaming resilience).
-        //
-        // #317 review, #346 (requirement 3): the assistant message's id is
-        // generated here rather than read back from an INSERT -- see
-        // finalizeAssistantTurn's own doc comment for why that's what lets
-        // the lock release, the message persist, and the llm_call_logs
-        // write (previously three serialized round-trips, all directly
-        // perceived as tail latency since the SDK awaits onFinish inside
-        // the stream's flush) collapse into one db.batch()/transaction.
-        const shouldPersist = !isErrorOutcome && hasRenderableContent(responseMessage.parts);
-        // #275: the current equivalent of the old "hasRenderableContent
-        // false -> bare return, nothing logged" branch -- that separate
-        // early return doesn't exist anymore (#268/#342 folded it into this
-        // one shouldPersist gate, above), so this is the single place that
-        // now knows a turn is about to go unpersisted, for either reason
-        // (isErrorOutcome, or a `stop`/`tool-calls` finish that still
-        // produced no renderable content). Warn, not error: nothing threw --
-        // this is the system correctly refusing to write a truncated/blank
-        // row, but an operator debugging "the tutor showed my student an
-        // error" needs to see it happened and why (finishReason/isAborted),
-        // not infer it from a gap in the transcript.
-        if (!shouldPersist) {
-          logServerWarn("chatHandler.onFinish.noRenderableContent", "turn produced no persistable content", {
-            conversationId: conv.id,
-            userId: authContext.session.userId,
-            model: servingConfig.modelName,
-            finishReason: finishReason ?? null,
-            isAborted: Boolean(isAborted),
-          });
-        }
-        const assistantMessage = shouldPersist
-          ? { id: crypto.randomUUID(), parts: responseMessage.parts }
-          : null;
-
-        // #364 (requirement 3): still ONE row per turn after a failover, not
-        // one per attempt. There is exactly one finalizeAssistantTurn call
-        // site pair in this callback and streamWithFallback returns exactly
-        // one result, so a failed-over turn cannot produce a second row --
-        // and `servingConfig` (above) means the one row it does produce names
-        // the provider/model/config that actually answered, never the primary
-        // that didn't. `latencyMs` deliberately still measures from
-        // turnStartedAt, i.e. the whole model-call window including the
-        // failed first attempt: that is what the student actually waited.
-        //
-        // #317 review, #321: one llm_call_logs row per turn -- including the
-        // error/aborted/no-content cases above, which previously early-
-        // returned with nothing written anywhere. This was the operational
-        // gap #321 names: a provider outage or a rotated key produced
-        // "zero evidence" -- no error rate, no per-provider breakdown, no
-        // latency, no cost.
-        // #317 review, #349 (requirement 3): result.totalUsage, not
-        // result.usage -- the AI SDK documents result.usage as "the token
-        // usage of the LAST STEP" only. stopWhen: stepCountIs(5) above
-        // makes multi-step turns (a tool call, then a follow-up text
-        // step) a designed path, and providers bill per call: result.usage
-        // alone silently dropped every earlier step's tokens from cost
-        // and usage reporting on any turn that used a tool.
-        //
-        // #317 review, #350 (requirement 2): raced against
-        // USAGE_FETCH_TIMEOUT_MS -- see that constant's own doc comment for
-        // why this Promise.all can hang forever on a genuinely cancelled
-        // stream instead of merely resolving slowly. `finalizeAssistantTurn`
-        // still runs on timeout (with null usage/cost fields, errorFlag
-        // true), rather than onFinish just hanging and never reaching it at
-        // all -- the lock still releases and a row still lands, even though
-        // this specific turn's token/cost numbers are unknowable.
+        // The try/catch that used to start only at the usage-fetch race
+        // further down now wraps this callback's ENTIRE body, including the
+        // persistence-gate logic (isErrorOutcome/shouldPersist/
+        // assistantMessage, immediately below) that previously ran BEFORE
+        // any try/catch in this function at all. Nothing there throws
+        // today -- this is a defensive widening, not a behavior change for
+        // any currently-passing path -- but a future edit that adds a
+        // throwable statement to that section would previously have
+        // propagated out of onFinish uncaught by anything here, leaving the
+        // conversation turn lock un-released with no log line naming what
+        // happened (worse than the accepted "self-heals via LOCK_STALE_MS"
+        // trade-off the catch below already documents for every other
+        // throw in this callback). The catch's own lock-release/
+        // error-classification behavior is unchanged: it still only logs
+        // and lets a stuck lock self-heal via staleness, exactly as it did
+        // before this fix -- this only widens what it guards.
         let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-        const timedOut = Symbol("usage-fetch-timed-out");
-        const timeoutPromise = new Promise<typeof timedOut>((resolve) => {
-          timeoutHandle = setTimeout(() => resolve(timedOut), USAGE_FETCH_TIMEOUT_MS);
-        });
         try {
+          // #268, #342: NOT persisted unless the turn reached a real terminal
+          // state. Originally this was `isAborted || finishReason === "error"`
+          // -- a denylist that let anything else through, including
+          // `finishReason === undefined` and `"unknown"`. #342 found the gap
+          // that denylist left: a client-side Stop or disconnect (not a
+          // server-side abort -- ai@5.0.195's `isAborted` is set only by an
+          // in-stream `abort` chunk, which the server emits only when its OWN
+          // `abortSignal` (STREAM_TIMEOUT_MS) trips, never on a client reader
+          // cancel) produces `isAborted: false` and `finishReason: undefined`,
+          // which the denylist waved through as "success." An allowlist of
+          // the finish reasons that actually mean "the model produced a real,
+          // complete-as-far-as-it-went answer" closes that: "stop" (normal
+          // completion), "length" (hit its token budget -- still a real
+          // answer, not a truncation, so deliberately included), and
+          // "tool-calls" (the model's last of the up-to-5 steps this route
+          // allows ended on a tool call). Everything else -- undefined,
+          // "unknown", "content-filter", "other", and "error" itself -- is
+          // treated as not-a-real-answer and falls through to the same
+          // not-persisted path an aborted/provider-error turn already took.
+          // #451: TERMINAL_FINISH_REASONS itself now lives at module scope
+          // (above hasRenderableContent) so messageMetadata's own callback
+          // can share this exact allowlist -- see that callback's doc
+          // comment for why.
+          const isErrorOutcome = isAborted || !finishReason || !TERMINAL_FINISH_REASONS.has(finishReason);
+
+          // Persisting a rejected turn anyway would write a row the
+          // idempotency replay path above (classifyTurn) would then treat as
+          // "already answered" on every future retry -- for the finishReason
+          // gate above, permanently serving the same half-sentence back with
+          // no error and no way out except Restart (which voids the
+          // submission); for hasRenderableContent's own gate (its own doc
+          // comment), a permanently-empty assistant row. Not persisting
+          // instead leaves nothing for this turn, so a retry's idempotency
+          // check falls through to a genuine model call again.
+          //
+          // best-effort, not double-write-proof: if the *worker process* dies
+          // before onFinish runs (vs. the client just disconnecting), the
+          // assistant message is lost and the client's retry will only re-send
+          // the user message (already deduped above), so no response ever gets
+          // generated for that turn. That gap is a documented limitation (#3
+          // pitfall 2), not fixed here -- tracked as #96 (streaming resilience).
+          //
+          // #317 review, #346 (requirement 3): the assistant message's id is
+          // generated up front (not read back from an INSERT) -- see
+          // finalizeAssistantTurn's own doc comment for why that's what lets
+          // the lock release, the message persist, and the llm_call_logs
+          // write (previously three serialized round-trips, all directly
+          // perceived as tail latency since the SDK awaits onFinish inside
+          // the stream's flush) collapse into one db.batch()/transaction.
+          //
+          // #440 audit, Fix 1: that generation moved from here to
+          // `assistantMessageId` above (this callback's outer closure) --
+          // messageMetadata's `finish`-part callback needs the SAME id, and it
+          // runs before onFinish ever does (see assistantMessageId's own doc
+          // comment for why), so onFinish can no longer be the place that
+          // mints it. Reused here rather than generated twice so the id the
+          // client was just told to expect (via metadata.id) is the exact id
+          // this turn persists under.
+          const shouldPersist = !isErrorOutcome && hasRenderableContent(responseMessage.parts);
+          // #275: the current equivalent of the old "hasRenderableContent
+          // false -> bare return, nothing logged" branch -- that separate
+          // early return doesn't exist anymore (#268/#342 folded it into this
+          // one shouldPersist gate, above), so this is the single place that
+          // now knows a turn is about to go unpersisted, for either reason
+          // (isErrorOutcome, or a `stop`/`tool-calls` finish that still
+          // produced no renderable content). Warn, not error: nothing threw --
+          // this is the system correctly refusing to write a truncated/blank
+          // row, but an operator debugging "the tutor showed my student an
+          // error" needs to see it happened and why (finishReason/isAborted),
+          // not infer it from a gap in the transcript.
+          if (!shouldPersist) {
+            logServerWarn("chatHandler.onFinish.noRenderableContent", "turn produced no persistable content", {
+              conversationId: conv.id,
+              userId: authContext.session.userId,
+              model: servingConfig.modelName,
+              finishReason: finishReason ?? null,
+              isAborted: Boolean(isAborted),
+            });
+          }
+          const assistantMessage = shouldPersist ? { id: assistantMessageId, parts: responseMessage.parts } : null;
+
+          // #364 (requirement 3): still ONE row per turn after a failover, not
+          // one per attempt. There is exactly one finalizeAssistantTurn call
+          // site pair in this callback and streamWithFallback returns exactly
+          // one result, so a failed-over turn cannot produce a second row --
+          // and `servingConfig` (above) means the one row it does produce names
+          // the provider/model/config that actually answered, never the primary
+          // that didn't. `latencyMs` deliberately still measures from
+          // turnStartedAt, i.e. the whole model-call window including the
+          // failed first attempt: that is what the student actually waited.
+          //
+          // #317 review, #321: one llm_call_logs row per turn -- including the
+          // error/aborted/no-content cases above, which previously early-
+          // returned with nothing written anywhere. This was the operational
+          // gap #321 names: a provider outage or a rotated key produced
+          // "zero evidence" -- no error rate, no per-provider breakdown, no
+          // latency, no cost.
+          // #317 review, #349 (requirement 3): result.totalUsage, not
+          // result.usage -- the AI SDK documents result.usage as "the token
+          // usage of the LAST STEP" only. stopWhen: stepCountIs(5) above
+          // makes multi-step turns (a tool call, then a follow-up text
+          // step) a designed path, and providers bill per call: result.usage
+          // alone silently dropped every earlier step's tokens from cost
+          // and usage reporting on any turn that used a tool.
+          //
+          // #317 review, #350 (requirement 2): raced against
+          // USAGE_FETCH_TIMEOUT_MS -- see that constant's own doc comment for
+          // why this Promise.all can hang forever on a genuinely cancelled
+          // stream instead of merely resolving slowly. `finalizeAssistantTurn`
+          // still runs on timeout (with null usage/cost fields, errorFlag
+          // true), rather than onFinish just hanging and never reaching it at
+          // all -- the lock still releases and a row still lands, even though
+          // this specific turn's token/cost numbers are unknowable.
+          // #440 audit, Fix 2: `timeoutHandle` itself is declared once, above
+          // (this callback's outer try/catch doc comment explains why) -- only
+          // assigned here, inside the now-single try this section shares with
+          // the persistence-gate logic above it.
+          const timedOut = Symbol("usage-fetch-timed-out");
+          const timeoutPromise = new Promise<typeof timedOut>((resolve) => {
+            timeoutHandle = setTimeout(() => resolve(timedOut), USAGE_FETCH_TIMEOUT_MS);
+          });
           const usageResult = await Promise.race([
             Promise.all([result.totalUsage, result.response, result.warnings]),
             timeoutPromise,

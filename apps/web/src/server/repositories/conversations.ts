@@ -20,15 +20,16 @@ export async function listConversationsForOwner(
   db: Db,
   scope: CourseScope,
   ownerUserId: string,
-  opts?: { includeDeleted?: boolean; kind?: ConversationKind; limit?: number; before?: { updatedAt: Date; id: string } },
+  opts?: { kind?: ConversationKind; limit?: number; before?: { updatedAt: Date; id: string } },
 ) {
   const conditions = [
     eq(conversations.courseId, scope),
     eq(conversations.ownerUserId, ownerUserId),
+    // #311: `includeDeleted` was dropped -- no route ever passed it (only
+    // a repository test did, purely to prove this default filter exists),
+    // so soft-deleted conversations are unconditionally excluded here now.
+    eq(conversations.isDeleted, false),
   ];
-  if (!opts?.includeDeleted) {
-    conditions.push(eq(conversations.isDeleted, false));
-  }
   // Optional: #5's GET /api/conversations?kind=tutor route always passes
   // this (defaulting to "tutor" itself, not here -- this function stays a
   // no-op filter when omitted so the #3-era repo tests that call it without
@@ -97,6 +98,42 @@ export async function listConversationsForOwner(
   const countByConversationId = new Map(counts.map((c) => [c.conversationId, c.count]));
 
   return rows.map((r) => ({ ...r, messageCount: countByConversationId.get(r.id) ?? 0 }));
+}
+
+// #438: backs GET /api/conversations/:id, the targeted reconciliation read
+// the tutor rail's client asks for once a chat turn's stream settles
+// (useTutorConversations.ts's reconcileConversationCount) instead of
+// guessing whether the server persisted one row or two for that turn. A
+// single-conversation counterpart to listConversationsForOwner's own
+// per-page counts query above -- same aggregate, scoped to exactly the one
+// id a caller already knows it wants rather than a whole page's worth.
+//
+// #438 review: takes a `scope: CourseScope` and checks
+// assertConversationInScope itself, matching getMessagesForConversation/
+// getLastMessages' own defense-in-depth convention -- both require a scope
+// and re-verify it internally even though their current callers have
+// already checked ownership upstream too. This function had neither
+// originally; its one call site (getConversationHandler) already calls
+// getOwnedConversationOrNull first, so it wasn't exploitable, but a
+// scope-less repository function of this shape is exactly the "safe only by
+// caller discipline, not by construction" pattern this codebase avoids for
+// its siblings. A wrong-scope/nonexistent conversationId now returns 0
+// (matching getMessagesForConversation's "not owned -> empty" convention)
+// rather than silently counting rows for an id the caller never proved it
+// owns.
+export async function getConversationMessageCount(
+  db: Db,
+  scope: CourseScope,
+  conversationId: string,
+): Promise<number> {
+  const owned = await assertConversationInScope(db, scope, conversationId);
+  if (!owned) return 0;
+
+  const [row] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(messages)
+    .where(eq(messages.conversationId, conversationId));
+  return row?.count ?? 0;
 }
 
 export async function createConversation(

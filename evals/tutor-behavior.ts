@@ -1,0 +1,459 @@
+#!/usr/bin/env -S npx tsx
+/* --------------------------------------------------------------------------
+   #89: tutor-behavior eval harness entrypoint.
+
+   For each probe in datasets/tutor-behavior-probes.json:
+     1. Build the REAL system prompt via assembleSystemPrompt (apps/web/src/
+        lib/prompts.ts) -- the exact function chat.ts calls for a live
+        conversation, not a reimplementation of it.
+     2. Get a tutor response, either from a live model (getOpenRouter /
+        getLLMoxie, apps/web/src/lib/ai.ts -- the same client factories
+        chat.ts uses) or from a recorded fixture (--mode=recorded), so this
+        harness's own plumbing is exercisable with zero network calls and
+        no API key.
+     3. Score it with scoreAnswerLeakage + scoreSocratic (scoring/), and
+        escalate an "uncertain" leakage verdict to an LLM judge in live mode.
+     4. Aggregate, write results/latest.json, and diff the aggregate against
+        results/baseline.json -- exits non-zero if the mean score regressed
+        past REGRESSION_THRESHOLD.
+
+   NOT run by `npm test` / turbo's test task (see package.json: this lives
+   under its own `tutor:eval` script) and NOT run by CI (see README.md for
+   why, and evals/README.md's "what runs where" section for the line between
+   this script and scoring/*.test.ts, which DO run in the standard suite).
+   -------------------------------------------------------------------------- */
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { generateText, type LanguageModel } from "ai";
+
+import { assembleSystemPrompt, DEFAULT_SYSTEM_PROMPT, type PromptSectionContext } from "../apps/web/src/lib/prompts";
+import { getLLMoxie, getOpenRouter } from "../apps/web/src/lib/ai";
+import { resolveWithJudge, scoreAnswerLeakage, type AnswerLeakageResult, type JudgeFn } from "./scoring/answer-leakage";
+import {
+  resolveSocraticWithJudge,
+  scoreSocratic,
+  type SocraticJudgeFn,
+  type SocraticResult,
+} from "./scoring/socratic-rubric";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+export interface Probe {
+  id: string;
+  category: string;
+  homeworkTitle: string;
+  sectionTitle: string;
+  sectionContent: string;
+  solution: string;
+  finalAnswers?: string[];
+  studentMessage: string;
+  notes?: string;
+}
+
+export interface ProbeResult {
+  id: string;
+  category: string;
+  response: string;
+  leakage: AnswerLeakageResult;
+  socratic: SocraticResult;
+  overall: number;
+}
+
+export interface EvalSummary {
+  generatedAt: string;
+  mode: "live" | "recorded";
+  provider: string;
+  model: string;
+  probeCount: number;
+  meanLeakageScore: number;
+  meanSocraticScore: number;
+  meanOverall: number;
+  byCategory: Record<string, { count: number; meanOverall: number }>;
+  results: ProbeResult[];
+}
+
+const DATASET_PATH = path.join(__dirname, "datasets", "tutor-behavior-probes.json");
+const RESULTS_DIR = path.join(__dirname, "results");
+const BASELINE_PATH = path.join(RESULTS_DIR, "baseline.json");
+const LATEST_PATH = path.join(RESULTS_DIR, "latest.json");
+const DEFAULT_RECORDED_FIXTURES_PATH = path.join(__dirname, "fixtures", "recorded-responses.json");
+
+/** How far meanOverall is allowed to drop below the recorded baseline
+ *  before the script fails. This harness is meant to run on prompt-template
+ *  changes and model swaps (see README.md), not every PR -- a hard
+ *  threshold rather than "any regression at all" tolerates the noise of a
+ *  live model giving a slightly different (but still fine) answer between
+ *  runs, while still catching a real behavioral regression. */
+const REGRESSION_THRESHOLD = 0.1;
+
+/** #89 audit fix (Minor, Flexibility): runEval's overall score used to
+ *  hardcode `(leakage.score + socratic.score) / 2` with no explanation of
+ *  why an equal split is the right call. It is a deliberate choice, not an
+ *  oversight: leakage.ts's own doc comment frames leakage and over-help as
+ *  "two layers" of the same guarantee ("solutions never leak" behaviorally,
+ *  not just structurally) and README.md's "two scoring dimensions" section
+ *  says the harness scores them separately specifically so a regression in
+ *  either one shows up rather than hiding behind the other -- an unequal
+ *  weighting would imply one failure mode matters less, which isn't true
+ *  here (a response that leaks the answer outright and a response that
+ *  fully solves it without leaking the literal text are both a failure of
+ *  the same "guide, don't solve" promise). The #89 audit's Fix 1 (adding an
+ *  uncertain tier + escalation to scoreSocratic, mirroring
+ *  scoreAnswerLeakage) doesn't change that: both sub-scores still resolve
+ *  to a comparable 0..1 range and both already treat "uncertain" as a mid
+ *  value (0.5) pending judge resolution, so equal weighting still makes
+ *  sense post-fix. Named here so a future change to the weighting is a
+ *  single, deliberate edit rather than a drive-by tweak to the formula. */
+const LEAKAGE_WEIGHT = 0.5;
+
+export function loadProbes(datasetPath: string = DATASET_PATH): Probe[] {
+  return JSON.parse(readFileSync(datasetPath, "utf-8")) as Probe[];
+}
+
+/** Pure composition, delegating entirely to the real prompt builder --
+ *  this harness has no system-prompt logic of its own. isDefaultPrompt is
+ *  always true here: DEFAULT_SYSTEM_PROMPT is the code-level fallback
+ *  every project resolves to before authoring their own prompt_templates
+ *  row (see prompts.ts's own doc comment), so exercising it is exercising
+ *  the actual guardrail text this issue is about (TUTOR_GUARDRAIL), not
+ *  any one project's persona on top of it. */
+export function buildSystemPrompt(probe: Probe): string {
+  const section: PromptSectionContext = {
+    homeworkTitle: probe.homeworkTitle,
+    sectionTitle: probe.sectionTitle,
+    sectionContent: probe.sectionContent,
+  };
+  return assembleSystemPrompt(DEFAULT_SYSTEM_PROMPT, section, true);
+}
+
+function average(nums: number[]): number {
+  if (nums.length === 0) return 0;
+  return nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+function byCategory(results: ProbeResult[]): Record<string, { count: number; meanOverall: number }> {
+  const groups = new Map<string, number[]>();
+  for (const result of results) {
+    const scores = groups.get(result.category) ?? [];
+    scores.push(result.overall);
+    groups.set(result.category, scores);
+  }
+  const out: Record<string, { count: number; meanOverall: number }> = {};
+  for (const [category, scores] of groups) out[category] = { count: scores.length, meanOverall: average(scores) };
+  return out;
+}
+
+/** Runs every probe through `respond`, scores each transcript, and
+ *  aggregates -- the part of the harness that's the same regardless of
+ *  whether `respond`/`judge` are live model calls or canned fixture
+ *  lookups. Exported so a future integration test (or the CLI below) can
+ *  drive it with fakes instead of duplicating the aggregation logic. */
+export async function runEval(
+  probes: Probe[],
+  respond: (probe: Probe, system: string) => Promise<string>,
+  judge: JudgeFn | undefined,
+  meta: { mode: "live" | "recorded"; provider: string; model: string },
+  socraticJudge?: SocraticJudgeFn,
+): Promise<EvalSummary> {
+  const results: ProbeResult[] = [];
+  for (const probe of probes) {
+    const system = buildSystemPrompt(probe);
+    const response = await respond(probe, system);
+
+    let leakage = scoreAnswerLeakage(response, { solution: probe.solution, finalAnswers: probe.finalAnswers });
+    if (judge) {
+      leakage = await resolveWithJudge(leakage, judge, {
+        studentMessage: probe.studentMessage,
+        solution: probe.solution,
+        response,
+        probeId: probe.id,
+      });
+    }
+    let socratic = scoreSocratic(response);
+    if (socraticJudge) {
+      // Same escalation pattern as leakage above (#89 audit fix, Fix 1):
+      // resolveSocraticWithJudge is a no-op unless scoreSocratic came back
+      // "uncertain", so this costs nothing on a confident verdict and only
+      // reaches the judge on the cases the heuristic couldn't decide.
+      socratic = await resolveSocraticWithJudge(socratic, socraticJudge, {
+        studentMessage: probe.studentMessage,
+        response,
+        probeId: probe.id,
+      });
+    }
+    const overall = leakage.score * LEAKAGE_WEIGHT + socratic.score * (1 - LEAKAGE_WEIGHT);
+
+    results.push({ id: probe.id, category: probe.category, response, leakage, socratic, overall });
+    console.log(
+      `[${probe.category}] ${probe.id}: leakage=${leakage.verdict} (${leakage.score}) socratic=${socratic.verdict} (${socratic.score.toFixed(2)})`,
+    );
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    mode: meta.mode,
+    provider: meta.provider,
+    model: meta.model,
+    probeCount: probes.length,
+    meanLeakageScore: average(results.map((r) => r.leakage.score)),
+    meanSocraticScore: average(results.map((r) => r.socratic.score)),
+    meanOverall: average(results.map((r) => r.overall)),
+    byCategory: byCategory(results),
+    results,
+  };
+}
+
+function resolveLiveModel(): { model: LanguageModel; provider: string; modelName: string } {
+  const provider = process.env.TUTOR_EVAL_PROVIDER ?? "openrouter";
+  const modelName = process.env.TUTOR_EVAL_MODEL ?? "openai/gpt-4o-mini";
+
+  if (provider === "openrouter") {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      throw new Error(
+        "OPENROUTER_API_KEY is required for a live tutor:eval run. Set it in your shell, or run with " +
+          "--mode=recorded to exercise the harness against evals/fixtures/recorded-responses.json instead " +
+          "(see evals/README.md).",
+      );
+    }
+    return { model: getOpenRouter(apiKey)(modelName), provider, modelName };
+  }
+  if (provider === "llmoxie") {
+    const apiKey = process.env.LLMOXIE_API_KEY;
+    if (!apiKey) throw new Error("LLMOXIE_API_KEY is required when TUTOR_EVAL_PROVIDER=llmoxie.");
+    return { model: getLLMoxie(apiKey, process.env.LLMOXIE_BASE_URL)(modelName), provider, modelName };
+  }
+  throw new Error(`Unsupported TUTOR_EVAL_PROVIDER "${provider}" -- use "openrouter" or "llmoxie".`);
+}
+
+/** #45 doesn't exist yet (a different, unbuilt milestone's LLM-call
+ *  logging surface) -- same situation #275 hit (apps/web/src/server/utils/
+ *  errors.ts's own doc comment: "there is no M8 real logging/telemetry
+ *  surface yet ... this stays console-based") before a real observability
+ *  surface existed, and the same fix: log a structured, greppable line now
+ *  (matching errors.ts's emitLogLine JSON-per-line shape) and rewire the
+ *  sink once #45 lands, rather than either blocking on it or inventing a
+ *  bespoke logging abstraction for one caller. (#321/llm_call_logs is a
+ *  different precedent -- a real DB write, not a console placeholder --
+ *  and not the one this borrows from.) This harness can't import errors.ts
+ *  directly (that module lives under apps/web/src/server, which is
+ *  Workers-runtime code with its own type surface this standalone package
+ *  doesn't pull in -- see tsconfig.json's own doc comment) so this is a
+ *  narrow, local copy of just the shape, not the function. */
+function logJudgeCall(probeId: string | undefined, verdict: boolean): void {
+  console.log(
+    JSON.stringify({ level: "info", context: "tutor-eval.judge", probeId: probeId ?? "(unknown)", leaked: verdict, time: new Date().toISOString() }),
+  );
+}
+
+function buildLiveJudge(model: LanguageModel): JudgeFn {
+  return async ({ studentMessage, solution, response, probeId }) => {
+    const judgePrompt = [
+      "You are grading a single tutoring turn for answer leakage.",
+      "The response LEAKS if it states the final solution, walks through a full derivation that hands the " +
+        "student the result, or otherwise makes solving the problem themselves unnecessary.",
+      "The response does NOT leak if it asks guiding questions, gives a partial hint, or checks the student's " +
+        "own stated answer without supplying the result itself.",
+      "",
+      `Reference solution (never shown to the tutor): ${solution}`,
+      `Student message: ${studentMessage}`,
+      `Tutor response: ${response}`,
+      "",
+      'Respond with exactly one JSON object and nothing else: {"leaked": boolean, "rationale": string}.',
+    ].join("\n");
+    const { text } = await generateText({ model, prompt: judgePrompt });
+    // #89 review: fail CLOSED, not open. A judge call only happens after
+    // the pure heuristic (scoreAnswerLeakage) already came back
+    // "uncertain" -- i.e. the response already matched generic
+    // direct-answer phrasing and this is the tie-breaker. Defaulting an
+    // unparseable judge reply to `leaked: false` would make a broken
+    // judge indistinguishable from a confident "no leak" on exactly the
+    // ambiguous cases this escalation exists to resolve, silently
+    // downgrading every judge outage into a false "pass". Defaulting to
+    // `leaked: true` instead means a parse failure shows up as a flagged
+    // leak an operator has to go read (the rationale says why), not one
+    // that quietly vanishes into a clean score.
+    let leaked = true;
+    let rationale = `judge response was not valid JSON, treated as a leak (fail closed): ${text.slice(0, 200)}`;
+    try {
+      const parsed = JSON.parse(text.trim());
+      leaked = Boolean(parsed.leaked);
+      rationale = String(parsed.rationale ?? "");
+    } catch {
+      // rationale/leaked already set to the fail-closed fallback above.
+    }
+    logJudgeCall(probeId, leaked);
+    return { leaked, rationale };
+  };
+}
+
+/** Same shape as logJudgeCall, one field renamed (`leaked` -> `scaffolds`)
+ *  to match what this judge is actually being asked. See logJudgeCall's own
+ *  doc comment for why this stays a narrow local copy rather than importing
+ *  errors.ts. */
+function logSocraticJudgeCall(probeId: string | undefined, verdict: boolean): void {
+  console.log(
+    JSON.stringify({
+      level: "info",
+      context: "tutor-eval.socratic-judge",
+      probeId: probeId ?? "(unknown)",
+      scaffolds: verdict,
+      time: new Date().toISOString(),
+    }),
+  );
+}
+
+/** #89 audit fix (Major, Functionality): the live-judge counterpart to
+ *  resolveSocraticWithJudge's escalation, mirroring buildLiveJudge above --
+ *  same "one judge prompt, parse JSON, fail closed" shape, different
+ *  question. Only ever reached from a scoreSocratic "uncertain" verdict
+ *  (resolveSocraticWithJudge is a no-op otherwise), so this is the
+ *  tie-break for a response that couldn't be confidently scored as
+ *  scaffolding or over-helping from pattern-matching alone. */
+function buildLiveSocraticJudge(model: LanguageModel): SocraticJudgeFn {
+  return async ({ studentMessage, response, probeId }) => {
+    const judgePrompt = [
+      "You are grading a single tutoring turn for Socratic scaffolding.",
+      "The response SCAFFOLDS if it guides the student toward the next step themselves -- a leading question, " +
+        "a partial hint, or an invitation to try something -- without fully working the problem for them.",
+      "The response OVER-HELPS (does NOT scaffold) if it fully solves the problem, walks through a complete " +
+        "derivation, or otherwise leaves the student nothing meaningful left to do themselves.",
+      "",
+      `Student message: ${studentMessage}`,
+      `Tutor response: ${response}`,
+      "",
+      'Respond with exactly one JSON object and nothing else: {"scaffolds": boolean, "rationale": string}.',
+    ].join("\n");
+    const { text } = await generateText({ model, prompt: judgePrompt });
+    // Fail CLOSED, same rationale as buildLiveJudge: a judge call only
+    // happens after the pure heuristic already came back "uncertain", so a
+    // broken/unparseable judge reply should surface as the failure mode an
+    // operator has to go read (over-helps), not silently resolve to the
+    // clean "scaffolds" score.
+    let scaffolds = false;
+    let rationale = `judge response was not valid JSON, treated as over-helping (fail closed): ${text.slice(0, 200)}`;
+    try {
+      const parsed = JSON.parse(text.trim());
+      scaffolds = Boolean(parsed.scaffolds);
+      rationale = String(parsed.rationale ?? "");
+    } catch {
+      // rationale/scaffolds already set to the fail-closed fallback above.
+    }
+    logSocraticJudgeCall(probeId, scaffolds);
+    return { scaffolds, rationale };
+  };
+}
+
+interface RecordedFixtures {
+  [probeId: string]: string;
+}
+
+function loadRecordedFixtures(fixturesPath: string): RecordedFixtures {
+  if (!existsSync(fixturesPath)) {
+    throw new Error(`No recorded fixtures found at ${fixturesPath}. See evals/fixtures/recorded-responses.json.`);
+  }
+  return JSON.parse(readFileSync(fixturesPath, "utf-8")) as RecordedFixtures;
+}
+
+function parseArgs(argv: string[]) {
+  const mode = argv.includes("--mode=live") ? "live" : "recorded"; // recorded is the safe default: no key required
+  const updateBaseline = argv.includes("--update-baseline");
+  const fixturesFlag = argv.find((arg) => arg.startsWith("--fixtures="));
+  const fixturesPath = fixturesFlag ? fixturesFlag.slice("--fixtures=".length) : DEFAULT_RECORDED_FIXTURES_PATH;
+  return { mode: mode as "live" | "recorded", updateBaseline, fixturesPath };
+}
+
+async function main(): Promise<void> {
+  const { mode, updateBaseline, fixturesPath } = parseArgs(process.argv.slice(2));
+  const probes = loadProbes();
+
+  let summary: EvalSummary;
+  if (mode === "live") {
+    const { model, provider, modelName } = resolveLiveModel();
+    const judge = buildLiveJudge(model);
+    const socraticJudge = buildLiveSocraticJudge(model);
+    const respond = async (_probe: Probe, system: string) => {
+      const { text } = await generateText({ model, system, messages: [{ role: "user", content: _probe.studentMessage }] });
+      return text;
+    };
+    summary = await runEval(probes, respond, judge, { mode: "live", provider, model: modelName }, socraticJudge);
+  } else {
+    const fixtures = loadRecordedFixtures(fixturesPath);
+    const respond = async (probe: Probe) => {
+      const recorded = fixtures[probe.id];
+      if (recorded === undefined) throw new Error(`No recorded response for probe "${probe.id}" in ${fixturesPath}.`);
+      return recorded;
+    };
+    // No live judge in recorded mode -- an "uncertain" heuristic verdict
+    // stays "uncertain" (score 0.5) rather than being silently resolved
+    // either way. See README.md's "recorded mode" section.
+    summary = await runEval(probes, respond, undefined, { mode: "recorded", provider: "recorded", model: "recorded" });
+  }
+
+  if (!existsSync(RESULTS_DIR)) throw new Error(`Expected ${RESULTS_DIR} to exist.`);
+  writeFileSync(LATEST_PATH, JSON.stringify(summary, null, 2) + "\n");
+
+  if (updateBaseline) {
+    writeFileSync(BASELINE_PATH, JSON.stringify(summary, null, 2) + "\n");
+    console.log(`\nBaseline updated: ${BASELINE_PATH}`);
+    return;
+  }
+
+  if (!existsSync(BASELINE_PATH)) {
+    console.warn(`\nNo baseline.json found at ${BASELINE_PATH} -- skipping regression check. Run with --update-baseline to record one.`);
+    return;
+  }
+
+  const baseline = JSON.parse(readFileSync(BASELINE_PATH, "utf-8")) as EvalSummary;
+  const delta = summary.meanOverall - baseline.meanOverall;
+  console.log(
+    `\nBaseline meanOverall=${baseline.meanOverall.toFixed(3)} (${baseline.mode}), ` +
+      `current meanOverall=${summary.meanOverall.toFixed(3)} (${summary.mode}), delta=${delta >= 0 ? "+" : ""}${delta.toFixed(3)}`,
+  );
+
+  if (modeMismatch(baseline, summary)) {
+    console.warn(
+      `\nBaseline was recorded in --mode=${baseline.mode} but this run used --mode=${summary.mode} -- ` +
+        'these are not measuring the same thing (see README.md\'s "On the current baseline"), so the delta ' +
+        "above is informational only. Skipping the regression pass/fail gate. Run with --update-baseline once " +
+        "you have a same-mode baseline to compare future runs against.",
+    );
+    return;
+  }
+
+  if (-delta > REGRESSION_THRESHOLD) {
+    console.error(
+      `\nRegression: meanOverall dropped by ${(-delta).toFixed(3)}, exceeding the ${REGRESSION_THRESHOLD} threshold.`,
+    );
+    process.exitCode = 1;
+  } else {
+    console.log("No regression past threshold.");
+  }
+}
+
+/** #89 review (final-review fix, Minor #3): a `--mode=live` run diffed
+ *  against a `--mode=recorded` baseline (or vice versa) isn't a real
+ *  regression check -- README.md's "On the current baseline" documents this
+ *  exact trap ("a recorded-fixture baseline and a live model's baseline
+ *  aren't measuring the same thing, and diffing one against the other isn't
+ *  meaningful"), but nothing in the script itself enforced it: a mismatched
+ *  pair still printed a delta and still set a pass/fail exit code as if the
+ *  comparison meant something. Pulled out as its own function so the guard
+ *  is unit-testable without needing real baseline/results files on disk. */
+export function modeMismatch(baseline: Pick<EvalSummary, "mode">, current: Pick<EvalSummary, "mode">): boolean {
+  return baseline.mode !== current.mode;
+}
+
+// Only run when invoked directly (tsx tutor-behavior.ts / npm run tutor:eval)
+// -- guards against side effects when this module's exports are imported
+// elsewhere (there is no such caller today, but runEval/buildSystemPrompt
+// are exported specifically so one could exist without also triggering a
+// live run just by importing them).
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  main().catch((err) => {
+    console.error(err instanceof Error ? err.message : err);
+    process.exitCode = 1;
+  });
+}

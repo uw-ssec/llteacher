@@ -52,6 +52,16 @@ export const AUDIT_ACTIONS = {
    *  is added here rather than reusing "user"/"conversation" for a
    *  course-level event. */
   TRANSCRIPT_LIST_VIEWED: "course.transcript_list_viewed",
+  /** #90: browsing a course's flagged tutor responses is also student-
+   *  record access -- the list returns decrypted student names plus the
+   *  flagged response text itself, the same class of read
+   *  TRANSCRIPT_LIST_VIEWED already covers for the sibling transcript list.
+   *  A distinct action string (not a reuse of TRANSCRIPT_LIST_VIEWED)
+   *  because it names a different resource being browsed -- see
+   *  AUDIT_ACTIONS' own module comment on why a distinguishable value
+   *  matters once #50's audit viewer exists to filter on it. target_type
+   *  "course", target_id the course whose flags were browsed. */
+  FEEDBACK_LIST_VIEWED: "course.feedback_list_viewed",
   /** #210: a TA was put on a course, or restored to it after removal. Audited
    *  because it hands someone access to every student's work in that course
    *  -- the membership is the access, and the capability grant on top of it

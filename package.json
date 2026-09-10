@@ -6,14 +6,16 @@
   "workspaces": [
     "apps/web",
     "apps/admin",
-    "packages/*"
+    "packages/*",
+    "evals"
   ],
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "clean": "turbo run clean && rm -rf node_modules"
+    "clean": "turbo run clean && rm -rf node_modules",
+    "tutor:eval": "npm run tutor:eval --workspace=evals"
   },
   "devDependencies": {
     "turbo": "^2.3.0"
