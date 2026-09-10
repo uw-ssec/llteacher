@@ -112,6 +112,10 @@ export const AUDIT_ACTIONS = {
    *  carries the token itself -- see organizationCredentials.ts's own
    *  module comment on why the plaintext never reaches this layer. */
   CANVAS_TOKEN_SET: "credential.canvas_token_set",
+  /** #73: a second (or later) entry over an existing token -- distinguished
+   *  from CANVAS_TOKEN_SET so the audit log can tell "registered for the
+   *  first time" apart from "rotated" without decrypting anything. */
+  CANVAS_TOKEN_REPLACED: "credential.canvas_token_replaced",
   CANVAS_TOKEN_DELETED: "credential.canvas_token_deleted",
   /** #73: the "Validate" button was pressed. Audited because it's the one
    *  action here that actually reaches Canvas with the stored token. */

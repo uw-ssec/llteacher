@@ -70,7 +70,11 @@ describe("CanvasIntegrationView -- token settings (#73)", () => {
     const putCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit)?.method === "PUT");
     expect(putCall).toBeDefined();
     const putBody = JSON.parse((putCall![1] as RequestInit).body as string);
-    expect(putBody).toEqual({ token: "raw-plaintext-token", canvasBaseUrl: "https://uw.instructure.com" });
+    expect(putBody).toEqual({
+      token: "raw-plaintext-token",
+      canvasBaseUrl: "https://uw.instructure.com",
+      expiresAt: null,
+    });
   });
 
   it("shows a masked existing token and validates it on request", async () => {
@@ -115,6 +119,46 @@ describe("CanvasIntegrationView -- token settings (#73)", () => {
     await waitFor(() =>
       expect(screen.getAllByText("Canvas rejected this token.").length).toBeGreaterThan(0),
     );
+  });
+
+  it("shows an overdue expiry warning once past the expiry date", async () => {
+    const EXPIRED = { ...CREDENTIAL, expiresAt: "2020-01-01T00:00:00.000Z" };
+    stub((url, init) => {
+      if (url.endsWith("/canvas/credential") && (!init.method || init.method === "GET")) {
+        return jsonRes({ credential: EXPIRED });
+      }
+      if (url.endsWith("/canvas/status")) return jsonRes(IDLE_STATUS);
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    renderView();
+
+    await waitFor(() => screen.getByText(/Expired/));
+  });
+
+  it("submits an expiry date entered on a first-time save", async () => {
+    const fetchMock = stub((url, init) => {
+      if (url.endsWith("/canvas/credential") && (!init.method || init.method === "GET")) {
+        return jsonRes({ credential: null });
+      }
+      if (url.endsWith("/canvas/credential") && init.method === "PUT") {
+        return jsonRes({ credential: CREDENTIAL });
+      }
+      if (url.endsWith("/canvas/status")) return jsonRes(IDLE_STATUS);
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    renderView();
+
+    await waitFor(() => screen.getByLabelText("API token"));
+    fireEvent.change(screen.getByLabelText("Canvas instance URL"), {
+      target: { value: "https://uw.instructure.com" },
+    });
+    fireEvent.change(screen.getByLabelText("API token"), { target: { value: "t" } });
+    fireEvent.change(screen.getByLabelText("Expiry date (optional)"), { target: { value: "2026-12-01" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save token" }));
+
+    await waitFor(() => screen.getByText("ab••••yz"));
+    const putCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit)?.method === "PUT");
+    expect(JSON.parse((putCall![1] as RequestInit).body as string)).toMatchObject({ expiresAt: "2026-12-01" });
   });
 
   it("reopens the entry form for Replace token, without prefilling the old token", async () => {

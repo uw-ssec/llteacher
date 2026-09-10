@@ -111,15 +111,22 @@ export async function setCanvasCredentialHandler(c: Context<AppEnv>) {
 
   const db = makeDb(c.env.DATABASE_URL);
   const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
+  // Read-before-write, purely to pick the right audit action (#73: "set" vs
+  // "replace" are distinguishable log entries) -- setCanvasCredential's own
+  // upsert is what actually decides create-vs-update at the database level.
+  const existed = (await getCanvasCredentialSummary(db, cipher, ctx.scope)) !== null;
   await setCanvasCredential(db, cipher, ctx.scope, {
     token,
     canvasBaseUrl: baseUrlResult.baseUrl,
     expiresAt: expiresAtResult.expiresAt,
   });
 
-  await auditCredentialChange(c, ctx, AUDIT_ACTIONS.CANVAS_TOKEN_SET, {
-    canvasBaseUrl: baseUrlResult.baseUrl,
-  });
+  await auditCredentialChange(
+    c,
+    ctx,
+    existed ? AUDIT_ACTIONS.CANVAS_TOKEN_REPLACED : AUDIT_ACTIONS.CANVAS_TOKEN_SET,
+    { canvasBaseUrl: baseUrlResult.baseUrl },
+  );
 
   const credential = await getCanvasCredentialSummary(db, cipher, ctx.scope);
   return c.json({ credential });

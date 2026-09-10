@@ -23,6 +23,19 @@ import type {
   CanvasSyncStatusResponse,
 } from "@llteacher/ui/api";
 
+/** #73: "show expiry state" -- turns the raw expiresAt into the sentence
+ *  an instructor actually needs: whether it's already past, coming up
+ *  soon (re-entry is a known quarterly chore, so this is a nudge rather
+ *  than a countdown), or simply not set. */
+function expiryStateText(expiresAt: string | null): { text: string; overdue: boolean } {
+  if (!expiresAt) return { text: "No expiry date on file.", overdue: false };
+  const days = Math.ceil((new Date(expiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+  const date = new Date(expiresAt).toLocaleDateString();
+  if (days < 0) return { text: `Expired ${date}.`, overdue: true };
+  if (days <= 14) return { text: `Expires ${date} — replace it soon.`, overdue: true };
+  return { text: `Expires ${date}.`, overdue: false };
+}
+
 async function errorMessageFor(res: Response, fallback: string): Promise<string> {
   try {
     const body = (await res.json()) as { error?: unknown };
@@ -55,6 +68,10 @@ export function CanvasIntegrationView({
   const [editingCredential, setEditingCredential] = useState(false);
   const [tokenInput, setTokenInput] = useState("");
   const [baseUrlInput, setBaseUrlInput] = useState("https://");
+  // #73: "expiry metadata... show expiry state." An empty string, not
+  // undefined -- a controlled <input type="date"> needs a string value on
+  // every render, and "" is what clears back to "no expiry recorded."
+  const [expiresAtInput, setExpiresAtInput] = useState("");
   const [savingCredential, setSavingCredential] = useState(false);
   const [validating, setValidating] = useState(false);
   const [validation, setValidation] = useState<{ ok: boolean; message: string } | null>(null);
@@ -98,7 +115,11 @@ export function CanvasIntegrationView({
         const res = await fetch(`/api/courses/${courseId}/canvas/credential`, {
           method: "PUT",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ token: tokenInput, canvasBaseUrl: baseUrlInput }),
+          body: JSON.stringify({
+            token: tokenInput,
+            canvasBaseUrl: baseUrlInput,
+            expiresAt: expiresAtInput || null,
+          }),
           signal,
         });
         if (!res.ok) {
@@ -122,7 +143,7 @@ export function CanvasIntegrationView({
         dispose();
       }
     },
-    [courseId, tokenInput, baseUrlInput, announce],
+    [courseId, tokenInput, baseUrlInput, expiresAtInput, announce],
   );
 
   const deleteCredential = useCallback(async () => {
@@ -334,9 +355,17 @@ export function CanvasIntegrationView({
             <p className="admin-form-hint">
               {credential.rotatedAt
                 ? `Last entered ${new Date(credential.rotatedAt).toLocaleDateString()}.`
-                : "No entry date on file."}{" "}
-              Canvas tokens are typically good for about a quarter — re-enter it here once it expires.
+                : "No entry date on file."}
             </p>
+            {(() => {
+              const expiry = expiryStateText(credential.expiresAt);
+              return (
+                <p className={expiry.overdue ? "admin-field-error" : "admin-form-hint"}>
+                  {expiry.overdue && <Warning size={14} weight="regular" aria-hidden="true" style={{ marginRight: 4 }} />}
+                  {expiry.text}
+                </p>
+              );
+            })()}
             {validation && (
               <p className={validation.ok ? "admin-form-hint" : "admin-field-error"}>
                 {validation.ok && (
@@ -360,6 +389,7 @@ export function CanvasIntegrationView({
                 onClick={() => {
                   setEditingCredential(true);
                   setTokenInput("");
+                  setExpiresAtInput(credential.expiresAt ? credential.expiresAt.slice(0, 10) : "");
                   setValidation(null);
                 }}
               >
@@ -400,6 +430,19 @@ export function CanvasIntegrationView({
               <p className="admin-form-hint">
                 Generate one in Canvas under Account → Settings → New Access Token. This app stores it
                 encrypted and never displays it again in full.
+              </p>
+            </div>
+            <div className="admin-form-field">
+              <label htmlFor="canvas-token-expiry">Expiry date (optional)</label>
+              <input
+                id="canvas-token-expiry"
+                type="date"
+                value={expiresAtInput}
+                onChange={(e) => setExpiresAtInput(e.target.value)}
+              />
+              <p className="admin-form-hint">
+                Canvas tokens are typically good for about a quarter. Setting a date here shows a
+                reminder above once it's close, so this doesn't fail silently.
               </p>
             </div>
             <div className="admin-form-actions">

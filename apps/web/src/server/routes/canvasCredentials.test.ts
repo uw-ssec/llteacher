@@ -138,6 +138,9 @@ describe("GET credential", () => {
 
 describe("PUT credential", () => {
   it("sets the credential and audits the change, echoing only the masked summary", async () => {
+    // beforeEach's default (getSummaryMock resolves SUMMARY) means a
+    // credential already exists, so this exercises the "replace" path --
+    // see the dedicated "first-ever set" test below for the other branch.
     const res = await buildApp(instructorOfA()).request(
       url(),
       json("PUT", { token: "raw-plaintext-token", canvasBaseUrl: "https://uw.instructure.com" }),
@@ -157,8 +160,46 @@ describe("PUT credential", () => {
     expect(auditBestEffortMock).toHaveBeenCalledWith(
       {},
       ["org-1"],
+      expect.objectContaining({ action: "credential.canvas_token_replaced" }),
+    );
+  });
+
+  it("audits a first-ever entry as 'set', not 'replaced'", async () => {
+    getSummaryMock.mockResolvedValueOnce(null).mockResolvedValue(SUMMARY);
+    const res = await buildApp(instructorOfA()).request(
+      url(),
+      json("PUT", { token: "raw-plaintext-token", canvasBaseUrl: "https://uw.instructure.com" }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+    expect(auditBestEffortMock).toHaveBeenCalledWith(
+      {},
+      ["org-1"],
       expect.objectContaining({ action: "credential.canvas_token_set" }),
     );
+  });
+
+  it("accepts and forwards an expiry date", async () => {
+    await buildApp(instructorOfA()).request(
+      url(),
+      json("PUT", { token: "t", canvasBaseUrl: "https://uw.instructure.com", expiresAt: "2026-12-01" }),
+      TEST_ENV,
+    );
+    expect(setCredentialMock).toHaveBeenCalledWith(
+      {},
+      expect.anything(),
+      "org-1",
+      expect.objectContaining({ expiresAt: new Date("2026-12-01") }),
+    );
+  });
+
+  it("rejects an unparseable expiry date", async () => {
+    const res = await buildApp(instructorOfA()).request(
+      url(),
+      json("PUT", { token: "t", canvasBaseUrl: "https://uw.instructure.com", expiresAt: "not a date" }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
   });
 
   it("normalizes a trailing slash off the base URL", async () => {
