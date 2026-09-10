@@ -24,9 +24,11 @@
    -------------------------------------------------------------------------- */
 
 import type { Context } from "hono";
+import type { Db } from "../../db/client";
 import { makeDb } from "../../db/client";
 import type { AppEnv } from "../context";
 import { instructorScope } from "../utils/guards";
+import type { CourseScope } from "../repositories/scope";
 import {
   deleteMaterial,
   getMaterialForReingest,
@@ -35,7 +37,12 @@ import {
   setMaterialStatus,
   setMaterialStorageKey,
 } from "../repositories/materials";
-import { createDocument } from "../repositories/knowledgeDocuments";
+import {
+  createDocument,
+  getDocumentBySourceMaterial,
+  updateDocumentBody,
+  type CreateDocumentInput,
+} from "../repositories/knowledgeDocuments";
 import { materialStorageKey, storageFromEnv, StorageError } from "../storage/objectStore";
 import {
   ALLOWED_EXTENSIONS,
@@ -56,6 +63,72 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   return [...new Uint8Array(digest)]
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+/* --------------------------------------------------------------------------
+   I-2/I-3 (final review): the derived document path.
+
+   The create route (knowledgeDocuments.ts) treats a path collision as a
+   caller error and refuses. Tier-1 ingestion cannot do that -- there is no
+   caller to hand a 400 back to mid-upload who could rename anything, the
+   bytes are already stored, and a material row already exists claiming to
+   be about to become ready. So this normalises the degenerate cases
+   (an empty title, a reserved OKF basename) instead of refusing them, and
+   uniquifies a same-named collision with a numeric suffix rather than
+   letting the insert throw past the handler.
+
+   This is deliberately narrower than a general slugifier: it does not
+   attempt the create route's traversal-segment refusal (a filename does not
+   contain a `/` in the shapes this pipeline sees), only the failure modes a
+   real filename can actually produce -- ".txt" (empty title after stripping
+   the extension) and "index.txt"/"log.md" (a reserved OKF basename), plus
+   whatever second file collides on name. Unifying this with the create
+   route's validator is deferred (see the final review's follow-up list) --
+   #40's import spec is the one committing to that shared shape. */
+
+function baseDocumentPath(title: string): string {
+  const sanitized = title.replace(/[^A-Za-z0-9._/-]/g, "-");
+  const segments = sanitized
+    .split("/")
+    .map((segment) => segment.replace(/^[.-]+|[.-]+$/g, ""))
+    .filter((segment) => segment.length > 0);
+  const base = segments.length > 0 ? segments.join("/") : "untitled";
+  const parts = base.split("/");
+  const basename = parts[parts.length - 1]!;
+  // A concept document may not use index/log as its basename (the
+  // knowledge_documents_reserved_basename_chk CHECK) -- rename rather than
+  // let the insert throw on a filename that just happens to be "index.txt".
+  if (basename === "index" || basename === "log") {
+    parts[parts.length - 1] = `${basename}-material`;
+  }
+  return parts.join("/");
+}
+
+const MAX_PATH_ATTEMPTS = 25;
+
+/** Inserts a document at `basePath`, retrying at `${basePath}-2`,
+ *  `${basePath}-3`, ... on failure, up to MAX_PATH_ATTEMPTS. Mirrors
+ *  createDocumentHandler's own reasoning (knowledgeDocuments.ts): a
+ *  well-formed tier-1 document can only collide on the path unique index,
+ *  so any failure here is treated as "path taken" and retried at the next
+ *  suffix. The bound turns a pathological, permanently-stuck collision into
+ *  an honest thrown error instead of a runaway loop. */
+async function createDocumentAtUniquePath(
+  db: Db,
+  scope: CourseScope,
+  basePath: string,
+  rest: Omit<CreateDocumentInput, "path">,
+): Promise<Awaited<ReturnType<typeof createDocument>>> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= MAX_PATH_ATTEMPTS; attempt++) {
+    const path = attempt === 1 ? basePath : `${basePath}-${attempt}`;
+    try {
+      return await createDocument(db, scope, { ...rest, path });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 export async function listMaterialsHandler(c: Context<AppEnv>) {
@@ -153,16 +226,38 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
   await setMaterialStorageKey(db, scope, material.id, key);
 
   if (converted) {
-    await createDocument(db, scope, {
-      path: converted.title.replace(/[^A-Za-z0-9._/-]/g, "-"),
-      kind: "concept",
-      type: converted.type,
-      title: converted.title,
-      body: converted.markdown,
-      bodyOriginal: converted.markdown,
-      sourceMaterialId: material.id,
-      editedById: membershipId,
-    });
+    // I-2: the derived path is neither validated nor unique by construction
+    // -- a duplicate filename, "index.txt", "log.md", or a name like ".txt"
+    // (an empty title) must not throw past this handler after the bytes are
+    // already stored, or the material strands at `pending` with no
+    // explanation. createDocumentAtUniquePath normalises the degenerate
+    // cases and retries a genuine collision at the next numeric suffix; if
+    // it still cannot land the document, the material is marked `failed`
+    // with a real reason instead of the request 500ing with none.
+    try {
+      await createDocumentAtUniquePath(db, scope, baseDocumentPath(converted.title), {
+        kind: "concept",
+        type: converted.type,
+        title: converted.title,
+        body: converted.markdown,
+        bodyOriginal: converted.markdown,
+        sourceMaterialId: material.id,
+        editedById: membershipId,
+      });
+    } catch (error) {
+      logServerError("materials.upload.createDocument", error);
+      await setMaterialStatus(
+        db,
+        scope,
+        material.id,
+        "failed",
+        "The extracted text could not be saved as a document. The uploaded file is still stored; try reingesting.",
+      );
+      return c.json(
+        { id: material.id, status: "failed", error: "Could not save the extracted document." },
+        500,
+      );
+    }
     // Everything the status asserts is now true: the bytes are stored and
     // the document exists. Only now does it claim `ready`.
     await setMaterialStatus(db, scope, material.id, "ready", null);
@@ -231,16 +326,51 @@ export async function reingestMaterialHandler(c: Context<AppEnv>) {
   }
 
   const membershipId = membershipIdOf(c, scope);
-  await createDocument(db, scope, {
-    path: converted.title.replace(/[^A-Za-z0-9._/-]/g, "-"),
-    kind: "concept",
-    type: converted.type,
-    title: converted.title,
-    body: converted.markdown,
-    bodyOriginal: converted.markdown,
-    sourceMaterialId: materialId,
-    editedById: membershipId,
-  });
+
+  // I-3: an already-converted material has a document sitting at exactly
+  // the path a second createDocument would derive, so reingesting it
+  // unconditionally was a guaranteed unique-index violation. Reingest is
+  // idempotent instead: find the document this material already produced
+  // (by source_material_id, not by re-deriving the path) and refresh its
+  // body in place -- reporting `documentCreated: false` honestly, since no
+  // new document was made -- rather than trying to insert a duplicate.
+  const existing = await getDocumentBySourceMaterial(db, scope, materialId);
+  if (existing) {
+    await updateDocumentBody(db, scope, existing.id, {
+      body: converted.markdown,
+      editedById: membershipId,
+    });
+    await setMaterialStatus(db, scope, materialId, "ready", null);
+    return c.json({ status: "ready", documentCreated: false });
+  }
+
+  // No document yet for this material (its first successful conversion, or
+  // its first attempt was stranded by I-2 before any document landed):
+  // create one, uniquifying against a same-named collision as upload does.
+  try {
+    await createDocumentAtUniquePath(db, scope, baseDocumentPath(converted.title), {
+      kind: "concept",
+      type: converted.type,
+      title: converted.title,
+      body: converted.markdown,
+      bodyOriginal: converted.markdown,
+      sourceMaterialId: materialId,
+      editedById: membershipId,
+    });
+  } catch (error) {
+    logServerError("materials.reingest.createDocument", error);
+    await setMaterialStatus(
+      db,
+      scope,
+      materialId,
+      "failed",
+      "The extracted text could not be saved as a document.",
+    );
+    return c.json(
+      { status: "failed", documentCreated: false, error: "Could not save the extracted document." },
+      500,
+    );
+  }
   await setMaterialStatus(db, scope, materialId, "ready", null);
   return c.json({ status: "ready", documentCreated: true });
 }

@@ -142,6 +142,27 @@ describe.skipIf(!DATABASE_URL)("knowledgeCollections repository", () => {
     expect(docs.map((d) => d.path)).toEqual(["week/a"]);
   });
 
+  // I-6 (final review): `_` is inside PATH_RE's accepted alphabet, but it is
+  // also LIKE's "match any one character" wildcard. Pre-fix, the directory
+  // went into the pattern unescaped, so "week_1/%" would ALSO match
+  // "weekX1/..." -- a folder named "week_1" leaked a sibling folder's
+  // documents into the collection. This pins that a literal underscore in a
+  // selected directory's name is matched literally, not as a wildcard.
+  it("does not let a directory item with a literal underscore match an unrelated sibling", async () => {
+    const collection = await createCollection(db, courseA, {
+      name: "Underscore",
+      createdById: membershipA,
+    });
+    await createDocument(db, courseA, { path: "week_1/a", kind: "concept", type: "n", body: "" });
+    // Differs from "week_1" only in the character underscore would wildcard
+    // over -- exactly the sibling an unescaped pattern would also match.
+    await createDocument(db, courseA, { path: "weekX1/b", kind: "concept", type: "n", body: "" });
+    await setCollectionItems(db, courseA, collection.id, [{ directoryPath: "week_1" }]);
+
+    const docs = await listDocumentsInCollections(db, courseA, [collection.id]);
+    expect(docs.map((d) => d.path)).toEqual(["week_1/a"]);
+  });
+
   it("deduplicates a document selected both directly and via its folder", async () => {
     const collection = await createCollection(db, courseA, {
       name: "Overlap",

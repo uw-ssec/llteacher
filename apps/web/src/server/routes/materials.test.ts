@@ -32,6 +32,8 @@ vi.mock("../storage/objectStore", async (importOriginal) => {
 
 const listMaterialsForCourse = vi.fn();
 const createDocument = vi.fn();
+const getDocumentBySourceMaterial = vi.fn();
+const updateDocumentBody = vi.fn();
 const insertMaterial = vi.fn();
 const deleteMaterial = vi.fn();
 const getMaterialForReingest = vi.fn();
@@ -48,6 +50,8 @@ vi.mock("../repositories/materials", () => ({
 }));
 vi.mock("../repositories/knowledgeDocuments", () => ({
   createDocument: (...args: unknown[]) => createDocument(...args),
+  getDocumentBySourceMaterial: (...args: unknown[]) => getDocumentBySourceMaterial(...args),
+  updateDocumentBody: (...args: unknown[]) => updateDocumentBody(...args),
 }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
@@ -78,6 +82,11 @@ beforeEach(() => {
   listMaterialsForCourse.mockResolvedValue([]);
   insertMaterial.mockResolvedValue({ id: "mat-1" });
   createDocument.mockResolvedValue({ id: "doc-1", path: "lecture1" });
+  // No prior document for this material by default -- most tests exercise
+  // a material's first (or only) conversion, not a reingest of one that
+  // already succeeded.
+  getDocumentBySourceMaterial.mockResolvedValue(null);
+  updateDocumentBody.mockResolvedValue({ id: "doc-1", path: "lecture1" });
 });
 
 describe("materials routes", () => {
@@ -174,6 +183,94 @@ describe("materials routes", () => {
       expect.objectContaining({ status: "pending" }),
     );
     expect(createDocument).not.toHaveBeenCalled();
+  });
+
+  // I-2 (final review): a second upload whose derived path collides with an
+  // existing document used to throw an uncaught unique-violation past this
+  // handler as a bare 500 -- pre-fix, createDocument was called once at
+  // "lecture1" with no retry, so this mock (reject once, then resolve)
+  // would leave the rejection unhandled and the test would fail with an
+  // unhandled promise rejection / non-201 status instead of asserting a
+  // second, disambiguated attempt.
+  it("retries the derived path with a numeric suffix on a collision", async () => {
+    createDocument
+      .mockRejectedValueOnce(new Error("duplicate key value violates unique constraint"))
+      .mockResolvedValueOnce({ id: "doc-2", path: "lecture1-2" });
+
+    const res = await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials`,
+      upload("lecture1.vtt", "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nHello.", "text/vtt"),
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(201);
+    expect(createDocument).toHaveBeenNthCalledWith(
+      1,
+      expect.anything(),
+      COURSE_ID,
+      expect.objectContaining({ path: "lecture1" }),
+    );
+    expect(createDocument).toHaveBeenNthCalledWith(
+      2,
+      expect.anything(),
+      COURSE_ID,
+      expect.objectContaining({ path: "lecture1-2" }),
+    );
+    expect(setMaterialStatus).toHaveBeenCalledWith(
+      expect.anything(), COURSE_ID, "mat-1", "ready", null,
+    );
+  });
+
+  // I-2: a name like ".txt" derives an empty title, and "index.txt" derives
+  // the reserved OKF basename "index" -- both threw a CHECK-constraint
+  // violation past the handler pre-fix (an unvalidated, empty or reserved
+  // path was passed straight to createDocument with no normalisation and no
+  // try/catch at all).
+  it("normalises a degenerate derived path instead of passing it straight through", async () => {
+    const res = await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials`,
+      upload("index.txt", "hello", "text/plain"),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(201);
+    expect(createDocument).toHaveBeenCalledWith(
+      expect.anything(),
+      COURSE_ID,
+      expect.objectContaining({ path: "index-material" }),
+    );
+  });
+
+  // I-2: when every numeric suffix up to the bound is still taken, the
+  // handler must not let that final rejection bubble out as a bare 500 --
+  // pre-fix there was no retry loop at all, so createDocument's single
+  // rejection was entirely uncaught and the material was left `pending`
+  // with `errorDetail: null`, the exact "no status ever misrepresents
+  // reality" failure the review calls out.
+  it("reports an exhausted path collision honestly instead of a bare 500", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    createDocument.mockRejectedValue(new Error("duplicate key value violates unique constraint"));
+
+    const res = await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials`,
+      upload("lecture1.vtt", "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nHello.", "text/vtt"),
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { id: string; status: string; error: string };
+    expect(body.status).toBe("failed");
+    expect(body.error).toBeTruthy();
+    expect(setMaterialStatus).toHaveBeenCalledWith(
+      expect.anything(),
+      COURSE_ID,
+      "mat-1",
+      "failed",
+      expect.stringMatching(/could not be saved/i),
+    );
+    // Never claims ready when no document exists.
+    expect(setMaterialStatus).not.toHaveBeenCalledWith(
+      expect.anything(), COURSE_ID, "mat-1", "ready", null,
+    );
   });
 
   it("reports a retryable storage failure as 503, not a dead end", async () => {
@@ -337,6 +434,46 @@ describe("materials routes", () => {
       "m3",
       "failed",
       "The stored file is missing.",
+    );
+  });
+
+  // I-3 (final review): reingesting an already-converted material used to
+  // unconditionally call createDocument again at the same derived path --
+  // a guaranteed unique-index violation against the document reingest is
+  // meant to refresh. Pre-fix, createDocument would be called (and, mocked
+  // to reject as it would against a real DB, its rejection would propagate
+  // uncaught); the fix instead looks the existing document up by
+  // source_material_id and updates its body in place.
+  it("is idempotent for an already-converted material: updates the existing document instead of re-creating it", async () => {
+    getMaterialForReingest.mockResolvedValue({
+      id: "m4",
+      originalFilename: "lecture1.vtt",
+      storageKey: "courses/c/materials/m4/lecture1.vtt",
+    });
+    await store.put(
+      "courses/c/materials/m4/lecture1.vtt",
+      new TextEncoder().encode("WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nUpdated.").buffer,
+      {},
+    );
+    getDocumentBySourceMaterial.mockResolvedValue({ id: "doc-4", path: "lecture1" });
+
+    const res = await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials/m4/reingest`,
+      { method: "POST" },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "ready", documentCreated: false });
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(updateDocumentBody).toHaveBeenCalledWith(
+      expect.anything(),
+      COURSE_ID,
+      "doc-4",
+      expect.objectContaining({ body: "Updated." }),
+    );
+    expect(setMaterialStatus).toHaveBeenCalledWith(
+      expect.anything(), COURSE_ID, "m4", "ready", null,
     );
   });
 

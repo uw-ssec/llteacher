@@ -233,6 +233,16 @@ export async function getCollectionItems(
   );
 }
 
+/** Escapes the three characters that are meaningful to Postgres's LIKE
+ *  operator (`\`, `%`, `_`) so a caller-controlled directory path is matched
+ *  literally rather than as a pattern. Postgres's default LIKE escape
+ *  character is backslash with no `ESCAPE` clause required, so escaping the
+ *  backslash itself first (before introducing any new ones) is what keeps
+ *  this correct. */
+function escapeLikePattern(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
 /** Every document in any of the given collections, deduplicated. A document
  *  selected both directly and through its folder appears once. */
 export async function listDocumentsInCollections(
@@ -265,9 +275,14 @@ export async function listDocumentsInCollections(
   const predicates = [];
   if (documentIds.length > 0) predicates.push(inArray(knowledgeDocuments.id, documentIds));
   // The trailing slash is load-bearing: without it "week" also matches
-  // "weekend/b".
+  // "weekend/b". The directory itself also has to be escaped before it goes
+  // into the pattern (I-6): `_` is inside PATH_RE's accepted alphabet, and
+  // in a LIKE pattern it means "any one character" -- unescaped, a
+  // directory named "week_1" would also match "weekX1/...". Postgres's
+  // default LIKE escape character is a literal backslash with no ESCAPE
+  // clause needed, so escaping backslash, `%`, and `_` here is sufficient.
   for (const dir of directories) {
-    predicates.push(like(knowledgeDocuments.path, `${dir}/%`));
+    predicates.push(like(knowledgeDocuments.path, `${escapeLikePattern(dir)}/%`));
   }
   if (predicates.length === 0) return [];
 

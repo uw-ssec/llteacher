@@ -37,12 +37,25 @@ export function parentDirectories(path: string): string[] {
   return directories;
 }
 
+/** parseLinks.ts's LINK_RE matches a link label as `[^\]]*` -- it stops at
+ *  the first literal `]`, with no backslash-unescaping, because that file
+ *  is deliberately not a full markdown parser. So a title containing `]`
+ *  cannot be made safe with ordinary CommonMark-style `\]` escaping here:
+ *  the backslash would still leave a bare `]` for that regex to stop on,
+ *  producing exactly the malformed, mis-parsed entry this exists to
+ *  prevent (M-8 / final review deferred item 14). Substituting the
+ *  visually-equivalent fullwidth bracket keeps the rendered listing legible
+ *  while guaranteeing no literal `]` reaches the label. */
+function safeLinkLabel(label: string): string {
+  return label.replace(/\]/g, "］");
+}
+
 export function renderIndex(directoryPath: string, entries: IndexEntry[]): string {
   const heading = directoryPath === "" ? "Knowledge base" : directoryPath;
   if (entries.length === 0) return `## ${heading}\n\nNo documents yet.\n`;
 
   const lines = entries.map((entry) => {
-    const label = entry.title ?? entry.path.split("/").pop() ?? entry.path;
+    const label = safeLinkLabel(entry.title ?? entry.path.split("/").pop() ?? entry.path);
     const suffix = entry.description ? ` - ${entry.description}` : "";
     return `* [${label}](/${entry.path})${suffix}`;
   });

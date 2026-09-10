@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { appendLogEntry, directoryOf, parentDirectories, renderIndex } from "./bundle";
+import { parseLinks } from "./parseLinks";
 
 describe("renderIndex", () => {
   it("renders OKF index entries under a heading", () => {
@@ -20,6 +21,35 @@ describe("renderIndex", () => {
 
   it("renders an empty directory without an entry list", () => {
     expect(renderIndex("week1", [])).toBe("## week1\n\nNo documents yet.\n");
+  });
+
+  // M-8 / final review deferred item 14 (triaged fix-before-merge): a title
+  // containing `]` used to be interpolated straight into the link label
+  // unescaped, producing `* [Part 1] Notes](/week1/a)` -- a malformed link
+  // whose own `]` closes the label three characters early. This pins that
+  // the literal character never reaches the rendered label.
+  it("does not let a title's own ] characters break the link syntax", () => {
+    const markdown = renderIndex("week1", [
+      { path: "week1/a", title: "Part 1] Notes", description: null },
+    ]);
+    expect(markdown).not.toContain("[Part 1] Notes](/week1/a)");
+    expect(markdown).toContain("[Part 1］ Notes](/week1/a)");
+  });
+
+  // The real failure mode M-8 describes is one level removed from the
+  // string shape above: the malformed entry is then fed back through
+  // parseLinks (index.md is itself a document with a body). Pre-fix, that
+  // second parse would either extract no link from this line at all (the
+  // trailing "] Notes](/week1/a)" has no leading "[" to anchor a new match)
+  // or -- worse, depending on surrounding content -- misattribute the link
+  // boundary. Either way `week1/a` is not the link target the source data
+  // says it should be. This asserts the round trip actually holds.
+  it("round-trips through parseLinks even when a title contains ]", () => {
+    const markdown = renderIndex("week1", [
+      { path: "week1/a", title: "Part 1] Notes", description: null },
+    ]);
+    const links = parseLinks(markdown, "week1/index");
+    expect(links.map((l) => l.targetPath)).toContain("week1/a");
   });
 });
 
