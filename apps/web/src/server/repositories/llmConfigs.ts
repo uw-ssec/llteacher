@@ -367,29 +367,24 @@ export async function cloneLlmConfig(
 
 /** #170: the config a given piece of work runs under.
  *
- *  **Resolution order: the section's homework, then the org default.**
+ *  **Resolution order: the section's homework, the course, then the org
+ *  default.** This is intentionally the same selection policy as
+ *  `lib/llm-config.ts`'s `resolveLLMConfig`; the cross-resolver matrix in this
+ *  file is the regression guard for every valid override combination.
  *
- *  The upstream fork carries a separate global-template model whose only job
- *  is minting per-course configs. That does not port: their LLMConfig is
- *  course-scoped, ours is org-scoped with a partial unique index enforcing
- *  one default per org -- so the org default already plays the role their
- *  GlobalLLMDefault plays, and adding a third tier would create exactly the
- *  drift their two-model design risks.
+ *  The functions remain separate because their callers need different
+ *  contracts. The chat resolver returns credential-bearing runtime fields and
+ *  auto-provisions a persisted platform default for a new organization. This
+ *  repository resolver returns the admin console's `LlmConfigRecord` wire
+ *  shape, deliberately without credentials, and returns null when no usable
+ *  org default exists so the draft-grade route can retain its existing
+ *  platform fallback. Neither difference changes which active, org-scoped
+ *  override wins when a candidate exists.
  *
- *  There is deliberately no course tier between the two. `courses` carries no
- *  llm_config_id column, and inventing one here would mean a resolution step
- *  that reads a column nothing writes. When a course tier is genuinely
- *  wanted, it goes in the schema first and then in the middle of this
- *  function; the order is documented so that insertion point is obvious.
- *
- *  Returns null when the org has no usable default -- which the caller must
- *  handle rather than assume away. That happens for a brand-new organization,
- *  and momentarily if a promotion half-failed (see promoteToDefault). Callers
- *  degrade to the platform prompt; they do not fail the student's turn.
- *
- *  Inactive configs are skipped at every tier: a homework pinned to a config
- *  that was later deactivated resolves onward to the org default rather than
- *  running on a config an instructor deliberately retired. */
+ *  The course config is passed by the grade caller because it already loaded
+ *  the course row with `getOrgScopeAndLlmConfigForCourse`; looking it up again
+ *  here would add a round trip. Inactive or cross-org overrides are skipped at
+ *  every tier, matching the chat resolver's active and org predicates. */
 export async function resolveLlmConfig(
   db: Db,
   scope: OrgScope,
@@ -483,7 +478,6 @@ export async function resolveLlmConfig(
    makes them dead" applies to this one function, not the pair.
 
    #421: it now walks the same three tiers as lib/llm-config.ts's resolver
-   (homework -> course -> org default). Two resolvers over one policy is
-   still the underlying problem -- #431 tracks collapsing them -- but until
-   then they agree on WHICH config a section resolves to, which is what the
-   draft-grade path was silently getting wrong. */
+   (homework -> course -> org default). #443 documents why the two return
+   shapes remain separate and adds a matrix test to keep their shared policy
+   aligned; future changes to either resolver must update that contract test. */
