@@ -1,5 +1,54 @@
 # M11: Canvas Integration — Implementation Plan
 
+## 2026-09-10 sync check (implementation + epic acceptance pass, pre-PR)
+
+Implemented inline, all in this one session, in the order this doc lays
+out below. Full verification before opening the PR: `npm run typecheck`
+clean across all 4 packages; `npx vitest run --testTimeout=30000` from
+`apps/web` against the local Docker Postgres (`llteacher-test-pg`) with
+every migration re-applied from a dropped schema — 104 files / 1984
+passed / 8 skipped (pre-existing, unrelated); `apps/admin`'s own suite —
+22 files / 257 passed. No live Canvas account was available in this
+environment, so the Canvas HTTP layer is exercised only against a mocked
+`fetch` (`canvas-api.test.ts`) and mocked `listCanvasEnrollments`
+(`CanvasRosterSyncService.test.ts`, against a real Postgres) -- flagged
+explicitly, not silently assumed equivalent to a live-Canvas check.
+
+One real defect caught by the DB-gated sync-service tests, not by design
+review: `course_memberships_canvas_enrollment_uq` is a GLOBAL unique
+index (mirroring Canvas's own platform-wide enrollment ids), not scoped
+per course -- an early version of the test fixtures reused literal
+`"e1"`/`"e2"` ids across independent test cases and collided for real
+against that constraint. Fixed in the tests (a per-test id namespace),
+not the service -- the service's behavior on that failure (report a
+per-row error, don't fail the whole sync) was already correct.
+
+**Epic #61 acceptance checklist**, re-read against the real code rather
+than assumed from this plan's own intent:
+- [x] An instructor registers their Canvas token (encrypted, masked,
+      auditable) and links a Canvas course
+- [x] "Sync from Canvas" populates the roster with pending users who
+      claim accounts via WorkOS SSO on first login (reuses roster.ts's
+      existing pending-user path -- Design decision #3)
+- [x] Re-sync is idempotent; removals and role changes are reflected
+      without deleting rows
+- [x] A runbook documents token generation, scopes, and quarterly
+      refresh (`docs/operations/canvas-token-setup.md`)
+
+Deliberately NOT built, per this plan's own scope boundaries: LTI 1.3
+(#58-#60, explicitly deferred by the epic itself), a scheduled/automatic
+re-sync (the epic names it optional; this PR ships the manual trigger
+only, noted in the runbook), general course-creation UI (course linking
+assumes the llteacher course already exists), and WorkOS bulk-invite API
+calls (superseded by the reuse decision above).
+
+Two gaps found and fixed during this same pass, before opening the PR:
+the admin form collected `expiresAt` but never displayed it or warned
+near expiry (#73's own "show expiry state" requirement), and every
+token save audited as `credential.canvas_token_set` even on a
+replacement. Both fixed with matching test coverage rather than left for
+review to catch.
+
 > **For agentic workers:** Implemented **inline in one session**, not via
 > subagent-driven-development (explicit user choice for this milestone).
 > Scope: GitHub milestone 11 (`M11: Canvas Integration`), issues
