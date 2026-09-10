@@ -336,10 +336,32 @@ export async function reingestMaterialHandler(c: Context<AppEnv>) {
   // new document was made -- rather than trying to insert a duplicate.
   const existing = await getDocumentBySourceMaterial(db, scope, materialId);
   if (existing) {
-    await updateDocumentBody(db, scope, existing.id, {
-      body: converted.markdown,
-      editedById: membershipId,
-    });
+    // Round 2 fix: this branch is now the COMMON reingest path (any
+    // already-converted material takes it), and it had no guard at all --
+    // a transient updateDocumentBody failure threw unhandled, leaving the
+    // material's status claiming whatever it was before with no record of
+    // the failed attempt. Same honesty contract as the create branch below:
+    // catch, mark the material `failed` with a real reason, and answer with
+    // a structured error rather than an uncaught exception.
+    try {
+      await updateDocumentBody(db, scope, existing.id, {
+        body: converted.markdown,
+        editedById: membershipId,
+      });
+    } catch (error) {
+      logServerError("materials.reingest.updateDocumentBody", error);
+      await setMaterialStatus(
+        db,
+        scope,
+        materialId,
+        "failed",
+        "The extracted text could not be saved to the existing document.",
+      );
+      return c.json(
+        { status: "failed", documentCreated: false, error: "Could not update the existing document." },
+        500,
+      );
+    }
     await setMaterialStatus(db, scope, materialId, "ready", null);
     return c.json({ status: "ready", documentCreated: false });
   }

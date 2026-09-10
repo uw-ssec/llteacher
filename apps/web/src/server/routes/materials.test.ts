@@ -477,6 +477,54 @@ describe("materials routes", () => {
     );
   });
 
+  // Round 2 (I-3 gap): the found branch above -- now the common reingest
+  // path -- had no try/catch around updateDocumentBody at all. Pre-fix, a
+  // rejection here would propagate straight out of the handler unhandled
+  // (no try/catch existed to give the mocked rejection anywhere to go), so
+  // this test's own `mockRejectedValueOnce` would surface as an unhandled
+  // promise rejection / a non-JSON, non-500-with-body response instead of
+  // ever reaching the assertions below.
+  it("reports an existing-document update failure honestly instead of throwing unhandled", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    getMaterialForReingest.mockResolvedValue({
+      id: "m5",
+      originalFilename: "lecture1.vtt",
+      storageKey: "courses/c/materials/m5/lecture1.vtt",
+    });
+    await store.put(
+      "courses/c/materials/m5/lecture1.vtt",
+      new TextEncoder().encode("WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nUpdated.").buffer,
+      {},
+    );
+    getDocumentBySourceMaterial.mockResolvedValue({ id: "doc-5", path: "lecture1" });
+    updateDocumentBody.mockRejectedValueOnce(new Error("connection reset"));
+
+    const res = await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials/m5/reingest`,
+      { method: "POST" },
+      TEST_ENV,
+    );
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { status: string; documentCreated: boolean; error: string };
+    expect(body.status).toBe("failed");
+    expect(body.documentCreated).toBe(false);
+    expect(body.error).toBeTruthy();
+    expect(setMaterialStatus).toHaveBeenCalledWith(
+      expect.anything(),
+      COURSE_ID,
+      "m5",
+      "failed",
+      expect.stringMatching(/could not be saved/i),
+    );
+    // Never claims ready when the update failed.
+    expect(setMaterialStatus).not.toHaveBeenCalledWith(
+      expect.anything(), COURSE_ID, "m5", "ready", null,
+    );
+    // And never falls through to (re-)creating a document at the same path.
+    expect(createDocument).not.toHaveBeenCalled();
+  });
+
   it("does not admit a student to reingest", async () => {
     // The other three handlers each have their own "does not admit a
     // student" case; reingest shares the same scopeOf() gate and deserves
