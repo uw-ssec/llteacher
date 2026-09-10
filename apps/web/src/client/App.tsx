@@ -1170,22 +1170,21 @@ export default function App() {
               loadOlderMessagesError={tutorOlderMessagesError}
               contextWindowSize={MAX_HISTORY_MESSAGES}
               onStop={tutorSurface.stop}
-              /* client-feedback-ui audit, Fix 1: the tutor surface never
-                 wired this at all, so the Flag button (#90) only ever
-                 existed on the homework-section chat below -- a tutor
-                 conversation still belongs to a course/section (the rail is
-                 scoped by `courseId`, see useTutorConversations(courseId)
-                 above), it just has no per-section conversationId of its
-                 own. `tutorConversationId` is this surface's equivalent of
-                 the section surface's `conversationId` below -- the id
-                 ResponseFeedback needs to scope its POST -- and is always
-                 defined in this branch (the ternary above only renders this
-                 ConversationView when it is truthy), so no `undefined`
-                 guard is needed here the way the section call below needs
-                 one. */
-              renderAiFeedbackSlot={(messageId) => (
-                <ResponseFeedback conversationId={tutorConversationId} messageId={messageId} />
-              )}
+              /* #448 (Cordero review, PR440): a `renderAiFeedbackSlot` was
+                 wired here by an earlier audit fix (reasoning: "a tutor
+                 conversation still belongs to a course/section, it just has
+                 no per-section conversationId of its own") -- but the
+                 server's `flagResponseHandler` (routes/feedback.ts) rejects
+                 ANY conversation with `kind !== "section"` with a 400,
+                 deliberately: "Feedback context (section/homework titles,
+                 the PR3 transcript-viewer drill-in) only makes sense for a
+                 section conversation -- the free-standing 'tutor' surface
+                 has no section/homework to attach a flag to, and is out of
+                 scope for this pilot instrument." Every flag from the rail
+                 failed unconditionally. The server's boundary is correct;
+                 this earlier client-side wiring simply never checked it.
+                 Deliberately NOT wired -- no `renderAiFeedbackSlot` prop --
+                 so `ConversationView`'s feedback slot never renders here. */
             />
           </ErrorBoundary>
         ) : (

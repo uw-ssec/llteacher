@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { AUTO_TITLE_MAX_LENGTH, DEFAULT_TUTOR_CONVERSATION_TITLE, deriveTutorConversationTitle } from "./tutorConversationTitle";
+import {
+  AUTO_TITLE_MAX_LENGTH,
+  DEFAULT_TUTOR_CONVERSATION_TITLE,
+  MAX_CONVERSATION_TITLE_UTF16_LENGTH,
+  deriveTutorConversationTitle,
+} from "./tutorConversationTitle";
 
 describe("deriveTutorConversationTitle (#231/#287)", () => {
   it("derives a title from the first text part, trimmed", () => {
@@ -86,4 +91,47 @@ describe("DEFAULT_TUTOR_CONVERSATION_TITLE (#287)", () => {
   it("is the exact sentinel every 'still untouched' check compares against", () => {
     expect(DEFAULT_TUTOR_CONVERSATION_TITLE).toBe("New Conversation");
   });
+});
+
+/* #453 (Cordero review, PR440): AUTO_TITLE_MAX_LENGTH (60) counts Unicode
+   CODE POINTS; routes/conversations.ts's PATCH/POST title schema
+   (`z.string().max(MAX_CONVERSATION_TITLE_UTF16_LENGTH)`) checks JS's own
+   `.length`, which counts UTF-16 CODE UNITS. A code point outside the Basic
+   Multilingual Plane is a surrogate PAIR -- 2 UTF-16 units for 1 code point
+   -- so a 60-code-point title built entirely from such characters could
+   reach up to 121 UTF-16 units (120 + the appended ellipsis), comfortably
+   over the server's 100-unit ceiling. Before this fix, the PATCH the
+   auto-title fire-and-forget call makes would 400 against that limit, and
+   the conversation row silently stayed titled DEFAULT_TUTOR_CONVERSATION_
+   TITLE forever -- nothing surfaces a schema-validation failure to the
+   student, since App.tsx's renameConversation call doesn't wait on or
+   surface this PATCH's outcome (by design, see its own doc comment). */
+describe("deriveTutorConversationTitle stays within the server's UTF-16 title limit (#453)", () => {
+  it("further truncates a 60-code-point title built entirely from astral-plane characters so it still fits the PATCH schema's UTF-16 max", () => {
+    // 60 code points, every one a surrogate pair (U+1F600 "😀") -- 120
+    // UTF-16 units of emoji alone, before even appending the ellipsis.
+    const allEmoji = "😀".repeat(AUTO_TITLE_MAX_LENGTH);
+    expect(Array.from(allEmoji).length).toBe(AUTO_TITLE_MAX_LENGTH);
+    expect(allEmoji.length).toBe(AUTO_TITLE_MAX_LENGTH * 2); // pre-#453 shape: 120 UTF-16 units
+
+    const result = deriveTutorConversationTitle([{ type: "text", text: allEmoji }]);
+    expect(result).not.toBeNull();
+    // THE PIN: the actual value the PATCH schema checks (.length, UTF-16
+    // units) must fit -- not just the code-point count.
+    expect(result!.length).toBeLessThanOrEqual(MAX_CONVERSATION_TITLE_UTF16_LENGTH);
+    // Still ends in the ellipsis (genuinely truncated, not silently
+    // emptied) and still contains no lone surrogate (the #287 guarantee
+    // must survive this ADDITIONAL truncation pass too).
+    expect(result!.endsWith("…")).toBe(true);
+    // eslint-disable-next-line no-control-regex -- surrogate range check
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(result!)).toBe(false);
+  });
+
+  it("does not need the extra truncation pass for an all-BMP title at the code-point limit (no regression on the common case)", () => {
+    const exact = "a".repeat(AUTO_TITLE_MAX_LENGTH);
+    const result = deriveTutorConversationTitle([{ type: "text", text: exact }]);
+    expect(result).toBe(exact);
+    expect(result!.length).toBeLessThanOrEqual(MAX_CONVERSATION_TITLE_UTF16_LENGTH);
+  });
+
 });

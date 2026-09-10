@@ -93,7 +93,19 @@ function isComposerDisabled(el: HTMLTextAreaElement): boolean {
    back into UIMessage chunks (verified against uiMessageChunkSchema in
    node_modules/ai/dist/index.mjs, not guessed). x-conversation-id is set on
    the Response the same way chatHandler sets it in production. */
-function chatStreamResponse(conversationId: string, replyText: string) {
+function chatStreamResponse(
+  conversationId: string,
+  replyText: string,
+  /* #447 (Cordero review, PR440): optional -- most existing callers of this
+     helper predate chat.ts's `messageMetadata` fix and don't care about it.
+     When provided, embedded directly on the `finish` chunk itself (NOT a
+     separate `message-metadata` chunk), matching chat.ts's own server-side
+     wire shape exactly (verified against node_modules/ai/dist/index.js,
+     ~L5760: `{type:"finish", finishReason, ...({messageMetadata} if set)}`
+     -- the client's own `processUIMessageStream` reads `chunk.messageMetadata`
+     off the SAME "finish" chunk for this case, not a separate one). */
+  finishMetadata?: { createdAt: string; id: string },
+) {
   const chunks = [
     { type: "start" },
     { type: "start-step" },
@@ -101,7 +113,7 @@ function chatStreamResponse(conversationId: string, replyText: string) {
     { type: "text-delta", id: "t1", delta: replyText },
     { type: "text-end", id: "t1" },
     { type: "finish-step" },
-    { type: "finish" },
+    { type: "finish", ...(finishMetadata ? { messageMetadata: finishMetadata } : {}) },
   ];
   const body = chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
   return new Response(body, {
@@ -809,15 +821,19 @@ describe("App tutor-conversations rail (#4)", () => {
     expect(chatCalls[0]!.messages.map((m) => m.role)).toEqual(["user"]);
   });
 
-  // client-feedback-ui audit, Fix 1: the Flag button (#90,
-  // ResponseFeedback.tsx, rendered via ConversationView's
-  // renderAiFeedbackSlot slot) only ever appeared on the homework-section
-  // chat -- App.tsx never wired the prop on the tutor ConversationView call
-  // at all, so a student flagging a bad answer had no way to do so from a
-  // tutor conversation. Pins that App.tsx now wires it there too, scoped by
-  // `tutorConversationId` the same way the section surface scopes it by its
-  // own `conversationId`.
-  it("renders the flag-response affordance on a persisted assistant turn in the tutor chat (#90)", async () => {
+  // #448 (Cordero review, PR440): an earlier audit fix wired
+  // `renderAiFeedbackSlot` onto the tutor ConversationView call, reasoning a
+  // tutor conversation "still belongs to a course/section" -- but the
+  // server's `flagResponseHandler` (routes/feedback.ts) rejects ANY
+  // conversation with `kind !== "section"` unconditionally with a 400: "the
+  // free-standing 'tutor' surface has no section/homework to attach a flag
+  // to, and is out of scope for this pilot instrument." Every flag from the
+  // rail failed. This pins the CORRECTED behavior: no Flag control renders
+  // on the tutor surface at all, matching the server's own deliberate
+  // boundary -- superseding the earlier (incorrect) "renders the
+  // flag-response affordance ... in the tutor chat (#90)" test this
+  // replaces.
+  it("#448: does not render a Flag control on the tutor surface -- the server rejects feedback for non-section conversations", async () => {
     renderTutorRailApp({
       onConversationsGet: () =>
         new Response(
@@ -872,7 +888,7 @@ describe("App tutor-conversations rail (#4)", () => {
     await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
     await screen.findByText("prior answer");
 
-    expect(screen.getByRole("button", { name: "Flag this response" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Flag this response" })).toBeNull();
   });
 
   // #4: because hydration is async (fetch /messages, then apply), tutor
@@ -1212,6 +1228,71 @@ describe("App tutor-conversations rail (#4)", () => {
         .closest(".tutor-conversation-item");
       expect(row?.querySelector(".tutor-conversation-item__count")?.textContent).toBe("5 messages");
     });
+  });
+});
+
+// #447 (Cordero review, PR440): the server stamps the persisted row id into
+// `messageMetadata` (chat.ts's own `messageMetadata` hook, part of the
+// #440 audit's earlier fix), but `buildMessageData` (useConversationSurface)
+// was returning the AI SDK's own client-assigned `m.id` for the Flag
+// control's target -- the id a fresh POST /messages/:messageId/feedback
+// looked up by database id, so it 404'd for exactly the turn a student would
+// actually want to flag (one they just read, live), and only started
+// working after a reload replaced `aiMessages` with rehydrated data (whose
+// `id` IS already the real row id). This exercises a message that streams
+// in during the CURRENT session -- never rehydrated -- proving the Flag
+// control now targets the persisted id from the live metadata, not the
+// SDK's own.
+describe("App feedback flag targets the persisted row id for a live-streamed turn (#447)", () => {
+  it("POSTs to the server-stamped persisted id, not the AI SDK's own client-assigned message id", async () => {
+    const hydrated = homeworkFixture({
+      sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
+    });
+    const feedbackPosts: Array<{ url: string }> = [];
+    renderApp({
+      homeworks: hydrated,
+      routes: (url, init) => {
+        if (url.endsWith("/hints")) return new Response(JSON.stringify({ used: 0, limit: null }), { status: 200 });
+        if (url.includes("/conversations/sec-conv-1/messages") && (!init || init.method === undefined)) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        if (url === "/api/chat") {
+          // The real, server-stamped persisted id -- deliberately a
+          // DIFFERENT string shape than whatever the AI SDK assigns its own
+          // messages (a UUID-like `msg-persisted-777`, not the SDK's own
+          // generated id), so a test failure here is unambiguous about
+          // which id actually got sent.
+          return chatStreamResponse("sec-conv-1", "the answer", {
+            createdAt: "2026-09-10T00:00:00.000Z",
+            id: "msg-persisted-777",
+          });
+        }
+        if (url.match(/\/messages\/[^/]+\/feedback$/) && init?.method === "POST") {
+          feedbackPosts.push({ url });
+          return new Response(JSON.stringify({ id: "flag-1" }), { status: 201 });
+        }
+        return undefined;
+      },
+    });
+
+    const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.type(composer, "what does this mean?{Enter}");
+    await screen.findByText("the answer");
+
+    const flagButton = await screen.findByRole("button", { name: "Flag this response" });
+    await user.click(flagButton);
+
+    // ResponseFeedback's own form -- pick whatever reason/submit affordance
+    // it renders and submit with minimal input, matching its own component
+    // test's interaction pattern.
+    const dialog = await screen.findByRole("alertdialog", { name: "Flag this response" });
+    const reasonOption = within(dialog).getByRole("radio", { name: /Incorrect/i });
+    await user.click(reasonOption);
+    await user.click(within(dialog).getByRole("button", { name: "Submit" }));
+
+    await waitFor(() => expect(feedbackPosts).toHaveLength(1));
+    expect(feedbackPosts[0]!.url).toBe("/api/conversations/sec-conv-1/messages/msg-persisted-777/feedback");
   });
 });
 

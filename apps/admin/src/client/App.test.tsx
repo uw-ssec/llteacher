@@ -1,6 +1,6 @@
 import { describe, it, vi, afterEach, expect } from "vitest";
 import { render, screen, waitFor, cleanup, fireEvent, within } from "@testing-library/react";
-import App from "./App";
+import App, { FeedbackDashboardDataLoader } from "./App";
 import { AuthProvider } from "./components/AuthProvider";
 
 afterEach(cleanup);
@@ -537,5 +537,124 @@ describe("Feedback dashboard page-turn failure surfaces an inline error + Retry 
     );
     await waitFor(() => screen.getByText(/3–4 of 4/));
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #452 (Cordero review, PR440): FeedbackDashboardDataLoader's fetch effect
+   had no request ordering -- an overlapping request's response could be
+   silently overwritten by an EARLIER request's response arriving LATER,
+   regardless of which one the instructor actually dispatched most
+   recently. `useTutorConversations.ts`'s own `requestSeqRef` idiom (a
+   monotonic counter, bumped at dispatch, checked again before any state
+   write) now guards every write in this effect the same way.
+
+   Driven directly against the exported component (not through the full App
+   navigation tree): the real Previous/Next/Retry controls all compute their
+   next target from already-loaded `data`, which makes a genuinely
+   double-dispatched, out-of-order-resolving pair of requests structurally
+   unreachable through those controls alone -- each re-click either targets
+   the SAME offset the effect's own dependency array already deduped
+   (`onChangeOffset` called twice with an unchanged value never re-fires the
+   effect), or the Retry affordance itself unmounts the instant the first
+   click's synchronous effect body clears `pageError`, before a second click
+   can land on it. Rerendering with two DIFFERENT `offset` props directly
+   reproduces the actual race without inventing an unrelated
+   courseId-switching flow just to trigger it. -------------------------------------------------------------------------- */
+describe("Feedback dashboard pagination ignores an out-of-order stale response (#452)", () => {
+  it("keeps the most recently dispatched offset request's data, even when an earlier request's response arrives later", async () => {
+    let resolveFirstDispatch: (() => void) | undefined;
+    let resolveSecondDispatch: (() => void) | undefined;
+    const callsByOffset: Record<number, number> = {};
+
+    const page = (offset: number, studentName: string) => ({
+      items: [
+        {
+          id: `flag-${offset}`,
+          conversationId: `conv-${offset}`,
+          messageId: "msg-1",
+          studentId: "student-1",
+          studentName,
+          reason: "incorrect",
+          comment: null,
+          responseSnapshot: [{ type: "text", text: "Some response." }],
+          isDeleted: false,
+          sectionId: "sec-1",
+          sectionTitle: "Section 2",
+          homeworkId: "hw-1",
+          homeworkTitle: "HW 1",
+          flaggedAt: "2026-08-01T00:00:00.000Z",
+        },
+      ],
+      total: 6,
+      limit: 2,
+      offset,
+    });
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const offset = Number(new URL(url, "http://localhost").searchParams.get("offset"));
+      // The FIRST dispatch (offset=0, on mount) resolves immediately and
+      // isn't part of the race -- only the two overlapping offset=2/offset=4
+      // dispatches (both fired before either resolves) are held.
+      if (offset === 0) return new Response(JSON.stringify(page(0, "Ada Lovelace")), { status: 200 });
+      callsByOffset[offset] = (callsByOffset[offset] ?? 0) + 1;
+      const label = offset === 2 ? "STALE offset=2 (superseded before it resolved)" : "FRESH offset=4 (the actual latest dispatch)";
+      return new Promise<Response>((resolve) => {
+        const respond = () => resolve(new Response(JSON.stringify(page(offset, label)), { status: 200 }));
+        if (offset === 2) resolveFirstDispatch = respond;
+        else resolveSecondDispatch = respond;
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { rerender } = render(
+      <FeedbackDashboardDataLoader
+        courseId="c1"
+        offset={0}
+        onBack={() => {}}
+        onChangeOffset={() => {}}
+        onOpenTranscript={() => {}}
+      />,
+    );
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    // Two rapid offset changes -- BOTH dispatched before either resolves,
+    // exactly the "Next-then-Next-again" (or Next-then-Previous-then-Next)
+    // shape Cordero's review describes, just driven directly rather than
+    // through the buttons' own already-loaded-data target computation.
+    rerender(
+      <FeedbackDashboardDataLoader
+        courseId="c1"
+        offset={2}
+        onBack={() => {}}
+        onChangeOffset={() => {}}
+        onOpenTranscript={() => {}}
+      />,
+    );
+    rerender(
+      <FeedbackDashboardDataLoader
+        courseId="c1"
+        offset={4}
+        onBack={() => {}}
+        onChangeOffset={() => {}}
+        onOpenTranscript={() => {}}
+      />,
+    );
+    await waitFor(() => expect(callsByOffset[2]).toBe(1));
+    await waitFor(() => expect(callsByOffset[4]).toBe(1));
+
+    // Resolve OUT of order: the SECOND (most recent) dispatch first, the
+    // FIRST (now-stale) dispatch after.
+    resolveSecondDispatch?.();
+    await waitFor(() => screen.getByText("FRESH offset=4 (the actual latest dispatch)"));
+
+    resolveFirstDispatch?.();
+    // THE PIN: the stale first dispatch's late-arriving response must NOT
+    // overwrite the screen -- give it a tick to (incorrectly) land if the
+    // request-seq guard were absent, then assert it didn't.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText("STALE offset=2 (superseded before it resolved)")).toBeNull();
+    expect(screen.getByText("FRESH offset=4 (the actual latest dispatch)")).toBeTruthy();
   });
 });

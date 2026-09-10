@@ -106,7 +106,9 @@ let capturedStreamResponseOnError: ((error: unknown) => string) | undefined;
 // a fake stream part (the same shape the AI SDK's own `TextStreamPart`
 // union carries) the way capturedOnFinish is already driven with a fake
 // responseMessage above.
-let capturedMessageMetadata: ((event: { part: { type: string } }) => unknown) | undefined;
+let capturedMessageMetadata:
+  | ((event: { part: { type: string; finishReason?: string } }) => unknown)
+  | undefined;
 // #317 review, #321: chat.ts's own onFinish awaits result.totalUsage/
 // result.response/result.warnings to build the llm_call_logs row --
 // individual tests override these via mockUsage/mockResponseMeta/
@@ -2390,7 +2392,18 @@ describe("POST /api/chat", () => {
       expect(capturedMessageMetadata!({ part: { type: "text-start" } })).toBeUndefined();
       expect(capturedMessageMetadata!({ part: { type: "text-delta" } })).toBeUndefined();
 
-      const metadata = capturedMessageMetadata!({ part: { type: "finish" } }) as
+      // #451 (Cordero review, PR440): a "finish" part with a NON-terminal
+      // (or absent) finishReason must NOT get metadata either -- onFinish's
+      // own `shouldPersist` gate would refuse to persist a row for this
+      // turn, so telling the client a `createdAt`/`persistedId` exists would
+      // expose a Flag control that 404s. Covers the exact aborted/errored
+      // case Cordero's review named.
+      expect(capturedMessageMetadata!({ part: { type: "finish" } })).toBeUndefined();
+      expect(capturedMessageMetadata!({ part: { type: "finish", finishReason: "error" } })).toBeUndefined();
+      expect(capturedMessageMetadata!({ part: { type: "finish", finishReason: "content-filter" } })).toBeUndefined();
+      expect(capturedMessageMetadata!({ part: { type: "finish", finishReason: "other" } })).toBeUndefined();
+
+      const metadata = capturedMessageMetadata!({ part: { type: "finish", finishReason: "stop" } }) as
         | { createdAt?: unknown; id?: unknown }
         | undefined;
       expect(metadata).toBeDefined();

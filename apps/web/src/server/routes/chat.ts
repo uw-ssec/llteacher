@@ -673,6 +673,18 @@ const chatEnvelopeSchema = z.object({
 // fix shipped, or a future path that doesn't go through onFinish). Now:
 // reject the WHOLE array the moment any part is still mid-flight, and only
 // then check whether at least one part actually renders.
+// #440 audit, Fix 1 / #451 (Cordero review, PR440): the finish reasons that
+// actually mean "the model produced a real, complete-as-far-as-it-went
+// answer" -- "stop" (normal completion), "length" (hit its token budget,
+// still a real answer), "tool-calls" (ended on a tool call). Everything else
+// (undefined, "unknown", "content-filter", "other", "error") is not a real
+// answer. Module-level (not a local `const` inside onFinish, as it was
+// before #451) so `messageMetadata`'s callback below -- which decides
+// whether to tell the client this turn has a persisted id at all -- can
+// check the EXACT same allowlist `onFinish`'s own `shouldPersist` gate uses,
+// rather than risk a second, independently-drifting copy.
+const TERMINAL_FINISH_REASONS = new Set(["stop", "length", "tool-calls"]);
+
 function hasRenderableContent(parts: unknown): boolean {
   if (!Array.isArray(parts)) return false;
   let sawRenderablePart = false;
@@ -2592,16 +2604,44 @@ export async function chatHandler(c: Context<AppEnv>) {
       // `generateMessageId` is passed to this call), which is NOT the id
       // onFinish mints for the persisted row; ConversationView's own doc
       // comment on AIMessageData.createdAt already anticipates exactly this
-      // gap. Fires on every terminal stream outcome, including one onFinish
-      // goes on to decide NOT to persist (a provider error, an aborted turn,
-      // or a turn with no renderable content) -- messageMetadata has no way
-      // to see onFinish's shouldPersist verdict, since it runs first; this
-      // mirrors `sendFinish`'s own always-fires-at-stream-end behavior
-      // (default true) elsewhere in this same options object, and an
-      // unpersisted turn's message is never shown as complete to begin with
-      // (ConversationView's isStreaming/error handling, not this gate).
+      // gap.
+      //
+      // #451 (Cordero review, PR440): this callback runs BEFORE onFinish
+      // (see assistantMessageId's own doc comment above), so it structurally
+      // cannot see onFinish's own `shouldPersist` verdict -- that verdict is
+      // `!isErrorOutcome && hasRenderableContent(responseMessage.parts)`, and
+      // `responseMessage.parts` (the ASSEMBLED UIMessage parts) simply
+      // doesn't exist yet at this point in the pipeline; only the raw
+      // model-stream's own "finish" TextStreamPart does, which carries
+      // `finishReason` but no content. An earlier version of this comment
+      // argued the gap was harmless because "an unpersisted turn's message
+      // is never shown as complete to begin with" -- true for the streaming
+      // indicator, but NOT for the Flag affordance, which keys off
+      // `createdAt`/`persistedId` alone: a turn that finishes with a
+      // TERMINAL `finishReason` but happens to produce zero renderable
+      // content (`hasRenderableContent` false) would still get a Flag
+      // control that 404s when clicked, since `onFinish` never persists that
+      // row.
+      //
+      // Checking `part.finishReason` against the SAME `TERMINAL_FINISH_
+      // REASONS` allowlist `onFinish`'s own `isErrorOutcome` uses closes the
+      // large majority of this gap: any aborted, non-terminal, or error
+      // finish reason now withholds `id`/`createdAt` entirely, so the Flag
+      // control simply never renders for it (same as the existing `!isStrea
+      // ming && msg.persistedId` client-side gate already does for a turn
+      // still in flight). What this does NOT close: a TERMINAL finish
+      // reason (stop/length/tool-calls) that nonetheless produced literally
+      // no renderable content -- `hasRenderableContent` needs the assembled
+      // response text, which isn't available here at all; duplicating that
+      // check's OWN logic (not just its allowlist) against raw TextStreamParts
+      // would mean two independently-maintained "has content" implementations
+      // that could drift. That narrower case is a documented, accepted
+      // residual gap (a model finishing "normally" with an entirely empty
+      // response), not something this fix claims to eliminate.
       messageMetadata: ({ part }) =>
-        part.type === "finish" ? { createdAt: new Date().toISOString(), id: assistantMessageId } : undefined,
+        part.type === "finish" && part.finishReason !== undefined && TERMINAL_FINISH_REASONS.has(part.finishReason)
+          ? { createdAt: new Date().toISOString(), id: assistantMessageId }
+          : undefined,
       // #317 review, #321 + "strongly recommend" item, #334: previously
       // absent, so the SDK's default error-to-string conversion reached the
       // client unfiltered -- combined with App.tsx rendering chatError.message
@@ -2688,7 +2728,10 @@ export async function chatHandler(c: Context<AppEnv>) {
           // "unknown", "content-filter", "other", and "error" itself -- is
           // treated as not-a-real-answer and falls through to the same
           // not-persisted path an aborted/provider-error turn already took.
-          const TERMINAL_FINISH_REASONS = new Set(["stop", "length", "tool-calls"]);
+          // #451: TERMINAL_FINISH_REASONS itself now lives at module scope
+          // (above hasRenderableContent) so messageMetadata's own callback
+          // can share this exact allowlist -- see that callback's doc
+          // comment for why.
           const isErrorOutcome = isAborted || !finishReason || !TERMINAL_FINISH_REASONS.has(finishReason);
 
           // Persisting a rejected turn anyway would write a row the

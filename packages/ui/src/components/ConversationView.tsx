@@ -266,6 +266,16 @@ export interface AIMessageData {
    *  for a turn still streaming, which renders no time rather than a made-up
    *  one. */
   createdAt?: string;
+  /** #447 (Cordero review, PR440): the DATABASE row id -- deliberately
+   *  separate from `id` above, which is this row's React key (and, for a
+   *  freshly-streamed turn, the AI SDK's own client-assigned id, NOT the
+   *  persisted one -- see useConversationSurface.tsx's `buildMessageData`
+   *  for the full story). `renderAiFeedbackSlot` below is called with THIS
+   *  field, not `id`, so the feedback POST always targets a row the server
+   *  can actually find. `undefined` while streaming (nothing to flag yet --
+   *  matches the `feedbackSlot` gate below, which never asks for it before
+   *  it exists). */
+  persistedId?: string;
 }
 
 export interface StudentMessageData {
@@ -610,15 +620,21 @@ function renderMessageRow(
         role="ai"
         isStreaming={msg.isStreaming}
         createdAt={msg.createdAt}
-        /* #90: only for a message that has round-tripped through the
+        /* #90/#447: only for a message that has round-tripped through the
            persisted history (see createdAt's own doc comment on
-           AIMessageData) -- a turn still streaming or just completed has
-           no createdAt yet, and critically no confirmed REAL row id either
-           (chat.ts's onFinish mints the persisted row's id independently of
-           whatever id the stream itself used, see this task's own report),
-           so offering to flag it here would be flagging an id the server
-           may not recognize as this message once persisted. */
-        feedbackSlot={!msg.isStreaming && msg.createdAt ? getFeedbackSlot?.(msg.id) : undefined}
+           AIMessageData) -- a turn still streaming has no createdAt yet.
+           Called with `msg.persistedId` (the DATABASE row id), NOT `msg.id`
+           (this row's React key, which for a freshly-streamed turn is the AI
+           SDK's own client-assigned id -- see AIMessageData.persistedId's
+           own doc comment for the full #447 story: `msg.id` here 404'd the
+           feedback POST for exactly the case this affordance exists for, a
+           student flagging an answer they just read, and only worked after
+           a reload replaced it with rehydrated data). Gated on
+           `msg.persistedId` itself, not just `!msg.isStreaming &&
+           msg.createdAt` -- the two are set together in practice, but
+           requiring the actual value this call needs is what makes that
+           true by construction rather than by coincidence. */
+        feedbackSlot={!msg.isStreaming && msg.persistedId ? getFeedbackSlot?.(msg.persistedId) : undefined}
       >
         {msg.content}
       </Message>

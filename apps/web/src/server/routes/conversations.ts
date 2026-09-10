@@ -49,7 +49,7 @@ import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS }
 // and App.tsx's client-side auto-title-on-first-message fix -- so every
 // caller that needs to create a title-less row, or decide whether a row is
 // still safe to auto-title, agrees on exactly one string.
-import { DEFAULT_TUTOR_CONVERSATION_TITLE } from "../../shared/tutorConversationTitle";
+import { DEFAULT_TUTOR_CONVERSATION_TITLE, MAX_CONVERSATION_TITLE_UTF16_LENGTH } from "../../shared/tutorConversationTitle";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type {
@@ -91,11 +91,16 @@ const MAX_TUTOR_CONVERSATIONS_PER_COURSE = 300;
 
 const createConversationSchema = z.object({
   courseId: z.string().uuid(),
-  title: z.string().trim().min(1).max(100).optional(),
+  // #453: shared with deriveTutorConversationTitle's own UTF-16 ceiling
+  // (tutorConversationTitle.ts) -- see that constant's own doc comment for
+  // why a literal `100` here, independent of that one, is exactly the kind
+  // of duplicated-limit drift that let an emoji-heavy auto-title 400
+  // silently against this schema in the first place.
+  title: z.string().trim().min(1).max(MAX_CONVERSATION_TITLE_UTF16_LENGTH).optional(),
 });
 
 const updateConversationSchema = z.object({
-  title: z.string().trim().min(1).max(100),
+  title: z.string().trim().min(1).max(MAX_CONVERSATION_TITLE_UTF16_LENGTH),
 });
 
 // #218: projects a raw `conversations` row to the wire contract -- drops

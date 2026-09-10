@@ -838,7 +838,18 @@ function TranscriptListDataLoader({
 
 /** #90: the instructor's course-wide flagged-response review. Same
  *  loader/view split as every other admin{View,DataLoader} pair. */
-function FeedbackDashboardDataLoader({
+// #452 test: exported so App.test.tsx can drive its `offset` prop directly
+// (via rerender) rather than through the full App navigation tree -- the
+// real Previous/Next/Retry controls all compute their next target from
+// already-loaded `data`, which makes a genuinely double-dispatched,
+// out-of-order-resolving pair of requests structurally unreachable through
+// those controls alone (each re-click either targets the SAME offset the
+// effect's own dependency array already deduped, or the Retry affordance
+// itself unmounts the instant the first click's synchronous effect body
+// clears `pageError`). Driving `offset` directly is the only way to
+// reproduce the actual race #452 is about without inventing an unrelated
+// courseId-switching flow just to trigger it.
+export function FeedbackDashboardDataLoader({
   courseId,
   offset,
   onBack,
@@ -902,10 +913,23 @@ function FeedbackDashboardDataLoader({
      closure, so the effect's own dependency array doesn't need to (and
      shouldn't) include `data`. */
   const hasLoadedRef = useRef(false);
+  /* #452 (Cordero review, PR440): no request ordering meant a fast
+     Next-then-Previous click pair issues two overlapping fetches (offset=2,
+     then offset=0), and whichever RESPONSE happened to arrive last -- not
+     whichever was clicked last -- was what ended up on screen: ordinary
+     network jitter could land offset=2's data over a page the instructor
+     had already clicked back away from. `useTutorConversations.ts`'s own
+     `requestSeqRef` is the established idiom for exactly this in this
+     codebase: a monotonically-incrementing counter, bumped at DISPATCH
+     time, captured locally, and checked again before any state write --
+     so only the response belonging to the MOST RECENTLY dispatched
+     request is ever allowed to land, regardless of resolution order. */
+  const requestSeqRef = useRef(0);
   useEffect(() => {
     setIsFetching(true);
     setLoadError(false);
     setPageError(false);
+    const requestSeq = ++requestSeqRef.current;
     const params = new URLSearchParams({ offset: String(offset) });
     fetch(`/api/courses/${courseId}/instructor/feedback?${params}`)
       .then((r) => {
@@ -913,14 +937,19 @@ function FeedbackDashboardDataLoader({
         return r.json();
       })
       .then((json: FeedbackDashboardData) => {
+        if (requestSeq !== requestSeqRef.current) return;
         setData(json);
         hasLoadedRef.current = true;
       })
       .catch(() => {
+        if (requestSeq !== requestSeqRef.current) return;
         if (hasLoadedRef.current) setPageError(true);
         else setLoadError(true);
       })
-      .finally(() => setIsFetching(false));
+      .finally(() => {
+        if (requestSeq !== requestSeqRef.current) return;
+        setIsFetching(false);
+      });
   }, [courseId, offset, attempt]);
   // Only a failure with nothing already on screen to fall back to takes over
   // the whole view -- a failed page-forward/back fetch with a previous page

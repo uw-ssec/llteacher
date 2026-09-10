@@ -1483,7 +1483,16 @@ describe("ConversationView renderAiFeedbackSlot gating (#90)", () => {
     expect(screen.queryByTestId("feedback-slot")).toBeNull();
   });
 
-  it("DOES offer the feedback slot, with the real message id, once the AI message has settled with a createdAt", () => {
+  it("DOES offer the feedback slot, with the PERSISTED row id (not the React-key id), once the AI message has settled with a createdAt (#447)", () => {
+    // #447 (Cordero review, PR440): `id` and `persistedId` deliberately
+    // DIFFERENT here -- `id` is this row's React key (stable for the row's
+    // whole lifetime; for a freshly-streamed turn it's the AI SDK's own
+    // client-assigned id, not the database row id). `persistedId` is the
+    // database row id `messageMetadata` (chat.ts) stamps in once the turn
+    // finishes. Before the fix, this call site passed `msg.id` -- which
+    // would have made this assertion pass with "sdk-client-id" instead,
+    // silently proving the wrong thing. Using two DIFFERENT values is what
+    // makes this test able to catch that regression at all.
     const renderAiFeedbackSlot = vi.fn((messageId: string) => (
       <span data-testid="feedback-slot">{messageId}</span>
     ));
@@ -1492,13 +1501,35 @@ describe("ConversationView renderAiFeedbackSlot gating (#90)", () => {
         breadcrumb="b"
         onSendMessage={() => {}}
         messages={[
-          { id: "real-message-id", role: "ai", content: "settled", createdAt: "2026-08-26T09:00:00.000Z" },
+          {
+            id: "sdk-client-id",
+            persistedId: "real-message-id",
+            role: "ai",
+            content: "settled",
+            createdAt: "2026-08-26T09:00:00.000Z",
+          },
         ]}
         renderAiFeedbackSlot={renderAiFeedbackSlot}
       />,
     );
     expect(renderAiFeedbackSlot).toHaveBeenCalledWith("real-message-id");
     expect(screen.getByTestId("feedback-slot").textContent).toBe("real-message-id");
+  });
+
+  it("does NOT offer the feedback slot for a settled AI message with no persistedId yet, even with a createdAt (#447 defensive gate)", () => {
+    const renderAiFeedbackSlot = vi.fn(() => <span data-testid="feedback-slot">flag</span>);
+    render(
+      <ConversationView
+        breadcrumb="b"
+        onSendMessage={() => {}}
+        messages={[
+          { id: "sdk-client-id", role: "ai", content: "settled", createdAt: "2026-08-26T09:00:00.000Z" },
+        ]}
+        renderAiFeedbackSlot={renderAiFeedbackSlot}
+      />,
+    );
+    expect(renderAiFeedbackSlot).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("feedback-slot")).toBeNull();
   });
 
   it("renders no feedback slot at all when the caller omits renderAiFeedbackSlot, even for a settled message", () => {

@@ -532,6 +532,36 @@ describe("PATCH /api/conversations/:id", () => {
     expect(updateConversationTitleMock).not.toHaveBeenCalled();
   });
 
+  // #453 (Cordero review, PR440): closes the loop end-to-end between
+  // deriveTutorConversationTitle's own UTF-16 ceiling
+  // (shared/tutorConversationTitle.ts) and THIS route's real schema -- not
+  // just that both happen to reference the same constant (that's pinned in
+  // tutorConversationTitle.test.ts), but that a title
+  // deriveTutorConversationTitle actually PRODUCES for the worst case (60
+  // code points, every one an astral-plane surrogate pair) is genuinely
+  // ACCEPTED by this endpoint, which is the real, reachable auto-title PATCH
+  // App.tsx's fire-and-forget renameConversation call makes.
+  it("accepts the title deriveTutorConversationTitle produces for an all-astral-plane 60-code-point first message", async () => {
+    const { deriveTutorConversationTitle } = await import("../../shared/tutorConversationTitle");
+    const allEmojiTitle = deriveTutorConversationTitle([{ type: "text", text: "😀".repeat(60) }]);
+    expect(allEmojiTitle).not.toBeNull();
+
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+    updateConversationTitleMock.mockResolvedValue(fakeConversationRow({ title: allEmojiTitle! }));
+
+    const res = await patchConv(buildApp(fakeAuthContext()), "22222222-2222-2222-2222-222222222222", {
+      title: allEmojiTitle!,
+    });
+
+    expect(res.status).toBe(200);
+    expect(updateConversationTitleMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "course-a",
+      "22222222-2222-2222-2222-222222222222",
+      allEmojiTitle,
+    );
+  });
+
   it("400s when the request body is not valid JSON", async () => {
     getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
     const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222", {

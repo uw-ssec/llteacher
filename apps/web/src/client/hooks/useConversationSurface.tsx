@@ -137,6 +137,40 @@ function buildMessageData(
     return typeof meta?.createdAt === "string" ? meta.createdAt : undefined;
   };
 
+  /* #447 (Cordero review, PR440): `m.id` is NOT reliably the persisted
+     database row id -- for a message rehydrated by fetchConversationHistory
+     (App.tsx), `id: r.id` IS the real row id (metadata carries no `id` of
+     its own for that path). But for a message that streams in live during
+     THIS session, `m.id` is whatever id @ai-sdk/react's own Chat instance
+     assigned when the turn started (no `generateMessageId` is passed to
+     `useChat`) -- a DIFFERENT id than the one chat.ts's `onFinish` persists.
+     The server's `messageMetadata` hook (chat.ts) stamps the REAL persisted
+     id into `metadata.id` the moment the turn finishes (see that hook's own
+     doc comment for why). Flagging a freshly-streamed answer previously
+     sent `m.id` (the SDK id) to `POST /messages/:messageId/feedback`, which
+     looks up by database id -- 404ing every time, until a reload replaced
+     `aiMessages` with rehydrated data carrying the real id.
+
+     Deliberately a SEPARATE field (`persistedId` below), not a change to
+     `id` itself: `id` is also this row's React key at the ConversationView
+     level (`<Fragment key={msg.id}>`) -- switching it the instant a turn
+     finishes would remount that row (losing scroll/focus state, and any
+     local component state like ResponseFeedback's own "flagged"
+     confirmation) for every single completed turn. `persistedId` starts
+     `undefined` while streaming and becomes populated at the exact moment
+     `createdAt` does (same `messageMetadata` "finish" stamp, or the
+     rehydrated row's own id) -- which is already the same instant
+     ConversationView's feedback-slot gate (`!msg.isStreaming &&
+     msg.createdAt`) first allows the Flag control to render, so by
+     construction it's never asked for before it exists. */
+  const persistedId = (m: UIMessage): string | undefined => {
+    const meta = m.metadata as { id?: unknown } | undefined;
+    if (typeof meta?.id === "string") return meta.id;
+    // Rehydrated messages (fetchConversationHistory) carry no metadata.id,
+    // but their top-level `id` IS already the real persisted row id.
+    return turnCreatedAt(m) !== undefined ? m.id : undefined;
+  };
+
   const messages: MessageData[] = aiMessages.map((m, idx) => {
     const isLast = idx === aiMessages.length - 1;
     const isStreaming = isLast && chatStatus === "streaming";
@@ -173,6 +207,7 @@ function buildMessageData(
         content,
         createdAt: turnCreatedAt(m),
         isStreaming: isStreaming && !isStopped,
+        persistedId: persistedId(m),
       };
     }
 
@@ -403,40 +438,129 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
     runRCode,
   } = options;
 
-  /* #96: false from the moment a fresh send is dispatched until the server
-     answers 2xx for it -- see ConversationSurface.sendFailure for what
-     that implies. `fetchImpl` already throws (ChatResponseError)
-     on a non-2xx response before returning, so "fetchImpl resolved" and
-     "the server accepted this send" are the same event regardless of which
-     surface-specific work happens inside `fetchImpl` first. */
-  const acceptedRef = useRef(true);
-  /* #418: what the in-flight send actually was, and which `resetKey` it was
-     typed under. Written by `send` below at the moment of sending -- not
-     reconstructed in the failure-detection effect below from whatever
-     `aiMessages`/`resetKey` happen to hold when the request finally rejects,
-     which can be arbitrarily later than the send itself (a hanging fetch
-     outlives a switch). Read and cleared by the failure-detection effect on
-     the failure path; cleared here on the SUCCESS path too (#420 review fix,
-     Minor) -- not currently reachable as a live bug (the failure effect
-     already requires `acceptedRef.current === false`, and `send()`
-     unconditionally overwrites this ref before every subsequent send
-     regardless), but leaving a stale reference to already-accepted, already
-     -persisted text around for longer than it's needed is a footgun for
-     whoever next reads or extends this file. */
-  const pendingSendRef = useRef<{ text: string; key: typeof resetKey } | null>(null);
+  /* #449/#450 review fix (blocking + non-blocking, same root cause, one
+     fix): `acceptedRef`/`pendingSendRef` used to be two SINGLETON refs
+     shared by every dispatch on this surface. Two independent failure
+     modes fell out of that:
+
+     #449 -- @ai-sdk/react's `useChat` recreates its underlying `Chat`
+     instance when `surfaceKey` (passed as `id`) changes (`shouldRecreateChat`
+     in useChat's own source: `"id" in options && chat.id !== options.id`).
+     A still-in-flight request that was dispatched against the OLD,
+     now-abandoned instance settles later -- but the status-watching effect
+     below only fires off THIS render's `status`, which by then belongs to
+     the NEW instance (a fresh Chat object, `status: "ready"`, no error).
+     The old instance's own late `status -> "error"` transition has no
+     subscriber left that re-renders this hook, so the effect never runs for
+     it: the student's unsent text is silently gone, not merely stuck
+     unrecoverable behind a switch. Verified against the installed
+     `ai@5.0.195` -- `Chat#makeRequest` catches the transport's rejection
+     itself and calls `this.setStatus({status:"error"})`; it never rethrows,
+     so `sendMessage(...)`'s own returned promise can't be awaited here
+     either to route around this. IMPORTANT and easy to get wrong: `Chat
+     #clearError` (`ai@5.0.195`) is itself guarded --
+     `if (this.status === "error") { ...; this.setStatus({status:"ready"}) }`
+     -- a no-op when called BEFORE the SDK's own `makeRequest` catch has had
+     a chance to set `status: "error"`. Since `wrappedFetch`'s own catch
+     runs and (after this fix) rethrows BEFORE that happens, calling
+     `clearError()` synchronously from inside `wrappedFetch` would silently
+     no-op every time -- so for the case where THIS dispatch's own instance
+     is STILL current (only `resetKey` has diverged, not `surfaceKey`/`id`
+     itself -- the section surface's own documented lag window), this fix
+     deliberately leaves that case to the EXISTING status-watching effect
+     below, which fires AFTER the real transition and so sees `clearError()`
+     actually take effect. `wrappedFetch` only takes over the ABANDONED
+     -instance case, which the effect structurally cannot observe at all.
+
+     #450 -- even WITHOUT a switch, a second dispatch (a fresh send, or a
+     retry) started while the first is still pending overwrites these same
+     singleton refs before the first settles, so the first dispatch's own
+     eventual success/failure reads and writes the SECOND dispatch's
+     bookkeeping instead of its own -- "one turn's response marks another
+     accepted."
+
+     `activeDispatchRef` fixes both: each dispatch gets its OWN record
+     object, captured locally inside `wrappedFetch` the INSTANT that
+     specific fetch call starts (see below) -- a later dispatch reassigning
+     `activeDispatchRef.current` can never reach back and mutate an
+     already-in-flight call's own captured object, whichever of the two
+     paths above ends up handling its eventual failure. */
+  interface DispatchRecord {
+    text: string;
+    key: typeof resetKey;
+    /** #449: `surfaceKey` AT THE MOMENT this dispatch started -- compared
+     *  against the freshest `surfaceKey` (via `surfaceKeyRef` below) at
+     *  failure time to tell "still the same Chat instance" (the effect
+     *  below can handle it) apart from "instance already recreated,
+     *  abandoned" (only `wrappedFetch`'s own catch can). */
+    surfaceKeyAtDispatch: typeof surfaceKey;
+    accepted: boolean;
+  }
+  const activeDispatchRef = useRef<DispatchRecord | null>(null);
+  /* #449: the freshest `surfaceKey`, read from a ref rather than the plain
+     closed-over variable. `wrappedFetch`'s own closure is "locked in" at
+     whichever render created (or last recreated) the CURRENT `useChat` Chat
+     instance -- useChat's `chatRef` only re-runs `new Chat(options)`
+     (installing a NEW `transport`, and therefore a NEW `wrappedFetch`
+     closure) when `id` changes, not on every render -- so a plain
+     closed-over `surfaceKey` inside `wrappedFetch` would always read
+     whatever it was AT THAT CREATION, never the value current when a LATER
+     invocation's catch actually runs. This ref is written unconditionally
+     on every render, so it always reflects the CURRENT value regardless of
+     which render's `wrappedFetch` closure is the one actually executing. */
+  const surfaceKeyRef = useRef(surfaceKey);
+  surfaceKeyRef.current = surfaceKey;
+  /* #418: the send-half failure record -- moved earlier in this file (was
+     declared after `useChat` below) so `wrappedFetch`, which now creates it
+     directly for the abandoned-instance case, can reference the setter
+     without a forwarding ref. See this field's own further doc comment
+     where `sendFailure` derives from it, below `useChat`. */
+  const [sendFailureRecord, setSendFailureRecord] = useState<{
+    failure: { text: string };
+    recordedAtKey: typeof resetKey;
+  } | null>(null);
   const wrappedFetch: typeof fetch = async (input, init) => {
-    const res = await fetchImpl(input, init);
-    acceptedRef.current = true;
-    pendingSendRef.current = null;
-    return res;
+    // Captured HERE, synchronously, the instant THIS specific fetch call
+    // starts -- see activeDispatchRef's own doc comment above for why this
+    // must not be re-read after the `await` below.
+    const dispatch = activeDispatchRef.current;
+    try {
+      const res = await fetchImpl(input, init);
+      if (dispatch) dispatch.accepted = true;
+      return res;
+    } catch (err) {
+      // Only a dispatch that came through `send()` below (never `regenerate`,
+      // which doesn't create one) and hasn't already succeeded represents
+      // un-persisted, recoverable student text -- this is exactly the
+      // acceptedRef.current === false check the old code did, just scoped
+      // to THIS dispatch's own object instead of a shared ref. AND only
+      // when the Chat instance it was dispatched against has since been
+      // recreated (surfaceKeyRef diverged from what was captured at dispatch
+      // time) -- the same-instance case is deliberately left to the effect
+      // below (see this block's own #449 doc comment for why: clearError()
+      // would no-op if called from here for that case).
+      if (dispatch && !dispatch.accepted && dispatch.surfaceKeyAtDispatch !== surfaceKeyRef.current) {
+        setSendFailureRecord({ failure: { text: dispatch.text }, recordedAtKey: dispatch.key });
+        // No transcript trim needed here: the ABANDONED instance's own
+        // `aiMessages` belong to a surface that isn't mounted any more --
+        // returning to it re-hydrates from the server, which never stored
+        // this un-persisted message in the first place (same reasoning the
+        // effect's own key-mismatch branch below already relies on).
+        // Only clear if nothing has since claimed this ref -- an
+        // overlapping LATER dispatch (#450) may already have replaced it
+        // with its own record, which must survive untouched.
+        if (activeDispatchRef.current === dispatch) activeDispatchRef.current = null;
+      }
+      throw err;
+    }
   };
 
   /* #441 (response-half twin of #420's send-half fix): the `resetKey` that
      was current at the moment the turn NOW in flight was dispatched -- for
      EVERY turn, a fresh send or a retry, not just the send-half case
-     `pendingSendRef` already tracks. Deliberately NOT cleared on acceptance
-     (unlike `pendingSendRef`, which the whole point of #420's fix was to
-     stop needing past that point) -- a send-half failure is already fully
+     `activeDispatchRef` already tracks. Deliberately NOT cleared on
+     acceptance (unlike `activeDispatchRef`, which the whole point of #420's
+     fix was to stop needing past that point) -- a send-half failure is already fully
      handled by the time `wrappedFetch` resolves, but a response-half
      failure (the stream itself dying) can only be detected LATER, arbitrarily
      long after acceptance, which is exactly the window a switch can land in.
@@ -485,20 +609,19 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
 
   const [stoppedMessageId, setStoppedMessageId] = useState<string | null>(null);
 
-  /* #419: the send-half failure record. Deliberately NOT cleared when
-     `resetKey` changes (see below) -- it's a `{ failure, recordedAtKey }`
-     pair kept alive across a switch so that returning to the surface it was
-     recorded under still hands the student's words back (the pre-#419
-     behavior nulled this the instant `resetKey` changed, which meant
-     leaving and returning destroyed an un-persisted, un-recoverable message
-     outright). `failure` is the exact object identity exposed as
-     `sendFailure` below -- see that field's own doc comment (#302 review fix,
-     Critical #1) for why this must stay a single stable object per failure,
-     not one rebuilt fresh on every render that happens to still match. */
-  const [sendFailureRecord, setSendFailureRecord] = useState<{
-    failure: { text: string };
-    recordedAtKey: typeof resetKey;
-  } | null>(null);
+  /* #419: the send-half failure record -- `sendFailureRecord`/
+     `setSendFailureRecord` themselves are now declared earlier in this file
+     (see the #449 doc comment above `wrappedFetch`), so `wrappedFetch` can
+     create this directly. Deliberately NOT cleared when `resetKey` changes
+     (see below) -- it's a `{ failure, recordedAtKey }` pair kept alive
+     across a switch so that returning to the surface it was recorded under
+     still hands the student's words back (the pre-#419 behavior nulled this
+     the instant `resetKey` changed, which meant leaving and returning
+     destroyed an un-persisted, un-recoverable message outright). `failure`
+     is the exact object identity exposed as `sendFailure` below -- see that
+     field's own doc comment (#302 review fix, Critical #1) for why this
+     must stay a single stable object per failure, not one rebuilt fresh on
+     every render that happens to still match. */
 
   /* #419: exposed to the caller ONLY when the failure's own `recordedAtKey`
      still matches the CURRENT `resetKey` -- this is the render-site gate
@@ -585,8 +708,8 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
     prevStatusRef.current = status;
 
     /* #441: a turn that finished successfully needs no dispatch-key record
-       any more. Defensive, mirroring `pendingSendRef`'s own success-path
-       clear in `wrappedFetch` above -- not currently reachable as a live
+       any more. Defensive, mirroring `activeDispatchRef`'s own success-path
+       handling in `wrappedFetch` above -- not currently reachable as a live
        bug (a fresh dispatch always overwrites `dispatchedKeyRef` before it
        is next read), but leaving a stale key around for longer than
        needed is the same footgun that comment already warns about. */
@@ -596,45 +719,56 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
 
     // Only the moment a turn FAILS, not every render while it stays failed.
     if (status !== "error" || previous === "error") return;
-    if (acceptedRef.current) {
-      /* #441 (response-half twin of #420's send-half fix): the send was
-         already accepted -- the server persisted the student's turn, and
-         either the reply stream itself died, or this is a `regenerate`
-         retry (which never routes through `send` below, so `acceptedRef`
-         never goes false for it either) -- so there is no un-persisted
-         text to hand back, unlike the send-half branch below. But #420's
-         OWN fix only closed this window on the send half: `surfaceKey`
-         (and the Chat instance recreation with it) doesn't catch up until
-         the NEW surface's history fetch resolves, so if the turn that just
-         failed was dispatched under a DIFFERENT `resetKey` than the one
-         current right now, the student has already switched away from the
-         surface this failure belongs to -- and without clearing here, this
+
+    /* #449 review fix: the ABANDONED-instance send-half case (a switch that
+       also recreated the Chat instance before this failure landed) is now
+       handled SYNCHRONOUSLY inside `wrappedFetch`'s own catch above -- see
+       that block's own doc comment for why this effect structurally cannot
+       observe that case at all, and why `clearError()` must NOT be called
+       from there for the case THIS effect still owns. By the time `status`
+       genuinely transitions to "error" HERE, `activeDispatchRef.current` is
+       one of: `null` (an abandoned-instance failure already fully handled
+       above, or nothing was ever dispatched), a dispatch with `accepted:
+       true` (a response-half failure, or a `regenerate` retry -- neither
+       has un-persisted text to hand back), or -- the case this branch below
+       exists for -- a dispatch that is NOT accepted and whose instance is
+       STILL the current one: a same-instance send-half failure. */
+    const dispatch = activeDispatchRef.current;
+    if (dispatch?.accepted) {
+      /* #441 (response-half twin of #420's send-half fix): #420's OWN fix
+         only closed this window on the send half: `surfaceKey` (and the
+         Chat instance recreation with it) doesn't catch up until the NEW
+         surface's history fetch resolves, so if the turn that just failed
+         was dispatched under a DIFFERENT `resetKey` than the one current
+         right now, the student has already switched away from the surface
+         this failure belongs to -- and without clearing here, this
          still-mounted instance's `status`/`error` would sit at "error" over
          the new surface, rendering an error row with a live Retry
          (`errorRow.onRetry`, since `hasSendFailure` is false here) pointed
          at the OLD surface's `buildRetryBody`/conversationId. One click
          regenerates a turn into a DIFFERENT section's conversation --
-         reachable more easily than the Critical #420 fixed, since this is
-         a durable button sitting on screen, not a sub-frame timing window. */
+         reachable more easily than the Critical #420 fixed, since this is a
+         durable button sitting on screen, not a sub-frame timing window. */
       if (dispatchedKeyRef.current !== resetKey) {
         clearError();
       }
       dispatchedKeyRef.current = undefined;
       return;
     }
-    const pending = pendingSendRef.current;
-    // No record of a send means nothing to hand back -- a turn that reached
-    // "error" without `send` having started it is not a send-half failure
-    // this can recover.
-    if (!pending) return;
-    pendingSendRef.current = null;
+    if (!dispatch) return;
+    // Same-instance send-half failure: `dispatch` is non-null and not yet
+    // accepted, and (per this branch's own guard above) `wrappedFetch`'s
+    // catch deliberately did NOT handle it -- do so here, now that `status`
+    // has genuinely transitioned and `clearError()` (in the switched-away
+    // branch below) will actually take effect rather than no-op.
+    activeDispatchRef.current = null;
     // A FRESH object every time this fires (#302 review fix, Critical #1) --
     // never re-derived from a memo or recomputed at a render call site -- so
     // that two consecutive failures with the same text each independently
     // restore, and so ConversationView's own identity-keyed "restore once"
     // guard can't be defeated by an unrelated re-render minting a
     // new-looking object for the SAME failure.
-    setSendFailureRecord({ failure: { text: pending.text }, recordedAtKey: pending.key });
+    setSendFailureRecord({ failure: { text: dispatch.text }, recordedAtKey: dispatch.key });
     /* #418: only mutate the transcript on screen when it's still the one
        that failed -- i.e. `resetKey` hasn't moved on since the send. After a
        switch, `aiMessages` belongs to a different surface and slicing its
@@ -642,7 +776,7 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
        surface needs no cleanup in that case, since its transcript is
        unmounted and returning re-hydrates it from the server, which never
        stored the failed message in the first place. */
-    if (pending.key === resetKey) {
+    if (dispatch.key === resetKey) {
       const last = aiMessages[aiMessages.length - 1];
       // Defensive: a send-half failure never gets far enough for the SDK to
       // append an assistant message, so the tail is the student's own
@@ -651,22 +785,27 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
     } else {
       /* #420 review fix (Important #2): the switch-beats-failure ordering
          all of #418/#419/#420 are about -- this rejection is landing on a
-         surface the student has already left. `surfaceKey` (and the Chat
-         instance recreation that comes with it) won't catch up until the
-         NEW surface's own history fetch resolves, which can be arbitrarily
-         later than this moment -- so without an explicit clear here, this
-         still-mounted useChat instance's `status`/`error` would otherwise
-         sit at "error" over the new surface until then. Clearing it HERE,
-         the instant the mismatch is detected (rather than only on the
-         `resetKey`-keyed effect above, which already ran once for THIS
-         switch and won't fire again until the NEXT one), closes that
-         window immediately: the same effect invocation that records the
-         failure (for #419's later restore) also retires the stale error
-         row and its Retry it would otherwise render for the wrong
-         conversation. Batched with `setSendFailureRecord` above into the
-         same commit, so there is no intermediate render where `status` is
-         still "error" for a `hasSendFailure`-classified-but-orphaned row to
-         flash on screen. */
+         surface the student has already left (resetKey diverged, but the
+         SAME Chat instance -- surfaceKey hasn't caught up yet, otherwise
+         wrappedFetch's catch above would already have handled this).
+         `surfaceKey` (and the Chat instance recreation that comes with it)
+         won't catch up until the NEW surface's own history fetch resolves,
+         which can be arbitrarily later than this moment -- so without an
+         explicit clear here, this still-mounted useChat instance's
+         `status`/`error` would otherwise sit at "error" over the new
+         surface until then. Clearing it HERE, the instant the mismatch is
+         detected (rather than only on the `resetKey`-keyed effect above,
+         which already ran once for THIS switch and won't fire again until
+         the NEXT one), closes that window immediately: the same effect
+         invocation that records the failure (for #419's later restore) also
+         retires the stale error row and its Retry it would otherwise render
+         for the wrong conversation. Batched with `setSendFailureRecord`
+         above into the same commit, so there is no intermediate render
+         where `status` is still "error" for a `hasSendFailure`-classified
+         -but-orphaned row to flash on screen. Safe to call unconditionally
+         here (unlike from `wrappedFetch`): `status` has ALREADY transitioned
+         to "error" by the time this effect runs, so `clearError()`'s own
+         `if (this.status === "error")` guard passes. */
       clearError();
     }
     // #441: this turn's failure has now been fully handled (send-half) --
@@ -739,16 +878,23 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
      the original handlers, where the guard was the very first line before
      any of that work. */
   const send = (text: string, extraBody?: Record<string, unknown>) => {
-    acceptedRef.current = false;
     // A fresh send supersedes any previous failure -- its text is either
     // being re-sent right now or was deliberately replaced by the student.
     // Unlike a `resetKey` change (#419), a fresh send genuinely retires the
     // old record rather than merely gating its display.
     setSendFailureRecord(null);
-    /* #418: the words, and the `resetKey` they belong to, recorded HERE, at
-       the moment of sending -- not reconstructed in the failure-detection
-       effect above from whatever `aiMessages`/`resetKey` happen to hold when
-       the request finally rejects.
+    /* #418/#449/#450: a BRAND NEW record object for THIS dispatch, assigned
+       to `activeDispatchRef` here, at the moment of sending -- not
+       reconstructed in the failure-detection effect above from whatever
+       `aiMessages`/`resetKey` happen to hold when the request finally
+       rejects, and not sharing a singleton with any OTHER dispatch that
+       might still be in flight or start before this one settles (#450).
+       `wrappedFetch` captures this exact object (via `activeDispatchRef
+       .current`) the instant its own fetch call starts, synchronously
+       after this line runs -- so a LATER dispatch reassigning
+       `activeDispatchRef.current` (a fresh send, or a switch's own
+       `regenerate` retry) can never reach back and corrupt what THIS one
+       already captured.
 
        A hanging send outlives a switch: the caller's `initialMessages`/
        `setMessages` replace `aiMessages` with the new surface's history on a
@@ -756,8 +902,11 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
        the WRONG surface's last message, stamp the failure with the wrong
        key, drop a PERSISTED message out of that surface's transcript, and
        pre-fill its composer one Enter away from sending it twice. The failed
-       surface's actual text would be lost either way. */
-    pendingSendRef.current = { text, key: resetKey };
+       surface's actual text would be lost either way -- `dispatch.key`
+       (captured here, read back inside `wrappedFetch`'s own catch) is what
+       lets that catch tell the two cases apart without ever touching
+       `aiMessages`/`resetKey` as they stand LATER, at failure time. */
+    activeDispatchRef.current = { text, key: resetKey, surfaceKeyAtDispatch: surfaceKey, accepted: false };
     // #441: this send's dispatch key, unconditionally overwritten here --
     // see dispatchedKeyRef's own doc comment above.
     dispatchedKeyRef.current = resetKey;

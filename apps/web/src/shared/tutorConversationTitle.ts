@@ -34,6 +34,28 @@
 export const AUTO_TITLE_MAX_LENGTH = 60;
 export const DEFAULT_TUTOR_CONVERSATION_TITLE = "New Conversation";
 
+/** #453 (Cordero review, PR440): the conversation-rename PATCH schema's own
+ *  `z.string().trim().min(1).max(100)` (routes/conversations.ts,
+ *  `updateConversationSchema`/`createConversationSchema`) -- Zod's `.max()`
+ *  on a string checks JS's own `.length`, which counts UTF-16 CODE UNITS,
+ *  not code points. `AUTO_TITLE_MAX_LENGTH` (60) counts code points
+ *  (`deriveTutorConversationTitle`'s own #287 fix, below) -- for a
+ *  first message that happens to be 60+ code points of astral-plane
+ *  characters (most emoji, U+10000 and above, each a surrogate PAIR: 2
+ *  UTF-16 units), a 60-code-point-truncated title plus its appended "…"
+ *  ellipsis could measure up to 121 UTF-16 units -- comfortably over this
+ *  server-side limit. The PATCH then 400s, and the auto-title silently
+ *  never lands (App.tsx's renameConversation call has nothing that
+ *  distinguishes this from a lost network request -- see its own "doesn't
+ *  wait on the turn's completion" fire-and-forget design), leaving the row
+ *  stuck at DEFAULT_TUTOR_CONVERSATION_TITLE with no visible error. Hoisted
+ *  here, imported by BOTH `deriveTutorConversationTitle` below (as the
+ *  hard UTF-16 ceiling its own code-point truncation must additionally
+ *  respect) and `routes/conversations.ts`'s schema (replacing that file's
+ *  own literal `100`), so the two can't drift apart the way
+ *  AUTO_TITLE_MAX_LENGTH and the PATCH schema already had. */
+export const MAX_CONVERSATION_TITLE_UTF16_LENGTH = 100;
+
 /** Derives an initial title for a brand-new tutor conversation from its
  *  first user message. Truncates the first text part; returns null (falls
  *  back to DEFAULT_TUTOR_CONVERSATION_TITLE) for a message with no text
@@ -54,7 +76,16 @@ export const DEFAULT_TUTOR_CONVERSATION_TITLE = "New Conversation";
  *  UTF-8, which is exactly what happens on the way into a Postgres text
  *  column. `Array.from(str)` iterates a string by code point (via its own
  *  `[Symbol.iterator]`, which is surrogate-pair-aware), so slicing the
- *  resulting array can only ever cut BETWEEN whole characters. */
+ *  resulting array can only ever cut BETWEEN whole characters.
+ *
+ *  #453: code-point count alone isn't enough -- see
+ *  MAX_CONVERSATION_TITLE_UTF16_LENGTH's own doc comment above. After the
+ *  #287 code-point truncation, this ALSO enforces the server's real UTF-16
+ *  ceiling by dropping trailing code points (one at a time -- a single
+ *  extra-wide code point rarely needs more than one or two removed) until
+ *  the result plus its ellipsis fits, so a title this function returns can
+ *  never itself trigger the PATCH schema's `.max()` rejection regardless of
+ *  how many of its code points are outside the BMP. */
 export function deriveTutorConversationTitle(parts: unknown): string | null {
   if (!Array.isArray(parts)) return null;
   const textPart = parts.find(
@@ -64,6 +95,13 @@ export function deriveTutorConversationTitle(parts: unknown): string | null {
   const text = textPart?.text.trim();
   if (!text) return null;
   const codePoints = Array.from(text);
-  if (codePoints.length <= AUTO_TITLE_MAX_LENGTH) return text;
-  return `${codePoints.slice(0, AUTO_TITLE_MAX_LENGTH).join("").trimEnd()}…`;
+  if (codePoints.length <= AUTO_TITLE_MAX_LENGTH && text.length <= MAX_CONVERSATION_TITLE_UTF16_LENGTH) return text;
+
+  let truncated = codePoints.length > AUTO_TITLE_MAX_LENGTH ? codePoints.slice(0, AUTO_TITLE_MAX_LENGTH) : codePoints;
+  let result = `${truncated.join("").trimEnd()}…`;
+  while (result.length > MAX_CONVERSATION_TITLE_UTF16_LENGTH && truncated.length > 0) {
+    truncated = truncated.slice(0, -1);
+    result = `${truncated.join("").trimEnd()}…`;
+  }
+  return result;
 }
