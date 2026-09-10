@@ -13,8 +13,10 @@ import type { Db } from "../../db/client";
 import {
   collectionAttachments,
   collectionItems,
+  homeworks,
   knowledgeDocuments,
   materialCollections,
+  sections,
 } from "../../db/schema";
 import {
   resolveCollections,
@@ -201,6 +203,46 @@ export async function setCollectionItems(
   return true;
 }
 
+/** The raw item selection backing a collection -- documents and directories,
+ *  distinguishably -- so an editor can restore exactly what was checked.
+ *  This is deliberately NOT listDocumentsInCollections: a folder selection
+ *  is not the same as the documents it currently happens to contain, and
+ *  resolving it away here would make it impossible for the console to
+ *  re-check the right boxes. Guarded on scope first: null (not an empty
+ *  array) tells the route a foreign collection id was named, so it can
+ *  answer 404 rather than "an empty collection". */
+export async function getCollectionItems(
+  db: Db,
+  scope: CourseScope,
+  collectionId: string,
+): Promise<CollectionItemInput[] | null> {
+  const owned = await getCollection(db, scope, collectionId);
+  if (!owned) return null;
+
+  const rows = await db
+    .select({
+      documentId: collectionItems.documentId,
+      directoryPath: collectionItems.directoryPath,
+    })
+    .from(collectionItems)
+    .where(eq(collectionItems.collectionId, collectionId))
+    .orderBy(collectionItems.createdAt);
+
+  return rows.map((r) =>
+    r.documentId ? { documentId: r.documentId } : { directoryPath: r.directoryPath! },
+  );
+}
+
+/** Escapes the three characters that are meaningful to Postgres's LIKE
+ *  operator (`\`, `%`, `_`) so a caller-controlled directory path is matched
+ *  literally rather than as a pattern. Postgres's default LIKE escape
+ *  character is backslash with no `ESCAPE` clause required, so escaping the
+ *  backslash itself first (before introducing any new ones) is what keeps
+ *  this correct. */
+function escapeLikePattern(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
 /** Every document in any of the given collections, deduplicated. A document
  *  selected both directly and through its folder appears once. */
 export async function listDocumentsInCollections(
@@ -233,9 +275,14 @@ export async function listDocumentsInCollections(
   const predicates = [];
   if (documentIds.length > 0) predicates.push(inArray(knowledgeDocuments.id, documentIds));
   // The trailing slash is load-bearing: without it "week" also matches
-  // "weekend/b".
+  // "weekend/b". The directory itself also has to be escaped before it goes
+  // into the pattern (I-6): `_` is inside PATH_RE's accepted alphabet, and
+  // in a LIKE pattern it means "any one character" -- unescaped, a
+  // directory named "week_1" would also match "weekX1/...". Postgres's
+  // default LIKE escape character is a literal backslash with no ESCAPE
+  // clause needed, so escaping backslash, `%`, and `_` here is sufficient.
   for (const dir of directories) {
-    predicates.push(like(knowledgeDocuments.path, `${dir}/%`));
+    predicates.push(like(knowledgeDocuments.path, `${escapeLikePattern(dir)}/%`));
   }
   if (predicates.length === 0) return [];
 
@@ -301,6 +348,41 @@ export async function listAttachments(
     collectionId: r.collectionId,
     scope: rowToScope(r),
   }));
+}
+
+/** Tenancy check for a homework-scoped attachment. `homeworks` carries its
+ *  own `course_id`, so this is a direct lookup: does the referenced
+ *  homework belong to the acting course? The foreign key on
+ *  collection_attachments.scope_homework_id only proves the homework
+ *  exists SOMEWHERE -- never that it belongs here. */
+export async function homeworkBelongsToCourse(
+  db: Db,
+  scope: CourseScope,
+  homeworkId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: homeworks.id })
+    .from(homeworks)
+    .where(and(eq(homeworks.id, homeworkId), eq(homeworks.courseId, scope)))
+    .limit(1);
+  return !!row;
+}
+
+/** Tenancy check for a section-scoped attachment. `sections` has no
+ *  `course_id` of its own -- only `homework_id` -- so the course is reached
+ *  through the one join to `homeworks`, which does carry it. */
+export async function sectionBelongsToCourse(
+  db: Db,
+  scope: CourseScope,
+  sectionId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: sections.id })
+    .from(sections)
+    .innerJoin(homeworks, eq(sections.homeworkId, homeworks.id))
+    .where(and(eq(sections.id, sectionId), eq(homeworks.courseId, scope)))
+    .limit(1);
+  return !!row;
 }
 
 export async function attachCollection(

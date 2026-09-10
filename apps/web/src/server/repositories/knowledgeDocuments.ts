@@ -117,6 +117,29 @@ export async function getDocument(
   return row ? (toIso(row) as KnowledgeDocumentRecord) : null;
 }
 
+/** The document tier-1 ingestion produced from a given upload, if any. Used
+ *  by reingest (I-3) to make re-running conversion idempotent: a material
+ *  that already has a document must be updated in place, not re-inserted at
+ *  the same derived path, which is a guaranteed unique-index collision with
+ *  itself. */
+export async function getDocumentBySourceMaterial(
+  db: Db,
+  scope: CourseScope,
+  materialId: string,
+): Promise<KnowledgeDocumentRecord | null> {
+  const [row] = await db
+    .select(RECORD_COLUMNS)
+    .from(knowledgeDocuments)
+    .where(
+      and(
+        eq(knowledgeDocuments.sourceMaterialId, materialId),
+        eq(knowledgeDocuments.courseId, scope),
+      ),
+    )
+    .limit(1);
+  return row ? (toIso(row) as KnowledgeDocumentRecord) : null;
+}
+
 /** Rebuilds the outbound link rows for one document. Wholesale delete +
  *  insert rather than a diff: a body edit can change every link, the counts
  *  are tiny, and a diff would be more code with more ways to leave a stale

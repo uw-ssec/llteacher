@@ -66,6 +66,32 @@ import {
   deleteCoursePromptTemplateHandler,
 } from "./routes/promptTemplates";
 import { listLlmModelsHandler } from "./routes/llmModels";
+import {
+  listMaterialsHandler,
+  uploadMaterialHandler,
+  deleteMaterialHandler,
+  reingestMaterialHandler,
+} from "./routes/materials";
+import {
+  listDocumentsHandler,
+  createDocumentHandler,
+  getDocumentHandler,
+  updateDocumentHandler,
+  deleteDocumentHandler,
+  documentLinksHandler,
+} from "./routes/knowledgeDocuments";
+import {
+  listCollectionsHandler,
+  createCollectionHandler,
+  updateCollectionHandler,
+  deleteCollectionHandler,
+  getCollectionItemsHandler,
+  setCollectionItemsHandler,
+  listAttachmentsHandler,
+  attachCollectionHandler,
+  detachCollectionHandler,
+  resolveKnowledgeHandler,
+} from "./routes/knowledgeCollections";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireGraderOf, requireInstructorOf, requireRole } from "./utils/guards";
@@ -355,6 +381,83 @@ app.post(
 // the moment it is downloaded, so who may create one is a narrower question
 // than who may read the same data inside the console.
 app.post("/api/courses/:courseId/exports", requireInstructorOf()(createExportHandler));
+
+// ---- Knowledge management (#42) ----
+// All instructor-of-course, all nested under :courseId so requireInstructorOf
+// guards tenancy straight from the path.
+app.get("/api/courses/:courseId/materials", requireInstructorOf()(listMaterialsHandler));
+app.post("/api/courses/:courseId/materials", requireInstructorOf()(uploadMaterialHandler));
+app.delete(
+  "/api/courses/:courseId/materials/:materialId",
+  requireInstructorOf()(deleteMaterialHandler),
+);
+app.post(
+  "/api/courses/:courseId/materials/:materialId/reingest",
+  requireInstructorOf()(reingestMaterialHandler),
+);
+
+app.get(
+  "/api/courses/:courseId/knowledge/documents",
+  requireInstructorOf()(listDocumentsHandler),
+);
+app.post(
+  "/api/courses/:courseId/knowledge/documents",
+  requireInstructorOf()(createDocumentHandler),
+);
+app.get(
+  "/api/courses/:courseId/knowledge/documents/:documentId",
+  requireInstructorOf()(getDocumentHandler),
+);
+app.put(
+  "/api/courses/:courseId/knowledge/documents/:documentId",
+  requireInstructorOf()(updateDocumentHandler),
+);
+app.delete(
+  "/api/courses/:courseId/knowledge/documents/:documentId",
+  requireInstructorOf()(deleteDocumentHandler),
+);
+app.get(
+  "/api/courses/:courseId/knowledge/documents/:documentId/links",
+  requireInstructorOf()(documentLinksHandler),
+);
+
+app.get(
+  "/api/courses/:courseId/knowledge/collections",
+  requireInstructorOf()(listCollectionsHandler),
+);
+app.post(
+  "/api/courses/:courseId/knowledge/collections",
+  requireInstructorOf()(createCollectionHandler),
+);
+app.patch(
+  "/api/courses/:courseId/knowledge/collections/:collectionId",
+  requireInstructorOf()(updateCollectionHandler),
+);
+app.delete(
+  "/api/courses/:courseId/knowledge/collections/:collectionId",
+  requireInstructorOf()(deleteCollectionHandler),
+);
+app.get(
+  "/api/courses/:courseId/knowledge/collections/:collectionId/items",
+  requireInstructorOf()(getCollectionItemsHandler),
+);
+app.put(
+  "/api/courses/:courseId/knowledge/collections/:collectionId/items",
+  requireInstructorOf()(setCollectionItemsHandler),
+);
+app.get(
+  "/api/courses/:courseId/knowledge/attachments",
+  requireInstructorOf()(listAttachmentsHandler),
+);
+app.post(
+  "/api/courses/:courseId/knowledge/collections/:collectionId/attachments",
+  requireInstructorOf()(attachCollectionHandler),
+);
+app.delete(
+  "/api/courses/:courseId/knowledge/attachments/:attachmentId",
+  requireInstructorOf()(detachCollectionHandler),
+);
+app.get("/api/courses/:courseId/knowledge/resolve", requireInstructorOf()(resolveKnowledgeHandler));
 
 // #172 audit (CMP-005): an unmatched /api/* path fell through to the SPA
 // catch-all below, which serves index.html with a 200. A client calling a

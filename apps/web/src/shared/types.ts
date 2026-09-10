@@ -462,6 +462,14 @@ declare global {
     // once in the dashboard as a single Endpoint delivering events for
     // every organization under that project.
     WORKOS_WEBHOOK_SECRET: string;
+    /* #42: Neon Object Storage, reached over the S3 wire protocol rather
+       than a Worker binding. Buckets are branch-aware — branching the
+       database forks its buckets copy-on-write — which is why this is not
+       R2. The AWS move (#81) changes these four values, not the code. */
+    STORAGE_ENDPOINT: string;
+    STORAGE_BUCKET: string;
+    STORAGE_ACCESS_KEY_ID: string;
+    STORAGE_SECRET_ACCESS_KEY: string;
   }
 }
 

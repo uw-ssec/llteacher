@@ -2,6 +2,7 @@ import type { Context } from "hono";
 import type { AuthContext, CourseRole } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import { logServerError } from "./errors";
+import { courseScopeFromAuthContext, type CourseScope } from "../repositories/scope";
 
 type GuardedHandler = (c: Context<AppEnv>) => Response | Promise<Response>;
 
@@ -86,6 +87,27 @@ export function releaseGatePostureOf(handler: unknown): ReleaseGatePosture | und
   return (handler as unknown as Record<symbol, ReleaseGatePosture | undefined>)[
     RELEASE_GATE_POSTURE
   ];
+}
+
+/** The instructor-scoped course id for a request, or null.
+ *
+ *  Mints through `courseScopeFromAuthContext` -- the sanctioned path, never
+ *  `unsafeCourseScope` -- but supplies `isInstructorOf` as the predicate.
+ *  That function checks `isMemberOf`, which a STUDENT satisfies; a route
+ *  reading a course's entire knowledge base needs authoring authority.
+ *
+ *  Registered routes are ALSO wrapped in requireInstructorOf(). That is
+ *  deliberate belt-and-braces: a handler that depends on its registration for
+ *  authorization fails open the first time someone registers it without the
+ *  wrapper, and nothing about the handler itself says so. */
+export function instructorScope(c: Context<AppEnv>): CourseScope | null {
+  const authContext = getAuthContext(c);
+  const courseId = c.req.param("courseId");
+  if (!authContext || !courseId) return null;
+  return courseScopeFromAuthContext(
+    { isMemberOf: (id) => authContext.isInstructorOf(id) },
+    courseId,
+  );
 }
 
 /** Grading authority (#172): strictly wider than requireInstructorOf --

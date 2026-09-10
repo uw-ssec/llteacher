@@ -234,6 +234,74 @@ describe("app composition", () => {
   });
 });
 
+/** Task 17 (#42): every knowledge-management route must be registered
+ *  through requireInstructorOf(), not just guarded from inside the handler.
+ *
+ *  Each handler also calls instructorScope() (utils/guards.ts) itself, so a
+ *  student is refused either way -- but the two layers answer with
+ *  different bodies. The handler's own check (see e.g.
+ *  routes/materials.ts's `if (!scope) return c.json({ error: "Not
+ *  permitted." }, 403)`) never runs when the wrapper is in place, because
+ *  requireInstructorOf() short-circuits first with `{ error: "Instructor
+ *  access denied" }` (utils/guards.ts). Asserting on that exact message,
+ *  through the real exported `app` rather than a per-route test file's own
+ *  minimal Hono mount, is what would actually fail if a future edit
+ *  registered one of these routes bare: the response would still be a 403,
+ *  just the handler's "Not permitted." instead of the wrapper's "Instructor
+ *  access denied." */
+describe("knowledge management routes are wrapped in requireInstructorOf (#42, Task 17)", () => {
+  const COURSE_ID = "course-km";
+  const OTHER_ID = "11111111-2222-4333-8444-555555555555";
+
+  const ROUTES: Array<{ method: string; path: string }> = [
+    { method: "GET", path: `/api/courses/${COURSE_ID}/materials` },
+    { method: "POST", path: `/api/courses/${COURSE_ID}/materials` },
+    { method: "DELETE", path: `/api/courses/${COURSE_ID}/materials/${OTHER_ID}` },
+    { method: "POST", path: `/api/courses/${COURSE_ID}/materials/${OTHER_ID}/reingest` },
+    { method: "GET", path: `/api/courses/${COURSE_ID}/knowledge/documents` },
+    { method: "POST", path: `/api/courses/${COURSE_ID}/knowledge/documents` },
+    { method: "GET", path: `/api/courses/${COURSE_ID}/knowledge/documents/${OTHER_ID}` },
+    { method: "PUT", path: `/api/courses/${COURSE_ID}/knowledge/documents/${OTHER_ID}` },
+    { method: "DELETE", path: `/api/courses/${COURSE_ID}/knowledge/documents/${OTHER_ID}` },
+    { method: "GET", path: `/api/courses/${COURSE_ID}/knowledge/documents/${OTHER_ID}/links` },
+    { method: "GET", path: `/api/courses/${COURSE_ID}/knowledge/collections` },
+    { method: "POST", path: `/api/courses/${COURSE_ID}/knowledge/collections` },
+    { method: "PATCH", path: `/api/courses/${COURSE_ID}/knowledge/collections/${OTHER_ID}` },
+    { method: "DELETE", path: `/api/courses/${COURSE_ID}/knowledge/collections/${OTHER_ID}` },
+    { method: "GET", path: `/api/courses/${COURSE_ID}/knowledge/collections/${OTHER_ID}/items` },
+    { method: "PUT", path: `/api/courses/${COURSE_ID}/knowledge/collections/${OTHER_ID}/items` },
+    { method: "GET", path: `/api/courses/${COURSE_ID}/knowledge/attachments` },
+    { method: "POST", path: `/api/courses/${COURSE_ID}/knowledge/collections/${OTHER_ID}/attachments` },
+    { method: "DELETE", path: `/api/courses/${COURSE_ID}/knowledge/attachments/${OTHER_ID}` },
+    { method: "GET", path: `/api/courses/${COURSE_ID}/knowledge/resolve` },
+  ];
+
+  it("registers exactly 20 knowledge-management routes -- this list must grow with the route table", () => {
+    expect(ROUTES).toHaveLength(20);
+  });
+
+  it.each(ROUTES)(
+    "refuses a course member who is not an instructor via the wrapper, not the handler ($method $path)",
+    async ({ method, path }) => {
+      findMany.mockResolvedValue([
+        { id: "m1", userId: "u1", courseId: COURSE_ID, role: "student", droppedAt: null },
+      ]);
+
+      const key = await loadSessionKey(ENV);
+      const sealed = await sealSession(createSessionPayload("u1", "w1", 0), key);
+
+      const res = await app.request(
+        path,
+        { method, headers: { cookie: `${SESSION_COOKIE_NAME}=${sealed}` } },
+        ENV,
+      );
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: "Instructor access denied" });
+    },
+  );
+});
+
 /** #172 audit (CMP-005): a missing API route must be an unambiguous JSON
  *  404, not the SPA shell with a 200. During a rolling deploy where the
  *  admin bundle leads the Worker, the 200 made `r.ok` true and left the
