@@ -3,7 +3,14 @@ import { useForm, useFieldArray } from "react-hook-form";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Button, Input } from "@llteacher/ui";
-import type { LlmConfigPayload } from "@llteacher/ui/api";
+import type {
+  AttachmentListPayload,
+  CollectionListPayload,
+  LlmConfigPayload,
+  ResolutionPayload,
+} from "@llteacher/ui/api";
+import { apiClient } from "../lib/api-client";
+import { useApiResource } from "../lib/useApiResource";
 
 /** #33: the section shape this form edits, declared where it is used rather
  *  than imported from the retired fixture module. It is the FORM's working
@@ -81,6 +88,14 @@ export interface HomeworkFormProps {
   }) => Promise<void>;
   llmConfigs: LlmConfigPayload[];
   isLoading?: boolean;
+  /** #42: needed to load/mutate this course's knowledge collections. Always
+   *  present — even in create mode, where nothing is fetched yet — because
+   *  every call site already has it in scope. */
+  courseId: string;
+  /** #42: undefined in create mode. A collection cannot be attached to a
+   *  homework that does not exist yet, so the knowledge fieldset only does
+   *  real work once this is set. */
+  homeworkId?: string;
 }
 
 const MAX_SECTIONS = 20;
@@ -92,7 +107,7 @@ const MAX_SECTIONS = 20;
    every submit error as a server failure. */
 const SAVE_FAILED = "Failed to save homework. Please try again.";
 
-export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: HomeworkFormProps) {
+export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading, courseId, homeworkId }: HomeworkFormProps) {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const {
     register, control, handleSubmit, watch, formState: { errors, isDirty },
@@ -137,6 +152,90 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
   const { fields: widgetFields, append: appendWidget, remove: removeWidget } = useFieldArray({ control, name: "widgets" });
 
   useUnsavedChangesGuard(isDirty);
+
+  /* #42: knowledge attachment lives here, not only on the collections
+     screen, because this is where an instructor setting up an assignment
+     will look for it.
+
+     The resolution note below is not decoration. Attachment resolves
+     most-specific-wins, so a section attachment silently replaces whatever
+     is set here -- which is the one genuinely surprising consequence of
+     override semantics, and the reason /knowledge/resolve returns the
+     deciding `level` alongside the collections.
+
+     Collections/attachments are only fetched once `homeworkId` exists: in
+     create mode there is nothing to attach to, so a real GET here would be
+     a wasted round-trip for data the fieldset never renders (see the
+     `!homeworkId` branch of the JSX below). */
+  const collections = useApiResource<CollectionListPayload>(
+    (opts) =>
+      homeworkId
+        ? apiClient.knowledge.listCollections(courseId, opts)
+        : Promise.resolve({ collections: [] }),
+    [courseId, homeworkId],
+  );
+  const attachments = useApiResource<AttachmentListPayload>(
+    (opts) =>
+      homeworkId
+        ? apiClient.knowledge.listAttachments(courseId, opts)
+        : Promise.resolve({ attachments: [] }),
+    [courseId, homeworkId],
+  );
+  const resolution = useApiResource<ResolutionPayload>(
+    (opts) =>
+      homeworkId
+        ? apiClient.knowledge.resolve(courseId, { homeworkId }, opts)
+        : Promise.resolve({ level: "none", collectionIds: [], documents: [] }),
+    [courseId, homeworkId],
+  );
+
+  const attachedHere = new Map(
+    (attachments.data?.attachments ?? [])
+      .filter((a) => a.scope.kind === "homework" && a.scope.homeworkId === homeworkId)
+      .map((a) => [a.collectionId, a.id]),
+  );
+
+  const [attachError, setAttachError] = useState<string | null>(null);
+  // Guards against a double-click firing two overlapping attach/detach calls
+  // for the same collection: `attachedHere` only updates once `attachments`
+  // reloads, so two clicks inside that window would both read "not attached"
+  // and both POST an attach, without this.
+  const [pendingCollectionIds, setPendingCollectionIds] = useState<Set<string>>(new Set());
+
+  async function toggleCollection(collectionId: string) {
+    if (!homeworkId || pendingCollectionIds.has(collectionId)) return;
+    setPendingCollectionIds((prev) => new Set(prev).add(collectionId));
+    setAttachError(null);
+    const existing = attachedHere.get(collectionId);
+    try {
+      if (existing) {
+        await apiClient.knowledge.detach(courseId, existing, { signal: null });
+      } else {
+        await apiClient.knowledge.attach(
+          courseId,
+          collectionId,
+          { kind: "homework", homeworkId },
+          { signal: null },
+        );
+      }
+      attachments.reload();
+      resolution.reload();
+    } catch (err) {
+      // Standing rule for this feature: an attach/detach failure is reported,
+      // not swallowed -- a silently-failed checkbox would leave the
+      // instructor believing knowledge is attached when it is not (or vice
+      // versa).
+      setAttachError(
+        (err as Error)?.message ?? "Could not update that attachment. Please try again.",
+      );
+    } finally {
+      setPendingCollectionIds((prev) => {
+        const next = new Set(prev);
+        next.delete(collectionId);
+        return next;
+      });
+    }
+  }
 
   // The MAX_SECTIONS check must run *before* react-hook-form's own field
   // validation: each section's title/content are `required`, so 21 freshly
@@ -220,6 +319,76 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
           {selectableConfigs.map((cfg) => <option key={cfg.id} value={cfg.id}>{cfg.name}</option>)}
         </select>
       </div>
+
+      <fieldset className="admin-form-group">
+        <legend>Knowledge</legend>
+        <p className="admin-form-hint">
+          Collections the tutor grounds on for this assignment.
+        </p>
+
+        {/* Create mode: nothing exists yet for an attachment to point at, so
+            say that rather than rendering checkboxes that cannot be saved. */}
+        {!homeworkId && (
+          <p className="admin-form-hint">
+            Save the assignment first — knowledge can be attached once it exists.
+          </p>
+        )}
+
+        {homeworkId && collections.error && (
+          <AdminNotice
+            eyebrow="Could not load"
+            title="Collections didn't load"
+            body="Knowledge attachments could not be checked — this does not mean nothing is attached."
+            onRetry={collections.canRetry ? collections.reload : undefined}
+          />
+        )}
+
+        {homeworkId && !collections.error && (collections.data?.collections ?? []).map((collection) => (
+          <label key={collection.id} className="admin-form-check">
+            <input
+              type="checkbox"
+              checked={attachedHere.has(collection.id)}
+              disabled={pendingCollectionIds.has(collection.id)}
+              onChange={() => void toggleCollection(collection.id)}
+            />
+            <span className="admin-form-check__label">{collection.name}</span>
+          </label>
+        ))}
+
+        {homeworkId && !collections.error && (collections.data?.collections ?? []).length === 0 && (
+          <p className="admin-form-hint">No collections exist yet for this course.</p>
+        )}
+
+        {attachError && <p role="alert" className="admin-field-error">{attachError}</p>}
+
+        {/* The resolution note is the one place this override rule is said
+            out loud: most-specific-wins means a section attachment silently
+            replaces whatever is checked above, with no other signal that it
+            happened. A failed resolve is reported the same way -- staying
+            silent here would read as "nothing overrides this", which may not
+            be true. */}
+        {homeworkId && resolution.error && (
+          <p className="admin-inline-note">
+            Could not check whether a section overrides this — try again before relying on what's checked above.
+          </p>
+        )}
+        {homeworkId && resolution.data?.level === "section" && (
+          <p className="admin-inline-note">
+            A section overrides this homework's knowledge — those sections ground on their own
+            collection instead of this one.
+          </p>
+        )}
+        {homeworkId && resolution.data?.level === "homework" && (
+          <p className="admin-inline-note">
+            This homework's own attachments are in effect — no section overrides them.
+          </p>
+        )}
+        {homeworkId && resolution.data?.level === "none" && (
+          <p className="admin-inline-note">
+            Nothing attached, so the tutor answers with no course materials.
+          </p>
+        )}
+      </fieldset>
 
       <fieldset className="admin-form-group">
         <legend>Publish</legend>
