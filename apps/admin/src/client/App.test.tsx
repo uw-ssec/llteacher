@@ -288,6 +288,135 @@ describe("homework routing by per-course role (#172, FUN-002)", () => {
   });
 });
 
+/** #42/#23: the knowledge views existed and were tested in isolation, but
+ *  nothing routed to them -- App.tsx had no case for the `knowledge` nav key
+ *  and imported none of the four views, so clicking the sidebar entry
+ *  rendered nothing. This suite is the wiring's own test: the nav key
+ *  reaches the bundle browser, a TA never sees the entry (authorOnly, same
+ *  gating as llm-configs/students/ta-permissions/exports), and a document
+ *  opened from a folder returns to that exact folder on "back" rather than
+ *  the browser's root default. */
+describe("Knowledge navigation (#42, #23)", () => {
+  const KNOWLEDGE_DOCUMENTS = [
+    {
+      id: "d1", path: "week1/lecture", kind: "concept", type: "transcript",
+      title: "Lecture 1", description: null, tags: null, indexStatus: "indexed",
+      sourceMaterialId: null, updatedAt: "2026-01-01T00:00:00.000Z",
+    },
+    {
+      id: "d2", path: "syllabus", kind: "concept", type: "syllabus",
+      title: "Syllabus", description: null, tags: null, indexStatus: "indexed",
+      sourceMaterialId: null, updatedAt: "2026-01-01T00:00:00.000Z",
+    },
+  ];
+
+  function stubProfile(courses: unknown[], topLevelRole = "instructor") {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/profile")) {
+          return new Response(JSON.stringify({ userId: "u1", role: topLevelRole, courses }), {
+            status: 200,
+          });
+        }
+        if (url.includes("/homeworks")) {
+          return new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
+        }
+        // Checked ahead of the plain document-list/document-detail branches
+        // below, since a links URL also contains "/knowledge/documents/".
+        if (url.endsWith("/links")) {
+          return new Response(JSON.stringify({ outbound: [], backlinks: [] }), { status: 200 });
+        }
+        if (url.endsWith("/knowledge/documents")) {
+          return new Response(JSON.stringify({ documents: KNOWLEDGE_DOCUMENTS }), { status: 200 });
+        }
+        if (url.includes("/knowledge/documents/")) {
+          const id = url.split("/").pop();
+          const doc = KNOWLEDGE_DOCUMENTS.find((d) => d.id === id);
+          return new Response(
+            JSON.stringify({ ...doc, body: "Body text", bodyOriginal: null, frontmatter: null, editedAt: null }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/knowledge/collections")) {
+          return new Response(JSON.stringify({ collections: [] }), { status: 200 });
+        }
+        if (url.includes("/knowledge/attachments")) {
+          return new Response(JSON.stringify({ attachments: [] }), { status: 200 });
+        }
+        if (url.includes("/materials")) {
+          return new Response(JSON.stringify({ materials: [] }), { status: 200 });
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      }),
+    );
+  }
+
+  it("navigates to the knowledge base from the sidebar", async () => {
+    stubProfile([
+      { id: "c1", title: "STATS 311", role: "instructor", canViewSolutions: true, canViewDrafts: true },
+    ]);
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: /Knowledge/ }));
+    await waitFor(() => screen.getByText(/Knowledge base/));
+  });
+
+  it("does not offer knowledge to a TA, whose requests would 403", async () => {
+    stubProfile(
+      [{ id: "c1", title: "STATS 311", role: "ta", canViewSolutions: false, canViewDrafts: false }],
+      "ta",
+    );
+    renderApp();
+    await waitFor(() => screen.getByRole("navigation"));
+    expect(screen.queryByRole("button", { name: /Knowledge/ })).toBeNull();
+  });
+
+  /* Beyond the brief: the sidebar has one Knowledge entry, not two.
+     Collections is reached through a segmented control within the knowledge
+     surface rather than a second nav item -- this confirms that path
+     actually works, not just that the view exists in isolation. */
+  it("reaches Collections through the segmented control within Knowledge", async () => {
+    stubProfile([
+      { id: "c1", title: "STATS 311", role: "instructor", canViewSolutions: true, canViewDrafts: true },
+    ]);
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: /Knowledge/ }));
+    await waitFor(() => screen.getByText(/Knowledge base/));
+
+    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
+    await waitFor(() => screen.getByText(/RECORDS/));
+  });
+
+  /* Beyond the brief: App.tsx's own View union follows the transcript-list/
+     returnToGrade convention of carrying the state needed to reconstruct the
+     screen a drill-in came from. This is that convention's own test for the
+     knowledge surface -- opening a document from inside "week1" and coming
+     back must show "week1" again, not silently reset to the bundle's root. */
+  it("returns to the folder a document was opened from, not the browser's root", async () => {
+    stubProfile([
+      { id: "c1", title: "STATS 311", role: "instructor", canViewSolutions: true, canViewDrafts: true },
+    ]);
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: /Knowledge/ }));
+    await waitFor(() => screen.getByText(/Knowledge base/));
+
+    // Root shows only the root-level document until "week1" is opened.
+    await waitFor(() => screen.getByText("Syllabus"));
+    fireEvent.click(screen.getByRole("button", { name: /week1/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Lecture 1" }));
+
+    // Landed on the document editor.
+    await waitFor(() => screen.getByText(/Referenced by/));
+
+    // "Back" restores week1, not root: Lecture 1 is visible again and
+    // Syllabus (root-level) is not.
+    fireEvent.click(screen.getByRole("button", { name: "Knowledge base" }));
+    await waitFor(() => screen.getByText("Lecture 1"));
+    expect(screen.queryByText("Syllabus")).toBeNull();
+  });
+});
+
 /* --------------------------------------------------------------------------
    #193 (#172 re-audit, USE-024): the console says so when it has degraded
    the caller to read-only.

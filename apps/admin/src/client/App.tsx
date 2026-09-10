@@ -35,6 +35,10 @@ import { LLMConfigsDataLoader, type ConfigScreen } from "./views/LLMConfigsDataL
 import { StudentsView } from "./views/StudentsView";
 import { GradingPanel } from "./views/GradingPanel";
 import { ExportView } from "./views/ExportView";
+import { KnowledgeView } from "./views/KnowledgeView";
+import { KnowledgeDocumentView } from "./views/KnowledgeDocumentView";
+import { CollectionsView } from "./views/CollectionsView";
+import { CollectionEditView } from "./views/CollectionEditView";
 import { apiClient, setUnauthorizedHandler } from "./lib/api-client";
 import { useApiResource } from "./lib/useApiResource";
 import { useAuth, type CourseRole } from "./components/AuthProvider";
@@ -133,7 +137,21 @@ type View =
       sectionTitle: string;
       sectionId: string;
       studentId: string;
-    };
+    }
+  /* #42/#23: the bundle browser. `directory` is the rail's own selection,
+     lifted here (via KnowledgeView's onDirectoryChange) rather than left as
+     purely-internal useState -- same reason transcript-list's `offset`
+     lives in this same View union instead of local state: it must survive
+     a drill-in and back, not just a re-render. Undefined means "root",
+     matching KnowledgeView's own default. */
+  | { kind: "knowledge"; directory?: string }
+  /* Carries `returnDirectory` -- the browser's `directory` at the moment
+     this document was opened -- so "back" lands on the exact folder the
+     instructor was looking at, not the browser's root default. Same
+     carried-state convention as transcript-detail's `list` above. */
+  | { kind: "knowledge-document"; documentId: string; returnDirectory?: string }
+  | { kind: "collections" }
+  | { kind: "collection-edit"; collectionId: string };
 
 const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "homeworks":          "Instructor Console · Homeworks",
@@ -149,6 +167,10 @@ const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "ta-permissions":     "Instructor Console · TA permissions",
   "exports":            "Instructor Console · Export",
   "grade":              "Instructor Console · Grading",
+  "knowledge":          "Instructor Console · Knowledge",
+  "knowledge-document": "Instructor Console · Knowledge · Document",
+  "collections":        "Instructor Console · Knowledge · Collections",
+  "collection-edit":    "Instructor Console · Knowledge · Collection",
 };
 
 export default function App() {
@@ -236,6 +258,11 @@ export default function App() {
         ? "homeworks"
         : view.kind === "create-llm-config" || view.kind === "edit-llm-config"
           ? "llm-configs"
+        : view.kind === "knowledge" ||
+            view.kind === "knowledge-document" ||
+            view.kind === "collections" ||
+            view.kind === "collection-edit"
+          ? "knowledge"
         : (view.kind as AdminNavKey);
 
   const navigate = (key: AdminNavKey) => {
@@ -595,6 +622,107 @@ export default function App() {
                   <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
                 )
               )}
+
+              {/* #42: the knowledge surface -- bundle browser, document
+                  editor, collection list, and contents picker. Grouped under
+                  one guard (like the llm-configs trio above) because all
+                  four share the same authoring/course gate, then split by
+                  kind below. authorOnly in the sidebar already keeps a TA
+                  from reaching this by clicking, but a stale view state is
+                  guarded here too, same as every other authorOnly surface in
+                  this file (#172). */}
+              {(view.kind === "knowledge" ||
+                view.kind === "knowledge-document" ||
+                view.kind === "collections" ||
+                view.kind === "collection-edit") &&
+                (!canAuthor ? (
+                  <EmptyView
+                    label="Only instructors can manage this course's knowledge base"
+                    body={NOT_INSTRUCTOR_BODY}
+                  />
+                ) : !CURRENT_COURSE_ID ? (
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
+                ) : (
+                  <>
+                    {/* The sidebar has one Knowledge entry, not two -- this
+                        segmented control is how the console distinguishes
+                        "the bundle" from "collections" without a second nav
+                        item, the smaller change per the design note in the
+                        task brief. Two <button>s, not a second onNavigate
+                        target, so it's reachable the same way every other
+                        interactive element in this shell is. */}
+                    <nav className="admin-subnav" aria-label="Knowledge sections">
+                      <button
+                        type="button"
+                        className={
+                          view.kind === "knowledge" || view.kind === "knowledge-document"
+                            ? "admin-subnav__tab admin-subnav__tab--active"
+                            : "admin-subnav__tab"
+                        }
+                        aria-current={
+                          view.kind === "knowledge" || view.kind === "knowledge-document"
+                            ? "page"
+                            : undefined
+                        }
+                        onClick={() => setView({ kind: "knowledge" })}
+                      >
+                        Bundle
+                      </button>
+                      <button
+                        type="button"
+                        className={
+                          view.kind === "collections" || view.kind === "collection-edit"
+                            ? "admin-subnav__tab admin-subnav__tab--active"
+                            : "admin-subnav__tab"
+                        }
+                        aria-current={
+                          view.kind === "collections" || view.kind === "collection-edit"
+                            ? "page"
+                            : undefined
+                        }
+                        onClick={() => setView({ kind: "collections" })}
+                      >
+                        Collections
+                      </button>
+                    </nav>
+
+                    {view.kind === "knowledge" && (
+                      <KnowledgeView
+                        courseId={CURRENT_COURSE_ID}
+                        initialDirectory={view.directory}
+                        onDirectoryChange={(directory) =>
+                          setView((prev) => (prev.kind === "knowledge" ? { ...prev, directory } : prev))
+                        }
+                        onOpenDocument={(documentId) =>
+                          setView({ kind: "knowledge-document", documentId, returnDirectory: view.directory })
+                        }
+                      />
+                    )}
+
+                    {view.kind === "knowledge-document" && (
+                      <KnowledgeDocumentView
+                        courseId={CURRENT_COURSE_ID}
+                        documentId={view.documentId}
+                        onBack={() => setView({ kind: "knowledge", directory: view.returnDirectory })}
+                      />
+                    )}
+
+                    {view.kind === "collections" && (
+                      <CollectionsView
+                        courseId={CURRENT_COURSE_ID}
+                        onEditCollection={(collectionId) => setView({ kind: "collection-edit", collectionId })}
+                      />
+                    )}
+
+                    {view.kind === "collection-edit" && (
+                      <CollectionEditView
+                        courseId={CURRENT_COURSE_ID}
+                        collectionId={view.collectionId}
+                        onBack={() => setView({ kind: "collections" })}
+                      />
+                    )}
+                  </>
+                ))}
             </div>
           </div>
         </main>

@@ -6527,6 +6527,410 @@ body {
   outline-offset: 2px;
 }
 
+/* -- Knowledge sub-nav (#23) -------------------------------------------------
+   The sidebar has one Knowledge entry, not two: this segmented control is
+   how the console distinguishes the bundle browser from collections without
+   a second nav item. Underline-style tabs, not another sidebar rail --
+   collections is a view within Knowledge, not a sibling section of the
+   console. */
+
+.admin-subnav {
+  display: flex;
+  gap: var(--space-4);
+  margin-block-end: var(--space-4);
+  border-block-end: 1px solid var(--color-border);
+}
+
+.admin-subnav__tab {
+  padding-block: var(--space-2);
+  background: none;
+  border: none;
+  border-block-end: 2px solid transparent;
+  margin-block-end: -1px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.admin-subnav__tab:hover,
+.admin-subnav__tab:focus-visible {
+  color: var(--color-text);
+  outline: none;
+}
+
+.admin-subnav__tab--active {
+  color: var(--color-text);
+  border-block-end-color: var(--color-accent-warm);
+}
+
+/* -- Knowledge base bundle browser (#42) -----------------------------------
+   Two-pane layout: a directory rail derived from OKF paths (there is no
+   directory table -- see apps/admin/src/client/lib/documentTree.ts) beside
+   the selected directory's documents. The uploaded-files strip sits below,
+   full width, because it is a different subject (raw materials) from the
+   documents pane (their processed OKF output) and conflating the two into
+   one grid would blur that distinction. */
+
+.admin-knowledge {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: var(--space-4);
+  margin-block-start: var(--space-4);
+}
+
+.admin-knowledge__tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-inline-end: var(--space-3);
+  border-inline-end: 1px solid var(--color-border);
+}
+
+.admin-knowledge__folder {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding-block: 6px;
+  padding-inline-end: var(--space-2);
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  text-align: start;
+  cursor: pointer;
+}
+
+.admin-knowledge__folder:hover,
+.admin-knowledge__folder:focus-visible {
+  background-color: rgba(133, 117, 77, 0.06);
+  color: var(--color-text);
+  outline: none;
+}
+
+.admin-knowledge__folder--active {
+  background-color: rgba(133, 117, 77, 0.1);
+  color: var(--color-text);
+  font-weight: var(--weight-medium);
+}
+
+.admin-knowledge__listing {
+  min-inline-size: 0;
+}
+
+/* -- Uploaded-files strip ---------------------------------------------------
+   Deliberately plain, not another catalog table: these are raw uploads, not
+   OKF records, and a PDF sitting at `pending` with its reason showing is the
+   honest-status design (#40 does not exist yet) -- it should read as a
+   status list, not as content the console is proud of. */
+
+.admin-knowledge__materials {
+  margin-block-start: var(--space-6);
+}
+
+.admin-knowledge__materials h2 {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 var(--space-3);
+}
+
+.admin-knowledge__material-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-knowledge__material {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+
+.admin-knowledge__material-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.admin-knowledge__material-note {
+  flex-basis: 100%;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+/* -- KnowledgeDocumentView — one OKF concept, edited by hand (#42) --------
+   The editor is the escape hatch for a format #40 cannot extract yet, and
+   the links panel is why this is a full view rather than a modal: broken
+   links are listed and marked, not filtered out, per OKF's "MUST tolerate
+   broken links". */
+
+.admin-knowledge-doc__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  margin: var(--space-4) 0;
+  padding: 0;
+}
+
+.admin-knowledge-doc__meta > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.admin-knowledge-doc__meta dt {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-variant: small-caps;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.admin-knowledge-doc__meta dd {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+/* Saving re-queues indexing -- said out loud rather than left silent, so an
+   instructor does not wonder why an edit has not reached the tutor yet. */
+.admin-inline-note {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-inline-start: 2px solid var(--color-accent-warm);
+  background-color: rgba(183, 165, 122, 0.08);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.admin-knowledge-doc__editor {
+  width: 100%;
+  min-height: 24rem;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  color: var(--color-text);
+  resize: vertical;
+}
+
+.admin-knowledge-doc__editor:focus,
+.admin-knowledge-doc__editor:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+  border-color: var(--color-accent);
+  background-color: var(--color-bg);
+}
+
+.admin-knowledge-doc__preview {
+  min-height: 24rem;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  color: var(--color-text);
+}
+
+.admin-knowledge-doc__preview :first-child {
+  margin-block-start: 0;
+}
+
+.admin-knowledge-doc__links {
+  margin-block-start: var(--space-6);
+}
+
+.admin-knowledge-doc__links h2 {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: var(--space-5) 0 var(--space-3);
+}
+
+.admin-knowledge-doc__links h2:first-child {
+  margin-block-start: 0;
+}
+
+.admin-knowledge-doc__links ul {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-knowledge-doc__links li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.admin-knowledge-doc__links code {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+}
+
+/* Broken, not hidden -- OKF says consumers must tolerate a broken link, not
+   pretend it isn't there. */
+.admin-knowledge-doc__broken {
+  margin-inline-start: auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background-color: rgba(255, 135, 135, 0.12);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant: small-caps;
+  letter-spacing: 0.04em;
+  color: var(--color-error);
+}
+
+/* -- CollectionEditView — the contents picker (#42) -------------------------
+   Two panes: a picker of folders and documents on the left, and a resolved
+   preview on the right that mirrors the server's own live-subtree
+   resolution exactly (trailing-slash prefix match included) -- it previews
+   what the tutor will retrieve, so it must never disagree with the server. */
+
+.admin-collection-edit {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: var(--space-5);
+  align-items: start;
+  margin-block-start: var(--space-4);
+}
+
+.admin-collection-edit__picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.admin-collection-edit__picker legend {
+  padding: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-block: var(--space-3) var(--space-2);
+}
+
+.admin-collection-edit__picker legend:first-of-type {
+  margin-block-start: 0;
+}
+
+.admin-collection-edit__picker label {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding-block: 4px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.admin-collection-edit__resolved {
+  position: sticky;
+  top: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+}
+
+.admin-collection-edit__resolved h2 {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 var(--space-2);
+}
+
+.admin-collection-edit__resolved > p {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.admin-collection-edit__resolved ul {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 24rem;
+  overflow-y: auto;
+}
+
+.admin-collection-edit__resolved li {
+  padding-block: 2px;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  word-break: break-all;
+}
+
+/* -- CollectionsView — the "New collection" disclosure form (#42) ---------
+   The inline form that closes the "createCollection is unreachable" gap.
+   Reuses .admin-form / .admin-form-field for the fields themselves; only the
+   surrounding card and its action row are specific to this disclosure. */
+
+.admin-collections__create {
+  max-width: 480px;
+  margin-block: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+}
+
+.admin-collections__create-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
 /* -------------------------------------------------------------------------
    .alert-dialog — AlertDialog (#248): labelled, focus-trapped,
    Escape-dismissible confirm dialog for destructive actions. Built on the

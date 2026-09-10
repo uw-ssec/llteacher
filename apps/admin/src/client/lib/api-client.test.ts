@@ -202,3 +202,140 @@ describe("request shapes (#33)", () => {
     expect(result.configs[0]!.name).toBe("Socratic");
   });
 });
+
+describe("apiClient.knowledge", () => {
+  // The brief's own verbatim `vi.fn(async () => new Response(...))` fails
+  // `tsc -b`: a callback declared with zero parameters makes vitest infer
+  // `mock.calls` as `[][]`, and indexing an empty tuple is TS2493. `stub()`
+  // above already exists in this file for exactly this shape, so every case
+  // here (including the three lifted straight from the brief) goes through
+  // it instead of repeating the untyped literal.
+  it("lists documents under the course path", async () => {
+    const fetchMock = stub(() => json({ documents: [] }));
+
+    await apiClient.knowledge.listDocuments("c1", { signal: null });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/courses/c1/knowledge/documents");
+  });
+
+  it("sends an upload as multipart without a JSON content-type", async () => {
+    const fetchMock = stub(() => json({ id: "m1" }, 201));
+
+    const file = new File(["hi"], "a.txt", { type: "text/plain" });
+    await apiClient.knowledge.uploadMaterial("c1", file, { signal: null });
+
+    const init = fetchMock.mock.calls[0]![1]!;
+    expect(init.body).toBeInstanceOf(FormData);
+    // Letting the browser set the multipart boundary is the point: an
+    // explicit content-type here produces a body the server cannot parse.
+    expect(new Headers(init.headers).get("content-type")).toBeNull();
+  });
+
+  it("encodes ids into the resolve query rather than the path", async () => {
+    const fetchMock = stub(() => json({ level: "none", collectionIds: [], documents: [] }));
+
+    await apiClient.knowledge.resolve("c1", { homeworkId: "hw 1" }, { signal: null });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "/api/courses/c1/knowledge/resolve?homeworkId=hw+1",
+    );
+  });
+
+  it("uploads the file under the 'file' form field", async () => {
+    const fetchMock = stub(() => json({ id: "m1" }, 201));
+
+    const file = new File(["hi"], "a.txt", { type: "text/plain" });
+    await apiClient.knowledge.uploadMaterial("c1", file, { signal: null });
+
+    const init = fetchMock.mock.calls[0]![1]!;
+    const form = init.body as FormData;
+    expect(form.get("file")).toBe(file);
+  });
+
+  it("posts to the reingest endpoint and reports whether a document was created", async () => {
+    const fetchMock = stub(() => json({ status: "pending", documentCreated: false }));
+
+    const result = await apiClient.knowledge.reingestMaterial("c1", "m1", { signal: null });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/courses/c1/materials/m1/reingest");
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({ method: "POST" });
+    expect(result.documentCreated).toBe(false);
+  });
+
+  it("omits every unset field from the resolve query rather than sending it empty", async () => {
+    const fetchMock = stub(() => json({ level: "none", collectionIds: [], documents: [] }));
+
+    await apiClient.knowledge.resolve("c1", {}, { signal: null });
+
+    // No hole in the path, and no trailing "?" advertising a query with
+    // nothing in it.
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/courses/c1/knowledge/resolve");
+  });
+
+  it("sends only the ids that are actually set when several are present", async () => {
+    const fetchMock = stub(() => json({ level: "none", collectionIds: [], documents: [] }));
+
+    await apiClient.knowledge.resolve(
+      "c1",
+      { homeworkId: "hw1", sectionId: undefined, llmConfigId: "cfg1" },
+      { signal: null },
+    );
+
+    const url = new URL(String(fetchMock.mock.calls[0]![0]), "http://x");
+    expect(url.searchParams.get("homeworkId")).toBe("hw1");
+    expect(url.searchParams.get("llmConfigId")).toBe("cfg1");
+    expect(url.searchParams.has("sectionId")).toBe(false);
+  });
+
+  it("encodes a document id containing a slash so it cannot escape its path segment", async () => {
+    const fetchMock = stub(() => new Response(null, { status: 204 }));
+
+    await apiClient.knowledge.deleteDocument("c1", "../admin", { signal: null });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "/api/courses/c1/knowledge/documents/..%2Fadmin",
+    );
+  });
+
+  it("GETs a collection's items and returns them as-is (documents and directories, not resolved documents)", async () => {
+    const items = [{ documentId: "d1" }, { directoryPath: "week1" }];
+    const fetchMock = stub(() => json({ items }));
+
+    const result = await apiClient.knowledge.getCollectionItems("c1", "col1", opts);
+
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/courses/c1/knowledge/collections/col1/items");
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({ method: "GET" });
+    expect(result.items).toEqual(items);
+  });
+
+  it("PUTs the collection items as a body object keyed by 'items'", async () => {
+    const fetchMock = stub(() => new Response(null, { status: 204 }));
+
+    await apiClient.knowledge.setCollectionItems(
+      "c1",
+      "col1",
+      [{ documentId: "d1" }],
+      { signal: null },
+    );
+
+    const init = fetchMock.mock.calls[0]![1]!;
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body as string)).toEqual({ items: [{ documentId: "d1" }] });
+  });
+
+  it("attach wraps the scope under a 'scope' key", async () => {
+    const fetchMock = stub(() => new Response(null, { status: 204 }));
+
+    await apiClient.knowledge.attach(
+      "c1",
+      "col1",
+      { kind: "homework", homeworkId: "hw1" },
+      { signal: null },
+    );
+
+    const init = fetchMock.mock.calls[0]![1]!;
+    expect(JSON.parse(init.body as string)).toEqual({
+      scope: { kind: "homework", homeworkId: "hw1" },
+    });
+  });
+});

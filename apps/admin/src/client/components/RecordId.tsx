@@ -11,7 +11,7 @@
    -------------------------------------------------------------------------- */
 
 export type RecordIdProps = {
-  prefix: "HW" | "CFG" | "STU" | "SEC";
+  prefix: "HW" | "CFG" | "STU" | "SEC" | "DOC" | "COL";
   index: number;
   /** Visual size; defaults to "md" */
   size?: "sm" | "md";

@@ -10,6 +10,7 @@
 
 import {
   BookOpen,
+  Books,
   CaretDoubleLeft,
   CaretDoubleRight,
   ClipboardText,
@@ -26,7 +27,8 @@ export type AdminNavKey =
   | "llm-configs"
   | "students"
   | "ta-permissions"
-  | "exports";
+  | "exports"
+  | "knowledge";
 
 export type AdminSidebarProps = {
   active: AdminNavKey;
@@ -69,6 +71,10 @@ const NAV_ITEMS: NavItem[] = [
   // would be a nav item leading to a denial -- the dead-end shape #172
   // exists to remove.
   { key: "llm-configs",  label: "LLM configs", icon: <Sparkle size={15} weight="regular" />,       description: "Tutor models", authorOnly: true },
+  // #42: authorOnly for the same reason as llm-configs above -- the
+  // knowledge routes are requireInstructorOf, so a TA sees this entry lead
+  // straight to a 403 unless it is omitted rather than disabled (#172).
+  { key: "knowledge", label: "Knowledge", icon: <Books size={15} weight="regular" />, description: "Materials and collections", authorOnly: true },
   // #32: the roster now exists, so "Students" points at the students. Until
   // it did, #172's audit (USE-004) had to rename this entry to "TA
   // permissions" because that page was the only thing behind it -- an entry

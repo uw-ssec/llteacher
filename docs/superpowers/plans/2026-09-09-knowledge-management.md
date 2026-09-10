@@ -6521,21 +6521,65 @@ Invoke the `/commit` skill to stage and commit. Suggested message:
 
 Append to `App.test.tsx`:
 
-```tsx
-it("navigates to the knowledge base from the sidebar", async () => {
-  renderApp({ role: "instructor" });
-  fireEvent.click(await screen.findByRole("button", { name: /Knowledge/ }));
-  await waitFor(() => screen.getByText(/Knowledge base/));
-});
+**Read `App.test.tsx` first — `renderApp()` takes NO arguments.** Role is set by stubbing
+`/api/profile` before calling it. The `describe("TA console gating (#172)")` block already
+has a `stubProfile(courses, topLevelRole)` helper for exactly this; add the TA case inside
+that block so it reuses the helper, and give the instructor case its own stub.
 
-it("does not offer knowledge to a TA, whose requests would 403", async () => {
-  renderApp({ role: "ta" });
-  await waitFor(() => screen.getByRole("navigation"));
-  expect(screen.queryByRole("button", { name: /Knowledge/ })).toBeNull();
-});
+Inside the existing `describe("TA console gating (#172)")` block:
+
+```tsx
+  it("does not offer knowledge to a TA, whose requests would 403", async () => {
+    stubProfile(
+      [{ id: "c1", title: "STATS 311", role: "ta", canViewSolutions: false, canViewDrafts: false }],
+      "ta",
+    );
+    renderApp();
+    await waitFor(() => screen.getByText(/Instructor Console/i));
+    // Omitted entirely, not disabled: a disabled control still advertises an
+    // action this user can never complete (#172).
+    expect(screen.queryByRole("button", { name: /Knowledge/ })).toBeNull();
+  });
 ```
 
-Use whatever `renderApp` helper the file already defines; if it takes a different shape, follow it rather than adding a new one.
+And as its own top-level case, with its own stub since `stubProfile` is scoped to that
+block:
+
+```tsx
+describe("App knowledge navigation (#42)", () => {
+  it("navigates to the knowledge base from the sidebar", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/profile")) {
+          return new Response(
+            JSON.stringify({
+              userId: "u1",
+              role: "instructor",
+              courses: [
+                { id: "c1", title: "STATS 311", role: "instructor", canViewSolutions: true, canViewDrafts: true },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/knowledge/documents")) {
+          return new Response(JSON.stringify({ documents: [] }), { status: 200 });
+        }
+        if (url.includes("/materials")) {
+          return new Response(JSON.stringify({ materials: [] }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
+      }),
+    );
+    renderApp();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Knowledge/ }));
+    await waitFor(() => screen.getByText(/Knowledge base/));
+  });
+});
+```
 
 - [ ] **Step 2: Run to verify it fails**
 

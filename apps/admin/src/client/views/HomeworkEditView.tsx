@@ -144,6 +144,8 @@ export function HomeworkEditView({
       <HomeworkForm
         initialData={initialData}
         llmConfigs={llmConfigs}
+        courseId={courseId}
+        homeworkId={homeworkId}
         onSubmit={async (payload) => {
           const patchRes = await fetch(`/api/courses/${courseId}/homeworks/${homeworkId}`, {
             method: "PATCH",
