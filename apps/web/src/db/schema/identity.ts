@@ -77,6 +77,17 @@ export const membershipDropReasonEnum = pgEnum("membership_drop_reason", [
   "user_deprovisioned",
 ]);
 
+// #74: per-course Canvas connection sync status, surfaced on the admin
+// "Sync from Canvas" panel. "idle" covers both "never synced" and "synced
+// and nothing changed" -- the distinction is in lastSyncedAt (courses
+// table) being null or not, not a fifth status value.
+export const lmsSyncStatusEnum = pgEnum("lms_sync_status", [
+  "idle",
+  "syncing",
+  "success",
+  "error",
+]);
+
 // "claimed" (#151) is the transient state between an insert-first
 // onConflictDoNothing-style claim and the final status a handler settles
 // into. Its purpose is purely to make claiming atomic: a concurrent
@@ -314,9 +325,23 @@ export const courseMemberships = pgTable(
 );
 
 // ---------- OrganizationCredential ----------
-// Per-org secrets pointer. secret_ref stores an external secrets-manager
-// reference (Cloudflare Secrets Store, AWS Secrets Manager, etc.) -- never
-// the secret itself.
+// Per-org secrets pointer. Two mutually exclusive storage shapes, exactly
+// one of which is set per row (enforced by the check constraint below):
+//
+//   - secret_ref: names an ALLOWLISTED ENV BINDING (a Wrangler secret set
+//     at deploy time -- see lib/llm-config.ts's ALLOWED_SECRET_REF_BINDINGS).
+//     The only shape this table had through M4: platform-operator-deployed
+//     provider keys (OPENROUTER_API_KEY etc.), never anything a user typed.
+//   - encrypted_secret: AES-256-GCM ciphertext, the SAME IdentityCipher
+//     primitive used for PII elsewhere in this file (identity-cipher.ts),
+//     for a value a user actually typed into the console at runtime --
+//     starting with #73's instructor-supplied Canvas API token. A Wrangler
+//     secret can't represent this: it doesn't exist until an instructor
+//     enters it, is per-organization, and there is no deploy-time moment to
+//     provision it at. resolveApiKey (llm-config.ts) is untouched by this --
+//     it only ever reads secret_ref rows, so LLM credential resolution for
+//     chat is unaffected. encrypted_secret is read only by the Canvas API
+//     client (lib/canvas-api.ts) via repositories/organizationCredentials.ts.
 
 export const organizationCredentials = pgTable(
   "organization_credentials",
@@ -327,8 +352,29 @@ export const organizationCredentials = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     provider: credentialProviderEnum("provider").notNull(),
     label: text("label").notNull(),
-    secretRef: text("secret_ref").notNull(),
+    secretRef: text("secret_ref"),
+    encryptedSecret: encryptedText("encrypted_secret"),
+    // #73: which Canvas instance this token is for (e.g.
+    // "https://uw.instructure.com"). Lives on the credential, not on
+    // lmsIntegrations, deliberately: an instructor validates a token
+    // ("Validate" button, #73) before any course is linked, so the base URL
+    // has to be resolvable from the credential alone at that point --
+    // lmsIntegrations doesn't exist yet at token-entry time. Every course
+    // later linked with this credential (lmsIntegrations.apiCredentialId)
+    // shares the same Canvas instance, which also avoids storing the same
+    // URL once per linked course. Null for every non-canvas provider.
+    canvasBaseUrl: text("canvas_base_url"),
+    // #73: "replace token" is a full re-entry, not a diff -- so rotatedAt is
+    // stamped on every write of encrypted_secret, including the first. Left
+    // null for the secret_ref shape (an operator-deployed binding has no
+    // rotation event this table can observe).
     rotatedAt: timestamp("rotated_at", { withTimezone: true }),
+    // #73: instructors are told Canvas tokens are expected to be refreshed
+    // roughly quarterly. Null means "no expiry recorded" (the secret_ref
+    // shape, or a token entered without one) -- advisory only, nothing
+    // rejects a token past this date, since Canvas itself is the source of
+    // truth for whether it still works (see /validate).
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -343,12 +389,24 @@ export const organizationCredentials = pgTable(
       t.provider,
       t.label,
     ),
+    check(
+      "organization_credentials_exactly_one_secret_shape_chk",
+      sql`(${t.secretRef} IS NOT NULL) <> (${t.encryptedSecret} IS NOT NULL)`,
+    ),
   ],
 );
 
 // ---------- LMSIntegration ----------
 // Per-course LMS connection. At most one per course in the MVP.
-// LTI 1.3 deployment metadata + a pointer to the Canvas API token credential.
+//
+// #73/#74: the LTI 1.3 launch triple (lti_iss/lti_client_id/
+// lti_deployment_id) is nullable -- a near-term, token-only Canvas
+// connection has no LTI launch at all, only an api_credential_id pointing
+// at the instructor's token (organization_credentials, provider='canvas')
+// LTI 1.3 (#58-#60) remains future work; when it lands, a row will carry
+// the LTI triple instead of (or alongside) the token fields. The old NOT
+// NULL + unique-triple shape assumed every row was LTI-launched, which
+// was true only because no other kind of row existed yet.
 
 export const lmsIntegrations = pgTable(
   "lms_integrations",
@@ -358,13 +416,25 @@ export const lmsIntegrations = pgTable(
       .notNull()
       .references(() => courses.id, { onDelete: "cascade" }),
     provider: lmsProviderEnum("provider").notNull().default("canvas"),
-    ltiIss: text("lti_iss").notNull(),
-    ltiClientId: text("lti_client_id").notNull(),
-    ltiDeploymentId: text("lti_deployment_id").notNull(),
+    ltiIss: text("lti_iss"),
+    ltiClientId: text("lti_client_id"),
+    ltiDeploymentId: text("lti_deployment_id"),
+    // The Canvas instance URL lives on the credential this row points at
+    // (organizationCredentials.canvasBaseUrl), not duplicated here -- see
+    // that column's own comment for why.
     apiCredentialId: uuid("api_credential_id").references(
       () => organizationCredentials.id,
       { onDelete: "set null" },
     ),
+    // Which Canvas course this row syncs from lives on courses.canvasCourseId
+    // (already unique per org) -- not duplicated here.
+    lastSyncStatus: lmsSyncStatusEnum("last_sync_status").notNull().default("idle"),
+    lastSyncCounts: jsonb("last_sync_counts").$type<{
+      added: number;
+      updated: number;
+      removed: number;
+    }>(),
+    lastSyncErrorMessage: text("last_sync_error_message"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -374,11 +444,17 @@ export const lmsIntegrations = pgTable(
   },
   (t) => [
     uniqueIndex("lms_integrations_course_uq").on(t.courseId),
-    uniqueIndex("lms_integrations_iss_client_deployment_uq").on(
-      t.ltiIss,
-      t.ltiClientId,
-      t.ltiDeploymentId,
-    ),
+    // Postgres unique indexes already treat every NULL as distinct from
+    // every other NULL (composite indexes included), so an unqualified
+    // index here would not actually reject two token-only rows with an
+    // all-null LTI triple. Partial anyway, scoped to `lti_iss IS NOT NULL`,
+    // so the index only ever holds entries for rows this constraint is
+    // meaningful for -- an LTI-launched row's (iss, client, deployment)
+    // uniquely identifies one deployment -- rather than accumulating one
+    // index entry per token-only row for a comparison that can never fire.
+    uniqueIndex("lms_integrations_iss_client_deployment_uq")
+      .on(t.ltiIss, t.ltiClientId, t.ltiDeploymentId)
+      .where(sql`${t.ltiIss} IS NOT NULL`),
   ],
 );
 
