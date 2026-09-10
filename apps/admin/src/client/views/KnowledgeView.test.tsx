@@ -130,6 +130,66 @@ describe("KnowledgeView", () => {
     expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/materials")).length).toBe(1);
   });
 
+  // I-4 (final review): handleFile awaited the upload with no catch at all,
+  // so a failed upload was an unhandled promise rejection with zero
+  // user-visible signal -- the instructor saw the list "reload" with
+  // nothing added and no explanation. Pre-fix, this test's own rejected
+  // fetch would propagate out of the click handler unhandled and the
+  // assertion below would never see admin-field-error text appear.
+  it("reports an upload failure instead of leaving it invisible", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === "POST" && url.endsWith("/materials")) {
+          return new Response(JSON.stringify({ error: "boom" }), { status: 500 });
+        }
+        if (url.includes("/knowledge/documents")) {
+          return new Response(JSON.stringify({ documents: DOCUMENTS }), { status: 200 });
+        }
+        if (url.includes("/materials")) {
+          return new Response(JSON.stringify({ materials: MATERIALS }), { status: 200 });
+        }
+        return new Response(null, { status: 404 });
+      }),
+    );
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+
+    const input = screen.getByLabelText(/upload/i) as HTMLInputElement;
+    const good = new File(["hello"], "notes.txt", { type: "text/plain" });
+    fireEvent.change(input, { target: { files: [good] } });
+
+    await waitFor(() => expect(screen.getByText(/boom|could not upload/i)).toBeTruthy());
+  });
+
+  // I-4: same unhandled-rejection gap in the retry path. Pre-fix, this
+  // rejected reingest call would propagate unhandled and the retry alert
+  // this test looks for would never render.
+  it("reports a retry failure instead of leaving it invisible", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === "POST" && url.endsWith("/reingest")) {
+          return new Response(JSON.stringify({ error: "boom" }), { status: 500 });
+        }
+        if (url.includes("/knowledge/documents")) {
+          return new Response(JSON.stringify({ documents: DOCUMENTS }), { status: 200 });
+        }
+        if (url.includes("/materials")) {
+          return new Response(JSON.stringify({ materials: MATERIALS }), { status: 200 });
+        }
+        return new Response(null, { status: 404 });
+      }),
+    );
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+
+    fireEvent.click(screen.getByLabelText(/Retry ingestion for paper\.pdf/));
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+  });
+
   it("offers a retry only for materials that are not ready", async () => {
     stubFetch();
     render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);

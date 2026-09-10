@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import type { AttachmentListPayload, LlmConfigPayload, ResolutionPayload } from "@llteacher/ui/api";
-import { HomeworkForm } from "./HomeworkForm";
+import { HomeworkForm, type HomeworkFormInitialData } from "./HomeworkForm";
 
 /* #33: shaped as the wire contract the form now takes, so a server field
    rename breaks this fixture too rather than letting the suite pass against
@@ -49,6 +49,40 @@ const KNOWLEDGE_ATTACHMENTS: AttachmentListPayload = {
 };
 const KNOWLEDGE_RESOLUTION: ResolutionPayload = { level: "homework", collectionIds: ["col1"], documents: [] };
 
+/* C-1: the form resolves `/knowledge/resolve` with only `homeworkId` (there
+   is no single section to ask about from this form), so the endpoint's
+   section-level matcher structurally cannot fire and `level: "section"` is
+   not a payload it can ever return for that request. The override warning
+   is instead computed client-side from this homework's own section ids
+   crossed with the attachment list -- so exercising it means giving the
+   form a homework whose sections include "s1" and stubbing an attachment
+   actually scoped to "s1", not stubbing an unreachable resolve response. */
+const HOMEWORK_WITH_SECTION: HomeworkFormInitialData = {
+  title: "Existing HW",
+  description: "d",
+  dueDate: "2099-01-01T00:00",
+  llmConfigId: null,
+  sections: [
+    {
+      id: "s1",
+      homeworkId: "hw1",
+      title: "Sec 1",
+      order: 1,
+      hasSolution: false,
+      submissionsCount: 0,
+      content: "c",
+      solutionContent: undefined,
+      type: "conversation",
+    },
+  ],
+  widgets: [],
+  status: "active",
+  releasedAt: null,
+  isHidden: false,
+  expiresAt: null,
+  publishedAt: "2026-01-01T00:00:00.000Z",
+};
+
 function stubFetchWithCollections(
   overrides: {
     resolve?: ResolutionPayload;
@@ -81,13 +115,20 @@ function stubFetchWithCollections(
   return mock;
 }
 
-function renderForm(overrides: { homeworkId?: string; onSubmit?: ReturnType<typeof vi.fn> } = {}) {
+function renderForm(
+  overrides: {
+    homeworkId?: string;
+    onSubmit?: ReturnType<typeof vi.fn>;
+    initialData?: HomeworkFormInitialData;
+  } = {},
+) {
   return render(
     <HomeworkForm
       courseId="c1"
       homeworkId={overrides.homeworkId}
       onSubmit={overrides.onSubmit ?? vi.fn()}
       llmConfigs={LLM_CONFIGS}
+      initialData={overrides.initialData}
     />,
   );
 }
@@ -407,9 +448,34 @@ describe("HomeworkForm", () => {
     });
 
     it("warns when a section overrides the homework's knowledge", async () => {
-      stubFetchWithCollections({ resolve: { level: "section", collectionIds: ["col2"], documents: [] } });
-      renderForm({ homeworkId: "hw1" });
+      // The real endpoint can never answer `level: "section"` for this
+      // form's request (see HOMEWORK_WITH_SECTION's comment), so the
+      // regression here stubs what the form actually asks for: an
+      // attachment scoped to one of this homework's own section ids.
+      stubFetchWithCollections({
+        attachments: {
+          attachments: [{ id: "a2", collectionId: "col2", scope: { kind: "section", sectionId: "s1" } }],
+        },
+      });
+      renderForm({ homeworkId: "hw1", initialData: HOMEWORK_WITH_SECTION });
       await waitFor(() => screen.getByText(/a section overrides/i));
+    });
+
+    it("does not warn of a section override for an attachment scoped to a section outside this homework", async () => {
+      // Same shape as above, but the attached section id ("other-section")
+      // does not belong to this homework's sections ("s1") -- the pre-fix
+      // code could not tell the difference (it never checked section ids at
+      // all), so this pins that the check is actually scoped.
+      stubFetchWithCollections({
+        attachments: {
+          attachments: [
+            { id: "a2", collectionId: "col2", scope: { kind: "section", sectionId: "other-section" } },
+          ],
+        },
+      });
+      renderForm({ homeworkId: "hw1", initialData: HOMEWORK_WITH_SECTION });
+      await waitFor(() => screen.getByText(/own attachments are in effect/i));
+      expect(screen.queryByText(/a section overrides/i)).toBeNull();
     });
 
     it("says what the tutor will retrieve when nothing is attached", async () => {

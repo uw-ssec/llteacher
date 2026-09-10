@@ -52,6 +52,7 @@ export function CollectionEditView({ courseId, collectionId, onBack }: Collectio
   const [directories, setDirectories] = useState<Set<string>>(new Set());
   const [documentIds, setDocumentIds] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const documents = useApiResource<KnowledgeDocumentListPayload>(
     (opts) => apiClient.knowledge.listDocuments(courseId, opts),
@@ -112,9 +113,16 @@ export function CollectionEditView({ courseId, collectionId, onBack }: Collectio
   // forever instead of as the failure it is.
   const baselineUnknown = !!items.error || items.loading || !items.data;
 
+  // I-5 (final review): this had try/finally but no catch, so a failed
+  // wholesale item write left the instructor on the page with the button
+  // back at "Save" and no indication the collection's contents were not
+  // replaced -- the exact "failure must never be invisible" rule this
+  // feature holds itself to everywhere else. Reported through the same
+  // admin-alert shape items.error already renders below.
   async function save() {
     if (baselineUnknown || saving) return;
     setSaving(true);
+    setSaveError(null);
     try {
       const itemsToSave: CollectionItemBody[] = [
         ...[...directories].map((directoryPath) => ({ directoryPath })),
@@ -124,6 +132,10 @@ export function CollectionEditView({ courseId, collectionId, onBack }: Collectio
         signal: null,
       });
       onBack();
+    } catch (err) {
+      setSaveError(
+        (err as Error)?.message ?? "Could not save this collection's contents. Please try again.",
+      );
     } finally {
       setSaving(false);
     }
@@ -203,6 +215,15 @@ export function CollectionEditView({ courseId, collectionId, onBack }: Collectio
               </button>
             )}
           </span>
+        </div>
+      )}
+
+      {saveError && (
+        <div className="admin-alert" role="alert">
+          <span className="admin-alert__icon" aria-hidden="true">
+            <Warning size={16} />
+          </span>
+          <span>{saveError}</span>
         </div>
       )}
 

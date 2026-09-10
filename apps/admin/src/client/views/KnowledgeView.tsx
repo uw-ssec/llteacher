@@ -51,6 +51,7 @@ export function KnowledgeView({
 }: KnowledgeViewProps) {
   const [directory, setDirectoryState] = useState(initialDirectory ?? "");
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [retryError, setRetryError] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
 
   function setDirectory(next: string) {
@@ -107,7 +108,15 @@ export function KnowledgeView({
   }, [pending, materials.reload, documents.reload]);
 
   /** Client-side validation is for a fast error only; the server re-checks
-   *  both of these and is the authority. */
+   *  both of these and is the authority.
+   *
+   *  I-4 (final review): `apiClient.request()` throws `ApiError` on any
+   *  non-2xx response, and this used to await the upload with no `catch` at
+   *  all -- a 500/502/503/403 from the server became an unhandled promise
+   *  rejection, and the instructor saw the list reload with nothing added
+   *  and no explanation. The upload's own `admin-field-error` slot already
+   *  existed for the two client-side checks above; a server-side failure
+   *  now reports through that same slot rather than vanishing. */
   async function handleFile(file: File | undefined) {
     if (!file) return;
     const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
@@ -122,19 +131,34 @@ export function KnowledgeView({
       return;
     }
     setUploadError(null);
-    await apiClient.knowledge.uploadMaterial(courseId, file, { signal: null });
-    documents.reload();
-    materials.reload();
+    try {
+      await apiClient.knowledge.uploadMaterial(courseId, file, { signal: null });
+      documents.reload();
+      materials.reload();
+    } catch (err) {
+      setUploadError((err as Error)?.message ?? "Could not upload that file. Please try again.");
+    }
   }
 
   /* #42: the retry affordance for a material the pipeline could not extract.
      It is honest about the no-op: re-running tier-1 conversion on a PDF comes
      back `pending` again, and the material's own error_detail keeps saying why,
-     rather than the button implying the next press might differ. */
+     rather than the button implying the next press might differ.
+
+     I-4: same unhandled-rejection gap as handleFile above -- a failed retry
+     (the network call itself, not the honest "still pending" response)
+     vanished with no signal. Reported through its own slot, mirroring the
+     materials-load-failure alert already in this file, rather than reusing
+     uploadError: a retry failure is not about the file picker. */
   async function retry(materialId: string) {
-    await apiClient.knowledge.reingestMaterial(courseId, materialId, { signal: null });
-    materials.reload();
-    documents.reload();
+    setRetryError(null);
+    try {
+      await apiClient.knowledge.reingestMaterial(courseId, materialId, { signal: null });
+      materials.reload();
+      documents.reload();
+    } catch (err) {
+      setRetryError((err as Error)?.message ?? "Could not retry that material. Please try again.");
+    }
   }
 
   return (
@@ -234,6 +258,18 @@ export function KnowledgeView({
 
       <section className="admin-knowledge__materials">
         <h2>Uploaded files</h2>
+        {/* I-4: a failed retry attempt (the network call, not an honest
+            "still pending" response) used to vanish with no signal at all.
+            Mirrors the load-failure alert just below rather than
+            uploadError, which is scoped to the file picker. */}
+        {retryError && (
+          <div className="admin-alert" role="alert">
+            <span className="admin-alert__icon" aria-hidden="true">
+              <Warning size={16} weight="regular" />
+            </span>
+            <span>{retryError}</span>
+          </div>
+        )}
         {materials.error ? (
           /* A materials-load failure does not block the document browser --
              the two panes are independently useful -- but it is reported

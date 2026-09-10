@@ -195,6 +195,21 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading, cou
       .map((a) => [a.collectionId, a.id]),
   );
 
+  // C-1: `/knowledge/resolve` is called with only `homeworkId` (never a
+  // `sectionId` -- there is no single section to ask about from this form),
+  // so its section-level matcher can never fire and `resolution.data.level`
+  // can never come back "section". The override warning has to be answered
+  // from data this form already has instead: the homework's own section ids
+  // (`initialData.sections`) and the course's attachment list it already
+  // loads. A section of THIS homework overrides it exactly when some
+  // attachment is scoped to one of those section ids.
+  const homeworkSectionIds = new Set((initialData?.sections ?? []).map((s) => s.id));
+  const sectionOverride =
+    !!homeworkId &&
+    (attachments.data?.attachments ?? []).some(
+      (a) => a.scope.kind === "section" && homeworkSectionIds.has(a.scope.sectionId),
+    );
+
   const [attachError, setAttachError] = useState<string | null>(null);
   // Guards against a double-click firing two overlapping attach/detach calls
   // for the same collection: `attachedHere` only updates once `attachments`
@@ -361,29 +376,41 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading, cou
 
         {attachError && <p role="alert" className="admin-field-error">{attachError}</p>}
 
-        {/* The resolution note is the one place this override rule is said
-            out loud: most-specific-wins means a section attachment silently
-            replaces whatever is checked above, with no other signal that it
-            happened. A failed resolve is reported the same way -- staying
-            silent here would read as "nothing overrides this", which may not
-            be true. */}
-        {homeworkId && resolution.error && (
+        {/* The override note is the one place this rule is said out loud:
+            most-specific-wins means a section attachment silently replaces
+            whatever is checked above, with no other signal that it
+            happened. C-1: `/knowledge/resolve` cannot answer this by itself
+            (it is only ever asked about `homeworkId`, never a `sectionId`),
+            so `sectionOverride` above is computed from the attachment list
+            this form already loads, and a failed load of THAT is what this
+            note now reports on -- staying silent here would read as
+            "nothing overrides this", which may not be true. */}
+        {homeworkId && attachments.error && (
           <p className="admin-inline-note">
             Could not check whether a section overrides this — try again before relying on what's checked above.
           </p>
         )}
-        {homeworkId && resolution.data?.level === "section" && (
+        {homeworkId && !attachments.error && sectionOverride && (
           <p className="admin-inline-note">
             A section overrides this homework's knowledge — those sections ground on their own
             collection instead of this one.
           </p>
         )}
-        {homeworkId && resolution.data?.level === "homework" && (
+        {/* The homework/none-level explanations only ever describe what
+            applies where no section overrides it, and only once we know
+            that -- both resolution's own load and the attachment check
+            above have to have succeeded first. */}
+        {homeworkId && !attachments.error && !sectionOverride && resolution.error && (
+          <p className="admin-inline-note">
+            Could not check what this homework's knowledge resolves to — try again before relying on what's checked above.
+          </p>
+        )}
+        {homeworkId && !attachments.error && !sectionOverride && !resolution.error && resolution.data?.level === "homework" && (
           <p className="admin-inline-note">
             This homework's own attachments are in effect — no section overrides them.
           </p>
         )}
-        {homeworkId && resolution.data?.level === "none" && (
+        {homeworkId && !attachments.error && !sectionOverride && !resolution.error && resolution.data?.level === "none" && (
           <p className="admin-inline-note">
             Nothing attached, so the tutor answers with no course materials.
           </p>

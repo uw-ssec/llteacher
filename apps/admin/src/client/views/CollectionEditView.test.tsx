@@ -220,4 +220,34 @@ describe("CollectionEditView", () => {
       }),
     );
   });
+
+  // I-5 (final review): save() had try/finally but no catch, so a failed PUT
+  // left the instructor on the page with the button back at "Save" and no
+  // indication the collection's contents were not replaced. Pre-fix, the
+  // rejected PUT below would propagate unhandled, onBack would never be
+  // asserted against (correctly, since the save failed), but neither would
+  // any alert appear -- this pins that a failure is now visible AND that the
+  // view does not navigate away as if the save had succeeded.
+  it("reports a save failure instead of leaving it invisible", async () => {
+    const onBack = vi.fn();
+    const mock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === "PUT") {
+        return new Response(JSON.stringify({ error: "boom" }), { status: 500 });
+      }
+      if (url.includes("/items")) return new Response(JSON.stringify({ items: [] }), { status: 200 });
+      if (url.includes("/documents")) return new Response(JSON.stringify(DOCUMENTS), { status: 200 });
+      return new Response(JSON.stringify({ collections: [] }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", mock);
+
+    render(<CollectionEditView courseId="c1" collectionId="col1" onBack={onBack} />);
+    fireEvent.click(await saveButtonReady());
+
+    await waitFor(() => expect(screen.getByText(/boom|could not save/i)).toBeTruthy());
+    expect(onBack).not.toHaveBeenCalled();
+    // The button must return to a clickable "Save", not stay stuck at
+    // "Saving…" -- the instructor needs to be able to try again.
+    expect(screen.getByRole("button", { name: /^save$/i })).toBeTruthy();
+  });
 });
