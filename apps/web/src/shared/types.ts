@@ -487,6 +487,64 @@ import type {
 export type { ParticipationStatus, SubmissionCell, StudentSubmissionRow };
 export type HomeworkSubmissionsResponse = HomeworkSubmissionsMatrix;
 
+/* -- Canvas integration (#73/#74) ------------------------------------------ */
+
+export interface CanvasCredentialResponse {
+  credential: {
+    id: string;
+    maskedToken: string;
+    canvasBaseUrl: string;
+    expiresAt: string | null;
+    rotatedAt: string | null;
+  } | null;
+}
+
+export interface CanvasCredentialBody {
+  token: string;
+  canvasBaseUrl: string;
+  /** ISO date string, or omitted/null for "no expiry recorded." */
+  expiresAt?: string | null;
+}
+
+export type CanvasValidateResponse =
+  | { ok: true; canvasUserId: string; name: string | null }
+  | { ok: false; message: string };
+
+export interface CanvasCourseOption {
+  canvasCourseId: string;
+  name: string;
+  courseCode: string | null;
+  term: string | null;
+}
+
+export interface CanvasCourseListResponse {
+  courses: CanvasCourseOption[];
+}
+
+export interface CanvasLinkBody {
+  canvasCourseId: string;
+}
+
+export interface CanvasLinkResponse {
+  lmsIntegrationId: string;
+  canvasCourseId: string;
+}
+
+export interface CanvasSyncStatusResponse {
+  canvasCourseId: string | null;
+  lastSyncStatus: "idle" | "syncing" | "success" | "error";
+  lastSyncCounts: { added: number; updated: number; removed: number } | null;
+  lastSyncErrorMessage: string | null;
+  lastSyncedAt: string | null;
+}
+
+export interface CanvasSyncResponse {
+  added: number;
+  updated: number;
+  removed: number;
+  errors: { canvasEnrollmentId: string; message: string }[];
+}
+
 // Cloudflare Worker bindings + secrets. Augmented in Phase 1+.
 declare global {
   interface Env {

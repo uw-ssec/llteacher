@@ -222,3 +222,77 @@ export interface ExportRequestBody {
    *  grade-dispute case. */
   studentId?: string;
 }
+
+/* -- Canvas integration (#73/#74) ------------------------------------------
+   Mirrors apps/web/src/shared/types.ts's own copy of these shapes -- apps/
+   admin never imports from apps/web (see TaCapabilitiesView.tsx's header
+   comment), so the wire contract is declared once per side and kept in
+   sync by review, the same convention every other type pair in this file
+   already follows. */
+
+export interface CanvasCredentialSummary {
+  id: string;
+  maskedToken: string;
+  canvasBaseUrl: string;
+  expiresAt: IsoDateTime | null;
+  rotatedAt: IsoDateTime | null;
+}
+
+export interface CanvasCredentialResponse {
+  credential: CanvasCredentialSummary | null;
+}
+
+export interface CanvasCredentialBody {
+  token: string;
+  canvasBaseUrl: string;
+  expiresAt?: string | null;
+}
+
+export type CanvasValidateResponse =
+  | { ok: true; canvasUserId: string; name: string | null }
+  | { ok: false; message: string };
+
+export interface CanvasCourseOption {
+  canvasCourseId: string;
+  name: string;
+  courseCode: string | null;
+  term: string | null;
+}
+
+export interface CanvasCourseListResponse {
+  courses: CanvasCourseOption[];
+}
+
+export interface CanvasLinkBody {
+  canvasCourseId: string;
+}
+
+export interface CanvasLinkResponse {
+  lmsIntegrationId: string;
+  canvasCourseId: string;
+}
+
+export type CanvasSyncStatus = "idle" | "syncing" | "success" | "error";
+
+export interface CanvasSyncCounts {
+  added: number;
+  updated: number;
+  removed: number;
+}
+
+export interface CanvasSyncStatusResponse {
+  canvasCourseId: string | null;
+  lastSyncStatus: CanvasSyncStatus;
+  lastSyncCounts: CanvasSyncCounts | null;
+  lastSyncErrorMessage: string | null;
+  lastSyncedAt: IsoDateTime | null;
+}
+
+export interface CanvasSyncRowError {
+  canvasEnrollmentId: string;
+  message: string;
+}
+
+export interface CanvasSyncResponse extends CanvasSyncCounts {
+  errors: CanvasSyncRowError[];
+}
