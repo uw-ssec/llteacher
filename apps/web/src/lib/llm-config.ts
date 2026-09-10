@@ -31,6 +31,12 @@ import { getOpenRouter, getLLMoxie } from "./ai";
    could drift on provider/credential handling. See that function's own doc
    comment for why it is not just `resolveLLMConfig` called with the
    fallback id.
+   The draft-grade repository resolver remains separate because its caller
+   needs the admin-console wire shape without credentials and its no-default
+   fallback is intentionally different. Both resolvers must nevertheless
+   choose the same active, org-scoped homework -> course -> org-default row;
+   `repositories/llmConfigs.test.ts` exercises that contract across every
+   valid override combination (#443).
    -------------------------------------------------------------------------- */
 
 export type LlmProvider = "openai" | "anthropic" | "claude_for_education" | "openrouter" | "local" | "llmoxie";
