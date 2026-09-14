@@ -1,5 +1,63 @@
 # M11: Canvas Integration — Implementation Plan
 
+## 2026-09-14 sync check (end-to-end provisioning verification, post-PR-open)
+
+User request after PR #457 was open and reviewer-requested: prove the
+full instructor-facing flow works — token entry through to real
+database rows for students (name/email) and course memberships, and
+the WorkOS reconciliation half. Clarified scope first rather than
+guessing (AskUserQuestion): confirmed "provisioned in WorkOS" means the
+already-built pending-user design (Design decision #3), not new
+active-WorkOS-API scope; confirmed mocked Canvas responses over a real
+account; confirmed the local disposable Postgres over the shared dev DB.
+
+Added `routes/canvasProvisioning.integration.test.ts`: drives the REAL
+route handlers, REAL repositories, and REAL IdentityCipher (genuine
+AES-256-GCM round-trips, not mocked crypto) against the local Postgres,
+substituting only the Canvas HTTP boundary — same fidelity posture
+`chat.fallback.integration.test.ts` documents for its own single
+substituted boundary. Covers token save (asserts the raw token never
+appears in any HTTP response) → validate → course picker → link →
+sync → real `course_memberships`/`users` rows with correctly
+decrypted name/email and the right role per Canvas enrollment type →
+sync status + full audit trail → a simulated real first login
+(`UserIdentityService.createOrClaimUser`, the exact call site
+`auth.ts`'s callback handler makes) claiming the pending row → a second
+sync proving idempotency.
+
+**A genuinely useful escaped-bug hunt, twice over, during this pass**:
+1. Two test-fixture bugs (not product bugs) surfaced by real
+   constraints: a non-UUID `session.userId` silently tripped
+   `auditBestEffort`'s own swallow-and-log path (by design — a broken
+   audit write must never break the request it's auditing), and a
+   missing `users` row for the fake instructor hit
+   `audit_events`'s real FK. Both fixed in the fixture.
+2. A harder one: repeated manual runs against this file's *persistent*
+   local Postgres intermittently threw a generic WebCrypto
+   `OperationError: Cipher job failed` deep inside
+   `UserIdentityService.createOrClaimUser`. Bisected by instrumenting
+   (temporarily, not committed) both the test and
+   `UserIdentityService.ts` line-by-line — traced to `byWorkosId`
+   genuinely matching a row, which turned out to be a **leftover row
+   from an earlier debug run**: one fixture literal
+   (`"workos-user-ada-real-login"`) was never namespaced, so it
+   collided with a stale row encrypted under that earlier run's own
+   random `ENCRYPTION_KEY` — decrypting it under *this* run's key then
+   fails exactly the way a wrong key should (a real AES-GCM auth-tag
+   mismatch), surfaced as that generic error. Confirms
+   `courseMemberships.canvasEnrollmentId`, `users.email_blind_index`,
+   and `users.workos_user_id` are genuinely globally unique in
+   practice, not just in the schema DDL — the same lesson
+   `CanvasRosterSyncService.test.ts`'s own header already records, now
+   hit a second time in a different file. Fixed by namespacing every
+   fixture identifier with a fresh UUID per run; verified safe by
+   running the file twice in a row against the same unreset database.
+
+Final verification: `npm run typecheck` clean across all 4 packages;
+full `apps/web` suite from a **freshly re-applied migration set** (schema
+dropped and recreated, not just re-run against leftover state) —
+**105 files / 1985 passed / 8 skipped**.
+
 ## 2026-09-10 sync check (implementation + epic acceptance pass, pre-PR)
 
 Implemented inline, all in this one session, in the order this doc lays
