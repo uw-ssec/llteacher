@@ -252,6 +252,34 @@ describe("PUT credential", () => {
     );
     expect(res.status).toBe(400);
   });
+
+  // #2 (security review, PR #457): SSRF via an unvalidated Canvas base
+  // URL -- every one of these becomes the target of a real fetch() with
+  // the org's bearer token attached (canvas-api.ts).
+  it.each([
+    "https://localhost/",
+    "https://127.0.0.1/",
+    "https://169.254.169.254/", // cloud metadata endpoint
+    "https://[::1]/",
+    "https://internal-service/", // no TLD -- not a real public hostname
+    "https://canvas.local/",
+  ])("rejects a private/loopback/local base URL: %s", async (canvasBaseUrl) => {
+    const res = await buildApp(instructorOfA()).request(
+      url(),
+      json("PUT", { token: "t", canvasBaseUrl }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("accepts a real institutional Canvas domain", async () => {
+    const res = await buildApp(instructorOfA()).request(
+      url(),
+      json("PUT", { token: "t", canvasBaseUrl: "https://canvas.uw.edu" }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+  });
 });
 
 describe("DELETE credential", () => {

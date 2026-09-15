@@ -32,7 +32,7 @@ reads courses and enrollments your own account can already see
 1. Open the admin console → **Canvas** (left sidebar, instructors only).
 2. Under **Canvas API token**, enter:
    - **Canvas instance URL** — your institution's Canvas domain, e.g.
-     `https://uw.instructure.com`. No trailing path.
+     `https://canvas.uw.edu`. No trailing path.
    - **API token** — the value copied in step 1.
 3. Click **Save token**.
 
@@ -101,6 +101,11 @@ row with no Canvas-side changes reports zero additions.
   problems (missing email, an unrecognized Canvas role, a genuine role
   conflict against someone already manually added). They don't fail the
   whole sync; everyone else still syncs normally.
+- **"A sync for this course is already running"** — a previous sync for
+  this course is still in progress (or the request that started it never
+  got a chance to report back, e.g. a network drop). Wait a few minutes
+  and try again; the lock clears on its own after 10 minutes even if the
+  original request never returns.
 
 ## Scope of this integration
 

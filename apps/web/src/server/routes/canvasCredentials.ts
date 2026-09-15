@@ -17,7 +17,7 @@ import { type Context } from "hono";
 import { makeDb } from "../../db/client";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
-import { validateCanvasToken } from "../../lib/canvas-api";
+import { CanvasRateLimitedError, validateCanvasToken } from "../../lib/canvas-api";
 import {
   deleteCanvasCredential,
   getCanvasCredentialSummary,
@@ -53,7 +53,7 @@ async function orgScopeForInstructor(
  *  confusing 404 instead of this one, immediate, actionable message. */
 function parseCanvasBaseUrl(raw: unknown): { baseUrl: string } | { error: string } {
   if (typeof raw !== "string" || !raw.trim()) {
-    return { error: "Enter your Canvas instance URL (e.g. https://uw.instructure.com)." };
+    return { error: "Enter your Canvas instance URL (e.g. https://canvas.uw.edu)." };
   }
   const trimmed = raw.trim();
   if (trimmed.length > BASE_URL_MAX) return { error: "That URL is too long." };
@@ -61,15 +61,47 @@ function parseCanvasBaseUrl(raw: unknown): { baseUrl: string } | { error: string
   try {
     url = new URL(trimmed);
   } catch {
-    return { error: "Enter a valid URL (e.g. https://uw.instructure.com)." };
+    return { error: "Enter a valid URL (e.g. https://canvas.uw.edu)." };
   }
   if (url.protocol !== "https:") {
     return { error: "Canvas instance URLs must use https." };
   }
   if (url.pathname !== "/" && url.pathname !== "") {
-    return { error: "Enter the Canvas instance's base URL only, with no path (e.g. https://uw.instructure.com)." };
+    return { error: "Enter the Canvas instance's base URL only, with no path (e.g. https://canvas.uw.edu)." };
+  }
+  if (isDisallowedCanvasHost(url.hostname)) {
+    return {
+      error: "That doesn't look like a Canvas instance URL. Enter your institution's public Canvas domain (e.g. https://canvas.uw.edu).",
+    };
   }
   return { baseUrl: `${url.protocol}//${url.host}` };
+}
+
+/** #2 (security review, PR #457): this base URL becomes the target of
+ *  every subsequent Canvas request this app makes (canvas-api.ts), with
+ *  the org's bearer token attached, and `validateCanvasToken`/
+ *  `listCanvasCourses` reflect response fields back to the caller --
+ *  unvalidated, this is SSRF plus an internal host/port scanner (status
+ *  and latency differentiate reachability). This app has no DNS-
+ *  resolution capability in this environment (Cloudflare Workers) to
+ *  check where a hostname actually resolves, and even a resolved check is
+ *  defeatable by DNS rebinding between validation and use -- so this is a
+ *  best-effort, defense-in-depth filter on the URL's literal host.
+ *  `fetchAllPages`' own same-origin pagination lock (canvas-api.ts) is
+ *  the load-bearing mitigation for the actual request boundary this URL
+ *  feeds. A real Canvas instance is always a public DNS hostname with at
+ *  least one dot -- "localhost", a bare IP literal, or a single-label
+ *  host is never legitimate here, on any institution's Canvas. */
+function isDisallowedCanvasHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host.endsWith(".local") || host.endsWith(".internal")) return true;
+  if (host.includes(":")) return true; // IPv6 literal (URL.hostname keeps the brackets)
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return true; // IPv4 literal (URL parsing already
+  // canonicalizes hex/octal-obfuscated forms into this shape, so this one
+  // check covers those too)
+  if (!host.includes(".")) return true; // no TLD -- not a real public hostname
+  return false;
 }
 
 function parseExpiresAt(raw: unknown): { expiresAt: Date | null } | { error: string } {
@@ -167,6 +199,12 @@ export async function validateCanvasCredentialHandler(c: Context<AppEnv>) {
     result = await validateCanvasToken(decrypted.canvasBaseUrl, decrypted.token);
   } catch (err) {
     logServerError("validateCanvasCredentialHandler", err);
+    // #11 (compatibility review, PR #457): distinct from the generic
+    // unreachable-instance message below -- a rate limit means the token
+    // and instance are both fine, just to try again shortly.
+    if (err instanceof CanvasRateLimitedError) {
+      return c.json({ ok: false, message: "Canvas is rate-limiting this request. Wait a moment and try again." }, 200);
+    }
     return c.json(
       { ok: false, message: "Could not reach Canvas. Check the instance URL and try again." },
       200,

@@ -81,17 +81,35 @@ describe("canvas-api", () => {
       fetchMock.mockResolvedValueOnce(jsonResponse({ error: "nope" }, { status: 500 }));
       await expect(listCanvasCourses("https://uw.instructure.com", "tok")).rejects.toThrow();
     });
+
+    // #1 (security review, PR #457): the Link header's `rel="next"` URL is
+    // followed with the bearer token attached, via a fetch() this code
+    // makes itself, not a browser-mediated redirect -- so nothing strips
+    // the Authorization header if it points off-instance. A malicious or
+    // compromised page response could otherwise hand the org-wide Canvas
+    // token to any host it names.
+    it("refuses to follow pagination to a different origin", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse([{ id: 1, name: "STATS 311" }], {
+          link: '<https://evil.example.com/steal-token>; rel="next"',
+        }),
+      );
+      await expect(listCanvasCourses("https://uw.instructure.com", "tok")).rejects.toThrow(
+        /outside the expected Canvas instance/,
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("listCanvasEnrollments", () => {
-    it("maps enrollment rows, preferring login_id over email", async () => {
+    it("maps enrollment rows, preferring email over login_id", async () => {
       fetchMock.mockResolvedValueOnce(
         jsonResponse([
           {
             id: 501,
             type: "StudentEnrollment",
             enrollment_state: "active",
-            user: { id: 9001, login_id: "jdoe@uw.edu", email: "other@example.com", name: "Jane Doe" },
+            user: { id: 9001, login_id: "jdoe", email: "jdoe@uw.edu", name: "Jane Doe" },
           },
         ]),
       );
@@ -108,6 +126,42 @@ describe("canvas-api", () => {
       ]);
       expect(fetchMock.mock.calls[0]![0]).toContain("/api/v1/courses/123/enrollments");
       expect(fetchMock.mock.calls[0]![0]).toContain("state[]=active");
+      expect(fetchMock.mock.calls[0]![0]).toContain("include[]=email");
+    });
+
+    it("falls back to login_id only when it's shaped like an email", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse([
+          {
+            id: 502,
+            type: "StudentEnrollment",
+            enrollment_state: "active",
+            user: { id: 9002, login_id: "jdoe@uw.edu", name: "Jane Doe" },
+          },
+        ]),
+      );
+      const enrollments = await listCanvasEnrollments("https://uw.instructure.com", "tok", "123");
+      expect(enrollments[0]!.email).toBe("jdoe@uw.edu");
+    });
+
+    it("does not treat a bare NetID login_id as an email -- reports no email instead", async () => {
+      // #12 (compatibility review, PR #457): at NetID institutions like UW,
+      // login_id is a bare login name ("jdoe"), not an email. Silently
+      // using it as one produces a value that fails every downstream
+      // domain check instead of the clear "no email on file" a real gap
+      // deserves.
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse([
+          {
+            id: 503,
+            type: "StudentEnrollment",
+            enrollment_state: "active",
+            user: { id: 9003, login_id: "jdoe", name: "Jane Doe" },
+          },
+        ]),
+      );
+      const enrollments = await listCanvasEnrollments("https://uw.instructure.com", "tok", "123");
+      expect(enrollments[0]!.email).toBeNull();
     });
 
     it("skips a row with no resolvable user id", async () => {

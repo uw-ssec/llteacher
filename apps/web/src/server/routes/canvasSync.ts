@@ -13,10 +13,11 @@ import { type Context } from "hono";
 import { makeDb } from "../../db/client";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
-import { listCanvasCourses, CanvasApiError } from "../../lib/canvas-api";
+import { listCanvasCourses, CanvasApiError, CanvasRateLimitedError } from "../../lib/canvas-api";
 import { syncCanvasRoster } from "../../lib/services/CanvasRosterSyncService";
 import { getDecryptedCanvasCredential } from "../repositories/organizationCredentials";
 import {
+  beginSync,
   getLmsIntegrationForCourse,
   linkCanvasCourse,
   markCourseSynced,
@@ -105,6 +106,25 @@ export async function linkCanvasCourseHandler(c: Context<AppEnv>) {
   const credential = await getDecryptedCanvasCredential(db, cipher, ctx.orgScope);
   if (!credential) return c.json({ error: NO_CREDENTIAL_MESSAGE }, 409);
 
+  // #3 (security review, PR #457): canvasCourseId arrives from the request
+  // body, not from a value this handler itself resolved. The credential is
+  // shared org-wide (canvasCredentials.ts's own header), so without this
+  // check an instructor of ANY course in the org could supply an arbitrary
+  // Canvas course id and pull a colleague's roster -- names, emails, role
+  // -- onto their own course. Cross-checking against this same token's own
+  // listCanvasCourses() result -- the same list the course picker itself
+  // shows -- confirms the id is actually one the token's owner teaches.
+  let visibleCourses;
+  try {
+    visibleCourses = await listCanvasCourses(credential.canvasBaseUrl, credential.token);
+  } catch (err) {
+    logServerError("linkCanvasCourseHandler", err);
+    return c.json({ error: canvasErrorMessage(err) }, 503);
+  }
+  if (!visibleCourses.some((course) => course.canvasCourseId === canvasCourseId)) {
+    return c.json({ error: "That Canvas course isn't visible to this organization's Canvas token." }, 403);
+  }
+
   const outcome = await linkCanvasCourse(db, ctx.scope, ctx.orgScope, {
     canvasCourseId,
     credentialId: credential.id,
@@ -136,9 +156,28 @@ export async function syncCanvasCourseHandler(c: Context<AppEnv>) {
     return c.json({ error: "Link this course to a Canvas course first." }, 409);
   }
 
+  // #6 (reliability/security review, PR #457): claims the "syncing" state
+  // atomically before any fetch or write starts -- see beginSync's own
+  // header (lmsIntegrations.ts) for why this matters: two overlapping
+  // syncs on one course can otherwise have the earlier run's removal pass
+  // soft-drop a student the later run just (re-)added.
+  const claimed = await beginSync(db, integration.id);
+  if (!claimed) {
+    return c.json(
+      { error: "A sync for this course is already running. Wait for it to finish and try again." },
+      409,
+    );
+  }
+
   const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
   const credential = await getDecryptedCanvasCredential(db, cipher, ctx.orgScope);
-  if (!credential) return c.json({ error: NO_CREDENTIAL_MESSAGE }, 409);
+  if (!credential) {
+    // Release the "syncing" claim taken above -- without this, a course
+    // that loses its credential between linking and syncing would stay
+    // permanently locked out of ever syncing again.
+    await updateSyncStatus(db, integration.id, { status: "error", errorMessage: NO_CREDENTIAL_MESSAGE });
+    return c.json({ error: NO_CREDENTIAL_MESSAGE }, 409);
+  }
 
   try {
     const result = await syncCanvasRoster(db, cipher, ctx.scope, integration.canvasCourseId, credential);
@@ -168,6 +207,15 @@ export async function syncCanvasCourseHandler(c: Context<AppEnv>) {
 }
 
 function canvasErrorMessage(err: unknown): string {
+  // #11 (compatibility review, PR #457): checked BEFORE the generic
+  // CanvasApiError branch below, and matters now that isRateLimited
+  // (canvas-api.ts) actually detects 429 -- CanvasRateLimitedError can
+  // carry status 403 on an older Canvas instance too, which would
+  // otherwise fall into the "rejected token" branch and tell an
+  // instructor to replace a token that's working fine.
+  if (err instanceof CanvasRateLimitedError) {
+    return "Canvas is rate-limiting this request. Wait a moment and try again.";
+  }
   if (err instanceof CanvasApiError) {
     return err.status === 401 || err.status === 403
       ? "Canvas rejected this token. It may have expired or been revoked -- check Canvas Integration settings."

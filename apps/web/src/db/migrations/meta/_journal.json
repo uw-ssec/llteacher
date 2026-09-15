@@ -330,6 +330,13 @@
       "when": 1789063794770,
       "tag": "0046_puzzling_kingpin",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1789435443480,
+      "tag": "0047_canvas_enrollment_uq_per_course",
+      "breakpoints": true
     }
   ]
 }

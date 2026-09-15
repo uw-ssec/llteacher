@@ -295,4 +295,31 @@ describe("CanvasIntegrationView -- course link + sync (#74)", () => {
     await waitFor(() => screen.getByText("No email address on file."));
     expect(screen.getByText("1 added, 0 updated, 0 removed.")).toBeTruthy();
   });
+
+  // #7 (usability/reliability review, PR #457): a request-level sync
+  // failure (a 409 from #6's concurrency guard, a timeout, a 5xx) must
+  // render a visible alert, not just post to the screen-reader-only live
+  // region -- the previous version left a sighted instructor with zero
+  // signal anything went wrong, and the natural next move (click again)
+  // was exactly how the concurrency race got triggered.
+  it("shows a visible error when the sync request itself fails", async () => {
+    const LINKED_STATUS = { ...IDLE_STATUS, canvasCourseId: "cc-1", lastSyncStatus: "success" as const };
+    stub((url, init) => {
+      if (url.endsWith("/canvas/credential") && (!init.method || init.method === "GET")) {
+        return jsonRes({ credential: CREDENTIAL });
+      }
+      if (url.endsWith("/canvas/status")) return jsonRes(LINKED_STATUS);
+      if (url.endsWith("/canvas/sync") && init.method === "POST") {
+        return jsonRes({ error: "A sync for this course is already running. Wait for it to finish and try again." }, 409);
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    renderView();
+
+    await waitFor(() => screen.getByRole("button", { name: /Sync from Canvas/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Sync from Canvas/ }));
+
+    const alert = await waitFor(() => screen.getByRole("alert"));
+    expect(alert.textContent).toMatch(/already running/);
+  });
 });

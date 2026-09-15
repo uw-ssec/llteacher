@@ -5553,6 +5553,11 @@ body {
 
 .admin-form-field input[type="text"],
 .admin-form-field input[type="datetime-local"],
+.admin-form-field input[type="password"],
+.admin-form-field input[type="url"],
+.admin-form-field input[type="date"],
+.admin-form-field input[type="email"],
+.admin-form-field input[type="number"],
 .admin-form-field select,
 .admin-form-field textarea,
 .admin-form-record input[type="text"],

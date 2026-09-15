@@ -12,10 +12,20 @@
    recovers cleanly either way, since both writes are themselves upserts.
    -------------------------------------------------------------------------- */
 
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, lt, ne, or } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { courses, lmsIntegrations } from "../../db/schema";
 import type { CourseScope } from "./scope";
+
+/** #6 (reliability/security review, PR #457): how long a "syncing" claim
+ *  is honored before a later request is allowed to reclaim it. Guards
+ *  against a genuinely stuck lock (the isolate that claimed it was killed
+ *  mid-sync, per issue #355's own documented failure mode, and never got
+ *  to write a terminal status) rather than requiring a heartbeat/renewal
+ *  mechanism this feature doesn't otherwise need. Generous on purpose: a
+ *  real sync for an ordinary course finishes in seconds, so this only
+ *  ever matters for the stuck case, not the normal one. */
+const SYNC_STALE_MS = 10 * 60 * 1000;
 
 export type LmsSyncStatus = (typeof lmsIntegrations.$inferSelect)["lastSyncStatus"];
 
@@ -100,6 +110,29 @@ export async function linkCanvasCourse(
     .returning({ id: lmsIntegrations.id });
 
   return { outcome: "linked", lmsIntegrationId: row!.id };
+}
+
+/** #6 (reliability/security review, PR #457): claims the "syncing" state
+ *  before the fetch+write window starts, atomically -- the WHERE clause
+ *  IS the lock, so two concurrent sync requests for the same course
+ *  cannot both win. Without this, two overlapping runs could have the
+ *  earlier run's Pass C (CanvasRosterSyncService.ts) soft-drop a student
+ *  the later run just (re-)added, based on a snapshot taken before either
+ *  run's write window. Returns false (refuse, don't queue) when a sync is
+ *  already running and its claim isn't stale (see SYNC_STALE_MS above). */
+export async function beginSync(db: Db, lmsIntegrationId: string): Promise<boolean> {
+  const staleBefore = new Date(Date.now() - SYNC_STALE_MS);
+  const [row] = await db
+    .update(lmsIntegrations)
+    .set({ lastSyncStatus: "syncing", updatedAt: new Date() })
+    .where(
+      and(
+        eq(lmsIntegrations.id, lmsIntegrationId),
+        or(ne(lmsIntegrations.lastSyncStatus, "syncing"), lt(lmsIntegrations.updatedAt, staleBefore)),
+      ),
+    )
+    .returning({ id: lmsIntegrations.id });
+  return row !== undefined;
 }
 
 /** Sync status transitions (#74's "last sync time, counts, errors" UI).

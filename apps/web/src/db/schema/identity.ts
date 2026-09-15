@@ -292,8 +292,22 @@ export const courseMemberships = pgTable(
   },
   (t) => [
     uniqueIndex("course_memberships_user_course_uq").on(t.userId, t.courseId),
+    // #5 (security review, PR #457): originally table-global (migration
+    // 0000), which mirrored Canvas's own platform-wide enrollment ids but
+    // ignored that llteacher is multi-tenant across MULTIPLE Canvas
+    // instances -- two organizations on two different Canvas instances
+    // (e.g. canvas.uw.edu vs. any other institution) draw enrollment ids
+    // from the same small integer space, so a collision there is
+    // near-certain at scale, not theoretical. This PR (#74) is the first
+    // code that ever writes this column, which is what made the
+    // pre-existing global index reachable. Rescoped to the course: every
+    // read of it (CanvasRosterSyncService's own `knownByCanvasId` lookup)
+    // was already course-scoped, so this only removes an unintended
+    // cross-tenant collision, not a real invariant -- one Canvas
+    // instance's enrollment id genuinely only needs to be unique within
+    // the one llteacher course it's synced into.
     uniqueIndex("course_memberships_canvas_enrollment_uq")
-      .on(t.canvasEnrollmentId)
+      .on(t.courseId, t.canvasEnrollmentId)
       .where(sql`${t.canvasEnrollmentId} IS NOT NULL`),
     index("course_memberships_course_idx").on(t.courseId),
     check(

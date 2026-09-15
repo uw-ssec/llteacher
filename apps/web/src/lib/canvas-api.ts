@@ -72,15 +72,24 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_RATE_LIMIT_RETRIES = 3;
 const RATE_LIMIT_BACKOFF_MS = 1_000;
 const PER_PAGE = 100;
+/** Defense-in-depth bound on fetchAllPages -- at 100/page this is 50,000
+ *  rows, far past any real course roster, so it never fires in practice.
+ *  It exists so a malformed/malicious Link header can't drive an unbounded
+ *  fetch loop even if the same-origin check below is somehow satisfied. */
+const MAX_PAGES = 500;
 
 function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, "");
 }
 
+/** #11 (compatibility review, PR #457): Canvas's rate-limit signal moved to
+ *  the standard 429 status years ago on current/modern instances. The 403
+ *  check below is kept for older instances that still use it, but without
+ *  the 429 branch this backoff never fired against a real deployment --
+ *  every rate-limited request threw an unretried CanvasApiError mid-
+ *  pagination instead of backing off. */
 function isRateLimited(status: number, bodyText: string): boolean {
-  // Canvas signals rate limiting as a 403 whose body names it explicitly,
-  // not the classic 429 -- a plain 403 (a genuinely insufficient scope) must
-  // not be retried as if it were transient.
+  if (status === 429) return true;
   return status === 403 && bodyText.includes("Rate Limit Exceeded");
 }
 
@@ -146,8 +155,23 @@ async function fetchAllPages<T>(
   mapItem: (raw: unknown) => T | null,
 ): Promise<T[]> {
   const items: T[] = [];
+  // #1 (security review, PR #457): the `next` link is followed with the
+  // bearer token attached, via a fresh fetch() this code makes itself --
+  // not a browser-mediated redirect, so the Authorization-header-stripping
+  // the Fetch spec applies to cross-origin redirects does NOT apply here.
+  // Locking every subsequent page to the origin of the FIRST request (the
+  // Canvas instance URL the instructor themselves entered and this app
+  // already validated) means a malicious or compromised page response
+  // cannot hand the org-wide Canvas token to an arbitrary host by naming
+  // it in its own Link header.
+  const allowedOrigin = new URL(firstUrl).origin;
   let url: string | null = firstUrl;
+  let pageCount = 0;
   while (url) {
+    pageCount++;
+    if (pageCount > MAX_PAGES) {
+      throw new CanvasApiError("Canvas API pagination exceeded the expected page count.", 502);
+    }
     const { status, headers, bodyText } = await canvasFetch(url, token);
     if (status < 200 || status >= 300) {
       throw new CanvasApiError(
@@ -168,7 +192,22 @@ async function fetchAllPages<T>(
       const mapped = mapItem(raw);
       if (mapped !== null) items.push(mapped);
     }
-    url = parseNextLink(headers.get("link"));
+    const next = parseNextLink(headers.get("link"));
+    if (next) {
+      let nextOrigin: string;
+      try {
+        nextOrigin = new URL(next).origin;
+      } catch {
+        throw new CanvasApiError("Canvas API returned an unparseable pagination link.", status);
+      }
+      if (nextOrigin !== allowedOrigin) {
+        throw new CanvasApiError(
+          "Canvas API pagination pointed outside the expected Canvas instance.",
+          status,
+        );
+      }
+    }
+    url = next;
   }
   return items;
 }
@@ -256,7 +295,7 @@ export async function listCanvasEnrollments(
 ): Promise<CanvasEnrollment[]> {
   const url =
     `${normalizeBaseUrl(baseUrl)}/api/v1/courses/${encodeURIComponent(canvasCourseId)}/enrollments` +
-    `?per_page=${PER_PAGE}&state[]=active&state[]=invited`;
+    `?per_page=${PER_PAGE}&state[]=active&state[]=invited&include[]=email`;
   return fetchAllPages(url, token, (raw) => {
     const e = raw as Record<string, unknown>;
     const user = e.user as Record<string, unknown> | undefined;
@@ -268,8 +307,24 @@ export async function listCanvasEnrollments(
       type: e.type,
       enrollmentState: typeof e.enrollment_state === "string" ? e.enrollment_state : "active",
       userId: String(user.id),
-      email: typeof user.login_id === "string" ? user.login_id : typeof user.email === "string" ? user.email : null,
+      email: emailFromCanvasUser(user),
       name: typeof user.name === "string" ? user.name : null,
     };
   });
+}
+
+/** #12 (compatibility review, PR #457): `login_id` is not a documented
+ *  field of an enrollment's embedded `user` object, and at NetID
+ *  institutions (UW, this app's target deployment) it's a bare login name
+ *  like "kshitij", not an email address -- treating it as one silently
+ *  hands the domain-allowlist check (roster.ts) and every downstream
+ *  consumer a value shaped nothing like the real thing instead of the
+ *  clear "no email on file" a genuine gap deserves. `user.email`
+ *  (populated when `include[]=email` is requested and the caller has
+ *  permission -- see the request URL above) is preferred; `login_id` is
+ *  only accepted as a fallback when it's actually shaped like an email. */
+function emailFromCanvasUser(user: Record<string, unknown>): string | null {
+  if (typeof user.email === "string" && user.email.includes("@")) return user.email;
+  if (typeof user.login_id === "string" && user.login_id.includes("@")) return user.login_id;
+  return null;
 }

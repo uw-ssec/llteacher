@@ -1,5 +1,387 @@
 # M11: Canvas Integration — Implementation Plan
 
+## 2026-09-15 sync check — fixes for the 11-dimension review's blocking/critical findings
+
+User request: fix everything the review below found. Fixed all 5 of
+security's own merge-gate items (1-5) and all 4 of the "also
+Critical/Major, load-bearing" items (6-9) -- the exact set the review's
+own "Recommended next step" named as the real blocking scope. Left for a
+deliberate follow-up (not started): item #10 (duplicate-enrollment
+dedup), item #13 (`apiCredentialId` unused), and the extensive
+usability/accessibility Major list -- all explicitly flagged "not
+blocking" by the review itself, and the review's own closing line
+suggested asking before a full pass on the Minor/Enhancement tier; the
+same judgment extended here to the larger Major-tier UI work rather than
+rushing it in the same pass as the security fixes.
+
+1. **Pagination token-exfiltration** — `fetchAllPages` (`canvas-api.ts`)
+   now locks every page after the first to the origin of the request that
+   started the fetch, and throws rather than following an off-origin
+   `Link` header; a 500-page defensive bound added alongside it. Covered
+   by a new test asserting a cross-origin `next` link is refused and
+   fetch is called exactly once.
+2. **SSRF via unvalidated Canvas base URL** — `parseCanvasBaseUrl`
+   (`canvasCredentials.ts`) now rejects `localhost`, `.local`/`.internal`
+   suffixes, IPv4/IPv6 literals, and single-label hosts, as a best-effort
+   defense-in-depth filter (this environment has no DNS-resolution
+   capability to check where a hostname actually resolves; fix #1's
+   same-origin pagination lock is the load-bearing mitigation for the
+   actual request boundary). Six disallowed-host cases + one real-domain
+   acceptance case added to `canvasCredentials.test.ts`.
+3. **Cross-instructor roster disclosure** — `linkCanvasCourseHandler`
+   (`canvasSync.ts`) now cross-checks the submitted `canvasCourseId`
+   against the org's own token's `listCanvasCourses()` result before
+   linking, refusing with 403 if it isn't one the token's owner actually
+   teaches. Covered by a new test.
+4. **Role-grant ratchet** — Pass A's grouped update (see #8 below) now
+   clears `canViewSolutions`/`canViewDrafts` whenever the incoming role
+   isn't `ta`, closing the exact gap the DB's own
+   `course_memberships_capabilities_require_ta` constraint was written to
+   catch. Covered by a new test: syncs a TA, manually grants both flags,
+   demotes via a re-sync, asserts both are cleared and no error is
+   reported.
+5. **`canvasEnrollmentId` uniqueness was table-global** — rescoped to
+   `(course_id, canvas_enrollment_id)` via new migration
+   `0047_canvas_enrollment_uq_per_course.sql`. Safe by construction (a
+   narrower scope can only reduce conflicts, never introduce new ones).
+   Applied to the local test Postgres via the normal `db:migrate`, and to
+   the shared dev DB via the same scratch-single-migration approach used
+   for 0046 (that DB's full migration sequence has known pre-existing
+   drift, documented in this plan's 2026-09-14 entry below) — confirmed
+   via `pg_indexes` before and after.
+6. **No concurrency guard on sync** — added `beginSync`
+   (`lmsIntegrations.ts`): an atomic `UPDATE ... WHERE lastSyncStatus !=
+   'syncing' OR updatedAt < now() - 10min` claim, called at the top of
+   `syncCanvasCourseHandler` before any fetch or write; returns 409 "A
+   sync for this course is already running" if the claim fails. The
+   10-minute staleness escape hatch handles an isolate killed mid-sync
+   without needing a heartbeat mechanism this feature doesn't otherwise
+   warrant. Covered by a new test.
+7. **Silent sync/link/delete failures** — every catch in
+   `CanvasIntegrationView.tsx` that previously called only `announce()`
+   (the screen-reader-only live region) on a non-abort failure now also
+   sets a visible error: `runSync` gained a dedicated `syncError` state
+   rendered as an `admin-alert`, with a distinct message when the failure
+   is specifically a client-side timeout (`err.name === "TimeoutError"`,
+   `abortAfter.ts`'s own distinguishing reason) versus a genuine
+   component-unmount abort (`"AbortError"`, correctly still suppressed).
+   `linkCourse` and `deleteCredential` now reuse their existing
+   `courseOptionsError`/`credentialError` banners the same way. Covered
+   by a new test asserting a failed sync request renders a `role="alert"`
+   element, not just an announcement.
+8. **Sequential per-row DB writes (issue #355's pattern, reintroduced)** —
+   Pass A's known-row updates are now grouped by `(role, canvasRole)` and
+   written in at most a handful of statements (mirrors `roster.ts`'s own
+   `restoresByRole` pattern) instead of one UPDATE per student. Pass B's
+   Canvas-identity stamp is now threaded directly into
+   `upsertCourseMembers`' own batched INSERT (`roster.ts`'s
+   `ProvisionEntry` gained optional `canvasEnrollmentId`/`canvasRole`
+   fields) for the dominant "added" case, leaving only the much smaller
+   "restored"/"already_enrolled" subset as a residual per-row loop. Pass
+   C was already a single batched UPDATE and is unchanged.
+9. **Parsing-gap mass-drop reported as success** — Pass C's removal diff
+   now excludes based on every enrollment THIS sync actually fetched
+   (`enrollments`), not just the ones that parsed cleanly (`mapped`), so
+   a row that fails to map (unmapped role, missing email) is reported as
+   a per-row error without also being read as "no longer enrolled" and
+   soft-dropped. Covered by a new test: syncs an enrollment, re-syncs
+   with that same enrollment now missing its email, asserts it's NOT
+   removed.
+
+Also fixed as directly-named root causes of the above (compatibility
+review's #11/#12, cited by security's own #9 writeup):
+- `isRateLimited` (`canvas-api.ts`) now also matches Canvas's real/current
+  429 rate-limit status (was 403-only, dead against any modern Canvas
+  instance); `canvasErrorMessage` (`canvasSync.ts`) and the validate
+  handler (`canvasCredentials.ts`) now give `CanvasRateLimitedError` its
+  own message instead of folding it into "token rejected."
+- `listCanvasEnrollments` now requests `include[]=email` and prefers
+  `user.email` over `user.login_id`, only falling back to `login_id` when
+  it's actually shaped like an email — at NetID institutions (UW, this
+  app's target deployment) `login_id` is a bare login name, not an email,
+  and silently using it as one produced a value that failed every
+  downstream domain check instead of a clear "no email on file."
+
+**Verification**: `npm run typecheck` clean across all 4 packages;
+`apps/web`'s full suite (Docker Postgres, freshly migrated) — 105
+files / 1999 passed / 8 skipped (the 8 are pre-existing and unrelated);
+`apps/admin`'s full suite — 22 files / 257 passed. 14 new/updated test
+cases across `canvas-api.test.ts`, `CanvasRosterSyncService.test.ts`,
+`canvasCredentials.test.ts`, `canvasSync.test.ts`, and
+`CanvasIntegrationView.test.tsx` covering every fix above.
+
+Not yet re-run: the full 11-dimension review itself. These fixes were
+scoped tightly to the findings as written, not re-audited fresh — worth
+a targeted re-check of items 1-9 (not a full 11-agent re-run) before
+merge, given how easy it is for a fix this size to introduce something
+new.
+
+## 2026-09-14/15 sync check — 11-dimension review of PR #457, verdict: HOLD
+
+Full multi-agent review against PR #457's diff, following this project's
+established 11-dimension methodology (security/functionality/reliability/
+maintainability/performance/scalability/compatibility/flexibility/
+usability/accessibility — security examined first and last): 10 parallel
+single-dimension audits, then a dedicated final security re-pass over the
+other 9 dimensions' findings plus the diff itself. Two live UI/UX fixes
+(a corrected example Canvas URL — `https://canvas.uw.edu`, confirmed via
+search, not the placeholder `uw.instructure.com` originally used; and a
+CSS fix for password/url/date inputs that rendered with no visible
+border) landed mid-review in response to real user testing and were
+folded into the later passes' context.
+
+**Verdict from the final security pass, which had the full picture: HOLD
+— do not merge as-is.** Not a reversal of the first security pass; the
+cross-cutting view sharpened it. The defects concentrate at one coherent
+boundary — everywhere this app trusts data it received *from* Canvas
+(a URL in a `Link` header, a `canvasCourseId` in a request body, an
+enrollment type, an enrollment id) — which is a fixable theme, not a
+diffuse quality problem. Everything else audited as genuinely clean:
+encryption/IV handling, token masking, org-scoping on every query, CSRF,
+SQLi, the exactly-one-secret-shape DB constraint.
+
+### Blocking (security's own merge gate — fix before merge)
+
+1. **Pagination token-exfiltration primitive.** `lib/canvas-api.ts:125-174`
+   — `fetchAllPages` follows the `Link` header's `rel="next"` URL
+   *verbatim*, bearer token attached, to any origin, with no page bound.
+   This is not a redirect (where the platform would strip the
+   `Authorization` header) — it's a fresh `fetch()` the code makes itself.
+   A malicious/compromised second page hands the org-wide Canvas token to
+   any host the response names. **Closes finding #2 below too** — fixing
+   this to same-origin-only also bounds the SSRF blast radius.
+2. **SSRF via unvalidated Canvas base URL.** `routes/canvasCredentials.ts:54-73`
+   (`parseCanvasBaseUrl`) checks scheme (https) and path (none) but never
+   the host — no allowlist, no private/link-local/loopback rejection.
+   `validateCanvasToken`/`listCanvasCourses` reflect response fields back
+   to the caller, so this doubles as an internal port/host scanner
+   (status + latency differentiate reachability). Needs an org-configured
+   allowlist, not a hardcoded `*.instructure.com` check — `canvas.uw.edu`
+   itself is a vanity domain, proof institutions don't all live on one
+   hostname pattern.
+3. **Cross-instructor roster disclosure.** `routes/canvasSync.ts:100-111`
+   — `linkCanvasCourseHandler` accepts `canvasCourseId` from the request
+   body with no check that it's one of the courses the org's *stored*
+   token can actually see. Combined with the credential being org-wide:
+   instructor B (any course, same org) can link to a Canvas course
+   instructor A teaches, sync pulls A's students' names/emails onto B's
+   course, which B can then read. Fix: verify against `listCanvasCourses`'
+   own result before linking.
+4. **Role-grant ratchet: escalation succeeds, revocation silently fails.**
+   `lib/services/CanvasRosterSyncService.ts:129-145` (Pass A) — the
+   known-row role update never clears `canViewSolutions`/`canViewDrafts`,
+   unlike every other role/restore write in the codebase (`roster.ts`,
+   `UserIdentityService.ts`, `users.ts` all clear them). The DB's own
+   `course_memberships_capabilities_require_ta` check constraint
+   (`identity.ts:320-323`) — written, per its own comment, *specifically*
+   to catch "the future role-change path" that "cannot forget" this —
+   catches the violation on **demotion** (TA→student with a live grant)
+   and throws, which Pass A swallows into the per-row error array while
+   the sync reports `"success"`. A demoted TA keeps the answer-key grant
+   indefinitely. Promotion (student→instructor) hits no such constraint
+   and sails through. Same block also needs the restore scoped to
+   `droppedReason = "roster_removal"` (see #6) — both are 1-2 line fixes
+   in the same `.set()` call.
+5. **`canvasEnrollmentId` uniqueness is table-global, not per-tenant.**
+   `course_memberships_canvas_enrollment_uq` (`identity.ts:295-297`,
+   from migration `0000`) has no `course_id`/`organization_id` scope.
+   Two organizations on two different Canvas instances (`canvas.uw.edu`
+   vs. any other institution) draw enrollment ids from the same small
+   integer space — collision is near-certain at scale, not theoretical.
+   This PR is the *first* code that ever writes this column, so it's
+   what makes the pre-existing index reachable. One org's data volume can
+   permanently and unresolvably fail another org's sync for the colliding
+   student (availability/integrity, not disclosure — the course-scoped
+   `knownByCanvasId` lookup is correct). Needs a migration to rescope the
+   index to `(organization_id, canvas_enrollment_id)`.
+
+### Also Critical/Major (not in security's own gate, but load-bearing — fix in the same pass)
+
+6. **No concurrency guard on sync, and the DB records reads confirm it's reachable.**
+   Reliability, Critical. `lms_sync_status`'s `'syncing'` value is defined
+   (`identity.ts:86`) and never written anywhere — no advisory lock, no
+   precondition check. Pass C (`CanvasRosterSyncService.ts:193-230`) reads
+   *live* DB state after an arbitrarily long fetch+write window but acts
+   on an `incomingIdSet` snapshot taken *before* that window — so two
+   overlapping sync runs on one course can have the earlier run's Pass C
+   soft-drop a student the later run just added and who is actually
+   currently enrolled. Security's read: not exploitable cross-course (an
+   instructor can only race their own course), but it is a real audit-
+   evasion gap — the outcome is indistinguishable from a legitimate Canvas
+   drop, no per-user attribution, and (given #9 just below) alarmingly
+   easy to trigger by accident.
+7. **The one thing standing between "accident" and "routine occurrence" for #6: sync failures are silent to the user.**
+   Usability/Reliability, Critical. `CanvasIntegrationView.tsx`'s sync
+   timeout (60s) aborts the *client* fetch only — the server-side sync
+   keeps running. The catch path (`~:315-320`) calls `announce()` into the
+   screen-reader-only live region and nothing else: no visible error, no
+   `setSyncResult`, no status refresh. A sighted instructor sees the
+   button flip back to "Sync from Canvas" with zero signal anything
+   happened, and the only reasonable next move is to click it again —
+   which is precisely what reproduces #6. Same silent-catch shape exists
+   on Validate and Link. Security's assessment: this UX gap is the
+   *primary realistic trigger* for the concurrency race, not just an
+   annoyance next to it.
+8. **Sequential per-row DB writes reintroduce a defect this codebase already fixed once (issue #355).**
+   Performance/Functionality/Scalability/Compatibility, Critical (4-way
+   cross-confirmed). `CanvasRosterSyncService.ts`'s Pass A (`:126-145`)
+   and Pass B (`:161-190`) each issue one individual `db.update()` per
+   enrolled student in a sequential loop — exactly the shape `roster.ts`'s
+   own header comment says a prior CSV-import incident (#355) was fixed
+   to eliminate ("~900 [queries] for 300 rows... exceeded both the cap
+   and the wall clock, leaving a half-written roster"). Measured: ~300
+   round trips at 300 students, exceeding the Workers free-tier cap
+   (50) at ~42 students and this repo's own 900-subrequest budget
+   (`autoSubmitOverdue.ts`) at ~890. Security's addition: when the isolate
+   is killed mid-loop, Pass A's already-committed role writes have no
+   accompanying audit event (`auditLmsChange` runs after, at the very
+   end) and `lastSyncStatus` keeps showing the *previous* run's
+   `"success"` — so this isn't just slow, it's FERPA-relevant roster
+   mutation with an actively misleading status and zero audit trail, and
+   it's deterministic at ordinary course sizes, not rare. Fix (given by
+   Performance, matches `roster.ts`'s own `restoresByRole` pattern):
+   group Pass A's writes by `(role, canvasRole)` — ≤5 statements
+   regardless of course size; thread the Canvas stamp into
+   `upsertCourseMembers`'s own write for Pass B. Takes a 2,000-student
+   sync from ~2,028 subrequests to ~35.
+9. **A parsing gap can soft-drop most or all of a roster while reporting `"success"`.**
+   Functionality, Critical. Any enrollment the sync can't interpret
+   (unmapped Canvas role type, missing email) is filtered out *before*
+   `incomingIdSet` is built (`CanvasRosterSyncService.ts:87-110`), so
+   Pass C's removal diff (`:202-230`) reads it as "no longer enrolled,"
+   not "couldn't parse." Concretely: if Canvas ever stops returning
+   `login_id` on the enrollment's embedded user (a real, version-
+   dependent field per Compatibility's finding #12 below — it isn't
+   even a documented field of that object), every row fails to map,
+   `mapped` is empty, and Pass C drops the *entire* previously-synced
+   roster in one sync, reported as success. Security's read: not
+   realistically attacker-triggerable (requires Canvas-side rights that
+   already grant direct removal), but it fails open and silent — a
+   sanity bound (refuse/flag Pass C if `removed` exceeds some fraction
+   of the roster, or if any row failed to parse) is the right guard and
+   would also blunt #6.
+
+### Also worth knowing before merging (Major, not blocking)
+
+10. **Duplicate Canvas enrollments for one person (multi-section — routine, not an edge case) permanently break, not just flap.**
+    Functionality/Flexibility. Two enrollments, same email, different
+    `canvasEnrollmentId`s → the stamping loop overwrites one id with the
+    other on every sync (last-write-wins), and if the two enrollments
+    carry different roles (Student + TA is the common case), the loser's
+    re-sync hits `upsertCourseMembers`' deliberate role-conflict refusal
+    every single time going forward — an unresolvable, un-actionable
+    per-row error the instructor sees on every future sync with no fix
+    available to them. Needs de-duplication by email before Pass B.
+11. **Canvas's rate-limit signal moved from 403 to 429 years ago; this app's backoff only checks for 403.**
+    Compatibility. `isRateLimited` (`canvas-api.ts:80-85`) never matches
+    on a real/current Canvas instance, so the whole backoff/retry
+    mechanism (and `CanvasRateLimitedError`) is dead code today — every
+    rate-limited request throws a generic, unretried `CanvasApiError`
+    mid-pagination. Fix both the detection and the route-layer mapping
+    together (Flexibility separately found the route never distinguishes
+    `CanvasRateLimitedError` from a generic 403 — currently moot since
+    it's unreachable, but would become a live bug the moment 429-
+    detection is added without also fixing the mapping).
+12. **`login_id` is not a documented field of the enrollment's embedded user object,** and where present is a NetID-style login name, not an email, at NetID institutions (UW is the target deployment). Compatibility. Root cause of #9's most likely real-world trigger.
+13. **`lms_integrations.apiCredentialId` is written and never read** — every credential resolution goes straight to the org-wide singleton by fixed label, ignoring which credential a specific course-link actually recorded. Flexibility/Security. Not cross-tenant-unsafe today (the singleton lookup is itself org-scoped), but a rotated token silently re-authorizes every dormant course link with no confirmation, and it's exactly the kind of write-and-ignore field that becomes a real confusion bug the moment a second credential per org is ever added.
+
+### Usability/Accessibility — extensive, not merge-blocking on security grounds but real regressions against this codebase's own established bar
+
+Both reviews graded against `TaCapabilitiesView.tsx`/`StudentsView.tsx`,
+which have been through multiple real remediation passes documented in
+their own code comments (the "ACC-NNN"/"USE-NNN" convention). Highest-
+value items:
+
+- **No visible error on sync/validate/link timeout or failure** (Usability
+  Critical, same defect as #7 above, also present on Validate/Link).
+- **A failed *load* renders as "no token on file"** and the recovery path
+  offered is destructive — re-entering the token — for what's usually a
+  transient network blip on an org-wide credential (Usability, Major).
+- **No focus management across six teardown paths** — repeat of this
+  codebase's own documented ACC-020 lesson; a keyboard/screen-reader user
+  loses their place to `<body>` on Replace/Cancel/Save/Delete/Link/Cancel
+  (Accessibility, Critical).
+- **Six buttons `disabled` while in flight** — repeat of the documented
+  ACC-002 lesson (disabling a focused control blurs it and drops a
+  keyboard user); the established fix in this codebase is a re-entry
+  guard, not `disabled` (Accessibility, Major).
+- **Four of the six error/status regions are conditionally-mounted
+  `role="alert"`/`role="status"`** — repeat of the documented ACC-004
+  lesson (a region inserted already containing its text doesn't reliably
+  announce); several also double-announce via both the region and
+  `announce()` (repeat of ACC-025) (Accessibility, Major).
+- **No `aria-invalid`/`aria-errormessage` field association anywhere** —
+  every validation error surfaces in a page-level banner instead of next
+  to the field that caused it, the exact case this codebase's own
+  ACC-003 fix (cited in `styles.css`'s own comments) exists to prevent;
+  the CSS rule for it is present and unused in this view (Accessibility,
+  Major).
+- **The sync result — the actual point of the feature — renders as the
+  quietest, smallest text on the page**, with unidentified rows (no
+  student name attached to a failure) and at least one raw internal
+  value leaking through (`Could not enroll jane@uw.edu (role_conflict).`,
+  since that repository result carries no message field) (Usability,
+  Major). This repo already has the right pattern one file away
+  (`RosterImportPanel.tsx`'s tone-and-copy table for the same
+  `ProvisionStatus` values) — reuse it rather than rendering raw.
+- **The linked course displays as a raw numeric Canvas ID** with no name,
+  so an instructor teaching two sections can't verify which one they
+  linked without re-opening the picker (Usability, Major).
+- **Nothing prompts validation after save, and an invalid token "saves
+  successfully"** with no on-card indication it was never verified
+  (Usability, Major).
+- **The org-wide blast radius of removing the token is never stated**,
+  and the confirm dialog is generic where every sibling confirm dialog in
+  this codebase names the subject, states the consequence, states what's
+  preserved, and states the undo path (Usability, Major).
+- **A new WCAG 1.4.11 contrast failure**, introduced by today's own CSS
+  fix: the border color the fix correctly applied (`--color-border`) is
+  the same token already used for `text`/`select`/`textarea` and already
+  fails 3:1 there — but for `password`/`url`/`date` specifically this is
+  a *regression*, since those fields previously fell through to the
+  browser's default border (~4.3:1, passing). The right fix is a
+  dedicated input-boundary token across the whole `.admin-form-field`
+  rule, not a revert (Accessibility, Major).
+- Full lists (Minor/Enhancement tier, ~15 more items each) are in the two
+  agents' own transcripts — expiry-date off-by-one-day rendering
+  (timezone), a stray missing hint id on two of three form fields, no
+  loading-state noun, etc. Not reproduced here; ask if a full itemized
+  pass is wanted before fixing.
+
+### Maintainability findings worth carrying forward (Major, not merge-blocking)
+
+- Pass A's restore comment claims a `droppedReason` scoping it doesn't
+  implement (the same defect as blocking item #4/#6 above, independently
+  caught by a different lens).
+- Pass C duplicates `removeCourseMember`'s drop write field-for-field but
+  silently omits its instructor/admin removal guard, with no comment
+  saying that's deliberate.
+- Seven of nine new wire types (`shared/types.ts` + `packages/ui/src/api/types.ts`)
+  are declared, exported, and never imported anywhere — inert
+  documentation that can't drift-detect, unlike this repo's own
+  convention of binding response types at the return site.
+- Three hand-written copies of the `lms_sync_status` vocabulary (schema
+  enum, two TS unions) with no parity test, unlike `course_role`'s own
+  `courseRoleParity.test.ts` guarding the identical shape of problem.
+- `orgScopeForInstructor`-equivalent authority→scope translation now
+  exists in three places (`llmConfigs.ts`, `canvasCredentials.ts`,
+  `canvasSync.ts`), two of them stripped of the original's explanatory
+  comment.
+
+### Recommended next step
+
+Security's own merge gate (items 1-5 above) plus items 6-9 are the real
+blocking set — all five of security's items are narrow (1-2 line fixes
+for #4, a same-origin+page-bound check for #1/#2, a `listCanvasCourses`
+cross-check for #3, one migration for #5). Items 6-9 share a root cause
+(#8's batching fix) or are cheap (#6/#7's status-write + visible-error
+pair). Recommend fixing all nine in this same PR before merge, plus the
+highest-value usability/accessibility items (visible error states,
+focus management, the field-error association), given how much of the
+usability/accessibility list traces back to the same few root causes
+(silent catches, six unguarded teardowns) rather than being 30
+independent problems.
+
 ## 2026-09-14 sync check (end-to-end provisioning verification, post-PR-open)
 
 User request after PR #457 was open and reviewer-requested: prove the

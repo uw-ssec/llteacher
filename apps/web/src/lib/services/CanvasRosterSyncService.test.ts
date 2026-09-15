@@ -262,6 +262,65 @@ describe.skipIf(!DATABASE_URL)("syncCanvasRoster (#74)", () => {
     });
   });
 
+  // #9 (functionality review, PR #457): a previously-synced enrollment that
+  // fails to parse on a LATER sync (an unmapped role, a missing email) must
+  // be reported as a per-row error, not read as "no longer enrolled" and
+  // soft-dropped. Before this fix, Pass C's removal diff was built from
+  // only the successfully-mapped rows, so a parsing gap on an
+  // already-active enrollment silently cost that person their access.
+  it("does not soft-drop a previously-synced enrollment that fails to parse on a later sync", async () => {
+    const scope = await newCourse();
+    const enrollment = enrollmentFactory();
+    const e1 = enrollment("e1");
+    listCanvasEnrollmentsMock.mockResolvedValueOnce([e1]);
+    await syncCanvasRoster(db, cipher, scope, "canvas-1", CREDENTIAL);
+
+    // Same enrollment id, but Canvas now returns no email for it (or an
+    // unmapped role) -- a real gap, but not a removal.
+    listCanvasEnrollmentsMock.mockResolvedValueOnce([enrollment("e1", { email: null })]);
+    const second = await syncCanvasRoster(db, cipher, scope, "canvas-1", CREDENTIAL);
+
+    expect(second.removed).toBe(0);
+    expect(second.errors).toEqual([{ canvasEnrollmentId: e1.canvasEnrollmentId, message: expect.any(String) }]);
+    const rows = await membershipsFor(scope);
+    const row = rows.find((r) => r.course_memberships.canvasEnrollmentId === e1.canvasEnrollmentId)!;
+    expect(row.course_memberships.droppedAt).toBeNull();
+  });
+
+  // #4 (security review, PR #457): the DB's own
+  // course_memberships_capabilities_require_ta constraint means a TA's
+  // capability grants MUST be cleared the moment Canvas reports they're no
+  // longer a TA -- every other role/restore write in this codebase already
+  // does this; Pass A's known-row update previously didn't, so this write
+  // used to throw and get swallowed into the per-row error array while the
+  // sync still reported success, leaving the demoted TA's grant in place.
+  it("clears TA capability grants when Canvas demotes a known TA", async () => {
+    const scope = await newCourse();
+    const enrollment = enrollmentFactory();
+    const e1 = enrollment("e1", { type: "TaEnrollment" });
+    listCanvasEnrollmentsMock.mockResolvedValueOnce([e1]);
+    await syncCanvasRoster(db, cipher, scope, "canvas-1", CREDENTIAL);
+
+    let rows = await membershipsFor(scope);
+    const membershipId = rows.find((r) => r.course_memberships.canvasEnrollmentId === e1.canvasEnrollmentId)!
+      .course_memberships.id;
+    await db
+      .update(courseMemberships)
+      .set({ canViewSolutions: true, canViewDrafts: true })
+      .where(eq(courseMemberships.id, membershipId));
+
+    listCanvasEnrollmentsMock.mockResolvedValueOnce([enrollment("e1", { type: "StudentEnrollment" })]);
+    const second = await syncCanvasRoster(db, cipher, scope, "canvas-1", CREDENTIAL);
+
+    expect(second.errors).toEqual([]);
+    rows = await membershipsFor(scope);
+    const demoted = rows.find((r) => r.course_memberships.canvasEnrollmentId === e1.canvasEnrollmentId)!
+      .course_memberships;
+    expect(demoted.role).toBe("student");
+    expect(demoted.canViewSolutions).toBe(false);
+    expect(demoted.canViewDrafts).toBe(false);
+  });
+
   afterAll(async () => {
     vi.restoreAllMocks();
   });

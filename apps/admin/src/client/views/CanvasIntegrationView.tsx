@@ -165,8 +165,18 @@ export function CanvasIntegrationView({
       setValidation(null);
       announce("Canvas token removed.");
     } catch (err) {
+      // #7 (usability/reliability review, PR #457): a real component
+      // teardown aborts with reason.name "AbortError" (the parent
+      // lifecycle signal's default); abortAfter's own timeout aborts with
+      // "TimeoutError" (abortAfter.ts) and must still surface visibly --
+      // announce() alone reaches only a screen reader's live region, so a
+      // sighted instructor saw the button reset with zero signal anything
+      // happened, and the only reasonable next move was to click it
+      // again, which is exactly how #6's sync race gets triggered.
       if ((err as Error)?.name === "AbortError") return;
-      announce("Could not remove that token. Please try again.");
+      const message = "Could not remove that token. Please try again.";
+      setCredentialError(message);
+      announce(message);
     } finally {
       dispose();
     }
@@ -213,6 +223,7 @@ export function CanvasIntegrationView({
   const [linking, setLinking] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<CanvasSyncResponse | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
 
   const loadStatus = useCallback(() => {
     const { signal, dispose } = abortAfter(15_000, abortRef.current?.signal ?? null);
@@ -281,8 +292,12 @@ export function CanvasIntegrationView({
       announce("Course linked to Canvas.");
       loadStatus();
     } catch (err) {
+      // #7: see deleteCredential's catch above for why this must not be
+      // announce()-only.
       if ((err as Error)?.name === "AbortError") return;
-      announce("Could not link that course. Please try again.");
+      const message = "Could not link that course. Please try again.";
+      setCourseOptionsError(message);
+      announce(message);
     } finally {
       setLinking(false);
       dispose();
@@ -292,15 +307,20 @@ export function CanvasIntegrationView({
   const runSync = useCallback(async () => {
     setSyncing(true);
     setSyncResult(null);
+    setSyncError(null);
     announce("Syncing roster from Canvas — this can take a moment for a large course…");
     // A full-course sync (fetch every page of enrollments, then write) can
     // genuinely run long; this ceiling is generous rather than tight, so a
-    // real sync isn't mistaken for a hang.
+    // real sync isn't mistaken for a hang. Aborting here only cancels the
+    // CLIENT's fetch -- the server-side sync keeps running -- which is
+    // exactly why this catch must leave a visible, actionable trace
+    // rather than silently resetting the button (#7 below).
     const { signal, dispose } = abortAfter(60_000, abortRef.current?.signal ?? null);
     try {
       const res = await fetch(`/api/courses/${courseId}/canvas/sync`, { method: "POST", signal });
       if (!res.ok) {
         const message = await errorMessageFor(res, "The sync could not complete.");
+        setSyncError(message);
         announce(message);
         loadStatus();
         return;
@@ -313,8 +333,22 @@ export function CanvasIntegrationView({
       );
       loadStatus();
     } catch (err) {
+      // #7 (usability/reliability review, PR #457): the previous version
+      // of this catch called announce() only -- a sighted instructor saw
+      // the button flip back to "Sync from Canvas" with no visible signal
+      // anything went wrong, and the only reasonable next move was to
+      // click it again while the FIRST sync might still be running
+      // server-side -- precisely what #6's concurrency guard now refuses,
+      // but a clear error here is what stops the instructor from hitting
+      // it in the first place.
       if ((err as Error)?.name === "AbortError") return;
-      announce("The sync could not complete. Please try again.");
+      const message =
+        (err as Error)?.name === "TimeoutError"
+          ? "The sync is taking longer than expected. It may still be running -- check back shortly, or try again once it finishes."
+          : "The sync could not complete. Please try again.";
+      setSyncError(message);
+      announce(message);
+      loadStatus();
     } finally {
       setSyncing(false);
       dispose();
@@ -412,10 +446,18 @@ export function CanvasIntegrationView({
                 id="canvas-base-url"
                 type="url"
                 required
-                placeholder="https://uw.instructure.com"
+                placeholder="https://canvas.uw.edu"
+                aria-describedby="canvas-base-url-hint"
                 value={baseUrlInput}
                 onChange={(e) => setBaseUrlInput(e.target.value)}
               />
+              {/* A placeholder disappears the moment the field is focused, so
+                  it can't be the only place this example lives -- an
+                  instructor tabbing in and typing never sees it. */}
+              <p className="admin-form-hint" id="canvas-base-url-hint">
+                For example: <code>https://canvas.uw.edu</code> — the address bar URL when you're
+                signed into Canvas, with no path after it.
+              </p>
             </div>
             <div className="admin-form-field">
               <label htmlFor="canvas-token">API token</label>
@@ -511,6 +553,15 @@ export function CanvasIntegrationView({
                   Change linked course
                 </button>
               </div>
+
+              {syncError && (
+                <div className="admin-alert" role="alert">
+                  <span className="admin-alert__icon" aria-hidden="true">
+                    <Warning size={16} weight="regular" />
+                  </span>
+                  <span>{syncError}</span>
+                </div>
+              )}
 
               {syncResult && (
                 <div className="admin-form-hint" role="status">

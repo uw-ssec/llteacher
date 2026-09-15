@@ -26,6 +26,7 @@ const getLmsIntegrationMock = vi.fn();
 const linkCanvasCourseMock = vi.fn();
 const markCourseSyncedMock = vi.fn();
 const updateSyncStatusMock = vi.fn();
+const beginSyncMock = vi.fn();
 const auditBestEffortMock = vi.fn();
 const listCanvasCoursesMock = vi.fn();
 const syncCanvasRosterMock = vi.fn();
@@ -41,6 +42,7 @@ vi.mock("../repositories/lmsIntegrations", () => ({
   linkCanvasCourse: (...a: unknown[]) => linkCanvasCourseMock(...a),
   markCourseSynced: (...a: unknown[]) => markCourseSyncedMock(...a),
   updateSyncStatus: (...a: unknown[]) => updateSyncStatusMock(...a),
+  beginSync: (...a: unknown[]) => beginSyncMock(...a),
 }));
 vi.mock("../utils/audit", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../utils/audit")>()),
@@ -104,6 +106,7 @@ beforeEach(() => {
   linkCanvasCourseMock.mockReset().mockResolvedValue({ outcome: "linked", lmsIntegrationId: "lms-1" });
   markCourseSyncedMock.mockReset().mockResolvedValue(undefined);
   updateSyncStatusMock.mockReset().mockResolvedValue(undefined);
+  beginSyncMock.mockReset().mockResolvedValue(true);
   auditBestEffortMock.mockReset().mockResolvedValue(undefined);
   listCanvasCoursesMock.mockReset().mockResolvedValue([
     { canvasCourseId: "canvas-course-1", name: "STATS 311", courseCode: "STATS 311 A", term: "Fall" },
@@ -206,6 +209,21 @@ describe("PUT link", () => {
     expect(linkCanvasCourseMock).not.toHaveBeenCalled();
   });
 
+  it("#3: refuses to link a Canvas course the org's own token can't see", async () => {
+    // listCanvasCoursesMock's default resolved value only names
+    // "canvas-course-1" -- a course id the token doesn't report must be
+    // refused rather than linked, or any instructor in the org could pull
+    // a colleague's roster onto their own course via the shared org-wide
+    // token.
+    const res = await buildApp(instructorOfA()).request(
+      url("/link"),
+      json("PUT", { canvasCourseId: "some-other-instructors-course" }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(403);
+    expect(linkCanvasCourseMock).not.toHaveBeenCalled();
+  });
+
   it("rejects a missing canvasCourseId", async () => {
     const res = await buildApp(instructorOfA()).request(url("/link"), json("PUT", {}), TEST_ENV);
     expect(res.status).toBe(400);
@@ -232,6 +250,13 @@ describe("POST sync", () => {
 
   it("requires the course to be linked first", async () => {
     getLmsIntegrationMock.mockResolvedValue(null);
+    const res = await buildApp(instructorOfA()).request(url("/sync"), { method: "POST" }, TEST_ENV);
+    expect(res.status).toBe(409);
+    expect(syncCanvasRosterMock).not.toHaveBeenCalled();
+  });
+
+  it("#6: refuses to start a second sync while one is already running", async () => {
+    beginSyncMock.mockResolvedValue(false);
     const res = await buildApp(instructorOfA()).request(url("/sync"), { method: "POST" }, TEST_ENV);
     expect(res.status).toBe(409);
     expect(syncCanvasRosterMock).not.toHaveBeenCalled();
