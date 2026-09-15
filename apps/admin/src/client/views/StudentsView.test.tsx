@@ -23,6 +23,7 @@ const ACTIVE = {
   enrolledAt: "2026-01-01T00:00:00.000Z",
   lastLoginAt: new Date(Date.now() - 3_600_000).toISOString(),
   droppedAt: null,
+  fromCanvas: false,
 };
 const PENDING = {
   ...ACTIVE,
@@ -74,6 +75,18 @@ describe("StudentsView (#32)", () => {
     // A pending person has no display name until their first login; saying
     // "(no name on file)" would read as a data problem.
     expect(screen.getByText("ghopper")).toBeTruthy();
+  });
+
+  // #61's own acceptance checklist ("Canvas badge" on synced roster rows).
+  it("shows a Canvas badge only for a member synced from Canvas", async () => {
+    const SYNCED = { ...PENDING, membershipId: "m-4", email: "synced@uw.edu", fromCanvas: true };
+    stub(() => rosterResponse([ACTIVE, SYNCED]));
+    renderView();
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    expect(screen.getByText("Canvas")).toBeTruthy();
+    // Exactly one row has the badge -- ACTIVE (fromCanvas: false) doesn't.
+    expect(screen.getAllByText("Canvas")).toHaveLength(1);
   });
 
   it("keeps removed people visible rather than hiding them", async () => {

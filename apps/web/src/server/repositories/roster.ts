@@ -690,6 +690,7 @@ export async function listCourseRoster(
       enrolledAt: courseMemberships.enrolledAt,
       lastLoginAt: users.lastLoginAt,
       droppedAt: courseMemberships.droppedAt,
+      canvasEnrollmentId: courseMemberships.canvasEnrollmentId,
     })
     .from(courseMemberships)
     .innerJoin(users, eq(courseMemberships.userId, users.id))
@@ -727,6 +728,7 @@ export async function listCourseRoster(
       enrolledAt: r.enrolledAt.toISOString(),
       lastLoginAt: r.lastLoginAt ? r.lastLoginAt.toISOString() : null,
       droppedAt: r.droppedAt ? r.droppedAt.toISOString() : null,
+      fromCanvas: r.canvasEnrollmentId !== null,
     });
   }
 

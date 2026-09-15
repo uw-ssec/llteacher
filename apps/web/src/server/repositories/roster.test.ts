@@ -86,6 +86,21 @@ describe.skipIf(!DATABASE_URL)("roster provisioning (#32, #86)", () => {
     expect(member.role).toBe("student");
   });
 
+  // #61's own acceptance checklist ("Canvas badge" on synced roster rows).
+  it("marks fromCanvas true only for a membership with a canvasEnrollmentId, false otherwise", async () => {
+    const addr = email();
+    const added = await upsertCourseMember(db, scope(), cipher, { email: addr, role: "student" }, UW);
+    let { members } = await listCourseRoster(db, scope(), cipher, { search: addr });
+    expect(members.find((m) => m.email === addr)!.fromCanvas).toBe(false);
+
+    await db
+      .update(courseMemberships)
+      .set({ canvasEnrollmentId: `ce-${crypto.randomUUID().slice(0, 8)}` })
+      .where(eq(courseMemberships.id, added.membershipId!));
+    ({ members } = await listCourseRoster(db, scope(), cipher, { search: addr }));
+    expect(members.find((m) => m.email === addr)!.fromCanvas).toBe(true);
+  });
+
   it("derives and stores the NetID for a uw.edu address", async () => {
     // The #210 admin search keys on netid_blind_index; waiting for a first
     // login to populate it would make a just-imported student unfindable.

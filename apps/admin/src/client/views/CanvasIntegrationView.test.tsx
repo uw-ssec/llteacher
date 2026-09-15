@@ -399,7 +399,10 @@ describe("CanvasIntegrationView -- course link + sync (#74)", () => {
     await waitFor(() => screen.getByRole("button", { name: /Sync from Canvas/ }));
     fireEvent.click(screen.getByRole("button", { name: /Sync from Canvas/ }));
 
-    await waitFor(() => screen.getByText("2 added, 1 updated, 0 removed."));
+    // #61's own acceptance checklist: the result names both counts AND
+    // duration ("2 added, 1 updated, 0 removed in 0.0s." -- exact seconds
+    // vary by test-run speed, so this only pins the counts + shape).
+    await waitFor(() => screen.getByText(/2 added, 1 updated, 0 removed in \d+\.\d+s\./));
   });
 
   // #8 (usability review, PR #457): an instructor teaching two sections
@@ -466,7 +469,7 @@ describe("CanvasIntegrationView -- course link + sync (#74)", () => {
     fireEvent.click(screen.getByRole("button", { name: /Sync from Canvas/ }));
 
     await waitFor(() => screen.getByText("No email address on file."));
-    expect(screen.getByText("1 added, 0 updated, 0 removed.")).toBeTruthy();
+    expect(screen.getByText(/1 added, 0 updated, 0 removed in \d+\.\d+s\./)).toBeTruthy();
   });
 
   // #7 (usability/reliability review, PR #457): a request-level sync

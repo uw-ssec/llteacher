@@ -36,6 +36,15 @@ function expiryStateText(expiresAt: string | null): { text: string; overdue: boo
   return { text: `Expires ${date}.`, overdue: false };
 }
 
+/** #61's own acceptance checklist: sync results show duration alongside
+ *  row counts. Sub-second syncs (the common case against a small seeded
+ *  course) read as "0.4s", not "0s" -- one decimal place is precise
+ *  enough for an instructor deciding whether a sync hung, not a
+ *  benchmark. */
+function formatDuration(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
 async function errorMessageFor(res: Response, fallback: string): Promise<string> {
   try {
     const body = (await res.json()) as { error?: unknown };
@@ -360,6 +369,7 @@ export function CanvasIntegrationView({
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<CanvasSyncResponse | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncDurationMs, setSyncDurationMs] = useState<number | null>(null);
 
   const loadStatus = useCallback(() => {
     const { signal, dispose } = abortAfter(15_000, abortRef.current?.signal ?? null);
@@ -474,6 +484,11 @@ export function CanvasIntegrationView({
     setSyncing(true);
     setSyncResult(null);
     setSyncError(null);
+    setSyncDurationMs(null);
+    // #61's own "End-to-end acceptance checklist" ("Sync from Canvas...
+    // displays row count and duration") -- a client-observed wall-clock
+    // measurement, not something the server needs to compute or return.
+    const startedAt = Date.now();
     announce("Syncing roster from Canvas — this can take a moment for a large course…");
     // A full-course sync (fetch every page of enrollments, then write) can
     // genuinely run long; this ceiling is generous rather than tight, so a
@@ -492,9 +507,11 @@ export function CanvasIntegrationView({
         return;
       }
       const data = (await res.json()) as CanvasSyncResponse;
+      const durationMs = Date.now() - startedAt;
       setSyncResult(data);
+      setSyncDurationMs(durationMs);
       announce(
-        `Sync complete: ${data.added} added, ${data.updated} updated, ${data.removed} removed` +
+        `Sync complete in ${formatDuration(durationMs)}: ${data.added} added, ${data.updated} updated, ${data.removed} removed` +
           (data.errors.length > 0 ? `, ${data.errors.length} could not be synced.` : "."),
       );
       loadStatus();
@@ -823,7 +840,8 @@ export function CanvasIntegrationView({
               {syncResult && (
                 <div className="admin-form-hint">
                   <p>
-                    {syncResult.added} added, {syncResult.updated} updated, {syncResult.removed} removed.
+                    {syncResult.added} added, {syncResult.updated} updated, {syncResult.removed} removed
+                    {syncDurationMs !== null && ` in ${formatDuration(syncDurationMs)}`}.
                   </p>
                   {syncResult.errors.length > 0 && (
                     <ul>

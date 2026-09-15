@@ -134,6 +134,12 @@ export interface RosterMemberPayload {
   enrolledAt: IsoDateTime;
   lastLoginAt: IsoDateTime | null;
   droppedAt: IsoDateTime | null;
+  /** #61's own acceptance checklist ("Student list shows Canvas-synced
+   *  users with a Canvas badge"). Derived from whether the membership
+   *  carries a canvasEnrollmentId, not the id itself -- the client has
+   *  no use for Canvas's internal id, only whether the row came from a
+   *  sync. */
+  fromCanvas: boolean;
 }
 
 export interface RosterListPayload {

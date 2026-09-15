@@ -4778,6 +4778,24 @@ body {
   color: var(--color-accent);
 }
 
+/* #61's own acceptance checklist ("Canvas badge" on synced roster rows).
+   Same small-pill visual language as .admin-chip -- mono, uppercase,
+   subtle border -- but static: no cursor/hover, since this labels a
+   fact about the row (where it came from), not a control. */
+.admin-source-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
 .admin-roster-row__identity {
   display: flex;
   align-items: center;
