@@ -67,7 +67,13 @@ function fieldForCredentialError(message: string): "canvas-base-url" | "canvas-t
 
 export function CanvasIntegrationView({
   courseId,
-  courseTitle,
+  // Unused for now -- the page header dropped the per-course title
+  // suffix (`Canvas · ${courseTitle}`) since the only course in this
+  // console today is seed data, not something an instructor picked.
+  // Kept in the prop type rather than removed so restoring it later (once
+  // there's a real multi-course picker) is a one-line change here, not a
+  // signature change at the call site too.
+  courseTitle: _courseTitle,
 }: {
   courseId: string;
   courseTitle: string;
@@ -519,7 +525,7 @@ export function CanvasIntegrationView({
     <div className="admin-view">
       <PageHeader
         eyebrow="CANVAS INTEGRATION"
-        title={`Canvas · ${courseTitle}`}
+        title="Canvas"
         subtitle="Connect this organization's Canvas account and keep a course roster in sync from it."
       />
 
