@@ -546,7 +546,7 @@ export interface CanvasSyncResponse {
   errors: { canvasEnrollmentId: string; message: string }[];
 }
 
-// Cloudflare Worker bindings + secrets. Augmented in Phase 1+.
+// Node runtime configuration + secrets. Augmented in Phase 1+.
 declare global {
   interface Env {
     DATABASE_URL: string;
@@ -578,7 +578,6 @@ declare global {
        degradation: a missing platform credential still fails loudly rather
        than silently answering from a model nobody chose. */
     LLM_DEGRADED_MODEL?: string;
-    ASSETS: Fetcher;
     // Auth (M1): sealed session cookie key + IdentityCipher keys.
     SESSION_SECRET: string;
     ENCRYPTION_KEY: string;
