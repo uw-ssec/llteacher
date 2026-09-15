@@ -38,15 +38,12 @@
    query (findOverdueSubmissionCandidates, repositories/submissions.ts).
 
    ---------------------------------------------------------------------------
-   Design decision 2 -- Cloudflare Cron Trigger.
+   Design decision 2 -- explicit Node job command.
 
-   This app deploys as a Cloudflare Worker (apps/web/wrangler.jsonc, `npm
-   run deploy` = migrate + `wrangler deploy`); there is no AWS/EventBridge
-   infrastructure in the tree despite #167's own note gesturing at it as a
-   future target. The native mechanism is a Cron Trigger firing the Worker's
-   `scheduled()` export, which is what server/index.ts now wires -- no new
-   runtime, no new deploy target, and the schedule itself is one line of
-   already-reviewed config rather than an admin screen.
+   The Node deployment invokes this sweep through a dedicated command rather
+   than a web-request handler. Scheduler configuration and process lifecycle
+   belong to deployment code, keeping this function focused on selecting and
+   submitting eligible sections exactly once.
 
    ---------------------------------------------------------------------------
    Design decision 3 -- bounded per invocation (final review).

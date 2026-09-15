@@ -40,7 +40,6 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
     WORKOS_CLIENT_ID: "unused",
     OPENROUTER_API_KEY: "",
     LLMOXIE_API_KEY: "",
-    ASSETS: {} as Env["ASSETS"],
     SESSION_SECRET: "unused",
     ENCRYPTION_KEY: "unused",
     BLIND_INDEX_KEY: "unused",

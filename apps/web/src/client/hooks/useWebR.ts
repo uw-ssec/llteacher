@@ -20,7 +20,7 @@ import { useCallback, useState } from "react";
    scripts/copy-webr-assets.mjs, which materializes them into Vite's public
    dir at dev/build time (not committed, same reasoning as node_modules/
    itself) -- so computeModuleUrl() below now resolves to a same-origin path
-   served through the app's own ASSETS binding, not a third-party CDN.
+   served through the app's own Node static server, not a third-party CDN.
 
    `baseUrl` (not the `SW_URL` option the old code passed, which isn't a
    real WebROptions field in this pinned version -- see below) points the
@@ -64,8 +64,8 @@ import { useCallback, useState } from "react";
    request, not on page load").
    -------------------------------------------------------------------------- */
 
-/** Same-origin path served by Vite's public dir (dev) / the Workers ASSETS
- *  binding (prod) -- see scripts/copy-webr-assets.mjs and this file's own
+/** Same-origin path served by Vite's public dir (dev) / the Node static
+ *  server (prod) -- see scripts/copy-webr-assets.mjs and this file's own
  *  header comment. Kept as a runtime specifier (not a static `import
  *  "webr"`) for the same reason the old CDN version was: `@vite-ignore`
  *  below tells Vite not to try to bundle/analyze the ~18MB WASM binary this

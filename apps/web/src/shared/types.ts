@@ -561,7 +561,7 @@ declare global {
        "openrouter-only configs never read it" case, it's a platform-wide
        500 on every message. resolveApiKey previously cast Env away
        entirely (`c.env as unknown as Record<string, string | undefined>`),
-       which meant neither tsc nor `wrangler types` could flag an absent
+       which meant neither tsc nor the runtime configuration tests could flag an absent
        secret at all; that cast is now confined to one narrow,
        allowlist-gated helper (llm-config.ts's readEnvSecret) instead of
        erasing the whole Env contract at the chat.ts call site. */
