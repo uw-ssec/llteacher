@@ -48,6 +48,23 @@ async function errorMessageFor(res: Response, fallback: string): Promise<string>
   return fallback;
 }
 
+/** #6 (accessibility review, PR #457, ACC-003): this view's own error
+ *  messages come back as one page-level string, not a field-scoped
+ *  response the server tags -- so the field to mark aria-invalid is
+ *  inferred from which of THIS form's own fixed, known validation
+ *  sentences the message matches (parseCanvasBaseUrl/setCanvasCredentialHandler,
+ *  canvasCredentials.ts). Returns null rather than guessing wrong when a
+ *  message doesn't match any of them (a network failure, a 5xx) -- an
+ *  unmatched error stays page-level only, which is correct: it isn't
+ *  about a specific field's content. */
+function fieldForCredentialError(message: string): "canvas-base-url" | "canvas-token" | "canvas-token-expiry" | null {
+  const lower = message.toLowerCase();
+  if (lower.includes("url") || lower.includes("canvas instance")) return "canvas-base-url";
+  if (lower.includes("token")) return "canvas-token";
+  if (lower.includes("expiry") || lower.includes("date")) return "canvas-token-expiry";
+  return null;
+}
+
 export function CanvasIntegrationView({
   courseId,
   courseTitle,
@@ -62,9 +79,58 @@ export function CanvasIntegrationView({
     [],
   );
 
+  // #3 (accessibility review, PR #457, ACC-020): six state transitions in
+  // this view swap which DOM block is rendered (the token card <-> the
+  // token form, the "link a course" button <-> the picker <-> the linked-
+  // course view) -- each one, unguided, drops keyboard/screen-reader focus
+  // to <body>. `focusTargetRef` names where focus should land after the
+  // NEXT render reflects a transition; a plain no-dependency-array effect
+  // (the same "runs after every render, no-ops when nothing is pending"
+  // shape as this view's other one-shot effects) applies and clears it.
+  // Mirrors TaCapabilitiesView's own restoreFocusTo pattern, simplified
+  // for this view's single-target (not per-row) shape.
+  type FocusTarget =
+    | "credential-base-url"
+    | "credential-replace-button"
+    | "credential-validate-button"
+    | "link-course-button"
+    | "course-select"
+    | "sync-button";
+  const focusTargetRef = useRef<FocusTarget | null>(null);
+  const baseUrlInputRef = useRef<HTMLInputElement>(null);
+  const replaceButtonRef = useRef<HTMLButtonElement>(null);
+  const validateButtonRef = useRef<HTMLButtonElement>(null);
+  const linkCourseButtonRef = useRef<HTMLButtonElement>(null);
+  const courseSelectRef = useRef<HTMLSelectElement>(null);
+  const syncButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const target = focusTargetRef.current;
+    if (!target) return;
+    focusTargetRef.current = null;
+    const refs: Record<FocusTarget, React.RefObject<HTMLElement | null>> = {
+      "credential-base-url": baseUrlInputRef,
+      "credential-replace-button": replaceButtonRef,
+      "credential-validate-button": validateButtonRef,
+      "link-course-button": linkCourseButtonRef,
+      "course-select": courseSelectRef,
+      "sync-button": syncButtonRef,
+    };
+    refs[target].current?.focus();
+  });
+
   // ---- Section 1: the org's Canvas token ----
   const [credential, setCredential] = useState<CanvasCredentialSummary | null | undefined>(undefined);
   const [credentialError, setCredentialError] = useState<string | null>(null);
+  // #2 (usability review, PR #457): a transient network blip on
+  // loadCredential previously set `credential` to null on ANY failure,
+  // which this view's own render logic reads as "no token on file" and
+  // shows the blank entry form -- the org's real token is still saved,
+  // but the recovery path offered (re-enter it from scratch) is both
+  // wrong and needlessly destructive-feeling. This flag keeps `credential`
+  // truly unknown on a load failure so the credentialError banner (with a
+  // Retry action) renders instead of the entry form.
+  const [credentialLoadFailed, setCredentialLoadFailed] = useState(false);
   const [editingCredential, setEditingCredential] = useState(false);
   const [tokenInput, setTokenInput] = useState("");
   const [baseUrlInput, setBaseUrlInput] = useState("https://");
@@ -75,6 +141,14 @@ export function CanvasIntegrationView({
   const [savingCredential, setSavingCredential] = useState(false);
   const [validating, setValidating] = useState(false);
   const [validation, setValidation] = useState<{ ok: boolean; message: string } | null>(null);
+  // #4 (accessibility review, PR #457, ACC-002): plain refs, not state --
+  // these guard re-entry inside the handlers below (see saveCredential/
+  // deleteCredential) instead of `disabled` on the button, which is the
+  // established fix in this codebase for the same lesson (disabling a
+  // focused control blurs it and drops a keyboard user). No render needs
+  // to react to these directly; the button's own label text (e.g.
+  // "Saving…") is the visible in-flight signal.
+  const deletingCredentialRef = useRef(false);
 
   const loadCredential = useCallback(() => {
     announce("Loading Canvas token settings…");
@@ -87,12 +161,15 @@ export function CanvasIntegrationView({
       .then((data) => {
         setCredential(data.credential);
         setCredentialError(null);
+        setCredentialLoadFailed(false);
         if (data.credential) setBaseUrlInput(data.credential.canvasBaseUrl);
       })
       .catch((err: unknown) => {
         if ((err as Error)?.name === "AbortError") return;
-        setCredentialError((err as Error).message || "Could not load Canvas token settings.");
-        setCredential(null);
+        const message = (err as Error).message || "Could not load Canvas token settings.";
+        setCredentialError(message);
+        setCredentialLoadFailed(true);
+        announce(message);
       })
       .finally(dispose);
   }, [courseId, announce]);
@@ -104,9 +181,61 @@ export function CanvasIntegrationView({
     return () => controller.abort();
   }, [loadCredential]);
 
+  // Declared before saveCredential (below), which calls this directly
+  // after a successful save (#9) -- kept in saveCredential's own
+  // dependency array, so it needs to already be initialized by then.
+  const validateCredential = useCallback(async () => {
+    // #4 (accessibility review, PR #457, ACC-002): re-entry guard, not
+    // `disabled` -- see deletingCredentialRef's own comment above.
+    if (validating) {
+      announce("Still validating — please wait.");
+      return;
+    }
+    setValidating(true);
+    setValidation(null);
+    announce("Validating Canvas token…");
+    const { signal, dispose } = abortAfter(20_000, abortRef.current?.signal ?? null);
+    try {
+      const res = await fetch(`/api/courses/${courseId}/canvas/credential/validate`, {
+        method: "POST",
+        signal,
+      });
+      if (!res.ok) {
+        const message = await errorMessageFor(res, "Could not validate that token.");
+        setValidation({ ok: false, message });
+        announce(message);
+        return;
+      }
+      const body = (await res.json()) as { ok: boolean; message?: string; name?: string | null };
+      const message = body.ok
+        ? `Token works — connected as ${body.name ?? "your Canvas account"}.`
+        : body.message ?? "That token did not work.";
+      setValidation({ ok: body.ok, message });
+      announce(message);
+    } catch (err) {
+      if ((err as Error)?.name === "AbortError") return;
+      const message =
+        (err as Error)?.name === "TimeoutError"
+          ? "Validating is taking longer than expected. Please try again."
+          : "Could not reach Canvas. Please try again.";
+      setValidation({ ok: false, message });
+      announce(message);
+    } finally {
+      setValidating(false);
+      dispose();
+    }
+  }, [courseId, validating, announce]);
+
   const saveCredential = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
+      // #4 (accessibility review, PR #457, ACC-002): re-entry guard
+      // instead of `disabled` on the submit button -- see this view's own
+      // deletingCredentialRef comment above for why.
+      if (savingCredential) {
+        announce("Still saving the Canvas token — please wait.");
+        return;
+      }
       setSavingCredential(true);
       setCredentialError(null);
       announce("Saving Canvas token…");
@@ -134,23 +263,52 @@ export function CanvasIntegrationView({
         setTokenInput("");
         setValidation(null);
         announce("Canvas token saved.");
+        // #3: the form is about to unmount; the card's Validate button is
+        // the next natural landing spot.
+        focusTargetRef.current = "credential-validate-button";
+        // #9 (usability review, PR #457): nothing previously prompted a
+        // check after save, so a mistyped/invalid token "saved
+        // successfully" with no on-card indication it had never actually
+        // been confirmed against Canvas. Firing this here (not awaited --
+        // the save itself already succeeded, and a slow/failing validate
+        // call must not block the save from completing) surfaces that
+        // immediately instead of leaving it for the instructor to
+        // remember to click Validate themselves.
+        void validateCredential();
       } catch (err) {
         if ((err as Error)?.name === "AbortError") return;
         const message = "Could not save that token. Please try again.";
         setCredentialError(message);
         announce(message);
       } finally {
+        setSavingCredential(false);
         dispose();
       }
     },
-    [courseId, tokenInput, baseUrlInput, expiresAtInput, announce],
+    [courseId, tokenInput, baseUrlInput, expiresAtInput, savingCredential, announce, validateCredential],
   );
 
   const deleteCredential = useCallback(async () => {
+    // #4 (accessibility review, PR #457, ACC-002): re-entry guard, not
+    // `disabled` -- see deletingCredentialRef's own comment above.
+    if (deletingCredentialRef.current) {
+      announce("Still removing the Canvas token — please wait.");
+      return;
+    }
+    // #10 (usability review, PR #457): the previous wording never stated
+    // the blast radius (org-wide, not just this course) or the undo path.
+    // Matches this codebase's own confirm-dialog convention elsewhere
+    // (StudentsView/TaCapabilitiesView): name the subject, state the
+    // consequence, state what's preserved, state the undo path.
     const confirmed = window.confirm(
-      "Remove this organization's Canvas token?\n\nCourses linked to Canvas will stop being able to sync until a new token is entered.",
+      "Remove this organization's Canvas token?\n\n" +
+        "This token is shared by every course in your organization that syncs from Canvas -- " +
+        "ALL of them stop being able to sync the moment it's removed, not just this course. " +
+        "Rosters already synced are kept; no one loses access because of this. " +
+        "Enter a new token any time to restore syncing everywhere.",
     );
     if (!confirmed) return;
+    deletingCredentialRef.current = true;
     announce("Removing Canvas token…");
     const { signal, dispose } = abortAfter(15_000, abortRef.current?.signal ?? null);
     try {
@@ -164,6 +322,8 @@ export function CanvasIntegrationView({
       setCredential(null);
       setValidation(null);
       announce("Canvas token removed.");
+      // #3: the card is about to unmount in favor of the entry form.
+      focusTargetRef.current = "credential-base-url";
     } catch (err) {
       // #7 (usability/reliability review, PR #457): a real component
       // teardown aborts with reason.name "AbortError" (the parent
@@ -178,37 +338,7 @@ export function CanvasIntegrationView({
       setCredentialError(message);
       announce(message);
     } finally {
-      dispose();
-    }
-  }, [courseId, announce]);
-
-  const validateCredential = useCallback(async () => {
-    setValidating(true);
-    setValidation(null);
-    announce("Validating Canvas token…");
-    const { signal, dispose } = abortAfter(20_000, abortRef.current?.signal ?? null);
-    try {
-      const res = await fetch(`/api/courses/${courseId}/canvas/credential/validate`, {
-        method: "POST",
-        signal,
-      });
-      if (!res.ok) {
-        const message = await errorMessageFor(res, "Could not validate that token.");
-        setValidation({ ok: false, message });
-        announce(message);
-        return;
-      }
-      const body = (await res.json()) as { ok: boolean; message?: string; name?: string | null };
-      const message = body.ok
-        ? `Token works — connected as ${body.name ?? "your Canvas account"}.`
-        : body.message ?? "That token did not work.";
-      setValidation({ ok: body.ok, message });
-      announce(message);
-    } catch (err) {
-      if ((err as Error)?.name === "AbortError") return;
-      setValidation({ ok: false, message: "Could not reach Canvas. Please try again." });
-    } finally {
-      setValidating(false);
+      deletingCredentialRef.current = false;
       dispose();
     }
   }, [courseId, announce]);
@@ -238,16 +368,24 @@ export function CanvasIntegrationView({
       })
       .catch((err: unknown) => {
         if ((err as Error)?.name === "AbortError") return;
-        setStatusError((err as Error).message);
+        const message = (err as Error).message;
+        setStatusError(message);
+        announce(message);
       })
       .finally(dispose);
-  }, [courseId]);
+  }, [courseId, announce]);
 
   useEffect(() => {
     if (credential) loadStatus();
   }, [credential, loadStatus]);
 
   const loadCourseOptions = useCallback(async () => {
+    // #4 (accessibility review, PR #457, ACC-002): re-entry guard, not
+    // `disabled` -- see deletingCredentialRef's own comment above.
+    if (loadingCourseOptions) {
+      announce("Still loading Canvas courses — please wait.");
+      return;
+    }
     setLoadingCourseOptions(true);
     setCourseOptionsError(null);
     announce("Loading Canvas courses…");
@@ -260,17 +398,27 @@ export function CanvasIntegrationView({
       announce(
         data.courses.length === 1 ? "1 Canvas course found." : `${data.courses.length} Canvas courses found.`,
       );
+      // #3: the picker's own select is the next natural landing spot.
+      focusTargetRef.current = "course-select";
     } catch (err) {
       if ((err as Error)?.name === "AbortError") return;
-      setCourseOptionsError((err as Error).message);
+      const message = (err as Error).message;
+      setCourseOptionsError(message);
+      announce(message);
     } finally {
       setLoadingCourseOptions(false);
       dispose();
     }
-  }, [courseId, announce]);
+  }, [courseId, loadingCourseOptions, announce]);
 
   const linkCourse = useCallback(async () => {
     if (!selectedCanvasCourseId) return;
+    // #4 (accessibility review, PR #457, ACC-002): re-entry guard, not
+    // `disabled` -- see deletingCredentialRef's own comment above.
+    if (linking) {
+      announce("Still linking this course — please wait.");
+      return;
+    }
     setLinking(true);
     announce("Linking this Canvas course…");
     const { signal, dispose } = abortAfter(15_000, abortRef.current?.signal ?? null);
@@ -290,6 +438,9 @@ export function CanvasIntegrationView({
       setCourseOptions(null);
       setSyncResult(null);
       announce("Course linked to Canvas.");
+      // #3: the picker is about to unmount in favor of the linked-course
+      // view; its Sync button is the next natural landing spot.
+      focusTargetRef.current = "sync-button";
       loadStatus();
     } catch (err) {
       // #7: see deleteCredential's catch above for why this must not be
@@ -302,9 +453,18 @@ export function CanvasIntegrationView({
       setLinking(false);
       dispose();
     }
-  }, [courseId, selectedCanvasCourseId, announce, loadStatus]);
+  }, [courseId, selectedCanvasCourseId, linking, announce, loadStatus]);
 
   const runSync = useCallback(async () => {
+    // #4 (accessibility review, PR #457, ACC-002): re-entry guard, not
+    // `disabled` -- see deletingCredentialRef's own comment above. Backed
+    // up server-side by #6's own atomic claim (lmsIntegrations.ts's
+    // beginSync), which is the load-bearing guard; this one just stops
+    // the instructor's own double-click from ever reaching it.
+    if (syncing) {
+      announce("Still syncing — please wait.");
+      return;
+    }
     setSyncing(true);
     setSyncResult(null);
     setSyncError(null);
@@ -353,7 +513,7 @@ export function CanvasIntegrationView({
       setSyncing(false);
       dispose();
     }
-  }, [courseId, announce, loadStatus]);
+  }, [courseId, syncing, announce, loadStatus]);
 
   return (
     <div className="admin-view">
@@ -363,6 +523,14 @@ export function CanvasIntegrationView({
         subtitle="Connect this organization's Canvas account and keep a course roster in sync from it."
       />
 
+      {/* #5 (accessibility review, PR #457, ACC-004): the ONE always-mounted
+          live region for this view. Every conditionally-mounted banner
+          below deliberately carries no role="alert"/role="status" -- a
+          region inserted into the DOM already containing its text doesn't
+          reliably announce, the same lesson TaCapabilitiesView's own
+          loadError already documents. Routing every announcement through
+          this single channel is also what avoids ACC-025's double-announce
+          (a banner AND a live region both speaking the same event). */}
       <div className="admin-visually-hidden" role="status" aria-live="polite">
         <span key={live.nonce}>{live.text}</span>
       </div>
@@ -371,17 +539,26 @@ export function CanvasIntegrationView({
         <h2 id="canvas-token-heading">Canvas API token</h2>
 
         {credentialError && (
-          <div className="admin-alert" role="alert">
+          <div className="admin-alert">
             <span className="admin-alert__icon" aria-hidden="true">
               <Warning size={16} weight="regular" />
             </span>
             <span>{credentialError}</span>
+            {/* #2 (usability review, PR #457): a load failure is a
+                transient-network-blip default, not "you need to start
+                over" -- Retry re-runs the same load rather than routing
+                into the destructive-feeling blank entry form below. */}
+            {credentialLoadFailed && (
+              <button type="button" className="admin-link-button" onClick={loadCredential} style={{ marginLeft: 8 }}>
+                Retry
+              </button>
+            )}
           </div>
         )}
 
-        {credential === undefined ? (
+        {credential === undefined && !credentialLoadFailed ? (
           <p>Loading…</p>
-        ) : credential && !editingCredential ? (
+        ) : credentialLoadFailed ? null : credential && !editingCredential ? (
           <div className="admin-form-field">
             <p>
               <strong>{credential.maskedToken}</strong> — {credential.canvasBaseUrl}
@@ -410,14 +587,15 @@ export function CanvasIntegrationView({
             )}
             <div className="admin-form-actions admin-form-actions--inline">
               <button
+                ref={validateButtonRef}
                 type="button"
                 className="admin-button"
                 onClick={validateCredential}
-                disabled={validating}
               >
                 {validating ? "Validating…" : "Validate"}
               </button>
               <button
+                ref={replaceButtonRef}
                 type="button"
                 className="admin-button admin-button--ghost"
                 onClick={() => {
@@ -425,6 +603,8 @@ export function CanvasIntegrationView({
                   setTokenInput("");
                   setExpiresAtInput(credential.expiresAt ? credential.expiresAt.slice(0, 10) : "");
                   setValidation(null);
+                  // #3: the card is about to unmount in favor of the form.
+                  focusTargetRef.current = "credential-base-url";
                 }}
               >
                 Replace token
@@ -443,14 +623,37 @@ export function CanvasIntegrationView({
             <div className="admin-form-field">
               <label htmlFor="canvas-base-url">Canvas instance URL</label>
               <input
+                ref={baseUrlInputRef}
                 id="canvas-base-url"
                 type="url"
                 required
                 placeholder="https://canvas.uw.edu"
-                aria-describedby="canvas-base-url-hint"
+                aria-describedby={
+                  credentialError && fieldForCredentialError(credentialError) === "canvas-base-url"
+                    ? "canvas-base-url-hint canvas-base-url-error"
+                    : "canvas-base-url-hint"
+                }
+                aria-invalid={credentialError && fieldForCredentialError(credentialError) === "canvas-base-url" ? "true" : undefined}
+                aria-errormessage={
+                  credentialError && fieldForCredentialError(credentialError) === "canvas-base-url"
+                    ? "canvas-base-url-error"
+                    : undefined
+                }
                 value={baseUrlInput}
                 onChange={(e) => setBaseUrlInput(e.target.value)}
               />
+              {/* #6 (accessibility review, PR #457, ACC-003): both
+                  aria-describedby AND aria-errormessage point here when
+                  this field is the one the error applies to -- VoiceOver
+                  does not implement aria-errormessage alone, the same
+                  reason TaCapabilitiesView keeps both. The CSS this
+                  activates (`input[aria-invalid="true"]`) already existed
+                  in styles.css and was unused by this view. */}
+              {credentialError && fieldForCredentialError(credentialError) === "canvas-base-url" && (
+                <p className="admin-field-error" id="canvas-base-url-error">
+                  {credentialError}
+                </p>
+              )}
               {/* A placeholder disappears the moment the field is focused, so
                   it can't be the only place this example lives -- an
                   instructor tabbing in and typing never sees it. */}
@@ -466,10 +669,26 @@ export function CanvasIntegrationView({
                 type="password"
                 required
                 autoComplete="off"
+                aria-describedby={
+                  credentialError && fieldForCredentialError(credentialError) === "canvas-token"
+                    ? "canvas-token-hint canvas-token-error"
+                    : "canvas-token-hint"
+                }
+                aria-invalid={credentialError && fieldForCredentialError(credentialError) === "canvas-token" ? "true" : undefined}
+                aria-errormessage={
+                  credentialError && fieldForCredentialError(credentialError) === "canvas-token"
+                    ? "canvas-token-error"
+                    : undefined
+                }
                 value={tokenInput}
                 onChange={(e) => setTokenInput(e.target.value)}
               />
-              <p className="admin-form-hint">
+              {credentialError && fieldForCredentialError(credentialError) === "canvas-token" && (
+                <p className="admin-field-error" id="canvas-token-error">
+                  {credentialError}
+                </p>
+              )}
+              <p className="admin-form-hint" id="canvas-token-hint">
                 Generate one in Canvas under Account → Settings → New Access Token. This app stores it
                 encrypted and never displays it again in full.
               </p>
@@ -479,23 +698,45 @@ export function CanvasIntegrationView({
               <input
                 id="canvas-token-expiry"
                 type="date"
+                aria-describedby={
+                  credentialError && fieldForCredentialError(credentialError) === "canvas-token-expiry"
+                    ? "canvas-token-expiry-hint canvas-token-expiry-error"
+                    : "canvas-token-expiry-hint"
+                }
+                aria-invalid={
+                  credentialError && fieldForCredentialError(credentialError) === "canvas-token-expiry" ? "true" : undefined
+                }
+                aria-errormessage={
+                  credentialError && fieldForCredentialError(credentialError) === "canvas-token-expiry"
+                    ? "canvas-token-expiry-error"
+                    : undefined
+                }
                 value={expiresAtInput}
                 onChange={(e) => setExpiresAtInput(e.target.value)}
               />
-              <p className="admin-form-hint">
+              {credentialError && fieldForCredentialError(credentialError) === "canvas-token-expiry" && (
+                <p className="admin-field-error" id="canvas-token-expiry-error">
+                  {credentialError}
+                </p>
+              )}
+              <p className="admin-form-hint" id="canvas-token-expiry-hint">
                 Canvas tokens are typically good for about a quarter. Setting a date here shows a
                 reminder above once it's close, so this doesn't fail silently.
               </p>
             </div>
             <div className="admin-form-actions">
-              <button type="submit" className="admin-button admin-button--primary" disabled={savingCredential}>
+              <button type="submit" className="admin-button admin-button--primary">
                 {savingCredential ? "Saving…" : "Save token"}
               </button>
               {credential && (
                 <button
                   type="button"
                   className="admin-button admin-button--ghost"
-                  onClick={() => setEditingCredential(false)}
+                  onClick={() => {
+                    setEditingCredential(false);
+                    // #3: the form is about to unmount in favor of the card.
+                    focusTargetRef.current = "credential-replace-button";
+                  }}
                 >
                   Cancel
                 </button>
@@ -510,7 +751,7 @@ export function CanvasIntegrationView({
           <h2 id="canvas-sync-heading">Course roster sync</h2>
 
           {statusError && (
-            <div className="admin-alert" role="alert">
+            <div className="admin-alert">
               <span className="admin-alert__icon" aria-hidden="true">
                 <Warning size={16} weight="regular" />
               </span>
@@ -521,7 +762,18 @@ export function CanvasIntegrationView({
           {status?.canvasCourseId ? (
             <div className="admin-form-field">
               <p>
-                Linked to Canvas course <strong>{status.canvasCourseId}</strong>.
+                {/* #8 (usability review, PR #457): the raw numeric Canvas
+                    course id told an instructor teaching two sections
+                    nothing about which one they'd linked -- the name
+                    captured at link time (canvasSync.ts's own
+                    linkCanvasCourseHandler) is the primary label now, with
+                    the id kept as a secondary detail rather than dropped. */}
+                Linked to Canvas course{" "}
+                <strong>{status.canvasCourseName ?? status.canvasCourseId}</strong>
+                {status.canvasCourseName && (
+                  <span className="admin-form-hint"> (Canvas id {status.canvasCourseId})</span>
+                )}
+                .
               </p>
               <p className="admin-form-hint">
                 {status.lastSyncedAt
@@ -536,10 +788,10 @@ export function CanvasIntegrationView({
 
               <div className="admin-form-actions">
                 <button
+                  ref={syncButtonRef}
                   type="button"
                   className="admin-button admin-button--primary"
                   onClick={runSync}
-                  disabled={syncing}
                 >
                   <CloudArrowDown size={14} weight="regular" aria-hidden="true" style={{ marginRight: 4 }} />
                   {syncing ? "Syncing…" : "Sync from Canvas"}
@@ -548,14 +800,13 @@ export function CanvasIntegrationView({
                   type="button"
                   className="admin-button admin-button--ghost"
                   onClick={loadCourseOptions}
-                  disabled={loadingCourseOptions}
                 >
                   Change linked course
                 </button>
               </div>
 
               {syncError && (
-                <div className="admin-alert" role="alert">
+                <div className="admin-alert">
                   <span className="admin-alert__icon" aria-hidden="true">
                     <Warning size={16} weight="regular" />
                   </span>
@@ -564,7 +815,7 @@ export function CanvasIntegrationView({
               )}
 
               {syncResult && (
-                <div className="admin-form-hint" role="status">
+                <div className="admin-form-hint">
                   <p>
                     {syncResult.added} added, {syncResult.updated} updated, {syncResult.removed} removed.
                   </p>
@@ -583,7 +834,7 @@ export function CanvasIntegrationView({
           )}
 
           {courseOptionsError && (
-            <div className="admin-alert" role="alert">
+            <div className="admin-alert">
               <span className="admin-alert__icon" aria-hidden="true">
                 <Warning size={16} weight="regular" />
               </span>
@@ -593,10 +844,10 @@ export function CanvasIntegrationView({
 
           {!status?.canvasCourseId && courseOptions === null && (
             <button
+              ref={linkCourseButtonRef}
               type="button"
               className="admin-button"
               onClick={loadCourseOptions}
-              disabled={loadingCourseOptions}
             >
               {loadingCourseOptions ? "Loading…" : "Link a Canvas course"}
             </button>
@@ -610,6 +861,7 @@ export function CanvasIntegrationView({
                 <>
                   <label htmlFor="canvas-course-select">Canvas course</label>
                   <select
+                    ref={courseSelectRef}
                     id="canvas-course-select"
                     value={selectedCanvasCourseId}
                     onChange={(e) => setSelectedCanvasCourseId(e.target.value)}
@@ -627,14 +879,19 @@ export function CanvasIntegrationView({
                       type="button"
                       className="admin-button admin-button--primary"
                       onClick={linkCourse}
-                      disabled={!selectedCanvasCourseId || linking}
+                      disabled={!selectedCanvasCourseId}
                     >
                       {linking ? "Linking…" : "Link this course"}
                     </button>
                     <button
                       type="button"
                       className="admin-button admin-button--ghost"
-                      onClick={() => setCourseOptions(null)}
+                      onClick={() => {
+                        setCourseOptions(null);
+                        // #3: the picker is about to unmount in favor of
+                        // the "Link a Canvas course" button.
+                        focusTargetRef.current = "link-course-button";
+                      }}
                     >
                       Cancel
                     </button>

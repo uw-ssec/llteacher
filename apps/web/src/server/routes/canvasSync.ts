@@ -81,6 +81,7 @@ export async function getCanvasSyncStatusHandler(c: Context<AppEnv>) {
   const integration = await getLmsIntegrationForCourse(db, ctx.scope);
   return c.json({
     canvasCourseId: integration?.canvasCourseId ?? null,
+    canvasCourseName: integration?.canvasCourseName ?? null,
     lastSyncStatus: integration?.lastSyncStatus ?? "idle",
     lastSyncCounts: integration?.lastSyncCounts ?? null,
     lastSyncErrorMessage: integration?.lastSyncErrorMessage ?? null,
@@ -121,12 +122,21 @@ export async function linkCanvasCourseHandler(c: Context<AppEnv>) {
     logServerError("linkCanvasCourseHandler", err);
     return c.json({ error: canvasErrorMessage(err) }, 503);
   }
-  if (!visibleCourses.some((course) => course.canvasCourseId === canvasCourseId)) {
+  const matchedCourse = visibleCourses.find((course) => course.canvasCourseId === canvasCourseId);
+  if (!matchedCourse) {
     return c.json({ error: "That Canvas course isn't visible to this organization's Canvas token." }, 403);
   }
 
+  // #8 (usability review, PR #457): the picker already knows this course's
+  // display name -- persisting it here is what lets the linked-course view
+  // show it instead of a raw numeric id (see getCanvasSyncStatusHandler).
+  const canvasCourseName = matchedCourse.courseCode
+    ? `${matchedCourse.name} (${matchedCourse.courseCode})`
+    : matchedCourse.name;
+
   const outcome = await linkCanvasCourse(db, ctx.scope, ctx.orgScope, {
     canvasCourseId,
+    canvasCourseName,
     credentialId: credential.id,
   });
   if (outcome.outcome === "canvas_course_already_linked") {

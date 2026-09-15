@@ -158,6 +158,7 @@ describe("GET status", () => {
     const res = await buildApp(instructorOfA()).request(url("/status"), {}, TEST_ENV);
     expect(await res.json()).toEqual({
       canvasCourseId: null,
+      canvasCourseName: null,
       lastSyncStatus: "idle",
       lastSyncCounts: null,
       lastSyncErrorMessage: null,

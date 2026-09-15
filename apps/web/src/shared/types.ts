@@ -532,6 +532,7 @@ export interface CanvasLinkResponse {
 
 export interface CanvasSyncStatusResponse {
   canvasCourseId: string | null;
+  canvasCourseName: string | null;
   lastSyncStatus: "idle" | "syncing" | "success" | "error";
   lastSyncCounts: { added: number; updated: number; removed: number } | null;
   lastSyncErrorMessage: string | null;

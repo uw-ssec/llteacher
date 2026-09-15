@@ -32,6 +32,7 @@ export type LmsSyncStatus = (typeof lmsIntegrations.$inferSelect)["lastSyncStatu
 export interface LmsIntegrationRow {
   id: string;
   canvasCourseId: string | null;
+  canvasCourseName: string | null;
   apiCredentialId: string | null;
   lastSyncStatus: LmsSyncStatus;
   lastSyncCounts: { added: number; updated: number; removed: number } | null;
@@ -51,6 +52,7 @@ export async function getLmsIntegrationForCourse(
       lastSyncCounts: lmsIntegrations.lastSyncCounts,
       lastSyncErrorMessage: lmsIntegrations.lastSyncErrorMessage,
       canvasCourseId: courses.canvasCourseId,
+      canvasCourseName: courses.canvasCourseName,
       lastSyncedAt: courses.lastSyncedAt,
     })
     .from(lmsIntegrations)
@@ -75,7 +77,7 @@ export async function linkCanvasCourse(
   db: Db,
   scope: CourseScope,
   orgId: string,
-  input: { canvasCourseId: string; credentialId: string },
+  input: { canvasCourseId: string; canvasCourseName: string | null; credentialId: string },
 ): Promise<LinkCanvasCourseOutcome> {
   // courses_org_canvas_course_uq is per-organization: refuse before writing
   // if a DIFFERENT course in this org already claims this Canvas course id,
@@ -92,7 +94,7 @@ export async function linkCanvasCourse(
 
   await db
     .update(courses)
-    .set({ canvasCourseId: input.canvasCourseId, updatedAt: new Date() })
+    .set({ canvasCourseId: input.canvasCourseId, canvasCourseName: input.canvasCourseName, updatedAt: new Date() })
     .where(eq(courses.id, scope));
 
   const [row] = await db

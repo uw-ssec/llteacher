@@ -50,6 +50,16 @@
   --raw-surface-raised:  #F6F3ED;   /* sidebar background */
   --raw-border:          #E5E1D8;   /* standard ruled border */
   --raw-border-strong:   #D4CFC5;   /* stronger dividers */
+  /* PR #457 accessibility review: introduced when a fix for a different
+     bug (unstyled password/url/date inputs, CanvasIntegrationView) gave
+     `.admin-form-field` inputs a real border for the first time --
+     `--raw-border` is 1.14:1 against --color-surface, `--raw-border-strong`
+     is 1.35:1, both failing WCAG 1.4.11's 3:1 obligation for a form
+     field's own visible boundary (a non-text UI component). Those tokens
+     stay as-is (dividers/rules are decorative, not interactive
+     boundaries); this one is for input/select/textarea borders
+     specifically. #847E72 clears 3:1 against --color-surface (3.51:1). */
+  --raw-input-border:    #847E72;   /* WCAG 1.4.11 @ 3:1 against --color-surface */
 
   /* Code surfaces */
   --raw-code-bg:         #F4F1EA;   /* code block background */
@@ -171,6 +181,7 @@
   /* Borders */
   --color-border:        var(--raw-border);
   --color-border-strong: var(--raw-border-strong);
+  --color-input-border:  var(--raw-input-border);
 
   /* Text */
   --color-text:          var(--raw-text);
@@ -251,6 +262,11 @@
 
   --color-border:        #2E2C28;
   --color-border-strong: #3A3834;
+  /* #457: #7C766C clears 3:1 against this block's --color-surface #222220
+     (3.54:1) -- see the light-theme --raw-input-border comment for why a
+     dedicated token exists instead of reusing --color-border-strong
+     (#3A3834 is only 1.36:1 here). */
+  --color-input-border:  #7C766C;
 
   /* #334: --color-error was the one token the stopped states use that this
      block never overrode. It was a border colour (3:1 obligation); the
@@ -309,6 +325,7 @@
   /* Border colors */
   --color-border:         var(--color-border);
   --color-border-strong:  var(--color-border-strong);
+  --color-input-border:   var(--color-input-border);
 
   /* Accent — UW Husky Purple (primary) */
   --color-accent:         var(--color-accent);
@@ -5566,7 +5583,10 @@ body {
 .admin-form-record textarea {
   width: 100%;
   padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border);
+  /* #457 accessibility review: --color-border fails WCAG 1.4.11's 3:1 for
+     a form field's own visible boundary (1.14:1) -- see --raw-input-border's
+     own comment. */
+  border: 1px solid var(--color-input-border);
   border-radius: var(--radius-sm);
   background-color: var(--color-surface);
   font-family: var(--font-sans);

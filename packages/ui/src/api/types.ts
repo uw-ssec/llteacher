@@ -282,6 +282,7 @@ export interface CanvasSyncCounts {
 
 export interface CanvasSyncStatusResponse {
   canvasCourseId: string | null;
+  canvasCourseName: string | null;
   lastSyncStatus: CanvasSyncStatus;
   lastSyncCounts: CanvasSyncCounts | null;
   lastSyncErrorMessage: string | null;

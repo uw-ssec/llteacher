@@ -222,6 +222,15 @@ export const courses = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
     canvasCourseId: text("canvas_course_id"),
+    // #8 (usability review, PR #457): the linked Canvas course's own
+    // display name at the moment of linking (linkCanvasCourse,
+    // lmsIntegrations.ts) -- before this, the console had nowhere to show
+    // an instructor teaching two sections which one they'd actually
+    // linked, only the raw numeric canvasCourseId. Not re-fetched on
+    // every status check (Canvas's own name is authoritative there, not
+    // this one) -- a stale name after a rename in Canvas is a display nit
+    // an instructor would spot re-linking, not a correctness problem.
+    canvasCourseName: text("canvas_course_name"),
     code: text("code").notNull(),
     term: text("term").notNull(),
     title: text("title").notNull(),
@@ -436,6 +445,21 @@ export const lmsIntegrations = pgTable(
     // The Canvas instance URL lives on the credential this row points at
     // (organizationCredentials.canvasBaseUrl), not duplicated here -- see
     // that column's own comment for why.
+    //
+    // #13 (flexibility/security review, PR #457): recorded at link time
+    // (lmsIntegrations.ts's linkCanvasCourse) but NOT currently consulted
+    // by credential resolution -- organizationCredentials.ts's own header
+    // is explicit that there is exactly one Canvas credential per
+    // organization today, at a fixed label, so every sync/validate/course-
+    // list call resolves that singleton directly rather than following
+    // this column. Not a live bug (the singleton lookup is itself
+    // org-scoped, so nothing cross-tenant leaks), but it IS a trap:
+    // rotating the org's token silently re-authorizes every course link
+    // with no confirmation, and this column looking populated invites a
+    // future reader to assume it's load-bearing. If multi-credential-per-
+    // org support is ever added, credential resolution has to actually
+    // start reading this field -- it isn't free today just because the
+    // column exists.
     apiCredentialId: uuid("api_credential_id").references(
       () => organizationCredentials.id,
       { onDelete: "set null" },

@@ -321,6 +321,37 @@ describe.skipIf(!DATABASE_URL)("syncCanvasRoster (#74)", () => {
     expect(demoted.canViewDrafts).toBe(false);
   });
 
+  // #10 (functionality/flexibility review, PR #457): a person enrolled in
+  // two sections of the same Canvas course (routine, not an edge case)
+  // maps to two `mapped` entries with the same email and different
+  // canvasEnrollmentIds. Before the fix, whichever entry's stamp landed
+  // last silently overwrote the other's, and if the roles differed, the
+  // loser's id hit a role-conflict error on every future sync forever.
+  it("dedupes a person enrolled twice in the same course, keeping the higher-authority role and dropping the loser silently", async () => {
+    const scope = await newCourse();
+    const enrollment = enrollmentFactory();
+    const sharedEmail = `dup-${crypto.randomUUID().slice(0, 8)}@uw.edu`;
+    const studentEnrollment = enrollment("section-a", { type: "StudentEnrollment", email: sharedEmail });
+    const taEnrollment = enrollment("section-b", { type: "TaEnrollment", email: sharedEmail });
+    listCanvasEnrollmentsMock.mockResolvedValueOnce([studentEnrollment, taEnrollment]);
+
+    const result = await syncCanvasRoster(db, cipher, scope, "canvas-1", CREDENTIAL);
+
+    expect(result.added).toBe(1);
+    expect(result.errors).toEqual([]);
+    const rows = await membershipsFor(scope);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.course_memberships.role).toBe("ta"); // higher authority wins
+    expect(rows[0]!.course_memberships.canvasEnrollmentId).toBe(taEnrollment.canvasEnrollmentId);
+
+    // Re-syncing the exact same pair must not resurrect a role-conflict
+    // error for the loser on every subsequent run.
+    listCanvasEnrollmentsMock.mockResolvedValueOnce([studentEnrollment, taEnrollment]);
+    const second = await syncCanvasRoster(db, cipher, scope, "canvas-1", CREDENTIAL);
+    expect(second.errors).toEqual([]);
+    expect(second.removed).toBe(0);
+  });
+
   afterAll(async () => {
     vi.restoreAllMocks();
   });

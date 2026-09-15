@@ -337,6 +337,13 @@
       "when": 1789435443480,
       "tag": "0047_canvas_enrollment_uq_per_course",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1789451658344,
+      "tag": "0048_courses_canvas_course_name",
+      "breakpoints": true
     }
   ]
 }

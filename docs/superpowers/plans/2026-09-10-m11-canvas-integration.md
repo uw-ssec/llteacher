@@ -1,5 +1,122 @@
 # M11: Canvas Integration — Implementation Plan
 
+## 2026-09-15 sync check — the remaining review findings (items 10/13, usability/accessibility Major list)
+
+Follow-up to the entry directly below: user asked for the deferred items
+too. Covers item #10 (duplicate-enrollment dedup), item #13
+(`apiCredentialId` unused), and the usability/accessibility Major list's
+enumerated items (the unenumerated Minor/Enhancement tier -- ~15 more
+per agent, never itemized in this doc -- is still not covered; a fresh
+pass would be needed to extract it).
+
+10. **Duplicate Canvas enrollments (multi-section) no longer permanently
+    break.** `CanvasRosterSyncService.ts`: entries are deduplicated by
+    email BEFORE the known/new split (not just within one sync's "new"
+    set, which only fixed the first-sync case) -- the highest-authority
+    role among duplicates wins, chosen consistently across syncs since
+    role authority doesn't change sync to sync, so the same
+    canvasEnrollmentId converges as "known" every time. The loser is
+    dropped silently, never reaching either write pass, so it can never
+    produce a recurring role-conflict error. Covered by a new test
+    spanning two sync runs.
+13. **`apiCredentialId` unused-field trap documented, not built out.**
+    Building real per-link credential resolution would be speculative
+    engineering against a feature (multi-credential-per-org) that
+    doesn't exist and isn't planned -- `organizationCredentials.ts`'s own
+    header is explicit that exactly one Canvas credential per org is the
+    deliberate v0 design. Instead, `identity.ts`'s own column comment now
+    states plainly that this field is written but not currently consulted
+    by credential resolution, and what would need to change if
+    multi-credential support is ever added -- so a future reader doesn't
+    assume it's already load-bearing.
+
+**Usability/accessibility Major items** (all traced back to a handful of
+root causes, as the original review predicted):
+
+- **Raw `role_conflict` leak fixed at the source.** `CanvasRosterSyncService.ts`
+  gained `friendlyProvisionMessage` -- `role_conflict` results now name
+  the existing role and suggest a manual fix, instead of leaking the raw
+  ProvisionStatus enum value into instructor-facing copy.
+- **Linked course now shows its name, not just a raw Canvas id.** New
+  `courses.canvas_course_name` column (migration `0048`), populated at
+  link time from the same `listCanvasCourses()` result #3's cross-check
+  already fetches -- no extra Canvas call. Falls back to the id alone for
+  a course linked before this column existed.
+- **A failed credential load offers Retry, not the blank entry form.**
+  New `credentialLoadFailed` state keeps `credential` genuinely unknown
+  on a load failure instead of collapsing to `null` (which this view's
+  own render logic read as "no token on file").
+- **Six buttons no longer `disabled` while in flight** (ACC-002): each
+  in-flight boolean is now a re-entry guard inside its own handler
+  (`if (saving) { announce(...); return; }`) instead of `disabled` on the
+  button, matching TaCapabilitiesView's own established fix for the same
+  lesson (disabling a focused control blurs it and drops a keyboard
+  user). `runSync`'s guard is defense-in-depth on top of #6's real,
+  server-side atomic claim.
+- **Focus restored across six teardown paths** (ACC-020): a single
+  `focusTargetRef` + one no-dependency-array effect (mirrors
+  TaCapabilitiesView's per-row `restoreFocusTo`, simplified for this
+  view's single-target shape) -- Replace/Cancel/Save/Delete/Link/Cancel
+  each name where focus should land before the transition that would
+  otherwise drop it to `<body>`.
+- **No more conditionally-mounted `role="alert"`/`role="status"` banners**
+  (ACC-004), and no more double-announcing the same event on two channels
+  (ACC-025): every banner that used to carry a role now carries none,
+  relying solely on the one always-mounted live region -- matching
+  TaCapabilitiesView's own already-established fix for the identical
+  defect (its `loadError` banner already omits `role` for the same
+  reason).
+- **Field-level `aria-invalid`/`aria-errormessage` now wired up** (ACC-003):
+  a small heuristic (`fieldForCredentialError`) matches this form's fixed,
+  known validation sentences to the field they're about, activating the
+  `input[aria-invalid="true"]` CSS rule that already existed in
+  `styles.css` and was unused by this view. `aria-describedby` carries
+  both the hint id and the error id together, not one or the other --
+  VoiceOver doesn't implement `aria-errormessage` alone.
+- **Token validated automatically right after save**, not left for the
+  instructor to remember (fire-and-forget, doesn't block the save
+  itself completing).
+- **Removal confirmation now states the org-wide blast radius, what's
+  preserved, and the undo path** -- matching every sibling confirm
+  dialog in this codebase (StudentsView/TaCapabilitiesView's own
+  convention).
+- **A real, separate bug caught while fixing ACC-002**:
+  `savingCredential` was set true but never reset to false anywhere in
+  the original code -- the Save button stuck on "Saving…" forever after
+  the first save attempt. Fixed with a `finally` block; covered by a
+  regression test (save once, reopen the form, confirm the button reads
+  "Save token" again).
+- **New WCAG 1.4.11 contrast fix**: a dedicated `--color-input-border`
+  token (light `#847E72` @ 3.51:1, dark `#7C766C` @ 3.54:1, both
+  precisely computed against `--color-surface`) replaces `--color-border`
+  (1.14:1) on every `.admin-form-field`/`.admin-form-record` input --
+  fixes the regression the same session's earlier CSS border fix
+  introduced, per the review's own recommendation ("a dedicated
+  input-boundary token... not a revert").
+
+**Not done, deliberately**: the Minor/Enhancement tier (~15 more items
+per agent -- expiry-date timezone off-by-one, a stray missing hint id,
+loading-state noun choices, etc.) was never itemized in this doc, only
+described as existing in the review agents' own transcripts. Extracting
+and fixing that tier would need a fresh pass, not a continuation of this
+one.
+
+**Verification**: `npm run typecheck` clean across all 4 packages;
+`apps/web`'s full suite -- 105 files / 2000 passed / 8 skipped (Docker
+Postgres, freshly migrated including 0047 and 0048); `apps/admin`'s full
+suite -- 22 files / 265 passed. `CanvasIntegrationView.test.tsx` alone
+grew from 12 to 19 cases covering every behavioral change above.
+Migrations 0047 and 0048 applied to both the local test Postgres and the
+shared dev DB (the same scratch-single-migration approach as 0046, since
+that DB's full sequence has known pre-existing drift). **Not verified
+live in a browser**: this session has no WorkOS login credentials to
+reach the authenticated admin console, so the visual/interactive
+behavior (focus movement, the Retry button, the field-error styling) is
+confirmed only by the component test suite (jsdom + Testing Library,
+which does assert real DOM/ARIA attributes) and by hand-computed
+contrast ratios, not by an actual rendered screenshot. Both dev servers
+are running for the user's own manual check.
+
 ## 2026-09-15 sync check — fixes for the 11-dimension review's blocking/critical findings
 
 User request: fix everything the review below found. Fixed all 5 of
