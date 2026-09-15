@@ -14,7 +14,21 @@ export type Db = NodeDb & {
   batch(queries: readonly unknown[]): Promise<any[]>;
 };
 
+let pool: Pool | undefined;
+let db: Db | undefined;
+
 export function makeDb(databaseUrl: string): Db {
-  const pool = new Pool({ connectionString: databaseUrl, max: 10 });
-  return drizzle(pool, { schema }) as Db;
+  if (db) return db;
+
+  pool = new Pool({ connectionString: databaseUrl, max: 10 });
+  db = drizzle(pool, { schema }) as Db;
+  return db;
+}
+
+/** Releases the process-owned pool during Node server shutdown. */
+export async function closeDb(): Promise<void> {
+  const currentPool = pool;
+  pool = undefined;
+  db = undefined;
+  await currentPool?.end();
 }

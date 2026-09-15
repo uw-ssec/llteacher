@@ -1,13 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("pg", () => ({ Pool: vi.fn() }));
+const { poolEnd } = vi.hoisted(() => ({ poolEnd: vi.fn().mockResolvedValue(undefined) }));
+
+vi.mock("pg", () => ({ Pool: vi.fn(() => ({ end: poolEnd })) }));
 vi.mock("drizzle-orm/node-postgres", () => ({
   drizzle: vi.fn(() => ({ driver: "node-postgres" })),
 }));
 
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { makeDb } from "../db/client";
+import { closeDb, makeDb } from "../db/client";
 import { loadRuntimeConfig } from "./config";
 
 const runtimeEnvironment = {
@@ -35,13 +37,29 @@ describe("loadRuntimeConfig", () => {
 });
 
 describe("makeDb", () => {
-  it("creates Drizzle from a node-postgres pool", () => {
+  it("reuses one process-owned node-postgres client", () => {
     const databaseUrl = runtimeEnvironment.DATABASE_URL!;
 
     const db = makeDb(databaseUrl);
+    const sameDb = makeDb(databaseUrl);
 
+    expect(Pool).toHaveBeenCalledTimes(1);
     expect(Pool).toHaveBeenCalledWith({ connectionString: databaseUrl, max: 10 });
-    expect(drizzle).toHaveBeenCalledWith(expect.any(Pool), expect.objectContaining({ schema: expect.any(Object) }));
+    expect(drizzle).toHaveBeenCalledWith(expect.objectContaining({ end: poolEnd }), expect.objectContaining({ schema: expect.any(Object) }));
     expect(db).toEqual({ driver: "node-postgres" });
+    expect(sameDb).toBe(db);
+  });
+
+  it("closes the process pool before rebuilding it", async () => {
+    await closeDb();
+    vi.clearAllMocks();
+
+    const db = makeDb(runtimeEnvironment.DATABASE_URL!);
+    await closeDb();
+    const rebuiltDb = makeDb(runtimeEnvironment.DATABASE_URL!);
+
+    expect(poolEnd).toHaveBeenCalledOnce();
+    expect(Pool).toHaveBeenCalledTimes(2);
+    expect(rebuiltDb).not.toBe(db);
   });
 });
