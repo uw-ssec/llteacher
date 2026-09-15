@@ -59,6 +59,15 @@ the AWS provider to Floci. It never requires AWS credentials or creates cloud
 resources. Future staging and production stacks use Pulumi Cloud for state;
 GitHub Actions obtains AWS deployment credentials via GitHub OIDC.
 
+The infrastructure project checks in `Pulumi.yaml`, `Pulumi.local.yaml`, and
+`Pulumi.production.yaml` (plus `Pulumi.staging.yaml` when real staging is
+enabled). These files contain only non-secret stack configuration: region,
+resource sizing, local Floci endpoint settings, domain names, and feature
+flags. Wrapper commands select the correct state backend: filesystem for
+`local`, Pulumi Cloud for `staging` and `production`. Secret values are never
+committed in stack files; local values are supplied from an ignored environment
+file, while deployed values come from Secrets Manager and protected CI secrets.
+
 The deployment order is invariant: provision or update infrastructure, build
 and publish the image, run database migrations as a one-off task, then update
 the long-lived ECS service and wait for its health check. The service is never
