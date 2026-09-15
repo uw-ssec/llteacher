@@ -2,12 +2,9 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
-/* #368: matches server/index.ts's own COOP/COEP
-   middleware -- see that file's comment for the full reasoning. Needed here
-   too because dev mode serves the page and static assets directly through
-   Vite's own server, not through the Hono app (only /api/* goes through
-   devApiProxy above); in production everything -- including these same
-   headers -- goes through the one Hono app instead. */
+/* #368: matches the Node server's COOP/COEP headers. Vite serves pages and
+   static assets itself during development, while `/api/*` proxies to the
+   separately running Node API server. */
 const CROSS_ORIGIN_ISOLATION_HEADERS = {
   "Cross-Origin-Opener-Policy": "same-origin",
   "Cross-Origin-Embedder-Policy": "require-corp",

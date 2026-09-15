@@ -9,11 +9,9 @@ export default defineConfig({
     port: 2312,
     strictPort: true,
     proxy: {
-      // apps/admin has no worker of its own (issue #8: "apps/admin talks to
-      // the same worker API"). In dev, apps/web's Vite dev server (port
-      // 2311) runs that worker in-process via its own devApiProxy plugin;
-      // this just forwards /api/* there so cookies set by /api/auth/*
-      // round-trip correctly against http://localhost:2312.
+      // apps/admin shares the Node API with the web SPA. In development,
+      // apps/web's Vite server (port 2311) proxies this request onward to the
+      // Node server; this hop keeps browser cookies same-origin at 2312.
       "/api": {
         target: "http://localhost:2311",
         changeOrigin: true,

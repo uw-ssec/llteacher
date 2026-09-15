@@ -85,11 +85,8 @@ import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "./utils/errors";
 import { TenancyMismatchError, IdempotencyKeyConflictError, PromptTemplateConflictError } from "./repositories/errors";
 import type { AppEnv } from "./context";
 
-/** Exported (in addition to being wrapped by the default export below) so
- *  the route-level suites can keep calling `app.request(path, init, env)`.
- *  The default export is no longer the Hono instance itself: a Worker with
- *  a Cron Trigger has to export an object carrying both `fetch` and
- *  `scheduled` (#167). */
+/** Exported so route-level suites can call `app.request(path, init, env)` and
+ *  the Node adapter can delegate `/api/*` traffic to this API-only app. */
 export const app = new Hono<AppEnv>();
 
 // Catches anything thrown by middleware/handlers that isn't already handled
@@ -405,11 +402,7 @@ app.post("/api/courses/:courseId/canvas/sync", requireInstructorOf()(syncCanvasC
 // than who may read the same data inside the console.
 app.post("/api/courses/:courseId/exports", requireInstructorOf()(createExportHandler));
 
-// #172 audit (CMP-005): an unmatched /api/* path fell through to the SPA
-// catch-all below, which serves index.html with a 200. A client calling a
-// route its server doesn't have yet -- the realistic rolling-deploy skew
-// when the admin bundle leads the Worker -- therefore saw `r.ok === true`
-// and only failed when JSON.parse choked on HTML. That failed closed by
-// accident of content type, not by design. A JSON 404 makes a missing API
-// route unambiguous for every current and future client.
+// #172 audit (CMP-005): an unmatched /api/* path must be an unambiguous JSON
+// 404. The Node adapter delegates API paths here before either SPA fallback,
+// so clients never receive index.html for a missing API route.
 app.all("/api/*", (c) => c.json({ error: "Not found" }, 404));

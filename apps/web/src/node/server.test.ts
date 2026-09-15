@@ -3,9 +3,11 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
+import { SESSION_COOKIE_NAME, createSessionPayload, loadSessionKey, sealSession } from "../lib/session";
 const { closeDb } = vi.hoisted(() => ({ closeDb: vi.fn().mockResolvedValue(undefined) }));
 
 vi.mock("../db/client", () => ({ closeDb, makeDb: vi.fn() }));
+vi.mock("../server/middleware/roles", () => ({ rolesMiddleware: async (_c: unknown, next: () => Promise<void>) => next() }));
 
 import { closeNodeServer, createNodeServer } from "./server";
 
@@ -15,7 +17,7 @@ const runtimeConfig = {
   WORKOS_CLIENT_ID: "workos-client-id",
   OPENROUTER_API_KEY: "openrouter-api-key",
   LLMOXIE_API_KEY: "llmoxie-api-key",
-  SESSION_SECRET: "session-secret",
+  SESSION_SECRET: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
   ENCRYPTION_KEY: "encryption-key",
   BLIND_INDEX_KEY: "blind-index-key",
   WORKOS_WEBHOOK_SECRET: "webhook-secret",
@@ -44,7 +46,7 @@ afterEach(async () => {
   server = undefined;
 });
 
-async function request(path: string): Promise<Response> {
+async function request(path: string, init: RequestInit = {}): Promise<Response> {
   server = createNodeServer(runtimeConfig, {
     adminBuildDir: join(buildRoot, "admin"),
     port: 0,
@@ -53,7 +55,10 @@ async function request(path: string): Promise<Response> {
   await new Promise<void>((resolve) => server!.once("listening", resolve));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Node server did not bind a TCP port");
-  return fetch(`http://127.0.0.1:${address.port}${path}`, { headers: { connection: "close" } });
+  return fetch(`http://127.0.0.1:${address.port}${path}`, {
+    ...init,
+    headers: { ...init.headers, connection: "close" },
+  });
 }
 
 describe("createNodeServer", () => {
@@ -99,6 +104,18 @@ describe("createNodeServer", () => {
 
     expect(response.status).toBe(401);
     expect(response.headers.get("content-type")).toContain("application/json");
+  });
+
+  it("returns the API app's JSON 404 for unknown API paths", async () => {
+    const key = await loadSessionKey(runtimeConfig);
+    const sealed = await sealSession(createSessionPayload("user-1", "workos-user-1", 0), key);
+    const response = await request("/api/does-not-exist", {
+      headers: { cookie: `${SESSION_COOKIE_NAME}=${sealed}` },
+    });
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(await response.json()).toEqual({ error: "Not found" });
   });
 
   it("closes the database pool when the Node server shuts down", async () => {
