@@ -162,3 +162,4 @@ node_modules/
 # datasets/pii-scan.test.ts also scans this file when it exists, but that
 # scan is not a substitute for keeping it out of git entirely.
 /evals/datasets/flagged-feedback-export.json
+.claude/checkpoints/

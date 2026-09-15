@@ -323,6 +323,27 @@
       "when": 1788904659809,
       "tag": "0045_response_feedback_course_flagged_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1789063794770,
+      "tag": "0046_puzzling_kingpin",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1789435443480,
+      "tag": "0047_canvas_enrollment_uq_per_course",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1789451658344,
+      "tag": "0048_courses_canvas_course_name",
+      "breakpoints": true
     }
   ]
 }

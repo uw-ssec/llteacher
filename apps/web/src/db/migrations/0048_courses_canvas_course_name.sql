@@ -1,0 +1,1 @@
+ALTER TABLE "courses" ADD COLUMN "canvas_course_name" text;

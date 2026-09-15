@@ -523,7 +523,13 @@ export async function resolveApiKey(
         `llm_configs ${config.id} references a credential that no longer exists or belongs to a different org`,
       );
     }
-    if (!ALLOWED_SECRET_REF_BINDINGS.has(credential.secretRef)) {
+    // #73: organization_credentials now also holds the encrypted-secret
+    // shape (a user-entered value, e.g. a Canvas token) alongside this
+    // env-binding shape -- see that table's own schema comment. An
+    // llm_configs row should never link to one of those, but if it
+    // somehow does, secretRef is null here and must fail the same way a
+    // missing binding does, not crash on a null Set lookup.
+    if (!credential.secretRef || !ALLOWED_SECRET_REF_BINDINGS.has(credential.secretRef)) {
       throw new LLMCredentialMissingError(
         `Secret binding "${credential.secretRef}" is not on the allowlist of env bindings this deployment may resolve a credential from`,
       );

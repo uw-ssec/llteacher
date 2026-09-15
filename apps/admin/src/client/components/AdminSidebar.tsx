@@ -12,6 +12,7 @@ import {
   BookOpen,
   CaretDoubleLeft,
   CaretDoubleRight,
+  CloudArrowDown,
   ClipboardText,
   DownloadSimple,
   Flag,
@@ -28,6 +29,7 @@ export type AdminNavKey =
   | "llm-configs"
   | "students"
   | "ta-permissions"
+  | "canvas"
   | "exports";
 
 export type AdminSidebarProps = {
@@ -81,6 +83,11 @@ const NAV_ITEMS: NavItem[] = [
   // labelled Students that listed the one role it does not show.
   { key: "students",     label: "Students",       icon: <Users size={15} weight="regular" />,      description: "Course roster", authorOnly: true },
   { key: "ta-permissions", label: "TA permissions", icon: <ShieldCheck size={15} weight="regular" />, description: "Grant solutions and drafts", authorOnly: true },
+  // #73/#74: the Canvas token is an org-wide credential and the sync is a
+  // roster-changing action, so this is authorOnly alongside Students/TA
+  // permissions -- a TA reads the roster, they do not manage where it
+  // comes from.
+  { key: "canvas",       label: "Canvas",         icon: <CloudArrowDown size={15} weight="regular" />, description: "Token and roster sync", authorOnly: true },
   { key: "exports",      label: "Export",         icon: <DownloadSimple size={15} weight="regular" />, description: "Records and transcripts", authorOnly: true },
 ];
 

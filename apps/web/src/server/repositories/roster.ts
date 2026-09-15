@@ -50,6 +50,14 @@ export interface ProvisionEntry {
    *  name the person's own login supplied -- see upsertCourseMember. */
   displayName?: string;
   role: CourseRole;
+  /** #8 (performance review, PR #457): when set, stamped onto a newly
+   *  INSERTed membership in the SAME statement `upsertCourseMembers`
+   *  already issues, rather than a second per-row UPDATE after the fact.
+   *  Only CanvasRosterSyncService supplies these; every other caller
+   *  (manual add, CSV import, NetID entry) leaves them undefined and the
+   *  columns are simply absent from that INSERT, unchanged from before. */
+  canvasEnrollmentId?: string;
+  canvasRole?: string;
 }
 
 export interface ProvisionResult {
@@ -369,7 +377,14 @@ export async function upsertCourseMembers(
   const membershipByUser = new Map(existingMemberships.map((m) => [m.userId, m]));
 
   /* Pass 5 -- classify, then write each class in one statement. */
-  const toInsert: { index: number; userId: string; email: string; role: CourseRole }[] = [];
+  const toInsert: {
+    index: number;
+    userId: string;
+    email: string;
+    role: CourseRole;
+    canvasEnrollmentId?: string;
+    canvasRole?: string;
+  }[] = [];
   const toRestore: { index: number; membershipId: string; email: string; role: CourseRole }[] = [];
 
   pending.forEach((p, i) => {
@@ -386,7 +401,14 @@ export async function upsertCourseMembers(
     }
     const existing = membershipByUser.get(userId);
     if (!existing) {
-      toInsert.push({ index: p.index, userId, email: p.email, role: p.entry.role });
+      toInsert.push({
+        index: p.index,
+        userId,
+        email: p.email,
+        role: p.entry.role,
+        canvasEnrollmentId: p.entry.canvasEnrollmentId,
+        canvasRole: p.entry.canvasRole,
+      });
       return;
     }
     if (existing.droppedAt === null) {
@@ -420,6 +442,7 @@ export async function upsertCourseMembers(
     // course_id), so two concurrent imports that both read "no membership
     // here" both try to insert, and the loser takes down the whole file.
     // Doing nothing on conflict makes the loser's insert a no-op.
+    const insertNow = new Date();
     const inserted = await db
       .insert(courseMemberships)
       .values(
@@ -429,6 +452,9 @@ export async function upsertCourseMembers(
           role: t.role,
           canViewSolutions: false,
           canViewDrafts: false,
+          ...(t.canvasEnrollmentId
+            ? { canvasEnrollmentId: t.canvasEnrollmentId, canvasRole: t.canvasRole ?? null, lastSyncedAt: insertNow }
+            : {}),
         })),
       )
       .onConflictDoNothing({ target: [courseMemberships.userId, courseMemberships.courseId] })
@@ -664,6 +690,7 @@ export async function listCourseRoster(
       enrolledAt: courseMemberships.enrolledAt,
       lastLoginAt: users.lastLoginAt,
       droppedAt: courseMemberships.droppedAt,
+      canvasEnrollmentId: courseMemberships.canvasEnrollmentId,
     })
     .from(courseMemberships)
     .innerJoin(users, eq(courseMemberships.userId, users.id))
@@ -701,6 +728,7 @@ export async function listCourseRoster(
       enrolledAt: r.enrolledAt.toISOString(),
       lastLoginAt: r.lastLoginAt ? r.lastLoginAt.toISOString() : null,
       droppedAt: r.droppedAt ? r.droppedAt.toISOString() : null,
+      fromCanvas: r.canvasEnrollmentId !== null,
     });
   }
 
