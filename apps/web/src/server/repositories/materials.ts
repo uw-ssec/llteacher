@@ -13,6 +13,8 @@ export interface MaterialSummary {
   status: (typeof courseMaterials.$inferSelect)["status"];
   errorDetail: string | null;
   uploadedAt: string;
+  relativePath: string | null;
+  documentPath: string | null;
 }
 
 /** Explicit projection, not select(). Same reasoning as llmConfigs'
@@ -31,6 +33,8 @@ const MATERIAL_COLUMNS = {
   status: courseMaterials.status,
   errorDetail: courseMaterials.errorDetail,
   uploadedAt: courseMaterials.uploadedAt,
+  relativePath: courseMaterials.relativePath,
+  documentPath: courseMaterials.documentPath,
 } as const;
 
 export async function listMaterialsForCourse(
@@ -49,6 +53,7 @@ export interface InsertMaterialInput {
   title: string;
   sourceType: (typeof courseMaterials.$inferInsert)["sourceType"];
   originalFilename: string;
+  relativePath?: string | null;
   storageKey: string;
   byteSize: number;
   contentType: string | null;
@@ -70,6 +75,7 @@ export async function insertMaterial(
       title: input.title,
       sourceType: input.sourceType,
       originalFilename: input.originalFilename,
+      relativePath: input.relativePath ?? null,
       storageKey: input.storageKey,
       byteSize: input.byteSize,
       contentType: input.contentType,
@@ -86,13 +92,13 @@ export async function deleteMaterial(
   db: Db,
   scope: CourseScope,
   materialId: string,
-): Promise<{ storageKey: string | null } | null> {
+): Promise<{ storageKey: string | null; documentPath: string | null } | null> {
   const [row] = await db
     .delete(courseMaterials)
     .where(
       and(eq(courseMaterials.id, materialId), eq(courseMaterials.courseId, scope)),
     )
-    .returning({ storageKey: courseMaterials.storageKey });
+    .returning({ storageKey: courseMaterials.storageKey, documentPath: courseMaterials.documentPath });
   return row ?? null;
 }
 
@@ -114,17 +120,36 @@ export async function getMaterialForReingest(
   db: Db,
   scope: CourseScope,
   materialId: string,
-): Promise<{ id: string; originalFilename: string | null; storageKey: string | null } | null> {
+): Promise<{
+  id: string;
+  originalFilename: string | null;
+  storageKey: string | null;
+  relativePath: string | null;
+  documentPath: string | null;
+} | null> {
   const [row] = await db
     .select({
       id: courseMaterials.id,
       originalFilename: courseMaterials.originalFilename,
       storageKey: courseMaterials.storageKey,
+      relativePath: courseMaterials.relativePath,
+      documentPath: courseMaterials.documentPath,
     })
     .from(courseMaterials)
-    .where(and(eq(courseMaterials.id, materialId), eq(courseMaterials.courseId, scope)))
-    .limit(1);
+    .where(and(eq(courseMaterials.id, materialId), eq(courseMaterials.courseId, scope)));
   return row ?? null;
+}
+
+export async function setMaterialDocumentPath(
+  db: Db,
+  scope: CourseScope,
+  materialId: string,
+  documentPath: string | null,
+): Promise<void> {
+  await db
+    .update(courseMaterials)
+    .set({ documentPath, updatedAt: new Date() })
+    .where(and(eq(courseMaterials.id, materialId), eq(courseMaterials.courseId, scope)));
 }
 
 export async function setMaterialStatus(

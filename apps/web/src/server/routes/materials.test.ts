@@ -1,10 +1,14 @@
 /* --------------------------------------------------------------------------
-   #31/#42: the materials routes' request contract.
+   #31/#40/#42: the materials routes' request contract.
 
    The repository suite (repositories/materials.test.ts) owns the data
    invariants against a real Postgres. This file owns who is admitted, which
-   bodies are refused and with what sentence, the tiered-ingestion outcome
-   reaching the client, and the retryable/permanent storage-failure split.
+   bodies are refused and with what sentence, and how upload/reingest/delete
+   wire into extraction (knowledge/extract/job.ts) and the knowledge service.
+   Extraction's own state machine (pending -> processing -> ready | failed,
+   concept-id disambiguation, unsupported formats) is unit-tested in its own
+   right at knowledge/extract/job.test.ts; here extractMaterial and
+   scheduleExtraction are mocked so this file stays about the HTTP contract.
    -------------------------------------------------------------------------- */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -30,15 +34,25 @@ vi.mock("../storage/objectStore", async (importOriginal) => {
   return { ...actual, storageFromEnv: () => store };
 });
 
+const scheduleExtraction = vi.fn();
+const extractMaterial = vi.fn();
+vi.mock("../knowledge/extract/job", () => ({
+  scheduleExtraction: (...a: unknown[]) => scheduleExtraction(...a),
+  extractMaterial: (...a: unknown[]) => extractMaterial(...a),
+}));
+
+const knowledgeRemove = vi.fn();
+vi.mock("../knowledge/service", () => ({
+  knowledgeServiceFromEnv: () => ({ remove: (...a: unknown[]) => knowledgeRemove(...a) }),
+}));
+
 const listMaterialsForCourse = vi.fn();
-const createDocument = vi.fn();
-const getDocumentBySourceMaterial = vi.fn();
-const updateDocumentBody = vi.fn();
 const insertMaterial = vi.fn();
 const deleteMaterial = vi.fn();
 const getMaterialForReingest = vi.fn();
 const setMaterialStatus = vi.fn();
 const setMaterialStorageKey = vi.fn();
+const setMaterialDocumentPath = vi.fn();
 
 vi.mock("../repositories/materials", () => ({
   listMaterialsForCourse: (...args: unknown[]) => listMaterialsForCourse(...args),
@@ -47,11 +61,7 @@ vi.mock("../repositories/materials", () => ({
   getMaterialForReingest: (...args: unknown[]) => getMaterialForReingest(...args),
   setMaterialStatus: (...args: unknown[]) => setMaterialStatus(...args),
   setMaterialStorageKey: (...args: unknown[]) => setMaterialStorageKey(...args),
-}));
-vi.mock("../repositories/knowledgeDocuments", () => ({
-  createDocument: (...args: unknown[]) => createDocument(...args),
-  getDocumentBySourceMaterial: (...args: unknown[]) => getDocumentBySourceMaterial(...args),
-  updateDocumentBody: (...args: unknown[]) => updateDocumentBody(...args),
+  setMaterialDocumentPath: (...args: unknown[]) => setMaterialDocumentPath(...args),
 }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
@@ -81,12 +91,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   listMaterialsForCourse.mockResolvedValue([]);
   insertMaterial.mockResolvedValue({ id: "mat-1" });
-  createDocument.mockResolvedValue({ id: "doc-1", path: "lecture1" });
-  // No prior document for this material by default -- most tests exercise
-  // a material's first (or only) conversion, not a reingest of one that
-  // already succeeded.
-  getDocumentBySourceMaterial.mockResolvedValue(null);
-  updateDocumentBody.mockResolvedValue({ id: "doc-1", path: "lecture1" });
+  extractMaterial.mockResolvedValue({ status: "ready", documentPath: "lecture1" });
 });
 
 describe("materials routes", () => {
@@ -146,131 +151,71 @@ describe("materials routes", () => {
     expect(insertMaterial).not.toHaveBeenCalled();
   });
 
-  it("stores a transcript and creates a ready document", async () => {
-    const vtt = "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nHello.";
-    const res = await appWith("instructor").request(
-      `/api/courses/${COURSE_ID}/materials`,
-      upload("lecture1.vtt", vtt, "text/vtt"),
-      TEST_ENV,
-    );
-    expect(res.status).toBe(201);
-    // Insert is pessimistic now (Finding 2): the row is always written
-    // pending first, and only upgraded to ready once the bytes are stored
-    // and the document exists -- see "only claims ready once the bytes are
-    // stored and the document exists" below for that upgrade itself.
-    expect(insertMaterial).toHaveBeenCalledWith(
-      expect.anything(),
-      COURSE_ID,
-      expect.objectContaining({ sourceType: "transcript", status: "pending" }),
-    );
-    expect(createDocument).toHaveBeenCalledWith(
-      expect.anything(),
-      COURSE_ID,
-      expect.objectContaining({ type: "transcript", body: "Hello." }),
-    );
-  });
-
-  it("holds a PDF at pending and creates no document", async () => {
-    const res = await appWith("instructor").request(
-      `/api/courses/${COURSE_ID}/materials`,
-      upload("paper.pdf", "%PDF-1.7", "application/pdf"),
-      TEST_ENV,
-    );
-    expect(res.status).toBe(201);
-    expect(insertMaterial).toHaveBeenCalledWith(
-      expect.anything(),
-      COURSE_ID,
-      expect.objectContaining({ status: "pending" }),
-    );
-    expect(createDocument).not.toHaveBeenCalled();
-  });
-
-  // I-2 (final review): a second upload whose derived path collides with an
-  // existing document used to throw an uncaught unique-violation past this
-  // handler as a bare 500 -- pre-fix, createDocument was called once at
-  // "lecture1" with no retry, so this mock (reject once, then resolve)
-  // would leave the rejection unhandled and the test would fail with an
-  // unhandled promise rejection / non-201 status instead of asserting a
-  // second, disambiguated attempt.
-  it("retries the derived path with a numeric suffix on a collision", async () => {
-    createDocument
-      .mockRejectedValueOnce(new Error("duplicate key value violates unique constraint"))
-      .mockResolvedValueOnce({ id: "doc-2", path: "lecture1-2" });
-
+  it("accepts an upload, stores it pending, and schedules extraction off the request path", async () => {
     const res = await appWith("instructor").request(
       `/api/courses/${COURSE_ID}/materials`,
       upload("lecture1.vtt", "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nHello.", "text/vtt"),
       TEST_ENV,
     );
-
+    // Every successful upload answers 201 pending now: extraction runs after
+    // the handler returns (scheduleExtraction, below), so nothing here yet
+    // knows whether the format is supported or the concept write will land.
     expect(res.status).toBe(201);
-    expect(createDocument).toHaveBeenNthCalledWith(
-      1,
+    expect(await res.json()).toEqual({ id: "mat-1", status: "pending" });
+    expect(insertMaterial).toHaveBeenCalledWith(
       expect.anything(),
       COURSE_ID,
-      expect.objectContaining({ path: "lecture1" }),
+      expect.objectContaining({ sourceType: "transcript", status: "pending", relativePath: null }),
     );
-    expect(createDocument).toHaveBeenNthCalledWith(
-      2,
-      expect.anything(),
-      COURSE_ID,
-      expect.objectContaining({ path: "lecture1-2" }),
-    );
-    expect(setMaterialStatus).toHaveBeenCalledWith(
-      expect.anything(), COURSE_ID, "mat-1", "ready", null,
-    );
-  });
-
-  // I-2: a name like ".txt" derives an empty title, and "index.txt" derives
-  // the reserved OKF basename "index" -- both threw a CHECK-constraint
-  // violation past the handler pre-fix (an unvalidated, empty or reserved
-  // path was passed straight to createDocument with no normalisation and no
-  // try/catch at all).
-  it("normalises a degenerate derived path instead of passing it straight through", async () => {
-    const res = await appWith("instructor").request(
-      `/api/courses/${COURSE_ID}/materials`,
-      upload("index.txt", "hello", "text/plain"),
-      TEST_ENV,
-    );
-    expect(res.status).toBe(201);
-    expect(createDocument).toHaveBeenCalledWith(
-      expect.anything(),
-      COURSE_ID,
-      expect.objectContaining({ path: "index-material" }),
-    );
-  });
-
-  // I-2: when every numeric suffix up to the bound is still taken, the
-  // handler must not let that final rejection bubble out as a bare 500 --
-  // pre-fix there was no retry loop at all, so createDocument's single
-  // rejection was entirely uncaught and the material was left `pending`
-  // with `errorDetail: null`, the exact "no status ever misrepresents
-  // reality" failure the review calls out.
-  it("reports an exhausted path collision honestly instead of a bare 500", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    createDocument.mockRejectedValue(new Error("duplicate key value violates unique constraint"));
-
-    const res = await appWith("instructor").request(
-      `/api/courses/${COURSE_ID}/materials`,
-      upload("lecture1.vtt", "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nHello.", "text/vtt"),
-      TEST_ENV,
-    );
-
-    expect(res.status).toBe(500);
-    const body = (await res.json()) as { id: string; status: string; error: string };
-    expect(body.status).toBe("failed");
-    expect(body.error).toBeTruthy();
-    expect(setMaterialStatus).toHaveBeenCalledWith(
+    expect(setMaterialStorageKey).toHaveBeenCalledWith(
       expect.anything(),
       COURSE_ID,
       "mat-1",
-      "failed",
-      expect.stringMatching(/could not be saved/i),
+      expect.any(String),
     );
-    // Never claims ready when no document exists.
-    expect(setMaterialStatus).not.toHaveBeenCalledWith(
-      expect.anything(), COURSE_ID, "mat-1", "ready", null,
+    expect(scheduleExtraction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: COURSE_ID,
+        materialId: "mat-1",
+        filename: "lecture1.vtt",
+        relativePath: null,
+        existingDocumentPath: null,
+      }),
     );
+  });
+
+  it("accepts a valid relativePath and forwards it to the insert and the scheduled extraction", async () => {
+    const form = new FormData();
+    form.set("file", new File(["hi"], "lecture1.vtt", { type: "text/vtt" }));
+    form.set("relativePath", "Module 1/lecture1.vtt");
+    const res = await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials`,
+      { method: "POST", body: form },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(201);
+    expect(insertMaterial).toHaveBeenCalledWith(
+      expect.anything(),
+      COURSE_ID,
+      expect.objectContaining({ relativePath: "Module 1/lecture1.vtt" }),
+    );
+    expect(scheduleExtraction).toHaveBeenCalledWith(
+      expect.objectContaining({ relativePath: "Module 1/lecture1.vtt" }),
+    );
+  });
+
+  it("rejects a relativePath that escapes with ..", async () => {
+    const form = new FormData();
+    form.set("file", new File(["hi"], "lecture1.vtt", { type: "text/vtt" }));
+    form.set("relativePath", "../x");
+    const res = await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials`,
+      { method: "POST", body: form },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+    expect(insertMaterial).not.toHaveBeenCalled();
+    expect(scheduleExtraction).not.toHaveBeenCalled();
   });
 
   it("reports a retryable storage failure as 503, not a dead end", async () => {
@@ -288,9 +233,10 @@ describe("materials routes", () => {
     );
     expect(res.status).toBe(503);
     expect(((await res.json()) as { error: string }).error).toMatch(/try uploading again/i);
+    expect(scheduleExtraction).not.toHaveBeenCalled();
   });
 
-  it("reports a permanent storage failure as 502", async () => {
+  it("reports a permanent storage failure as 502 and removes the orphaned row", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(store, "put").mockRejectedValueOnce(new StorageError("put", 403));
 
@@ -300,41 +246,8 @@ describe("materials routes", () => {
       TEST_ENV,
     );
     expect(res.status).toBe(502);
-  });
-
-  it("only claims ready once the bytes are stored and the document exists", async () => {
-    // The row is written pending first and upgraded afterwards, so a failure
-    // anywhere in between leaves a status that is still true.
-    const res = await appWith("instructor").request(
-      `/api/courses/${COURSE_ID}/materials`,
-      upload("lecture1.vtt", "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nHello.", "text/vtt"),
-      TEST_ENV,
-    );
-    expect(res.status).toBe(201);
-    expect(insertMaterial).toHaveBeenCalledWith(
-      expect.anything(),
-      COURSE_ID,
-      expect.objectContaining({ status: "pending" }),
-    );
-    expect(setMaterialStatus).toHaveBeenCalledWith(
-      expect.anything(), COURSE_ID, "mat-1", "ready", null,
-    );
-  });
-
-  it("leaves the material pending when storing the bytes fails", async () => {
-    // The upgrade to ready must not have happened: nothing may claim the
-    // tutor can use content that was never stored.
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    vi.spyOn(store, "put").mockRejectedValueOnce(new StorageError("put", 403));
-
-    await appWith("instructor").request(
-      `/api/courses/${COURSE_ID}/materials`,
-      upload("lecture1.vtt", "WEBVTT", "text/vtt"),
-      TEST_ENV,
-    );
-    expect(setMaterialStatus).not.toHaveBeenCalledWith(
-      expect.anything(), COURSE_ID, expect.anything(), "ready", null,
-    );
+    expect(deleteMaterial).toHaveBeenCalledWith(expect.anything(), COURSE_ID, "mat-1");
+    expect(scheduleExtraction).not.toHaveBeenCalled();
   });
 
   it("refuses to delete a material belonging to another course", async () => {
@@ -348,7 +261,7 @@ describe("materials routes", () => {
   });
 
   it("deletes a material and removes its stored object", async () => {
-    deleteMaterial.mockResolvedValue({ storageKey: "courses/c/materials/m/a.pdf" });
+    deleteMaterial.mockResolvedValue({ storageKey: "courses/c/materials/m/a.pdf", documentPath: null });
     const removed = vi.spyOn(store, "delete");
 
     const res = await appWith("instructor").request(
@@ -358,6 +271,19 @@ describe("materials routes", () => {
     );
     expect(res.status).toBe(204);
     expect(removed).toHaveBeenCalledWith("courses/c/materials/m/a.pdf");
+    expect(knowledgeRemove).not.toHaveBeenCalled();
+  });
+
+  it("also removes the associated concept when a material has one", async () => {
+    deleteMaterial.mockResolvedValue({ storageKey: null, documentPath: "n" });
+
+    const res = await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials/mat-1`,
+      { method: "DELETE" },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(204);
+    expect(knowledgeRemove).toHaveBeenCalledWith(COURSE_ID, "n");
   });
 
   it("does not admit a student to delete", async () => {
@@ -375,8 +301,21 @@ describe("materials routes", () => {
     // hiccup on the best-effort cleanup must not turn a completed delete
     // into a client-visible failure.
     vi.spyOn(console, "error").mockImplementation(() => {});
-    deleteMaterial.mockResolvedValue({ storageKey: "courses/c/materials/m/a.pdf" });
+    deleteMaterial.mockResolvedValue({ storageKey: "courses/c/materials/m/a.pdf", documentPath: null });
     vi.spyOn(store, "delete").mockRejectedValueOnce(new StorageError("delete", 500));
+
+    const res = await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials/mat-1`,
+      { method: "DELETE" },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(204);
+  });
+
+  it("still returns 204 when the concept removal fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    deleteMaterial.mockResolvedValue({ storageKey: null, documentPath: "n" });
+    knowledgeRemove.mockRejectedValueOnce(new Error("concept locked"));
 
     const res = await appWith("instructor").request(
       `/api/courses/${COURSE_ID}/materials/mat-1`,
@@ -400,12 +339,15 @@ describe("materials routes", () => {
       id: "m2",
       originalFilename: "paper.pdf",
       storageKey: "courses/c/materials/m2/paper.pdf",
+      relativePath: null,
+      documentPath: null,
     });
     await store.put(
       "courses/c/materials/m2/paper.pdf",
       new TextEncoder().encode("%PDF").buffer,
       {},
     );
+    extractMaterial.mockResolvedValue({ status: "pending", documentPath: null });
 
     const res = await appWith("instructor").request(
       `/api/courses/${COURSE_ID}/materials/m2/reingest`,
@@ -413,7 +355,15 @@ describe("materials routes", () => {
       TEST_ENV,
     );
     expect(await res.json()).toEqual({ status: "pending", documentCreated: false });
-    expect(createDocument).not.toHaveBeenCalled();
+    expect(extractMaterial).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: COURSE_ID,
+        materialId: "m2",
+        filename: "paper.pdf",
+        relativePath: null,
+        existingDocumentPath: null,
+      }),
+    );
   });
 
   it("marks a material failed when its stored file has gone missing", async () => {
@@ -421,6 +371,8 @@ describe("materials routes", () => {
       id: "m3",
       originalFilename: "a.vtt",
       storageKey: "courses/c/materials/m3/missing.vtt",
+      relativePath: null,
+      documentPath: null,
     });
     const res = await appWith("instructor").request(
       `/api/courses/${COURSE_ID}/materials/m3/reingest`,
@@ -435,27 +387,23 @@ describe("materials routes", () => {
       "failed",
       "The stored file is missing.",
     );
+    expect(extractMaterial).not.toHaveBeenCalled();
   });
 
-  // I-3 (final review): reingesting an already-converted material used to
-  // unconditionally call createDocument again at the same derived path --
-  // a guaranteed unique-index violation against the document reingest is
-  // meant to refresh. Pre-fix, createDocument would be called (and, mocked
-  // to reject as it would against a real DB, its rejection would propagate
-  // uncaught); the fix instead looks the existing document up by
-  // source_material_id and updates its body in place.
-  it("is idempotent for an already-converted material: updates the existing document instead of re-creating it", async () => {
+  it("passes the existing document path through to extractMaterial and reports it unchanged on an idempotent reingest", async () => {
     getMaterialForReingest.mockResolvedValue({
       id: "m4",
       originalFilename: "lecture1.vtt",
       storageKey: "courses/c/materials/m4/lecture1.vtt",
+      relativePath: null,
+      documentPath: "lecture1",
     });
     await store.put(
       "courses/c/materials/m4/lecture1.vtt",
       new TextEncoder().encode("WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nUpdated.").buffer,
       {},
     );
-    getDocumentBySourceMaterial.mockResolvedValue({ id: "doc-4", path: "lecture1" });
+    extractMaterial.mockResolvedValue({ status: "ready", documentPath: "lecture1" });
 
     const res = await appWith("instructor").request(
       `/api/courses/${COURSE_ID}/materials/m4/reingest`,
@@ -465,39 +413,51 @@ describe("materials routes", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: "ready", documentCreated: false });
-    expect(createDocument).not.toHaveBeenCalled();
-    expect(updateDocumentBody).toHaveBeenCalledWith(
-      expect.anything(),
-      COURSE_ID,
-      "doc-4",
-      expect.objectContaining({ body: "Updated." }),
-    );
-    expect(setMaterialStatus).toHaveBeenCalledWith(
-      expect.anything(), COURSE_ID, "m4", "ready", null,
+    expect(extractMaterial).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filename: "lecture1.vtt",
+        existingDocumentPath: "lecture1",
+      }),
     );
   });
 
-  // Round 2 (I-3 gap): the found branch above -- now the common reingest
-  // path -- had no try/catch around updateDocumentBody at all. Pre-fix, a
-  // rejection here would propagate straight out of the handler unhandled
-  // (no try/catch existed to give the mocked rejection anywhere to go), so
-  // this test's own `mockRejectedValueOnce` would surface as an unhandled
-  // promise rejection / a non-JSON, non-500-with-body response instead of
-  // ever reaching the assertions below.
-  it("reports an existing-document update failure honestly instead of throwing unhandled", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => {});
+  it("reports documentCreated when reingest derives a document path for the first time", async () => {
+    getMaterialForReingest.mockResolvedValue({
+      id: "m6",
+      originalFilename: "syllabus.txt",
+      storageKey: "courses/c/materials/m6/syllabus.txt",
+      relativePath: null,
+      documentPath: null,
+    });
+    await store.put(
+      "courses/c/materials/m6/syllabus.txt",
+      new TextEncoder().encode("Weeks").buffer,
+      {},
+    );
+    extractMaterial.mockResolvedValue({ status: "ready", documentPath: "syllabus" });
+
+    const res = await appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials/m6/reingest`,
+      { method: "POST" },
+      TEST_ENV,
+    );
+    expect(await res.json()).toEqual({ status: "ready", documentCreated: true });
+  });
+
+  it("reports a failed reingest without pretending the write happened", async () => {
     getMaterialForReingest.mockResolvedValue({
       id: "m5",
       originalFilename: "lecture1.vtt",
       storageKey: "courses/c/materials/m5/lecture1.vtt",
+      relativePath: null,
+      documentPath: "lecture1",
     });
     await store.put(
       "courses/c/materials/m5/lecture1.vtt",
       new TextEncoder().encode("WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nUpdated.").buffer,
       {},
     );
-    getDocumentBySourceMaterial.mockResolvedValue({ id: "doc-5", path: "lecture1" });
-    updateDocumentBody.mockRejectedValueOnce(new Error("connection reset"));
+    extractMaterial.mockResolvedValue({ status: "failed", documentPath: "lecture1" });
 
     const res = await appWith("instructor").request(
       `/api/courses/${COURSE_ID}/materials/m5/reingest`,
@@ -505,24 +465,8 @@ describe("materials routes", () => {
       TEST_ENV,
     );
 
-    expect(res.status).toBe(500);
-    const body = (await res.json()) as { status: string; documentCreated: boolean; error: string };
-    expect(body.status).toBe("failed");
-    expect(body.documentCreated).toBe(false);
-    expect(body.error).toBeTruthy();
-    expect(setMaterialStatus).toHaveBeenCalledWith(
-      expect.anything(),
-      COURSE_ID,
-      "m5",
-      "failed",
-      expect.stringMatching(/could not be saved/i),
-    );
-    // Never claims ready when the update failed.
-    expect(setMaterialStatus).not.toHaveBeenCalledWith(
-      expect.anything(), COURSE_ID, "m5", "ready", null,
-    );
-    // And never falls through to (re-)creating a document at the same path.
-    expect(createDocument).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "failed", documentCreated: false });
   });
 
   it("does not admit a student to reingest", async () => {
@@ -536,5 +480,6 @@ describe("materials routes", () => {
     );
     expect(res.status).toBe(403);
     expect(getMaterialForReingest).not.toHaveBeenCalled();
+    expect(extractMaterial).not.toHaveBeenCalled();
   });
 });
