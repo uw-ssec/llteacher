@@ -561,8 +561,37 @@ describe("knowledgeListingParagraph", () => {
   it("truncates past the cap and says how many were omitted", () => {
     const many = Array.from({ length: 400 }, (_, i) => concept(`d/c-${i}`, `Concept ${i}`, "x".repeat(40)));
     const out = knowledgeListingParagraph(many);
-    expect(out.length).toBeLessThanOrEqual(KNOWLEDGE_LISTING_MAX_CHARS + KNOWLEDGE_INSTRUCTION.length + 200);
+    expect(out.indexOf("</course_knowledge>") + "</course_knowledge>".length).toBeLessThanOrEqual(KNOWLEDGE_LISTING_MAX_CHARS);
     expect(out).toMatch(/- \.\.\. and \d+ more; use searchKnowledge to find them/);
+  });
+  it("counts every omitted concept and never leaves a heading without rows", () => {
+    const many = [
+      ...Array.from({ length: 150 }, (_, i) => concept(`a/c-${i}`, `Concept ${i}`, "x".repeat(40))),
+      ...Array.from({ length: 150 }, (_, i) => concept(`b/c-${i}`, `Concept ${i}`, "x".repeat(40))),
+    ];
+    const out = knowledgeListingParagraph(many);
+    const body = out.slice(0, out.indexOf("</course_knowledge>"));
+    const rendered = body.split("\n").filter((l) => l.startsWith("- ") && !l.startsWith("- ...")).length;
+    const n = Number(/- \.\.\. and (\d+) more/.exec(out)![1]);
+    expect(rendered + n).toBe(300);
+    const lines = body.split("\n");
+    lines.forEach((l, i) => {
+      if (l.startsWith("## ")) expect(lines[i + 1]?.startsWith("- ") && !lines[i + 1]?.startsWith("- ...")).toBe(true);
+    });
+    expect(out.indexOf("</course_knowledge>") + "</course_knowledge>".length).toBeLessThanOrEqual(KNOWLEDGE_LISTING_MAX_CHARS);
+  });
+  it("keeps directories as a contiguous prefix of the sorted order", () => {
+    const many = ["a", "b", "c"].flatMap((d) =>
+      Array.from({ length: 80 }, (_, i) => concept(`${d}/c-${i}`, `Concept ${i}`, "x".repeat(40))),
+    );
+    const out = knowledgeListingParagraph(many);
+    const headings = out.split("\n").filter((l) => l.startsWith("## "));
+    expect(headings.length).toBeGreaterThan(0);
+    expect(headings).toEqual(["## a", "## b", "## c"].slice(0, headings.length));
+  });
+  it("collapses newlines in titles and descriptions to one line", () => {
+    const out = knowledgeListingParagraph([concept("x", "Two\nline title", "Desc with\n\nbreaks  and   spaces")]);
+    expect(out).toContain("- x: Two line title. Desc with breaks and spaces");
   });
 });
 
