@@ -26,14 +26,13 @@ string, pagination cursors, and worked `curl` examples — see:
    environment manager, or the container runtime; the app does not parse a
    local environment file itself.
 3. `npm run db:migrate`.
-4. In one terminal, run `npm run node:serve` to start the Node API and static
-   server (default port `3000`, or `PORT`). In another, run `npm run dev` to
-   start the web Vite server on `2311`; it proxies `/api` to
-   `NODE_API_URL` (default `http://localhost:3000`).
-
-To work on both SPAs locally, run the root `npm run dev` in a third terminal;
-the admin Vite server runs on `2312` and forwards `/api` through the web Vite
-proxy to the Node server.
+4. In one terminal, run `npm run node:serve --workspace=llteacher-web` to
+   start the Node API and static server (default port `3000`, or `PORT`).
+5. In another terminal at the repository root, run `npm run dev` once. It
+   starts the web Vite server on `2311` and the admin Vite server on `2312`.
+   Web Vite proxies `/api` to `NODE_API_URL` (default
+   `http://localhost:3000`); admin Vite forwards API requests through that
+   web proxy.
 
 ## Deploying
 
