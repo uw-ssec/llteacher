@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, writeFileSync, utimesSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, utimesSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { withWriteLock, WriteLockTimeoutError } from "./writeLock";
@@ -42,5 +42,28 @@ describe("withWriteLock", () => {
     const lock = lockIn();
     await expect(withWriteLock(lock, async () => { throw new Error("boom"); })).rejects.toThrow("boom");
     expect(existsSync(lock)).toBe(false);
+  });
+  it("does not remove a lock it no longer owns", async () => {
+    const lock = lockIn();
+    writeFileSync(lock, "someone-else");
+    await expect(withWriteLock(lock, async () => 1, { timeoutMs: 100 })).rejects.toBeInstanceOf(
+      WriteLockTimeoutError,
+    );
+    expect(existsSync(lock)).toBe(true);
+    expect(readFileSync(lock, "utf-8")).toBe("someone-else");
+  });
+  it("the finally path leaves another holder's lock in place after a steal", async () => {
+    const lock = lockIn();
+    writeFileSync(lock, "dead");
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(lock, old, old);
+    expect(
+      await withWriteLock(lock, async () => {
+        writeFileSync(lock, "other-holder");
+        return 1;
+      }, { staleMs: 60_000 })
+    ).toBe(1);
+    expect(existsSync(lock)).toBe(true);
+    expect(readFileSync(lock, "utf-8")).toBe("other-holder");
   });
 });
