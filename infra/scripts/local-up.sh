@@ -13,9 +13,10 @@ fi
 npm run build --workspace=infra
 pulumi -C "$root/infra" up --stack local --yes
 repo=$(pulumi -C "$root/infra" stack output ecrRepositoryUrl --stack local)
-AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 aws --endpoint-url http://localhost:4566 ecr get-login-password | docker login --username AWS --password-stdin "${repo%%/*}"
 docker build --tag "$repo:local" --file "$root/Dockerfile.aws" "$root"
-docker push "$repo:local"
+# Floci's ECS service resolves an ECR-shaped image that already exists in the
+# local Docker daemon. This avoids its registry proxy while preserving the
+# production task-definition image URI; CI/production performs a real ECR push.
 pulumi -C "$root/infra" config set --stack local provisionService true
 pulumi -C "$root/infra" config set --stack local deployApp true
 pulumi -C "$root/infra" up --stack local --yes
