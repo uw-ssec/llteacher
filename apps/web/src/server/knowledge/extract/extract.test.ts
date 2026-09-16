@@ -1,0 +1,75 @@
+import { describe, it, expect } from "vitest";
+import { zipSync, strToU8 } from "fflate";
+import { extract, sniffTranscript } from "./index";
+
+const enc = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer;
+const zip = (files: Record<string, string>) =>
+  zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, strToU8(v)]))).buffer as ArrayBuffer;
+
+const SRT = "1\n00:00:01,000 --> 00:00:04,000\nWelcome to Econ 201.\n\n2\n00:00:05,000 --> 00:00:08,000\nToday: supply and demand.\n";
+
+const MINIMAL_PDF = `%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj
+4 0 obj << /Length 60 >> stream
+BT /F1 24 Tf 72 700 Td (Supply and demand set price) Tj ET
+endstream endobj
+5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj
+trailer << /Root 1 0 R >>`;
+
+const EMPTY_PDF = MINIMAL_PDF.replace("(Supply and demand set price) Tj", "");
+
+describe("sniffTranscript", () => {
+  it("detects SRT and VTT cue lines", () => {
+    expect(sniffTranscript(SRT)).toBe(true);
+    expect(sniffTranscript("WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nHi")).toBe(true);
+    expect(sniffTranscript("Just a syllabus paragraph.")).toBe(false);
+  });
+});
+
+describe("extract", () => {
+  it("converts a .txt that is really SRT into a transcript concept", async () => {
+    const out = await extract("Lecture 1 captions.txt", enc(SRT));
+    expect(out).toMatchObject({ kind: "extracted", type: "transcript", title: "Lecture 1 captions" });
+    expect((out as { markdown: string }).markdown).toBe("Welcome to Econ 201.\n\nToday: supply and demand.");
+  });
+  it("passes markdown and plain text through as notes", async () => {
+    const out = await extract("notes.md", enc("# Notes\n\nBody."));
+    expect(out).toMatchObject({ kind: "extracted", type: "note", markdown: "# Notes\n\nBody." });
+  });
+  it("reads docx paragraphs and headings", async () => {
+    const xml = `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+      <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Module 1</w:t></w:r></w:p>
+      <w:p><w:r><w:t xml:space="preserve">Supply and </w:t></w:r><w:r><w:t>demand.</w:t></w:r></w:p>
+      <w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Elasticity</w:t></w:r></w:p>
+      <w:p><w:r><w:t>Responds to price.</w:t></w:r></w:p></w:body></w:document>`;
+    const out = await extract("Lecture 2.docx", zip({ "word/document.xml": xml }));
+    expect(out).toMatchObject({ kind: "extracted", type: "lecture", title: "Module 1" });
+    expect((out as { markdown: string }).markdown).toBe("# Module 1\n\nSupply and demand.\n\n## Elasticity\n\nResponds to price.");
+  });
+  it("reads pptx slides in order with slide headings", async () => {
+    const slide = (t: string) => `<?xml version="1.0"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="x"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>${t}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`;
+    const out = await extract("Deck.pptx", zip({ "ppt/slides/slide2.xml": slide("Second"), "ppt/slides/slide1.xml": slide("First"), "ppt/slides/slide10.xml": slide("Tenth") }));
+    expect(out).toMatchObject({ kind: "extracted", type: "slides", title: "Deck" });
+    expect((out as { markdown: string }).markdown).toBe("## Slide 1\n\nFirst\n\n## Slide 2\n\nSecond\n\n## Slide 10\n\nTenth");
+  });
+  it("reads a text-layer PDF", async () => {
+    const out = await extract("Reading.pdf", enc(MINIMAL_PDF));
+    expect(out).toMatchObject({ kind: "extracted", type: "reading", title: "Reading" });
+    expect((out as { markdown: string }).markdown).toContain("Supply and demand set price");
+  });
+  it("marks a PDF with no text layer as unsupported", async () => {
+    const out = await extract("Scan.pdf", enc(EMPTY_PDF));
+    expect(out).toMatchObject({ kind: "unsupported" });
+    expect((out as { reason: string }).reason).toMatch(/no text layer/i);
+  });
+  it("never throws on garbage bytes", async () => {
+    expect((await extract("x.docx", enc("not a zip"))).kind).toBe("unsupported");
+    expect((await extract("x.pptx", enc("not a zip"))).kind).toBe("unsupported");
+    expect((await extract("x.pdf", enc("not a pdf"))).kind).toBe("unsupported");
+  });
+  it("reports unknown formats as unsupported", async () => {
+    expect(await extract("audio.mp3", enc(""))).toMatchObject({ kind: "unsupported" });
+  });
+});
