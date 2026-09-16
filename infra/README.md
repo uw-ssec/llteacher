@@ -25,6 +25,10 @@ and enables the service. Later runs retain the existing development resources
 and deploy a freshly tagged image. Floci ECS uses that local image directly;
 production CI performs a real ECR push.
 
+Each deploy registers the new task definition with the service held at zero,
+runs `npm run db:migrate` as a one-off ECS task, and starts the service only
+after that task exits successfully.
+
 The launcher creates a random passphrase in the ignored, owner-only
 `.floci/pulumi-passphrase` file on its first run and reuses it thereafter.
 Normally there is no need to set `PULUMI_CONFIG_PASSPHRASE`; an explicitly set
@@ -39,6 +43,9 @@ Floci's ALB emulator currently exposes HTTP on its listener even when the
 AWS listener protocol is HTTPS. A small Caddy container therefore terminates
 the trusted `mkcert` certificate on public port `443` and forwards to Floci's
 ALB on `8443`; the ALB remains the only application router.
+
+The local RDS emulator uses `pgvector/pgvector:pg16`, matching the pgvector
+extension enabled by the migration bootstrap on real RDS PostgreSQL.
 
 `verify-local-stack.sh` uses certificate verification, never `--insecure`.
 Production requires an externally validated ACM certificate and real secret

@@ -47,7 +47,10 @@ docker build --tag "$image_uri" --file "$root/Dockerfile.aws" "$root"
 # daemon. Its CreateRepository URI is intentionally not used here: that is the
 # registry proxy address, not the local-image lookup key.
 pulumi -C "$root/infra" config set --stack local provisionService true
-pulumi -C "$root/infra" config set --stack local deployApp true
 pulumi -C "$root/infra" config set --stack local imageTag "$image_tag"
+pulumi -C "$root/infra" config set --stack local deployApp false
+pulumi -C "$root/infra" up --stack local --yes
+"$root/infra/scripts/run-local-migrations.sh"
+pulumi -C "$root/infra" config set --stack local deployApp true
 pulumi -C "$root/infra" up --stack local --yes
 echo "Local ECS service deployed. Run npm run aws:local:verify after the ALB becomes healthy."
