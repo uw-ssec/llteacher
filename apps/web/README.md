@@ -49,6 +49,10 @@ relies on BuildKit's per-Dockerfile ignore file, `apps/web/Dockerfile.dockerigno
 `.wrangler` out of the build context without touching the root `.dockerignore` (that one belongs to
 the legacy Python image).
 
+The image currently ships with `devDependencies` installed because the server entry point runs
+through `tsx` rather than compiled JS; trimming the runtime image to production dependencies only
+is a follow-up.
+
 Env vars the image cares about: `KNOWLEDGE_ROOT` (knowledge bundle root; `/mnt/knowledge` in the
 image default), `OKF_BINARY` (override the `okf` executable path/name; defaults to `okf` on `PATH`,
 which resolves to `/usr/local/bin/okf` in this image), and `PORT` (defaults to `8080`).

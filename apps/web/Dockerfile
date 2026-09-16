@@ -16,7 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
   && curl -fsSL -o /tmp/okf "https://github.com/okf-memory/okf-agent-memory/releases/download/v${OKF_VERSION}/okf-linux-${TARGETARCH}" \
   && curl -fsSL -o /tmp/checksums.txt "https://github.com/okf-memory/okf-agent-memory/releases/download/v${OKF_VERSION}/checksums.txt" \
   && cd /tmp && grep -E ' +bin/okf-linux-'"${TARGETARCH}"'$' checksums.txt | sed -E 's# +bin/okf-linux-'"${TARGETARCH}"'$#  okf#' > okf.sha256 && test -s okf.sha256 && sha256sum -c okf.sha256 \
-  && install -m 0755 /tmp/okf /usr/local/bin/okf && rm -rf /tmp/okf /tmp/checksums.txt /var/lib/apt/lists/*
+  && install -m 0755 /tmp/okf /usr/local/bin/okf \
+  && apt-get purge -y curl && apt-get autoremove -y \
+  && rm -rf /tmp/okf /tmp/checksums.txt /var/lib/apt/lists/*
 WORKDIR /repo
 COPY --from=build /repo/node_modules ./node_modules
 COPY --from=build /repo/package.json ./package.json
