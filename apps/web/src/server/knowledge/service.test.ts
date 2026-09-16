@@ -125,6 +125,12 @@ describe.skipIf(!okfAvailable(OKF))("OkfKnowledgeService (real binary)", () => {
     expect(report.brokenLinks).toEqual([{ source: "a", target: "gone" }]);
   });
 
+  it("validates a course with no bundle yet without creating one on disk", async () => {
+    const report = await svc.validate(COURSE_B);
+    expect(report).toEqual({ conceptCount: 0, brokenLinks: [], orphans: [], isConformant: true });
+    expect(existsSync(path.join(root, "courses", COURSE_B))).toBe(false);
+  });
+
   it("rejects bad ids and bad course ids before touching okf", async () => {
     await expect(svc.show(COURSE_A, "Bad Id")).rejects.toBeInstanceOf(ConceptIdError);
     await expect(svc.show(COURSE_A, "../x")).rejects.toBeInstanceOf(ConceptIdError);

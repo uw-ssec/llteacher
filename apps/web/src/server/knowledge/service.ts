@@ -417,7 +417,9 @@ export class OkfKnowledgeService implements KnowledgeService {
 
   async validate(courseId: string): Promise<ValidationReport> {
     const dir = this.bundleDir(courseId);
-    await this.ensureBundle(courseId);
+    if (!(await exists(dir))) {
+      return { conceptCount: 0, brokenLinks: [], orphans: [], isConformant: true };
+    }
     const r = await runOkf<OkfValidate>(this.binary, ["validate", dir]);
     return {
       conceptCount: r.concept_count,
