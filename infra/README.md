@@ -14,7 +14,6 @@ Run the initial local setup:
 
 ```sh
 export PULUMI_STACK=local
-export PULUMI_CONFIG_PASSPHRASE='choose-a-local-passphrase'
 ./infra/scripts/install-local-cert.sh
 sudo sh -c 'echo "127.0.0.1 llteacher.local" >> /etc/hosts'
 ./infra/scripts/local-up.sh
@@ -25,6 +24,14 @@ image exists, then builds a Docker image tagged with Floci's ECR-shaped URI
 and enables the service. Later runs retain the existing development resources
 and deploy a freshly tagged image. Floci ECS uses that local image directly;
 production CI performs a real ECR push.
+
+The launcher creates a random passphrase in the ignored, owner-only
+`.floci/pulumi-passphrase` file on its first run and reuses it thereafter.
+Normally there is no need to set `PULUMI_CONFIG_PASSPHRASE`; an explicitly set
+value overrides the local file for recovery or automation.
+
+`Pulumi.local.yaml` is generated local state and is intentionally ignored.
+`Pulumi.local.example.yaml` documents the non-secret baseline configuration.
 `floci-down.sh` stops only the local emulator and keeps its development
 resources intact.
 

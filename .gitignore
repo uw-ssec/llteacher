@@ -149,6 +149,7 @@ node_modules/
 # Filesystem Pulumi state and persistent Floci emulator data are local only.
 /.pulumi/
 /.floci/
+/infra/Pulumi.local.yaml
 /infra/dist/
 
 # Local meeting notes (not for the shared repo)
