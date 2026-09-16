@@ -1,11 +1,12 @@
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 import type { Application } from "./app.js";
+import type { InfraConfig } from "./config.js";
 import type { Database } from "./database.js";
 import type { Network } from "./network.js";
 
 /** The existing overdue-submission sweep, isolated as a short-lived ECS task. */
-export function createOverdueJob(name: string, app: Application, data: Database, network: Network, provider: aws.Provider): aws.cloudwatch.LogGroup {
+export function createOverdueJob(name: string, config: InfraConfig, app: Application, data: Database, network: Network, provider: aws.Provider): aws.cloudwatch.LogGroup {
   const options = { provider };
   const logGroup = new aws.cloudwatch.LogGroup(`${name}-overdue-job-logs`, { retentionInDays: 7 }, options);
   const taskDefinition = new aws.ecs.TaskDefinition(`${name}-overdue-job-task`, {
@@ -31,7 +32,13 @@ export function createOverdueJob(name: string, app: Application, data: Database,
     policy: pulumi.all([taskDefinition.arn]).apply(([taskArn]) => JSON.stringify({ Version: "2012-10-17", Statement: [{ Action: "ecs:RunTask", Effect: "Allow", Resource: taskArn }, { Action: "iam:PassRole", Effect: "Allow", Resource: "*" }] })),
     role: role.id,
   }, options);
-  const rule = new aws.cloudwatch.EventRule(`${name}-overdue-hourly`, { scheduleExpression: "rate(1 hour)" }, options);
+  // Floci currently loops an ECS task-state event back through the EventBridge
+  // ECS target. Keep the local rule represented but disabled; staging and
+  // production run the real hourly overdue-submission sweep.
+  const rule = new aws.cloudwatch.EventRule(`${name}-overdue-hourly`, {
+    isEnabled: !config.isLocal,
+    scheduleExpression: "rate(1 hour)",
+  }, options);
   new aws.cloudwatch.EventTarget(`${name}-overdue-target`, {
     arn: app.cluster.arn,
     ecsTarget: {

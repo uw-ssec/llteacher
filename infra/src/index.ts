@@ -12,7 +12,7 @@ const provider = createAwsProvider(config);
 const network = createNetwork(name, provider);
 const data = createDataResources(name, network, provider);
 const app = createApplication(name, config, network, data, provider);
-const jobLogGroup = createOverdueJob(name, app, data, network, provider);
+const jobLogGroup = createOverdueJob(name, config, app, data, network, provider);
 
 export const appUrl = app.appUrl;
 export const ecrRepositoryUrl = app.repository.repositoryUrl;
