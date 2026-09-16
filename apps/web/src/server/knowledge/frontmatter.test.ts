@@ -22,6 +22,13 @@ describe("parseFrontmatter", () => {
   it("returns an empty map when there is no frontmatter", () => {
     expect(parseFrontmatter("just text")).toEqual({ frontmatter: {}, body: "just text" });
   });
+  it("handles CRLF line endings", () => {
+    const CRLF_RAW = RAW.replace(/\n/g, "\r\n");
+    const { frontmatter: fm1, body: body1 } = parseFrontmatter(RAW);
+    const { frontmatter: fm2, body: body2 } = parseFrontmatter(CRLF_RAW);
+    expect(fm2).toEqual(fm1);
+    expect(body2).toBe(body1);
+  });
 });
 
 describe("setFrontmatterKeys", () => {
@@ -38,5 +45,13 @@ describe("setFrontmatterKeys", () => {
     const twice = setFrontmatterKeys(once, { status: "verified-by-instructor" });
     expect(twice.match(/^status:/gm)).toHaveLength(1);
     expect(twice).toContain("status: verified-by-instructor");
+  });
+  it("handles CRLF line endings with setFrontmatterKeys", () => {
+    const CRLF_RAW = RAW.replace(/\n/g, "\r\n");
+    const out = setFrontmatterKeys(CRLF_RAW, { status: "generated" });
+    const statusLines = out.match(/^status:/gm);
+    expect(statusLines).toHaveLength(1);
+    const fences = out.match(/^---$/gm);
+    expect(fences).toHaveLength(2);
   });
 });
