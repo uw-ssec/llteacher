@@ -1,5 +1,6 @@
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
+import type { InfraConfig } from "./config.js";
 import type { Network } from "./network.js";
 
 export interface Database {
@@ -7,9 +8,11 @@ export interface Database {
   databaseUrlSecretVersion: aws.secretsmanager.SecretVersion;
   instance: aws.rds.Instance;
   materialsBucket: aws.s3.Bucket;
+  runtimeSecret?: aws.secretsmanager.Secret;
+  runtimeSecretVersion?: aws.secretsmanager.SecretVersion;
 }
 
-export function createDataResources(name: string, network: Network, provider: aws.Provider): Database {
+export function createDataResources(name: string, config: InfraConfig, network: Network, provider: aws.Provider): Database {
   const options = { provider };
   const subnetGroup = new aws.rds.SubnetGroup(`${name}-db-subnets`, {
     subnetIds: network.publicSubnetIds,
@@ -36,6 +39,17 @@ export function createDataResources(name: string, network: Network, provider: aw
     secretId: databaseUrlSecret.id,
     secretString: pulumi.interpolate`postgres://llteacher:${password}@${instance.address}:${instance.port}/llteacher`,
   }, options);
+  const runtimeSecretValue = new pulumi.Config().getSecret("runtimeSecrets");
+  if (!config.isLocal && !runtimeSecretValue) {
+    throw new Error('The staging and production stacks require a secret "runtimeSecrets" JSON value.');
+  }
+  const runtimeSecret = runtimeSecretValue === undefined ? undefined : new aws.secretsmanager.Secret(`${name}-runtime`, {
+    description: "LLTeacher WorkOS, LLM provider, and application encryption settings.",
+  }, options);
+  const runtimeSecretVersion = runtimeSecret === undefined ? undefined : new aws.secretsmanager.SecretVersion(`${name}-runtime-value`, {
+    secretId: runtimeSecret.id,
+    secretString: runtimeSecretValue!,
+  }, options);
   const materialsBucket = new aws.s3.Bucket(`${name}-materials`, {
     forceDestroy: false,
   }, options);
@@ -46,5 +60,5 @@ export function createDataResources(name: string, network: Network, provider: aw
     ignorePublicAcls: true,
     restrictPublicBuckets: true,
   }, options);
-  return { databaseUrlSecret, databaseUrlSecretVersion, instance, materialsBucket };
+  return { databaseUrlSecret, databaseUrlSecretVersion, instance, materialsBucket, runtimeSecret, runtimeSecretVersion };
 }

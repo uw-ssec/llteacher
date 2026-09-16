@@ -45,7 +45,7 @@ export function createApplication(name: string, config: InfraConfig, network: Ne
     networkMode: "awsvpc",
     requiresCompatibilities: ["FARGATE"],
     taskRoleArn: taskRole.arn,
-    containerDefinitions: pulumi.all([repository.repositoryUrl, logGroup.name, data.databaseUrlSecret.arn]).apply(([repositoryUrl, logGroupName, databaseSecretArn]) => JSON.stringify([{
+    containerDefinitions: pulumi.all([repository.repositoryUrl, logGroup.name, data.databaseUrlSecret.arn, data.runtimeSecret?.arn]).apply(([repositoryUrl, logGroupName, databaseSecretArn, runtimeSecretArn]) => JSON.stringify([{
       name: "app",
       // Floci's local-image fast path matches the canonical AWS ECR URI,
       // whereas its CreateRepository response is a localhost registry URI.
@@ -56,9 +56,12 @@ export function createApplication(name: string, config: InfraConfig, network: Ne
       essential: true,
       portMappings: [{ containerPort: 8080, protocol: "tcp" }],
       logConfiguration: { logDriver: "awslogs", options: { "awslogs-group": logGroupName, "awslogs-region": "us-east-1", "awslogs-stream-prefix": "app" } },
-      secrets: [{ name: "DATABASE_URL", valueFrom: databaseSecretArn }],
+      secrets: [
+        { name: "DATABASE_URL", valueFrom: databaseSecretArn },
+        ...(!runtimeSecretArn ? [] : ["WORKOS_API_KEY", "WORKOS_CLIENT_ID", "OPENROUTER_API_KEY", "LLMOXIE_API_KEY", "SESSION_SECRET", "ENCRYPTION_KEY", "BLIND_INDEX_KEY", "WORKOS_WEBHOOK_SECRET"].map((name) => ({ name, valueFrom: `${runtimeSecretArn}:${name}::` }))),
+      ],
     }])),
-  }, { ...options, dependsOn: [data.databaseUrlSecretVersion] });
+  }, { ...options, dependsOn: [data.databaseUrlSecretVersion, ...(data.runtimeSecretVersion ? [data.runtimeSecretVersion] : [])] });
   const alb = new aws.lb.LoadBalancer(`${name}-alb`, { internal: false, loadBalancerType: "application", subnets: network.publicSubnetIds, securityGroups: [network.albSecurityGroup.id] }, options);
   const targetGroup = new aws.lb.TargetGroup(`${name}-app-targets`, {
     healthCheck: { matcher: "200-399", path: "/" },

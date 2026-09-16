@@ -51,6 +51,12 @@ extension enabled by the migration bootstrap on real RDS PostgreSQL.
 Production requires an externally validated ACM certificate and real secret
 values before its stack is applied.
 
+Staging and production also require a Pulumi secret named `runtimeSecrets`: a
+JSON object containing `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`,
+`OPENROUTER_API_KEY`, `LLMOXIE_API_KEY`, `SESSION_SECRET`, `ENCRYPTION_KEY`,
+`BLIND_INDEX_KEY`, and `WORKOS_WEBHOOK_SECRET`. Pulumi writes it to Secrets
+Manager and ECS reads only the needed JSON keys at task start.
+
 ## Current Floci limitation
 
 The topology and resource APIs have been applied successfully with Floci

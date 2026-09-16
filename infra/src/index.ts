@@ -10,7 +10,7 @@ const config = loadInfraConfig();
 const name = `llteacher-${config.environment}`;
 const provider = createAwsProvider(config);
 const network = createNetwork(name, provider);
-const data = createDataResources(name, network, provider);
+const data = createDataResources(name, config, network, provider);
 const app = createApplication(name, config, network, data, provider);
 const jobLogGroup = createOverdueJob(name, config, app, data, network, provider);
 
