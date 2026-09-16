@@ -1,6 +1,7 @@
 # Git and version control
 .git
 .gitignore
+node_modules/
 
 # Python cache and virtual environments
 __pycache__
