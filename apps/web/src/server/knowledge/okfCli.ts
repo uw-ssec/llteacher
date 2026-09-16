@@ -8,8 +8,17 @@ export class OkfError extends Error {
     readonly args: string[],
     readonly exitCode: number | null,
     readonly stderr: string,
+    readonly errno?: string,
   ) {
-    super(`okf ${args[0] ?? ""} failed (${exitCode ?? "timeout"}): ${stderr.trim().slice(0, 500)}`);
+    let code = "";
+    if (typeof exitCode === "number") {
+      code = String(exitCode);
+    } else if (errno) {
+      code = errno;
+    } else {
+      code = "timeout";
+    }
+    super(`okf ${args[0] ?? ""} failed (${code}): ${stderr.trim().slice(0, 500)}`);
     this.name = "OkfError";
   }
 }
@@ -38,7 +47,9 @@ export function runOkf<T>(binary: string, args: string[], opts: { timeoutMs?: nu
       (error, stdout, stderr) => {
         if (error) {
           const code = (error as NodeJS.ErrnoException & { code?: number | string }).code;
-          reject(new OkfError(fullArgs, typeof code === "number" ? code : null, stderr || error.message));
+          const errno = typeof code === "string" ? code : undefined;
+          const exitCode = typeof code === "number" ? code : null;
+          reject(new OkfError(fullArgs, exitCode, stderr || error.message, errno));
           return;
         }
         const text = stdout.trim();

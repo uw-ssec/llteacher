@@ -32,3 +32,11 @@ describe("okfAvailable", () => {
     expect(okfAvailable("/nonexistent/okf")).toBe(false);
   });
 });
+
+describe("runOkf error handling", () => {
+  it("rejects with OkfError containing ENOENT when binary is missing", async () => {
+    await expect(runOkf("/nonexistent/okf", ["version"], { json: false })).rejects.toSatisfy((err) => {
+      return err instanceof OkfError && err.message.includes("ENOENT");
+    });
+  });
+});
