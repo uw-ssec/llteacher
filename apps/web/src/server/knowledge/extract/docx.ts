@@ -1,5 +1,5 @@
 import { unzipSync, strFromU8 } from "fflate";
-import { decodeXml, titleFromFilename, type ExtractionOutcome } from "./types";
+import { decodeXml, MAX_PART_BYTES, titleFromFilename, type ExtractionOutcome } from "./types";
 
 const PARA_RE = /<w:p[\s>][\s\S]*?<\/w:p>/g;
 const STYLE_RE = /<w:pStyle w:val="([^"]+)"/;
@@ -13,9 +13,16 @@ function headingLevel(style: string | undefined): number {
 export async function extractDocx(filename: string, bytes: ArrayBuffer): Promise<ExtractionOutcome> {
   let xml: string;
   try {
-    const files = unzipSync(new Uint8Array(bytes));
+    const files = unzipSync(new Uint8Array(bytes), {
+      filter: (f) => f.originalSize <= MAX_PART_BYTES && f.name === "word/document.xml",
+    });
     const doc = files["word/document.xml"];
-    if (!doc) return { kind: "unsupported", reason: "docx has no word/document.xml" };
+    if (!doc) {
+      return {
+        kind: "unsupported",
+        reason: "docx has no readable word/document.xml (missing or larger than 50 MB)",
+      };
+    }
     xml = strFromU8(doc);
   } catch {
     return { kind: "unsupported", reason: "docx could not be unzipped" };

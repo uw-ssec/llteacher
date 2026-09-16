@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { zipSync, strToU8 } from "fflate";
 import { extract, sniffTranscript } from "./index";
+import { decodeXml } from "./types";
 
 const enc = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer;
 const zip = (files: Record<string, string>) =>
@@ -48,11 +49,56 @@ describe("extract", () => {
     expect(out).toMatchObject({ kind: "extracted", type: "lecture", title: "Module 1" });
     expect((out as { markdown: string }).markdown).toBe("# Module 1\n\nSupply and demand.\n\n## Elasticity\n\nResponds to price.");
   });
+  it("falls back to the filename for docx with no heading styles at all", async () => {
+    const xml = `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+      <w:p><w:r><w:t>Plain intro paragraph.</w:t></w:r></w:p>
+      <w:p><w:r><w:t>Second plain paragraph.</w:t></w:r></w:p></w:body></w:document>`;
+    const out = await extract("Notes plain.docx", zip({ "word/document.xml": xml }));
+    expect(out).toMatchObject({ kind: "extracted", type: "lecture", title: "Notes plain" });
+    expect((out as { markdown: string }).markdown).toBe("Plain intro paragraph.\n\nSecond plain paragraph.");
+  });
+  it("rejects a docx zip bomb: an oversized word/document.xml is never decompressed", async () => {
+    const bytes = zip({ "word/document.xml": " ".repeat(51 * 1024 * 1024) });
+    const start = performance.now();
+    const out = await extract("Bomb.docx", bytes);
+    const elapsedMs = performance.now() - start;
+    // eslint-disable-next-line no-console
+    console.log(`zip bomb test: extract() took ${elapsedMs.toFixed(1)}ms`);
+    expect(out).toMatchObject({ kind: "unsupported" });
+    expect((out as { reason: string }).reason).toMatch(/50 MB/);
+  });
   it("reads pptx slides in order with slide headings", async () => {
     const slide = (t: string) => `<?xml version="1.0"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="x"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>${t}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`;
     const out = await extract("Deck.pptx", zip({ "ppt/slides/slide2.xml": slide("Second"), "ppt/slides/slide1.xml": slide("First"), "ppt/slides/slide10.xml": slide("Tenth") }));
     expect(out).toMatchObject({ kind: "extracted", type: "slides", title: "Deck" });
     expect((out as { markdown: string }).markdown).toBe("## Slide 1\n\nFirst\n\n## Slide 2\n\nSecond\n\n## Slide 10\n\nTenth");
+  });
+  it("orders pptx slides by the presentation's own sldId order, not the slideN.xml filenames", async () => {
+    const slide = (t: string) => `<?xml version="1.0"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="x"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>${t}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`;
+    const presentationXml = `<?xml version="1.0"?><p:presentation xmlns:p="x" xmlns:r="y"><p:sldIdLst>
+      <p:sldId id="256" r:id="rId2"/>
+      <p:sldId id="257" r:id="rId3"/>
+      <p:sldId id="258" r:id="rId1"/>
+    </p:sldIdLst></p:presentation>`;
+    const relsXml = `<?xml version="1.0"?><Relationships xmlns="z">
+      <Relationship Id="rId1" Type="slide" Target="slides/slide1.xml"/>
+      <Relationship Id="rId2" Type="slide" Target="slides/slide2.xml"/>
+      <Relationship Id="rId3" Type="slide" Target="slides/slide3.xml"/>
+    </Relationships>`;
+    const out = await extract(
+      "Deck.pptx",
+      zip({
+        "ppt/slides/slide1.xml": slide("Alpha"),
+        "ppt/slides/slide2.xml": slide("Beta"),
+        "ppt/slides/slide3.xml": slide("Gamma"),
+        "ppt/presentation.xml": presentationXml,
+        "ppt/_rels/presentation.xml.rels": relsXml,
+      }),
+    );
+    expect(out).toMatchObject({ kind: "extracted", type: "slides", title: "Deck" });
+    expect((out as { markdown: string }).markdown).toBe(
+      "## Slide 1\n\nBeta\n\n## Slide 2\n\nGamma\n\n## Slide 3\n\nAlpha",
+    );
   });
   it("reads a text-layer PDF", async () => {
     const out = await extract("Reading.pdf", enc(MINIMAL_PDF));
@@ -71,5 +117,11 @@ describe("extract", () => {
   });
   it("reports unknown formats as unsupported", async () => {
     expect(await extract("audio.mp3", enc(""))).toMatchObject({ kind: "unsupported" });
+  });
+});
+
+describe("decodeXml", () => {
+  it("decodes hex numeric entities before decimal and named entities", () => {
+    expect(decodeXml("&#x2019;&#39;&amp;lt;")).toBe("’'&lt;");
   });
 });
