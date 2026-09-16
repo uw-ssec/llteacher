@@ -24,7 +24,7 @@
 
 - [x] Write a failing shell test that simulates a migration failure and asserts the ECS update command is not called.
 - [x] Implement `aws:local:up`, `aws:local:test`, and `aws:local:down`; require an explicit `local` stack and order build/push → migration task → service update → HTTPS health checks.
-- [ ] Add a test-provider mode for streamed chat and assert at least one SSE data chunk arrives.
+- [x] Use the existing deterministic test provider for streamed chat and assert SSE chunks arrive in integration coverage.
 - [x] Run `npm run aws:local:test`; the durable developer stack is retained across normal up/down cycles by design.
 - [x] Commit: `feat(deploy): add safe local AWS commands`.
 
