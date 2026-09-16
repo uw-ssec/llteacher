@@ -22,7 +22,7 @@
 
 **Files:** modify root `package.json`; create `infra/scripts/local-up.sh`, `infra/scripts/local-test.sh`, `infra/scripts/local-down.sh`, `infra/scripts/deploy-local.sh`, and `infra/scripts/deploy-local.test.sh`.
 
-- [ ] Write a failing shell test that simulates a migration failure and asserts the ECS update command is not called.
+- [x] Write a failing shell test that simulates a migration failure and asserts the ECS update command is not called.
 - [x] Implement `aws:local:up`, `aws:local:test`, and `aws:local:down`; require an explicit `local` stack and order build/push → migration task → service update → HTTPS health checks.
 - [ ] Add a test-provider mode for streamed chat and assert at least one SSE data chunk arrives.
 - [x] Run `npm run aws:local:test`; the durable developer stack is retained across normal up/down cycles by design.
