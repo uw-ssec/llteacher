@@ -6,8 +6,9 @@ not use an AWS account. Staging and production use the same program without
 endpoint overrides.
 
 Prerequisites: Docker Desktop, Node 24, Pulumi 3.234+, AWS CLI, and `mkcert`
-(`brew install mkcert`). Floci is run as `floci/floci:latest` with persistent
-data under `.floci/data`.
+(`brew install mkcert`). Floci is run in `hybrid` persistent-storage mode with
+data under `.floci/data`; normal `aws:local:down`/`up` cycles retain local
+development resources.
 
 Run the initial local setup:
 
