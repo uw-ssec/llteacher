@@ -161,6 +161,7 @@ app.use("/api/*", rolesMiddleware);
 // API routes — registered directly on `app` rather than via app.route(prefix, sub)
 // to avoid Hono's prefix-stripping behavior that can cause /api/hello to not
 // match a sub-app's `/` handler.
+app.get("/api/health", (c) => c.json({ status: "ok" }));
 app.get("/api/hello", helloHandler);
 app.post("/api/chat", chatHandler);
 app.get("/api/auth/login", loginHandler);

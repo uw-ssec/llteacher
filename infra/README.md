@@ -17,16 +17,21 @@ export PULUMI_STACK=local
 export PULUMI_CONFIG_PASSPHRASE='choose-a-local-passphrase'
 ./infra/scripts/install-local-cert.sh
 sudo sh -c 'echo "127.0.0.1 llteacher.local" >> /etc/hosts'
-pulumi -C infra config set --stack local --secret databasePassword 'local-only-password'
 ./infra/scripts/local-up.sh
 ```
 
-The first pass intentionally leaves the ECS service absent. That creates ECR
-before an image exists. The launcher then builds a Docker image tagged with
-Floci's ECR-shaped URI, enables the service, and reruns Pulumi. Floci ECS uses
-that local image directly; production CI performs a real ECR push.
+The launcher initializes an empty local stack once, creates ECR before an
+image exists, then builds a Docker image tagged with Floci's ECR-shaped URI
+and enables the service. Later runs retain the existing development resources
+and deploy a freshly tagged image. Floci ECS uses that local image directly;
+production CI performs a real ECR push.
 `floci-down.sh` stops only the local emulator and keeps its development
 resources intact.
+
+Floci's ALB emulator currently exposes HTTP on its listener even when the
+AWS listener protocol is HTTPS. A small Caddy container therefore terminates
+the trusted `mkcert` certificate on public port `443` and forwards to Floci's
+ALB on `8443`; the ALB remains the only application router.
 
 `verify-local-stack.sh` uses certificate verification, never `--insecure`.
 Production requires an externally validated ACM certificate and real secret

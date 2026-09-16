@@ -111,6 +111,14 @@ describe("createNodeServer", () => {
     expect(response.headers.get("content-type")).toContain("application/json");
   });
 
+  it("exposes an unauthenticated health endpoint for the load balancer", async () => {
+    const response = await request("/api/health");
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(await response.json()).toEqual({ status: "ok" });
+  });
+
   it("returns the API app's JSON 404 for unknown API paths", async () => {
     const key = await loadSessionKey(runtimeConfig);
     const sealed = await sealSession(createSessionPayload("user-1", "workos-user-1", 0), key);
