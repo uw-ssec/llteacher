@@ -67,11 +67,11 @@ Postgres keeps identity, enrolment, conversations, messages, `course_materials` 
   title: <from document title, slide deck title, or filename>
   description: <first ~200 characters of body, single line>
   resource: llteacher://materials/{materialId}
-  sources: ["<original filename>, uploaded <ISO date>"]
-  generated: { by: agent/llteacher-extractor, at: <ISO timestamp> }
+  status: generated
+  generated: { by: agent/cli, at: <ISO timestamp> }   # written by okf itself
   ```
 
-  `generated` is okf's own provenance convention. An instructor edit through the console updates the body through `okf update`, which okf logs; the frontmatter keys above are preserved. `verified` is never written by the app.
+  `generated` and `status: generated` are okf's own provenance conventions. okf writes `generated` (its CLI actor is `agent/cli`; the app does not override it). `okf create` accepts only type, title, and description, so the service adds `resource` and `status` to the frontmatter block after creation; `okf update` preserves scalar extra keys, verified against 0.1.5, and the CI fixture test guards this for 0.3.0. List-valued keys such as `sources` are not preserved by `okf update`, so the app does not write them; the original filename lives on the material row that `resource` points at. `verified` is never written by the app.
 - `index.md` and `log.md` are reserved. The service refuses to create, update, or delete them directly; they change only as okf's side effect of another operation.
 
 ## `KnowledgeService`
@@ -94,7 +94,7 @@ interface KnowledgeService {
 Rules that make this safe to expose:
 
 - **The bundle path is never an input.** Every method computes it from `courseId`. The model, the client, and the route never see or pass it.
-- **Concept ids are validated before use**: alphabet check, no `.` or `..` segments, no leading slash, resolved path must stay under the bundle root. okf 0.3.0 enforces containment itself (CWE-22 hardening); the service checks first so a rejection is a clean 400 rather than a parsed CLI error.
+- **Concept ids are validated before use**: alphabet check, no `.` or `..` segments, no leading slash, resolved path must stay under the bundle root. okf enforces `..` containment itself (CWE-22 hardening) but accepts spaces and capitals, so the service's alphabet check is load-bearing, not belt-and-braces. The bundle root is passed to okf as a `realpath`; okf refuses a symlinked root.
 - **`okf` runs via `execFile` with an argument array**, never a shell string. Per-call timeout of 10 seconds. stdout capped at 4 MB; a search result set is truncated to `limit` (default 8, max 20); a concept body returned to the model is capped at 12,000 characters with a truncation marker.
 - **Pinned binary.** The container installs okf 0.3.0 from the GitHub release tarball with a checksum check. A fixture bundle test in CI asserts search ordering and show output for a known bundle so an upgrade cannot silently change behaviour.
 - **Single writer.** One instructor per course plus an ECS service with `desiredCount: 1` for the quarter. The service additionally holds a per-course advisory lock file (`.okf-write.lock`, `O_EXCL`) around create, update, relate, remove, and rename so two concurrent console requests from the same instructor cannot interleave index regeneration. Reads take no lock.
@@ -168,7 +168,7 @@ The payload types in `packages/ui/src/api/types.ts` and the five views stay. The
 | POST `/knowledge/documents` | `create` for a concept; for a folder, the service writes an empty okf-format `index.md` and logs it, since okf has no directory command |
 | GET / PUT / DELETE `/knowledge/documents/:id` | `show`, `update`, `remove`; `:id` is the URL-encoded concept path, since there are no UUIDs |
 | POST `/knowledge/documents/:id/move` | `rename` |
-| GET `/knowledge/documents/:id/links` | `show`'s inbound and outbound plus `validate`'s broken list filtered to this concept |
+| GET `/knowledge/documents/:id/links` | outbound from the existing `parseLinks` over the concept body; inbound from `search`'s `inbound` field or a bundle walk; broken from `validate` filtered to this concept. `okf show` returns no link data |
 | GET `/knowledge/search?q=` (new) | `search`; the instructor's way to confirm material is findable, using the exact function students use |
 
 `indexStatus` in payloads is reported as `indexed` for every concept: a concept is searchable the moment it is written, so the value is true rather than a stub. The collections routes are unregistered from `server/index.ts` and the Collections sidebar entry and the Knowledge field on the homework form are removed from the console. Their code stays in the tree for the follow-up that brings scoping back.
@@ -204,7 +204,8 @@ The payload types in `packages/ui/src/api/types.ts` and the five views stay. The
 | | Status |
 |---|---|
 | `knowledge_documents`, `knowledge_links`, `material_collections`, `collection_items`, `collection_attachments`, `material_chunks` tables | **Stay in the schema, unused.** No drop migration this quarter |
-| `repositories/knowledgeDocuments.ts`, `knowledgeCollections.ts`, `knowledge/parseLinks.ts`, `knowledge/bundle.ts`, `knowledge/resolveCollections.ts` | Left in the tree, no longer imported by routes; delete after the quarter |
+| `repositories/knowledgeDocuments.ts`, `knowledgeCollections.ts`, `knowledge/bundle.ts`, `knowledge/resolveCollections.ts` | Left in the tree, no longer imported by routes; delete after the quarter |
+| `knowledge/parseLinks.ts` | Kept in use: the service's outbound-link source |
 | Collections routes, sidebar entry, homework-form Knowledge field | Unregistered and removed from the UI |
 | `course_materials`, `ObjectStore`, upload validation, tier-1 conversion logic | Kept; conversion becomes the text-native `Extractor` |
 | Console views for browsing and editing documents | Kept, backed by the filesystem |
