@@ -10,7 +10,11 @@ import {
   SECTION_CONVERSATION_PROMPTS,
   toolUsageParagraph,
   VOICE_CONSTRAINTS,
+  knowledgeListingParagraph,
+  KNOWLEDGE_INSTRUCTION,
+  KNOWLEDGE_LISTING_MAX_CHARS,
 } from "./prompts";
+import type { ConceptSummary } from "../server/knowledge/service";
 import { TOOLS, toolsForConversation } from "../server/routes/chat";
 
 describe("sectionGreeting (#305, #397)", () => {
@@ -534,5 +538,44 @@ describe("assembleSystemPrompt -- markSectionComplete stopping-rule wording (#16
     expect(lower).toContain("unblock");
     expect(lower).toContain("pedantic");
     expect(lower).toContain("does not submit");
+  });
+});
+
+function concept(id: string, title: string, description = "desc"): ConceptSummary {
+  return { id, kind: "concept", type: "lecture", title, description, resource: null, updatedAt: "2026-09-15T00:00:00.000Z" };
+}
+
+describe("knowledgeListingParagraph", () => {
+  it("is empty when there are no concepts, ignoring index and log rows", () => {
+    expect(knowledgeListingParagraph([])).toBe("");
+    expect(knowledgeListingParagraph([{ ...concept("index", "x"), kind: "index" }, { ...concept("log", "x"), kind: "log" }])).toBe("");
+  });
+  it("groups by directory and ends with the instruction", () => {
+    const out = knowledgeListingParagraph([concept("lectures/m1/intro", "Intro", "Markets"), concept("syllabus", "Syllabus")]);
+    expect(out).toContain("<course_knowledge>");
+    expect(out.indexOf("## (root)")).toBeLessThan(out.indexOf("## lectures/m1"));
+    expect(out).toContain("- lectures/m1/intro: Intro. Markets");
+    expect(out).toContain("- syllabus: Syllabus. desc");
+    expect(out.trim().endsWith(KNOWLEDGE_INSTRUCTION)).toBe(true);
+  });
+  it("truncates past the cap and says how many were omitted", () => {
+    const many = Array.from({ length: 400 }, (_, i) => concept(`d/c-${i}`, `Concept ${i}`, "x".repeat(40)));
+    const out = knowledgeListingParagraph(many);
+    expect(out.length).toBeLessThanOrEqual(KNOWLEDGE_LISTING_MAX_CHARS + KNOWLEDGE_INSTRUCTION.length + 200);
+    expect(out).toMatch(/- \.\.\. and \d+ more; use searchKnowledge to find them/);
+  });
+});
+
+describe("assembleSystemPrompt with knowledge", () => {
+  it("places the listing after the section block and before the guardrail", () => {
+    const section = { homeworkTitle: "HW1", sectionTitle: "S1", sectionContent: "Solve." };
+    const out = assembleSystemPrompt("T", section, true, false, undefined, [], "<course_knowledge>K</course_knowledge>");
+    expect(out.indexOf("</section_content>")).toBeLessThan(out.indexOf("<course_knowledge>"));
+    expect(out.indexOf("<course_knowledge>")).toBeLessThan(out.indexOf(TUTOR_GUARDRAIL));
+  });
+  it("adds nothing for an empty listing", () => {
+    expect(assembleSystemPrompt("T", undefined, false, false, undefined, [], "")).toBe(
+      assembleSystemPrompt("T", undefined, false, false, undefined, []),
+    );
   });
 });
