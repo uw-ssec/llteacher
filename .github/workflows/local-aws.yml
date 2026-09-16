@@ -1,0 +1,27 @@
+name: local AWS contract
+
+on:
+  pull_request:
+    paths: ["infra/**", "Dockerfile.aws", "apps/web/**", "apps/admin/**", ".github/workflows/local-aws.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  local-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Validate local-only deployment guardrails
+        run: |
+          npm test --workspace=infra
+          npm run typecheck --workspace=infra
+          bash -n infra/scripts/*.sh
+          ! rg -n 'AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY)|configure-aws-credentials' infra/scripts

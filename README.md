@@ -43,6 +43,22 @@ npx turbo test             # run all TS test suites
 
 Or scope to one workspace: `npm run dev --workspace=llteacher-web`.
 
+### Local AWS-shaped deployment
+
+The Node application, ALB, ECS, RDS, ECR, S3, logging, and scheduled job are
+defined in `infra/`. The local stack is explicitly guarded to use Floci only;
+it does not access an AWS account.
+
+```sh
+export PULUMI_CONFIG_PASSPHRASE='a local-only passphrase'
+npm run aws:local:up
+npm run aws:local:verify
+npm run aws:local:down
+```
+
+See [`infra/README.md`](./infra/README.md) for prerequisites, local TLS setup,
+and the current Floci ECS image-discovery limitation.
+
 The Django stack still uses its own commands (`uv run python run_tests.py`, `python manage.py runserver`) and is unaffected by Turborepo.
 
 ## 🚀 Project Status

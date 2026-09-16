@@ -1,0 +1,67 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target deployment environment
+        required: true
+        type: choice
+        options: [staging, production]
+      image_tag:
+        description: Immutable image tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  release:
+    name: Deploy ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 30
+    env:
+      PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+      AWS_REGION: us-east-1
+      STACK: ${{ inputs.environment }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: pulumi/actions@v6
+        with:
+          command: version
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Install and build
+        run: npm ci && npm run build --workspace=infra
+      - name: Preview infrastructure
+        run: pulumi -C infra preview --stack "$STACK" --non-interactive
+      - name: Build and publish application image
+        run: |
+          repository=$(pulumi -C infra stack output ecrRepositoryUrl --stack "$STACK")
+          aws ecr get-login-password | docker login --username AWS --password-stdin "${repository%%/*}"
+          docker build --tag "$repository:$IMAGE_TAG" --file Dockerfile.aws .
+          docker push "$repository:$IMAGE_TAG"
+      - name: Apply infrastructure with the published image
+        run: |
+          pulumi -C infra config set --stack "$STACK" imageTag "$IMAGE_TAG"
+          pulumi -C infra up --stack "$STACK" --yes --non-interactive
+      - name: Run migrations before service update
+        run: |
+          # The production migration command is a one-off ECS task using the
+          # just-applied task definition. A non-zero exit stops this job before
+          # any service update can occur.
+          task=$(aws ecs run-task --cluster "llteacher-$STACK-cluster" --task-definition "llteacher-$STACK-app" --launch-type FARGATE --count 1 --overrides '{"containerOverrides":[{"name":"app","command":["npm","run","db:migrate"]}]}' --query 'tasks[0].taskArn' --output text)
+          aws ecs wait tasks-stopped --cluster "llteacher-$STACK-cluster" --tasks "$task"
+          test "$(aws ecs describe-tasks --cluster "llteacher-$STACK-cluster" --tasks "$task" --query 'tasks[0].containers[0].exitCode' --output text)" = 0
+      - name: Wait for ECS service health
+        run: aws ecs wait services-stable --cluster "llteacher-$STACK-cluster" --services "llteacher-$STACK-app"
