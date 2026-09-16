@@ -43,6 +43,14 @@ describe("extractMaterial", () => {
     expect(knowledge.create).not.toHaveBeenCalled();
     expect(out).toEqual({ status: "ready", documentPath: "n" });
   });
+  it("self-heals a reingest whose concept was deleted: creates a fresh one when update returns null", async () => {
+    knowledge.update.mockResolvedValueOnce(null);
+    const out = await extractMaterial({ ...base, filename: "syllabus.txt", relativePath: null, bytes: enc("Weeks"), existingDocumentPath: "old-id" });
+    expect(knowledge.update).toHaveBeenCalledWith("c1", "old-id", { body: "Weeks" });
+    expect(knowledge.create).toHaveBeenCalledWith("c1", expect.objectContaining({ id: "syllabus" }));
+    expect(setMaterialDocumentPath).toHaveBeenCalledWith(expect.anything(), "c1", "m1", "syllabus");
+    expect(out).toEqual({ status: "ready", documentPath: "syllabus" });
+  });
   it("leaves an unsupported format at pending with the reason", async () => {
     const out = await extractMaterial({ ...base, filename: "talk.mp3", relativePath: null, bytes: enc("") });
     expect(setMaterialStatus.mock.calls.at(-1)!.slice(2)).toEqual(["m1", "pending", expect.stringMatching(/not supported/)]);
