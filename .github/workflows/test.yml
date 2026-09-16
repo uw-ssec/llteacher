@@ -142,11 +142,23 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Validates the Worker config (wrangler.jsonc) and the bundle just
-      # produced by the Build step above against the declared
-      # compatibility_date, without actually publishing (#148). Nothing had
-      # ever run `wrangler deploy` against this Worker before this check
-      # existed, so whether it deploys at all was unverified.
-      - name: Dry-run deploy (apps/web)
-        working-directory: apps/web
-        run: npx wrangler deploy --dry-run
+      # The production target is the Node/ECS image, not a Cloudflare Worker.
+      # Build it and verify the two SPA entry points from a running container;
+      # fake values are enough because neither page accesses external services.
+      - name: Validate ECS application image
+        run: |
+          docker build --tag llteacher-ci:latest --file Dockerfile.aws .
+          docker run --detach --name llteacher-ci --publish 8080:8080 \
+            --env DATABASE_URL=postgres://user:password@localhost:5432/llteacher \
+            --env WORKOS_API_KEY=workos-api-key \
+            --env WORKOS_CLIENT_ID=workos-client-id \
+            --env OPENROUTER_API_KEY=openrouter-api-key \
+            --env LLMOXIE_API_KEY=llmoxie-api-key \
+            --env SESSION_SECRET=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= \
+            --env ENCRYPTION_KEY=encryption-key \
+            --env BLIND_INDEX_KEY=blind-index-key \
+            --env WORKOS_WEBHOOK_SECRET=webhook-secret \
+            llteacher-ci:latest
+          trap 'docker logs llteacher-ci; docker rm --force llteacher-ci' EXIT
+          for _ in $(seq 1 20); do curl --fail --silent http://127.0.0.1:8080/ && break; sleep 1; done
+          curl --fail --silent http://127.0.0.1:8080/admin

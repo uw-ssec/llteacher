@@ -21,6 +21,10 @@ export function makeDb(databaseUrl: string): Db {
   if (db) return db;
 
   pool = new Pool({ connectionString: databaseUrl, max: 10 });
+  // node-postgres emits this for an idle client whose connection failed. An
+  // unhandled EventEmitter "error" would terminate the whole ECS task.
+  // Deliberately do not log the driver error: it can contain connection data.
+  pool.on("error", () => console.error("PostgreSQL pool idle client error"));
   db = drizzle(pool, { schema }) as Db;
   return db;
 }

@@ -5,8 +5,12 @@ import { join } from "node:path";
 import type { Server } from "node:http";
 import { SESSION_COOKIE_NAME, createSessionPayload, loadSessionKey, sealSession } from "../lib/session";
 const { closeDb } = vi.hoisted(() => ({ closeDb: vi.fn().mockResolvedValue(undefined) }));
+const { getAuthorizationUrl } = vi.hoisted(() => ({ getAuthorizationUrl: vi.fn(() => "https://workos.test/login") }));
 
 vi.mock("../db/client", () => ({ closeDb, makeDb: vi.fn() }));
+vi.mock("../lib/workos", () => ({
+  getWorkOS: () => ({ userManagement: { getAuthorizationUrl } }),
+}));
 vi.mock("../server/middleware/roles", () => ({ rolesMiddleware: async (_c: unknown, next: () => Promise<void>) => next() }));
 
 import { closeNodeServer, createNodeServer } from "./server";
@@ -58,6 +62,7 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
   return fetch(`http://127.0.0.1:${address.port}${path}`, {
     ...init,
     headers: { ...init.headers, connection: "close" },
+    redirect: "manual",
   });
 }
 
@@ -116,6 +121,20 @@ describe("createNodeServer", () => {
     expect(response.status).toBe(404);
     expect(response.headers.get("content-type")).toContain("application/json");
     expect(await response.json()).toEqual({ error: "Not found" });
+  });
+
+  it("uses the HTTPS public origin forwarded by the ALB for API requests", async () => {
+    const response = await request("/api/auth/login", {
+      headers: {
+        "x-forwarded-host": "llteacher.local",
+        "x-forwarded-proto": "https",
+      },
+    });
+
+    expect(response.status).toBe(302);
+    expect(getAuthorizationUrl).toHaveBeenCalledWith(expect.objectContaining({
+      redirectUri: "https://llteacher.local/api/auth/callback",
+    }));
   });
 
   it("closes the database pool when the Node server shuts down", async () => {

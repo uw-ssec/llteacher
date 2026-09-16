@@ -6,7 +6,11 @@ import {
   loadSessionKey,
   sealSession,
 } from "../../lib/session";
-import { OAUTH_STATE_COOKIE, OAUTH_VERIFIER_COOKIE } from "../../lib/oauth-state";
+import {
+  OAUTH_RETURN_TO_COOKIE,
+  OAUTH_STATE_COOKIE,
+  OAUTH_VERIFIER_COOKIE,
+} from "../../lib/oauth-state";
 import { auditEvents } from "../../db/schema";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
@@ -142,6 +146,18 @@ describe("GET /login", () => {
     expect(setCookie).toContain(OAUTH_VERIFIER_COOKIE);
     expect(setCookie).toContain("HttpOnly");
   });
+
+  it("remembers a safe local return destination", async () => {
+    const res = await auth.request("/login?returnTo=/admin", {}, TEST_ENV);
+
+    expect(res.headers.get("set-cookie")).toContain(`${OAUTH_RETURN_TO_COOKIE}=%2Fadmin`);
+  });
+
+  it("does not remember an external return destination", async () => {
+    const res = await auth.request("/login?returnTo=https://attacker.example", {}, TEST_ENV);
+
+    expect(res.headers.get("set-cookie")).not.toContain(OAUTH_RETURN_TO_COOKIE);
+  });
 });
 
 describe("GET /callback", () => {
@@ -213,6 +229,26 @@ describe("GET /callback", () => {
     const setCookie = res.headers.get("set-cookie") ?? "";
     expect(setCookie).toContain(SESSION_COOKIE_NAME);
     expect(setCookie).toContain("HttpOnly");
+  });
+
+  it("returns an admin sign-in flow to /admin", async () => {
+    authenticateWithCode.mockResolvedValue({
+      user: { id: "workos_1", email: "cdcore@uw.edu", firstName: "Cordero" },
+      accessToken: fakeAccessToken(),
+    });
+    const loginRes = await auth.request("/login?returnTo=/admin", {}, TEST_ENV);
+    const cookies = (loginRes.headers.get("set-cookie") ?? "")
+      .split(", ")
+      .map((cookie) => cookie.split(";")[0])
+      .join("; ");
+    const state = extractCookieValue(loginRes.headers.get("set-cookie") ?? "", OAUTH_STATE_COOKIE);
+
+    const res = await auth.request(`/callback?code=good&state=${state}`, {
+      headers: { cookie: cookies },
+    }, TEST_ENV);
+
+    expect(res.headers.get("location")).toBe("/admin");
+    expect(res.headers.get("set-cookie")).toContain(`${OAUTH_RETURN_TO_COOKIE}=;`);
   });
 
   it("audits user.provisioned (#147) when a new user logs in and their WorkOS org has a matching local row", async () => {

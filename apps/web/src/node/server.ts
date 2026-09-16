@@ -22,7 +22,7 @@ function createNodeApp(config: Env, options: NodeServerOptions) {
   const nodeApp = new Hono();
   const webBuildDir = options.webBuildDir ?? defaultWebBuildDir;
   const adminBuildDir = options.adminBuildDir ?? defaultAdminBuildDir;
-  const api = (c: { req: { raw: Request } }) => app.fetch(c.req.raw, config);
+  const api = (c: { req: { raw: Request } }) => app.fetch(requestForApi(c.req.raw), config);
 
   nodeApp.use("*", async (c, next) => {
     await next();
@@ -49,6 +49,34 @@ function createNodeApp(config: Env, options: NodeServerOptions) {
   nodeApp.get("*", serveStatic({ root: webBuildDir, path: "index.html" }));
 
   return nodeApp;
+}
+
+/**
+ * ECS only accepts API traffic from the ALB security group, so the ALB's
+ * forwarding headers are the authoritative public request origin. Rebuilding
+ * the Request here lets authentication generate HTTPS callback URLs and secure
+ * cookies even though the ALB reaches the task over its private HTTP listener.
+ */
+function requestForApi(request: Request): Request {
+  const proto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const host = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+  if (!proto && !host) return request;
+
+  const url = new URL(request.url);
+  if (proto === "https" || proto === "http") url.protocol = `${proto}:`;
+  if (host) url.host = host;
+  const headers = new Headers(request.headers);
+  // Hono derives c.req.url from Host in a few helpers, so keep it consistent
+  // with the reconstructed public URL as well.
+  if (host) headers.set("host", host);
+  if (proto === "https" || proto === "http") headers.set("origin", url.origin);
+  const init: RequestInit & { duplex: "half" } = {
+    body: request.body,
+    duplex: "half",
+    headers,
+    method: request.method,
+  };
+  return new Request(url, init);
 }
 
 /**

@@ -9,6 +9,8 @@
 
 export const OAUTH_STATE_COOKIE = "llt_oauth_state";
 export const OAUTH_VERIFIER_COOKIE = "llt_oauth_verifier";
+/** A validated in-app location to restore after the hosted sign-in flow. */
+export const OAUTH_RETURN_TO_COOKIE = "llt_oauth_return_to";
 /** Covers the AuthKit hosted-UI round trip; not the session lifetime. */
 export const OAUTH_TTL_SECONDS = 600;
 

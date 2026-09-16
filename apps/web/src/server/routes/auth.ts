@@ -19,6 +19,7 @@ import {
 } from "../../lib/session";
 import {
   OAUTH_STATE_COOKIE,
+  OAUTH_RETURN_TO_COOKIE,
   OAUTH_VERIFIER_COOKIE,
   OAUTH_TTL_SECONDS,
   generateState,
@@ -47,6 +48,8 @@ export async function loginHandler(c: Context<AppEnv>) {
   };
   setCookie(c, OAUTH_STATE_COOKIE, state, oauthCookieOptions);
   setCookie(c, OAUTH_VERIFIER_COOKIE, verifier, oauthCookieOptions);
+  const returnTo = safeReturnTo(c.req.query("returnTo"));
+  if (returnTo) setCookie(c, OAUTH_RETURN_TO_COOKIE, returnTo, oauthCookieOptions);
 
   const authorizationUrl = workos.userManagement.getAuthorizationUrl({
     clientId: c.env.WORKOS_CLIENT_ID,
@@ -64,8 +67,10 @@ export async function callbackHandler(c: Context<AppEnv>) {
   const returnedState = c.req.query("state");
   const expectedState = getCookie(c, OAUTH_STATE_COOKIE);
   const verifier = getCookie(c, OAUTH_VERIFIER_COOKIE);
+  const returnTo = safeReturnTo(getCookie(c, OAUTH_RETURN_TO_COOKIE));
   deleteCookie(c, OAUTH_STATE_COOKIE, { path: "/" });
   deleteCookie(c, OAUTH_VERIFIER_COOKIE, { path: "/" });
+  deleteCookie(c, OAUTH_RETURN_TO_COOKIE, { path: "/" });
 
   if (!code) {
     return c.text("Missing authorization code", 400);
@@ -152,7 +157,7 @@ export async function callbackHandler(c: Context<AppEnv>) {
       maxAge: SESSION_TTL_SECONDS,
     });
 
-    return c.redirect("/");
+    return c.redirect(returnTo ?? "/");
   } catch (err) {
     // DB down, misconfigured secrets, etc. -- never surface the real error
     // (e.g. a connection string) to the browser mid-login.
@@ -190,7 +195,7 @@ export async function logoutHandler(c: Context<AppEnv>) {
 
   if (workosSessionId) {
     const workos = getWorkOS(c.env.WORKOS_API_KEY);
-    const origin = c.req.header("origin") ?? new URL(c.req.url).origin;
+    const origin = publicOrigin(c);
     const logoutUrl = workos.userManagement.getLogoutUrl({
       sessionId: workosSessionId,
       returnTo: `${origin}/`,
@@ -228,8 +233,22 @@ function decodeSessionId(accessToken: string): string | undefined {
 }
 
 function callbackUrl(c: Context<AppEnv>): string {
-  const origin = c.req.header("origin") ?? new URL(c.req.url).origin;
-  return `${origin}/api/auth/callback`;
+  return `${publicOrigin(c)}/api/auth/callback`;
+}
+
+function publicOrigin(c: Context<AppEnv>): string {
+  const forwardedProto = c.req.header("x-forwarded-proto")?.split(",")[0]?.trim();
+  const forwardedHost = c.req.header("x-forwarded-host")?.split(",")[0]?.trim();
+  if ((forwardedProto === "https" || forwardedProto === "http") && forwardedHost) {
+    return `${forwardedProto}://${forwardedHost}`;
+  }
+  return c.req.header("origin") ?? new URL(c.req.url).origin;
+}
+
+/** Prevent an OAuth callback from becoming an open redirect. */
+function safeReturnTo(value: string | undefined): string | undefined {
+  if (!value || !value.startsWith("/") || value.startsWith("//")) return undefined;
+  return value;
 }
 
 function disallowedDomainPage(reason: string): string {
