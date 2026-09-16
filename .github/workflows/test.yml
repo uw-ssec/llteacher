@@ -117,6 +117,14 @@ jobs:
       - name: Install psql
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
 
+      - name: Install okf 0.3.0
+        run: |
+          curl -fsSL -o /tmp/okf https://github.com/okf-memory/okf-agent-memory/releases/download/v0.3.0/okf-linux-amd64
+          curl -fsSL -o /tmp/checksums.txt https://github.com/okf-memory/okf-agent-memory/releases/download/v0.3.0/checksums.txt
+          cd /tmp && grep ' okf-linux-amd64$' checksums.txt | sed 's/ okf-linux-amd64$/  okf/' | sha256sum -c -
+          sudo install -m 0755 /tmp/okf /usr/local/bin/okf
+          okf version
+
       - name: Apply Postgres extensions
         run: psql "$DATABASE_URL" -f apps/web/src/db/init/01_extensions.sql
 
