@@ -156,7 +156,13 @@ import type { AppEnv } from "../context";
 // belongs to. knowledgeServiceFromEnv is called once per request
 // (chatHandler, below) so the two tools' execute()s share one instance via
 // HintToolContext rather than each constructing their own.
-import { knowledgeServiceFromEnv, SEARCH_LIMIT_MAX, type KnowledgeService } from "../knowledge/service";
+import {
+  knowledgeServiceFromEnv,
+  SEARCH_LIMIT_DEFAULT,
+  SEARCH_LIMIT_MAX,
+  type ConceptSummary,
+  type KnowledgeService,
+} from "../knowledge/service";
 import type { ConceptCitation } from "../repositories/citations";
 
 /* Tool catalog typed as ToolSet. We use the AI SDK's jsonSchema() helper
@@ -172,7 +178,11 @@ import type { ConceptCitation } from "../repositories/citations";
    follow-up text in the same turn via stopWhen below. */
 /** #41: showKnowledge truncates a concept's body to this many characters
  *  before returning it to the model, so one oversized concept can't blow
- *  the context budget. */
+ *  the context budget. Tool-result bodies are NOT counted against the
+ *  history token budget (MAX_HISTORY_MESSAGES / MAX_TURN_STEPS trim by
+ *  message count, not content size), so up to MAX_TURN_STEPS - 1 opens in a
+ *  single turn can each add up to this many characters to what the model
+ *  sees this step. */
 export const SHOW_BODY_MAX_CHARS = 12_000;
 
 export const TOOLS: ToolSet = {
@@ -400,7 +410,7 @@ export const TOOLS: ToolSet = {
     }),
     execute: async (input: { query: string; limit?: number }, options: ToolCallOptions) => {
       const ctx = options.experimental_context as HintToolContext;
-      const limit = Math.min(SEARCH_LIMIT_MAX, Math.max(1, Math.floor(input.limit ?? 8)));
+      const limit = Math.min(SEARCH_LIMIT_MAX, Math.max(1, Math.floor(input.limit ?? SEARCH_LIMIT_DEFAULT)));
       const hits = await ctx.knowledge.search(ctx.courseId, input.query, limit);
       return { hits };
     },
@@ -1554,14 +1564,27 @@ export async function chatHandler(c: Context<AppEnv>) {
 
   // #41: the course's knowledge bundle, read once per request and shared by
   // both the system-prompt listing (below) and the searchKnowledge/
-  // showKnowledge tools via HintToolContext. `knowledge.list` must never
-  // fail the turn -- a bundle that fails to load degrades to "no listing,
-  // tools withheld" rather than a 500.
-  const knowledge = knowledgeServiceFromEnv(c.env);
-  const knowledgeConcepts = await knowledge.list(conv.courseId).catch((err) => {
-    logServerError("chatHandler.knowledge.list", err);
-    return [];
-  });
+  // showKnowledge tools via HintToolContext. Neither constructing the
+  // service NOR listing the bundle may ever fail the turn -- a missing or
+  // unmounted KNOWLEDGE_ROOT (OkfKnowledgeService's constructor calls
+  // realpathSync synchronously) or a failed `list()` both degrade to "no
+  // listing, tools withheld" rather than a 500. Deliberately one try/catch
+  // around BOTH steps: `knowledgeServiceFromEnv(c.env)` throwing was
+  // previously OUTSIDE the `.catch()` that only wrapped `.list()`, so that
+  // constructor throw 500'd every turn instead of degrading (code review
+  // finding). `knowledge` stays `null` on failure -- HintToolContext gets a
+  // stub `{ search: async () => [], show: async () => null }` below so its
+  // type stays satisfied without a third "is knowledge available" branch at
+  // every call site.
+  let knowledge: Pick<KnowledgeService, "search" | "show"> | null = null;
+  let knowledgeConcepts: ConceptSummary[] = [];
+  try {
+    const svc = knowledgeServiceFromEnv(c.env);
+    knowledgeConcepts = await svc.list(conv.courseId);
+    knowledge = svc;
+  } catch (err) {
+    logServerError("chatHandler.knowledge", err, { courseId: conv.courseId });
+  }
   const knowledgeListing = knowledgeListingParagraph(knowledgeConcepts);
   const openedConcepts = new Map<string, string>();
 
@@ -2292,7 +2315,13 @@ export async function chatHandler(c: Context<AppEnv>) {
         studentId: authContext.session.userId,
         promptTemplateId: conv.promptTemplateId,
         courseId: conv.courseId,
-        knowledge,
+        // #41 fix review: `knowledge` is null exactly when the bundle failed
+        // to load above (missing/unmounted KNOWLEDGE_ROOT, or any other
+        // construction/list failure) -- withholdKnowledge already removed
+        // searchKnowledge/showKnowledge from `turnTools` in that case, so
+        // this stub only exists to satisfy HintToolContext's type; neither
+        // method is reachable from the model this turn.
+        knowledge: knowledge ?? { search: async () => [], show: async () => null },
         openedConcepts,
       } satisfies HintToolContext,
       // #80: strengthens TOOLS.requestHint's secondary path (see its own
@@ -2581,6 +2610,13 @@ export async function chatHandler(c: Context<AppEnv>) {
         // assistant message to attach them to and an org to scope them to
         // (a course without an org, orgScope null, cannot cite into
         // conceptCitations' organizationId column).
+        if (openedConcepts.size > 0 && !orgScope) {
+          logServerWarn(
+            "chatHandler.onFinish.citationsDropped",
+            "concepts were opened via showKnowledge but citations were dropped: course has no organisation",
+            { conversationId: conv.id, courseId: conv.courseId, conceptCount: openedConcepts.size },
+          );
+        }
         const conceptCitations: ConceptCitation[] =
           assistantMessage && orgScope
             ? [...openedConcepts].map(([conceptPath, conceptTitle]) => ({

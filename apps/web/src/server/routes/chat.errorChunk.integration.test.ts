@@ -32,34 +32,32 @@
    together, so neither #3's nor #144's own mocked suite can catch it.
    -------------------------------------------------------------------------- */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import { Hono } from "hono";
 import { simulateReadableStream } from "ai";
 import type { LanguageModelV2, LanguageModelV2StreamPart } from "@ai-sdk/provider";
+import { mkdtempSync, realpathSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { chatHandler } from "./chat";
 import type { AuthContext } from "../middleware/roles";
 import { fakeAuthContext as buildFakeAuthContext, fakeMembership } from "../testing/authContext";
 import type { AppEnv } from "../context";
 
-const TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "test-key" } as Env;
+// #41 fix review: exercise the REAL OkfKnowledgeService against a real,
+// empty bundle root rather than mocking "../knowledge/service" away -- a
+// temp directory with no course subtree gives the exact same "empty
+// bundle" behaviour (list() -> [], withholds both knowledge tools and the
+// <course_knowledge> listing) that every expectation in this file was
+// written against, while also proving the real constructor (realpathSync)
+// and the real list() path don't 500 the turn on their own.
+let TEST_ENV: Env;
+beforeAll(() => {
+  const KNOWLEDGE_ROOT = realpathSync(mkdtempSync(path.join(os.tmpdir(), "kb-")));
+  TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "test-key", KNOWLEDGE_ROOT } as Env;
+});
 
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
-
-/* #41: this suite drives a real streamText, but has no KNOWLEDGE_ROOT in
-   TEST_ENV -- OkfKnowledgeService's constructor calls realpathSync()
-   synchronously, which would throw at knowledgeServiceFromEnv(c.env) call
-   time (before any async try/catch could help) if this weren't mocked. An
-   empty bundle here withholds searchKnowledge/showKnowledge and the
-   <course_knowledge> listing, which is what every expectation in this file
-   was written against. */
-vi.mock("../knowledge/service", () => ({
-  knowledgeServiceFromEnv: () => ({
-    list: async () => [],
-    search: async () => [],
-    show: async () => null,
-  }),
-  SEARCH_LIMIT_MAX: 20,
-}));
 
 /* #364: this file used to carry a `../repositories/llmConfigs` mock stubbing
    `resolveLlmConfig`/`resolveFallbackConfig`, left behind by the #317/#363

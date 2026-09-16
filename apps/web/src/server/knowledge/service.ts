@@ -127,13 +127,50 @@ function renderIndexBody(entries: IndexEntry[]): string {
   return lines.length > 0 ? `${lines.join("\n")}\n` : "";
 }
 
+// list() is called on every chat turn just to render the "here's what's in
+// the bundle" listing, so a short per-course cache avoids re-reading every
+// concept file's frontmatter on every message in a conversation. 15s keeps a
+// concept a teacher just created showing up well within one editing
+// session, while still collapsing the common case of several chat turns in
+// a row. NOTE: this cache is only exact within a single process -- correct
+// for this quarter's single-task deployment (one Worker instance per
+// course's traffic), but a future multi-instance deployment would need a
+// shared invalidation signal instead.
+const LIST_CACHE_TTL_MS = 15_000;
+
+// Frontmatter lives at the top of every concept file and `list()` never
+// looks at the body, so reading the whole file just to throw the body away
+// is wasted I/O on every concept, every call. 8192 bytes is comfortably
+// larger than any real frontmatter block (a handful of short key: value
+// lines) while staying a small, fixed-size read regardless of body length.
+const FRONTMATTER_HEAD_BYTES = 8192;
+
+async function readFrontmatterHead(file: string): Promise<string> {
+  const handle = await fs.open(file, "r");
+  try {
+    const buf = Buffer.alloc(FRONTMATTER_HEAD_BYTES);
+    const { bytesRead } = await handle.read(buf, 0, FRONTMATTER_HEAD_BYTES, 0);
+    return buf.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
 export class OkfKnowledgeService implements KnowledgeService {
   private readonly root: string;
   private readonly binary: string;
+  private readonly listCache = new Map<string, { at: number; value: ConceptSummary[] }>();
 
   constructor(opts: { root: string; binary: string }) {
     this.root = realpathSync(opts.root);
     this.binary = opts.binary;
+  }
+
+  // Every write method calls this once its write has landed (inside its own
+  // withCourseLock callback, so a concurrent list() either sees the fully
+  // pre-write cache or the fully post-write disk state, never a mix).
+  private invalidateListCache(courseId: string): void {
+    this.listCache.delete(courseId);
   }
 
   private courseDir(courseId: string): string {
@@ -181,19 +218,24 @@ export class OkfKnowledgeService implements KnowledgeService {
   }
 
   async list(courseId: string): Promise<ConceptSummary[]> {
+    const cached = this.listCache.get(courseId);
+    if (cached && Date.now() - cached.at < LIST_CACHE_TTL_MS) return cached.value;
+
     const dir = this.bundleDir(courseId);
     try {
       await fs.access(dir);
     } catch {
-      return [];
+      const empty: ConceptSummary[] = [];
+      this.listCache.set(courseId, { at: Date.now(), value: empty });
+      return empty;
     }
     const files = await walkMarkdown(dir, "");
     const out: ConceptSummary[] = [];
     for (const rel of files) {
       const id = rel.replace(/\.md$/, "");
       const full = path.join(dir, rel);
-      const [raw, stat] = await Promise.all([fs.readFile(full, "utf8"), fs.stat(full)]);
-      const { frontmatter } = parseFrontmatter(raw);
+      const [head, stat] = await Promise.all([readFrontmatterHead(full), fs.stat(full)]);
+      const { frontmatter } = parseFrontmatter(head);
       out.push({
         id,
         kind: kindOf(id),
@@ -204,7 +246,9 @@ export class OkfKnowledgeService implements KnowledgeService {
         updatedAt: stat.mtime.toISOString(),
       });
     }
-    return out.sort((a, b) => a.id.localeCompare(b.id));
+    out.sort((a, b) => a.id.localeCompare(b.id));
+    this.listCache.set(courseId, { at: Date.now(), value: out });
+    return out;
   }
 
   async search(courseId: string, query: string, limit = SEARCH_LIMIT_DEFAULT): Promise<SearchHit[]> {
@@ -292,8 +336,10 @@ export class OkfKnowledgeService implements KnowledgeService {
         // retry of this same id forever, so roll the partial create back.
         await fs.unlink(file).catch(() => {});
         await this.regenerateIndex(courseId, parentDirOf(input.id));
+        this.invalidateListCache(courseId);
         throw err;
       }
+      this.invalidateListCache(courseId);
       const created = await this.show(courseId, input.id);
       if (!created) throw new Error(`okf create reported success but ${input.id} is missing`);
       return created;
@@ -324,6 +370,7 @@ export class OkfKnowledgeService implements KnowledgeService {
         const raw = await fs.readFile(file, "utf8");
         await fs.writeFile(file, setFrontmatterKeys(raw, keep));
       }
+      this.invalidateListCache(courseId);
       return this.show(courseId, conceptId);
     });
   }
@@ -335,6 +382,7 @@ export class OkfKnowledgeService implements KnowledgeService {
     await this.withCourseLock(courseId, async () => {
       await this.ensureBundle(courseId);
       await runOkf(this.binary, ["relate", from, to, dir, "--desc", context]);
+      this.invalidateListCache(courseId);
     });
   }
 
@@ -346,6 +394,7 @@ export class OkfKnowledgeService implements KnowledgeService {
       await fs.unlink(file);
       await this.regenerateIndex(courseId, parentDirOf(conceptId));
       await this.appendLog(dir, `**Deletion**: Removed concept \`${conceptId}.md\`.`);
+      this.invalidateListCache(courseId);
       return true;
     });
   }
@@ -361,6 +410,7 @@ export class OkfKnowledgeService implements KnowledgeService {
       if (!(await exists(indexFile))) {
         await fs.writeFile(indexFile, this.renderOkfIndex(directoryHeading(directory), []));
         await this.appendLog(dir, `**Creation**: Created directory \`${directory}/\`.`);
+        this.invalidateListCache(courseId);
       }
     });
   }

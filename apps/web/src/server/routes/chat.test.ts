@@ -239,12 +239,18 @@ vi.mock("../repositories/hints", () => ({
 const knowledgeList = vi.fn();
 const knowledgeSearch = vi.fn();
 const knowledgeShow = vi.fn();
+// Exposed as its own vi.fn() (not just an inline arrow) so a test can
+// mockImplementationOnce a synchronous throw from it -- covering the
+// review finding that OkfKnowledgeService's constructor (realpathSync)
+// can throw before `.list()` is ever reached.
+const knowledgeServiceFromEnvMock = vi.fn((..._a: unknown[]) => ({
+  list: (...a: unknown[]) => knowledgeList(...a),
+  search: (...a: unknown[]) => knowledgeSearch(...a),
+  show: (...a: unknown[]) => knowledgeShow(...a),
+}));
 vi.mock("../knowledge/service", () => ({
-  knowledgeServiceFromEnv: () => ({
-    list: (...a: unknown[]) => knowledgeList(...a),
-    search: (...a: unknown[]) => knowledgeSearch(...a),
-    show: (...a: unknown[]) => knowledgeShow(...a),
-  }),
+  knowledgeServiceFromEnv: (...a: unknown[]) => knowledgeServiceFromEnvMock(...a),
+  SEARCH_LIMIT_DEFAULT: 8,
   SEARCH_LIMIT_MAX: 20,
 }));
 
@@ -419,6 +425,11 @@ describe("POST /api/chat", () => {
     knowledgeList.mockReset().mockResolvedValue([]);
     knowledgeSearch.mockReset().mockResolvedValue([]);
     knowledgeShow.mockReset().mockResolvedValue(null);
+    knowledgeServiceFromEnvMock.mockReset().mockImplementation(() => ({
+      list: (...a: unknown[]) => knowledgeList(...a),
+      search: (...a: unknown[]) => knowledgeSearch(...a),
+      show: (...a: unknown[]) => knowledgeShow(...a),
+    }));
   });
 
   it("returns 401 when there is no authContext", async () => {
@@ -3626,6 +3637,32 @@ describe("POST /api/chat", () => {
     expect(call.system).not.toContain("<course_knowledge>");
   });
 
+  it("degrades to no listing and no tools when the knowledge service fails to construct", async () => {
+    // #41 fix review: OkfKnowledgeService's constructor calls realpathSync
+    // synchronously, so a missing/unmounted KNOWLEDGE_ROOT throws before
+    // `.list()` is ever reached. That throw must be caught right alongside
+    // `.list()`'s own rejection, not just the latter -- otherwise it 500s
+    // every turn instead of degrading like any other knowledge failure.
+    knowledgeServiceFromEnvMock.mockImplementationOnce(() => {
+      throw new Error("ENOENT: no such file or directory, lstat '/missing/root'");
+    });
+    createConversationMock.mockResolvedValue({
+      id: "22222222-2222-2222-2222-222222222222",
+      ownerUserId: "u1",
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+    getLastMessagesMock.mockResolvedValue([]);
+    const res = await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+    expect(res.status).toBe(200);
+    const call = streamTextMock.mock.calls[0]![0] as { tools: Record<string, unknown>; system: string };
+    expect(call.tools.searchKnowledge).toBeUndefined();
+    expect(call.tools.showKnowledge).toBeUndefined();
+    expect(call.system).not.toContain("<course_knowledge>");
+  });
+
   it("offers both tools and injects the listing when the bundle has concepts", async () => {
     knowledgeList.mockResolvedValue([CONCEPT]);
     createConversationMock.mockResolvedValue({
@@ -3847,6 +3884,28 @@ describe("toolsForConversation (#168)", () => {
       expect(tools.markSectionComplete).toBeUndefined();
       expect(tools.requestHint).toBeUndefined();
       expect(tools.showDefinition).toBeDefined();
+    });
+  });
+
+  // #41 fix review, Minor 3: withholdKnowledge is the third, independent
+  // gating axis -- it only ever touches searchKnowledge/showKnowledge,
+  // regardless of sectionId or withholdRequestHint.
+  describe("withholdKnowledge option (#41)", () => {
+    it("withholdKnowledge: true removes exactly searchKnowledge and showKnowledge, leaving every other tool", () => {
+      const tools = toolsForConversation("section-1", { withholdKnowledge: true });
+      expect(tools.searchKnowledge).toBeUndefined();
+      expect(tools.showKnowledge).toBeUndefined();
+      expect(Object.keys(tools)).not.toContain("searchKnowledge");
+      expect(Object.keys(tools)).not.toContain("showKnowledge");
+      expect(tools.showDefinition).toBeDefined();
+      expect(tools.executeRCode).toBeDefined();
+      expect(tools.markSectionComplete).toBeDefined();
+    });
+
+    it("keeps both knowledge tools when withholdKnowledge is omitted", () => {
+      const tools = toolsForConversation("section-1");
+      expect(tools.searchKnowledge).toBeDefined();
+      expect(tools.showKnowledge).toBeDefined();
     });
   });
 });

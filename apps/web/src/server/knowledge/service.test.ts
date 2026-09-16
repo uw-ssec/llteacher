@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtempSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { okfAvailable } from "./okfCli";
@@ -135,5 +135,52 @@ describe.skipIf(!okfAvailable(OKF))("OkfKnowledgeService (real binary)", () => {
   it("refuses to create over an existing concept", async () => {
     await svc.create(COURSE_A, { id: "dup", type: "note", title: "A", description: "d", body: "" });
     await expect(svc.create(COURSE_A, { id: "dup", type: "note", title: "A", description: "d", body: "" })).rejects.toBeInstanceOf(ConceptExistsError);
+  });
+
+  // #41 fix review, Important 2: list() reads only each file's frontmatter
+  // head and caches the per-course result for 15s, since it's called on
+  // every chat turn just to render a listing. These two tests prove the
+  // cache actually serves stale reads within the TTL (by mutating a concept
+  // file directly on disk, bypassing every svc write method so nothing
+  // invalidates the cache) and that every write method invalidates it (by
+  // going through svc.create/update/relate/remove/createDirectory, each of
+  // which must make the very next list() see the new state despite being
+  // well within the same 15s window).
+  it("caches list() results for a course, serving a stale read within the TTL", async () => {
+    await svc.create(COURSE_A, { id: "a", type: "note", title: "Original", description: "d", body: "a" });
+    const first = await svc.list(COURSE_A);
+    expect(first.find((c) => c.id === "a")?.title).toBe("Original");
+
+    // Mutate the file on disk directly -- NOT through svc.update -- so the
+    // service's cache is never told anything changed.
+    const file = path.join(root, "courses", COURSE_A, "knowledge", "a.md");
+    const raw = readFileSync(file, "utf8");
+    writeFileSync(file, raw.replace("Original", "Mutated Behind The Cache's Back"), "utf8");
+
+    const second = await svc.list(COURSE_A);
+    expect(second.find((c) => c.id === "a")?.title).toBe("Original");
+  });
+
+  it("invalidates the cache on every write, so the next list() reflects it immediately", async () => {
+    await svc.create(COURSE_A, { id: "b", type: "note", title: "B", description: "d", body: "b" });
+    const afterCreate = await svc.list(COURSE_A);
+    expect(afterCreate.find((c) => c.id === "b")?.title).toBe("B");
+
+    await svc.update(COURSE_A, "b", { title: "B Updated" });
+    const afterUpdate = await svc.list(COURSE_A);
+    expect(afterUpdate.find((c) => c.id === "b")?.title).toBe("B Updated");
+
+    await svc.create(COURSE_A, { id: "c", type: "note", title: "C", description: "d", body: "c" });
+    await svc.relate(COURSE_A, "b", "c", "b depends on c");
+    const afterRelate = await svc.list(COURSE_A);
+    expect(afterRelate.map((x) => x.id)).toContain("c");
+
+    await svc.remove(COURSE_A, "c");
+    const afterRemove = await svc.list(COURSE_A);
+    expect(afterRemove.map((x) => x.id)).not.toContain("c");
+
+    await svc.createDirectory(COURSE_A, "new-dir");
+    const afterCreateDirectory = await svc.list(COURSE_A);
+    expect(afterCreateDirectory.some((x) => x.kind === "index" && x.id === "new-dir/index")).toBe(true);
   });
 });
