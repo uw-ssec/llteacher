@@ -22,35 +22,47 @@ string, pagination cursors, and worked `curl` examples — see:
 3. `npm run db:migrate` (after Drizzle schema exists in Phase 1).
 4. `npm run dev` to start Vite + Wrangler in dev mode.
 
+## Node runtime (replaces the Worker)
+
+- `brew install okf-memory/tap/okf` (pin 0.3.0; `okf version` must print v0.3.0).
+- `mkdir -p .knowledge` and set `KNOWLEDGE_ROOT=$(pwd)/.knowledge` (git-ignored). okf refuses a symlinked
+  root, so the app resolves it with realpath; on macOS `/tmp` is a symlink and will not work.
+- Run the API with `npm run start` (PORT defaults to 8080) and the SPA with `npm run dev` as before.
+- Production mounts EFS at `/mnt/knowledge`; the ECS service runs a single task this quarter because the
+  bundle has one writer per course and okf has no locking of its own beyond the app's lock file.
+
+### Container image
+
+`apps/web/Dockerfile` builds the Node runtime with the pinned `okf` binary installed at
+`/usr/local/bin/okf`. Build it from the **repo root**, not from `apps/web` -- the build needs the
+monorepo's `package-lock.json` and the workspace packages it depends on:
+
+```bash
+docker build -f apps/web/Dockerfile -t llteacher-web .
+docker run --rm llteacher-web okf version
+```
+
+Because the build context is the repo root, a `.dockerignore` placed in `apps/web/` would never be
+read -- Docker only looks for `.dockerignore` at the root of the context. Instead this Dockerfile
+relies on BuildKit's per-Dockerfile ignore file, `apps/web/Dockerfile.dockerignore` (matched as
+`<Dockerfile path>.dockerignore`), which keeps `node_modules`, `dist`, `.knowledge`, `.dev.vars`, and
+`.wrangler` out of the build context without touching the root `.dockerignore` (that one belongs to
+the legacy Python image).
+
+Env vars the image cares about: `KNOWLEDGE_ROOT` (knowledge bundle root; `/mnt/knowledge` in the
+image default), `OKF_BINARY` (override the `okf` executable path/name; defaults to `okf` on `PATH`,
+which resolves to `/usr/local/bin/okf` in this image), and `PORT` (defaults to `8080`).
+
+See [`docs/architecture/db-driver-split.md`](../../docs/architecture/db-driver-split.md) for why the
+Cloudflare Worker entry point is retired in favor of this Node server.
+
 ## Deploying
 
-`npm run deploy` runs `db:migrate` then `wrangler deploy` -- neither step
-provisions secrets, so these must already be set on the target environment
-(`wrangler secret put <NAME>`) before the first deploy that needs them:
-
-- `OPENROUTER_API_KEY` -- required from Phase 1 on.
-- `LLMOXIE_API_KEY` -- **required as of #178/#317's migration 0035**, not
-  optional. Every org's default `llm_configs` row now points at
-  `provider = 'llmoxie'` with no instructor-visible credential, so a missing
-  binding here is a 500 on every student's every chat turn, in every org --
-  not a narrow case that only affects openrouter-only deployments. Declared
-  as a required (non-optional) `Env` property in `src/shared/types.ts`
-  specifically so `tsc`/`wrangler types` catch its absence before deploy,
-  rather than at the first student's first message.
-- `LLMOXIE_BASE_URL` -- optional; unset falls back to the gateway's own
-  default host (`lib/ai.ts`'s `LLMOXIE_DEFAULT_BASE_URL`).
-- `SESSION_SECRET`, `ENCRYPTION_KEY`, `BLIND_INDEX_KEY`, `WORKOS_API_KEY`,
-  `WORKOS_WEBHOOK_SECRET` -- see `.dev.vars.example` for what each is for;
-  same requirement (must exist on the target before deploy).
-
-`wrangler.jsonc` also registers a Cloudflare Cron Trigger (`"crons": ["17 *
-* * *"]`, `wrangler deploy` provisions it automatically) -- the first
-scheduled job in this system. It fires the Worker's `scheduled()` export
-hourly, at minute 17, to run `autoSubmitOverdueSections` (#167): an
-unattended sweep that writes `submissions` rows for section conversations
-past their homework's deadline. There is no student or instructor request
-behind these writes, so if you're auditing "what can write to `submissions`
-outside an HTTP request," this is it.
+The Cloudflare Worker deploy path (`npm run deploy` / `wrangler deploy`) is
+retired -- there is no `deploy` script anymore. The app ships as the
+container image built from `apps/web/Dockerfile` and runs on AWS ECS Fargate
+instead. See [Node runtime (replaces the Worker)](#node-runtime-replaces-the-worker)
+above for local setup, env vars, and how to build and run that image.
 
 ## Seeding a dev dataset
 

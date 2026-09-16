@@ -121,7 +121,7 @@ jobs:
         run: |
           curl -fsSL -o /tmp/okf https://github.com/okf-memory/okf-agent-memory/releases/download/v0.3.0/okf-linux-amd64
           curl -fsSL -o /tmp/checksums.txt https://github.com/okf-memory/okf-agent-memory/releases/download/v0.3.0/checksums.txt
-          cd /tmp && grep ' bin/okf-linux-amd64$' checksums.txt | sed 's# bin/okf-linux-amd64$#  okf#' > okf.sha256 && test -s okf.sha256 && sha256sum -c okf.sha256
+          cd /tmp && grep -E ' +bin/okf-linux-amd64$' checksums.txt | sed -E 's# +bin/okf-linux-amd64$#  okf#' > okf.sha256 && test -s okf.sha256 && sha256sum -c okf.sha256
           sudo install -m 0755 /tmp/okf /usr/local/bin/okf
           okf version
 
