@@ -470,6 +470,12 @@ declare global {
     STORAGE_BUCKET: string;
     STORAGE_ACCESS_KEY_ID: string;
     STORAGE_SECRET_ACCESS_KEY: string;
+    /** Directory holding every course's OKF bundle:
+     *  `${KNOWLEDGE_ROOT}/courses/{courseId}/knowledge/`. EFS mount in
+     *  production, `./.knowledge` locally. Passed to okf as a realpath. */
+    KNOWLEDGE_ROOT: string;
+    /** Path to the okf binary. Defaults to "okf" on PATH. */
+    OKF_BINARY?: string;
   }
 }
 

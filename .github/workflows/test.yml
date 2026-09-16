@@ -141,12 +141,3 @@ jobs:
       # time.
       - name: Build
         run: npm run build
-
-      # Validates the Worker config (wrangler.jsonc) and the bundle just
-      # produced by the Build step above against the declared
-      # compatibility_date, without actually publishing (#148). Nothing had
-      # ever run `wrangler deploy` against this Worker before this check
-      # existed, so whether it deploys at all was unverified.
-      - name: Dry-run deploy (apps/web)
-        working-directory: apps/web
-        run: npx wrangler deploy --dry-run

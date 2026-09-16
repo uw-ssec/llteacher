@@ -17,3 +17,5 @@ coverage/
 # node_modules/webr dependency by scripts/copy-webr-assets.mjs (predev/
 # prebuild) -- never committed, same reasoning as node_modules/ itself.
 src/client/public/webr/
+
+.knowledge/
