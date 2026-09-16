@@ -1,50 +1,16 @@
-/* --------------------------------------------------------------------------
-   The bundle's documents (#42).
-
-   Path validation is the security-relevant part of this file. `path` becomes
-   a database identity and is rendered into markdown links, so a traversal
-   segment or a leading slash is refused here rather than normalised --
-   silently rewriting a caller's path produces a document at an address they
-   did not ask for, which is worse than an error.
-
-   Creating a FOLDER means creating its index document: OKF has no directory
-   entity, directories are implicit in paths, and an index document is both
-   the format's directory listing and the thing that keeps an empty folder
-   alive across a reload.
-
-   These are instructor-authoring routes (plan invariant: every course route
-   nests under requireInstructorOf()). Task 17 wraps registration in that
-   guard too, but instructorScope() (utils/guards.ts) checks isInstructorOf
-   directly rather than relying solely on that wrapper, so a handler called
-   on its own -- as this file's own tests do -- still refuses a student.
-   -------------------------------------------------------------------------- */
-
 import type { Context } from "hono";
 import { z } from "zod";
-import { makeDb } from "../../db/client";
-import type { Db } from "../../db/client";
 import type { AppEnv } from "../context";
 import { instructorScope } from "../utils/guards";
-import { appendLogEntry, directoryOf, parentDirectories, renderIndex } from "../knowledge/bundle";
+import { isValidConceptId } from "../knowledge/conceptId";
 import {
-  createDocument,
-  deleteDocument,
-  getDocument,
-  getDocumentLinks,
-  listDocuments,
-  updateDocumentBody,
-} from "../repositories/knowledgeDocuments";
-import type { CourseScope } from "../repositories/scope";
-import { logServerError } from "../utils/errors";
-import type {
-  DocumentLinksPayload,
-  KnowledgeDocumentListPayload,
-} from "@llteacher/ui/api";
+  ConceptExistsError, ConceptIdError, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, knowledgeServiceFromEnv,
+  type Concept, type ConceptSummary,
+} from "../knowledge/service";
+import type { DocumentLinksPayload, KnowledgeDocumentListPayload, KnowledgeDocumentPayload } from "@llteacher/ui/api";
 
-/** Segments are the OKF concept-id alphabet: no slashes at the ends, no
- *  empty or dot segments, nothing that needs escaping in a markdown link. */
-const PATH_RE = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
-const RESERVED_BASENAMES = new Set(["index", "log"]);
+const DIR_RE = /^[a-z0-9-]+(?:\/[a-z0-9-]+)*$/;
+const RESOURCE_RE = /^llteacher:\/\/materials\/([0-9a-f-]{36})$/i;
 
 const createSchema = z.object({
   path: z.string().min(1).max(400),
@@ -52,209 +18,120 @@ const createSchema = z.object({
   type: z.string().min(1).max(80).optional(),
   title: z.string().max(300).nullish(),
   description: z.string().max(1000).nullish(),
-  tags: z.array(z.string().max(80)).nullish(),
   body: z.string().default(""),
-  sourceMaterialId: z.string().uuid().nullish(),
 });
+const updateSchema = z.object({ body: z.string() });
 
-const updateSchema = z.object({
-  body: z.string(),
-});
-
-function membershipIdOf(c: Context<AppEnv>, courseId: string): string | null {
-  return c.get("authContext")?.memberships.find((m) => m.courseId === courseId)?.id ?? null;
+function toSummaryPayload(c: ConceptSummary) {
+  return {
+    id: c.id, path: c.id, kind: c.kind, type: c.type, title: c.title, description: c.description,
+    tags: null, indexStatus: "indexed" as const,
+    sourceMaterialId: c.resource ? (RESOURCE_RE.exec(c.resource)?.[1] ?? null) : null,
+    updatedAt: c.updatedAt,
+  };
 }
-
-/** Regenerates the index documents a change invalidates, and appends one
- *  dated log line. Best-effort and deliberately after the response-shaping
- *  work: a failed housekeeping write should not fail an otherwise-good
- *  create, and the next change repairs it. Errors are caught at each call
- *  site (not here) so a test -- and a reviewer -- can see exactly where the
- *  "best effort" boundary is.
- *
- *  `isoDate` is passed in rather than read from the clock here, matching
- *  bundle.ts -- the date is data, so the whole path stays testable. */
-async function maintainBundle(
-  db: Db,
-  scope: CourseScope,
-  changedPath: string,
-  message: string,
-  isoDate: string,
-): Promise<void> {
-  const documents = await listDocuments(db, scope);
-  const byPath = new Map(documents.map((d) => [d.path, d]));
-
-  // Only the ancestors of the changed path can have a stale listing.
-  for (const directory of parentDirectories(changedPath)) {
-    const indexPath = directory === "" ? "index" : `${directory}/index`;
-    const indexDocument = byPath.get(indexPath);
-    if (!indexDocument) continue;
-
-    const entries = documents
-      .filter((d) => d.kind === "concept" && directoryOf(d.path) === directory)
-      .map((d) => ({ path: d.path, title: d.title, description: d.description }));
-
-    await updateDocumentBody(db, scope, indexDocument.id, {
-      body: renderIndex(directory, entries),
-      editedById: null,
-    });
-  }
-
-  const log = byPath.get("log");
-  if (log) {
-    const current = await getDocument(db, scope, log.id);
-    await updateDocumentBody(db, scope, log.id, {
-      body: appendLogEntry(current?.body ?? "", isoDate, message),
-      editedById: null,
-    });
-  }
+function toDocumentPayload(c: Concept): KnowledgeDocumentPayload {
+  return { ...toSummaryPayload(c), body: c.body, bodyOriginal: null, frontmatter: c.frontmatter, editedAt: null };
 }
-
-/** Wraps maintainBundle so a housekeeping failure never turns an
- *  otherwise-good create or delete into a client-visible failure (see the
- *  doc comment above). The next change to the bundle repairs whatever this
- *  attempt failed to write. */
-async function maintainBundleBestEffort(
-  db: Db,
-  scope: CourseScope,
-  changedPath: string,
-  message: string,
-  isoDate: string,
-): Promise<void> {
-  try {
-    await maintainBundle(db, scope, changedPath, message, isoDate);
-  } catch (error) {
-    logServerError("knowledgeDocuments.maintainBundle", error);
-  }
+function conceptIdParam(c: Context<AppEnv>): string | null {
+  const raw = c.req.param("documentId");
+  if (!raw) return null;
+  return isValidConceptId(raw) ? raw : null;
+}
+function idError(err: unknown) {
+  return err instanceof ConceptIdError;
 }
 
 export async function listDocumentsHandler(c: Context<AppEnv>) {
   const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
-
-  const documents = await listDocuments(makeDb(c.env.DATABASE_URL), scope);
+  const documents = (await knowledgeServiceFromEnv(c.env).list(scope)).map(toSummaryPayload);
   return c.json({ documents } satisfies KnowledgeDocumentListPayload);
 }
 
 export async function createDocumentHandler(c: Context<AppEnv>) {
   const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
-
   const parsed = createSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: "Invalid document." }, 400);
   const input = parsed.data;
-
-  if (!PATH_RE.test(input.path)) {
-    return c.json(
-      { error: "Path must be slash-separated names using letters, numbers, dot, dash, or underscore." },
-      400,
-    );
-  }
-  if (input.path.split("/").some((segment) => segment === "." || segment === "..")) {
-    return c.json({ error: "Path may not contain . or .. segments." }, 400);
-  }
-
-  // A folder is its index document. The caller names the directory; we
-  // append the reserved basename.
-  const path = input.kind === "index" ? `${input.path}/index` : input.path;
-
-  if (input.kind === "concept") {
-    if (!input.type) {
-      return c.json({ error: "A concept needs a `type` — it is OKF's one required key." }, 400);
-    }
-    if (RESERVED_BASENAMES.has(path.split("/").pop()!)) {
-      return c.json({ error: "`index` and `log` are reserved OKF filenames." }, 400);
-    }
-  }
-
-  const db = makeDb(c.env.DATABASE_URL);
-  let created;
+  const svc = knowledgeServiceFromEnv(c.env);
   try {
-    created = await createDocument(db, scope, {
-      path,
-      kind: input.kind,
-      type: input.kind === "concept" ? input.type! : null,
-      title: input.title ?? null,
-      description: input.description ?? null,
-      tags: input.tags ?? null,
-      body: input.body,
-      sourceMaterialId: input.sourceMaterialId ?? null,
-      editedById: membershipIdOf(c, scope),
+    if (input.kind === "index") {
+      if (!DIR_RE.test(input.path)) return c.json({ error: "Folder names use lowercase letters, digits, and hyphens." }, 400);
+      await svc.createDirectory(scope, input.path);
+      return c.json({ id: `${input.path}/index`, path: `${input.path}/index`, kind: "index" }, 201);
+    }
+    if (!isValidConceptId(input.path)) return c.json({ error: "Paths use lowercase letters, digits, hyphens, and slashes; index and log are reserved." }, 400);
+    if (!input.type) return c.json({ error: "A concept needs a type." }, 400);
+    const created = await svc.create(scope, {
+      id: input.path, type: input.type, title: input.title ?? input.path,
+      description: input.description ?? "", body: input.body,
     });
-  } catch {
-    // The only constraint a well-formed request can hit is the path unique
-    // index; everything else was validated above.
-    return c.json({ error: "A document already exists at that path." }, 409);
+    return c.json(toDocumentPayload(created), 201);
+  } catch (err) {
+    if (err instanceof ConceptExistsError) return c.json({ error: "A document already exists at that path." }, 409);
+    if (idError(err)) return c.json({ error: "Invalid path." }, 400);
+    throw err;
   }
-
-  await maintainBundleBestEffort(
-    db,
-    scope,
-    path,
-    `**Creation** Added \`${path}\`.`,
-    new Date().toISOString().slice(0, 10),
-  );
-
-  return c.json(created, 201);
 }
 
 export async function getDocumentHandler(c: Context<AppEnv>) {
   const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
-
-  const documentId = c.req.param("documentId");
-  if (!documentId) return c.json({ error: "No such document." }, 404);
-
-  const document = await getDocument(makeDb(c.env.DATABASE_URL), scope, documentId);
-  return document ? c.json(document) : c.json({ error: "No such document." }, 404);
+  const id = conceptIdParam(c);
+  if (!id) return c.json({ error: "Invalid document id." }, 400);
+  const doc = await knowledgeServiceFromEnv(c.env).show(scope, id);
+  return doc ? c.json(toDocumentPayload(doc)) : c.json({ error: "No such document." }, 404);
 }
 
 export async function updateDocumentHandler(c: Context<AppEnv>) {
   const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
-
-  const documentId = c.req.param("documentId");
-  if (!documentId) return c.json({ error: "No such document." }, 404);
-
+  const id = conceptIdParam(c);
+  if (!id) return c.json({ error: "Invalid document id." }, 400);
   const parsed = updateSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: "Invalid document body." }, 400);
-
-  const updated = await updateDocumentBody(makeDb(c.env.DATABASE_URL), scope, documentId, {
-    body: parsed.data.body,
-    editedById: membershipIdOf(c, scope),
-  });
-  return updated ? c.json(updated) : c.json({ error: "No such document." }, 404);
+  const updated = await knowledgeServiceFromEnv(c.env).update(scope, id, { body: parsed.data.body });
+  return updated ? c.json(toDocumentPayload(updated)) : c.json({ error: "No such document." }, 404);
 }
 
 export async function deleteDocumentHandler(c: Context<AppEnv>) {
   const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
-
-  const documentId = c.req.param("documentId");
-  if (!documentId) return c.json({ error: "No such document." }, 404);
-
-  const db = makeDb(c.env.DATABASE_URL);
-  const removed = await deleteDocument(db, scope, documentId);
-  if (!removed) return c.json({ error: "No such document." }, 404);
-
-  await maintainBundleBestEffort(
-    db,
-    scope,
-    removed.path,
-    `**Update** Removed \`${removed.path}\`.`,
-    new Date().toISOString().slice(0, 10),
-  );
-
-  return c.body(null, 204);
+  const id = conceptIdParam(c);
+  if (!id) return c.json({ error: "Invalid document id." }, 400);
+  const removed = await knowledgeServiceFromEnv(c.env).remove(scope, id);
+  return removed ? c.body(null, 204) : c.json({ error: "No such document." }, 404);
 }
 
 export async function documentLinksHandler(c: Context<AppEnv>) {
   const scope = instructorScope(c);
   if (!scope) return c.json({ error: "Not permitted." }, 403);
+  const id = conceptIdParam(c);
+  if (!id) return c.json({ error: "Invalid document id." }, 400);
+  const svc = knowledgeServiceFromEnv(c.env);
+  const doc = await svc.show(scope, id);
+  if (!doc) return c.json({ error: "No such document." }, 404);
+  const report = await svc.validate(scope);
+  const broken = report.brokenLinks.filter((b) => b.source === id).map((b) => b.target);
+  const payload: DocumentLinksPayload = {
+    outbound: [
+      ...doc.outbound.map((t) => ({ rawHref: t, targetPath: t, resolvedDocumentId: t, isBroken: false })),
+      ...broken.map((t) => ({ rawHref: t, targetPath: t, resolvedDocumentId: null, isBroken: true })),
+    ],
+    backlinks: doc.inbound.map((s) => ({ sourceDocumentId: s, sourcePath: s })),
+  };
+  return c.json(payload);
+}
 
-  const documentId = c.req.param("documentId");
-  if (!documentId) return c.json({ error: "No such document." }, 404);
-
-  const links = await getDocumentLinks(makeDb(c.env.DATABASE_URL), scope, documentId);
-  return c.json(links satisfies DocumentLinksPayload);
+export async function searchKnowledgeHandler(c: Context<AppEnv>) {
+  const scope = instructorScope(c);
+  if (!scope) return c.json({ error: "Not permitted." }, 403);
+  const q = (c.req.query("q") ?? "").trim();
+  if (q === "") return c.json({ error: "q is required." }, 400);
+  const limitRaw = Number(c.req.query("limit") ?? SEARCH_LIMIT_DEFAULT);
+  const limit = Number.isInteger(limitRaw) ? Math.min(SEARCH_LIMIT_MAX, Math.max(1, limitRaw)) : SEARCH_LIMIT_DEFAULT;
+  const hits = await knowledgeServiceFromEnv(c.env).search(scope, q, limit);
+  return c.json({ hits });
 }

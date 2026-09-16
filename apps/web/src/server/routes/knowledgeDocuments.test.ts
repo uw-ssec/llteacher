@@ -1,11 +1,12 @@
 /* --------------------------------------------------------------------------
-   #42: the knowledge document routes' request contract.
+   #42: the knowledge document routes' request contract, rewritten over
+   KnowledgeService (the OKF bundle on disk) rather than the retired
+   Postgres tables.
 
-   The repository suite (repositories/knowledgeDocuments.db.test.ts) owns the
-   data invariants against a real Postgres. This file owns who is admitted,
-   path validation (the security-relevant part -- see knowledgeDocuments.ts),
-   the folder-is-its-index-document behaviour, and bundle maintenance being
-   best-effort.
+   This file owns who is admitted, path/id validation at the HTTP boundary,
+   and payload mapping from ConceptSummary/Concept to the console's wire
+   shape. The service's own tests own bundle behaviour (okf CLI calls, index
+   regeneration, locking); this file mocks the service entirely.
    -------------------------------------------------------------------------- */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -16,33 +17,43 @@ import {
   documentLinksHandler,
   getDocumentHandler,
   listDocumentsHandler,
+  searchKnowledgeHandler,
   updateDocumentHandler,
 } from "./knowledgeDocuments";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
 
 const COURSE_ID = "11111111-2222-4333-8444-555555555555";
-const DOC_ID = "22222222-2222-4333-8444-555555555555";
 const TEST_ENV = { DATABASE_URL: "ignored" } as unknown as Env;
 
-const repo = {
-  listDocuments: vi.fn(),
-  getDocument: vi.fn(),
-  createDocument: vi.fn(),
-  updateDocumentBody: vi.fn(),
-  deleteDocument: vi.fn(),
-  getDocumentLinks: vi.fn(),
+const svc = {
+  list: vi.fn(), show: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(),
+  createDirectory: vi.fn(), validate: vi.fn(), search: vi.fn(),
 };
-
-vi.mock("../repositories/knowledgeDocuments", () => ({
-  listDocuments: (...a: unknown[]) => repo.listDocuments(...a),
-  getDocument: (...a: unknown[]) => repo.getDocument(...a),
-  createDocument: (...a: unknown[]) => repo.createDocument(...a),
-  updateDocumentBody: (...a: unknown[]) => repo.updateDocumentBody(...a),
-  deleteDocument: (...a: unknown[]) => repo.deleteDocument(...a),
-  getDocumentLinks: (...a: unknown[]) => repo.getDocumentLinks(...a),
-}));
+vi.mock("../knowledge/service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../knowledge/service")>();
+  return { ...actual, knowledgeServiceFromEnv: () => svc };
+});
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
+
+const CONCEPT = {
+  id: "lectures/module-1/intro", kind: "concept" as const, type: "lecture", title: "Intro", description: "Markets",
+  resource: "llteacher://materials/33333333-3333-4333-8333-333333333333", updatedAt: "2026-09-15T00:00:00.000Z",
+  body: "# Intro", frontmatter: { type: "lecture" }, outbound: ["syllabus"], inbound: [],
+};
+const ENC = encodeURIComponent(CONCEPT.id);
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  svc.list.mockResolvedValue([CONCEPT]);
+  svc.show.mockResolvedValue(CONCEPT);
+  svc.create.mockResolvedValue(CONCEPT);
+  svc.update.mockResolvedValue(CONCEPT);
+  svc.remove.mockResolvedValue(true);
+  svc.createDirectory.mockResolvedValue(undefined);
+  svc.validate.mockResolvedValue({ conceptCount: 1, brokenLinks: [], orphans: [], isConformant: true });
+  svc.search.mockResolvedValue([]);
+});
 
 function appWith(role: "instructor" | "student" = "instructor") {
   const a = new Hono<AppEnv>();
@@ -61,6 +72,7 @@ function appWith(role: "instructor" | "student" = "instructor") {
   a.put("/api/courses/:courseId/knowledge/documents/:documentId", updateDocumentHandler);
   a.delete("/api/courses/:courseId/knowledge/documents/:documentId", deleteDocumentHandler);
   a.get("/api/courses/:courseId/knowledge/documents/:documentId/links", documentLinksHandler);
+  a.get("/api/courses/:courseId/knowledge/search", searchKnowledgeHandler);
   return a;
 }
 function app() {
@@ -68,293 +80,82 @@ function app() {
 }
 
 const base = `/api/courses/${COURSE_ID}/knowledge/documents`;
-const json = (body: unknown, method = "POST") => ({
-  method,
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify(body),
-});
 
-beforeEach(() => {
-  vi.clearAllMocks();
-  repo.listDocuments.mockResolvedValue([]);
-  repo.createDocument.mockResolvedValue({ id: DOC_ID, path: "a" });
-});
-
-describe("knowledge document routes", () => {
-  it("lists documents", async () => {
+describe("knowledge document routes over the bundle", () => {
+  it("rejects students", async () => {
+    expect((await appWith("student").request(base, {}, TEST_ENV)).status).toBe(403);
+  });
+  it("lists concepts in the payload shape the console expects", async () => {
     const res = await app().request(base, {}, TEST_ENV);
+    const body = (await res.json()) as { documents: unknown[] };
+    expect(body.documents[0]).toMatchObject({
+      id: CONCEPT.id, path: CONCEPT.id, kind: "concept", indexStatus: "indexed",
+      sourceMaterialId: "33333333-3333-4333-8333-333333333333", tags: null,
+    });
+  });
+  it("round-trips an encoded concept id in the URL", async () => {
+    const res = await app().request(`${base}/${ENC}`, {}, TEST_ENV);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ documents: [] });
+    expect(svc.show).toHaveBeenCalledWith(COURSE_ID, CONCEPT.id);
+    expect(((await res.json()) as { body: string }).body).toBe("# Intro");
   });
-
-  it("rejects a path with a traversal segment", async () => {
-    const res = await app().request(
-      base,
-      json({ path: "../escape", kind: "concept", type: "note" }),
-      TEST_ENV,
-    );
-    expect(res.status).toBe(400);
-    expect(repo.createDocument).not.toHaveBeenCalled();
+  it("404s an unknown concept and 400s a malformed id", async () => {
+    svc.show.mockResolvedValue(null);
+    expect((await app().request(`${base}/missing`, {}, TEST_ENV)).status).toBe(404);
+    expect((await app().request(`${base}/${encodeURIComponent("Bad Id")}`, {}, TEST_ENV)).status).toBe(400);
   });
-
-  it("rejects a leading or trailing slash in a path", async () => {
-    const res = await app().request(
-      base,
-      json({ path: "/leading", kind: "concept", type: "note" }),
-      TEST_ENV,
-    );
-    expect(res.status).toBe(400);
+  it("creates a concept, requiring type", async () => {
+    const ok = await app().request(base, { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: "notes/new", kind: "concept", type: "note", title: "New", description: "d", body: "b" }) }, TEST_ENV);
+    expect(ok.status).toBe(201);
+    expect(svc.create).toHaveBeenCalledWith(COURSE_ID, { id: "notes/new", type: "note", title: "New", description: "d", body: "b" });
+    const noType = await app().request(base, { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: "notes/new", kind: "concept" }) }, TEST_ENV);
+    expect(noType.status).toBe(400);
   });
-
-  it("rejects a concept with no type, the one required OKF key", async () => {
-    const res = await app().request(base, json({ path: "a", kind: "concept" }), TEST_ENV);
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toMatch(/type/i);
-  });
-
-  it("rejects a concept named index", async () => {
-    const res = await app().request(
-      base,
-      json({ path: "week1/index", kind: "concept", type: "note" }),
-      TEST_ENV,
-    );
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toMatch(/reserved/i);
-  });
-
-  it("creates a folder as its index document", async () => {
-    const res = await app().request(base, json({ path: "week1", kind: "index" }), TEST_ENV);
+  it("creates a folder through createDirectory", async () => {
+    const res = await app().request(base, { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: "readings", kind: "index" }) }, TEST_ENV);
     expect(res.status).toBe(201);
-    expect(repo.createDocument).toHaveBeenCalledWith(
-      expect.anything(),
-      COURSE_ID,
-      expect.objectContaining({ path: "week1/index", kind: "index" }),
-    );
+    expect(svc.createDirectory).toHaveBeenCalledWith(COURSE_ID, "readings");
   });
-
-  it("returns 404 for a document in another course", async () => {
-    repo.getDocument.mockResolvedValue(null);
-    const res = await app().request(`${base}/${DOC_ID}`, {}, TEST_ENV);
-    expect(res.status).toBe(404);
+  it("409s a duplicate and 400s reserved or invalid paths", async () => {
+    const { ConceptExistsError } = await import("../knowledge/service");
+    svc.create.mockRejectedValue(new ConceptExistsError("x"));
+    const dup = await app().request(base, { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: "x", kind: "concept", type: "t" }) }, TEST_ENV);
+    expect(dup.status).toBe(409);
+    for (const path of ["index", "a/log", "Has Space", "../up"]) {
+      const bad = await app().request(base, { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path, kind: "concept", type: "t" }) }, TEST_ENV);
+      expect(bad.status).toBe(400);
+    }
   });
-
-  it("updates a body", async () => {
-    repo.updateDocumentBody.mockResolvedValue({ id: DOC_ID, path: "a", body: "new" });
-    const res = await app().request(`${base}/${DOC_ID}`, json({ body: "new" }, "PUT"), TEST_ENV);
+  it("updates the body and deletes", async () => {
+    const put = await app().request(`${base}/${ENC}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ body: "new" }) }, TEST_ENV);
+    expect(put.status).toBe(200);
+    expect(svc.update).toHaveBeenCalledWith(COURSE_ID, CONCEPT.id, { body: "new" });
+    const del = await app().request(`${base}/${ENC}`, { method: "DELETE" }, TEST_ENV);
+    expect(del.status).toBe(204);
+    svc.remove.mockResolvedValue(false);
+    expect((await app().request(`${base}/${ENC}`, { method: "DELETE" }, TEST_ENV)).status).toBe(404);
+  });
+  it("reports links with broken ones from validate", async () => {
+    svc.validate.mockResolvedValue({ conceptCount: 1, brokenLinks: [{ source: CONCEPT.id, target: "gone" }], orphans: [], isConformant: true });
+    const res = await app().request(`${base}/${ENC}/links`, {}, TEST_ENV);
+    const body = (await res.json()) as { outbound: unknown[]; backlinks: unknown[] };
+    expect(body.outbound).toEqual(expect.arrayContaining([
+      { rawHref: "syllabus", targetPath: "syllabus", resolvedDocumentId: "syllabus", isBroken: false },
+      { rawHref: "gone", targetPath: "gone", resolvedDocumentId: null, isBroken: true },
+    ]));
+    expect(body.backlinks).toEqual([]);
+  });
+  it("searches with a clamped limit", async () => {
+    svc.search.mockResolvedValue([{ conceptId: CONCEPT.id, title: "Intro", type: "lecture", description: "Markets", score: 2 }]);
+    const res = await app().request(`/api/courses/${COURSE_ID}/knowledge/search?q=markets&limit=50`, {}, TEST_ENV);
     expect(res.status).toBe(200);
-    expect(repo.updateDocumentBody).toHaveBeenCalledWith(
-      expect.anything(),
-      COURSE_ID,
-      DOC_ID,
-      expect.objectContaining({ body: "new" }),
-    );
-  });
-
-  it("returns outbound links and backlinks", async () => {
-    repo.getDocumentLinks.mockResolvedValue({ outbound: [], backlinks: [] });
-    const res = await app().request(`${base}/${DOC_ID}/links`, {}, TEST_ENV);
-    expect(await res.json()).toEqual({ outbound: [], backlinks: [] });
-  });
-
-  it("returns 404 when deleting a document that is not this course's", async () => {
-    repo.deleteDocument.mockResolvedValue(false);
-    const res = await app().request(`${base}/${DOC_ID}`, { method: "DELETE" }, TEST_ENV);
-    expect(res.status).toBe(404);
-  });
-
-  it("regenerates the parent index after creating a concept", async () => {
-    repo.listDocuments.mockResolvedValue([
-      { id: "idx", path: "week1/index", kind: "index", title: null, description: null },
-      { id: DOC_ID, path: "week1/a", kind: "concept", title: "A", description: "First." },
-    ]);
-    repo.updateDocumentBody.mockResolvedValue({ id: "idx" });
-
-    await app().request(base, json({ path: "week1/a", kind: "concept", type: "note" }), TEST_ENV);
-
-    expect(repo.updateDocumentBody).toHaveBeenCalledWith(
-      expect.anything(),
-      COURSE_ID,
-      "idx",
-      expect.objectContaining({ body: expect.stringContaining("* [A](/week1/a) - First.") }),
-    );
-  });
-
-  it("does not fail a create when the bundle has no index document", async () => {
-    repo.listDocuments.mockResolvedValue([]);
-    const res = await app().request(base, json({ path: "a", kind: "concept", type: "note" }), TEST_ENV);
-    expect(res.status).toBe(201);
-  });
-
-  /* ------------------------- Extra boundary cases ------------------------- */
-
-  it("does not admit a student to any handler", async () => {
-    const student = appWith("student");
-    const res = await student.request(base, {}, TEST_ENV);
-    expect(res.status).toBe(403);
-    expect(repo.listDocuments).not.toHaveBeenCalled();
-  });
-
-  it("does not admit a student to create", async () => {
-    const student = appWith("student");
-    const res = await student.request(
-      base,
-      json({ path: "a", kind: "concept", type: "note" }),
-      TEST_ENV,
-    );
-    expect(res.status).toBe(403);
-    expect(repo.createDocument).not.toHaveBeenCalled();
-  });
-
-  it("refuses a non-member course id", async () => {
-    const other = "99999999-2222-4333-8444-555555555555";
-    const res = await app().request(
-      `/api/courses/${other}/knowledge/documents`,
-      {},
-      TEST_ENV,
-    );
-    expect(res.status).toBe(403);
-  });
-
-  it("rejects a path with a lone dot segment", async () => {
-    const res = await app().request(
-      base,
-      json({ path: "week1/./a", kind: "concept", type: "note" }),
-      TEST_ENV,
-    );
-    expect(res.status).toBe(400);
-    expect(repo.createDocument).not.toHaveBeenCalled();
-  });
-
-  it("rejects a path with a doubled slash (empty segment)", async () => {
-    const res = await app().request(
-      base,
-      json({ path: "week1//a", kind: "concept", type: "note" }),
-      TEST_ENV,
-    );
-    expect(res.status).toBe(400);
-    expect(repo.createDocument).not.toHaveBeenCalled();
-  });
-
-  it("rejects a path containing spaces or other unsafe characters", async () => {
-    const res = await app().request(
-      base,
-      json({ path: "week 1/a", kind: "concept", type: "note" }),
-      TEST_ENV,
-    );
-    expect(res.status).toBe(400);
-    expect(repo.createDocument).not.toHaveBeenCalled();
-  });
-
-  it("rejects an empty path", async () => {
-    const res = await app().request(
-      base,
-      json({ path: "", kind: "concept", type: "note" }),
-      TEST_ENV,
-    );
-    expect(res.status).toBe(400);
-    expect(repo.createDocument).not.toHaveBeenCalled();
-  });
-
-  it("rejects an index kind named log at the top level (reserved basename)", async () => {
-    // A folder named "log" would produce an index document at "log/index",
-    // which is fine -- but the caller directly asking for "log" as a
-    // top-level index path collides with the log document's own basename
-    // only if the *concept* rule were misapplied to index kinds. This
-    // asserts the reserved-basename check is concept-only, matching the
-    // brief and the DB CHECK, which allows kind=index to end in "index".
-    const res = await app().request(base, json({ path: "log", kind: "index" }), TEST_ENV);
-    expect(res.status).toBe(201);
-    expect(repo.createDocument).toHaveBeenCalledWith(
-      expect.anything(),
-      COURSE_ID,
-      expect.objectContaining({ path: "log/index", kind: "index" }),
-    );
-  });
-
-  it("rejects malformed JSON on create", async () => {
-    const res = await app().request(
-      base,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{not json",
-      },
-      TEST_ENV,
-    );
-    expect(res.status).toBe(400);
-    expect(repo.createDocument).not.toHaveBeenCalled();
-  });
-
-  it("returns 409 when the repository rejects a duplicate path", async () => {
-    repo.createDocument.mockRejectedValueOnce(new Error("duplicate key value"));
-    const res = await app().request(
-      base,
-      json({ path: "a", kind: "concept", type: "note" }),
-      TEST_ENV,
-    );
-    expect(res.status).toBe(409);
-  });
-
-  it("returns 404 when updating a document that is not this course's", async () => {
-    repo.updateDocumentBody.mockResolvedValue(null);
-    const res = await app().request(`${base}/${DOC_ID}`, json({ body: "new" }, "PUT"), TEST_ENV);
-    expect(res.status).toBe(404);
-  });
-
-  it("rejects an update with a non-string body", async () => {
-    const res = await app().request(`${base}/${DOC_ID}`, json({ body: 5 }, "PUT"), TEST_ENV);
-    expect(res.status).toBe(400);
-    expect(repo.updateDocumentBody).not.toHaveBeenCalled();
-  });
-
-  it("does not fail a delete when the bundle has no index or log document", async () => {
-    repo.deleteDocument.mockResolvedValue({ path: "week1/a" });
-    repo.listDocuments.mockResolvedValue([]);
-    const res = await app().request(`${base}/${DOC_ID}`, { method: "DELETE" }, TEST_ENV);
-    expect(res.status).toBe(204);
-  });
-
-  it("regenerates the parent index and appends a log entry after deleting", async () => {
-    repo.deleteDocument.mockResolvedValue({ path: "week1/a" });
-    repo.listDocuments.mockResolvedValue([
-      { id: "idx", path: "week1/index", kind: "index", title: null, description: null },
-      { id: "log-doc", path: "log", kind: "log", title: null, description: null },
-    ]);
-    repo.getDocument.mockResolvedValue({ id: "log-doc", body: "" });
-    repo.updateDocumentBody.mockResolvedValue({ id: "idx" });
-
-    const res = await app().request(`${base}/${DOC_ID}`, { method: "DELETE" }, TEST_ENV);
-
-    expect(res.status).toBe(204);
-    expect(repo.updateDocumentBody).toHaveBeenCalledWith(
-      expect.anything(),
-      COURSE_ID,
-      "idx",
-      expect.objectContaining({ body: expect.stringContaining("No documents yet.") }),
-    );
-    expect(repo.updateDocumentBody).toHaveBeenCalledWith(
-      expect.anything(),
-      COURSE_ID,
-      "log-doc",
-      expect.objectContaining({ body: expect.stringContaining("Removed `week1/a`") }),
-    );
-  });
-
-  it("still deletes successfully when bundle maintenance itself throws", async () => {
-    repo.deleteDocument.mockResolvedValue({ path: "week1/a" });
-    repo.listDocuments.mockRejectedValueOnce(new Error("transient failure"));
-
-    const res = await app().request(`${base}/${DOC_ID}`, { method: "DELETE" }, TEST_ENV);
-    expect(res.status).toBe(204);
-  });
-
-  it("still creates successfully when bundle maintenance itself throws", async () => {
-    repo.listDocuments.mockRejectedValueOnce(new Error("transient failure"));
-    const res = await app().request(
-      base,
-      json({ path: "a", kind: "concept", type: "note" }),
-      TEST_ENV,
-    );
-    expect(res.status).toBe(201);
+    expect(svc.search).toHaveBeenCalledWith(COURSE_ID, "markets", 20);
+    expect(((await res.json()) as { hits: unknown[] }).hits).toHaveLength(1);
+    expect((await app().request(`/api/courses/${COURSE_ID}/knowledge/search`, {}, TEST_ENV)).status).toBe(400);
   });
 });

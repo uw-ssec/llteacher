@@ -79,19 +79,8 @@ import {
   updateDocumentHandler,
   deleteDocumentHandler,
   documentLinksHandler,
+  searchKnowledgeHandler,
 } from "./routes/knowledgeDocuments";
-import {
-  listCollectionsHandler,
-  createCollectionHandler,
-  updateCollectionHandler,
-  deleteCollectionHandler,
-  getCollectionItemsHandler,
-  setCollectionItemsHandler,
-  listAttachmentsHandler,
-  attachCollectionHandler,
-  detachCollectionHandler,
-  resolveKnowledgeHandler,
-} from "./routes/knowledgeCollections";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
 import { requireCourseMember, requireGraderOf, requireInstructorOf, requireRole } from "./utils/guards";
@@ -396,6 +385,7 @@ app.post(
   requireInstructorOf()(reingestMaterialHandler),
 );
 
+// Collections routes (knowledgeCollections.ts) are intentionally unregistered this quarter; see the 2026-09-15 spec.
 app.get(
   "/api/courses/:courseId/knowledge/documents",
   requireInstructorOf()(listDocumentsHandler),
@@ -420,44 +410,10 @@ app.get(
   "/api/courses/:courseId/knowledge/documents/:documentId/links",
   requireInstructorOf()(documentLinksHandler),
 );
-
 app.get(
-  "/api/courses/:courseId/knowledge/collections",
-  requireInstructorOf()(listCollectionsHandler),
+  "/api/courses/:courseId/knowledge/search",
+  requireInstructorOf()(searchKnowledgeHandler),
 );
-app.post(
-  "/api/courses/:courseId/knowledge/collections",
-  requireInstructorOf()(createCollectionHandler),
-);
-app.patch(
-  "/api/courses/:courseId/knowledge/collections/:collectionId",
-  requireInstructorOf()(updateCollectionHandler),
-);
-app.delete(
-  "/api/courses/:courseId/knowledge/collections/:collectionId",
-  requireInstructorOf()(deleteCollectionHandler),
-);
-app.get(
-  "/api/courses/:courseId/knowledge/collections/:collectionId/items",
-  requireInstructorOf()(getCollectionItemsHandler),
-);
-app.put(
-  "/api/courses/:courseId/knowledge/collections/:collectionId/items",
-  requireInstructorOf()(setCollectionItemsHandler),
-);
-app.get(
-  "/api/courses/:courseId/knowledge/attachments",
-  requireInstructorOf()(listAttachmentsHandler),
-);
-app.post(
-  "/api/courses/:courseId/knowledge/collections/:collectionId/attachments",
-  requireInstructorOf()(attachCollectionHandler),
-);
-app.delete(
-  "/api/courses/:courseId/knowledge/attachments/:attachmentId",
-  requireInstructorOf()(detachCollectionHandler),
-);
-app.get("/api/courses/:courseId/knowledge/resolve", requireInstructorOf()(resolveKnowledgeHandler));
 
 // #172 audit (CMP-005): an unmatched /api/* path fell through to the SPA
 // catch-all below, which serves index.html with a 200. A client calling a
