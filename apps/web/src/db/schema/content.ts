@@ -517,6 +517,12 @@ export const courseMaterials = pgTable(
      *  #44's invariant: the same file uploaded twice is recognised rather
      *  than duplicated. */
     checksum: text("checksum"),
+    /** Where in the uploaded folder this file came from, verbatim
+     *  ("Uploaded Lectures/Module 1/Lecture 2.docx"). Null for a single-file
+     *  upload. */
+    relativePath: text("relative_path"),
+    /** OKF concept id the extractor wrote for this material, once ready. */
+    documentPath: text("document_path"),
     status: materialStatusEnum("status").notNull().default("pending"),
     errorDetail: text("error_detail"),
     uploadedAt: timestamp("uploaded_at", { withTimezone: true })

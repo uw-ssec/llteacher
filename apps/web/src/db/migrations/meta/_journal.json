@@ -330,6 +330,13 @@
       "when": 1788956885550,
       "tag": "0046_curly_reaper",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1789590351453,
+      "tag": "0047_okf_bundle_knowledge_base",
+      "breakpoints": true
     }
   ]
 }
