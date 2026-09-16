@@ -40,10 +40,11 @@
    ---------------------------------------------------------------------------
    Design decision 2 -- explicit Node job command.
 
-   The Node deployment invokes this sweep through a dedicated command rather
-   than a web-request handler. Scheduler configuration and process lifecycle
-   belong to deployment code, keeping this function focused on selecting and
-   submitting eligible sections exactly once.
+   The Node deployment invokes this sweep through `npm run
+   node:run-overdue-job`, a dedicated command rather than a web-request
+   handler. Scheduler configuration and process lifecycle belong to
+   deployment code, keeping this function focused on selecting and submitting
+   eligible sections exactly once.
 
    ---------------------------------------------------------------------------
    Design decision 3 -- bounded per invocation (final review).

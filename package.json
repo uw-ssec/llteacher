@@ -12,6 +12,8 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
+    "node:serve": "npm run node:serve --workspace=llteacher-web",
+    "node:run-overdue-job": "npm run node:run-overdue-job --workspace=llteacher-web",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "clean": "turbo run clean && rm -rf node_modules",

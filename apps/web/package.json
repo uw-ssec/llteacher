@@ -7,6 +7,7 @@
     "predev": "npm run copy-webr-assets",
     "dev": "vite",
     "node:serve": "tsx src/node/server.ts",
+    "node:run-overdue-job": "tsx src/node/run-overdue-job.ts",
     "prebuild": "npm run copy-webr-assets",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
