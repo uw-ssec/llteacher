@@ -1,11 +1,11 @@
 import { promises as fs, realpathSync } from "node:fs";
 import path from "node:path";
-import { runOkf, OkfError } from "./okfCli";
+import { runOkf } from "./okfCli";
 import { withWriteLock } from "./writeLock";
 import { isValidConceptId } from "./conceptId";
 import { parseFrontmatter, setFrontmatterKeys } from "./frontmatter";
 import { parseLinks } from "./parseLinks";
-import { appendLogEntry, renderIndex, type IndexEntry } from "./bundle";
+import { appendLogEntry, type IndexEntry } from "./bundle";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DIR_RE = /^[a-z0-9-]+(?:\/[a-z0-9-]+)*$/;
@@ -85,6 +85,48 @@ function kindOf(id: string): ConceptSummary["kind"] {
   return "concept";
 }
 
+// The parent directory of a concept id, in the "" (root) / "a/b" shape every
+// index-regenerating call expects -- path.posix.dirname("a") is ".", not "",
+// so that has to be normalised at every call site. Centralised here after the
+// fix-review found remove() computing this inline while create()'s new
+// rollback path needed the identical logic.
+function parentDirOf(conceptId: string): string {
+  const dir = path.posix.dirname(conceptId);
+  return dir === "." ? "" : dir;
+}
+
+// Matches how okf 0.1.5 itself derives a directory's index.md heading from
+// the directory name on disk (confirmed by creating `module-1/intro` against
+// the real binary and inspecting the auto-generated `module-1/index.md`):
+// the hyphen is kept as-is and only the first letter is capitalised
+// (`module-1` -> `Module-1`, `readings` -> `Readings`). Matching okf exactly
+// here means a directory's index.md heading looks the same whether okf
+// itself first wrote it or this service later regenerated it (on a
+// create-rollback or a delete).
+function directoryHeading(directory: string): string {
+  const last = directory.split("/").pop() ?? directory;
+  return last.charAt(0).toUpperCase() + last.slice(1);
+}
+
+// Renders the entry lines only (no heading), sorted by path, one
+// `* [title](path.md) - description` bullet per entry with the ` - ...`
+// suffix omitted when there is no description -- matches okf 0.1.5's own
+// index.md bullet format byte-for-byte (relative basename href, no blank
+// line before the first bullet). Shared by renderOkfIndex (non-root
+// directories) and regenerateIndex's root branch, which needs the bullets
+// without a heading line since it preserves okf's own frontmatter+heading
+// prefix instead.
+function renderIndexBody(entries: IndexEntry[]): string {
+  const lines = [...entries]
+    .sort((a, b) => a.path.localeCompare(b.path))
+    .map((entry) => {
+      const label = entry.title ?? entry.path;
+      const suffix = entry.description ? ` - ${entry.description}` : "";
+      return `* [${label}](${entry.path}.md)${suffix}`;
+    });
+  return lines.length > 0 ? `${lines.join("\n")}\n` : "";
+}
+
 export class OkfKnowledgeService implements KnowledgeService {
   private readonly root: string;
   private readonly binary: string;
@@ -118,6 +160,14 @@ export class OkfKnowledgeService implements KnowledgeService {
   // course directory exists before calling withWriteLock, not after.
   private async ensureCourseDir(courseId: string): Promise<void> {
     await fs.mkdir(this.courseDir(courseId), { recursive: true });
+  }
+
+  // Every write path needs ensureCourseDir() before it can take the lock (see
+  // above) and then takes the same per-course lock, so centralise both here
+  // instead of repeating the pair at each of the five write methods.
+  private async withCourseLock<T>(courseId: string, fn: () => Promise<T>): Promise<T> {
+    await this.ensureCourseDir(courseId);
+    return withWriteLock(this.lockPath(courseId), fn);
   }
 
   async ensureBundle(courseId: string): Promise<void> {
@@ -161,13 +211,9 @@ export class OkfKnowledgeService implements KnowledgeService {
     const dir = this.bundleDir(courseId);
     const q = query.trim();
     if (q === "") return [];
+    if (!(await exists(dir))) return [];
     const n = Math.min(Math.max(1, Math.floor(limit)), SEARCH_LIMIT_MAX);
-    const rows = await runOkf<OkfSearchRow[] | null>(this.binary, ["search", q, dir, "--limit", String(n)]).catch(
-      (err) => {
-        if (err instanceof OkfError && /no such file|not found|does not exist/i.test(err.stderr)) return null;
-        throw err;
-      },
-    );
+    const rows = await runOkf<OkfSearchRow[] | null>(this.binary, ["search", q, dir, "--limit", String(n)]);
     return (rows ?? []).map((r) => ({
       conceptId: r.concept_id,
       title: r.title ?? r.concept_id,
@@ -224,21 +270,30 @@ export class OkfKnowledgeService implements KnowledgeService {
   async create(courseId: string, input: CreateConcept): Promise<Concept> {
     const file = this.conceptFile(courseId, input.id);
     const dir = this.bundleDir(courseId);
-    await this.ensureCourseDir(courseId);
-    return withWriteLock(this.lockPath(courseId), async () => {
+    return this.withCourseLock(courseId, async () => {
       await this.ensureBundle(courseId);
       if (await exists(file)) throw new ConceptExistsError(input.id);
       await runOkf(this.binary, [
         "create", input.id, dir,
         "--type", input.type, "--title", input.title, "--desc", input.description,
       ]);
-      if (input.body.trim() !== "") {
-        await runOkf(this.binary, ["update", input.id, dir, "--body", input.body]);
+      try {
+        if (input.body.trim() !== "") {
+          await runOkf(this.binary, ["update", input.id, dir, "--body", input.body]);
+        }
+        const keys: Record<string, string> = { status: "generated" };
+        if (input.resource) keys.resource = input.resource;
+        const raw = await fs.readFile(file, "utf8");
+        await fs.writeFile(file, setFrontmatterKeys(raw, keys));
+      } catch (err) {
+        // okf create already landed the concept file on disk (and, for a
+        // nested id, its own directory index.md). Leaving that file behind
+        // after a failure here would make ConceptExistsError block every
+        // retry of this same id forever, so roll the partial create back.
+        await fs.unlink(file).catch(() => {});
+        await this.regenerateIndex(courseId, parentDirOf(input.id));
+        throw err;
       }
-      const keys: Record<string, string> = { status: "generated" };
-      if (input.resource) keys.resource = input.resource;
-      const raw = await fs.readFile(file, "utf8");
-      await fs.writeFile(file, setFrontmatterKeys(raw, keys));
       const created = await this.show(courseId, input.id);
       if (!created) throw new Error(`okf create reported success but ${input.id} is missing`);
       return created;
@@ -252,8 +307,7 @@ export class OkfKnowledgeService implements KnowledgeService {
   ): Promise<Concept | null> {
     const file = this.conceptFile(courseId, conceptId);
     const dir = this.bundleDir(courseId);
-    await this.ensureCourseDir(courseId);
-    return withWriteLock(this.lockPath(courseId), async () => {
+    return this.withCourseLock(courseId, async () => {
       if (!(await exists(file))) return null;
       const before = parseFrontmatter(await fs.readFile(file, "utf8")).frontmatter;
       const args = ["update", conceptId, dir];
@@ -278,8 +332,8 @@ export class OkfKnowledgeService implements KnowledgeService {
     this.conceptFile(courseId, from);
     this.conceptFile(courseId, to);
     const dir = this.bundleDir(courseId);
-    await this.ensureCourseDir(courseId);
-    await withWriteLock(this.lockPath(courseId), async () => {
+    await this.withCourseLock(courseId, async () => {
+      await this.ensureBundle(courseId);
       await runOkf(this.binary, ["relate", from, to, dir, "--desc", context]);
     });
   }
@@ -287,11 +341,10 @@ export class OkfKnowledgeService implements KnowledgeService {
   async remove(courseId: string, conceptId: string): Promise<boolean> {
     const file = this.conceptFile(courseId, conceptId);
     const dir = this.bundleDir(courseId);
-    await this.ensureCourseDir(courseId);
-    return withWriteLock(this.lockPath(courseId), async () => {
+    return this.withCourseLock(courseId, async () => {
       if (!(await exists(file))) return false;
       await fs.unlink(file);
-      await this.regenerateIndex(courseId, path.posix.dirname(conceptId) === "." ? "" : path.posix.dirname(conceptId));
+      await this.regenerateIndex(courseId, parentDirOf(conceptId));
       await this.appendLog(dir, `**Deletion**: Removed concept \`${conceptId}.md\`.`);
       return true;
     });
@@ -300,14 +353,13 @@ export class OkfKnowledgeService implements KnowledgeService {
   async createDirectory(courseId: string, directory: string): Promise<void> {
     if (!DIR_RE.test(directory)) throw new ConceptIdError(`Invalid directory: ${directory}`);
     const dir = this.bundleDir(courseId);
-    await this.ensureCourseDir(courseId);
-    await withWriteLock(this.lockPath(courseId), async () => {
+    await this.withCourseLock(courseId, async () => {
       await this.ensureBundle(courseId);
       const target = path.join(dir, directory);
       await fs.mkdir(target, { recursive: true });
       const indexFile = path.join(target, "index.md");
       if (!(await exists(indexFile))) {
-        await fs.writeFile(indexFile, renderIndex(directory, []));
+        await fs.writeFile(indexFile, this.renderOkfIndex(directoryHeading(directory), []));
         await this.appendLog(dir, `**Creation**: Created directory \`${directory}/\`.`);
       }
     });
@@ -328,14 +380,30 @@ export class OkfKnowledgeService implements KnowledgeService {
     };
   }
 
+  // Renders a non-root directory's index.md exactly as okf 0.1.5 writes one:
+  // `# ${heading}` (single hash) followed directly by one bullet per entry,
+  // no blank line in between. Hrefs are relative basenames (`two.md`), not
+  // bundle-absolute paths, matching what okf itself emits.
+  private renderOkfIndex(heading: string, entries: IndexEntry[]): string {
+    return `# ${heading}\n${renderIndexBody(entries)}`;
+  }
+
   // Rebuilds directory/index.md from the concept files that remain in
-  // `directory` after a create or delete. Entry paths are bundle-root
-  // relative (e.g. "d/two", not "two") because renderIndex always emits a
-  // bundle-absolute href (`/${entry.path}`, no directory prefix of its own
-  // and no ".md" suffix) -- see bundle.ts. Passing just the file's basename
-  // here would produce a link that resolves from the bundle root instead of
-  // from `directory`, silently pointing at the wrong file for any nested
-  // directory.
+  // `directory` after a create-rollback or a delete.
+  //
+  // Non-root: the file is fully overwritten with renderOkfIndex output.
+  //
+  // Root: okf owns the root index.md's frontmatter block and heading
+  // (`---\nokf_version: "0.2"\n---\n\n# Knowledge Base\n`, confirmed against
+  // the real 0.1.5 binary), and DOES list root-level concepts underneath
+  // that heading -- an earlier version of this method skipped the root
+  // entirely, which left a dead bullet behind after removing a root concept.
+  // So the root case reads the existing index.md, keeps everything through
+  // the first line starting with "# " untouched, and replaces only what
+  // follows with the current root-level entries. If no such heading line is
+  // found (e.g. index.md is missing or was never okf-authored), whatever
+  // frontmatter is present is kept and "# Knowledge Base" is appended before
+  // the entries.
   private async regenerateIndex(courseId: string, directory: string): Promise<void> {
     const dir = this.bundleDir(courseId);
     const target = path.join(dir, directory);
@@ -343,15 +411,29 @@ export class OkfKnowledgeService implements KnowledgeService {
     for (const name of await fs.readdir(target).catch(() => [] as string[])) {
       if (!name.endsWith(".md") || name === "index.md" || name === "log.md") continue;
       const { frontmatter } = parseFrontmatter(await fs.readFile(path.join(target, name), "utf8"));
-      const base = name.replace(/\.md$/, "");
       entries.push({
-        path: directory === "" ? base : `${directory}/${base}`,
+        path: name.replace(/\.md$/, ""),
         title: frontmatter.title ?? null,
         description: frontmatter.description ?? null,
       });
     }
-    if (directory === "") return; // okf owns the root index; it lists nothing per concept there
-    await fs.writeFile(path.join(target, "index.md"), renderIndex(directory, entries));
+
+    const indexFile = path.join(target, "index.md");
+    if (directory === "") {
+      const existing = await fs.readFile(indexFile, "utf8").catch(() => "");
+      const lines = existing.split("\n");
+      const headingIdx = lines.findIndex((line) => line.startsWith("# "));
+      const prefix =
+        headingIdx >= 0
+          ? `${lines.slice(0, headingIdx + 1).join("\n")}\n`
+          : existing.trim() === ""
+            ? "# Knowledge Base\n"
+            : `${existing.replace(/\s+$/, "")}\n\n# Knowledge Base\n`;
+      await fs.writeFile(indexFile, prefix + renderIndexBody(entries));
+      return;
+    }
+
+    await fs.writeFile(indexFile, this.renderOkfIndex(directoryHeading(directory), entries));
   }
 
   private async appendLog(dir: string, message: string): Promise<void> {

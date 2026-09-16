@@ -91,10 +91,25 @@ describe.skipIf(!okfAvailable(OKF))("OkfKnowledgeService (real binary)", () => {
     expect(await svc.remove(COURSE_A, "d/one")).toBe(true);
     expect(await svc.remove(COURSE_A, "d/one")).toBe(false);
     const index = readFileSync(path.join(root, "courses", COURSE_A, "knowledge", "d/index.md"), "utf8");
-    expect(index).toContain("[Two](/d/two)");
+    expect(index).toContain("[Two](two.md)");
     expect(index).not.toContain("one.md");
     const log = readFileSync(path.join(root, "courses", COURSE_A, "knowledge", "log.md"), "utf8");
     expect(log).toContain("**Deletion**");
+  });
+
+  it("removing a root-level concept regenerates the root index in okf's own format", async () => {
+    await svc.create(COURSE_A, { id: "syllabus", type: "syllabus", title: "Syllabus", description: "Course syllabus", body: "" });
+    await svc.create(COURSE_A, { id: "readings", type: "note", title: "Readings", description: "Assigned readings", body: "" });
+    expect(await svc.remove(COURSE_A, "syllabus")).toBe(true);
+    const index = readFileSync(path.join(root, "courses", COURSE_A, "knowledge", "index.md"), "utf8");
+    expect(index.startsWith('---\nokf_version: "0.2"')).toBe(true);
+    expect(index).toContain("# Knowledge Base");
+    expect(index).toContain("[Readings](readings.md)");
+    expect(index).not.toContain("syllabus.md");
+  });
+
+  it("returns [] from search when the course has no bundle yet", async () => {
+    expect(await svc.search(COURSE_B, "anything")).toEqual([]);
   });
 
   it("creates an empty directory that survives listing", async () => {
