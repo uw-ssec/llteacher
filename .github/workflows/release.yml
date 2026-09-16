@@ -51,17 +51,24 @@ jobs:
           aws ecr get-login-password | docker login --username AWS --password-stdin "${repository%%/*}"
           docker build --tag "$repository:$IMAGE_TAG" --file Dockerfile.aws .
           docker push "$repository:$IMAGE_TAG"
-      - name: Apply infrastructure with the published image
+      - name: Register the new revision without starting it
         run: |
           pulumi -C infra config set --stack "$STACK" imageTag "$IMAGE_TAG"
+          pulumi -C infra config set --stack "$STACK" deployApp false
           pulumi -C infra up --stack "$STACK" --yes --non-interactive
       - name: Run migrations before service update
         run: |
-          # The production migration command is a one-off ECS task using the
-          # just-applied task definition. A non-zero exit stops this job before
-          # any service update can occur.
-          task=$(aws ecs run-task --cluster "llteacher-$STACK-cluster" --task-definition "llteacher-$STACK-app" --launch-type FARGATE --count 1 --overrides '{"containerOverrides":[{"name":"app","command":["npm","run","db:migrate"]}]}' --query 'tasks[0].taskArn' --output text)
+          # The stopped service retains the VPC/subnet/security-group settings
+          # required by an awsvpc one-off task. If this exits non-zero, the new
+          # application revision is never started.
+          network=$(aws ecs describe-services --cluster "llteacher-$STACK-cluster" --services "llteacher-$STACK-app" --query 'services[0].networkConfiguration.awsvpcConfiguration' --output json)
+          task=$(aws ecs run-task --cluster "llteacher-$STACK-cluster" --task-definition "llteacher-$STACK-app" --launch-type FARGATE --count 1 --network-configuration "{\"awsvpcConfiguration\":$network}" --overrides '{"containerOverrides":[{"name":"app","command":["npm","run","db:migrate"]}]}' --query 'tasks[0].taskArn' --output text)
           aws ecs wait tasks-stopped --cluster "llteacher-$STACK-cluster" --tasks "$task"
           test "$(aws ecs describe-tasks --cluster "llteacher-$STACK-cluster" --tasks "$task" --query 'tasks[0].containers[0].exitCode' --output text)" = 0
-      - name: Wait for ECS service health
-        run: aws ecs wait services-stable --cluster "llteacher-$STACK-cluster" --services "llteacher-$STACK-app"
+      - name: Start the migrated service and check HTTPS
+        run: |
+          pulumi -C infra config set --stack "$STACK" deployApp true
+          pulumi -C infra up --stack "$STACK" --yes --non-interactive
+          aws ecs wait services-stable --cluster "llteacher-$STACK-cluster" --services "llteacher-$STACK-app"
+          app_url=$(pulumi -C infra stack output appUrl --stack "$STACK")
+          curl --fail --retry 12 --retry-delay 5 "$app_url/api/health"
