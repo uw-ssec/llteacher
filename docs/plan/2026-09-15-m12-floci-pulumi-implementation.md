@@ -23,28 +23,28 @@
 
 **Files:** create `infra/Pulumi.yaml`, `infra/Pulumi.local.yaml`, `infra/Pulumi.staging.yaml`, `infra/Pulumi.production.yaml`, `infra/package.json`, `infra/tsconfig.json`, `infra/src/config.ts`, `infra/src/config.test.ts`.
 
-- [ ] Write failing configuration tests proving the local stack requires a Floci endpoint and production rejects that endpoint.
-- [ ] Implement `loadInfraConfig()` returning `environment`, `isLocal`, `domainName`, `imageTag`, and endpoint settings; use Pulumi secrets only for values explicitly marked secret.
-- [ ] Add local filesystem and Pulumi Cloud wrapper selection outside committed stack config.
-- [ ] Run `npm test --workspace=infra` and `npm run typecheck --workspace=infra`.
-- [ ] Commit: `feat(infra): add guarded Pulumi stack configuration`.
+- [x] Write failing configuration tests proving the local stack requires a Floci endpoint and production rejects that endpoint.
+- [x] Implement `loadInfraConfig()` returning `environment`, `isLocal`, `domainName`, `imageTag`, and endpoint settings; use Pulumi secrets only for values explicitly marked secret.
+- [x] Add local filesystem and Pulumi Cloud wrapper selection outside committed stack config.
+- [x] Run `npm test --workspace=infra` and `npm run typecheck --workspace=infra`.
+- [x] Commit: `feat(infra): add guarded Pulumi stack configuration`.
 
 ### Task 2: Minimum resource graph
 
 **Files:** create `infra/src/index.ts`, `infra/src/network.ts`, `infra/src/database.ts`, `infra/src/app.ts`, `infra/src/scheduled-job.ts`, `infra/src/outputs.ts`; create `infra/src/config.test.ts` additions.
 
-- [ ] Write failing unit tests for one app service/resource naming and for local-only endpoint settings.
-- [ ] Implement VPC/subnets/security groups/egress, HTTPS ALB, one ECR repository, one ECS cluster/service/task definition, RDS Postgres + pgvector bootstrap, private materials bucket, secret references, CloudWatch logs, and the one EventBridge ECS-job target.
-- [ ] Expose only non-secret outputs: app URL, ECR URL, materials bucket name, and log-group names.
-- [ ] Run `pulumi -C infra preview --stack local` with Floci running; assert no real AWS endpoint appears in command output.
-- [ ] Commit: `feat(infra): provision minimal local AWS topology`.
+- [x] Write failing unit tests for one app service/resource naming and for local-only endpoint settings.
+- [x] Implement VPC/subnets/security groups/egress, HTTPS ALB, one ECR repository, one ECS cluster/service/task definition, RDS Postgres + pgvector bootstrap, private materials bucket, secret references, CloudWatch logs, and the one EventBridge ECS-job target.
+- [x] Expose only non-secret outputs: app URL, ECR URL, materials bucket name, and log-group names.
+- [x] Run `pulumi -C infra preview --stack local` with Floci running; assert no real AWS endpoint appears in command output.
+- [x] Commit: `feat(infra): provision minimal local AWS topology`.
 
 ### Task 3: Local TLS and Floci lifecycle
 
 **Files:** create `infra/scripts/floci-up.sh`, `infra/scripts/floci-down.sh`, `infra/scripts/install-local-cert.sh`, `infra/scripts/verify-local-stack.sh`; modify `.gitignore` and `infra/README.md`.
 
-- [ ] Write shell-level checks that reject a non-local stack in every Floci lifecycle script.
-- [ ] Pin the Floci image, persist development volumes, create a disposable test mode, create a trusted `mkcert` certificate for `llteacher.local`, and install/print the hosts-file mapping.
-- [ ] Make verification request `https://llteacher.local/`, `https://llteacher.local/admin`, and `https://llteacher.local/api/health` with certificate validation enabled.
-- [ ] Run the scripts locally and record the exact prerequisite versions in `infra/README.md`.
-- [ ] Commit: `feat(infra): add safe Floci local lifecycle`.
+- [x] Write shell-level checks that reject a non-local stack in every Floci lifecycle script.
+- [x] Pin the Floci image, persist development volumes, create a disposable test mode, create a trusted `mkcert` certificate for `llteacher.local`, and install/print the hosts-file mapping.
+- [x] Make verification request `https://llteacher.local/`, `https://llteacher.local/admin`, and `https://llteacher.local/api/health` with certificate validation enabled.
+- [x] Run the scripts locally and record the exact prerequisite versions in `infra/README.md`.
+- [x] Commit: `feat(infra): add safe Floci local lifecycle`.

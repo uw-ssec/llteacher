@@ -25,11 +25,11 @@
 
 **Produces:** `loadRuntimeConfig(env: NodeJS.ProcessEnv): Env` and a `makeDb(databaseUrl: string)` backed by `pg`.
 
-- [ ] Write failing tests that reject a missing `DATABASE_URL` and verify `makeDb` uses the node-postgres client.
-- [ ] Run `npm run test --workspace=llteacher-web -- src/runtime/config.test.ts`; expect failure because the module is absent.
-- [ ] Implement `loadRuntimeConfig` with the existing `Env` keys, `DATABASE_URL` validation, and no `ASSETS` binding; replace Neon imports and dependency with `pg` and `drizzle-orm/node-postgres`.
-- [ ] Re-run the focused test and `npm run typecheck --workspace=llteacher-web`.
-- [ ] Commit: `refactor(web): use Node runtime configuration and pg`.
+- [x] Write failing tests that reject a missing `DATABASE_URL` and verify `makeDb` uses the node-postgres client.
+- [x] Run `npm run test --workspace=llteacher-web -- src/runtime/config.test.ts`; expect failure because the module is absent.
+- [x] Implement `loadRuntimeConfig` with the existing `Env` keys, `DATABASE_URL` validation, and no `ASSETS` binding; replace Neon imports and dependency with `pg` and `drizzle-orm/node-postgres`.
+- [x] Re-run the focused test and `npm run typecheck --workspace=llteacher-web`.
+- [x] Commit: `refactor(web): use Node runtime configuration and pg`.
 
 ### Task 2: Same-container static routing and Node server
 
@@ -37,19 +37,19 @@
 
 **Produces:** `createNodeServer(config: Env)` serving `/`, `/admin`, and `/api/*` on `PORT`.
 
-- [ ] Write failing HTTP tests for `/`, `/admin`, `/admin/any/client/route`, and `/api/hello` using temporary web/admin build directories.
-- [ ] Run the focused Vitest file; expect an import/module failure.
-- [ ] Implement the Node adapter with Hono Node serving and explicit static fallbacks: web `index.html` for non-API routes, admin `index.html` below `/admin`, and no asset fallback for unmatched `/api/*`.
-- [ ] Remove Worker-only default export, `scheduled()` export, `ASSETS` use, Wrangler/Vite plugin wiring, and `.dev.vars` parsing; retain a Vite proxy to the Node API server for development.
-- [ ] Run focused tests, `npm run build`, and `npm run test --workspace=llteacher-web`.
-- [ ] Commit: `feat(web): run Hono and both SPAs on Node`.
+- [x] Write failing HTTP tests for `/`, `/admin`, `/admin/any/client/route`, and `/api/hello` using temporary web/admin build directories.
+- [x] Run the focused Vitest file; expect an import/module failure.
+- [x] Implement the Node adapter with Hono Node serving and explicit static fallbacks: web `index.html` for non-API routes, admin `index.html` below `/admin`, and no asset fallback for unmatched `/api/*`.
+- [x] Remove Worker-only default export, `scheduled()` export, `ASSETS` use, Wrangler/Vite plugin wiring, and `.dev.vars` parsing; retain a Vite proxy to the Node API server for development.
+- [x] Run focused tests, `npm run build`, and `npm run test --workspace=llteacher-web`.
+- [x] Commit: `feat(web): run Hono and both SPAs on Node`.
 
 ### Task 3: Container and overdue-job command
 
 **Files:** create `Dockerfile.aws`, `apps/web/src/node/run-overdue-job.ts`; modify root `package.json`, `apps/web/package.json`, `apps/web/src/server/jobs/autoSubmitOverdue.ts`; create `apps/web/src/node/run-overdue-job.test.ts`.
 
-- [ ] Write a failing test proving the job command calls the existing sweep once and closes the database pool on success or failure.
-- [ ] Build a multi-stage Node 24 image containing both SPA builds and the Node server; add `node:run-overdue-job` that loads runtime config, invokes the sweep, then exits.
-- [ ] Run the focused test and `docker build -f Dockerfile.aws -t llteacher:local .`.
-- [ ] Smoke-test `docker run --rm -p 8080:8080 llteacher:local`, then request `/` and `/admin`.
-- [ ] Commit: `feat(deploy): package app and overdue job for ECS`.
+- [x] Write a failing test proving the job command calls the existing sweep once and closes the database pool on success or failure.
+- [x] Build a multi-stage Node 24 image containing both SPA builds and the Node server; add `node:run-overdue-job` that loads runtime config, invokes the sweep, then exits.
+- [x] Run the focused test and `docker build -f Dockerfile.aws -t llteacher:local .`.
+- [x] Smoke-test `docker run --rm -p 8080:8080 llteacher:local`, then request `/` and `/admin`.
+- [x] Commit: `feat(deploy): package app and overdue job for ECS`.
