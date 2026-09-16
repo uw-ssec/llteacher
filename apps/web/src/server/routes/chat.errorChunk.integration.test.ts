@@ -45,6 +45,22 @@ const TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "test-key" } as 
 
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
+/* #41: this suite drives a real streamText, but has no KNOWLEDGE_ROOT in
+   TEST_ENV -- OkfKnowledgeService's constructor calls realpathSync()
+   synchronously, which would throw at knowledgeServiceFromEnv(c.env) call
+   time (before any async try/catch could help) if this weren't mocked. An
+   empty bundle here withholds searchKnowledge/showKnowledge and the
+   <course_knowledge> listing, which is what every expectation in this file
+   was written against. */
+vi.mock("../knowledge/service", () => ({
+  knowledgeServiceFromEnv: () => ({
+    list: async () => [],
+    search: async () => [],
+    show: async () => null,
+  }),
+  SEARCH_LIMIT_MAX: 20,
+}));
+
 /* #364: this file used to carry a `../repositories/llmConfigs` mock stubbing
    `resolveLlmConfig`/`resolveFallbackConfig`, left behind by the #317/#363
    merge -- chat.ts imports neither, and `resolveFallbackConfig` no longer

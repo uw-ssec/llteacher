@@ -230,6 +230,24 @@ vi.mock("../repositories/hints", () => ({
   recordHintRequest: (...args: unknown[]) => recordHintRequestMock(...args),
 }));
 
+// #41: the course knowledge base -- mocked so the knowledge-tools tests
+// below (describe("knowledge tools (#41)")) assert chatHandler's own wiring
+// (does it force the course from the conversation, does it withhold the
+// tools/listing for an empty bundle, does it persist citations) without
+// exercising the real OkfKnowledgeService, which shells out to a real
+// filesystem/CLI.
+const knowledgeList = vi.fn();
+const knowledgeSearch = vi.fn();
+const knowledgeShow = vi.fn();
+vi.mock("../knowledge/service", () => ({
+  knowledgeServiceFromEnv: () => ({
+    list: (...a: unknown[]) => knowledgeList(...a),
+    search: (...a: unknown[]) => knowledgeSearch(...a),
+    show: (...a: unknown[]) => knowledgeShow(...a),
+  }),
+  SEARCH_LIMIT_MAX: 20,
+}));
+
 function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
   return buildFakeAuthContext({
     memberships: [fakeMembership({ courseId: "55555555-5555-5555-5555-555555555555", role: "student" })],
@@ -395,6 +413,12 @@ describe("POST /api/chat", () => {
       { type: "finish" },
     ];
     resolveApiKeyMock.mockReset().mockResolvedValue("sk-test-key");
+    // #41: empty bundle by default -- withholds both knowledge tools and
+    // the <course_knowledge> listing, so tests that don't care about the
+    // knowledge base (the vast majority) don't need to know it exists.
+    knowledgeList.mockReset().mockResolvedValue([]);
+    knowledgeSearch.mockReset().mockResolvedValue([]);
+    knowledgeShow.mockReset().mockResolvedValue(null);
   });
 
   it("returns 401 when there is no authContext", async () => {
@@ -2081,6 +2105,8 @@ describe("POST /api/chat", () => {
       "22222222-2222-2222-2222-222222222222",
       { id: expect.any(String), parts: responseMessage.parts },
       expect.anything(),
+      // #41: no showKnowledge calls in this turn, so no citation rows.
+      [],
     );
   });
 
@@ -2411,6 +2437,7 @@ describe("POST /api/chat", () => {
         "22222222-2222-2222-2222-222222222222",
         null,
         expect.anything(),
+        [],
       );
       warnSpy.mockRestore();
     });
@@ -2452,6 +2479,7 @@ describe("POST /api/chat", () => {
         "22222222-2222-2222-2222-222222222222",
         null,
         expect.anything(),
+        [],
       );
       expect(warnSpy).toHaveBeenCalledTimes(1);
       expect(
@@ -2628,6 +2656,7 @@ describe("POST /api/chat", () => {
           costCents: null,
           errorFlag: true,
         }),
+        [],
       );
     });
 
@@ -2647,6 +2676,7 @@ describe("POST /api/chat", () => {
         "22222222-2222-2222-2222-222222222222",
         expect.objectContaining({ id: expect.any(String) }),
         expect.objectContaining({ errorFlag: false }),
+        [],
       );
     });
   });
@@ -2751,6 +2781,7 @@ describe("POST /api/chat", () => {
         "22222222-2222-2222-2222-222222222222",
         expect.objectContaining({ id: expect.any(String) }),
         expect.anything(),
+        [],
       );
     });
 
@@ -2771,6 +2802,7 @@ describe("POST /api/chat", () => {
         "22222222-2222-2222-2222-222222222222",
         null,
         expect.anything(),
+        [],
       );
       expect(appendMessageMock).not.toHaveBeenCalledWith(
         expect.anything(),
@@ -3564,6 +3596,130 @@ describe("POST /api/chat", () => {
       expect(res2.status).toBe(200);
       expect(streamTextMock).toHaveBeenCalledTimes(1);
     });
+  });
+
+  describe("knowledge tools (#41)", () => {
+  const CONCEPT = {
+    id: "lectures/intro",
+    kind: "concept",
+    type: "lecture",
+    title: "Intro",
+    description: "Markets",
+    resource: null,
+    updatedAt: "2026-09-15T00:00:00.000Z",
+  };
+
+  it("withholds both knowledge tools and injects no listing when the bundle is empty", async () => {
+    createConversationMock.mockResolvedValue({
+      id: "22222222-2222-2222-2222-222222222222",
+      ownerUserId: "u1",
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+    getLastMessagesMock.mockResolvedValue([]);
+    await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+    const call = streamTextMock.mock.calls[0]![0] as { tools: Record<string, unknown>; system: string };
+    expect(call.tools.searchKnowledge).toBeUndefined();
+    expect(call.tools.showKnowledge).toBeUndefined();
+    expect(call.system).not.toContain("<course_knowledge>");
+  });
+
+  it("offers both tools and injects the listing when the bundle has concepts", async () => {
+    knowledgeList.mockResolvedValue([CONCEPT]);
+    createConversationMock.mockResolvedValue({
+      id: "22222222-2222-2222-2222-222222222222",
+      ownerUserId: "u1",
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+    getLastMessagesMock.mockResolvedValue([]);
+    await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+    expect(knowledgeList).toHaveBeenCalledWith("55555555-5555-5555-5555-555555555555");
+    const call = streamTextMock.mock.calls[0]![0] as { tools: Record<string, unknown>; system: string };
+    expect(call.tools.searchKnowledge).toBeDefined();
+    expect(call.tools.showKnowledge).toBeDefined();
+    expect(call.system).toContain("- lectures/intro: Intro. Markets");
+  });
+
+  it("searchKnowledge forces the course from context and clamps limit", async () => {
+    knowledgeSearch.mockResolvedValue([
+      { conceptId: "lectures/intro", title: "Intro", type: "lecture", description: "Markets", score: 3.2 },
+    ]);
+    const ctx = {
+      courseId: "55555555-5555-5555-5555-555555555555",
+      knowledge: { search: knowledgeSearch, show: knowledgeShow },
+      openedConcepts: new Map(),
+    };
+    const out = await (
+      TOOLS.searchKnowledge as { execute: (i: unknown, o: unknown) => Promise<unknown> }
+    ).execute({ query: "markets", limit: 999 }, { experimental_context: ctx, toolCallId: "t1", messages: [] });
+    expect(knowledgeSearch).toHaveBeenCalledWith("55555555-5555-5555-5555-555555555555", "markets", 20);
+    expect(out).toEqual({
+      hits: [{ conceptId: "lectures/intro", title: "Intro", type: "lecture", description: "Markets", score: 3.2 }],
+    });
+  });
+
+  it("showKnowledge records the opened concept, caps the body, and reports not_found", async () => {
+    knowledgeShow.mockResolvedValue({
+      ...CONCEPT,
+      body: "x".repeat(20_000),
+      frontmatter: {},
+      outbound: ["a"],
+      inbound: [],
+    });
+    const opened = new Map<string, string>();
+    const ctx = {
+      courseId: "55555555-5555-5555-5555-555555555555",
+      knowledge: { search: knowledgeSearch, show: knowledgeShow },
+      openedConcepts: opened,
+    };
+    const exec = (
+      TOOLS.showKnowledge as { execute: (i: unknown, o: unknown) => Promise<{ body?: string; error?: string }> }
+    ).execute;
+    const out = await exec({ conceptId: "lectures/intro" }, { experimental_context: ctx, toolCallId: "t1", messages: [] });
+    expect(out.body!.length).toBeLessThanOrEqual(12_000 + 40);
+    expect(out.body!.endsWith("[truncated]")).toBe(true);
+    expect(opened.get("lectures/intro")).toBe("Intro");
+    knowledgeShow.mockResolvedValue(null);
+    expect(await exec({ conceptId: "missing" }, { experimental_context: ctx, toolCallId: "t2", messages: [] })).toEqual({
+      error: "not_found",
+    });
+  });
+
+  it("persists opened concepts as citations in onFinish", async () => {
+    knowledgeList.mockResolvedValue([CONCEPT]);
+    knowledgeShow.mockResolvedValue({ ...CONCEPT, body: "b", frontmatter: {}, outbound: [], inbound: [] });
+    createConversationMock.mockResolvedValue({
+      id: "22222222-2222-2222-2222-222222222222",
+      ownerUserId: "u1",
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+    getLastMessagesMock.mockResolvedValue([]);
+    await postChat(buildApp(fakeAuthContext()), {
+      messages: [userUiMessage],
+      courseId: "55555555-5555-5555-5555-555555555555",
+    });
+    const call = streamTextMock.mock.calls[0]![0] as {
+      experimental_context: { openedConcepts: Map<string, string> };
+      tools: Record<string, { execute: Function }>;
+    };
+    await call.tools.showKnowledge!.execute(
+      { conceptId: "lectures/intro" },
+      { experimental_context: call.experimental_context, toolCallId: "t1", messages: [] },
+    );
+    await capturedOnFinish!({
+      responseMessage: { id: "r", role: "assistant", parts: [{ type: "text", text: "grounded answer" }] },
+      finishReason: "stop",
+    });
+    const [, , , , cited] = finalizeAssistantTurnMock.mock.calls[0]!;
+    expect(cited).toEqual([
+      expect.objectContaining({ conceptPath: "lectures/intro", conceptTitle: "Intro", courseId: "55555555-5555-5555-5555-555555555555" }),
+    ]);
+  });
   });
 });
 

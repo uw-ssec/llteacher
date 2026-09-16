@@ -85,6 +85,23 @@ const FALLBACK_CONFIG = {
 
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
+/* #41: this suite drives a real streamText (see chat.errorChunk.integration
+   .test.ts's own comment on why), but has no KNOWLEDGE_ROOT in TEST_ENV --
+   OkfKnowledgeService's constructor calls realpathSync() synchronously,
+   which would throw at knowledgeServiceFromEnv(c.env) call time (before any
+   async try/catch could help) if this weren't mocked. An empty bundle here
+   withholds searchKnowledge/showKnowledge and the <course_knowledge>
+   listing, which is what every expectation in this file was written
+   against. */
+vi.mock("../knowledge/service", () => ({
+  knowledgeServiceFromEnv: () => ({
+    list: async () => [],
+    search: async () => [],
+    show: async () => null,
+  }),
+  SEARCH_LIMIT_MAX: 20,
+}));
+
 /* Config resolution is faked (it would otherwise run real Drizzle queries
    against the `{}` db above), but `buildProviderClient` is a SPY rather than
    a stub of convenience: what each hop asked for, and with which key, is
