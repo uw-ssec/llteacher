@@ -3,4 +3,8 @@ config:
   llteacher-infra:environment: local
   llteacher-infra:domainName: llteacher.local
   llteacher-infra:imageTag: local
+  llteacher-infra:deployApp: "false"
   llteacher-infra:flociEndpoint: http://localhost:4566
+  llteacher-infra:databasePassword:
+    secure: v1:CTbmR3USFFnfzu1D:0e/5IgGAdK6tMTxPAS3lWWYXnW2h0LWZ5GPj+A7mARwY4tTh6d9eYpHdT+TQbfUT
+encryptionsalt: v1:jJQXb0DzG5I=:v1:ECHF0DzSjuJxAMiQ:p2zGDwNIGmyQWOJiKlehs14hm2lz6g==

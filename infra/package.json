@@ -4,12 +4,14 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "build": "tsc",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "pulumi:local": "PULUMI_BACKEND_URL=file://$PWD/.pulumi/local pulumi --stack local",
-    "pulumi:cloud": "PULUMI_BACKEND_URL=https://api.pulumi.com pulumi"
+    "pulumi:local": "npm run build && PULUMI_BACKEND_URL=file://$PWD/.pulumi/local pulumi --stack local",
+    "pulumi:cloud": "npm run build && PULUMI_BACKEND_URL=https://api.pulumi.com pulumi"
   },
   "dependencies": {
+    "@pulumi/aws": "^7.46.0",
     "@pulumi/pulumi": "^3.262.0"
   },
   "devDependencies": {

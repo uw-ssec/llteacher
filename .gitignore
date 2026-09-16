@@ -146,6 +146,11 @@ node_modules/
 .turbo-cache/
 .worktrees/
 
+# Filesystem Pulumi state and persistent Floci emulator data are local only.
+/.pulumi/
+/.floci/
+/infra/dist/
+
 # Local meeting notes (not for the shared repo)
 /docs/notes/
 
