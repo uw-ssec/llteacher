@@ -2,9 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { useNavigate } from "react-router";
-import { Sidebar, TopNav, ConversationView, AlertDialog, Button, MessageMarkdown, renderToolPart, isToolPart, ErrorBoundary } from "@llteacher/ui";
+import { Sidebar, TopNav, ConversationView, AlertDialog, Button, MessageMarkdown, renderToolPart, isToolPart, ErrorBoundary, SourcesList } from "@llteacher/ui";
 import type { SidebarSection, MessageData, RCodeResult } from "@llteacher/ui";
 import { useRExecution } from "./hooks/useRExecution";
+import { sourcesFromParts } from "./sourcesFromParts";
 import { useAuth, initialsFrom } from "./components/AuthProvider";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
 import { TutorConversationsList } from "./views/TutorConversationsList";
@@ -245,6 +246,7 @@ function buildMessageData(
             if (!isToolPart(part)) return null;
             return renderToolPart(part, `tool-${m.id}-${i}`, { onRunRCode });
           })}
+          {!isStreaming && <SourcesList sources={sourcesFromParts(m.parts)} />}
           {isStopped && (
             <p className="message__stopped-note">
               You stopped this response. It wasn&rsquo;t saved, so the tutor won&rsquo;t remember it.

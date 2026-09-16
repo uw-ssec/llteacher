@@ -2410,6 +2410,31 @@ body {
     }
   }
 
+  /* -------------------------------------------------------------------------
+     .message__sources (#41) — collapsible attribution under a grounded
+     tutor reply. Concepts are whole documents this quarter, so there are no
+     page numbers -- just the title and the concept id.
+     ------------------------------------------------------------------------- */
+  .message__sources {
+    margin-top: var(--space-2);
+    font-size: 0.8125rem;
+    color: var(--color-text-muted);
+  }
+
+  .message__sources-summary {
+    cursor: pointer;
+  }
+
+  .message__sources-list {
+    margin: var(--space-1) 0 0;
+    padding-left: var(--space-4);
+  }
+
+  .message__sources-id {
+    font-family: var(--font-mono);
+    opacity: 0.75;
+  }
+
   .message__ai-body {
     font-family: var(--font-sans);
     font-size: var(--font-size-base);

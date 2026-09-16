@@ -17,6 +17,9 @@ export type { ConversationViewProps, MessageData, AIMessageData, StudentMessageD
 export { Message, MessageMarkdown } from "./components/Message";
 export type { MessageProps, MessageRole } from "./components/Message";
 
+export { SourcesList } from "./components/SourcesList";
+export type { SourceRef } from "./components/SourcesList";
+
 export { Composer } from "./components/Composer";
 export type { ComposerProps } from "./components/Composer";
 
