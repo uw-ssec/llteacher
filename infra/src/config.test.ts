@@ -25,6 +25,7 @@ describe("loadInfraConfig", () => {
           environment: "local",
           domainName: "llteacher.local",
           deployApp: "false",
+          provisionService: "false",
           imageTag: "local",
         }),
       ),
@@ -78,6 +79,7 @@ describe("loadInfraConfig", () => {
           environment: "local",
           domainName: "llteacher.local",
           deployApp: "false",
+          provisionService: "false",
           imageTag: "local",
           flociEndpoint: "http://localhost:4566",
         }),
@@ -87,6 +89,7 @@ describe("loadInfraConfig", () => {
       isLocal: true,
       domainName: "llteacher.local",
       deployApp: false,
+      provisionService: false,
       imageTag: "local",
       endpoints: { floci: "http://localhost:4566" },
     });

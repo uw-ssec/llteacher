@@ -7,6 +7,7 @@ export interface InfraConfig {
   isLocal: boolean;
   domainName: string;
   deployApp: boolean;
+  provisionService: boolean;
   imageTag: string;
   endpoints: {
     floci?: string;
@@ -42,6 +43,7 @@ export function loadInfraConfig(config: ConfigReader = new pulumi.Config()): Inf
   const environment = loadEnvironment(config);
   const flociEndpoint = config.get("flociEndpoint");
   const deployApp = config.get("deployApp") !== "false";
+  const provisionService = config.get("provisionService") !== "false";
 
   if (environment === "local" && !flociEndpoint) {
     throw new Error('The local stack requires a "flociEndpoint" configuration value.');
@@ -56,6 +58,7 @@ export function loadInfraConfig(config: ConfigReader = new pulumi.Config()): Inf
     isLocal: environment === "local",
     domainName: config.require("domainName"),
     deployApp,
+    provisionService,
     imageTag: config.require("imageTag"),
     endpoints: flociEndpoint === undefined ? {} : { floci: flociEndpoint },
   };

@@ -12,4 +12,11 @@ if ! pulumi -C "$root/infra" config get databasePassword --stack local >/dev/nul
 fi
 npm run build --workspace=infra
 pulumi -C "$root/infra" up --stack local --yes
-echo "Infrastructure is ready at zero app tasks. Build/push the ECR image, then set deployApp=true and run this command again."
+repo=$(pulumi -C "$root/infra" stack output ecrRepositoryUrl --stack local)
+AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 aws --endpoint-url http://localhost:4566 ecr get-login-password | docker login --username AWS --password-stdin "${repo%%/*}"
+docker build --tag "$repo:local" --file "$root/Dockerfile.aws" "$root"
+docker push "$repo:local"
+pulumi -C "$root/infra" config set --stack local provisionService true
+pulumi -C "$root/infra" config set --stack local deployApp true
+pulumi -C "$root/infra" up --stack local --yes
+echo "Local ECS service deployed. Run npm run aws:local:verify after the ALB becomes healthy."

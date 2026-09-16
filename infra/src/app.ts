@@ -71,14 +71,16 @@ export function createApplication(name: string, config: InfraConfig, network: Ne
     port: 443,
     protocol: "HTTPS",
   }, options);
-  new aws.ecs.Service(`${name}-app-service`, {
-    cluster: cluster.arn,
-    desiredCount: config.deployApp ? 1 : 0,
-    launchType: "FARGATE",
-    loadBalancers: [{ containerName: "app", containerPort: 8080, targetGroupArn: targetGroup.arn }],
-    name: `${name}-app`,
-    networkConfiguration: { assignPublicIp: true, securityGroups: [network.appSecurityGroup.id], subnets: network.publicSubnetIds },
-    taskDefinition: taskDefinition.arn,
-  }, options);
+  if (config.provisionService) {
+    new aws.ecs.Service(`${name}-app-service`, {
+      cluster: cluster.arn,
+      desiredCount: config.deployApp ? 1 : 0,
+      launchType: "FARGATE",
+      loadBalancers: [{ containerName: "app", containerPort: 8080, targetGroupArn: targetGroup.arn }],
+      name: `${name}-app`,
+      networkConfiguration: { assignPublicIp: true, securityGroups: [network.appSecurityGroup.id], subnets: network.publicSubnetIds },
+      taskDefinition: taskDefinition.arn,
+    }, options);
+  }
   return { appUrl: pulumi.interpolate`https://${config.domainName}`, cluster, executionRole, imageTag: config.imageTag, logGroup, repository, taskDefinition };
 }
