@@ -7,7 +7,8 @@ import * as schema from "./schema";
  *  against; the runtime is node-postgres. Both are drizzle PgDatabase
  *  instances over the same schema. `db.batch` is absent at runtime, and
  *  every batch call site already feature-detects it (atomic.ts,
- *  finalizeAssistantTurn, updateHomework). See db-driver-split.md. */
+ *  finalizeAssistantTurn, updateHomework). See the "2026-09-16: the split
+ *  is retired" section at the top of db-driver-split.md. */
 export type Db = ReturnType<typeof drizzleNeon<typeof schema>>;
 
 const pools = new Map<string, Pool>();

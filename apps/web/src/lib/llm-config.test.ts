@@ -48,6 +48,7 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
     STORAGE_BUCKET: "unused",
     STORAGE_ACCESS_KEY_ID: "unused",
     STORAGE_SECRET_ACCESS_KEY: "unused",
+    KNOWLEDGE_ROOT: "/tmp/unused",
     ...overrides,
   };
 }

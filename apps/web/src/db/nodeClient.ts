@@ -4,19 +4,16 @@ import * as schema from "./schema";
 import type { Db } from "./client";
 
 /**
- * DB client for anything that runs as a plain Node process rather than
- * inside the Cloudflare Worker -- Vitest integration tests and the
- * `db:seed` script (`apps/web/scripts/seed.ts`).
- *
- * Production code (`makeDb` in client.ts) uses @neondatabase/serverless's
- * HTTP driver -- the only driver that works inside a Cloudflare Worker (no
- * raw TCP sockets there). That driver speaks Neon's HTTP proxy protocol and
- * cannot reach a plain Postgres server, so it can't be pointed at the local
- * or CI pgvector container. This client uses node-postgres (`pg`, already a
- * devDependency for the drizzle-kit CLI, which has the same constraint)
- * over a real TCP connection instead -- works against local/CI Postgres
- * *and* a real Neon database, since Neon also speaks plain Postgres wire
- * protocol over TCP+SSL, not just HTTP.
+ * The un-pooled sibling of `client.ts`'s `makeDb`. Same node-postgres
+ * driver, same schema, same `as unknown as Db` cast -- the only difference
+ * is that this constructs a fresh, uncached `Pool` on every call instead of
+ * caching one per URL. That's fine for its two callers, which each run as a
+ * short-lived plain Node process and only ever call it once: Vitest
+ * integration tests and the `db:seed` script (`apps/web/scripts/seed.ts`).
+ * It would leak connections if used the way `makeDb` is (repeatedly, across
+ * requests in a long-lived process) -- see the "2026-09-16: the split is
+ * retired" section at the top of db-driver-split.md for why two clients
+ * still exist even though both now speak the same protocol.
  *
  * The result is cast to `Db` at the boundary: both are drizzle-orm
  * PgDatabase instances over the same `schema`, differing only in a
