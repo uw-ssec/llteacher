@@ -47,7 +47,12 @@ export function createApplication(name: string, config: InfraConfig, network: Ne
     taskRoleArn: taskRole.arn,
     containerDefinitions: pulumi.all([repository.repositoryUrl, logGroup.name, data.databaseUrlSecret.arn]).apply(([repositoryUrl, logGroupName, databaseSecretArn]) => JSON.stringify([{
       name: "app",
-      image: `${repositoryUrl}:${config.imageTag}`,
+      // Floci's local-image fast path matches the canonical AWS ECR URI,
+      // whereas its CreateRepository response is a localhost registry URI.
+      // Production uses the real repository URL and performs an ECR push.
+      image: config.isLocal
+        ? `000000000000.dkr.ecr.us-east-1.amazonaws.com/${name}/app:${config.imageTag}`
+        : `${repositoryUrl}:${config.imageTag}`,
       essential: true,
       portMappings: [{ containerPort: 8080, protocol: "tcp" }],
       logConfiguration: { logDriver: "awslogs", options: { "awslogs-group": logGroupName, "awslogs-region": "us-east-1", "awslogs-stream-prefix": "app" } },

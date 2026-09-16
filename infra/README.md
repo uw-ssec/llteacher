@@ -34,8 +34,6 @@ values before its stack is applied.
 ## Current Floci limitation
 
 The topology and resource APIs have been applied successfully with Floci
-0.2.3. At the final ECS launch, that release can report that the locally tagged
-ECR-shaped image is absent even when Docker reports it present. This is a
-Floci ECS image-discovery defect (the ECR registry proxy can also return 503).
-The launcher retains the correct image-before-service order and will complete
-once the emulator accepts the local image or its registry proxy is fixed.
+0.2.3. Its registry proxy can return `503`, so the local launcher deliberately
+uses Floci's supported canonical-AWS-URI local-image path instead of pushing
+through that proxy. This is local-only; production performs a real ECR push.
