@@ -101,9 +101,11 @@ describe.skipIf(!DATABASE_URL)("materials repository", () => {
         [
           "byteSize",
           "contentType",
+          "documentPath",
           "errorDetail",
           "id",
           "originalFilename",
+          "relativePath",
           "sourceType",
           "status",
           "title",
