@@ -1104,13 +1104,14 @@ describe.skipIf(!DATABASE_URL)("conversations repository", () => {
 
     // The abandoned-lock escape hatch: a Worker killed mid-request never
     // calls releaseConversationTurnLock, so without this a conversation
-    // would stay permanently locked. staleMs=0 makes any already-held lock
-    // immediately eligible for reclaim, without needing to wait a real
-    // 90 seconds in a test.
+    // would stay permanently locked. Set an explicitly old timestamp so
+    // millisecond clock resolution cannot make two acquisitions equal.
     it("treats a lock older than staleMs as abandoned and grants a new one", async () => {
       const id = await makeLockableConversation();
       await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(true);
-      await expect(acquireConversationTurnLock(db, id, 0)).resolves.toBe(true);
+      await db.update(conversations).set({ processingStartedAt: new Date(Date.now() - 120_000) })
+        .where(eq(conversations.id, id));
+      await expect(acquireConversationTurnLock(db, id, 90_000)).resolves.toBe(true);
     });
 
     it("does not treat a lock younger than staleMs as abandoned", async () => {
