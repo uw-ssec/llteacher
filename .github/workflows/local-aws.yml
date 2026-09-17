@@ -36,4 +36,6 @@ jobs:
           PULUMI_STACK=local ./infra/scripts/verify-local-stack.test.sh
           ! rg -n 'configure-aws-credentials|AWS_DEPLOY_ROLE|secrets\.AWS' .github/workflows/local-aws.yml
       - name: Exercise the local AWS deployment path
-        run: npm run aws:local:test
+        run: |
+          docker network create llteacher-floci-ci
+          FLOCI_DOCKER_NETWORK=llteacher-floci-ci npm run aws:local:test
