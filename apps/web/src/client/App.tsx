@@ -7,6 +7,7 @@ import type { SidebarSection, MessageData, RCodeResult } from "@llteacher/ui";
 import { useRExecution } from "./hooks/useRExecution";
 import { sourcesFromParts } from "./sourcesFromParts";
 import { useAuth, initialsFrom } from "./components/AuthProvider";
+import { AccountShell, StaffHome } from "./components/AccountShell";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
 import { TutorConversationsList } from "./views/TutorConversationsList";
 import { useTutorConversations } from "./hooks/useTutorConversations";
@@ -375,6 +376,13 @@ function studentTextOf(message: UIMessage): string {
    ========================================================================== */
 
 export default function App() {
+  const { loading, isAuthenticated, staffOnly } = useAuth();
+  if (loading) return null;
+  if (isAuthenticated && staffOnly) return <AccountShell title="Welcome"><StaffHome /></AccountShell>;
+  return <StudentApp />;
+}
+
+function StudentApp() {
   const { status: workerStatus, loading: workerLoading } = useWorkerStatus();
   const { isAuthenticated, loading: authLoading, error: authError, displayName, login, logout } = useAuth();
   /* #294: real initials for the avatar chip, from the profile this provider

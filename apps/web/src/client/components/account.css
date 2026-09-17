@@ -1,0 +1,10 @@
+.account-page { overflow: auto; }
+.account-content { width: min(100%, 48rem); margin: 0 auto; padding: clamp(1.5rem, 5vw, 4rem) 1.5rem; line-height: 1.6; }
+.account-content h1 { font-size: 2rem; font-weight: 650; margin: 1rem 0 1.5rem; }
+.account-content h2 { font-size: 1.2rem; font-weight: 600; margin: 0 0 .75rem; }
+.account-content p { margin: .75rem 0; overflow-wrap: anywhere; }
+.account-content a { color: #32006e; text-decoration: underline; text-underline-offset: .2em; }
+.account-content section { margin: 1.5rem 0; padding: 1.5rem; border: 1px solid #d8d3df; border-radius: .5rem; }
+.account-content .account-action { display: inline-block; margin: .75rem 0; padding: .65rem 1rem; color: white; background: #32006e; border-radius: .3rem; }
+.profile-view form { display: grid; gap: 1rem; margin-top: 2rem; max-width: 28rem; }
+.profile-view form button { justify-self: start; }

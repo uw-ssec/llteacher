@@ -177,6 +177,8 @@ describe("ProfileService.getProfileWithStats", () => {
 
     expect(profileA.role).toBe("instructor");
     expect(profileB.role).toBe("instructor");
+    expect(profileA.studentStats).toEqual({ submissionsCount: 0, completedSections: 0 });
+    expect(profileB.studentStats).toEqual(profileA.studentStats);
   });
 
   it("throws when the user does not exist", async () => {

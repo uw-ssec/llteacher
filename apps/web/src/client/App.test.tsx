@@ -3654,3 +3654,29 @@ describe("App section transcript load-older", () => {
     expect(screen.queryByText("SEC 2 OLDER MESSAGE")).toBeNull();
   });
 });
+
+describe("staff landing", () => {
+  it.each(["instructor", "ta", "admin"])("does not request student homework for staff-only %s", async (role) => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ role }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryRouter><AuthProvider><App /></AuthProvider></MemoryRouter>);
+    await screen.findByText("Your teaching workspace");
+    expect(fetchMock.mock.calls).toHaveLength(1);
+  });
+
+  it("keeps homework available for mixed staff and student memberships", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = url === "/api/profile"
+        ? { role: "instructor", studentStats: { submissionsCount: 0, completedSections: 0 } }
+        : url === "/api/hello" ? { ping_id: "test-ping" } : { homeworks: [] };
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryRouter><AuthProvider><App /></AuthProvider></MemoryRouter>);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/student/homeworks"));
+    expect(screen.queryByText("Your teaching workspace")).toBeNull();
+  });
+});

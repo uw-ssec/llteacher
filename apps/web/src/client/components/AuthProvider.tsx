@@ -14,16 +14,19 @@ export type AuthState = AuthSessionState & WebAuthExtra;
  *  already fetched by this provider; only the parse was missing. */
 export interface WebAuthExtra {
   displayName: string | null;
+  staffOnly: boolean;
 }
 
 function parseDisplayName(body: unknown): WebAuthExtra {
   const displayName = (body as { displayName?: unknown } | null)?.displayName;
-  return { displayName: typeof displayName === "string" && displayName.trim() !== "" ? displayName : null };
+  const profile = body as { role?: string; studentStats?: unknown } | null;
+  const staffOnly = ["instructor", "ta", "admin"].includes(profile?.role ?? "") && !profile?.studentStats;
+  return { staffOnly, displayName: typeof displayName === "string" && displayName.trim() !== "" ? displayName : null };
 }
 
 export const { AuthProvider, useAuth } = createAuthProvider<WebAuthExtra>({
   parseExtra: parseDisplayName,
-  defaultExtra: { displayName: null },
+  defaultExtra: { displayName: null, staffOnly: false },
 });
 
 /** Two-letter initials for the avatar chip, or null when there is no name to
