@@ -46,6 +46,11 @@ for ((attempt = 1; attempt <= attempts; attempt++)); do
     exit 0
   fi
 
+  ${aws_local[@]} ecs describe-tasks \
+    --cluster llteacher-local-cluster --tasks "$task" \
+    --query 'tasks[0].{lastStatus:lastStatus,stoppedReason:stoppedReason,containers:containers[].{exitCode:exitCode,reason:reason}}' \
+    --output json >&2
+
   if (( attempt < attempts )); then
     sleep "$delay_seconds"
   fi

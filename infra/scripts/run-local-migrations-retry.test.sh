@@ -21,4 +21,4 @@ EOF
 chmod +x "$test_dir/aws"
 
 PATH="$test_dir:$PATH" PULUMI_STACK=local LLTEACHER_LOCAL_MIGRATION_ATTEMPTS=2 LLTEACHER_LOCAL_MIGRATION_DELAY_SECONDS=0 LLTEACHER_TEST_COUNTER="$counter" "$root/infra/scripts/run-local-migrations.sh"
-test "$(cat "$counter")" = 2
+test "$(cat "$counter")" = 3
