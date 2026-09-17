@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-const { poolEnd } = vi.hoisted(() => ({ poolEnd: vi.fn().mockResolvedValue(undefined) }));
+const { poolEnd, poolOn } = vi.hoisted(() => ({
+  poolEnd: vi.fn().mockResolvedValue(undefined),
+  poolOn: vi.fn(),
+}));
 
-vi.mock("pg", () => ({ Pool: vi.fn(() => ({ end: poolEnd })) }));
+vi.mock("pg", () => ({ Pool: vi.fn(() => ({ end: poolEnd, on: poolOn })) }));
 vi.mock("drizzle-orm/node-postgres", () => ({
   drizzle: vi.fn(() => ({ driver: "node-postgres" })),
 }));
@@ -45,6 +48,7 @@ describe("makeDb", () => {
 
     expect(Pool).toHaveBeenCalledTimes(1);
     expect(Pool).toHaveBeenCalledWith({ connectionString: databaseUrl, max: 10 });
+    expect(poolOn).toHaveBeenCalledWith("error", expect.any(Function));
     expect(drizzle).toHaveBeenCalledWith(expect.objectContaining({ end: poolEnd }), expect.objectContaining({ schema: expect.any(Object) }));
     expect(db).toEqual({ driver: "node-postgres" });
     expect(sameDb).toBe(db);

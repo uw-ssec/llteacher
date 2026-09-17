@@ -23,7 +23,7 @@ task=$(${aws_local[@]} ecs run-task \
   --launch-type FARGATE \
   --count 1 \
   --network-configuration "{\"awsvpcConfiguration\":$network}" \
-  --overrides '{"containerOverrides":[{"name":"app","command":["npm","run","db:migrate"]}]}' \
+  --overrides '{"containerOverrides":[{"name":"app","command":["npm","--workspace=apps/web","run","db:migrate"]}]}' \
   --query 'tasks[0].taskArn' --output text)
 
 ${aws_local[@]} ecs wait tasks-stopped --cluster llteacher-local-cluster --tasks "$task"

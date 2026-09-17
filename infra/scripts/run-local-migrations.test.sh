@@ -25,4 +25,5 @@ set -e
 
 test "$exit_code" -ne 0
 ! rg -q 'ecs update-service' "$log"
+rg -F '"command":["npm","--workspace=apps/web","run","db:migrate"]' "$log"
 echo "migration failure prevented service update"
