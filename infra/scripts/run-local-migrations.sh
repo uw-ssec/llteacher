@@ -11,6 +11,14 @@ export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
 export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 
+# A fresh Floci RDS resource is registered by Pulumi before its backing
+# PostgreSQL container accepts connections. Wait for the emulator's RDS
+# readiness signal so the migration gate is deterministic in disposable CI.
+database_instance=$(${aws_local[@]} rds describe-db-instances \
+  --query 'DBInstances[0].DBInstanceIdentifier' --output text)
+test "$database_instance" != "None"
+${aws_local[@]} rds wait db-instance-available --db-instance-identifier "$database_instance"
+
 network=$(${aws_local[@]} ecs describe-services \
   --cluster llteacher-local-cluster \
   --services llteacher-local-app \

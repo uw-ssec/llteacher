@@ -11,6 +11,8 @@ printf '%s\n' '#!/usr/bin/env bash' \
   'printf "%s\\n" "$*" >> "$AWS_LOG"' \
   'case "$*" in' \
   '  *"ecs describe-services"*) echo "{\"subnets\":[\"subnet-1\"],\"securityGroups\":[\"sg-1\"],\"assignPublicIp\":\"ENABLED\"}" ;;' \
+  '  *"rds describe-db-instances"*) echo "llteacher-local-postgres-test" ;;' \
+  '  *"rds wait db-instance-available"*) ;;' \
   '  *"ecs run-task"*) echo "task-1" ;;' \
   '  *"ecs wait tasks-stopped"*) ;;' \
   '  *"ecs describe-tasks"*) echo "1" ;;' \
@@ -25,5 +27,7 @@ set -e
 
 test "$exit_code" -ne 0
 ! grep -q 'ecs update-service' "$log"
+grep -Fq 'rds describe-db-instances' "$log"
+grep -Fq 'rds wait db-instance-available --db-instance-identifier llteacher-local-postgres-test' "$log"
 grep -Fq '"command":["npm","--workspace=apps/web","run","db:migrate"]' "$log"
 echo "migration failure prevented service update"
