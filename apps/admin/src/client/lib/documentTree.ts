@@ -54,3 +54,59 @@ export function depthOf(directory: string): number {
 export function nameOf(directory: string): string {
   return directory === "" ? "Knowledge base" : (directory.split("/").pop() ?? directory);
 }
+
+/* -- Nested tree (search-first redesign) -------------------------------------
+   The rail needs collapsible folders with counts, which the flat, sorted
+   `directoriesOf` list cannot express. Same projection rule: every
+   directory named by any document's path exists, even if only an index
+   document created it. */
+
+export interface TreeNode {
+  name: string;
+  path: string;
+  /** Concepts inside, recursively. index and log documents are structure. */
+  count: number;
+  /** Documents of any kind inside, recursively, whose indexStatus is not
+   *  "indexed" -- what the rail marks so an instructor can find them. */
+  attention: number;
+  children: TreeNode[];
+}
+
+export function treeOf(
+  documents: readonly (TreeDocument & { indexStatus?: string })[],
+): TreeNode {
+  const root: TreeNode = { name: "Knowledge base", path: "", count: 0, attention: 0, children: [] };
+  const byPath = new Map<string, TreeNode>([["", root]]);
+  const nodeFor = (dir: string): TreeNode => {
+    const found = byPath.get(dir);
+    if (found) return found;
+    const parent = nodeFor(directoryOf(dir));
+    const node: TreeNode = { name: dir.split("/").pop() ?? dir, path: dir, count: 0, attention: 0, children: [] };
+    parent.children.push(node);
+    byPath.set(dir, node);
+    return node;
+  };
+  for (const document of documents) {
+    const leaf = nodeFor(directoryOf(document.path));
+    const isConcept = document.kind === "concept";
+    const needsAttention = document.indexStatus !== undefined && document.indexStatus !== "indexed";
+    for (const dir of ancestorsOf(leaf.path)) {
+      const node = byPath.get(dir)!;
+      if (isConcept) node.count += 1;
+      if (needsAttention) node.attention += 1;
+    }
+  }
+  const sortChildren = (node: TreeNode) => {
+    node.children.sort((a, b) => a.name.localeCompare(b.name));
+    node.children.forEach(sortChildren);
+  };
+  sortChildren(root);
+  return root;
+}
+
+/** Root first, then each folder down to `path` itself. */
+export function ancestorsOf(path: string): string[] {
+  if (path === "") return [""];
+  const segments = path.split("/");
+  return ["", ...segments.map((_, i) => segments.slice(0, i + 1).join("/"))];
+}

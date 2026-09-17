@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { directoriesOf, documentsIn, directoryOf, depthOf, nameOf } from "./documentTree";
+import { directoriesOf, documentsIn, directoryOf, depthOf, nameOf, treeOf, ancestorsOf } from "./documentTree";
 
 const DOCS = [
   { id: "1", path: "index", kind: "index" as const },
@@ -110,5 +110,52 @@ describe("nameOf", () => {
 
   it("uses the last segment as the name", () => {
     expect(nameOf("week1/lab")).toBe("lab");
+  });
+});
+
+describe("treeOf", () => {
+  const docs = [
+    { id: "1", path: "index", kind: "index" as const, indexStatus: "indexed" as const },
+    { id: "2", path: "week1/lecture", kind: "concept" as const, indexStatus: "indexed" as const },
+    { id: "3", path: "week1/lab/notes", kind: "concept" as const, indexStatus: "pending" as const },
+    { id: "4", path: "week1/lab/index", kind: "index" as const, indexStatus: "indexed" as const },
+    { id: "5", path: "syllabus", kind: "concept" as const, indexStatus: "indexed" as const },
+    { id: "6", path: "week2/index", kind: "index" as const, indexStatus: "indexed" as const },
+  ];
+
+  it("nests folders under the root with recursive concept counts", () => {
+    const root = treeOf(docs);
+    expect(root.path).toBe("");
+    expect(root.count).toBe(3);
+    expect(root.children.map((c) => c.name)).toEqual(["week1", "week2"]);
+    const week1 = root.children[0]!;
+    expect(week1.count).toBe(2);
+    expect(week1.children.map((c) => c.path)).toEqual(["week1/lab"]);
+    expect(week1.children[0]!.count).toBe(1);
+  });
+
+  it("counts documents that are not indexed, up through every ancestor", () => {
+    const root = treeOf(docs);
+    expect(root.attention).toBe(1);
+    expect(root.children[0]!.attention).toBe(1);
+    expect(root.children[0]!.children[0]!.attention).toBe(1);
+    expect(root.children[1]!.attention).toBe(0);
+  });
+
+  it("keeps a folder that only an index document created", () => {
+    expect(treeOf(docs).children[1]).toMatchObject({ path: "week2", count: 0, children: [] });
+  });
+
+  it("returns an empty root for no documents", () => {
+    expect(treeOf([])).toEqual({ name: "Knowledge base", path: "", count: 0, attention: 0, children: [] });
+  });
+});
+
+describe("ancestorsOf", () => {
+  it("lists every folder from the root down to the path itself", () => {
+    expect(ancestorsOf("a/b/c")).toEqual(["", "a", "a/b", "a/b/c"]);
+  });
+  it("is just the root for the root", () => {
+    expect(ancestorsOf("")).toEqual([""]);
   });
 });

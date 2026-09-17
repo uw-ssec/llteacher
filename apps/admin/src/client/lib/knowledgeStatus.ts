@@ -34,3 +34,14 @@ export function statusKind(status: MaterialStatus | KnowledgeIndexStatus): Statu
 export function statusLabel(status: MaterialStatus | KnowledgeIndexStatus): string {
   return LABEL[status];
 }
+
+/** What an instructor recognises an upload by: the path they picked it from
+ *  when it came in through the folder picker, else the file name, else the
+ *  title the server gave a nameless upload. */
+export function materialLabel(material: {
+  relativePath: string | null;
+  originalFilename: string | null;
+  title: string;
+}): string {
+  return material.relativePath ?? material.originalFilename ?? material.title;
+}
