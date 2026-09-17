@@ -15,6 +15,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { FolderOpen, UploadSimple, Warning, ArrowClockwise } from "@phosphor-icons/react";
+import { KnowledgeSearchBox } from "../components/KnowledgeSearchBox";
 import { PageHeader } from "../components/PageHeader";
 import { RecordId } from "../components/RecordId";
 import { StatusBadge } from "../components/StatusBadge";
@@ -116,27 +117,47 @@ export function KnowledgeView({
    *  rejection, and the instructor saw the list reload with nothing added
    *  and no explanation. The upload's own `admin-field-error` slot already
    *  existed for the two client-side checks above; a server-side failure
-   *  now reports through that same slot rather than vanishing. */
-  async function handleFile(file: File | undefined) {
-    if (!file) return;
-    const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
-    if (!ALLOWED_EXTENSIONS.includes(extension)) {
-      setUploadError(
-        `Unsupported file type ".${extension}". Allowed: ${ALLOWED_EXTENSIONS.join(", ")}.`,
-      );
-      return;
-    }
-    if (file.size > MAX_UPLOAD_BYTES) {
-      setUploadError("File is larger than the 25 MB limit.");
-      return;
-    }
+   *  now reports through that same slot rather than vanishing.
+   *
+   *  #42: handles a folder as well as a multi-select -- both hand the input
+   *  a FileList with more than one entry. Uploads run sequentially (not
+   *  Promise.all) so a large folder does not fire dozens of concurrent
+   *  requests, and one bad file does not stop the rest: every failure is
+   *  collected and reported together at the end. */
+  async function handleFiles(list: FileList | null) {
+    const files = Array.from(list ?? []).filter((f) => f.size > 0 && !f.name.startsWith("."));
+    if (files.length === 0) return;
+    const failures: string[] = [];
+    let successCount = 0;
     setUploadError(null);
-    try {
-      await apiClient.knowledge.uploadMaterial(courseId, file, { signal: null });
+    for (const file of files) {
+      const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+      if (!ALLOWED_EXTENSIONS.includes(extension)) {
+        failures.push(`${file.name}: unsupported file type .${extension}`);
+        continue;
+      }
+      if (file.size > MAX_UPLOAD_BYTES) {
+        failures.push(`${file.name}: larger than 25 MB`);
+        continue;
+      }
+      const rel = (file as File & { webkitRelativePath?: string }).webkitRelativePath || undefined;
+      try {
+        await apiClient.knowledge.uploadMaterial(courseId, file, { signal: null }, rel);
+        successCount += 1;
+      } catch (err) {
+        failures.push(`${file.name}: ${(err as Error)?.message ?? "upload failed"}`);
+      }
+    }
+    // Only reload the two listings when something actually landed server-side
+    // -- a purely client-side rejection (bad extension/size, every file) has
+    // nothing new to fetch, and the pre-existing "rejects a disallowed file"
+    // test asserts exactly one /materials GET (the initial load) in that case.
+    if (successCount > 0) {
       documents.reload();
       materials.reload();
-    } catch (err) {
-      setUploadError((err as Error)?.message ?? "Could not upload that file. Please try again.");
+    }
+    if (failures.length > 0) {
+      setUploadError(`${failures.length} of ${files.length} files failed:\n${failures.join("\n")}`);
     }
   }
 
@@ -172,20 +193,45 @@ export function KnowledgeView({
         title="Knowledge base"
         subtitle="Uploaded materials become OKF documents. Group them into collections to ground an assignment."
         actions={
-          <label className="admin-button admin-button--primary">
-            <UploadSimple size={15} /> Upload material
-            <input
-              type="file"
-              aria-label="Upload material"
-              className="admin-visually-hidden"
-              accept={ALLOWED_EXTENSIONS.map((e) => `.${e}`).join(",")}
-              onChange={(event) => void handleFile(event.target.files?.[0])}
-            />
-          </label>
+          <>
+            <label className="admin-button admin-button--primary">
+              <UploadSimple size={15} /> Upload files
+              <input
+                type="file"
+                multiple
+                aria-label="Upload material"
+                className="admin-visually-hidden"
+                accept={ALLOWED_EXTENSIONS.map((e) => `.${e}`).join(",")}
+                onChange={(event) => {
+                  void handleFiles(event.target.files);
+                  event.target.value = "";
+                }}
+              />
+            </label>
+            {/* #42: a folder upload is the same handleFiles path fed a
+                FileList whose entries each carry webkitRelativePath -- the
+                only browser-native way to pick a directory. The two
+                `webkitdirectory`/`directory` attributes aren't in React's
+                DOM typings, hence the cast. */}
+            <label className="admin-button">
+              <FolderOpen size={15} /> Upload folder
+              <input
+                type="file"
+                aria-label="Upload folder"
+                className="admin-visually-hidden"
+                {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+                onChange={(event) => {
+                  void handleFiles(event.target.files);
+                  event.target.value = "";
+                }}
+              />
+            </label>
+          </>
         }
       />
 
       {uploadError && <p className="admin-field-error">{uploadError}</p>}
+      <KnowledgeSearchBox courseId={courseId} onOpenDocument={onOpenDocument} />
 
       {documents.loading && <ViewLoading label="Loading the knowledge base…" />}
       {documents.error && <ViewError error={documents.error} onRetry={documents.reload} />}
@@ -295,7 +341,7 @@ export function KnowledgeView({
         ) : (
           <ul className="admin-knowledge__material-list">
             {materialList.map((material) => {
-              const label = material.originalFilename ?? material.title;
+              const label = material.relativePath ?? material.originalFilename ?? material.title;
               return (
                 <li key={material.id} className="admin-knowledge__material">
                   <span className="admin-knowledge__material-name">{label}</span>

@@ -235,6 +235,7 @@ export interface MaterialPayload {
   title: string;
   sourceType: MaterialSourceType;
   originalFilename: string | null;
+  relativePath: string | null;
   byteSize: number | null;
   contentType: string | null;
   status: MaterialStatus;

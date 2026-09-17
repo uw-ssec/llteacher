@@ -231,14 +231,18 @@ describe("apiClient.knowledge", () => {
     expect(new Headers(init.headers).get("content-type")).toBeNull();
   });
 
-  it("encodes ids into the resolve query rather than the path", async () => {
-    const fetchMock = stub(() => json({ level: "none", collectionIds: [], documents: [] }));
+  it("sends relativePath as a form field only when given", async () => {
+    const fetchMock = stub(() => json({ id: "m1", status: "pending" }));
 
-    await apiClient.knowledge.resolve("c1", { homeworkId: "hw 1" }, { signal: null });
-
-    expect(fetchMock.mock.calls[0]![0]).toBe(
-      "/api/courses/c1/knowledge/resolve?homeworkId=hw+1",
+    await apiClient.knowledge.uploadMaterial(
+      "c1",
+      new File(["x"], "a.txt"),
+      { signal: null },
+      "Module 1/a.txt",
     );
+
+    const body = fetchMock.mock.calls[0]![1]!.body as FormData;
+    expect(body.get("relativePath")).toBe("Module 1/a.txt");
   });
 
   it("uploads the file under the 'file' form field", async () => {
@@ -262,29 +266,14 @@ describe("apiClient.knowledge", () => {
     expect(result.documentCreated).toBe(false);
   });
 
-  it("omits every unset field from the resolve query rather than sending it empty", async () => {
-    const fetchMock = stub(() => json({ level: "none", collectionIds: [], documents: [] }));
+  it("encodes the search query", async () => {
+    const fetchMock = stub(() => json({ hits: [] }));
 
-    await apiClient.knowledge.resolve("c1", {}, { signal: null });
+    await apiClient.knowledge.search("c1", "supply & demand", { signal: null });
 
-    // No hole in the path, and no trailing "?" advertising a query with
-    // nothing in it.
-    expect(fetchMock.mock.calls[0]![0]).toBe("/api/courses/c1/knowledge/resolve");
-  });
-
-  it("sends only the ids that are actually set when several are present", async () => {
-    const fetchMock = stub(() => json({ level: "none", collectionIds: [], documents: [] }));
-
-    await apiClient.knowledge.resolve(
-      "c1",
-      { homeworkId: "hw1", sectionId: undefined, llmConfigId: "cfg1" },
-      { signal: null },
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "/api/courses/c1/knowledge/search?q=supply+%26+demand",
     );
-
-    const url = new URL(String(fetchMock.mock.calls[0]![0]), "http://x");
-    expect(url.searchParams.get("homeworkId")).toBe("hw1");
-    expect(url.searchParams.get("llmConfigId")).toBe("cfg1");
-    expect(url.searchParams.has("sectionId")).toBe(false);
   });
 
   it("encodes a document id containing a slash so it cannot escape its path segment", async () => {
@@ -295,47 +284,5 @@ describe("apiClient.knowledge", () => {
     expect(fetchMock.mock.calls[0]![0]).toBe(
       "/api/courses/c1/knowledge/documents/..%2Fadmin",
     );
-  });
-
-  it("GETs a collection's items and returns them as-is (documents and directories, not resolved documents)", async () => {
-    const items = [{ documentId: "d1" }, { directoryPath: "week1" }];
-    const fetchMock = stub(() => json({ items }));
-
-    const result = await apiClient.knowledge.getCollectionItems("c1", "col1", opts);
-
-    expect(fetchMock.mock.calls[0]![0]).toBe("/api/courses/c1/knowledge/collections/col1/items");
-    expect(fetchMock.mock.calls[0]![1]).toMatchObject({ method: "GET" });
-    expect(result.items).toEqual(items);
-  });
-
-  it("PUTs the collection items as a body object keyed by 'items'", async () => {
-    const fetchMock = stub(() => new Response(null, { status: 204 }));
-
-    await apiClient.knowledge.setCollectionItems(
-      "c1",
-      "col1",
-      [{ documentId: "d1" }],
-      { signal: null },
-    );
-
-    const init = fetchMock.mock.calls[0]![1]!;
-    expect(init.method).toBe("PUT");
-    expect(JSON.parse(init.body as string)).toEqual({ items: [{ documentId: "d1" }] });
-  });
-
-  it("attach wraps the scope under a 'scope' key", async () => {
-    const fetchMock = stub(() => new Response(null, { status: 204 }));
-
-    await apiClient.knowledge.attach(
-      "c1",
-      "col1",
-      { kind: "homework", homeworkId: "hw1" },
-      { signal: null },
-    );
-
-    const init = fetchMock.mock.calls[0]![1]!;
-    expect(JSON.parse(init.body as string)).toEqual({
-      scope: { kind: "homework", homeworkId: "hw1" },
-    });
   });
 });

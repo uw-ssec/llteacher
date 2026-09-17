@@ -26,7 +26,6 @@ export function HomeworkCreateView({
         subtitle="Sections, the AI tutor configuration, and when students can see it."
       />
       <HomeworkForm
-        courseId={courseId}
         llmConfigs={llmConfigs}
         onSubmit={async (payload) => {
           const res = await fetch(`/api/courses/${courseId}/homeworks`, {

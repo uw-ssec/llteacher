@@ -33,13 +33,6 @@
 
 import type {
   AddTaResultPayload,
-  AttachmentListPayload,
-  AttachmentScopePayload,
-  CollectionItemBody,
-  CollectionItemsPayload,
-  CollectionListPayload,
-  CollectionPayload,
-  CollectionWriteBody,
   CourseTaPayload,
   DocumentLinksPayload,
   ExportRequestBody,
@@ -53,7 +46,6 @@ import type {
   LlmConfigWriteBody,
   MaterialListPayload,
   MaterialStatus,
-  ResolutionPayload,
   RosterImportPayload,
   RosterListPayload,
 } from "@llteacher/ui/api";
@@ -380,9 +372,15 @@ export const apiClient = {
      *  browser must set the multipart boundary itself, and an explicit
      *  header here produces a body the server cannot parse. `request`
      *  skips its JSON default when the body is FormData. */
-    uploadMaterial: (courseId: string, file: File, opts: RequestOptions) => {
+    uploadMaterial: (
+      courseId: string,
+      file: File,
+      opts: RequestOptions,
+      relativePath?: string,
+    ) => {
       const form = new FormData();
       form.set("file", file);
+      if (relativePath) form.set("relativePath", relativePath);
       return request<{ id: string; status: MaterialStatus }>(
         `/api/courses/${encode(courseId)}/materials`,
         { method: "POST", body: form },
@@ -450,88 +448,21 @@ export const apiClient = {
         { method: "GET" },
         opts,
       ),
-
-    listCollections: (courseId: string, opts: RequestOptions) =>
-      request<CollectionListPayload>(
-        `/api/courses/${encode(courseId)}/knowledge/collections`,
-        { method: "GET" },
+    /** Same search the student-facing tutor tools call, so what an
+     *  instructor finds here is what the tutor can find. */
+    search: (courseId: string, q: string, opts: RequestOptions) =>
+      request<{
+        hits: Array<{
+          conceptId: string;
+          title: string;
+          type: string;
+          description: string;
+          score: number;
+        }>;
+      }>(
+        `/api/courses/${encode(courseId)}/knowledge/search?${new URLSearchParams({ q })}`,
+        {},
         opts,
       ),
-    createCollection: (courseId: string, body: CollectionWriteBody, opts: RequestOptions) =>
-      request<CollectionPayload>(
-        `/api/courses/${encode(courseId)}/knowledge/collections`,
-        { method: "POST", body: JSON.stringify(body) },
-        opts,
-      ),
-    deleteCollection: (courseId: string, collectionId: string, opts: RequestOptions) =>
-      request<null>(
-        `/api/courses/${encode(courseId)}/knowledge/collections/${encode(collectionId)}`,
-        { method: "DELETE" },
-        opts,
-      ),
-    /** The read half of setCollectionItems. Returns items, not resolved
-     *  documents -- a directory item comes back as a directoryPath, not the
-     *  documents currently under it, so the editor can restore exactly what
-     *  was selected rather than reconstructing a live subtree as a frozen
-     *  list of files. */
-    getCollectionItems: (courseId: string, collectionId: string, opts: RequestOptions) =>
-      request<CollectionItemsPayload>(
-        `/api/courses/${encode(courseId)}/knowledge/collections/${encode(collectionId)}/items`,
-        { method: "GET" },
-        opts,
-      ),
-    setCollectionItems: (
-      courseId: string,
-      collectionId: string,
-      items: CollectionItemBody[],
-      opts: RequestOptions,
-    ) =>
-      request<null>(
-        `/api/courses/${encode(courseId)}/knowledge/collections/${encode(collectionId)}/items`,
-        { method: "PUT", body: JSON.stringify({ items }) },
-        opts,
-      ),
-
-    listAttachments: (courseId: string, opts: RequestOptions) =>
-      request<AttachmentListPayload>(
-        `/api/courses/${encode(courseId)}/knowledge/attachments`,
-        { method: "GET" },
-        opts,
-      ),
-    attach: (
-      courseId: string,
-      collectionId: string,
-      scope: AttachmentScopePayload,
-      opts: RequestOptions,
-    ) =>
-      request<null>(
-        `/api/courses/${encode(courseId)}/knowledge/collections/${encode(collectionId)}/attachments`,
-        { method: "POST", body: JSON.stringify({ scope }) },
-        opts,
-      ),
-    detach: (courseId: string, attachmentId: string, opts: RequestOptions) =>
-      request<null>(
-        `/api/courses/${encode(courseId)}/knowledge/attachments/${encode(attachmentId)}`,
-        { method: "DELETE" },
-        opts,
-      ),
-
-    /** Query params, not path segments: every id here is optional, and a
-     *  path with holes in it is not a path. */
-    resolve: (
-      courseId: string,
-      target: { homeworkId?: string; sectionId?: string; llmConfigId?: string },
-      opts: RequestOptions,
-    ) => {
-      const query = new URLSearchParams(
-        Object.entries(target).filter(([, v]) => !!v) as [string, string][],
-      );
-      const suffix = query.toString() ? `?${query}` : "";
-      return request<ResolutionPayload>(
-        `/api/courses/${encode(courseId)}/knowledge/resolve${suffix}`,
-        { method: "GET" },
-        opts,
-      );
-    },
   },
 };

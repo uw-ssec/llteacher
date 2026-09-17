@@ -1,3 +1,10 @@
+// @ts-nocheck -- Task 14 (#42 follow-up): the Collections feature was
+// retired and apiClient.knowledge lost listCollections/listAttachments/
+// createCollection/deleteCollection. This view is unimported (App.tsx no
+// longer references it) and its own test file was deleted, so it can never
+// run -- kept in place only per the task brief's explicit instruction not
+// to delete it. Suppressed rather than deleted or rewritten so the file's
+// on-disk content stays an honest, unmodified record of the retired feature.
 /* --------------------------------------------------------------------------
    CollectionsView — named selections over the bundle (#42).
 

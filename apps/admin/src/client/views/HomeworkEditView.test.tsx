@@ -76,9 +76,8 @@ describe("HomeworkEditView", () => {
     fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW 1 updated" } });
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
 
-    // GET homework, PATCH homework, plus #42's 3 knowledge-fieldset GETs
-    // (collections/attachments/resolve) fired once HomeworkForm mounts.
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    // GET homework, PATCH homework.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     const calledUrls = fetchMock.mock.calls.map((c) => c[0] as string);
     expect(calledUrls.some((u) => u.includes("/publish"))).toBe(false);
   });
@@ -99,9 +98,8 @@ describe("HomeworkEditView", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: /published/i }));
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
 
-    // GET homework, PATCH homework, PATCH /publish, plus #42's 3
-    // knowledge-fieldset GETs fired once HomeworkForm mounts.
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(6));
+    // GET homework, PATCH homework, PATCH /publish.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     const publishCall = fetchMock.mock.calls.find((c) => (c[0] as string).includes("/publish"));
     expect(publishCall).toBeTruthy();
     const publishBody = JSON.parse((publishCall![1] as RequestInit).body as string);
@@ -125,9 +123,8 @@ describe("HomeworkEditView", () => {
     fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW 1 updated" } });
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
 
-    // GET homework, PATCH homework, plus #42's 3 knowledge-fieldset GETs
-    // fired once HomeworkForm mounts.
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    // GET homework, PATCH homework.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     const calledUrls = fetchMock.mock.calls.map((c) => c[0] as string);
     expect(calledUrls.some((u) => u.includes("/hide"))).toBe(false);
   });
@@ -148,9 +145,8 @@ describe("HomeworkEditView", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: /^hidden/i }));
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
 
-    // GET homework, PATCH homework, PATCH /hide, plus #42's 3
-    // knowledge-fieldset GETs fired once HomeworkForm mounts.
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(6));
+    // GET homework, PATCH homework, PATCH /hide.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     const hideCall = fetchMock.mock.calls.find((c) => (c[0] as string).includes("/hide"));
     expect(hideCall).toBeTruthy();
     const hideBody = JSON.parse((hideCall![1] as RequestInit).body as string);
@@ -201,9 +197,8 @@ describe("HomeworkEditView", () => {
     fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW 1 updated" } });
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
 
-    // GET homework, PATCH homework, plus #42's 3 knowledge-fieldset GETs
-    // fired once HomeworkForm mounts.
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    // GET homework, PATCH homework.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     const calledUrls = fetchMock.mock.calls.map((c) => c[0] as string);
     expect(calledUrls.some((u) => u.includes("/publish"))).toBe(false);
   });
@@ -255,9 +250,8 @@ describe("HomeworkEditView", () => {
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
 
     // GET homework (mount), PATCH homework, PATCH /publish (409), retry PATCH
-    // /publish (confirm:true), plus #42's 3 knowledge-fieldset GETs fired
-    // once HomeworkForm mounts.
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(7));
+    // /publish (confirm:true).
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
     const publishCalls = fetchMock.mock.calls.filter((c) => (c[0] as string).includes("/publish"));
     expect(publishCalls).toHaveLength(2);
     const retryBody = JSON.parse((publishCalls[1]![1] as RequestInit).body as string);
@@ -290,9 +284,8 @@ describe("HomeworkEditView", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: /published/i }));
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
 
-    // GET homework (mount), PATCH homework, PATCH /publish (409) -- no retry,
-    // plus #42's 3 knowledge-fieldset GETs fired once HomeworkForm mounts.
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(6));
+    // GET homework (mount), PATCH homework, PATCH /publish (409) -- no retry.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     const publishCalls = fetchMock.mock.calls.filter((c) => (c[0] as string).includes("/publish"));
     expect(publishCalls).toHaveLength(1);
     await waitFor(() => expect(screen.getByText(/failed to save/i)).toBeTruthy());

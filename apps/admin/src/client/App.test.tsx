@@ -339,12 +339,6 @@ describe("Knowledge navigation (#42, #23)", () => {
             { status: 200 },
           );
         }
-        if (url.includes("/knowledge/collections")) {
-          return new Response(JSON.stringify({ collections: [] }), { status: 200 });
-        }
-        if (url.includes("/knowledge/attachments")) {
-          return new Response(JSON.stringify({ attachments: [] }), { status: 200 });
-        }
         if (url.includes("/materials")) {
           return new Response(JSON.stringify({ materials: [] }), { status: 200 });
         }
@@ -370,22 +364,6 @@ describe("Knowledge navigation (#42, #23)", () => {
     renderApp();
     await waitFor(() => screen.getByRole("navigation"));
     expect(screen.queryByRole("button", { name: /Knowledge/ })).toBeNull();
-  });
-
-  /* Beyond the brief: the sidebar has one Knowledge entry, not two.
-     Collections is reached through a segmented control within the knowledge
-     surface rather than a second nav item -- this confirms that path
-     actually works, not just that the view exists in isolation. */
-  it("reaches Collections through the segmented control within Knowledge", async () => {
-    stubProfile([
-      { id: "c1", title: "STATS 311", role: "instructor", canViewSolutions: true, canViewDrafts: true },
-    ]);
-    renderApp();
-    fireEvent.click(await screen.findByRole("button", { name: /Knowledge/ }));
-    await waitFor(() => screen.getByText(/Knowledge base/));
-
-    fireEvent.click(screen.getByRole("button", { name: "Collections" }));
-    await waitFor(() => screen.getByText(/RECORDS/));
   });
 
   /* Beyond the brief: App.tsx's own View union follows the transcript-list/
