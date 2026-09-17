@@ -51,6 +51,13 @@ for ((attempt = 1; attempt <= attempts; attempt++)); do
     --query 'tasks[0].{lastStatus:lastStatus,stoppedReason:stoppedReason,containers:containers[].{exitCode:exitCode,reason:reason}}' \
     --output json >&2
 
+  # Floci's ECS API reports only the exit code. Its Docker-backed task log is
+  # the authoritative diagnostic when a local migration fails.
+  if [[ "${CI:-}" == "true" ]] && command -v docker >/dev/null; then
+    docker ps -a --filter label=io.floci.service=ecs --format '{{.ID}}' | \
+      xargs -r docker logs --tail 50 >&2 || true
+  fi
+
   if (( attempt < attempts )); then
     sleep "$delay_seconds"
   fi
