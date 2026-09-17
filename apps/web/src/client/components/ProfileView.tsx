@@ -58,12 +58,19 @@ export function ProfileView() {
 
   if (authLoading) return null;
   if (!isAuthenticated) return <UnauthenticatedHome onLogin={login} error={authError} />;
-  if (loading) return <AccountShell title="Profile"><p role="status">Loading profile…</p></AccountShell>;
-  if (!profile) return <AccountShell title="Profile"><p role="alert">Unable to load profile.</p><button onClick={() => setReloadKey((k) => k + 1)}>Try again</button></AccountShell>;
+  const heading = (
+    <>
+      <a className="account-back" href="/">← Home</a>
+      <h1 className="account-title account-title--compact">Profile</h1>
+    </>
+  );
+  if (loading) return <AccountShell title="Profile">{heading}<p role="status">Loading profile…</p></AccountShell>;
+  if (!profile) return <AccountShell title="Profile">{heading}<p role="alert">Unable to load profile.</p><button onClick={() => setReloadKey((k) => k + 1)}>Try again</button></AccountShell>;
 
   return (
     <AccountShell title="Profile">
     <div className="profile-view">
+      {heading}
       <p>{profile.email}</p>
       {profile.role && <p>Role: {profile.role}</p>}
       <p>Member of {profile.courseCount} course(s)</p>

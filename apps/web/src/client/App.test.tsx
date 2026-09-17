@@ -3664,6 +3664,24 @@ describe("staff landing", () => {
     expect(fetchMock.mock.calls).toHaveLength(1);
   });
 
+  it("lists the staff member's courses with their role, without a second request", async () => {
+    const courses = [
+      { id: "c1", title: "STAT 311 · Elements of Statistical Methods", role: "instructor", canViewSolutions: true, canViewDrafts: true },
+      { id: "c2", title: "BIOL 180", role: "ta", canViewSolutions: false, canViewDrafts: false },
+    ];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ role: "instructor", courses }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryRouter><AuthProvider><App /></AuthProvider></MemoryRouter>);
+    const ledger = await screen.findByRole("list");
+    const rows = within(ledger).getAllByRole("listitem");
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain("STAT 311");
+    expect(rows[0].textContent).toContain("Instructor");
+    expect(rows[1].textContent).toContain("TA");
+    expect(screen.getByText("Teaching · 2 courses")).toBeTruthy();
+    expect(fetchMock.mock.calls).toHaveLength(1);
+  });
+
   it("keeps homework available for mixed staff and student memberships", async () => {
     vi.stubGlobal("CSS", { supports: () => true });
     Element.prototype.scrollIntoView = vi.fn();

@@ -378,7 +378,7 @@ function studentTextOf(message: UIMessage): string {
 export default function App() {
   const { loading, isAuthenticated, staffOnly } = useAuth();
   if (loading) return null;
-  if (isAuthenticated && staffOnly) return <AccountShell title="Welcome"><StaffHome /></AccountShell>;
+  if (isAuthenticated && staffOnly) return <AccountShell title="Teaching"><StaffHome /></AccountShell>;
   return <StudentApp />;
 }
 

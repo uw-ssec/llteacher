@@ -1,4 +1,5 @@
 import { createAuthProvider, type AuthSessionState } from "@llteacher/ui";
+import type { CourseMembershipSummary } from "../../shared/types";
 
 /** #434 review: the context value is `AuthSessionState & WebAuthExtra`, so
  *  this alias was quietly dropping `displayName` from anything that used it.
@@ -15,18 +16,27 @@ export type AuthState = AuthSessionState & WebAuthExtra;
 export interface WebAuthExtra {
   displayName: string | null;
   staffOnly: boolean;
+  /** Courses where the caller holds a staff role, already present on the
+   *  profile body this provider fetches -- the teaching workspace lists them
+   *  without a second request. */
+  staffCourses: CourseMembershipSummary[];
 }
+
+const STAFF_ROLES = ["instructor", "ta", "admin"];
 
 function parseDisplayName(body: unknown): WebAuthExtra {
   const displayName = (body as { displayName?: unknown } | null)?.displayName;
-  const profile = body as { role?: string; studentStats?: unknown } | null;
-  const staffOnly = ["instructor", "ta", "admin"].includes(profile?.role ?? "") && !profile?.studentStats;
-  return { staffOnly, displayName: typeof displayName === "string" && displayName.trim() !== "" ? displayName : null };
+  const profile = body as { role?: string; studentStats?: unknown; courses?: unknown } | null;
+  const staffOnly = STAFF_ROLES.includes(profile?.role ?? "") && !profile?.studentStats;
+  const staffCourses = Array.isArray(profile?.courses)
+    ? (profile.courses as CourseMembershipSummary[]).filter((c) => STAFF_ROLES.includes(c.role))
+    : [];
+  return { staffOnly, staffCourses, displayName: typeof displayName === "string" && displayName.trim() !== "" ? displayName : null };
 }
 
 export const { AuthProvider, useAuth } = createAuthProvider<WebAuthExtra>({
   parseExtra: parseDisplayName,
-  defaultExtra: { displayName: null, staffOnly: false },
+  defaultExtra: { displayName: null, staffOnly: false, staffCourses: [] },
 });
 
 /** Two-letter initials for the avatar chip, or null when there is no name to
