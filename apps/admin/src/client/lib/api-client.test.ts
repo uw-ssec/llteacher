@@ -283,6 +283,18 @@ describe("apiClient.knowledge", () => {
     expect(apiClient.knowledge.exportUrl("c1")).toBe("/api/courses/c1/knowledge/export");
   });
 
+  it("sends the delete requests for a document with its upload, a folder, and the whole base", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ documents: 1, uploads: 1 }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await apiClient.knowledge.deleteDocument("c1", "week1/lecture", { signal: null }, { withUpload: true });
+    await apiClient.knowledge.deleteDirectory("c1", "week1/lab", { signal: null }, { withUploads: false });
+    await apiClient.knowledge.deleteKnowledgeBase("c1", { confirm: "DELETE", withUploads: true }, { signal: null });
+    const calls = fetchMock.mock.calls.map(([u, i]) => [String(u), (i as RequestInit).method, (i as RequestInit).body]);
+    expect(calls[0]).toEqual(["/api/courses/c1/knowledge/documents/week1%2Flecture?withUpload=1", "DELETE", undefined]);
+    expect(calls[1]).toEqual(["/api/courses/c1/knowledge/directories/week1%2Flab", "DELETE", undefined]);
+    expect(calls[2]).toEqual(["/api/courses/c1/knowledge", "DELETE", JSON.stringify({ confirm: "DELETE", withUploads: true })]);
+  });
+
   it("encodes the search query", async () => {
     const fetchMock = stub(() => json({ hits: [] }));
 

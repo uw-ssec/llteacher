@@ -79,6 +79,13 @@ export interface KnowledgeService {
   /** The concept's file exactly as stored, frontmatter and all -- what an
    *  instructor gets when they download one document. Null if absent. */
   readRaw(courseId: string, conceptId: string): Promise<string | null>;
+  /** Removes a directory and every document under it (originals too),
+   *  regenerates the parent listing, and logs it. Null if there is no such
+   *  directory; the root is never removable this way -- see removeBundle. */
+  removeDirectory(courseId: string, directory: string): Promise<{ removed: string[] } | null>;
+  /** Removes every document and leaves a fresh, empty, valid bundle. Null if
+   *  the course has no bundle. */
+  removeBundle(courseId: string): Promise<{ removed: number } | null>;
   /** Every Markdown file in the bundle as one zip, paths preserved. Null if
    *  the course has no bundle yet. */
   exportBundle(courseId: string): Promise<Uint8Array | null>;
@@ -242,6 +249,40 @@ export class OkfKnowledgeService implements KnowledgeService {
     const file = this.conceptFile(courseId, conceptId);
     if (!(await exists(file))) return null;
     return fs.readFile(file, "utf8");
+  }
+
+  async removeDirectory(courseId: string, directory: string): Promise<{ removed: string[] } | null> {
+    if (!DIR_RE.test(directory)) return null;
+    const bundle = this.bundleDir(courseId);
+    const target = path.join(bundle, directory);
+    return this.withCourseLock(courseId, async () => {
+      if (!(await exists(target))) return null;
+      const files = await walkMarkdown(bundle, directory);
+      const removed = files
+        .map((rel) => rel.replace(/\.md$/, ""))
+        .filter((id) => path.basename(id) !== "index");
+      await fs.rm(target, { recursive: true, force: true });
+      await fs.rm(path.join(this.courseDir(courseId), "originals", directory), { recursive: true, force: true });
+      await this.regenerateIndex(courseId, parentDirOf(directory));
+      await this.appendLog(bundle, `**Deletion**: Removed directory \`${directory}/\` and ${removed.length} concept${removed.length === 1 ? "" : "s"}.`);
+      this.invalidateListCache(courseId);
+      return { removed };
+    });
+  }
+
+  async removeBundle(courseId: string): Promise<{ removed: number } | null> {
+    const bundle = this.bundleDir(courseId);
+    if (!(await exists(bundle))) return null;
+    const removed = (await this.list(courseId)).filter((d) => d.kind === "concept").length;
+    await this.withCourseLock(courseId, async () => {
+      await fs.rm(bundle, { recursive: true, force: true });
+      await fs.rm(path.join(this.courseDir(courseId), "originals"), { recursive: true, force: true });
+      this.invalidateListCache(courseId);
+    });
+    await this.ensureBundle(courseId);
+    await this.appendLog(bundle, `**Deletion**: Removed the whole knowledge base (${removed} concept${removed === 1 ? "" : "s"}).`);
+    this.invalidateListCache(courseId);
+    return { removed };
   }
 
   async exportBundle(courseId: string): Promise<Uint8Array | null> {

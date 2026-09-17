@@ -66,6 +66,11 @@ const MATERIALS = [
 function stubFetch(overrides: Record<string, unknown> = {}) {
   const mock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input);
+    if (_init?.method === "DELETE") {
+      return url.includes("/materials/")
+        ? new Response(null, { status: 204 })
+        : new Response(JSON.stringify({ documents: 1, uploads: 0 }), { status: 200 });
+    }
     if (url.includes("/reingest")) {
       return new Response(JSON.stringify({ status: "pending", documentCreated: false }), {
         status: 200,
@@ -562,8 +567,12 @@ describe("KnowledgeView", () => {
     stubFetch();
     render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
     await waitFor(() => screen.getByText("Syllabus"));
-    const link = screen.getByRole("link", { name: /Download all/ }) as HTMLAnchorElement;
+    // Upload files stays visible; the rest of the header is behind More.
+    expect(screen.queryByRole("link", { name: /Download all/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    const link = screen.getByRole("menuitem", { name: /Download all/ }) as HTMLAnchorElement;
     expect(link.getAttribute("href")).toBe("/api/courses/c1/knowledge/export");
+    expect(screen.getByRole("menuitem", { name: /Upload folder/ })).toBeTruthy();
   });
 
   it("offers a download on each row of a folder listing", async () => {
@@ -579,5 +588,55 @@ describe("KnowledgeView", () => {
     expect(screen.getByRole("link", { name: "Download original upload for Lecture 1" }).getAttribute("href")).toBe(
       "/api/courses/c1/materials/m1/download",
     );
+  });
+
+  it("deletes a selected folder after a modal confirmation and returns to the overview", async () => {
+    const fetchMock = stubFetch();
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+    fireEvent.click(screen.getByRole("button", { name: /week1/ }));
+    await waitFor(() => screen.getByText("Lecture 1"));
+    fireEvent.click(screen.getByRole("button", { name: /Delete folder/ }));
+    const dialog = await screen.findByRole("dialog", { name: /Delete “week1”/ });
+    expect(dialog.textContent).toMatch(/1 document/);
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => {
+      const del = fetchMock.mock.calls.find(([, i]) => (i as RequestInit)?.method === "DELETE");
+      expect(String(del?.[0])).toBe("/api/courses/c1/knowledge/directories/week1?withUploads=1");
+    });
+    await waitFor(() => screen.getByText(/Recently updated/));
+  });
+
+  it("deletes an upload from the uploads table after confirmation", async () => {
+    const fetchMock = stubFetch();
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText(/All uploads/));
+    fireEvent.click(screen.getByText(/All uploads/));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete lecture1.vtt" }));
+    await screen.findByRole("dialog", { name: /Delete “lecture1.vtt”/ });
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => {
+      const del = fetchMock.mock.calls.find(([, i]) => (i as RequestInit)?.method === "DELETE");
+      expect(String(del?.[0])).toBe("/api/courses/c1/materials/m1");
+    });
+  });
+
+  it("deletes the whole knowledge base only from the More menu with the typed phrase", async () => {
+    const fetchMock = stubFetch();
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+    expect(screen.queryByRole("button", { name: /Delete knowledge base/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Delete knowledge base/ }));
+    await screen.findByRole("dialog", { name: /Delete the whole knowledge base/ });
+    const confirm = screen.getByRole("button", { name: "Delete everything" }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    fireEvent.change(screen.getByRole("textbox", { name: /Type DELETE to confirm/ }), { target: { value: "DELETE" } });
+    fireEvent.click(confirm);
+    await waitFor(() => {
+      const del = fetchMock.mock.calls.find(([, i]) => (i as RequestInit)?.method === "DELETE");
+      expect(String(del?.[0])).toBe("/api/courses/c1/knowledge");
+      expect(JSON.parse(String((del?.[1] as RequestInit).body))).toEqual({ confirm: "DELETE", withUploads: true });
+    });
   });
 });

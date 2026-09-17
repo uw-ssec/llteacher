@@ -330,4 +330,37 @@ describe("Markdown cleanup review", () => {
     await screen.findByText("The document changed. Reload it before applying cleanup.");
     expect(screen.getByRole("region", { name: "Cleanup proposal" })).toBeTruthy();
   });
+
+  it("deletes the document with its upload after a modal confirmation, then goes back", async () => {
+    const onBack = vi.fn();
+    const fetchMock = stubFetch();
+    render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={onBack} />);
+    await screen.findByLabelText(/document body/i);
+    fireEvent.click(menuItem(/Delete document/));
+    const dialog = await screen.findByRole("dialog", { name: /Delete “Lecture 1”/ });
+    expect(dialog).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: /Also delete the original upload/ })).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([, i]) => (i as RequestInit)?.method === "DELETE")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(onBack).toHaveBeenCalled());
+    const del = fetchMock.mock.calls.find(([, i]) => (i as RequestInit)?.method === "DELETE");
+    expect(String(del?.[0])).toBe("/api/courses/c1/knowledge/documents/week1%2Flecture?withUpload=1");
+  });
+
+  it("keeps the upload when the box is unticked, and cancels cleanly", async () => {
+    const fetchMock = stubFetch();
+    render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
+    await screen.findByLabelText(/document body/i);
+    fireEvent.click(menuItem(/Delete document/));
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(menuItem(/Delete document/));
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("checkbox", { name: /Also delete the original upload/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, i]) => (i as RequestInit)?.method === "DELETE")).toBe(true));
+    const del = fetchMock.mock.calls.find(([, i]) => (i as RequestInit)?.method === "DELETE");
+    expect(String(del?.[0])).toBe("/api/courses/c1/knowledge/documents/week1%2Flecture");
+  });
 });

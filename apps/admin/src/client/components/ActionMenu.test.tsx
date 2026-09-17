@@ -82,4 +82,11 @@ describe("ActionMenu", () => {
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     expect((screen.getByRole("menuitem", { name: /Restore original/ }) as HTMLButtonElement).disabled).toBe(true);
   });
+
+  it("marks a destructive item and draws a separator before it", () => {
+    render(<ActionMenu label="More actions" items={[{ kind: "action", label: "Download", onSelect: vi.fn() }, { kind: "separator" }, { kind: "action", label: "Delete…", onSelect: vi.fn(), danger: true }]} />);
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.getByRole("menuitem", { name: "Delete…" }).className).toContain("admin-menu__item--danger");
+    expect(document.querySelector("hr.admin-menu__separator")).toBeTruthy();
+  });
 });

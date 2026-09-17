@@ -29,7 +29,8 @@ import rehypeKatex from "rehype-katex";
 import { diffLines } from "diff";
 import "katex/dist/katex.min.css";
 import "./knowledge-cleanup.css";
-import { ArrowCounterClockwise, ArrowLeft, DownloadSimple, Eye, FileArrowDown, LinkBreak, LinkSimple, PencilSimple, Sparkle, Warning } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, ArrowLeft, DownloadSimple, Eye, FileArrowDown, LinkBreak, LinkSimple, PencilSimple, Sparkle, Trash, Warning } from "@phosphor-icons/react";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ActionMenu, type ActionMenuItem } from "../components/ActionMenu";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
@@ -65,6 +66,10 @@ function DocumentEditor({
   const [preview, setPreview] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteWithUpload, setDeleteWithUpload] = useState(true);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const document = useApiResource<KnowledgeDocumentPayload>(
     (opts) => apiClient.knowledge.getDocument(courseId, documentId, opts),
@@ -203,7 +208,25 @@ function DocumentEditor({
           download: "",
         }]
       : []),
+    { kind: "separator" },
+    { kind: "action", label: "Delete document…", icon: <Trash size={16} />, danger: true, disabled: busy, onSelect: () => { setDeleteError(null); setConfirmDelete(true); } },
   ];
+
+  async function deleteDocument() {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await apiClient.knowledge.deleteDocument(courseId, record.path, { signal: null }, {
+        withUpload: record.sourceMaterialId !== null && deleteWithUpload,
+      });
+      setConfirmDelete(false);
+      onBack();
+    } catch (err) {
+      setDeleteError(err instanceof ApiError ? err.message : "Could not delete this document. Try again.");
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   return (
     <div className="admin-view">
@@ -214,7 +237,7 @@ function DocumentEditor({
         title={record.title ?? record.path}
         subtitle={record.description ?? undefined}
         actions={
-          <>
+          <div className="admin-knowledge-doc__actions">
             {dirty && <span className="admin-knowledge-doc__unsaved">Unsaved changes</span>}
             {/* The view toggle and Save stay visible: Save is the one action
                 with state, and the toggle is used constantly. Everything
@@ -236,8 +259,20 @@ function DocumentEditor({
               {saving ? "Saving…" : "Save"}
             </button>
             <ActionMenu label="More actions" items={menuItems} />
-          </>
+          </div>
         }
+      />
+
+      <ConfirmDialog
+        open={confirmDelete}
+        title={`Delete “${record.title ?? record.path}”?`}
+        body={<p>The document leaves the knowledge base and the tutor stops finding it. This cannot be undone from the console.</p>}
+        confirmLabel="Delete"
+        busy={deleting}
+        error={deleteError}
+        checkbox={record.sourceMaterialId ? { label: "Also delete the original upload", checked: deleteWithUpload, onChange: setDeleteWithUpload } : undefined}
+        onConfirm={() => void deleteDocument()}
+        onCancel={() => setConfirmDelete(false)}
       />
 
       <dl className="admin-knowledge-doc__meta">

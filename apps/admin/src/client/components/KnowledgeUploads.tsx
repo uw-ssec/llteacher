@@ -12,7 +12,7 @@
    -------------------------------------------------------------------------- */
 
 import { useMemo, useState } from "react";
-import { CaretRight, FileArrowDown } from "@phosphor-icons/react";
+import { CaretRight, FileArrowDown, Trash } from "@phosphor-icons/react";
 import { apiClient } from "../lib/api-client";
 import { StatusBadge } from "./StatusBadge";
 import { materialLabel, statusKind, statusLabel } from "../lib/knowledgeStatus";
@@ -31,7 +31,7 @@ function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-export function KnowledgeUploads({ courseId, materials }: { courseId: string; materials: readonly MaterialPayload[] }) {
+export function KnowledgeUploads({ courseId, materials, onDelete }: { courseId: string; materials: readonly MaterialPayload[]; onDelete?: (material: MaterialPayload) => void }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
@@ -98,6 +98,17 @@ export function KnowledgeUploads({ courseId, materials }: { courseId: string; ma
                       >
                         <FileArrowDown size={16} aria-hidden="true" />
                       </a>
+                      {onDelete && (
+                        <button
+                          type="button"
+                          className="admin-knowledge__icon-link admin-knowledge__icon-link--danger"
+                          aria-label={`Delete ${materialLabel(m)}`}
+                          title="Delete upload"
+                          onClick={() => onDelete(m)}
+                        >
+                          <Trash size={16} aria-hidden="true" />
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}

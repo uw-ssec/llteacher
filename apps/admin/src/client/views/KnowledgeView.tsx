@@ -18,8 +18,10 @@
    from the page this replaces.
    -------------------------------------------------------------------------- */
 
-import { useEffect, useMemo, useState } from "react";
-import { DownloadSimple, FolderOpen, UploadSimple, Warning } from "@phosphor-icons/react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { DownloadSimple, FolderOpen, Trash, UploadSimple, Warning } from "@phosphor-icons/react";
+import { ActionMenu } from "../components/ActionMenu";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { KnowledgeDownloadTools } from "../components/KnowledgeDownloadTools";
 import { KnowledgeAttention } from "../components/KnowledgeAttention";
 import { KnowledgeFolderTree } from "../components/KnowledgeFolderTree";
@@ -33,8 +35,8 @@ import { ViewLoading, ViewError } from "../components/ViewState";
 import { apiClient } from "../lib/api-client";
 import { useApiResource } from "../lib/useApiResource";
 import { ancestorsOf, documentsIn, treeOf, type TreeNode } from "../lib/documentTree";
-import { statusKind, statusLabel } from "../lib/knowledgeStatus";
-import type { KnowledgeDocumentListPayload, KnowledgeDocumentSummaryPayload, MaterialListPayload } from "@llteacher/ui/api";
+import { materialLabel, statusKind, statusLabel } from "../lib/knowledgeStatus";
+import type { KnowledgeDocumentListPayload, KnowledgeDocumentSummaryPayload, MaterialListPayload, MaterialPayload } from "@llteacher/ui/api";
 
 const ALLOWED_EXTENSIONS = ["pdf", "docx", "pptx", "txt", "md", "vtt", "srt"];
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
@@ -156,6 +158,18 @@ export function KnowledgeView({
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const [retryError, setRetryError] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
+  /** What the open confirmation modal is about, if any. One modal serves
+   *  the folder, the upload, and the whole base; the copy changes. */
+  const [pendingDelete, setPendingDelete] = useState<
+    | { kind: "folder"; directory: string }
+    | { kind: "upload"; material: MaterialPayload }
+    | { kind: "base" }
+    | null
+  >(null);
+  const [deleteWithUploads, setDeleteWithUploads] = useState(true);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const folderInput = useRef<HTMLInputElement>(null);
 
   const documents = useApiResource<KnowledgeDocumentListPayload>(
     (opts) => apiClient.knowledge.listDocuments(courseId, opts),
@@ -311,6 +325,46 @@ export function KnowledgeView({
     if (failures.length > 0) setRetryError(`${failures.length} of ${failed.length} retries could not be sent.`);
   }
 
+  function openDelete(target: NonNullable<typeof pendingDelete>) {
+    setDeleteError(null);
+    setDeleteWithUploads(true);
+    setPendingDelete(target);
+  }
+
+  async function runDelete() {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      if (pendingDelete.kind === "folder") {
+        const r = await apiClient.knowledge.deleteDirectory(courseId, pendingDelete.directory, { signal: null }, { withUploads: deleteWithUploads });
+        setAnnouncement(`Deleted ${r.documents} documents and ${r.uploads} uploads.`);
+        selectFolder("");
+      } else if (pendingDelete.kind === "upload") {
+        await apiClient.knowledge.deleteMaterial(courseId, pendingDelete.material.id, { signal: null });
+        setAnnouncement("Upload deleted.");
+      } else {
+        const r = await apiClient.knowledge.deleteKnowledgeBase(courseId, { confirm: "DELETE", withUploads: deleteWithUploads }, { signal: null });
+        setAnnouncement(`Deleted the knowledge base: ${r.documents} documents and ${r.uploads} uploads.`);
+        selectFolder("");
+        setQuery("");
+        setSubmittedQuery(null);
+      }
+      setPendingDelete(null);
+      documents.reload();
+      materials.reload();
+    } catch (err) {
+      setDeleteError((err as Error)?.message ?? "Could not delete. Try again.");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  const folderNode = pendingDelete?.kind === "folder"
+    ? pendingDelete.directory.split("/").reduce<TreeNode | undefined>((n, seg) => n?.children.find((c) => c.name === seg), tree)
+    : undefined;
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
   const hasQuery = query.trim() !== "";
   const emptyBundle = documents.data !== null && all.length === 0;
 
@@ -339,27 +393,33 @@ export function KnowledgeView({
                 }}
               />
             </label>
-            {/* The two `webkitdirectory`/`directory` attributes are the only
+            {/* Progressive disclosure: only the everyday action stays a
+                button. Upload folder, Download all, and the destructive
+                delete sit behind More. The folder input itself lives here,
+                hidden, because a menu item cannot be a file input; the
+                `webkitdirectory`/`directory` attributes are the only
                 browser-native way to pick a directory and aren't in React's
                 DOM typings, hence the cast. */}
-            <label className="admin-button admin-button--ghost">
-              <FolderOpen size={15} /> Upload folder
-              <input
-                type="file"
-                aria-label="Upload folder"
-                className="admin-visually-hidden"
-                {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
-                onChange={(event) => {
-                  void handleFiles(event.target.files);
-                  event.target.value = "";
-                }}
-              />
-            </label>
-            {/* A real link: the browser downloads the zip with the session
-                cookie and the server names the file after the course. */}
-            <a className="admin-button admin-button--ghost" href={apiClient.knowledge.exportUrl(courseId)} download="">
-              <DownloadSimple size={15} aria-hidden="true" /> Download all
-            </a>
+            <input
+              ref={folderInput}
+              type="file"
+              aria-label="Upload folder"
+              className="admin-visually-hidden"
+              {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+              onChange={(event) => {
+                void handleFiles(event.target.files);
+                event.target.value = "";
+              }}
+            />
+            <ActionMenu
+              label="More actions"
+              items={[
+                { kind: "action", label: "Upload folder", icon: <FolderOpen size={16} />, onSelect: () => folderInput.current?.click() },
+                { kind: "link", label: "Download all", hint: ".zip", icon: <DownloadSimple size={16} />, href: apiClient.knowledge.exportUrl(courseId), download: "" },
+                { kind: "separator" },
+                { kind: "action", label: "Delete knowledge base…", icon: <Trash size={16} />, danger: true, disabled: all.length === 0 && materialList.length === 0, onSelect: () => openDelete({ kind: "base" }) },
+              ]}
+            />
           </>
         }
       />
@@ -464,7 +524,12 @@ export function KnowledgeView({
                   <h2 className="admin-knowledge__label">
                     {directory.split("/").pop()} · {inFolder.length} {inFolder.length === 1 ? "document" : "documents"}
                   </h2>
-                  <span className="admin-knowledge__hint">type above to search within this folder</span>
+                  <span className="admin-knowledge__hint">
+                    type above to search within this folder ·{" "}
+                    <button type="button" className="admin-link-button admin-link-button--danger" onClick={() => openDelete({ kind: "folder", directory })}>
+                      Delete folder…
+                    </button>
+                  </span>
                 </div>
                 {inFolder.length === 0 ? (
                   <p className="admin-knowledge__empty">No documents yet in this folder. Open a subfolder in the rail, or search with the folder scope set.</p>
@@ -505,7 +570,42 @@ export function KnowledgeView({
         </div>
       )}
 
-      <KnowledgeUploads courseId={courseId} materials={materialList} />
+      <KnowledgeUploads courseId={courseId} materials={materialList} onDelete={(material) => openDelete({ kind: "upload", material })} />
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title={
+          pendingDelete?.kind === "folder" ? `Delete “${pendingDelete.directory.split("/").pop()}”?`
+          : pendingDelete?.kind === "upload" ? `Delete “${materialLabel(pendingDelete.material)}”?`
+          : "Delete the whole knowledge base?"
+        }
+        body={
+          pendingDelete?.kind === "folder" ? (
+            <p>
+              {plural(folderNode?.count ?? 0, "document")} under <span className="admin-knowledge__mono">{pendingDelete.directory}</span> leave
+              the knowledge base and the tutor stops finding them. This cannot be undone from the console.
+            </p>
+          ) : pendingDelete?.kind === "upload" ? (
+            <p>The stored file is removed, along with the document that was created from it.</p>
+          ) : (
+            <p>
+              Every one of the {plural(all.filter((d) => d.kind === "concept").length, "document")} leaves the knowledge base and the tutor
+              has nothing to search. This cannot be undone from the console.
+            </p>
+          )
+        }
+        confirmLabel={pendingDelete?.kind === "base" ? "Delete everything" : "Delete"}
+        busy={deleting}
+        error={deleteError}
+        checkbox={
+          pendingDelete?.kind === "folder" ? { label: "Also delete the original uploads", checked: deleteWithUploads, onChange: setDeleteWithUploads }
+          : pendingDelete?.kind === "base" ? { label: `Also delete every original upload (${materialList.length})`, checked: deleteWithUploads, onChange: setDeleteWithUploads }
+          : undefined
+        }
+        typeToConfirm={pendingDelete?.kind === "base" ? "DELETE" : undefined}
+        onConfirm={() => void runDelete()}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }

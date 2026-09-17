@@ -442,11 +442,26 @@ export const apiClient = {
         { method: "PUT", body: JSON.stringify(body) },
         opts,
       ),
-    deleteDocument: (courseId: string, documentId: string, opts: RequestOptions) =>
+    /** `withUpload` also removes the upload the document came from, so it
+     *  cannot sit at "ready" pointing at nothing. */
+    deleteDocument: (courseId: string, documentId: string, opts: RequestOptions, options?: { withUpload?: boolean }) =>
       request<null>(
-        `/api/courses/${encode(courseId)}/knowledge/documents/${encode(documentId)}`,
+        `/api/courses/${encode(courseId)}/knowledge/documents/${encode(documentId)}${options?.withUpload ? "?withUpload=1" : ""}`,
         { method: "DELETE" },
         opts,
+      ),
+    deleteDirectory: (courseId: string, directory: string, opts: RequestOptions, options?: { withUploads?: boolean }) =>
+      request<{ documents: number; uploads: number }>(
+        `/api/courses/${encode(courseId)}/knowledge/directories/${encode(directory)}${options?.withUploads ? "?withUploads=1" : ""}`,
+        { method: "DELETE" },
+        opts,
+      ),
+    /** Guarded server-side by the typed phrase; the console asks for it too. */
+    deleteKnowledgeBase: (courseId: string, body: { confirm: string; withUploads: boolean }, opts: RequestOptions) =>
+      request<{ documents: number; uploads: number }>(
+        `/api/courses/${encode(courseId)}/knowledge`,
+        { method: "DELETE", body: JSON.stringify(body) },
+        { timeoutMs: 120_000, ...opts },
       ),
     documentLinks: (courseId: string, documentId: string, opts: RequestOptions) =>
       request<DocumentLinksPayload>(

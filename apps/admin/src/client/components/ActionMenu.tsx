@@ -17,9 +17,10 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { DotsThree } from "@phosphor-icons/react";
 
 export type ActionMenuItem =
-  | { kind: "action"; label: string; icon?: ReactNode; hint?: string; onSelect: () => void; disabled?: boolean }
+  | { kind: "action"; label: string; icon?: ReactNode; hint?: string; onSelect: () => void; disabled?: boolean; danger?: boolean }
   | { kind: "link"; label: string; icon?: ReactNode; hint?: string; href: string; download?: string }
-  | { kind: "group"; label: string };
+  | { kind: "group"; label: string }
+  | { kind: "separator" };
 
 export type ActionMenuProps = {
   label: string;
@@ -79,7 +80,9 @@ export function ActionMenu({ label, items }: ActionMenuProps) {
       {open && (
         <div id={menuId} ref={menu} role="menu" aria-label={label} className="admin-menu__list" onKeyDown={onMenuKeyDown}>
           {items.map((item, i) =>
-            item.kind === "group" ? (
+            item.kind === "separator" ? (
+              <hr key={`s${i}`} className="admin-menu__separator" />
+            ) : item.kind === "group" ? (
               <div key={`g${i}`} className="admin-menu__group" role="presentation">{item.label}</div>
             ) : item.kind === "link" ? (
               <a
@@ -99,7 +102,7 @@ export function ActionMenu({ label, items }: ActionMenuProps) {
                 key={`a${i}`}
                 type="button"
                 role="menuitem"
-                className="admin-menu__item"
+                className={item.danger ? "admin-menu__item admin-menu__item--danger" : "admin-menu__item"}
                 disabled={item.disabled}
                 onClick={() => { close(true); item.onSelect(); }}
               >

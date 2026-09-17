@@ -117,3 +117,34 @@ every stored upload through the server per request is a queued job.
 rows, folder tables, and the recent list (icon links on hover and focus,
 Markdown always, original only when one exists); uploads table (original
 per row); the document view's More menu.
+
+## Addendum, 2026-09-17: deletion
+
+Every delete goes through one confirmation modal (`ConfirmDialog`, a
+native `<dialog>`: backdrop, focus held inside, Escape cancels, focus
+lands on Cancel). The confirm button is the only destructive-styled
+control on the page.
+
+- **Document.** "Delete document…" at the bottom of the document view's
+  More menu. The modal offers "Also delete the original upload" (checked
+  by default) when one exists, so the upload cannot sit at "ready"
+  pointing at nothing. `DELETE …/knowledge/documents/:id?withUpload=1`.
+- **Upload.** A delete icon per row in All uploads; the existing route
+  removes the stored file and the document it produced.
+- **Folder.** "Delete folder…" in the selected folder's section header.
+  The modal names the folder and its recursive document count, with
+  "Also delete the original uploads". New route
+  `DELETE …/knowledge/directories/:directory?withUploads=1`; the service
+  removes the directory, its originals, regenerates the parent listing,
+  and logs the deletion.
+- **Whole knowledge base.** "Delete knowledge base…" at the bottom of the
+  page header's More menu. The modal requires typing DELETE and offers
+  "Also delete every original upload". `DELETE …/knowledge` with
+  `{ confirm: "DELETE", withUploads }`; the server checks the phrase too,
+  clears the bundle, and re-initialises an empty valid one.
+- **No delete on result rows.** A document is deleted from its own page or
+  its folder; a hover icon next to download invites misclicks.
+
+The page header now discloses progressively as well: Upload files stays a
+button; Upload folder, Download all, and Delete knowledge base sit in a
+More menu.

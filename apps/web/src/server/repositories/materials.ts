@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, like } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { courseMaterials } from "../../db/schema";
 import type { CourseScope } from "./scope";
@@ -173,4 +173,43 @@ export async function recoverInterruptedExtractions(db: Db): Promise<void> {
   await db.update(courseMaterials)
     .set({ status: "failed", errorDetail: "Extraction was interrupted by a restart. Retry ingestion.", updatedAt: new Date() })
     .where(eq(courseMaterials.status, "processing"));
+}
+
+/** The material that produced one document, deleted; its storage key comes
+ *  back so the caller can drop the stored file. Null if none. */
+export async function deleteMaterialByDocumentPath(
+  db: Db,
+  scope: CourseScope,
+  documentPath: string,
+): Promise<{ storageKey: string | null } | null> {
+  const [row] = await db
+    .delete(courseMaterials)
+    .where(and(eq(courseMaterials.courseId, scope), eq(courseMaterials.documentPath, documentPath)))
+    .returning({ storageKey: courseMaterials.storageKey });
+  return row ?? null;
+}
+
+/** Every material whose document sits under `prefix` (a directory path with
+ *  its trailing slash), deleted. */
+export async function deleteMaterialsByDocumentPrefix(
+  db: Db,
+  scope: CourseScope,
+  prefix: string,
+): Promise<Array<{ storageKey: string | null }>> {
+  const escaped = prefix.replace(/[%_\\]/g, (ch) => `\\${ch}`);
+  return db
+    .delete(courseMaterials)
+    .where(and(eq(courseMaterials.courseId, scope), like(courseMaterials.documentPath, `${escaped}%`)))
+    .returning({ storageKey: courseMaterials.storageKey });
+}
+
+/** Every material of the course, deleted. */
+export async function deleteAllMaterials(
+  db: Db,
+  scope: CourseScope,
+): Promise<Array<{ storageKey: string | null }>> {
+  return db
+    .delete(courseMaterials)
+    .where(eq(courseMaterials.courseId, scope))
+    .returning({ storageKey: courseMaterials.storageKey });
 }

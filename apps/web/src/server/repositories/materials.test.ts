@@ -4,7 +4,7 @@ import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import { organizations, courses, users, courseMemberships, courseMaterials } from "../../db/schema";
 import { unsafeCourseScope } from "./scope";
-import { listMaterialsForCourse, recoverInterruptedExtractions } from "./materials";
+import { listMaterialsForCourse, recoverInterruptedExtractions, deleteMaterialByDocumentPath, deleteMaterialsByDocumentPrefix, deleteAllMaterials, setMaterialDocumentPath } from "./materials";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -123,5 +123,23 @@ describe.skipIf(!DATABASE_URL)("materials repository", () => {
         ].sort(),
       );
     }
+  });
+
+  describe("deletion by document path", () => {
+    it("deletes one material by the document it produced, only within its course", async () => {
+      const scopeA = unsafeCourseScope(courseAId);
+      await setMaterialDocumentPath(db, scopeA, materialAId, "lectures/intro");
+      expect(await deleteMaterialByDocumentPath(db, unsafeCourseScope(courseBId), "lectures/intro")).toBeNull();
+      expect(await deleteMaterialByDocumentPath(db, scopeA, "lectures/intro")).toEqual({ storageKey: null });
+      expect((await listMaterialsForCourse(db, scopeA)).some((m) => m.id === materialAId)).toBe(false);
+    });
+
+    it("deletes every material under a document path prefix, and all of them for the course", async () => {
+      const scopeB = unsafeCourseScope(courseBId);
+      await setMaterialDocumentPath(db, scopeB, materialBId, "lectures/module-1/notes");
+      expect(await deleteMaterialsByDocumentPrefix(db, scopeB, "lectures/module-2/")).toEqual([]);
+      expect(await deleteMaterialsByDocumentPrefix(db, scopeB, "lectures/module-1/")).toEqual([{ storageKey: null }]);
+      expect(await deleteAllMaterials(db, scopeB)).toEqual([]);
+    });
   });
 });

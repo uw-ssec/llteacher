@@ -97,6 +97,36 @@ describe.skipIf(!okfAvailable(OKF))("OkfKnowledgeService (real binary)", () => {
     expect(await svc.exportBundle(COURSE_B)).toBeNull();
   });
 
+  it("removes a directory with everything under it, its originals, and the parent's listing", async () => {
+    const intro = await svc.create(COURSE_A, { id: "lectures/module-1/intro", type: "lecture", title: "Intro", description: "", body: "A" });
+    await svc.create(COURSE_A, { id: "lectures/module-1/deep/notes", type: "lecture", title: "Notes", description: "", body: "B" });
+    await svc.create(COURSE_A, { id: "lectures/other", type: "lecture", title: "Other", description: "", body: "C" });
+    // An edit leaves an original behind; removal must take that too.
+    await svc.update(COURSE_A, "lectures/module-1/intro", { body: "A edited", expectedBody: intro.body });
+    const result = await svc.removeDirectory(COURSE_A, "lectures/module-1");
+    expect(result?.removed.sort()).toEqual(["lectures/module-1/deep/notes", "lectures/module-1/intro"]);
+    expect(existsSync(path.join(root, "courses", COURSE_A, "knowledge", "lectures/module-1"))).toBe(false);
+    expect(existsSync(path.join(root, "courses", COURSE_A, "originals", "lectures/module-1/intro.txt"))).toBe(false);
+    expect((await svc.list(COURSE_A)).map((d) => d.id)).toEqual(expect.arrayContaining(["lectures/other", "lectures/index"]));
+    expect((await svc.list(COURSE_A)).some((d) => d.id.startsWith("lectures/module-1"))).toBe(false);
+    expect(readFileSync(path.join(root, "courses", COURSE_A, "knowledge", "lectures/index.md"), "utf8")).not.toContain("module-1");
+    expect(readFileSync(path.join(root, "courses", COURSE_A, "knowledge", "log.md"), "utf8")).toContain("lectures/module-1");
+    expect(await svc.removeDirectory(COURSE_A, "lectures/module-1")).toBeNull();
+    expect(await svc.removeDirectory(COURSE_A, "")).toBeNull();
+  });
+
+  it("removes the whole bundle and leaves an empty, valid one behind", async () => {
+    await svc.create(COURSE_A, { id: "lectures/intro", type: "lecture", title: "Intro", description: "", body: "A" });
+    await svc.create(COURSE_A, { id: "syllabus", type: "syllabus", title: "Syllabus", description: "", body: "B" });
+    const result = await svc.removeBundle(COURSE_A);
+    expect(result).toEqual({ removed: 2 });
+    const after = await svc.list(COURSE_A);
+    expect(after.filter((d) => d.kind === "concept")).toEqual([]);
+    expect(existsSync(path.join(root, "courses", COURSE_A, "knowledge", "index.md"))).toBe(true);
+    expect((await svc.validate(COURSE_A)).isConformant).toBe(true);
+    expect(await svc.removeBundle(COURSE_B)).toBeNull();
+  });
+
   it("searches and shows within one course only", async () => {
     await svc.create(COURSE_A, { id: "elasticity", type: "lecture", title: "Elasticity", description: "Price elasticity of demand", body: "Elastic goods respond strongly to price." });
     await svc.create(COURSE_B, { id: "elasticity", type: "lecture", title: "Other course", description: "Unrelated", body: "Nothing about prices." });

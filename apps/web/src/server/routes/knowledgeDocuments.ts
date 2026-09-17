@@ -5,6 +5,9 @@ import type { AppEnv } from "../context";
 import { instructorScope } from "../utils/guards";
 import { makeDb } from "../../db/client";
 import { getCourseTitle } from "../repositories/courses";
+import { deleteAllMaterials, deleteMaterialByDocumentPath, deleteMaterialsByDocumentPrefix } from "../repositories/materials";
+import { storageFromEnv } from "../storage/objectStore";
+import { logServerError } from "../utils/errors";
 import { isValidConceptId } from "../knowledge/conceptId";
 import {
   ConceptConflictError, ConceptExistsError, ConceptIdError, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, isValidDirectory, knowledgeServiceFromEnv,
@@ -110,7 +113,76 @@ export async function deleteDocumentHandler(c: Context<AppEnv>) {
   const id = conceptIdParam(c);
   if (!id) return c.json({ error: "Invalid document id." }, 400);
   const removed = await knowledgeServiceFromEnv(c.env).remove(scope, id);
-  return removed ? c.body(null, 204) : c.json({ error: "No such document." }, 404);
+  if (!removed) return c.json({ error: "No such document." }, 404);
+  // ?withUpload=1: take the upload that produced this document with it, so
+  // it does not sit at "ready" pointing at nothing, ready to be re-extracted
+  // by a Retry. The default keeps it, for an instructor who wants to redo
+  // the extraction later.
+  if (flag(c.req.query("withUpload"))) {
+    const material = await deleteMaterialByDocumentPath(makeDb(c.env.DATABASE_URL), scope, id);
+    await dropStoredFiles(c, material ? [material] : []);
+  }
+  return c.body(null, 204);
+}
+
+function flag(value: string | undefined): boolean {
+  return value === "1" || value === "true";
+}
+
+/** Best effort: a stored file that will not delete is logged, not fatal --
+ *  the rows are already gone and the console has nothing left to show. */
+async function dropStoredFiles(c: Context<AppEnv>, rows: Array<{ storageKey: string | null }>): Promise<void> {
+  const store = storageFromEnv(c.env);
+  for (const row of rows) {
+    if (!row.storageKey) continue;
+    try {
+      await store.delete(row.storageKey);
+    } catch (error) {
+      logServerError("knowledge.delete.storage", error);
+    }
+  }
+}
+
+/** A folder and everything under it. `?withUploads=1` also removes the
+ *  uploads whose documents lived there. */
+export async function deleteDirectoryHandler(c: Context<AppEnv>) {
+  const scope = instructorScope(c);
+  if (!scope) return c.json({ error: "Not permitted." }, 403);
+  const directory = decodeURIComponent(c.req.param("directory") ?? "");
+  if (!isValidDirectory(directory)) return c.json({ error: "Invalid directory." }, 400);
+  const result = await knowledgeServiceFromEnv(c.env).removeDirectory(scope, directory);
+  if (!result) return c.json({ error: "No such folder." }, 404);
+  let uploads = 0;
+  if (flag(c.req.query("withUploads"))) {
+    const rows = await deleteMaterialsByDocumentPrefix(makeDb(c.env.DATABASE_URL), scope, `${directory}/`);
+    await dropStoredFiles(c, rows);
+    uploads = rows.length;
+  }
+  return c.json({ documents: result.removed.length, uploads });
+}
+
+const DELETE_PHRASE = "DELETE";
+
+/** The whole knowledge base. Guarded by a typed phrase in the body, because
+ *  it is the one action here the console cannot undo. */
+export async function deleteKnowledgeBaseHandler(c: Context<AppEnv>) {
+  const scope = instructorScope(c);
+  if (!scope) return c.json({ error: "Not permitted." }, 403);
+  const parsed = z
+    .object({ confirm: z.string(), withUploads: z.boolean().optional() })
+    .safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success || parsed.data.confirm !== DELETE_PHRASE) {
+    return c.json({ error: `Type ${DELETE_PHRASE} to confirm.` }, 400);
+  }
+  const result = await knowledgeServiceFromEnv(c.env).removeBundle(scope);
+  if (!result) return c.json({ error: "This course has no knowledge base yet." }, 404);
+  let uploads = 0;
+  if (parsed.data.withUploads) {
+    const rows = await deleteAllMaterials(makeDb(c.env.DATABASE_URL), scope);
+    await dropStoredFiles(c, rows);
+    uploads = rows.length;
+  }
+  return c.json({ documents: result.removed, uploads });
 }
 
 export async function documentLinksHandler(c: Context<AppEnv>) {

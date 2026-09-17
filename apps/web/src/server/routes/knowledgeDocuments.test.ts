@@ -22,7 +22,10 @@ import {
   updateDocumentHandler,
   downloadDocumentHandler,
   exportKnowledgeHandler,
+  deleteDirectoryHandler,
+  deleteKnowledgeBaseHandler,
 } from "./knowledgeDocuments";
+import { memoryObjectStore } from "../storage/objectStore";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
 
@@ -35,6 +38,7 @@ const TEST_ENV = { DATABASE_URL: "ignored" } as unknown as Env;
 const svc = {
   list: vi.fn(), show: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(),
   createDirectory: vi.fn(), validate: vi.fn(), search: vi.fn(), readRaw: vi.fn(), exportBundle: vi.fn(),
+  removeDirectory: vi.fn(), removeBundle: vi.fn(),
 };
 vi.mock("../knowledge/service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../knowledge/service")>();
@@ -43,6 +47,19 @@ vi.mock("../knowledge/service", async (importOriginal) => {
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 const getCourseTitle = vi.fn();
 vi.mock("../repositories/courses", () => ({ getCourseTitle: (...a: unknown[]) => getCourseTitle(...a) }));
+const deleteMaterialByDocumentPath = vi.fn();
+const deleteMaterialsByDocumentPrefix = vi.fn();
+const deleteAllMaterials = vi.fn();
+vi.mock("../repositories/materials", () => ({
+  deleteMaterialByDocumentPath: (...a: unknown[]) => deleteMaterialByDocumentPath(...a),
+  deleteMaterialsByDocumentPrefix: (...a: unknown[]) => deleteMaterialsByDocumentPrefix(...a),
+  deleteAllMaterials: (...a: unknown[]) => deleteAllMaterials(...a),
+}));
+const store = memoryObjectStore();
+vi.mock("../storage/objectStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../storage/objectStore")>();
+  return { ...actual, storageFromEnv: () => store };
+});
 
 const CONCEPT = {
   id: "lectures/module-1/intro", kind: "concept" as const, type: "lecture", title: "Intro", description: "Markets",
@@ -84,6 +101,8 @@ function appWith(role: "instructor" | "student" = "instructor") {
   a.get("/api/courses/:courseId/knowledge/search", searchKnowledgeHandler);
   a.get("/api/courses/:courseId/knowledge/documents/:documentId/download", downloadDocumentHandler);
   a.get("/api/courses/:courseId/knowledge/export", exportKnowledgeHandler);
+  a.delete("/api/courses/:courseId/knowledge/directories/:directory", deleteDirectoryHandler);
+  a.delete("/api/courses/:courseId/knowledge", deleteKnowledgeBaseHandler);
   return a;
 }
 function app() {
@@ -199,6 +218,60 @@ describe("knowledge document routes over the bundle", () => {
     svc.exportBundle.mockResolvedValue(null);
     expect((await app().request(`/api/courses/${COURSE_ID}/knowledge/export`, {}, TEST_ENV)).status).toBe(404);
     expect((await appWith("student").request(`/api/courses/${COURSE_ID}/knowledge/export`, {}, TEST_ENV)).status).toBe(403);
+  });
+
+  it("deletes a document and, when asked, the upload it came from", async () => {
+    svc.remove.mockResolvedValue(true);
+    await store.put("k/one.pdf", new TextEncoder().encode("x").buffer, {});
+    deleteMaterialByDocumentPath.mockResolvedValue({ storageKey: "k/one.pdf" });
+    const res = await app().request(`${base}/${ENC}?withUpload=1`, { method: "DELETE" }, TEST_ENV);
+    expect(res.status).toBe(204);
+    expect(deleteMaterialByDocumentPath).toHaveBeenCalledWith({}, COURSE_ID, CONCEPT.id);
+    expect(await store.get("k/one.pdf")).toBeNull();
+    deleteMaterialByDocumentPath.mockClear();
+    expect((await app().request(`${base}/${ENC}`, { method: "DELETE" }, TEST_ENV)).status).toBe(204);
+    expect(deleteMaterialByDocumentPath).not.toHaveBeenCalled();
+  });
+
+  it("deletes a folder, reporting what went, and cleans uploads only when asked", async () => {
+    svc.removeDirectory.mockResolvedValue({ removed: ["lectures/module-1/intro", "lectures/module-1/notes"] });
+    deleteMaterialsByDocumentPrefix.mockResolvedValue([{ storageKey: "k/a.pdf" }, { storageKey: null }]);
+    await store.put("k/a.pdf", new TextEncoder().encode("x").buffer, {});
+    const res = await app().request(`/api/courses/${COURSE_ID}/knowledge/directories/lectures%2Fmodule-1?withUploads=1`, { method: "DELETE" }, TEST_ENV);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ documents: 2, uploads: 2 });
+    expect(svc.removeDirectory).toHaveBeenCalledWith(COURSE_ID, "lectures/module-1");
+    expect(deleteMaterialsByDocumentPrefix).toHaveBeenCalledWith({}, COURSE_ID, "lectures/module-1/");
+    expect(await store.get("k/a.pdf")).toBeNull();
+
+    deleteMaterialsByDocumentPrefix.mockClear();
+    const keep = await app().request(`/api/courses/${COURSE_ID}/knowledge/directories/lectures%2Fmodule-1`, { method: "DELETE" }, TEST_ENV);
+    expect(await keep.json()).toEqual({ documents: 2, uploads: 0 });
+    expect(deleteMaterialsByDocumentPrefix).not.toHaveBeenCalled();
+
+    svc.removeDirectory.mockResolvedValue(null);
+    expect((await app().request(`/api/courses/${COURSE_ID}/knowledge/directories/nope`, { method: "DELETE" }, TEST_ENV)).status).toBe(404);
+    expect((await app().request(`/api/courses/${COURSE_ID}/knowledge/directories/..%2Fetc`, { method: "DELETE" }, TEST_ENV)).status).toBe(400);
+    expect((await appWith("student").request(`/api/courses/${COURSE_ID}/knowledge/directories/lectures`, { method: "DELETE" }, TEST_ENV)).status).toBe(403);
+  });
+
+  it("deletes the whole knowledge base only with the typed confirmation", async () => {
+    svc.removeBundle.mockResolvedValue({ removed: 1121 });
+    deleteAllMaterials.mockResolvedValue([{ storageKey: "k/z.pdf" }]);
+    await store.put("k/z.pdf", new TextEncoder().encode("x").buffer, {});
+    const json = (body: unknown) => ({ method: "DELETE", body: JSON.stringify(body), headers: { "content-type": "application/json" } });
+    const bad = await app().request(`/api/courses/${COURSE_ID}/knowledge`, json({ confirm: "delete?", withUploads: true }), TEST_ENV);
+    expect(bad.status).toBe(400);
+    expect(svc.removeBundle).not.toHaveBeenCalled();
+    const res = await app().request(`/api/courses/${COURSE_ID}/knowledge`, json({ confirm: "DELETE", withUploads: true }), TEST_ENV);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ documents: 1121, uploads: 1 });
+    expect(await store.get("k/z.pdf")).toBeNull();
+    deleteAllMaterials.mockClear();
+    const keep = await app().request(`/api/courses/${COURSE_ID}/knowledge`, json({ confirm: "DELETE", withUploads: false }), TEST_ENV);
+    expect(await keep.json()).toEqual({ documents: 1121, uploads: 0 });
+    expect(deleteAllMaterials).not.toHaveBeenCalled();
+    expect((await appWith("student").request(`/api/courses/${COURSE_ID}/knowledge`, json({ confirm: "DELETE" }), TEST_ENV)).status).toBe(403);
   });
 
   it("searches with a clamped limit", async () => {

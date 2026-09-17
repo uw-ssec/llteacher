@@ -7558,6 +7558,31 @@ tr:focus-within .admin-knowledge__row-tools {
 
 /* -- Document view header: view toggle and unsaved status -------------------- */
 
+.admin-knowledge-doc__actions {
+  --document-control-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.admin-knowledge-doc__actions > .admin-button,
+.admin-knowledge-doc__actions .admin-menu__trigger,
+.admin-knowledge-doc__actions .admin-knowledge-doc__view {
+  box-sizing: border-box;
+  height: var(--document-control-height);
+}
+
+.admin-knowledge-doc__actions .admin-menu__trigger {
+  width: var(--document-control-height);
+  justify-content: center;
+  padding: 0;
+}
+
+.admin-knowledge-doc__actions .admin-knowledge-doc__view button {
+  padding-block: 0;
+}
+
 .admin-knowledge-doc__view {
   display: inline-flex;
   padding: 3px;
@@ -7609,6 +7634,121 @@ tr:focus-within .admin-knowledge__row-tools {
   block-size: 6px;
   border-radius: 50%;
   background-color: var(--color-warning);
+}
+
+/* -- ConfirmDialog: the destructive-action modal ------------------------------
+   A native <dialog>; the browser owns the backdrop, focus, and Escape. The
+   confirm button is the only red control on the page. */
+
+.admin-dialog {
+  inline-size: min(480px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 8px;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.07), 0 16px 48px rgba(0, 0, 0, 0.16);
+}
+
+.admin-dialog::backdrop {
+  background-color: rgba(26, 26, 26, 0.45);
+}
+
+.admin-dialog__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-6);
+}
+
+.admin-dialog__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+}
+
+.admin-dialog__text {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.admin-dialog__text p {
+  margin: 0;
+}
+
+.admin-dialog__check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.admin-dialog__phrase {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.admin-dialog__phrase input {
+  padding-inline-start: var(--space-3);
+  font-family: var(--font-mono);
+}
+
+.admin-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.admin-button--danger {
+  background-color: var(--color-error);
+  border-color: var(--color-error);
+  color: #FFFFFF;
+}
+
+.admin-button--danger:hover:not(:disabled),
+.admin-button--danger:focus-visible {
+  background-color: color-mix(in srgb, var(--color-error) 85%, #1A1A1A);
+  border-color: color-mix(in srgb, var(--color-error) 85%, #1A1A1A);
+  outline: none;
+}
+
+.admin-button--danger:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.admin-link-button--danger {
+  color: var(--color-error);
+}
+
+.admin-menu__item--danger {
+  color: var(--color-error);
+}
+
+.admin-menu__item--danger .admin-menu__icon {
+  color: var(--color-error);
+}
+
+.admin-menu__separator {
+  border: 0;
+  border-block-start: 1px solid var(--color-border);
+  margin: 6px 4px;
+}
+
+.admin-knowledge__icon-link--danger {
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+}
+
+.admin-knowledge__icon-link--danger:hover {
+  color: var(--color-error);
+  background-color: rgba(180, 60, 60, 0.08); /* .admin-status--past_due */
 }
 
 /* -- KnowledgeDocumentView — one OKF concept, edited by hand (#42) --------
