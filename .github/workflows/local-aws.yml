@@ -30,6 +30,7 @@ jobs:
           npm run typecheck --workspace=infra
           bash -n infra/scripts/*.sh
           npm run aws:local:migration-guard
+          PULUMI_STACK=local ./infra/scripts/verify-local-stack.test.sh
           ! rg -n 'configure-aws-credentials|AWS_DEPLOY_ROLE|secrets\.AWS' .github/workflows/local-aws.yml
       - name: Exercise the local AWS deployment path
         run: npm run aws:local:test
