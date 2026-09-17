@@ -31,6 +31,7 @@ jobs:
           bash -n infra/scripts/*.sh
           npm run aws:local:migration-guard
           PULUMI_STACK=local ./infra/scripts/run-local-migrations-retry.test.sh
+          PULUMI_STACK=local ./infra/scripts/tls-proxy-up.test.sh
           PULUMI_STACK=local ./infra/scripts/local-test.test.sh
           PULUMI_STACK=local ./infra/scripts/verify-local-stack.test.sh
           ! rg -n 'configure-aws-credentials|AWS_DEPLOY_ROLE|secrets\.AWS' .github/workflows/local-aws.yml

@@ -9,5 +9,6 @@ cert_dir="$root/.floci/certs"
 }
 docker rm --force llteacher-local-tls >/dev/null 2>&1 || true
 docker run -d --name llteacher-local-tls -p 443:443 \
+  --add-host=host.docker.internal:host-gateway \
   -v "$cert_dir:/certs:ro" -v "$root/infra/Caddyfile:/etc/caddy/Caddyfile:ro" \
   caddy:2-alpine >/dev/null
