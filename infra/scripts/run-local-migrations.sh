@@ -25,17 +25,31 @@ network=$(${aws_local[@]} ecs describe-services \
   --query 'services[0].networkConfiguration.awsvpcConfiguration' \
   --output json)
 
-task=$(${aws_local[@]} ecs run-task \
-  --cluster llteacher-local-cluster \
-  --task-definition llteacher-local-app \
-  --launch-type FARGATE \
-  --count 1 \
-  --network-configuration "{\"awsvpcConfiguration\":$network}" \
-  --overrides '{"containerOverrides":[{"name":"app","command":["npm","--workspace=apps/web","run","db:migrate"]}]}' \
-  --query 'tasks[0].taskArn' --output text)
+attempts="${LLTEACHER_LOCAL_MIGRATION_ATTEMPTS:-6}"
+delay_seconds="${LLTEACHER_LOCAL_MIGRATION_DELAY_SECONDS:-5}"
 
-${aws_local[@]} ecs wait tasks-stopped --cluster llteacher-local-cluster --tasks "$task"
-exit_code=$(${aws_local[@]} ecs describe-tasks \
-  --cluster llteacher-local-cluster --tasks "$task" \
-  --query 'tasks[0].containers[0].exitCode' --output text)
-test "$exit_code" = 0
+for ((attempt = 1; attempt <= attempts; attempt++)); do
+  task=$(${aws_local[@]} ecs run-task \
+    --cluster llteacher-local-cluster \
+    --task-definition llteacher-local-app \
+    --launch-type FARGATE \
+    --count 1 \
+    --network-configuration "{\"awsvpcConfiguration\":$network}" \
+    --overrides '{"containerOverrides":[{"name":"app","command":["npm","--workspace=apps/web","run","db:migrate"]}]}' \
+    --query 'tasks[0].taskArn' --output text)
+
+  ${aws_local[@]} ecs wait tasks-stopped --cluster llteacher-local-cluster --tasks "$task"
+  exit_code=$(${aws_local[@]} ecs describe-tasks \
+    --cluster llteacher-local-cluster --tasks "$task" \
+    --query 'tasks[0].containers[0].exitCode' --output text)
+  if [[ "$exit_code" = 0 ]]; then
+    exit 0
+  fi
+
+  if (( attempt < attempts )); then
+    sleep "$delay_seconds"
+  fi
+done
+
+echo "Migration task failed after $attempts attempt(s); service deployment remains disabled." >&2
+exit 1

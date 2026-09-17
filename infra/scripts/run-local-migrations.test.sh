@@ -21,7 +21,7 @@ printf '%s\n' '#!/usr/bin/env bash' \
 chmod +x "$test_dir/aws"
 
 set +e
-PATH="$test_dir:$PATH" AWS_LOG="$log" PULUMI_STACK=local "$root/infra/scripts/run-local-migrations.sh"
+PATH="$test_dir:$PATH" AWS_LOG="$log" PULUMI_STACK=local LLTEACHER_LOCAL_MIGRATION_ATTEMPTS=1 "$root/infra/scripts/run-local-migrations.sh"
 exit_code=$?
 set -e
 
