@@ -4,7 +4,7 @@ Environment: staging, one instructor account, one student account in the same co
 
 ## Instructor loop
 1. Knowledge → Upload folder → pick the Econ 201 export. Expect every file listed under Materials with its folder path.
-2. Within two minutes: `.txt` captions, `.docx`, and `.pptx` show `ready`; scanned PDFs and `.mp3` show `pending` with a reason. Record the counts.
+2. After extraction completes: `.txt` captions, `.docx`, `.pptx`, and text-layer PDFs show `ready`; scanned PDFs show `pending` with a reason. MP3s, extensionless files, and files over 25 MB are rejected. Record counts and elapsed time.
 3. Open a `ready` material's document. Body is readable markdown; frontmatter shows `resource` and `status: generated`.
 4. Search box: type a phrase from a lecture. The lecture is in the results. Type nonsense. "No documents matched".
 5. Edit a document body and save. Search for a word you added. It is found.

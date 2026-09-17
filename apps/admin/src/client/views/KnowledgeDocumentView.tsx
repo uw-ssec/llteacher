@@ -11,9 +11,7 @@
 
    Editing is the escape hatch for formats #40 cannot extract yet: an
    instructor can write the markdown by hand and the document becomes real
-   grounding material with no model involved. Saving resets index_status to
-   pending, which the copy says out loud -- a silent re-queue would leave
-   someone wondering why their edit had not taken effect.
+   grounding material with no model involved. Saving updates the OKF body immediately for the next search.
 
    The "dirty" flag is compared against `savedBody`, not against
    `document.data.body`. A save's PUT response already tells this view the
@@ -204,7 +202,7 @@ export function KnowledgeDocumentView({
 
       {dirty && (
         <p className="admin-inline-note">
-          Saving re-queues this document to be re-indexed before the tutor uses the change.
+          Saving updates the searchable document the tutor uses.
         </p>
       )}
 

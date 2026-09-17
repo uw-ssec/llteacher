@@ -54,4 +54,13 @@ describe("OkfKnowledgeService.create rollback on partial failure", () => {
     await expect(fs.access(file)).rejects.toThrow();
     expect(await svc.show(COURSE_A, "a")).toBeNull();
   });
+  it("restores the previous body when OKF bookkeeping fails during update", async () => {
+    await fs.mkdir(dir, { recursive: true });
+    const original = '---\ntitle: "A"\ndescription: "d"\ntype: "note"\n---\n\noriginal body\n';
+    await fs.writeFile(file, original);
+    vi.mocked(runOkf).mockRejectedValueOnce(new Error("bookkeeping failed"));
+    await expect(svc.update(COURSE_A, "a", { body: "replacement" })).rejects.toThrow("bookkeeping failed");
+    expect(await fs.readFile(file, "utf8")).toBe(original);
+  });
+
 });

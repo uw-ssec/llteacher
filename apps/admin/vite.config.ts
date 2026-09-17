@@ -8,14 +8,10 @@ export default defineConfig({
     port: 2312,
     strictPort: true,
     proxy: {
-      // apps/admin has no worker of its own (issue #8: "apps/admin talks to
-      // the same worker API"). In dev, apps/web's Vite dev server (port
-      // 2311) runs that worker in-process via its own devApiProxy plugin;
-      // this just forwards /api/* there so cookies set by /api/auth/*
-      // round-trip correctly against http://localhost:2312.
+      // Both SPAs use the same Node API and preserve the browser origin.
       "/api": {
-        target: "http://localhost:2311",
-        changeOrigin: true,
+        target: process.env.LLTEACHER_API_URL ?? "http://localhost:8080",
+        changeOrigin: false,
       },
     },
   },

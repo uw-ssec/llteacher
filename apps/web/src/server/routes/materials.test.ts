@@ -12,6 +12,7 @@
    -------------------------------------------------------------------------- */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { withMaterialLock } from "../knowledge/materialLock";
 import { Hono } from "hono";
 import {
   listMaterialsHandler,
@@ -91,6 +92,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   listMaterialsForCourse.mockResolvedValue([]);
   insertMaterial.mockResolvedValue({ id: "mat-1" });
+  getMaterialForReingest.mockResolvedValue(null);
   extractMaterial.mockResolvedValue({ status: "ready", documentPath: "lecture1" });
 });
 
@@ -251,6 +253,7 @@ describe("materials routes", () => {
   });
 
   it("refuses to delete a material belonging to another course", async () => {
+    getMaterialForReingest.mockResolvedValue(null);
     deleteMaterial.mockResolvedValue(null);
     const res = await appWith("instructor").request(
       `/api/courses/${COURSE_ID}/materials/${OTHER_MATERIAL_ID}`,
@@ -260,7 +263,27 @@ describe("materials routes", () => {
     expect(res.status).toBe(404);
   });
 
+  it("waits for an active extraction before deleting its published concept", async () => {
+    let release!: () => void;
+    const extracting = withMaterialLock(COURSE_ID, "mat-1", async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      getMaterialForReingest.mockResolvedValue({ storageKey: null, documentPath: "just-published" });
+      deleteMaterial.mockResolvedValue({ storageKey: null, documentPath: "just-published" });
+    });
+    await vi.waitFor(() => expect(release).toBeDefined());
+    const response = appWith("instructor").request(
+      `/api/courses/${COURSE_ID}/materials/mat-1`, { method: "DELETE" }, TEST_ENV,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(deleteMaterial).not.toHaveBeenCalled();
+    release();
+    await extracting;
+    expect((await response).status).toBe(204);
+    expect(knowledgeRemove).toHaveBeenCalledWith(COURSE_ID, "just-published");
+  });
+
   it("deletes a material and removes its stored object", async () => {
+    getMaterialForReingest.mockResolvedValue({ storageKey: "courses/c/materials/m/a.pdf", documentPath: null });
     deleteMaterial.mockResolvedValue({ storageKey: "courses/c/materials/m/a.pdf", documentPath: null });
     const removed = vi.spyOn(store, "delete");
 
@@ -275,6 +298,7 @@ describe("materials routes", () => {
   });
 
   it("also removes the associated concept when a material has one", async () => {
+    getMaterialForReingest.mockResolvedValue({ storageKey: null, documentPath: "n" });
     deleteMaterial.mockResolvedValue({ storageKey: null, documentPath: "n" });
 
     const res = await appWith("instructor").request(
@@ -301,6 +325,7 @@ describe("materials routes", () => {
     // hiccup on the best-effort cleanup must not turn a completed delete
     // into a client-visible failure.
     vi.spyOn(console, "error").mockImplementation(() => {});
+    getMaterialForReingest.mockResolvedValue({ storageKey: "courses/c/materials/m/a.pdf", documentPath: null });
     deleteMaterial.mockResolvedValue({ storageKey: "courses/c/materials/m/a.pdf", documentPath: null });
     vi.spyOn(store, "delete").mockRejectedValueOnce(new StorageError("delete", 500));
 
@@ -312,8 +337,9 @@ describe("materials routes", () => {
     expect(res.status).toBe(204);
   });
 
-  it("still returns 204 when the concept removal fails", async () => {
+  it("keeps the material retryable when concept removal fails", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
+    getMaterialForReingest.mockResolvedValue({ storageKey: null, documentPath: "n" });
     deleteMaterial.mockResolvedValue({ storageKey: null, documentPath: "n" });
     knowledgeRemove.mockRejectedValueOnce(new Error("concept locked"));
 
@@ -322,7 +348,8 @@ describe("materials routes", () => {
       { method: "DELETE" },
       TEST_ENV,
     );
-    expect(res.status).toBe(204);
+    expect(res.status).toBe(503);
+    expect(deleteMaterial).not.toHaveBeenCalled();
   });
 
   it("does not admit a student", async () => {

@@ -164,3 +164,11 @@ export async function setMaterialStatus(
     .set({ status, errorDetail, updatedAt: new Date() })
     .where(and(eq(courseMaterials.id, materialId), eq(courseMaterials.courseId, scope)));
 }
+
+/** Run before accepting requests in the single-process deployment. A prior
+ * process cannot finish these jobs; retain their paths so Retry updates them. */
+export async function recoverInterruptedExtractions(db: Db): Promise<void> {
+  await db.update(courseMaterials)
+    .set({ status: "failed", errorDetail: "Extraction was interrupted by a restart. Retry ingestion.", updatedAt: new Date() })
+    .where(eq(courseMaterials.status, "processing"));
+}

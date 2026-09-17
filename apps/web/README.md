@@ -20,7 +20,8 @@ string, pagination cursors, and worked `curl` examples — see:
 1. `npm install`
 2. Copy `.dev.vars.example` to `.dev.vars` and fill in real values.
 3. `npm run db:migrate` (after Drizzle schema exists in Phase 1).
-4. `npm run dev` to start Vite + Wrangler in dev mode.
+4. Create `.knowledge`, run `npm run start` for the Node API, then `npm run dev` for Vite.
+   Both SPAs proxy `/api` to `http://localhost:8080`; set `LLTEACHER_API_URL` when using another API port.
 
 ## Node runtime (replaces the Worker)
 
@@ -32,7 +33,7 @@ string, pagination cursors, and worked `curl` examples — see:
   and put it somewhere earlier on your `PATH` than the brew shim (or point `OKF_BINARY` straight at it).
 - `mkdir -p .knowledge` and set `KNOWLEDGE_ROOT=$(pwd)/.knowledge` (git-ignored). okf refuses a symlinked
   root, so the app resolves it with realpath; on macOS `/tmp` is a symlink and will not work.
-- Run the API with `npm run start` (PORT defaults to 8080) and the SPA with `npm run dev` as before.
+- Run the API with `npm run start` (loads `.dev.vars` when present; PORT defaults to 8080) and the SPA with `npm run dev`.
 - Production mounts EFS at `/mnt/knowledge`; the ECS service runs a single task this quarter because the
   bundle has one writer per course and okf has no locking of its own beyond the app's lock file.
 
@@ -188,3 +189,11 @@ optional.
 ## Phase 0 status
 
 Scaffolding only. Auth, LLM, real routes land in subsequent phases (see `../docs/superpowers/plans/`).
+
+Extraction lifecycle: the Node server recovers interrupted `processing` materials
+as `failed` before listening, so instructors can retry them. Queued uploads and
+retries share a per-material lock with deletion and reread the current document
+path before extracting. This relies on the existing single-process deployment;
+overlapping replicas require shared job ownership and coordinated recovery.
+Document bodies are written through files under the course lock, avoiding OS
+command-argument limits; OKF still maintains the metadata, index, and log.

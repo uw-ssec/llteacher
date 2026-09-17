@@ -1,5 +1,6 @@
 import { promises as fs, realpathSync } from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { runOkf } from "./okfCli";
 import { withWriteLock } from "./writeLock";
 import { isValidConceptId } from "./conceptId";
@@ -173,6 +174,23 @@ async function readFrontmatterHead(file: string): Promise<string> {
   } finally {
     await handle.close();
   }
+}
+
+// Replace via rename so readers never observe a partially written body.
+async function atomicWrite(file: string, raw: string): Promise<void> {
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporary, raw);
+    await fs.rename(temporary, file);
+  } finally {
+    await fs.unlink(temporary).catch(() => undefined);
+  }
+}
+
+function replaceBody(raw: string, body: string): string {
+  const header = /^(---\r?\n[\s\S]*?\r?\n---)(?:\r?\n|$)/.exec(raw);
+  if (!header) throw new Error("Concept has no frontmatter");
+  return `${header[1]}\n\n${body}`;
 }
 
 export class OkfKnowledgeService implements KnowledgeService {
@@ -354,7 +372,8 @@ export class OkfKnowledgeService implements KnowledgeService {
       ]);
       try {
         if (input.body.trim() !== "") {
-          await runOkf(this.binary, ["update", input.id, dir, "--body", input.body]);
+          await atomicWrite(file, replaceBody(await fs.readFile(file, "utf8"), input.body));
+          await runOkf(this.binary, ["update", input.id, dir]);
         }
         const keys: Record<string, string> = { status: "generated" };
         if (input.resource) keys.resource = input.resource;
@@ -386,12 +405,19 @@ export class OkfKnowledgeService implements KnowledgeService {
     const dir = this.bundleDir(courseId);
     return this.withCourseLock(courseId, async () => {
       if (!(await exists(file))) return null;
-      const before = parseFrontmatter(await fs.readFile(file, "utf8")).frontmatter;
+      const original = await fs.readFile(file, "utf8");
+      const before = parseFrontmatter(original).frontmatter;
       const args = ["update", conceptId, dir];
-      if (patch.body !== undefined) args.push("--body", patch.body);
       if (patch.title !== undefined) args.push("--title", patch.title);
       if (patch.description !== undefined) args.push("--desc", patch.description);
-      if (args.length > 3) await runOkf(this.binary, args);
+      try {
+        if (patch.body !== undefined) await atomicWrite(file, replaceBody(original, patch.body));
+        if (patch.body !== undefined || args.length > 3) await runOkf(this.binary, args);
+      } catch (err) {
+        await atomicWrite(file, original);
+        this.invalidateListCache(courseId);
+        throw err;
+      }
       // okf update preserves scalar extra keys today; re-assert the two the
       // app owns so a future okf that drops them cannot silently lose them.
       const keep: Record<string, string> = {};

@@ -6,6 +6,7 @@ import path from "node:path";
 import { app } from "./index";
 import { closePools, makeDb } from "../db/client";
 import { autoSubmitOverdueSections } from "./jobs/autoSubmitOverdue";
+import { recoverInterruptedExtractions } from "./repositories/materials";
 import { drainExtractions } from "./knowledge/extract/job";
 import { logServerError, logServerInfo } from "./utils/errors";
 
@@ -32,11 +33,18 @@ export function envFromProcess(source: NodeJS.ProcessEnv = process.env): Env {
 const CLIENT_DIR = path.resolve(process.cwd(), "dist/client");
 const HOURLY_MS = 60 * 60 * 1000;
 
-export function buildNodeApp(env: Env) {
+export function buildNodeApp(env: Env, clientDir = CLIENT_DIR) {
   const outer = new Hono();
+  // Static HTML bypasses the inner API app, but needs these page-level
+  // headers too for WebR's SharedArrayBuffer execution channel.
+  outer.use("*", async (c, next) => {
+    await next();
+    c.header("Cross-Origin-Opener-Policy", "same-origin");
+    c.header("Cross-Origin-Embedder-Policy", "require-corp");
+  });
   outer.all("/api/*", (c) => app.fetch(c.req.raw, env));
-  outer.use("*", serveStatic({ root: path.relative(process.cwd(), CLIENT_DIR) }));
-  outer.get("*", (c) => c.html(readFileSync(path.join(CLIENT_DIR, "index.html"), "utf8")));
+  outer.use("*", serveStatic({ root: path.relative(process.cwd(), clientDir) }));
+  outer.get("*", (c) => c.html(readFileSync(path.join(clientDir, "index.html"), "utf8")));
   return outer;
 }
 
@@ -44,8 +52,7 @@ export function buildNodeApp(env: Env) {
  *  are already running. ECS sends SIGKILL 30 s after SIGTERM by default, so
  *  this leaves headroom for closePools() and process exit inside that
  *  window. An extraction still running at the deadline is abandoned, which
- *  is safe: its material row is still `pending` with a Retry button, and it
- *  was never marked ready. */
+ *  leaves a processing row that startup recovery marks failed for Retry. */
 const EXTRACTION_DRAIN_MS = 20_000;
 
 /** Stops accepting connections, lets in-flight extractions finish (up to the
@@ -77,12 +84,18 @@ export function installShutdownHandlers(server: { close: () => void }): void {
   process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
-if (process.argv[1]?.endsWith("node.ts") || process.argv[1]?.endsWith("node.js")) {
-  const env = envFromProcess();
-  const port = Number(process.env.PORT ?? 8080);
-  const server = serve({ fetch: buildNodeApp(env).fetch, port }, () => {
+export async function startNodeServer(env: Env, port: number) {
+  // Recovery must finish before any request can enqueue new work. This is
+  // valid for the supported single-process deployment, not overlapping replicas.
+  await recoverInterruptedExtractions(makeDb(env.DATABASE_URL));
+  return serve({ fetch: buildNodeApp(env).fetch, port }, () => {
     console.log(JSON.stringify({ level: "info", msg: "listening", port }));
   });
+}
+
+if (process.argv[1]?.endsWith("node.ts") || process.argv[1]?.endsWith("node.js")) {
+  const env = envFromProcess();
+  const server = await startNodeServer(env, Number(process.env.PORT ?? 8080));
   installShutdownHandlers(server);
   setInterval(() => {
     autoSubmitOverdueSections(makeDb(env.DATABASE_URL)).catch((err) =>

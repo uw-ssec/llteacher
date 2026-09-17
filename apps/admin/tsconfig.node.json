@@ -1,6 +1,8 @@
 {
   "compilerOptions": {
     "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "./dist/.tsbuildinfo-node",
     "skipLibCheck": true,
     "module": "ESNext",
     "moduleResolution": "bundler",

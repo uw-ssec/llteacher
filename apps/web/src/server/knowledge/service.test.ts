@@ -68,6 +68,16 @@ describe.skipIf(!okfAvailable(OKF))("OkfKnowledgeService (real binary)", () => {
     expect(await svc.search(COURSE_A, "zzzz", 5)).toEqual([]);
   });
 
+  it("creates and updates bodies larger than OS argument limits", async () => {
+    const body = "course text ".repeat(200_000);
+    const created = await svc.create(COURSE_A, { id: "large", type: "note", title: "Large", description: "d", body });
+    expect(created.body.trim()).toBe(body.trim());
+    const replacement = "replacement text ".repeat(200_000);
+    const updated = await svc.update(COURSE_A, "large", { body: replacement });
+    expect(updated?.body.trim()).toBe(replacement.trim());
+    expect((await svc.update(COURSE_A, "large", { body: "" }))?.body.trim()).toBe("");
+  });
+
   it("updates the body and preserves resource and status keys", async () => {
     await svc.create(COURSE_A, { id: "a", type: "note", title: "A", description: "d", body: "old", resource: "llteacher://materials/m-9" });
     const updated = await svc.update(COURSE_A, "a", { body: "new body" });

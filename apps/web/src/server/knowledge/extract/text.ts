@@ -1,3 +1,4 @@
+import { parseFrontmatter } from "../frontmatter";
 import { titleFromFilename, type ExtractionOutcome } from "./types";
 
 /** A real cue-timing line, anchored at line start: `00:00:01.000 --> 00:00:04.000`
@@ -66,10 +67,23 @@ export function sniffTranscript(text: string): boolean {
 }
 
 export async function extractText(filename: string, bytes: ArrayBuffer): Promise<ExtractionOutcome> {
-  const text = new TextDecoder().decode(bytes);
-  const title = titleFromFilename(filename);
+  let text = new TextDecoder().decode(bytes);
+  let title = titleFromFilename(filename);
+  let type = "note";
+  let description: string | undefined;
+  if (/\.md$/i.test(filename)) {
+    const parsed = parseFrontmatter(text);
+    // Import metadata as metadata, rather than feeding a second YAML header
+    // to retrieval or using its delimiters as the generated description.
+    if (Object.keys(parsed.frontmatter).length > 0) {
+      text = parsed.body;
+      title = parsed.frontmatter.title || title;
+      type = parsed.frontmatter.type || type;
+      description = parsed.frontmatter.description;
+    }
+  }
   if (sniffTranscript(text)) {
     return { kind: "extracted", type: "transcript", title, markdown: transcriptToProse(text) };
   }
-  return { kind: "extracted", type: "note", title, markdown: text.trim() };
+  return { kind: "extracted", type, title, ...(description ? { description } : {}), markdown: text.trim() };
 }

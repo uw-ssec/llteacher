@@ -101,7 +101,7 @@ export function KnowledgeView({
      unrelated re-render (e.g. the announcement effect above firing) and
      could starve it indefinitely under frequent renders. */
   const pending = materialList.some(
-    (m) => m.status === "pending" || m.status === "processing",
+    (m) => (m.status === "pending" && !m.errorDetail) || m.status === "processing",
   );
   useEffect(() => {
     if (!pending) return;

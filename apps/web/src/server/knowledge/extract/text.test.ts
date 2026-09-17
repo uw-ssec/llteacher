@@ -128,3 +128,11 @@ Today we cover regression.`;
     expect((crlfOut as { markdown: string }).markdown).toBe((lfOut as { markdown: string }).markdown);
   });
 });
+
+
+describe("Markdown imports", () => {
+  it("keeps title/type/description but excludes frontmatter from the body", async () => {
+    const out = await extract("gdp.md", enc('---\ntype: lecture\ntitle: "GDP"\ndescription: "Final goods and services"\nresource: "file:///private/source.pptx"\n---\n\n# GDP\nFinal output.'));
+    expect(out).toEqual({ kind: "extracted", type: "lecture", title: "GDP", description: "Final goods and services", markdown: "# GDP\nFinal output." });
+  });
+});

@@ -38,3 +38,8 @@ STORAGE_ENDPOINT="http://localhost:9000"
 STORAGE_BUCKET="llteacher-materials"
 STORAGE_ACCESS_KEY_ID="minioadmin"
 STORAGE_SECRET_ACCESS_KEY="minioadmin"
+
+# Node knowledge runtime (create this directory before starting the API).
+KNOWLEDGE_ROOT=".knowledge"
+OKF_BINARY="okf"
+PORT="8080"

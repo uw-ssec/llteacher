@@ -4,7 +4,7 @@ import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import { organizations, courses, users, courseMemberships, courseMaterials } from "../../db/schema";
 import { unsafeCourseScope } from "./scope";
-import { listMaterialsForCourse } from "./materials";
+import { listMaterialsForCourse, recoverInterruptedExtractions } from "./materials";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -87,6 +87,16 @@ describe.skipIf(!DATABASE_URL)("materials repository", () => {
     const rows = await listMaterialsForCourse(db, unsafeCourseScope(emptyCourse.id));
     expect(rows).toEqual([]);
     await db.delete(organizations).where(eq(organizations.id, emptyOrg.id));
+  });
+
+  it("recovers processing jobs while preserving completed materials and document paths", async () => {
+    await db.update(courseMaterials).set({ status: "processing", documentPath: "lecture" }).where(eq(courseMaterials.id, materialAId));
+    await db.update(courseMaterials).set({ status: "ready" }).where(eq(courseMaterials.id, materialBId));
+    await recoverInterruptedExtractions(db);
+    const [recovered] = await listMaterialsForCourse(db, unsafeCourseScope(courseAId));
+    expect(recovered).toMatchObject({ status: "failed", documentPath: "lecture", errorDetail: expect.stringContaining("Retry") });
+    const [ready] = await listMaterialsForCourse(db, unsafeCourseScope(courseBId));
+    expect(ready.status).toBe("ready");
   });
 
   it("projects an explicit column list, not the whole row", async () => {

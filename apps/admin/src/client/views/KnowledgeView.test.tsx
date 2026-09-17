@@ -385,6 +385,15 @@ describe("KnowledgeView", () => {
     vi.useRealTimers();
   });
 
+  it("does not poll a scan awaiting manual transcription", async () => {
+    vi.useFakeTimers();
+    const fetchMock = stubFetch({ materials: { materials: [MATERIALS[1]] } });
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
   // Beyond the brief: the negative case above proves polling stops when
   // idle, but not that it ever ran at all -- a `pending` check that always
   // evaluated false would pass that test too. This is the positive half.
@@ -398,7 +407,7 @@ describe("KnowledgeView", () => {
   it("keeps polling while a material is pending", async () => {
     vi.useFakeTimers();
     const fetchMock = stubFetch({
-      materials: { materials: [MATERIALS[1]] }, // status: "pending"
+      materials: { materials: [{ ...MATERIALS[1], errorDetail: null }] }, // queued
     });
     render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
     for (let i = 0; i < 10; i++) {

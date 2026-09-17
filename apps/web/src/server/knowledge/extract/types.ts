@@ -1,5 +1,5 @@
 export type ExtractionOutcome =
-  | { kind: "extracted"; type: string; title: string; markdown: string }
+  | { kind: "extracted"; type: string; title: string; description?: string; markdown: string }
   | { kind: "unsupported"; reason: string };
 
 export type Extractor = (filename: string, bytes: ArrayBuffer) => Promise<ExtractionOutcome>;

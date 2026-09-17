@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { withMaterialLock } from "../materialLock";
 import { extractMaterial, scheduleExtraction, pendingExtractions, drainExtractions } from "./job";
 import { unsafeCourseScope } from "../../repositories/scope";
 import type { ExtractionOutcome } from "./types";
 
+const getMaterialForReingest = vi.fn();
 const setMaterialStatus = vi.fn();
 const setMaterialDocumentPath = vi.fn();
 vi.mock("../../repositories/materials", () => ({
+  getMaterialForReingest: (...a: unknown[]) => getMaterialForReingest(...a),
   setMaterialStatus: (...a: unknown[]) => setMaterialStatus(...a),
   setMaterialDocumentPath: (...a: unknown[]) => setMaterialDocumentPath(...a),
 }));
@@ -32,7 +35,8 @@ const enc = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer;
 const base = { db: {} as never, courseId: unsafeCourseScope("c1"), materialId: "m1", knowledge: knowledge as never, existingDocumentPath: null };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  getMaterialForReingest.mockResolvedValue({ documentPath: null });
   hooks.extractOverride = null;
   knowledge.create.mockResolvedValue({ id: "x" });
   knowledge.update.mockResolvedValue({ id: "x" });
@@ -52,17 +56,31 @@ describe("extractMaterial", () => {
   it("disambiguates a taken id with a numeric suffix", async () => {
     const { ConceptExistsError } = await import("../service");
     knowledge.create.mockRejectedValueOnce(new ConceptExistsError("syllabus")).mockResolvedValueOnce({ id: "syllabus-2" });
+    knowledge.show.mockResolvedValue({ resource: "llteacher://materials/other-material" });
     const out = await extractMaterial({ ...base, filename: "syllabus.txt", relativePath: null, bytes: enc("Weeks") });
     expect(knowledge.create.mock.calls[1]![1]).toMatchObject({ id: "syllabus-2" });
     expect(out.documentPath).toBe("syllabus-2");
   });
+  it("adopts its own concept after a crash between the file write and DB path update", async () => {
+    const { ConceptExistsError } = await import("../service");
+    knowledge.create.mockRejectedValueOnce(new ConceptExistsError("n"));
+    knowledge.show.mockResolvedValue({ resource: "llteacher://materials/m1" });
+    const out = await extractMaterial({ ...base, filename: "n.txt", relativePath: null, bytes: enc("recovered") });
+    expect(out).toEqual({ status: "ready", documentPath: "n" });
+    expect(knowledge.create).toHaveBeenCalledTimes(1);
+    expect(knowledge.update).toHaveBeenCalledWith("c1", "n", { body: "recovered" });
+    expect(setMaterialDocumentPath).toHaveBeenCalledWith(expect.anything(), "c1", "m1", "n");
+  });
+
   it("updates the existing concept on reingest", async () => {
-    const out = await extractMaterial({ ...base, filename: "n.txt", relativePath: null, bytes: enc("new"), existingDocumentPath: "n" });
+    getMaterialForReingest.mockResolvedValue({ documentPath: "n" });
+    const out = await extractMaterial({ ...base, filename: "n.txt", relativePath: null, bytes: enc("new"), existingDocumentPath: "stale" });
     expect(knowledge.update).toHaveBeenCalledWith("c1", "n", { body: "new" });
     expect(knowledge.create).not.toHaveBeenCalled();
     expect(out).toEqual({ status: "ready", documentPath: "n" });
   });
   it("self-heals a reingest whose concept was deleted: creates a fresh one when update returns null", async () => {
+    getMaterialForReingest.mockResolvedValue({ documentPath: "old-id" });
     knowledge.update.mockResolvedValueOnce(null);
     const out = await extractMaterial({ ...base, filename: "syllabus.txt", relativePath: null, bytes: enc("Weeks"), existingDocumentPath: "old-id" });
     expect(knowledge.update).toHaveBeenCalledWith("c1", "old-id", { body: "Weeks" });
@@ -70,6 +88,45 @@ describe("extractMaterial", () => {
     expect(setMaterialDocumentPath).toHaveBeenCalledWith(expect.anything(), "c1", "m1", "syllabus");
     expect(out).toEqual({ status: "ready", documentPath: "syllabus" });
   });
+  it("serializes simultaneous retries and rereads the published path", async () => {
+    let documentPath: string | null = null;
+    getMaterialForReingest.mockImplementation(async () => ({ documentPath }));
+    setMaterialDocumentPath.mockImplementation(async (_db, _course, _id, value) => { documentPath = value; });
+    const job = { ...base, filename: "n.txt", relativePath: null, bytes: enc("new") };
+    const results = await Promise.all([extractMaterial(job), extractMaterial(job)]);
+    expect(knowledge.create).toHaveBeenCalledTimes(1);
+    expect(knowledge.update).toHaveBeenCalledWith("c1", "n", { body: "new" });
+    expect(results.map((r) => r.documentPath)).toEqual(["n", "n"]);
+  });
+
+  it("does not publish a job whose material was deleted while queued", async () => {
+    let release!: () => void;
+    const deleting = withMaterialLock("c1", "m1", async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      getMaterialForReingest.mockResolvedValue(null);
+    });
+    await vi.waitFor(() => expect(release).toBeDefined());
+    const running = extractMaterial({ ...base, filename: "n.txt", relativePath: null, bytes: enc("new") });
+    release();
+    await deleting;
+    expect(await running).toEqual({ status: "failed", documentPath: null });
+    expect(knowledge.create).not.toHaveBeenCalled();
+    expect(setMaterialStatus).not.toHaveBeenCalled();
+  });
+
+  it("marks an extractor exception failed so Retry remains available", async () => {
+    hooks.extractOverride = async () => { throw new Error("broken extractor"); };
+    expect((await extractMaterial({ ...base, filename: "n.txt", relativePath: null, bytes: enc("new") })).status).toBe("failed");
+    expect(setMaterialStatus.mock.calls.at(-1)?.[3]).toBe("failed");
+  });
+
+  it("does not pass Markdown delimiters to OKF metadata", async () => {
+    await extractMaterial({ ...base, filename: "note.md", relativePath: null, bytes: enc("# A heading\n\n---\n\nSome prose.") });
+    const input = knowledge.create.mock.calls[0]![1];
+    expect(input.description).not.toContain("---");
+    expect(input.body).toContain("---");
+  });
+
   it("leaves an unsupported format at pending with the reason", async () => {
     const out = await extractMaterial({ ...base, filename: "talk.mp3", relativePath: null, bytes: enc("") });
     expect(setMaterialStatus.mock.calls.at(-1)!.slice(2)).toEqual(["m1", "pending", expect.stringMatching(/not supported/)]);

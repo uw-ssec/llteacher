@@ -1,5 +1,12 @@
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { envFromProcess, installShutdownHandlers } from "./node";
+import { buildNodeApp, envFromProcess, installShutdownHandlers, startNodeServer } from "./node";
+
+const startup = vi.hoisted(() => ({ recover: vi.fn(), serve: vi.fn() }));
+vi.mock("./repositories/materials", () => ({ recoverInterruptedExtractions: startup.recover }));
+vi.mock("@hono/node-server", () => ({ serve: startup.serve }));
 
 const FULL = {
   DATABASE_URL: "postgres://x", WORKOS_API_KEY: "k", WORKOS_CLIENT_ID: "c",
@@ -19,6 +26,26 @@ describe("envFromProcess", () => {
   it("names every missing variable", () => {
     const { KNOWLEDGE_ROOT: _omit, ...partial } = FULL;
     expect(() => envFromProcess(partial)).toThrow(/KNOWLEDGE_ROOT/);
+  });
+});
+
+describe("startup recovery", () => {
+  it("does not listen until interrupted jobs have been recovered", async () => {
+    startup.serve.mockClear();
+    let release!: () => void;
+    startup.recover.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+    const starting = startNodeServer(envFromProcess(FULL), 8080);
+    expect(startup.serve).not.toHaveBeenCalled();
+    release();
+    await starting;
+    expect(startup.serve).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not accept requests when recovery fails", async () => {
+    startup.serve.mockClear();
+    startup.recover.mockRejectedValueOnce(new Error("database unavailable"));
+    await expect(startNodeServer(envFromProcess(FULL), 8080)).rejects.toThrow("database unavailable");
+    expect(startup.serve).not.toHaveBeenCalled();
   });
 });
 
@@ -70,5 +97,25 @@ describe("installShutdownHandlers", () => {
     // The second signal short-circuits: it exits without closing again.
     expect(exit).toHaveBeenCalledWith(0);
     expect(close).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("static page isolation", () => {
+  it("sets WebR isolation headers on files and SPA fallback routes", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "llteacher-node-static-"));
+    try {
+      await writeFile(path.join(dir, "index.html"), "<!doctype html><title>Review</title>");
+      const server = buildNodeApp(envFromProcess(FULL), dir);
+      for (const route of ["/index.html", "/conversations/test"]) {
+        const response = await server.request(route);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin");
+        expect(response.headers.get("Cross-Origin-Embedder-Policy")).toBe("require-corp");
+        expect(await response.text()).toContain("<title>Review</title>");
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

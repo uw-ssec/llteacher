@@ -44,6 +44,7 @@ import {
   extensionOf,
   sourceTypeFor,
 } from "../knowledge/convert";
+import { withMaterialLock } from "../knowledge/materialLock";
 import { logServerError } from "../utils/errors";
 import type { MaterialListPayload } from "@llteacher/ui/api";
 
@@ -187,26 +188,33 @@ export async function deleteMaterialHandler(c: Context<AppEnv>) {
   if (!materialId) return c.json({ error: "No such material." }, 404);
 
   const db = makeDb(c.env.DATABASE_URL);
-  const removed = await deleteMaterial(db, scope, materialId);
-  if (!removed) return c.json({ error: "No such material." }, 404);
+  return withMaterialLock(scope, materialId, async () => {
+    const material = await getMaterialForReingest(db, scope, materialId);
+    if (!material) return c.json({ error: "No such material." }, 404);
+    // Retrieval uses the filesystem, so remove grounding before deleting
+    // its retry handle in Postgres. A failed removal must remain retryable.
+    if (material.documentPath) {
+      try {
+        await knowledgeServiceFromEnv(c.env).remove(scope, material.documentPath);
+      } catch (error) {
+        logServerError("materials.delete.concept", error);
+        return c.json({ error: "Could not remove the knowledge document. Try deleting again." }, 503);
+      }
+    }
+    const removed = await deleteMaterial(db, scope, materialId);
+    if (!removed) return c.json({ error: "No such material." }, 404);
 
-  if (removed.storageKey) {
-    // Best effort: the row is already gone, and a stranded object is a
-    // cleanup problem rather than a correctness one.
-    try {
-      await storageFromEnv(c.env).delete(removed.storageKey);
-    } catch (error) {
-      logServerError("materials.delete.storage", error);
+    if (removed.storageKey) {
+      // Best effort: the row is already gone, and a stranded object is a
+      // cleanup problem rather than a correctness one.
+      try {
+        await storageFromEnv(c.env).delete(removed.storageKey);
+      } catch (error) {
+        logServerError("materials.delete.storage", error);
+      }
     }
-  }
-  if (removed.documentPath) {
-    try {
-      await knowledgeServiceFromEnv(c.env).remove(scope, removed.documentPath);
-    } catch (error) {
-      logServerError("materials.delete.concept", error);
-    }
-  }
-  return c.body(null, 204);
+    return c.body(null, 204);
+  });
 }
 
 /** Re-runs tier-1 conversion against the stored bytes. For a format the

@@ -77,12 +77,12 @@ describe("KnowledgeDocumentView", () => {
     await waitFor(() => expect(saved).toHaveBeenCalledWith({ body: "edited" }));
   });
 
-  it("warns that saving re-queues indexing", async () => {
+  it("explains that saving updates the searchable document", async () => {
     stubFetch();
     render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
     const editor = (await screen.findByLabelText(/document body/i)) as HTMLTextAreaElement;
     fireEvent.change(editor, { target: { value: "changed" } });
-    await waitFor(() => screen.getByText(/re-indexed/i));
+    await waitFor(() => screen.getByText(/updates the searchable document/i));
   });
 
   it("reverts to the extracted text", async () => {
@@ -113,7 +113,7 @@ describe("KnowledgeDocumentView", () => {
     stubFetch();
     render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
     await screen.findByLabelText(/document body/i);
-    expect(screen.queryByText(/re-indexed/i)).toBeNull();
+    expect(screen.queryByText(/updates the searchable document/i)).toBeNull();
     expect(screen.getByRole("button", { name: /^save$/i })).toHaveProperty("disabled", true);
   });
 
@@ -150,11 +150,11 @@ describe("KnowledgeDocumentView", () => {
     const editor = (await screen.findByLabelText(/document body/i)) as HTMLTextAreaElement;
 
     fireEvent.change(editor, { target: { value: "a fresh edit" } });
-    await waitFor(() => screen.getByText(/re-indexed/i));
+    await waitFor(() => screen.getByText(/updates the searchable document/i));
 
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
 
-    await waitFor(() => expect(screen.queryByText(/re-indexed/i)).toBeNull());
+    await waitFor(() => expect(screen.queryByText(/updates the searchable document/i)).toBeNull());
   });
 
   it("reports a failed save without discarding the instructor's edit", async () => {
@@ -169,13 +169,14 @@ describe("KnowledgeDocumentView", () => {
     render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
     const editor = (await screen.findByLabelText(/document body/i)) as HTMLTextAreaElement;
 
+    await waitFor(() => expect(editor.value).toBe(DOCUMENT.body));
     fireEvent.change(editor, { target: { value: "do not lose me" } });
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
 
     await waitFor(() => screen.getByRole("alert"));
     // The edit is still there, and the view still considers it unsaved.
     expect(editor.value).toBe("do not lose me");
-    expect(screen.getByText(/re-indexed/i)).toBeTruthy();
+    expect(screen.getByText(/updates the searchable document/i)).toBeTruthy();
   });
 
   it("shows an empty body and 'no links' states without crashing", async () => {
