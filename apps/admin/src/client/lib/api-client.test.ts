@@ -266,6 +266,15 @@ describe("apiClient.knowledge", () => {
     expect(result.documentCreated).toBe(false);
   });
 
+  it("sends the folder scope as dir when one is given", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ hits: [] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await apiClient.knowledge.search("c1", "markets", { signal: null }, "week1/lab");
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      "/api/courses/c1/knowledge/search?q=markets&dir=week1%2Flab",
+    );
+  });
+
   it("encodes the search query", async () => {
     const fetchMock = stub(() => json({ hits: [] }));
 

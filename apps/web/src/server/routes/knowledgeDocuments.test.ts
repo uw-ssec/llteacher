@@ -12,6 +12,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 import {
+  cleanupDocumentHandler,
   createDocumentHandler,
   deleteDocumentHandler,
   documentLinksHandler,
@@ -22,6 +23,9 @@ import {
 } from "./knowledgeDocuments";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
+
+const cleanupMock = vi.hoisted(() => vi.fn());
+vi.mock("../knowledge/cleanup", async (original) => ({ ...await original<typeof import("../knowledge/cleanup")>(), proposeCleanup: cleanupMock }));
 
 const COURSE_ID = "11111111-2222-4333-8444-555555555555";
 const TEST_ENV = { DATABASE_URL: "ignored" } as unknown as Env;
@@ -66,6 +70,7 @@ function appWith(role: "instructor" | "student" = "instructor") {
     );
     await next();
   });
+  a.post("/api/courses/:courseId/knowledge/documents/:documentId/cleanup", cleanupDocumentHandler);
   a.get("/api/courses/:courseId/knowledge/documents", listDocumentsHandler);
   a.post("/api/courses/:courseId/knowledge/documents", createDocumentHandler);
   a.get("/api/courses/:courseId/knowledge/documents/:documentId", getDocumentHandler);
@@ -150,12 +155,35 @@ describe("knowledge document routes over the bundle", () => {
     ]));
     expect(body.backlinks).toEqual([]);
   });
+  it("passes a directory scope through to the service and rejects a bad one", async () => {
+    svc.search.mockResolvedValue([]);
+    const ok = await app().request(`/api/courses/${COURSE_ID}/knowledge/search?q=markets&dir=lectures%2Fmodule-1`, {}, TEST_ENV);
+    expect(ok.status).toBe(200);
+    expect(svc.search).toHaveBeenCalledWith(COURSE_ID, "markets", 8, "lectures/module-1");
+    const bad = await app().request(`/api/courses/${COURSE_ID}/knowledge/search?q=markets&dir=..%2Fetc`, {}, TEST_ENV);
+    expect(bad.status).toBe(400);
+  });
   it("searches with a clamped limit", async () => {
     svc.search.mockResolvedValue([{ conceptId: CONCEPT.id, title: "Intro", type: "lecture", description: "Markets", score: 2 }]);
     const res = await app().request(`/api/courses/${COURSE_ID}/knowledge/search?q=markets&limit=50`, {}, TEST_ENV);
     expect(res.status).toBe(200);
-    expect(svc.search).toHaveBeenCalledWith(COURSE_ID, "markets", 20);
+    expect(svc.search).toHaveBeenCalledWith(COURSE_ID, "markets", 20, undefined);
     expect(((await res.json()) as { hits: unknown[] }).hits).toHaveLength(1);
     expect((await app().request(`/api/courses/${COURSE_ID}/knowledge/search`, {}, TEST_ENV)).status).toBe(400);
+  });
+});
+
+describe("cleanup proposals", () => {
+  it("requires instructor access before invoking a model", async () => {
+    const res = await appWith("student").request(`/api/courses/${COURSE_ID}/knowledge/documents/${ENC}/cleanup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body: "source" }) }, TEST_ENV);
+    expect(res.status).toBe(403);
+    expect(cleanupMock).not.toHaveBeenCalled();
+  });
+  it("proposes without saving and accepts the current editor draft", async () => {
+    cleanupMock.mockResolvedValue({ body: "# Clean", warnings: [] });
+    const res = await appWith().request(`/api/courses/${COURSE_ID}/knowledge/documents/${ENC}/cleanup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body: "unsaved draft" }) }, TEST_ENV);
+    expect(res.status).toBe(200);
+    expect(cleanupMock).toHaveBeenCalledWith("unsaved draft", TEST_ENV);
+    expect(svc.update).not.toHaveBeenCalled();
   });
 });

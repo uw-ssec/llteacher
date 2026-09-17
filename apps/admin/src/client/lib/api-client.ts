@@ -425,10 +425,16 @@ export const apiClient = {
         { method: "POST", body: JSON.stringify(body) },
         opts,
       ),
+    cleanupDocument: (courseId: string, documentId: string, body: string, opts: RequestOptions) =>
+      request<{ body: string; warnings: string[] }>(
+        `/api/courses/${encode(courseId)}/knowledge/documents/${encode(documentId)}/cleanup`,
+        { method: "POST", body: JSON.stringify({ body }) },
+        { timeoutMs: 130_000, ...opts },
+      ),
     updateDocument: (
       courseId: string,
       documentId: string,
-      body: { body: string },
+      body: { body: string; expectedBody?: string },
       opts: RequestOptions,
     ) =>
       request<KnowledgeDocumentPayload>(
@@ -450,7 +456,7 @@ export const apiClient = {
       ),
     /** Same search the student-facing tutor tools call, so what an
      *  instructor finds here is what the tutor can find. */
-    search: (courseId: string, q: string, opts: RequestOptions) =>
+    search: (courseId: string, q: string, opts: RequestOptions, dir?: string) =>
       request<{
         hits: Array<{
           conceptId: string;
@@ -460,7 +466,7 @@ export const apiClient = {
           score: number;
         }>;
       }>(
-        `/api/courses/${encode(courseId)}/knowledge/search?${new URLSearchParams({ q })}`,
+        `/api/courses/${encode(courseId)}/knowledge/search?${new URLSearchParams(dir ? { q, dir } : { q })}`,
         {},
         opts,
       ),

@@ -73,6 +73,7 @@ import {
   reingestMaterialHandler,
 } from "./routes/materials";
 import {
+  cleanupDocumentHandler,
   listDocumentsHandler,
   createDocumentHandler,
   getDocumentHandler,
@@ -410,6 +411,7 @@ app.get(
   "/api/courses/:courseId/knowledge/documents/:documentId/links",
   requireInstructorOf()(documentLinksHandler),
 );
+app.post("/api/courses/:courseId/knowledge/documents/:documentId/cleanup", requireInstructorOf()(cleanupDocumentHandler));
 app.get(
   "/api/courses/:courseId/knowledge/search",
   requireInstructorOf()(searchKnowledgeHandler),

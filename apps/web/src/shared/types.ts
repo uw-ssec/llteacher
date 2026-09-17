@@ -452,6 +452,8 @@ declare global {
        LLMOXIE_DEFAULT_BASE_URL in lib/ai.ts -- see the reasoning there for
        why a generated Azure hostname should not be a compile-time constant. */
     LLMOXIE_BASE_URL?: string;
+    /** Vision OCR model served by the configured LLMoxie gateway. */
+    OCR_MODEL?: string;
     ASSETS: Fetcher;
     // Auth (M1): sealed session cookie key + IdentityCipher keys.
     SESSION_SECRET: string;

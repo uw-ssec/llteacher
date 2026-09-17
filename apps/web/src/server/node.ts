@@ -22,6 +22,7 @@ export function envFromProcess(source: NodeJS.ProcessEnv = process.env): Env {
   if (missing.length > 0) throw new Error(`Missing env: ${missing.join(", ")}`);
   const env = Object.fromEntries(REQUIRED.map((k) => [k, source[k]])) as unknown as Env;
   env.LLMOXIE_BASE_URL = source.LLMOXIE_BASE_URL;
+  env.OCR_MODEL = source.OCR_MODEL;
   env.OKF_BINARY = source.OKF_BINARY;
   // The Worker served the SPA through this binding; on Node the outer app
   // below serves dist/client, so a request reaching this stub missed

@@ -1,3 +1,4 @@
+import { OcrError, type OcrOptions } from "./ocr";
 import type { Db } from "../../../db/client";
 import { getMaterialForReingest, setMaterialDocumentPath, setMaterialStatus } from "../../repositories/materials";
 import type { CourseScope } from "../../repositories/scope";
@@ -8,6 +9,7 @@ import { extract } from "./index";
 import { withMaterialLock } from "../materialLock";
 
 export interface ExtractionJob {
+  ocr?: OcrOptions;
   db: Db;
   courseId: CourseScope;
   materialId: string;
@@ -41,7 +43,7 @@ async function extractCurrentMaterial(job: ExtractionJob): Promise<{ status: "re
   const { db, courseId, materialId } = job;
   try {
     await setMaterialStatus(db, courseId, materialId, "processing", null);
-    const outcome = await extract(job.filename, job.bytes);
+    const outcome = await extract(job.filename, job.bytes, job.ocr);
     if (outcome.kind === "unsupported") {
       await setMaterialStatus(db, courseId, materialId, "pending", `${outcome.reason} The upload is stored; author a document manually to ground on it.`);
       return { status: "pending", documentPath: job.existingDocumentPath };
@@ -81,7 +83,7 @@ async function extractCurrentMaterial(job: ExtractionJob): Promise<{ status: "re
     return { status: "ready", documentPath };
   } catch (err) {
     logServerError("extract.write", err, { materialId });
-    await setMaterialStatus(db, courseId, materialId, "failed", "The extracted text could not be saved to the knowledge base. The uploaded file is still stored; try reingesting.");
+    await setMaterialStatus(db, courseId, materialId, "failed", err instanceof OcrError ? err.message : "The extracted text could not be saved to the knowledge base. The uploaded file is still stored; try reingesting.");
     return { status: "failed", documentPath: job.existingDocumentPath };
   }
 }
@@ -107,6 +109,8 @@ async function extractCurrentMaterial(job: ExtractionJob): Promise<{ status: "re
 const MAX_CONCURRENT_EXTRACTIONS = 2;
 
 const queue: ExtractionJob[] = [];
+const scheduled = new Set<string>();
+const jobKey = (job: ExtractionJob) => `${job.courseId}:${job.materialId}`.toLowerCase();
 const inFlight = new Set<Promise<void>>();
 let drainWaiters: Array<() => void> = [];
 
@@ -131,6 +135,7 @@ function pump(): void {
       .then(() => undefined)
       .catch((err) => logServerError("extract.job", err, { materialId: job.materialId }))
       .finally(() => {
+        scheduled.delete(jobKey(job));
         inFlight.delete(running);
         pump();
         settleDrainWaiters();
@@ -140,6 +145,8 @@ function pump(): void {
 }
 
 export function scheduleExtraction(job: ExtractionJob): void {
+  if (scheduled.has(jobKey(job))) return;
+  scheduled.add(jobKey(job));
   queue.push(job);
   // Still deferred to the next tick, for the same reason the pre-queue
   // version was: the request handler that enqueued this answers 201 first.

@@ -21,9 +21,14 @@
    flip the just-saved warning back on for no reason.
    -------------------------------------------------------------------------- */
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import { diffLines } from "diff";
+import "katex/dist/katex.min.css";
+import "./knowledge-cleanup.css";
 import { ArrowLeft, LinkBreak, LinkSimple, Warning } from "@phosphor-icons/react";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
@@ -39,7 +44,11 @@ export type KnowledgeDocumentViewProps = {
   onBack: () => void;
 };
 
-export function KnowledgeDocumentView({
+export function KnowledgeDocumentView(props: KnowledgeDocumentViewProps) {
+  return <DocumentEditor key={`${props.courseId}:${props.documentId}`} {...props} />;
+}
+
+function DocumentEditor({
   courseId,
   documentId,
   onBack,
@@ -49,6 +58,9 @@ export function KnowledgeDocumentView({
   // a save's own response -- see the file header for why this is not simply
   // `document.data.body`.
   const [savedBody, setSavedBody] = useState<string | null>(null);
+  const [proposal, setProposal] = useState<{ body: string; warnings: string[]; source: string } | null>(null);
+  const [cleaning, setCleaning] = useState(false);
+  const changes = useMemo(() => proposal ? diffLines(proposal.source, proposal.body) : [], [proposal]);
   const [preview, setPreview] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -107,23 +119,24 @@ export function KnowledgeDocumentView({
   const record = document.data;
   const dirty = draft !== null && savedBody !== null && draft !== savedBody;
 
-  async function save() {
+  async function save(cleanedBody?: string) {
     if (draft === null) return;
-    const sentBody = draft;
+    const sentBody = cleanedBody ?? draft;
     setSaving(true);
     setSaveError(null);
     try {
       const updated = await apiClient.knowledge.updateDocument(
         courseId,
         documentId,
-        { body: sentBody },
+        { body: sentBody, ...(cleanedBody !== undefined ? { expectedBody: savedBody ?? record.body } : {}) },
         { signal: null },
       );
       setSavedBody(updated.body);
       // Only snap the editor to the server's own text if nothing was typed
       // while the request was in flight -- otherwise a slow save would
       // clobber keystrokes made during it.
-      setDraft((current) => (current === sentBody ? updated.body : current));
+      setDraft((current) => (cleanedBody !== undefined || current === sentBody ? updated.body : current));
+      if (cleanedBody !== undefined) { setProposal(null); setPreview(true); }
       // The document's own metadata (index_status, editedAt, ...) is worth
       // refreshing, but the dirty flag no longer depends on this round trip
       // landing -- see the file header.
@@ -140,6 +153,18 @@ export function KnowledgeDocumentView({
     }
   }
 
+  async function cleanUp() {
+    if (!draft?.trim()) return;
+    setCleaning(true);
+    setSaveError(null);
+    try {
+      const result = await apiClient.knowledge.cleanupDocument(courseId, documentId, draft, { signal: null });
+      setProposal({ ...result, source: draft });
+    } catch (err) {
+      setSaveError(err instanceof ApiError ? err.message : "Could not clean up this document. Try again.");
+    } finally { setCleaning(false); }
+  }
+
   function revertToExtraction() {
     if (record.bodyOriginal !== null) setDraft(record.bodyOriginal);
   }
@@ -154,6 +179,11 @@ export function KnowledgeDocumentView({
         subtitle={record.description ?? undefined}
         actions={
           <>
+            <button type="button" className="admin-button admin-button--ghost"
+              disabled={cleaning || saving || proposal !== null || !draft?.trim() || draft.length > 60_000}
+              onClick={() => void cleanUp()}>
+              {cleaning ? "Cleaning up…" : "Clean up Markdown"}
+            </button>
             <button
               type="button"
               className="admin-button admin-button--ghost"
@@ -168,15 +198,16 @@ export function KnowledgeDocumentView({
               <button
                 type="button"
                 className="admin-button admin-button--ghost"
+                disabled={cleaning || saving || proposal !== null}
                 onClick={revertToExtraction}
               >
-                Revert to extraction
+                Restore original
               </button>
             )}
             <button
               type="button"
               className="admin-button admin-button--primary"
-              disabled={!dirty || saving}
+              disabled={!dirty || saving || cleaning || proposal !== null}
               onClick={() => void save()}
             >
               {saving ? "Saving…" : "Save"}
@@ -215,15 +246,35 @@ export function KnowledgeDocumentView({
         </div>
       )}
 
+      {draft !== null && draft.length > 60_000 && <p className="admin-inline-note">Cleanup supports up to 60,000 characters. Split this document into smaller sections first.</p>}
+      {cleaning && <p role="status">Preparing a formatting proposal. Your saved document is unchanged.</p>}
+      {proposal && (
+        <section className="knowledge-cleanup" aria-label="Cleanup proposal">
+          <h2>Review cleanup</h2>
+          <p>Check wording, numbers, tables, and equations before applying. Apply saves and updates search; the original is preserved.</p>
+          {proposal.warnings.length > 0 && <ul role="status">{proposal.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul>}
+          <h3>Preview</h3>
+          <div className="admin-knowledge-doc__preview"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{proposal.body}</ReactMarkdown></div>
+          <details open><summary>Changes: removed (−), added (+)</summary>
+            <pre className="knowledge-cleanup__diff">{changes.map((part, i) => <span key={i} className={part.added ? "diff-added" : part.removed ? "diff-removed" : undefined}>{part.value.split(/(?<=\n)/).map((line) => `${part.added ? "+ " : part.removed ? "− " : "  "}${line}`).join("")}</span>)}</pre>
+          </details>
+          <div className="knowledge-cleanup__actions">
+            <button className="admin-button admin-button--primary" disabled={saving} onClick={() => void save(proposal.body)}>{saving ? "Applying…" : "Apply cleanup"}</button>
+            <button className="admin-button admin-button--ghost" disabled={saving} onClick={() => setProposal(null)}>Discard</button>
+          </div>
+        </section>
+      )}
+
       {preview ? (
         <div className="admin-knowledge-doc__preview">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+          <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
             {draft || "*Nothing written yet.*"}
           </ReactMarkdown>
         </div>
       ) : (
         <textarea
           aria-label="Document body"
+          disabled={cleaning || proposal !== null}
           className="admin-knowledge-doc__editor"
           value={draft ?? ""}
           onChange={(event) => setDraft(event.target.value)}

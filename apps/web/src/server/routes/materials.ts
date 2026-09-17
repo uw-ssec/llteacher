@@ -1,3 +1,4 @@
+import { ocrOptionsFromEnv } from "../knowledge/extract/ocr";
 /* --------------------------------------------------------------------------
    Course material upload and lifecycle (#42).
 
@@ -173,6 +174,7 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
     filename: file.name,
     relativePath,
     bytes,
+    ocr: ocrOptionsFromEnv(c.env),
     knowledge: knowledgeServiceFromEnv(c.env),
     existingDocumentPath: null,
   });
@@ -240,6 +242,16 @@ export async function reingestMaterialHandler(c: Context<AppEnv>) {
     return c.json({ error: "The stored file is missing." }, 404);
   }
 
+  // OCR can take minutes. Return promptly and let the existing UI poll.
+  if (extensionOf(material.originalFilename) === "pdf") {
+    await setMaterialStatus(db, scope, materialId, "pending", null);
+    scheduleExtraction({ db, courseId: scope, materialId,
+      filename: material.originalFilename, relativePath: material.relativePath, bytes,
+      ocr: ocrOptionsFromEnv(c.env), knowledge: knowledgeServiceFromEnv(c.env),
+      existingDocumentPath: material.documentPath });
+    return c.json({ status: "pending", documentCreated: false }, 202);
+  }
+
   // Reingest runs synchronously (unlike upload's scheduleExtraction): the
   // instructor is waiting on this button and wants the outcome in the
   // response, not a pending status to poll.
@@ -250,6 +262,7 @@ export async function reingestMaterialHandler(c: Context<AppEnv>) {
     filename: material.originalFilename,
     relativePath: material.relativePath,
     bytes,
+    ocr: ocrOptionsFromEnv(c.env),
     knowledge: knowledgeServiceFromEnv(c.env),
     existingDocumentPath: material.documentPath,
   });

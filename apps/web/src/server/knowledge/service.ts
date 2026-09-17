@@ -10,6 +10,13 @@ import { appendLogEntry, type IndexEntry } from "./bundle";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DIR_RE = /^[a-z0-9-]+(?:\/[a-z0-9-]+)*$/;
+/** The one directory grammar, shared with the search route's `dir` scope. */
+export function isValidDirectory(dir: string): boolean {
+  return DIR_RE.test(dir);
+}
+/** How many rows to ask okf for when a directory scope will discard most of
+ *  them. okf has no path filter, so a scoped search over-fetches and trims. */
+const SCOPED_FETCH_LIMIT = 200;
 export const SEARCH_LIMIT_DEFAULT = 8;
 export const SEARCH_LIMIT_MAX = 20;
 
@@ -19,6 +26,8 @@ export class ConceptIdError extends Error {
     this.name = "ConceptIdError";
   }
 }
+export class ConceptConflictError extends Error {}
+
 export class ConceptExistsError extends Error {
   constructor(id: string) {
     super(`A concept already exists at ${id}`);
@@ -38,6 +47,7 @@ export interface ConceptSummary {
 export interface SearchHit { conceptId: string; title: string; type: string; description: string; score: number }
 export interface Concept extends ConceptSummary {
   body: string;
+  bodyOriginal?: string | null;
   frontmatter: Record<string, string>;
   outbound: string[];
   inbound: string[];
@@ -53,13 +63,14 @@ export interface ValidationReport {
 export interface KnowledgeService {
   ensureBundle(courseId: string): Promise<void>;
   list(courseId: string): Promise<ConceptSummary[]>;
-  search(courseId: string, query: string, limit?: number): Promise<SearchHit[]>;
+  /** `dir` restricts hits to concepts under that directory. */
+  search(courseId: string, query: string, limit?: number, dir?: string): Promise<SearchHit[]>;
   /** `includeInbound` defaults to true. Pass false to skip the whole-bundle
    *  backlink scan when the caller does not render inbound links -- see
    *  show()'s own comment. */
   show(courseId: string, conceptId: string, opts?: { includeInbound?: boolean }): Promise<Concept | null>;
   create(courseId: string, input: CreateConcept): Promise<Concept>;
-  update(courseId: string, conceptId: string, patch: { body?: string; title?: string; description?: string }): Promise<Concept | null>;
+  update(courseId: string, conceptId: string, patch: { body?: string; title?: string; description?: string; expectedBody?: string }): Promise<Concept | null>;
   relate(courseId: string, from: string, to: string, context: string): Promise<void>;
   remove(courseId: string, conceptId: string): Promise<boolean>;
   createDirectory(courseId: string, directory: string): Promise<void>;
@@ -203,6 +214,11 @@ export class OkfKnowledgeService implements KnowledgeService {
     this.binary = opts.binary;
   }
 
+  private originalFile(courseId: string, conceptId: string): string {
+    this.conceptFile(courseId, conceptId);
+    return path.join(this.courseDir(courseId), "originals", `${conceptId}.txt`);
+  }
+
   // Every write method calls this once its write has landed (inside its own
   // withCourseLock callback, so a concurrent list() either sees the fully
   // pre-write cache or the fully post-write disk state, never a mix).
@@ -288,20 +304,25 @@ export class OkfKnowledgeService implements KnowledgeService {
     return out;
   }
 
-  async search(courseId: string, query: string, limit = SEARCH_LIMIT_DEFAULT): Promise<SearchHit[]> {
+  async search(courseId: string, query: string, limit = SEARCH_LIMIT_DEFAULT, scopeDir?: string): Promise<SearchHit[]> {
     const dir = this.bundleDir(courseId);
     const q = query.trim();
     if (q === "") return [];
     if (!(await exists(dir))) return [];
     const n = Math.min(Math.max(1, Math.floor(limit)), SEARCH_LIMIT_MAX);
-    const rows = await runOkf<OkfSearchRow[] | null>(this.binary, ["search", q, dir, "--limit", String(n)]);
-    return (rows ?? []).map((r) => ({
-      conceptId: r.concept_id,
-      title: r.title ?? r.concept_id,
-      type: r.type ?? "",
-      description: r.description ?? "",
-      score: r.score,
-    }));
+    const fetchLimit = scopeDir ? SCOPED_FETCH_LIMIT : n;
+    const rows = await runOkf<OkfSearchRow[] | null>(this.binary, ["search", q, dir, "--limit", String(fetchLimit)]);
+    const prefix = scopeDir ? `${scopeDir}/` : "";
+    return (rows ?? [])
+      .filter((r) => r.concept_id.startsWith(prefix))
+      .slice(0, n)
+      .map((r) => ({
+        conceptId: r.concept_id,
+        title: r.title ?? r.concept_id,
+        type: r.type ?? "",
+        description: r.description ?? "",
+        score: r.score,
+      }));
   }
 
   /** I-1 (final review): inbound links are computed by reading EVERY concept
@@ -341,6 +362,7 @@ export class OkfKnowledgeService implements KnowledgeService {
       resource: frontmatter.resource ?? null,
       updatedAt: stat.mtime.toISOString(),
       body,
+      bodyOriginal: await fs.readFile(this.originalFile(courseId, conceptId), "utf8").catch((err: NodeJS.ErrnoException) => { if (err.code === "ENOENT") return null; throw err; }),
       frontmatter,
       outbound,
       inbound,
@@ -399,14 +421,25 @@ export class OkfKnowledgeService implements KnowledgeService {
   async update(
     courseId: string,
     conceptId: string,
-    patch: { body?: string; title?: string; description?: string },
+    patch: { body?: string; title?: string; description?: string; expectedBody?: string },
   ): Promise<Concept | null> {
     const file = this.conceptFile(courseId, conceptId);
     const dir = this.bundleDir(courseId);
     return this.withCourseLock(courseId, async () => {
       if (!(await exists(file))) return null;
       const original = await fs.readFile(file, "utf8");
-      const before = parseFrontmatter(original).frontmatter;
+      const parsedOriginal = parseFrontmatter(original);
+      if (patch.expectedBody !== undefined && patch.expectedBody !== parsedOriginal.body) {
+        throw new ConceptConflictError("The document changed. Reload it before applying cleanup.");
+      }
+      if (patch.body !== undefined) {
+        const backup = this.originalFile(courseId, conceptId);
+        await fs.mkdir(path.dirname(backup), { recursive: true });
+        await fs.writeFile(backup, parsedOriginal.body, { flag: "wx" }).catch((err: NodeJS.ErrnoException) => {
+          if (err.code !== "EEXIST") throw err;
+        });
+      }
+      const before = parsedOriginal.frontmatter;
       const args = ["update", conceptId, dir];
       if (patch.title !== undefined) args.push("--title", patch.title);
       if (patch.description !== undefined) args.push("--desc", patch.description);
@@ -449,6 +482,7 @@ export class OkfKnowledgeService implements KnowledgeService {
     return this.withCourseLock(courseId, async () => {
       if (!(await exists(file))) return false;
       await fs.unlink(file);
+      await fs.unlink(this.originalFile(courseId, conceptId)).catch((err: NodeJS.ErrnoException) => { if (err.code !== "ENOENT") throw err; });
       await this.regenerateIndex(courseId, parentDirOf(conceptId));
       await this.appendLog(dir, `**Deletion**: Removed concept \`${conceptId}.md\`.`);
       this.invalidateListCache(courseId);

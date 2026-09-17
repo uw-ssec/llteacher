@@ -43,3 +43,7 @@ STORAGE_SECRET_ACCESS_KEY="minioadmin"
 KNOWLEDGE_ROOT=".knowledge"
 OKF_BINARY="okf"
 PORT="8080"
+
+# Scanned-PDF OCR uses the LLMoxie gateway above, with low reasoning effort.
+# The gateway must expose this exact model and support image inputs.
+OCR_MODEL=gpt-5.4-mini

@@ -18,6 +18,19 @@ describe.skipIf(!okfAvailable(OKF))("OkfKnowledgeService (real binary)", () => {
     svc = new OkfKnowledgeService({ root, binary: OKF });
   });
 
+  it("preserves original text and rejects stale cleanup applies under the write lock", async () => {
+    const created = await svc.create(COURSE_A, { id: "cleanup", type: "reading", title: "Cleanup", description: "", body: "Original 50" });
+    const updated = await svc.update(COURSE_A, "cleanup", { body: "# Original 50", expectedBody: created.body });
+    expect(updated?.bodyOriginal).toBe(created.body);
+    await expect(svc.update(COURSE_A, "cleanup", { body: "stale", expectedBody: created.body })).rejects.toThrow("document changed");
+    await svc.update(COURSE_A, "cleanup", { body: "Another edit" });
+    expect((await svc.show(COURSE_A, "cleanup"))?.bodyOriginal).toBe(created.body);
+    expect((await svc.list(COURSE_A)).some((d) => d.id.includes("original"))).toBe(false);
+    await svc.remove(COURSE_A, "cleanup");
+    const recreated = await svc.create(COURSE_A, { id: "cleanup", type: "reading", title: "New", description: "", body: "New" });
+    expect(recreated.bodyOriginal).toBeNull();
+  });
+
   it("creates a concept with app frontmatter and okf bookkeeping", async () => {
     const created = await svc.create(COURSE_A, {
       id: "lectures/module-1/intro",
@@ -48,6 +61,19 @@ describe.skipIf(!okfAvailable(OKF))("OkfKnowledgeService (real binary)", () => {
 
   it("returns an empty list for a course with no bundle yet", async () => {
     expect(await svc.list(COURSE_B)).toEqual([]);
+  });
+
+  it("scopes a search to one directory and still fills the limit", async () => {
+    for (let i = 1; i <= 3; i++) {
+      await svc.create(COURSE_A, { id: `problem-sets/ps-${i}`, type: "lecture", title: `Problem Set ${i}`, description: "Elasticity practice", body: "Elasticity problems about price." });
+    }
+    await svc.create(COURSE_A, { id: "lectures/elasticity", type: "lecture", title: "Elasticity lecture", description: "Elasticity", body: "Elasticity elasticity elasticity price price." });
+    const scoped = await svc.search(COURSE_A, "elasticity price", 2, "problem-sets");
+    expect(scoped).toHaveLength(2);
+    expect(scoped.every((h) => h.conceptId.startsWith("problem-sets/"))).toBe(true);
+    // Without the scope the lecture, which scores highest, is the first hit.
+    const unscoped = await svc.search(COURSE_A, "elasticity price", 2);
+    expect(unscoped[0]!.conceptId).toBe("lectures/elasticity");
   });
 
   it("searches and shows within one course only", async () => {

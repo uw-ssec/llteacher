@@ -91,7 +91,7 @@ describe("KnowledgeDocumentView", () => {
     const editor = (await screen.findByLabelText(/document body/i)) as HTMLTextAreaElement;
 
     fireEvent.change(editor, { target: { value: "mangled" } });
-    fireEvent.click(screen.getByRole("button", { name: /revert to extraction/i }));
+    fireEvent.click(screen.getByRole("button", { name: /restore original/i }));
 
     await waitFor(() => expect(editor.value).toBe("Welcome to lecture one."));
   });
@@ -130,7 +130,7 @@ describe("KnowledgeDocumentView", () => {
     );
     render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
     await screen.findByLabelText(/document body/i);
-    expect(screen.queryByRole("button", { name: /revert to extraction/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /restore original/i })).toBeNull();
   });
 
   it("clears the re-index warning once a save actually succeeds, rather than leaving it stuck on", async () => {
@@ -218,5 +218,57 @@ describe("KnowledgeDocumentView", () => {
     await screen.findByLabelText(/document body/i);
     fireEvent.click(screen.getByRole("button", { name: /knowledge base/i }));
     expect(onBack).toHaveBeenCalled();
+  });
+});
+
+describe("Markdown cleanup review", () => {
+  function cleanupFetch() {
+    let saved = DOCUMENT.body;
+    const mock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/cleanup")) return new Response(JSON.stringify({ body: "# Clean lecture\n\nText", warnings: ["Check table columns"] }));
+      if (String(input).endsWith("/links")) return new Response(JSON.stringify(LINKS));
+      if (init?.method === "PUT") saved = JSON.parse(String(init.body)).body;
+      return new Response(JSON.stringify({ ...DOCUMENT, body: saved }));
+    });
+    vi.stubGlobal("fetch", mock);
+    return mock;
+  }
+  it("previews and discards without writing or losing the draft", async () => {
+    const mock = cleanupFetch();
+    render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
+    const editor = await screen.findByLabelText("Document body");
+    await waitFor(() => expect((editor as HTMLTextAreaElement).value).toBe(DOCUMENT.body));
+    fireEvent.change(editor, { target: { value: "Unsaved notes" } });
+    await waitFor(() => expect((screen.getByRole("button", { name: "Clean up Markdown" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Clean up Markdown" }));
+    await screen.findByRole("region", { name: "Cleanup proposal" });
+    expect(screen.getByText("Check table columns")).toBeTruthy();
+    expect(mock.mock.calls.filter(([, init]) => init?.method === "PUT")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect((screen.getByLabelText("Document body") as HTMLTextAreaElement).value).toBe("Unsaved notes");
+  });
+  it("applies with a saved-body precondition and refreshes the document", async () => {
+    const mock = cleanupFetch();
+    render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
+    await screen.findByLabelText("Document body");
+    await waitFor(() => expect((screen.getByRole("button", { name: "Clean up Markdown" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Clean up Markdown" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Apply cleanup" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Cleanup proposal" })).toBeNull());
+    const put = mock.mock.calls.find(([, init]) => init?.method === "PUT");
+    expect(JSON.parse(String(put?.[1]?.body))).toEqual({ body: "# Clean lecture\n\nText", expectedBody: DOCUMENT.body });
+    expect(screen.getByRole("heading", { name: "Clean lecture" })).toBeTruthy();
+  });
+  it("retains the proposal on a concurrent edit conflict", async () => {
+    const mock = cleanupFetch();
+    const impl = mock.getMockImplementation()!;
+    mock.mockImplementation(async (input, init) => init?.method === "PUT" ? new Response(JSON.stringify({ error: "The document changed. Reload it before applying cleanup." }), { status: 409 }) : impl(input, init));
+    render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
+    await screen.findByLabelText("Document body");
+    await waitFor(() => expect((screen.getByRole("button", { name: "Clean up Markdown" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Clean up Markdown" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Apply cleanup" }));
+    await screen.findByText("The document changed. Reload it before applying cleanup.");
+    expect(screen.getByRole("region", { name: "Cleanup proposal" })).toBeTruthy();
   });
 });

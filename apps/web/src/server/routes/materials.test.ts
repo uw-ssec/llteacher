@@ -361,7 +361,7 @@ describe("materials routes", () => {
     expect(res.status).toBe(403);
   });
 
-  it("re-reports pending for a format the pipeline still cannot extract", async () => {
+  it("queues PDF reingestion so OCR does not time out the request", async () => {
     getMaterialForReingest.mockResolvedValue({
       id: "m2",
       originalFilename: "paper.pdf",
@@ -382,7 +382,9 @@ describe("materials routes", () => {
       TEST_ENV,
     );
     expect(await res.json()).toEqual({ status: "pending", documentCreated: false });
-    expect(extractMaterial).toHaveBeenCalledWith(
+    expect(res.status).toBe(202);
+    expect(extractMaterial).not.toHaveBeenCalled();
+    expect(scheduleExtraction).toHaveBeenCalledWith(
       expect.objectContaining({
         courseId: COURSE_ID,
         materialId: "m2",

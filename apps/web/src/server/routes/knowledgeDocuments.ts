@@ -1,10 +1,11 @@
+import { CLEANUP_MAX_CHARS, CleanupError, proposeCleanup } from "../knowledge/cleanup";
 import type { Context } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../context";
 import { instructorScope } from "../utils/guards";
 import { isValidConceptId } from "../knowledge/conceptId";
 import {
-  ConceptExistsError, ConceptIdError, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, knowledgeServiceFromEnv,
+  ConceptConflictError, ConceptExistsError, ConceptIdError, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, isValidDirectory, knowledgeServiceFromEnv,
   type Concept, type ConceptSummary,
 } from "../knowledge/service";
 import type { DocumentLinksPayload, KnowledgeDocumentListPayload, KnowledgeDocumentPayload } from "@llteacher/ui/api";
@@ -20,7 +21,7 @@ const createSchema = z.object({
   description: z.string().max(1000).nullish(),
   body: z.string().default(""),
 });
-const updateSchema = z.object({ body: z.string() });
+const updateSchema = z.object({ body: z.string(), expectedBody: z.string().optional() });
 
 function toSummaryPayload(c: ConceptSummary) {
   return {
@@ -31,7 +32,7 @@ function toSummaryPayload(c: ConceptSummary) {
   };
 }
 function toDocumentPayload(c: Concept): KnowledgeDocumentPayload {
-  return { ...toSummaryPayload(c), body: c.body, bodyOriginal: null, frontmatter: c.frontmatter, editedAt: null };
+  return { ...toSummaryPayload(c), body: c.body, bodyOriginal: c.bodyOriginal ?? null, frontmatter: c.frontmatter, editedAt: null };
 }
 function conceptIdParam(c: Context<AppEnv>): string | null {
   const raw = c.req.param("documentId");
@@ -92,8 +93,13 @@ export async function updateDocumentHandler(c: Context<AppEnv>) {
   if (!id) return c.json({ error: "Invalid document id." }, 400);
   const parsed = updateSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: "Invalid document body." }, 400);
-  const updated = await knowledgeServiceFromEnv(c.env).update(scope, id, { body: parsed.data.body });
-  return updated ? c.json(toDocumentPayload(updated)) : c.json({ error: "No such document." }, 404);
+  try {
+    const updated = await knowledgeServiceFromEnv(c.env).update(scope, id, parsed.data);
+    return updated ? c.json(toDocumentPayload(updated)) : c.json({ error: "No such document." }, 404);
+  } catch (err) {
+    if (err instanceof ConceptConflictError) return c.json({ error: err.message }, 409);
+    throw err;
+  }
 }
 
 export async function deleteDocumentHandler(c: Context<AppEnv>) {
@@ -132,6 +138,25 @@ export async function searchKnowledgeHandler(c: Context<AppEnv>) {
   if (q === "") return c.json({ error: "q is required." }, 400);
   const limitRaw = Number(c.req.query("limit") ?? SEARCH_LIMIT_DEFAULT);
   const limit = Number.isInteger(limitRaw) ? Math.min(SEARCH_LIMIT_MAX, Math.max(1, limitRaw)) : SEARCH_LIMIT_DEFAULT;
-  const hits = await knowledgeServiceFromEnv(c.env).search(scope, q, limit);
+  const dirRaw = (c.req.query("dir") ?? "").trim();
+  if (dirRaw !== "" && !isValidDirectory(dirRaw)) return c.json({ error: "Invalid dir." }, 400);
+  const dir = dirRaw === "" ? undefined : dirRaw;
+  const hits = await knowledgeServiceFromEnv(c.env).search(scope, q, limit, dir);
   return c.json({ hits });
+}
+
+export async function cleanupDocumentHandler(c: Context<AppEnv>) {
+  const scope = instructorScope(c);
+  if (!scope) return c.json({ error: "Not permitted." }, 403);
+  const id = conceptIdParam(c);
+  if (!id) return c.json({ error: "Invalid document id." }, 400);
+  const parsed = z.object({ body: z.string().min(1).max(CLEANUP_MAX_CHARS) }).safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success || !parsed.data.body.trim()) return c.json({ error: "Cleanup supports nonempty documents up to 60,000 characters." }, 400);
+  const doc = await knowledgeServiceFromEnv(c.env).show(scope, id, { includeInbound: false });
+  if (!doc) return c.json({ error: "No such document." }, 404);
+  try { return c.json(await proposeCleanup(parsed.data.body, c.env)); }
+  catch (err) {
+    if (err instanceof CleanupError) return c.json({ error: err.message }, 502);
+    throw err;
+  }
 }

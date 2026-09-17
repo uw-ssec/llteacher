@@ -12,7 +12,7 @@ RUN npm run build --workspace=apps/web
 FROM node:24-slim AS runtime
 ARG OKF_VERSION=0.3.0
 ARG TARGETARCH
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl poppler-utils \
   && curl -fsSL -o /tmp/okf "https://github.com/okf-memory/okf-agent-memory/releases/download/v${OKF_VERSION}/okf-linux-${TARGETARCH}" \
   && curl -fsSL -o /tmp/checksums.txt "https://github.com/okf-memory/okf-agent-memory/releases/download/v${OKF_VERSION}/checksums.txt" \
   && cd /tmp && grep -E ' +bin/okf-linux-'"${TARGETARCH}"'$' checksums.txt | sed -E 's# +bin/okf-linux-'"${TARGETARCH}"'$#  okf#' > okf.sha256 && test -s okf.sha256 && sha256sum -c okf.sha256 \

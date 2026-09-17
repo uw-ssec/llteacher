@@ -197,3 +197,46 @@ path before extracting. This relies on the existing single-process deployment;
 overlapping replicas require shared job ownership and coordinated recovery.
 Document bodies are written through files under the course lock, avoiding OS
 command-argument limits; OKF still maintains the metadata, index, and log.
+
+### Scanned PDF OCR
+
+PDFs without usable embedded text fall back to `gpt-5.4-mini` with low
+reasoning effort through `LLMOXIE_BASE_URL` / `LLMOXIE_API_KEY`. Set `OCR_MODEL`
+only if the gateway uses a different alias for GPT-5.4 mini. The model must be enabled
+on that gateway; discovery alone does not grant access.
+
+Install Poppler locally (`brew install poppler` on macOS, `apt-get install
+poppler-utils` on Debian). The runtime Docker image includes it. Pages render
+at up to 2400 pixels and are transcribed sequentially, preserving page numbers.
+Text-layer PDFs do not make model calls. Scans are limited to 64 pages, each
+render to 30 seconds, each model request to 90 seconds, and each document to
+20 minutes. Rate limits and server errors receive two bounded retries.
+
+PDF Retry returns 202 and runs through the extraction queue; the console polls
+for completion. No partial transcription becomes searchable. Rendering,
+model-access, or incomplete-output failures retain the uploaded file and show
+a retryable explanation. Generated text identifies the OCR model; equations,
+tables, and unclear text should be checked against the original scan.
+
+Set `VITE_ADMIN_URL` in the frontend build environment to the instructor console's
+public URL. Staff-only accounts see a teaching workspace link instead of fetching
+student homework. Local ports 2311/2312 and 2411/2412 are paired automatically.
+Accounts with both staff and student memberships retain access to student homework.
+
+### Instructor Markdown cleanup
+
+The document editor's **Clean up Markdown** action sends the current draft to
+GPT-5.4 Mini (low effort) through the configured LLMoxie connection. It proposes
+formatting only; it does not save. remark normalizes GFM tables, lists and math.
+Instructors review a rendered preview, line diff and fidelity warnings, then
+Apply or Discard. Apply uses a saved-body precondition to reject concurrent edits
+and runs the normal OKF update/search refresh. Requests time out after two minutes;
+documents are limited to 60,000 characters and incomplete output is rejected.
+
+The first body edit preserves the prior body under
+`KNOWLEDGE_ROOT/courses/<courseId>/originals/<conceptId>.txt`, outside the searchable
+bundle. Include this directory in backups. The editor can restore this original
+as a draft and save it. For documents edited before this feature was installed,
+the preserved body is the earliest version available at the first subsequent edit,
+not necessarily the initial extraction. Deleting a concept removes its preserved
+original too.
