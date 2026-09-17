@@ -6698,6 +6698,27 @@ body {
   color: var(--color-text-muted);
 }
 
+/* -- KnowledgeSearchBox — instructor search over the OKF bundle (#42) -----
+   Runs the same search a student would use, so results read as a preview of
+   student-facing recall rather than an admin lookup tool. */
+
+.admin-knowledge-search {
+  margin-block: var(--space-3);
+}
+
+.admin-knowledge-search__form {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.admin-knowledge-search__results {
+  display: grid;
+  gap: var(--space-2);
+  margin-block: var(--space-2) 0;
+  padding-inline-start: var(--space-4);
+}
+
 /* -- KnowledgeDocumentView — one OKF concept, edited by hand (#42) --------
    The editor is the escape hatch for a format #40 cannot extract yet, and
    the links panel is why this is a full view rather than a modal: broken
