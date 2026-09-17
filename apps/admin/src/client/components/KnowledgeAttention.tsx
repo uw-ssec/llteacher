@@ -45,7 +45,7 @@ export function KnowledgeAttention({ materials, filter, showAll, onShowAll, onRe
   }
   return (
     <div className="admin-knowledge__attention">
-      <ul className="admin-knowledge__attention-list">
+      <ul className="admin-knowledge__attention-list" aria-label="Uploads needing attention">
         {visible.map((material) => {
           const label = materialLabel(material);
           return (

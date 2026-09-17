@@ -6,9 +6,11 @@
    inside is not indexed. Expansion is owned by the caller so it can survive
    a drill-in and back the same way the selected folder already does.
 
-   The chevron is its own button, not a span inside the name button: a
-   button inside a button is invalid HTML and reads as one control to a
-   screen reader, which would make "expand" and "select" indistinguishable.
+   Follows the ARIA tree pattern for expansion: the chevron is a mouse
+   affordance hidden from assistive tech, and the keyboard expands and
+   collapses with the right and left arrows on the folder itself. That keeps
+   one accessible control per folder, whose name is the folder's, so the
+   console's tests (and a screen reader's element list) find "week1" once.
    -------------------------------------------------------------------------- */
 
 import { CaretRight } from "@phosphor-icons/react";
@@ -32,7 +34,7 @@ export function KnowledgeFolderTree({ root, selected, expanded, onSelect, onTogg
           Collapse all
         </button>
       </div>
-      <ul className="admin-knowledge__tree" role="tree">
+      <ul className="admin-knowledge__tree">
         <Node node={root} selected={selected} expanded={expanded} onSelect={onSelect} onToggle={onToggle} />
       </ul>
     </nav>
@@ -46,29 +48,34 @@ function Node({
   const isOpen = expanded.has(node.path);
   const isSelected = selected === node.path;
   return (
-    <li role="none" className="admin-knowledge__tree-item">
+    <li className="admin-knowledge__tree-item">
       <div className={isSelected ? "admin-knowledge__node admin-knowledge__node--selected" : "admin-knowledge__node"}>
         {hasChildren ? (
-          <button
-            type="button"
+          <span
             className={isOpen ? "admin-knowledge__chevron admin-knowledge__chevron--open" : "admin-knowledge__chevron"}
-            aria-label={`${isOpen ? "Collapse" : "Expand"} ${node.name}`}
+            aria-hidden="true"
+            data-toggle={node.path}
             onClick={() => onToggle(node.path)}
           >
-            <CaretRight size={12} weight="bold" aria-hidden="true" />
-          </button>
+            <CaretRight size={12} weight="bold" />
+          </span>
         ) : (
           <span className="admin-knowledge__chevron admin-knowledge__chevron--leaf" aria-hidden="true" />
         )}
         <button
           type="button"
-          role="treeitem"
-          aria-selected={isSelected}
+          aria-current={isSelected ? "true" : undefined}
           aria-expanded={hasChildren ? isOpen : undefined}
           className="admin-knowledge__folder"
           onClick={() => onSelect(node.path)}
+          onKeyDown={(e) => {
+            if (!hasChildren) return;
+            if (e.key === "ArrowRight" && !isOpen) { e.preventDefault(); onToggle(node.path); }
+            if (e.key === "ArrowLeft" && isOpen) { e.preventDefault(); onToggle(node.path); }
+          }}
         >
           <span className="admin-knowledge__folder-name">{node.name}</span>
+          {" "}
           <span
             className={node.attention > 0 ? "admin-knowledge__count admin-knowledge__count--attention" : "admin-knowledge__count"}
             title={node.attention > 0 ? `${node.attention} need${node.attention === 1 ? "s" : ""} attention` : undefined}
@@ -78,7 +85,7 @@ function Node({
         </button>
       </div>
       {hasChildren && isOpen && (
-        <ul role="group" className="admin-knowledge__tree-children">
+        <ul className="admin-knowledge__tree-children">
           {node.children.map((child) => (
             <Node key={child.path} node={child} selected={selected} expanded={expanded} onSelect={onSelect} onToggle={onToggle} />
           ))}

@@ -29,7 +29,8 @@ import rehypeKatex from "rehype-katex";
 import { diffLines } from "diff";
 import "katex/dist/katex.min.css";
 import "./knowledge-cleanup.css";
-import { ArrowLeft, LinkBreak, LinkSimple, Warning } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, ArrowLeft, DownloadSimple, Eye, FileArrowDown, LinkBreak, LinkSimple, PencilSimple, Sparkle, Warning } from "@phosphor-icons/react";
+import { ActionMenu, type ActionMenuItem } from "../components/ActionMenu";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 import { ViewError, ViewLoading } from "../components/ViewState";
@@ -169,6 +170,41 @@ function DocumentEditor({
     if (record.bodyOriginal !== null) setDraft(record.bodyOriginal);
   }
 
+  const busy = cleaning || saving || proposal !== null;
+  const menuItems: ActionMenuItem[] = [
+    {
+      kind: "action",
+      label: cleaning ? "Cleaning up…" : "Clean up Markdown",
+      hint: "AI",
+      icon: <Sparkle size={16} />,
+      disabled: busy || !draft?.trim() || draft.length > 60_000,
+      onSelect: () => void cleanUp(),
+    },
+    // Only when there is something to revert to -- a hand-authored document
+    // has no extraction, and offering the control anyway would be a lie.
+    ...(record.bodyOriginal !== null
+      ? [{ kind: "action" as const, label: "Restore original", icon: <ArrowCounterClockwise size={16} />, disabled: busy, onSelect: revertToExtraction }]
+      : []),
+    { kind: "group", label: "Download" },
+    {
+      kind: "link",
+      label: "Markdown",
+      hint: ".md",
+      icon: <DownloadSimple size={16} />,
+      href: apiClient.knowledge.documentDownloadUrl(courseId, record.path),
+      download: `${record.path.split("/").pop() ?? record.path}.md`,
+    },
+    ...(record.sourceMaterialId
+      ? [{
+          kind: "link" as const,
+          label: "Original upload",
+          icon: <FileArrowDown size={16} />,
+          href: apiClient.knowledge.materialDownloadUrl(courseId, record.sourceMaterialId),
+          download: "",
+        }]
+      : []),
+  ];
+
   return (
     <div className="admin-view">
       {backButton}
@@ -179,31 +215,18 @@ function DocumentEditor({
         subtitle={record.description ?? undefined}
         actions={
           <>
-            <button type="button" className="admin-button admin-button--ghost"
-              disabled={cleaning || saving || proposal !== null || !draft?.trim() || draft.length > 60_000}
-              onClick={() => void cleanUp()}>
-              {cleaning ? "Cleaning up…" : "Clean up Markdown"}
-            </button>
-            <button
-              type="button"
-              className="admin-button admin-button--ghost"
-              onClick={() => setPreview((p) => !p)}
-            >
-              {preview ? "Edit" : "Preview"}
-            </button>
-            {/* Only when there is something to revert to -- a hand-authored
-                document has no extraction, and offering the control anyway
-                would be a lie. */}
-            {record.bodyOriginal !== null && (
-              <button
-                type="button"
-                className="admin-button admin-button--ghost"
-                disabled={cleaning || saving || proposal !== null}
-                onClick={revertToExtraction}
-              >
-                Restore original
+            {dirty && <span className="admin-knowledge-doc__unsaved">Unsaved changes</span>}
+            {/* The view toggle and Save stay visible: Save is the one action
+                with state, and the toggle is used constantly. Everything
+                else is one click away in the menu (progressive disclosure). */}
+            <div className="admin-knowledge-doc__view" role="group" aria-label="View">
+              <button type="button" aria-pressed={!preview} onClick={() => setPreview(false)}>
+                <PencilSimple size={15} aria-hidden="true" /> Edit
               </button>
-            )}
+              <button type="button" aria-pressed={preview} onClick={() => setPreview(true)}>
+                <Eye size={15} aria-hidden="true" /> Preview
+              </button>
+            </div>
             <button
               type="button"
               className="admin-button admin-button--primary"
@@ -212,6 +235,7 @@ function DocumentEditor({
             >
               {saving ? "Saving…" : "Save"}
             </button>
+            <ActionMenu label="More actions" items={menuItems} />
           </>
         }
       />

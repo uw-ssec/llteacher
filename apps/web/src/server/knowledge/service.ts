@@ -1,6 +1,7 @@
 import { promises as fs, realpathSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { zipSync, strToU8 } from "fflate";
 import { runOkf } from "./okfCli";
 import { withWriteLock } from "./writeLock";
 import { isValidConceptId } from "./conceptId";
@@ -75,6 +76,12 @@ export interface KnowledgeService {
   remove(courseId: string, conceptId: string): Promise<boolean>;
   createDirectory(courseId: string, directory: string): Promise<void>;
   validate(courseId: string): Promise<ValidationReport>;
+  /** The concept's file exactly as stored, frontmatter and all -- what an
+   *  instructor gets when they download one document. Null if absent. */
+  readRaw(courseId: string, conceptId: string): Promise<string | null>;
+  /** Every Markdown file in the bundle as one zip, paths preserved. Null if
+   *  the course has no bundle yet. */
+  exportBundle(courseId: string): Promise<Uint8Array | null>;
 }
 
 interface OkfSearchRow { concept_id: string; title: string; type: string; description: string; score: number }
@@ -230,6 +237,24 @@ export class OkfKnowledgeService implements KnowledgeService {
     if (!UUID_RE.test(courseId)) throw new ConceptIdError("Invalid course id");
     return path.join(this.root, "courses", courseId.toLowerCase());
   }
+  async readRaw(courseId: string, conceptId: string): Promise<string | null> {
+    if (!isValidConceptId(conceptId)) return null;
+    const file = this.conceptFile(courseId, conceptId);
+    if (!(await exists(file))) return null;
+    return fs.readFile(file, "utf8");
+  }
+
+  async exportBundle(courseId: string): Promise<Uint8Array | null> {
+    const dir = this.bundleDir(courseId);
+    if (!(await exists(dir))) return null;
+    const files = await walkMarkdown(dir, "");
+    const entries: Record<string, Uint8Array> = {};
+    for (const rel of files) {
+      entries[rel] = strToU8(await fs.readFile(path.join(dir, rel), "utf8"));
+    }
+    return zipSync(entries, { level: 6 });
+  }
+
   private bundleDir(courseId: string): string {
     return path.join(this.courseDir(courseId), "knowledge");
   }

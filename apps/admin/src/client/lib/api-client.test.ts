@@ -267,12 +267,20 @@ describe("apiClient.knowledge", () => {
   });
 
   it("sends the folder scope as dir when one is given", async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ hits: [] }), { status: 200 }));
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({ hits: [] }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     await apiClient.knowledge.search("c1", "markets", { signal: null }, "week1/lab");
     expect(String(fetchMock.mock.calls[0][0])).toBe(
       "/api/courses/c1/knowledge/search?q=markets&dir=week1%2Flab",
     );
+  });
+
+  it("builds download links that ride the session cookie, with ids encoded", () => {
+    expect(apiClient.knowledge.documentDownloadUrl("c1", "week1/lecture")).toBe(
+      "/api/courses/c1/knowledge/documents/week1%2Flecture/download",
+    );
+    expect(apiClient.knowledge.materialDownloadUrl("c1", "m 1")).toBe("/api/courses/c1/materials/m%201/download");
+    expect(apiClient.knowledge.exportUrl("c1")).toBe("/api/courses/c1/knowledge/export");
   });
 
   it("encodes the search query", async () => {

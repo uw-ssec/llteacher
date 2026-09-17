@@ -454,6 +454,14 @@ export const apiClient = {
         { method: "GET" },
         opts,
       ),
+    /** Download links are plain URLs for an <a download>: the browser sends
+     *  the session cookie itself, the server answers with an attachment, and
+     *  nothing has to pass through a Blob. */
+    documentDownloadUrl: (courseId: string, documentId: string) =>
+      `/api/courses/${encode(courseId)}/knowledge/documents/${encode(documentId)}/download`,
+    materialDownloadUrl: (courseId: string, materialId: string) =>
+      `/api/courses/${encode(courseId)}/materials/${encode(materialId)}/download`,
+    exportUrl: (courseId: string) => `/api/courses/${encode(courseId)}/knowledge/export`,
     /** Same search the student-facing tutor tools call, so what an
      *  instructor finds here is what the tutor can find. */
     search: (courseId: string, q: string, opts: RequestOptions, dir?: string) =>

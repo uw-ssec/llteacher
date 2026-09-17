@@ -19,6 +19,7 @@ import {
   uploadMaterialHandler,
   deleteMaterialHandler,
   reingestMaterialHandler,
+  downloadMaterialHandler,
 } from "./materials";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
@@ -79,6 +80,7 @@ function appWith(role: "instructor" | "student") {
   app.post("/api/courses/:courseId/materials", uploadMaterialHandler);
   app.delete("/api/courses/:courseId/materials/:materialId", deleteMaterialHandler);
   app.post("/api/courses/:courseId/materials/:materialId/reingest", reingestMaterialHandler);
+  app.get("/api/courses/:courseId/materials/:materialId/download", downloadMaterialHandler);
   return app;
 }
 
@@ -510,5 +512,28 @@ describe("materials routes", () => {
     expect(res.status).toBe(403);
     expect(getMaterialForReingest).not.toHaveBeenCalled();
     expect(extractMaterial).not.toHaveBeenCalled();
+  });
+
+  describe("download", () => {
+    it("streams the stored original with its own name and type", async () => {
+      await store.put("courses/c/materials/m1/notes.pdf", new TextEncoder().encode("%PDF-1.4").buffer, { contentType: "application/pdf" });
+      getMaterialForReingest.mockResolvedValue({
+        id: "m1", originalFilename: "Week 1 notes.pdf", storageKey: "courses/c/materials/m1/notes.pdf",
+        relativePath: null, documentPath: null, contentType: "application/pdf",
+      });
+      const res = await appWith("instructor").request(`/api/courses/${COURSE_ID}/materials/m1/download`, {}, TEST_ENV);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("application/pdf");
+      expect(res.headers.get("content-disposition")).toBe('attachment; filename="Week 1 notes.pdf"; filename*=UTF-8\'\'Week%201%20notes.pdf');
+      expect(await res.text()).toBe("%PDF-1.4");
+    });
+
+    it("is 404 when the material or its stored file is missing, and 403 for students", async () => {
+      getMaterialForReingest.mockResolvedValue(null);
+      expect((await appWith("instructor").request(`/api/courses/${COURSE_ID}/materials/m1/download`, {}, TEST_ENV)).status).toBe(404);
+      getMaterialForReingest.mockResolvedValue({ id: "m1", originalFilename: "gone.pdf", storageKey: "courses/c/materials/m1/gone.pdf", relativePath: null, documentPath: null, contentType: null });
+      expect((await appWith("instructor").request(`/api/courses/${COURSE_ID}/materials/m1/download`, {}, TEST_ENV)).status).toBe(404);
+      expect((await appWith("student").request(`/api/courses/${COURSE_ID}/materials/m1/download`, {}, TEST_ENV)).status).toBe(403);
+    });
   });
 });

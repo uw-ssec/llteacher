@@ -271,3 +271,29 @@ export async function reingestMaterialHandler(c: Context<AppEnv>) {
     documentCreated: result.documentPath !== null && result.documentPath !== material.documentPath,
   });
 }
+
+/** RFC 6266 / 5987: an ASCII fallback plus the UTF-8 form, so a file named in
+ *  another script or with spaces still downloads under its own name. */
+function attachmentDisposition(filename: string): string {
+  const ascii = filename.replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "_");
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
+/** The original upload, byte for byte, under its own name and type. */
+export async function downloadMaterialHandler(c: Context<AppEnv>) {
+  const scope = instructorScope(c);
+  if (!scope) return c.json({ error: "Not permitted." }, 403);
+  const materialId = c.req.param("materialId");
+  if (!materialId) return c.json({ error: "No such material." }, 404);
+  const material = await getMaterialForReingest(makeDb(c.env.DATABASE_URL), scope, materialId);
+  if (!material || !material.storageKey || !material.originalFilename) {
+    return c.json({ error: "No such material." }, 404);
+  }
+  const bytes = await storageFromEnv(c.env).get(material.storageKey);
+  if (!bytes) return c.json({ error: "The stored file is missing." }, 404);
+  return c.body(bytes, 200, {
+    "Content-Type": material.contentType ?? "application/octet-stream",
+    "Content-Disposition": attachmentDisposition(material.originalFilename),
+    "Cache-Control": "no-store",
+  });
+}

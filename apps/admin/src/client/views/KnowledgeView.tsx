@@ -1,33 +1,44 @@
 /* --------------------------------------------------------------------------
-   KnowledgeView — the course's OKF bundle, browsable (#42).
+   KnowledgeView — the course's OKF bundle, search first.
 
-   Two panes: a directory rail derived from document paths (there is no
-   directory table -- see lib/documentTree.ts) and the selected directory's
-   concepts.
+   An instructor comes here to confirm the tutor can find something, to find
+   one file by name or by what is inside it, and to see what an upload left
+   unfinished. So the search field is the tallest thing on the page and
+   takes focus on load; the folder rail is a real collapsible tree; and the
+   pane below shows, in order of what is asked of it: uploads filtered from
+   the status strip, search results, the selected folder's own documents,
+   or -- at rest -- what needs attention and what changed recently.
 
-   The materials strip below the listing is where the honest-status rule
-   becomes visible: a PDF sits at `pending` with the reason showing, because
-   #40's extraction pipeline does not exist yet. It is not marked ready and
-   it is not hidden. An instructor who needs that PDF grounded can author a
-   document against it by hand, which is the escape hatch that makes the
-   un-extractable tier usable before #40 lands.
+   Raw uploads live in a closed disclosure at the bottom. They are files,
+   not content, and the honest-status rule (a PDF at `pending` with its
+   reason showing, never marked ready and never hidden) now reads from the
+   "Needs attention" list instead of a thousand-row strip.
+
+   Uploading, retrying, and polling while work is in flight are unchanged
+   from the page this replaces.
    -------------------------------------------------------------------------- */
 
 import { useEffect, useMemo, useState } from "react";
-import { FolderOpen, UploadSimple, Warning, ArrowClockwise } from "@phosphor-icons/react";
-import { KnowledgeSearchBox } from "../components/KnowledgeSearchBox";
+import { DownloadSimple, FolderOpen, UploadSimple, Warning } from "@phosphor-icons/react";
+import { KnowledgeDownloadTools } from "../components/KnowledgeDownloadTools";
+import { KnowledgeAttention } from "../components/KnowledgeAttention";
+import { KnowledgeFolderTree } from "../components/KnowledgeFolderTree";
+import { KnowledgeSearchField } from "../components/KnowledgeSearchField";
+import { KnowledgeSearchResults } from "../components/KnowledgeSearchResults";
+import { KnowledgeStatusStrip, type UploadFilter } from "../components/KnowledgeStatusStrip";
+import { KnowledgeUploads } from "../components/KnowledgeUploads";
 import { PageHeader } from "../components/PageHeader";
-import { RecordId } from "../components/RecordId";
 import { StatusBadge } from "../components/StatusBadge";
-import { ViewLoading, ViewError, ViewEmpty } from "../components/ViewState";
+import { ViewLoading, ViewError } from "../components/ViewState";
 import { apiClient } from "../lib/api-client";
 import { useApiResource } from "../lib/useApiResource";
-import { depthOf, directoriesOf, documentsIn, nameOf } from "../lib/documentTree";
+import { ancestorsOf, documentsIn, treeOf, type TreeNode } from "../lib/documentTree";
 import { statusKind, statusLabel } from "../lib/knowledgeStatus";
-import type { KnowledgeDocumentListPayload, MaterialListPayload } from "@llteacher/ui/api";
+import type { KnowledgeDocumentListPayload, KnowledgeDocumentSummaryPayload, MaterialListPayload } from "@llteacher/ui/api";
 
 const ALLOWED_EXTENSIONS = ["pdf", "docx", "pptx", "txt", "md", "vtt", "srt"];
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const RECENT_ROWS = 8;
 
 export type KnowledgeViewProps = {
   courseId: string;
@@ -36,21 +47,108 @@ export type KnowledgeViewProps = {
    *  state so navigating away (e.g. into a document) and back via `onBack`
    *  restores the exact folder the instructor was in, rather than resetting
    *  to root -- this view is unmounted and remounted on that round trip, so
-   *  its own useState alone can't survive it. Undefined means root, same as
-   *  the bare `useState("")` this replaced. */
+   *  its own useState alone can't survive it. Undefined means root. */
   initialDirectory?: string;
   /** Fired whenever the selected folder changes, so the caller can carry it
    *  forward into whatever state needs to reconstruct this screen later. */
   onDirectoryChange?: (directory: string) => void;
+  /** Same round trip for the rail's expanded folders. Undefined means the
+   *  default: the root and its immediate children open. */
+  initialExpanded?: string[];
+  onExpandedChange?: (expanded: string[]) => void;
 };
+
+function formatIndexedAt(documents: readonly KnowledgeDocumentSummaryPayload[]): string {
+  const latest = documents.reduce((max, d) => (d.updatedAt > max ? d.updatedAt : max), "");
+  if (latest === "") return "Not indexed yet";
+  const when = new Date(latest);
+  const date = when.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  const time = when.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  return `Last indexed ${date} · ${time}`;
+}
+
+function formatUpdated(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function DocumentTable({
+  courseId, documents, onOpenDocument,
+}: { courseId: string; documents: readonly KnowledgeDocumentSummaryPayload[]; onOpenDocument: (id: string) => void }) {
+  return (
+    <div className="admin-knowledge__table-wrap">
+      <table className="admin-table admin-knowledge__doc-table">
+        <thead>
+          <tr><th>Title</th><th>Type</th><th>Indexing</th><th>Updated</th><th><span className="admin-visually-hidden">Download</span></th></tr>
+        </thead>
+        <tbody>
+          {documents.map((document) => (
+            <tr key={document.id}>
+              <td>
+                {/* A button, not a row-level onClick: a bare <tr onClick>
+                    is invisible to keyboard navigation and to a screen
+                    reader's interactive-elements list. */}
+                <button type="button" className="admin-link-button" onClick={() => onOpenDocument(document.id)}>
+                  {document.title ?? document.path}
+                </button>
+                <div className="admin-knowledge__mono admin-knowledge__doc-path">{document.path}</div>
+              </td>
+              <td>{document.type}</td>
+              <td>
+                <StatusBadge kind={statusKind(document.indexStatus)}>{statusLabel(document.indexStatus)}</StatusBadge>
+              </td>
+              <td className="admin-knowledge__muted">{formatUpdated(document.updatedAt)}</td>
+              <td>
+                <KnowledgeDownloadTools courseId={courseId} documentPath={document.path} title={document.title ?? document.path} sourceMaterialId={document.sourceMaterialId} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function Breadcrumb({ directory, onSelect }: { directory: string; onSelect: (dir: string) => void }) {
+  const crumbs = ancestorsOf(directory);
+  return (
+    <nav className="admin-knowledge__crumbs" aria-label="Breadcrumb">
+      {crumbs.map((dir, i) => {
+        const last = i === crumbs.length - 1;
+        const label = dir === "" ? "Knowledge base" : dir.split("/").pop();
+        return (
+          <span key={dir || "root"}>
+            {i > 0 && <span aria-hidden="true"> / </span>}
+            {last ? (
+              <span className="admin-knowledge__crumb--current" aria-current="page">{label}</span>
+            ) : (
+              <button type="button" className="admin-knowledge__crumb" onClick={() => onSelect(dir)}>{label}</button>
+            )}
+          </span>
+        );
+      })}
+    </nav>
+  );
+}
 
 export function KnowledgeView({
   courseId,
   onOpenDocument,
   initialDirectory,
   onDirectoryChange,
+  initialExpanded,
+  onExpandedChange,
 }: KnowledgeViewProps) {
   const [directory, setDirectoryState] = useState(initialDirectory ?? "");
+  /** null until the instructor touches the rail, or a caller restores it:
+   *  the default (root and its children open) depends on the tree, which is
+   *  not known until the documents load. */
+  const [expanded, setExpandedState] = useState<Set<string> | null>(
+    initialExpanded ? new Set(initialExpanded) : null,
+  );
+  const [query, setQuery] = useState("");
+  const [submittedQuery, setSubmittedQuery] = useState<string | null>(null);
+  const [uploadFilter, setUploadFilter] = useState<UploadFilter | null>(null);
+  const [showAllAttention, setShowAllAttention] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   /** Non-null only while handleFiles is running. A folder upload posts one
    *  request per file in sequence, so a 500-file folder is a minutes-long
@@ -58,11 +156,6 @@ export function KnowledgeView({
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const [retryError, setRetryError] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
-
-  function setDirectory(next: string) {
-    setDirectoryState(next);
-    onDirectoryChange?.(next);
-  }
 
   const documents = useApiResource<KnowledgeDocumentListPayload>(
     (opts) => apiClient.knowledge.listDocuments(courseId, opts),
@@ -86,9 +179,36 @@ export function KnowledgeView({
   }, [documents.loading, documents.error, documents.data]);
 
   const all = documents.data?.documents ?? [];
-  const directories = useMemo(() => directoriesOf(all), [all]);
-  const visible = useMemo(() => documentsIn(all, directory), [all, directory]);
   const materialList = materials.data?.materials ?? [];
+  const tree = useMemo(() => treeOf(all), [all]);
+  const expandedSet = useMemo<Set<string>>(() => {
+    if (expanded) return expanded;
+    return new Set(["", ...tree.children.map((c: TreeNode) => c.path), ...ancestorsOf(directory)]);
+  }, [expanded, tree, directory]);
+  const inFolder = useMemo(() => documentsIn(all, directory), [all, directory]);
+  const recent = useMemo(
+    () => all.filter((d) => d.kind === "concept").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, RECENT_ROWS),
+    [all],
+  );
+
+  function setDirectory(next: string) {
+    setDirectoryState(next);
+    onDirectoryChange?.(next);
+  }
+  function setExpanded(next: Set<string>) {
+    setExpandedState(next);
+    onExpandedChange?.([...next]);
+  }
+  function selectFolder(next: string) {
+    setDirectory(next);
+    setExpanded(new Set([...expandedSet, ...ancestorsOf(next)]));
+    setUploadFilter(null);
+  }
+  function toggleFolder(path: string) {
+    const next = new Set(expandedSet);
+    if (next.has(path)) next.delete(path); else next.add(path);
+    setExpanded(next);
+  }
 
   /* Poll only while something is actually in flight, and stop when nothing
      is: a blanket timer would keep an idle console requesting forever, and
@@ -98,8 +218,7 @@ export function KnowledgeView({
      stable `useCallback` from useApiResource), not on the `materials`/
      `documents` objects themselves -- those are new object literals every
      render, which would tear down and recreate this interval on every
-     unrelated re-render (e.g. the announcement effect above firing) and
-     could starve it indefinitely under frequent renders. */
+     unrelated re-render and could starve it indefinitely. */
   const pending = materialList.some(
     (m) => (m.status === "pending" && !m.errorDetail) || m.status === "processing",
   );
@@ -113,21 +232,12 @@ export function KnowledgeView({
   }, [pending, materials.reload, documents.reload]);
 
   /** Client-side validation is for a fast error only; the server re-checks
-   *  both of these and is the authority.
-   *
-   *  I-4 (final review): `apiClient.request()` throws `ApiError` on any
-   *  non-2xx response, and this used to await the upload with no `catch` at
-   *  all -- a 500/502/503/403 from the server became an unhandled promise
-   *  rejection, and the instructor saw the list reload with nothing added
-   *  and no explanation. The upload's own `admin-field-error` slot already
-   *  existed for the two client-side checks above; a server-side failure
-   *  now reports through that same slot rather than vanishing.
-   *
-   *  #42: handles a folder as well as a multi-select -- both hand the input
-   *  a FileList with more than one entry. Uploads run sequentially (not
+   *  both of these and is the authority. Uploads run sequentially (not
    *  Promise.all) so a large folder does not fire dozens of concurrent
    *  requests, and one bad file does not stop the rest: every failure is
-   *  collected and reported together at the end. */
+   *  collected and reported together at the end. A folder upload hands
+   *  this a FileList whose entries carry webkitRelativePath, which rides
+   *  along so the server can keep the folder structure. */
   async function handleFiles(list: FileList | null) {
     const files = Array.from(list ?? []).filter((f) => f.size > 0 && !f.name.startsWith("."));
     if (files.length === 0) return;
@@ -139,7 +249,6 @@ export function KnowledgeView({
     for (const file of files) {
       // Counted before the work, so the line names the file being uploaded
       // right now ("Uploading 12 of 529") rather than the last one finished.
-      // Client-side rejections below count too: they are files gone through.
       done += 1;
       setUploadProgress({ done, total: files.length });
       const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
@@ -160,10 +269,8 @@ export function KnowledgeView({
       }
     }
     setUploadProgress(null);
-    // Only reload the two listings when something actually landed server-side
-    // -- a purely client-side rejection (bad extension/size, every file) has
-    // nothing new to fetch, and the pre-existing "rejects a disallowed file"
-    // test asserts exactly one /materials GET (the initial load) in that case.
+    // Only reload when something actually landed server-side: a purely
+    // client-side rejection has nothing new to fetch.
     if (successCount > 0) {
       documents.reload();
       materials.reload();
@@ -173,16 +280,11 @@ export function KnowledgeView({
     }
   }
 
-  /* #42: the retry affordance for a material the pipeline could not extract.
-     It is honest about the no-op: re-running tier-1 conversion on a PDF comes
-     back `pending` again, and the material's own error_detail keeps saying why,
-     rather than the button implying the next press might differ.
-
-     I-4: same unhandled-rejection gap as handleFile above -- a failed retry
-     (the network call itself, not the honest "still pending" response)
-     vanished with no signal. Reported through its own slot, mirroring the
-     materials-load-failure alert already in this file, rather than reusing
-     uploadError: a retry failure is not about the file picker. */
+  /* The retry affordance for a material the pipeline could not extract. It
+     is honest about the no-op: re-running tier-1 conversion on a PDF comes
+     back `pending` again, and the material's own error_detail keeps saying
+     why. A failed retry call (the network, not an honest "still pending"
+     response) is reported through its own slot rather than vanishing. */
   async function retry(materialId: string) {
     setRetryError(null);
     try {
@@ -193,17 +295,34 @@ export function KnowledgeView({
       setRetryError((err as Error)?.message ?? "Could not retry that material. Please try again.");
     }
   }
+  async function retryAllFailed() {
+    setRetryError(null);
+    const failed = materialList.filter((m) => m.status === "failed");
+    const failures: string[] = [];
+    for (const m of failed) {
+      try {
+        await apiClient.knowledge.reingestMaterial(courseId, m.id, { signal: null });
+      } catch (err) {
+        failures.push((err as Error)?.message ?? m.id);
+      }
+    }
+    materials.reload();
+    documents.reload();
+    if (failures.length > 0) setRetryError(`${failures.length} of ${failed.length} retries could not be sent.`);
+  }
+
+  const hasQuery = query.trim() !== "";
+  const emptyBundle = documents.data !== null && all.length === 0;
 
   return (
-    <div className="admin-view">
+    <div className="admin-view admin-knowledge">
       <div className="admin-visually-hidden" role="status" aria-live="polite">
         {announcement}
       </div>
 
       <PageHeader
-        eyebrow={`KNOWLEDGE · ${all.length} DOCUMENTS`}
+        eyebrow={formatIndexedAt(all)}
         title="Knowledge base"
-        subtitle="Uploaded materials become OKF documents the tutor can search."
         actions={
           <>
             <label className="admin-button admin-button--primary">
@@ -220,12 +339,10 @@ export function KnowledgeView({
                 }}
               />
             </label>
-            {/* #42: a folder upload is the same handleFiles path fed a
-                FileList whose entries each carry webkitRelativePath -- the
-                only browser-native way to pick a directory. The two
-                `webkitdirectory`/`directory` attributes aren't in React's
+            {/* The two `webkitdirectory`/`directory` attributes are the only
+                browser-native way to pick a directory and aren't in React's
                 DOM typings, hence the cast. */}
-            <label className="admin-button">
+            <label className="admin-button admin-button--ghost">
               <FolderOpen size={15} /> Upload folder
               <input
                 type="file"
@@ -238,6 +355,11 @@ export function KnowledgeView({
                 }}
               />
             </label>
+            {/* A real link: the browser downloads the zip with the session
+                cookie and the server names the file after the course. */}
+            <a className="admin-button admin-button--ghost" href={apiClient.knowledge.exportUrl(courseId)} download="">
+              <DownloadSimple size={15} aria-hidden="true" /> Download all
+            </a>
           </>
         }
       />
@@ -246,150 +368,144 @@ export function KnowledgeView({
           (the announcement <div> above), and a second one updating once per
           file would read 529 interruptions aloud. */}
       {uploadProgress && (
-        <p className="admin-form-hint">
-          Uploading {uploadProgress.done} of {uploadProgress.total}…
-        </p>
+        <div className="admin-knowledge__progress">
+          <p className="admin-form-hint">Uploading {uploadProgress.done} of {uploadProgress.total}…</p>
+          <progress className="admin-knowledge__progress-bar" value={uploadProgress.done} max={uploadProgress.total} />
+        </div>
       )}
-      {/* The failures message is one "\n"-joined line per file, so it needs
-          the newlines rendered rather than collapsed into one run-on
-          sentence -- hence the --multiline modifier. */}
       {uploadError && <p className="admin-field-error admin-field-error--multiline">{uploadError}</p>}
-      <KnowledgeSearchBox courseId={courseId} onOpenDocument={onOpenDocument} />
+
+      <KnowledgeStatusStrip
+        documents={all}
+        materials={materialList}
+        filter={uploadFilter}
+        onFilter={(next) => { setUploadFilter(next); setShowAllAttention(false); }}
+      />
+
+      <KnowledgeSearchField
+        value={query}
+        onChange={(next) => { setQuery(next); setSubmittedQuery(null); setUploadFilter(null); }}
+        onSubmit={() => setSubmittedQuery(query.trim())}
+        onClear={() => { setQuery(""); setSubmittedQuery(null); }}
+        scope={directory === "" ? null : directory}
+        onClearScope={() => setDirectory("")}
+        busy={false}
+      />
 
       {documents.loading && <ViewLoading label="Loading the knowledge base…" />}
       {documents.error && <ViewError error={documents.error} onRetry={documents.reload} />}
 
       {documents.data && (
-        <div className="admin-knowledge">
-          <nav className="admin-knowledge__tree" aria-label="Folders">
-            {directories.map((dir) => (
-              <button
-                key={dir || "root"}
-                type="button"
-                className={
-                  dir === directory
-                    ? "admin-knowledge__folder admin-knowledge__folder--active"
-                    : "admin-knowledge__folder"
-                }
-                style={{ paddingLeft: `${8 + depthOf(dir) * 14}px` }}
-                onClick={() => setDirectory(dir)}
-              >
-                <FolderOpen size={14} /> {nameOf(dir)}
-              </button>
-            ))}
-          </nav>
+        <div className="admin-knowledge__body">
+          <KnowledgeFolderTree
+            root={tree}
+            selected={directory}
+            expanded={expandedSet}
+            onSelect={selectFolder}
+            onToggle={toggleFolder}
+            onCollapseAll={() => setExpanded(new Set([""]))}
+          />
 
-          <div className="admin-knowledge__listing">
-            {visible.length === 0 ? (
-              <ViewEmpty title="No documents yet in this folder." />
+          <div className="admin-knowledge__pane">
+            {retryError && (
+              <div className="admin-alert" role="alert">
+                <span className="admin-alert__icon" aria-hidden="true"><Warning size={16} weight="regular" /></span>
+                <span>{retryError}</span>
+              </div>
+            )}
+            {materials.error && (
+              /* A materials-load failure does not block the document browser
+                 -- the two panes are independently useful -- but it is
+                 reported rather than presenting an attention list that is
+                 silently just empty. */
+              <div className="admin-alert">
+                <span className="admin-alert__icon" aria-hidden="true"><Warning size={16} weight="regular" /></span>
+                <span>
+                  The uploads could not be loaded.{" "}
+                  {materials.canRetry && (
+                    <button type="button" className="admin-link-button" onClick={materials.reload}>Try again</button>
+                  )}
+                </span>
+              </div>
+            )}
+
+            {uploadFilter ? (
+              <section aria-label={`${uploadFilter} uploads`}>
+                <div className="admin-knowledge__section-head">
+                  <h2 className="admin-knowledge__label">{uploadFilter === "pending" ? "Pending uploads" : "Failed uploads"}</h2>
+                  <span className="admin-knowledge__hint">
+                    filtered from the status strip ·{" "}
+                    <button type="button" className="admin-link-button" onClick={() => setUploadFilter(null)}>Clear</button>
+                  </span>
+                </div>
+                <KnowledgeAttention
+                  materials={materialList}
+                  filter={uploadFilter}
+                  showAll
+                  onShowAll={() => {}}
+                  onRetry={(id) => void retry(id)}
+                  onRetryAllFailed={() => void retryAllFailed()}
+                />
+              </section>
+            ) : hasQuery ? (
+              <KnowledgeSearchResults
+                courseId={courseId}
+                query={query}
+                submittedQuery={submittedQuery}
+                scope={directory === "" ? null : directory}
+                documents={all}
+                onOpenDocument={onOpenDocument}
+                onRevealFolder={selectFolder}
+              />
+            ) : directory !== "" ? (
+              <section aria-label="Folder contents">
+                <Breadcrumb directory={directory} onSelect={selectFolder} />
+                <div className="admin-knowledge__section-head">
+                  <h2 className="admin-knowledge__label">
+                    {directory.split("/").pop()} · {inFolder.length} {inFolder.length === 1 ? "document" : "documents"}
+                  </h2>
+                  <span className="admin-knowledge__hint">type above to search within this folder</span>
+                </div>
+                {inFolder.length === 0 ? (
+                  <p className="admin-knowledge__empty">No documents yet in this folder. Open a subfolder in the rail, or search with the folder scope set.</p>
+                ) : (
+                  <DocumentTable courseId={courseId} documents={inFolder} onOpenDocument={onOpenDocument} />
+                )}
+              </section>
+            ) : emptyBundle ? (
+              <p className="admin-knowledge__empty">
+                <b>No documents yet.</b> Upload files or a folder to build the knowledge base the tutor searches.
+              </p>
             ) : (
-              <table className="admin-table">
-                <thead>
-                  <tr>
-                    <th>ID</th>
-                    <th>Title</th>
-                    <th>Type</th>
-                    <th>Indexing</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visible.map((document, i) => (
-                    <tr key={document.id}>
-                      <td>
-                        <RecordId prefix="DOC" index={i + 1} size="sm" />
-                      </td>
-                      <td>
-                        {/* A button, not a row-level onClick: a bare <tr onClick>
-                            is invisible to keyboard navigation and to a screen
-                            reader's interactive-elements list. */}
-                        <button
-                          type="button"
-                          className="admin-link-button"
-                          onClick={() => onOpenDocument(document.id)}
-                        >
-                          {document.title ?? document.path}
-                        </button>
-                      </td>
-                      <td>{document.type}</td>
-                      <td>
-                        <StatusBadge kind={statusKind(document.indexStatus)}>
-                          {statusLabel(document.indexStatus)}
-                        </StatusBadge>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <>
+                <section aria-label="Needs attention">
+                  <div className="admin-knowledge__section-head">
+                    <h2 className="admin-knowledge__label">Needs attention</h2>
+                    <span className="admin-knowledge__hint">uploads the pipeline could not finish on its own</span>
+                  </div>
+                  <KnowledgeAttention
+                    materials={materialList}
+                    filter={null}
+                    showAll={showAllAttention}
+                    onShowAll={() => setShowAllAttention(true)}
+                    onRetry={(id) => void retry(id)}
+                    onRetryAllFailed={() => void retryAllFailed()}
+                  />
+                </section>
+                <section aria-label="Recently updated">
+                  <div className="admin-knowledge__section-head">
+                    <h2 className="admin-knowledge__label">Recently updated</h2>
+                    <span className="admin-knowledge__hint">the last {recent.length} changes across the bundle</span>
+                  </div>
+                  <DocumentTable courseId={courseId} documents={recent} onOpenDocument={onOpenDocument} />
+                </section>
+              </>
             )}
           </div>
         </div>
       )}
 
-      <section className="admin-knowledge__materials">
-        <h2>Uploaded files</h2>
-        {/* I-4: a failed retry attempt (the network call, not an honest
-            "still pending" response) used to vanish with no signal at all.
-            Mirrors the load-failure alert just below rather than
-            uploadError, which is scoped to the file picker. */}
-        {retryError && (
-          <div className="admin-alert" role="alert">
-            <span className="admin-alert__icon" aria-hidden="true">
-              <Warning size={16} weight="regular" />
-            </span>
-            <span>{retryError}</span>
-          </div>
-        )}
-        {materials.error ? (
-          /* A materials-load failure does not block the document browser --
-             the two panes are independently useful -- but it is reported
-             rather than presenting an uploaded-files strip that is silently
-             just empty. */
-          <div className="admin-alert">
-            <span className="admin-alert__icon" aria-hidden="true">
-              <Warning size={16} weight="regular" />
-            </span>
-            <span>
-              The uploaded-files list could not be loaded.{" "}
-              {materials.canRetry && (
-                <button type="button" className="admin-link-button" onClick={materials.reload}>
-                  Try again
-                </button>
-              )}
-            </span>
-          </div>
-        ) : materialList.length === 0 ? (
-          !materials.loading && (
-            <p className="admin-form-hint">Nothing uploaded yet.</p>
-          )
-        ) : (
-          <ul className="admin-knowledge__material-list">
-            {materialList.map((material) => {
-              const label = material.relativePath ?? material.originalFilename ?? material.title;
-              return (
-                <li key={material.id} className="admin-knowledge__material">
-                  <span className="admin-knowledge__material-name">{label}</span>
-                  <StatusBadge kind={statusKind(material.status)}>
-                    {statusLabel(material.status)}
-                  </StatusBadge>
-                  {material.errorDetail && (
-                    <span className="admin-knowledge__material-note">{material.errorDetail}</span>
-                  )}
-                  {(material.status === "pending" || material.status === "failed") && (
-                    <button
-                      type="button"
-                      className="admin-button admin-button--minimal"
-                      onClick={() => void retry(material.id)}
-                      aria-label={`Retry ingestion for ${label}`}
-                    >
-                      <ArrowClockwise size={13} weight="bold" aria-hidden="true" /> Retry
-                    </button>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
+      <KnowledgeUploads courseId={courseId} materials={materialList} />
     </div>
   );
 }

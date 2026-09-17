@@ -71,6 +71,7 @@ import {
   uploadMaterialHandler,
   deleteMaterialHandler,
   reingestMaterialHandler,
+  downloadMaterialHandler,
 } from "./routes/materials";
 import {
   cleanupDocumentHandler,
@@ -81,6 +82,8 @@ import {
   deleteDocumentHandler,
   documentLinksHandler,
   searchKnowledgeHandler,
+  downloadDocumentHandler,
+  exportKnowledgeHandler,
 } from "./routes/knowledgeDocuments";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
@@ -385,6 +388,10 @@ app.post(
   "/api/courses/:courseId/materials/:materialId/reingest",
   requireInstructorOf()(reingestMaterialHandler),
 );
+app.get(
+  "/api/courses/:courseId/materials/:materialId/download",
+  requireInstructorOf()(downloadMaterialHandler),
+);
 
 // Collections routes (knowledgeCollections.ts) are intentionally unregistered this quarter; see the 2026-09-15 spec.
 app.get(
@@ -415,6 +422,14 @@ app.post("/api/courses/:courseId/knowledge/documents/:documentId/cleanup", requi
 app.get(
   "/api/courses/:courseId/knowledge/search",
   requireInstructorOf()(searchKnowledgeHandler),
+);
+app.get(
+  "/api/courses/:courseId/knowledge/documents/:documentId/download",
+  requireInstructorOf()(downloadDocumentHandler),
+);
+app.get(
+  "/api/courses/:courseId/knowledge/export",
+  requireInstructorOf()(exportKnowledgeHandler),
 );
 
 // #172 audit (CMP-005): an unmatched /api/* path fell through to the SPA

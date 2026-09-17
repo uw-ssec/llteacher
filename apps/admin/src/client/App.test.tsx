@@ -308,6 +308,12 @@ describe("Knowledge navigation (#42, #23)", () => {
       title: "Syllabus", description: null, tags: null, indexStatus: "indexed",
       sourceMaterialId: null, updatedAt: "2026-01-01T00:00:00.000Z",
     },
+    // Nested one level deeper so the rail has something to collapse.
+    {
+      id: "d3", path: "week1/lab/notes", kind: "concept", type: "transcript",
+      title: "Lab notes", description: null, tags: null, indexStatus: "indexed",
+      sourceMaterialId: null, updatedAt: "2025-12-01T00:00:00.000Z",
+    },
   ];
 
   function stubProfile(courses: unknown[], topLevelRole = "instructor") {
@@ -392,6 +398,30 @@ describe("Knowledge navigation (#42, #23)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Knowledge base" }));
     await waitFor(() => screen.getByText("Lecture 1"));
     expect(screen.queryByText("Syllabus")).toBeNull();
+  });
+  /* Same convention for the rail's expanded folders: an instructor who
+     collapsed the tree, opened a document from the recent list, and came
+     back should find the tree as they left it, not re-expanded. */
+  it("returns with the folder rail expanded as it was left", async () => {
+    stubProfile([
+      { id: "c1", title: "STATS 311", role: "instructor", canViewSolutions: true, canViewDrafts: true },
+    ]);
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: /Knowledge/ }));
+    // Root and its children open by default, so week1's own subfolder shows.
+    await waitFor(() => screen.getByRole("button", { name: /^lab/ }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse all" }));
+    expect(screen.queryByRole("button", { name: /^lab/ })).toBeNull();
+
+    // The recent list at rest still offers the document directly.
+    fireEvent.click(await screen.findByRole("button", { name: "Lecture 1" }));
+    await waitFor(() => screen.getByText(/Referenced by/));
+
+    fireEvent.click(screen.getByRole("button", { name: "Knowledge base" }));
+    await waitFor(() => screen.getByRole("button", { name: "Collapse all" }));
+    expect(screen.getByRole("button", { name: /week1/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^lab/ })).toBeNull();
   });
 });
 

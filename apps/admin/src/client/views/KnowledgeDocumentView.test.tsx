@@ -43,6 +43,13 @@ function stubFetch(onPut?: (body: unknown) => void) {
   return mock;
 }
 
+/** The header keeps only the view toggle and Save visible; everything else
+ *  is in the More menu. Opens it and returns the named item. */
+function menuItem(name: RegExp | string) {
+  fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+  return screen.getByRole("menuitem", { name });
+}
+
 describe("KnowledgeDocumentView", () => {
   it("renders the document's frontmatter and body", async () => {
     stubFetch();
@@ -91,7 +98,7 @@ describe("KnowledgeDocumentView", () => {
     const editor = (await screen.findByLabelText(/document body/i)) as HTMLTextAreaElement;
 
     fireEvent.change(editor, { target: { value: "mangled" } });
-    fireEvent.click(screen.getByRole("button", { name: /restore original/i }));
+    fireEvent.click(menuItem(/restore original/i));
 
     await waitFor(() => expect(editor.value).toBe("Welcome to lecture one."));
   });
@@ -130,7 +137,56 @@ describe("KnowledgeDocumentView", () => {
     );
     render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
     await screen.findByLabelText(/document body/i);
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.queryByRole("menuitem", { name: /restore original/i })).toBeNull();
+  });
+
+  it("keeps only the view toggle and Save in the header; the rest sits behind More", async () => {
+    stubFetch();
+    render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
+    await screen.findByLabelText(/document body/i);
+    expect(screen.getByRole("button", { name: "Edit" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Preview" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: /^save$/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Clean up Markdown" })).toBeNull();
     expect(screen.queryByRole("button", { name: /restore original/i })).toBeNull();
+    expect(screen.getByRole("button", { name: "More actions" })).toBeTruthy();
+  });
+
+  it("marks unsaved changes with a status word in the header", async () => {
+    stubFetch();
+    render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
+    const editor = (await screen.findByLabelText(/document body/i)) as HTMLTextAreaElement;
+    expect(screen.queryByText("Unsaved changes")).toBeNull();
+    fireEvent.change(editor, { target: { value: "edited" } });
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+  });
+
+  it("offers the Markdown and the original upload as downloads in the menu", async () => {
+    stubFetch();
+    render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
+    await screen.findByLabelText(/document body/i);
+    const md = menuItem(/^Markdown/) as HTMLAnchorElement;
+    expect(md.getAttribute("href")).toBe("/api/courses/c1/knowledge/documents/week1%2Flecture/download");
+    expect(md.getAttribute("download")).toBe("lecture.md");
+    const original = screen.getByRole("menuitem", { name: /^Original upload/ }) as HTMLAnchorElement;
+    expect(original.getAttribute("href")).toBe("/api/courses/c1/materials/m1/download");
+  });
+
+  it("omits the original-upload download for a hand-authored document", async () => {
+    const hand = { ...DOCUMENT, sourceMaterialId: null, bodyOriginal: null };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/links")) return new Response(JSON.stringify(LINKS), { status: 200 });
+        return new Response(JSON.stringify(hand), { status: 200 });
+      }),
+    );
+    render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
+    await screen.findByLabelText(/document body/i);
+    expect(menuItem(/^Markdown/)).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /^Original upload/ })).toBeNull();
   });
 
   it("clears the re-index warning once a save actually succeeds, rather than leaving it stuck on", async () => {
@@ -239,8 +295,9 @@ describe("Markdown cleanup review", () => {
     const editor = await screen.findByLabelText("Document body");
     await waitFor(() => expect((editor as HTMLTextAreaElement).value).toBe(DOCUMENT.body));
     fireEvent.change(editor, { target: { value: "Unsaved notes" } });
-    await waitFor(() => expect((screen.getByRole("button", { name: "Clean up Markdown" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Clean up Markdown" }));
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    await waitFor(() => expect((screen.getByRole("menuitem", { name: /^Clean up Markdown/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Clean up Markdown/ }));
     await screen.findByRole("region", { name: "Cleanup proposal" });
     expect(screen.getByText("Check table columns")).toBeTruthy();
     expect(mock.mock.calls.filter(([, init]) => init?.method === "PUT")).toHaveLength(0);
@@ -251,8 +308,9 @@ describe("Markdown cleanup review", () => {
     const mock = cleanupFetch();
     render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
     await screen.findByLabelText("Document body");
-    await waitFor(() => expect((screen.getByRole("button", { name: "Clean up Markdown" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Clean up Markdown" }));
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    await waitFor(() => expect((screen.getByRole("menuitem", { name: /^Clean up Markdown/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Clean up Markdown/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Apply cleanup" }));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Cleanup proposal" })).toBeNull());
     const put = mock.mock.calls.find(([, init]) => init?.method === "PUT");
@@ -265,8 +323,9 @@ describe("Markdown cleanup review", () => {
     mock.mockImplementation(async (input, init) => init?.method === "PUT" ? new Response(JSON.stringify({ error: "The document changed. Reload it before applying cleanup." }), { status: 409 }) : impl(input, init));
     render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
     await screen.findByLabelText("Document body");
-    await waitFor(() => expect((screen.getByRole("button", { name: "Clean up Markdown" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Clean up Markdown" }));
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    await waitFor(() => expect((screen.getByRole("menuitem", { name: /^Clean up Markdown/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Clean up Markdown/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Apply cleanup" }));
     await screen.findByText("The document changed. Reload it before applying cleanup.");
     expect(screen.getByRole("region", { name: "Cleanup proposal" })).toBeTruthy();

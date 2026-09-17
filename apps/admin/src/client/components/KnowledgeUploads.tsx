@@ -5,10 +5,15 @@
    needs a human already surfaced in KnowledgeAttention, so this exists for
    the occasional "did that file actually arrive?" -- filter by name, page
    through, newest first.
+
+   The rows render only once the disclosure is open. A thousand table rows
+   parked in a closed <details> would still cost the browser, and every file
+   name would sit in the DOM twice (here and in the attention list).
    -------------------------------------------------------------------------- */
 
 import { useMemo, useState } from "react";
-import { CaretRight } from "@phosphor-icons/react";
+import { CaretRight, FileArrowDown } from "@phosphor-icons/react";
+import { apiClient } from "../lib/api-client";
 import { StatusBadge } from "./StatusBadge";
 import { materialLabel, statusKind, statusLabel } from "../lib/knowledgeStatus";
 import type { MaterialPayload } from "@llteacher/ui/api";
@@ -26,7 +31,8 @@ function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-export function KnowledgeUploads({ materials }: { materials: readonly MaterialPayload[] }) {
+export function KnowledgeUploads({ courseId, materials }: { courseId: string; materials: readonly MaterialPayload[] }) {
+  const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
 
@@ -41,13 +47,16 @@ export function KnowledgeUploads({ materials }: { materials: readonly MaterialPa
   const slice = rows.slice(current * PAGE_SIZE, current * PAGE_SIZE + PAGE_SIZE);
 
   return (
-    <details className="admin-knowledge__uploads">
-      <summary className="admin-knowledge__uploads-summary">
+    <details className="admin-knowledge__uploads" open={open}>
+      <summary
+        className="admin-knowledge__uploads-summary"
+        onClick={(e) => { e.preventDefault(); setOpen((o) => !o); }}
+      >
         <span className="admin-knowledge__chevron" aria-hidden="true"><CaretRight size={12} weight="bold" /></span>
         <h2 className="admin-knowledge__label">All uploads · {materials.length.toLocaleString("en-US")}</h2>
         <span className="admin-knowledge__hint">raw files as received, newest first</span>
       </summary>
-      {materials.length === 0 ? (
+      {!open ? null : materials.length === 0 ? (
         <p className="admin-form-hint">Nothing uploaded yet.</p>
       ) : (
         <>
@@ -67,11 +76,11 @@ export function KnowledgeUploads({ materials }: { materials: readonly MaterialPa
           <div className="admin-knowledge__table-wrap">
             <table className="admin-table admin-knowledge__uploads-table">
               <thead>
-                <tr><th>File</th><th>Type</th><th>Size</th><th>Status</th><th>Uploaded</th></tr>
+                <tr><th>File</th><th>Type</th><th>Size</th><th>Status</th><th>Uploaded</th><th><span className="admin-visually-hidden">Download</span></th></tr>
               </thead>
               <tbody>
                 {slice.length === 0 ? (
-                  <tr><td colSpan={5} className="admin-muted">No uploads match.</td></tr>
+                  <tr><td colSpan={6} className="admin-muted">No uploads match.</td></tr>
                 ) : slice.map((m) => (
                   <tr key={m.id}>
                     <td className="admin-knowledge__mono">{materialLabel(m)}</td>
@@ -79,6 +88,17 @@ export function KnowledgeUploads({ materials }: { materials: readonly MaterialPa
                     <td>{formatBytes(m.byteSize)}</td>
                     <td><StatusBadge kind={statusKind(m.status)}>{statusLabel(m.status)}</StatusBadge></td>
                     <td>{formatDate(m.uploadedAt)}</td>
+                    <td>
+                      <a
+                        className="admin-knowledge__icon-link"
+                        href={apiClient.knowledge.materialDownloadUrl(courseId, m.id)}
+                        download=""
+                        aria-label={`Download ${materialLabel(m)}`}
+                        title="Download original"
+                      >
+                        <FileArrowDown size={16} aria-hidden="true" />
+                      </a>
+                    </td>
                   </tr>
                 ))}
               </tbody>

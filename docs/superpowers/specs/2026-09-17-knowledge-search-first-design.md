@@ -85,3 +85,35 @@ search-input focus rule. Geist and Geist Mono as everywhere else.
 `GET /knowledge/search?q=&limit=&dir=`: `dir` optional, validated with the
 same directory pattern as `createDirectory`; the service filters hits to
 `dir/` and fills up to `limit`.
+
+## Addendum, 2026-09-17: downloads and the document action bar
+
+Approved against https://claude.ai/artifact/W51qWsKiqK7Wx14P8MznEL.
+
+**Document view header.** At rest: an Edit / Preview toggle (icon pair)
+and Save. "Unsaved changes" is a status word beside the toggle. Everything
+else lives in a More (⋯) menu: Clean up Markdown, Restore original (only
+when an original exists), and a Download group with Markdown and Original
+upload (only when the document came from an upload). `ActionMenu` is the
+console's new overflow-menu component: menu-button pattern, arrows move,
+Escape closes and returns focus, outside click closes, link items are real
+anchors.
+
+**Downloads.**
+
+| What | Route | Delivers |
+|---|---|---|
+| One document | `GET …/knowledge/documents/:id/download` | the `.md` file, named after the last path segment |
+| One original upload | `GET …/materials/:id/download` | the stored file under its original name and type |
+| Whole knowledge base | `GET …/knowledge/export` | a `.zip` of every Markdown file, paths preserved |
+
+All three answer with `Content-Disposition: attachment`; the console uses
+plain anchors so the browser sends the session cookie itself. The zip is
+named `<course-slug>-knowledge-<YYYY-MM-DD>-<HHMM>Z.zip` (UTC, marked) so
+a folder of exports stays legible. Originals are not bundled: pulling
+every stored upload through the server per request is a queued job.
+
+**Where downloads appear.** Knowledge base header ("Download all"); result
+rows, folder tables, and the recent list (icon links on hover and focus,
+Markdown always, original only when one exists); uploads table (original
+per row); the document view's More menu.

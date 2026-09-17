@@ -3,6 +3,8 @@ import type { Context } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../context";
 import { instructorScope } from "../utils/guards";
+import { makeDb } from "../../db/client";
+import { getCourseTitle } from "../repositories/courses";
 import { isValidConceptId } from "../knowledge/conceptId";
 import {
   ConceptConflictError, ConceptExistsError, ConceptIdError, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, isValidDirectory, knowledgeServiceFromEnv,
@@ -159,4 +161,52 @@ export async function cleanupDocumentHandler(c: Context<AppEnv>) {
     if (err instanceof CleanupError) return c.json({ error: err.message }, 502);
     throw err;
   }
+}
+
+/** One document as a Markdown attachment. Named after the last path segment
+ *  so "lectures/module-1/intro" saves as intro.md; the folder is what the
+ *  instructor was already looking at. */
+export async function downloadDocumentHandler(c: Context<AppEnv>) {
+  const scope = instructorScope(c);
+  if (!scope) return c.json({ error: "Not permitted." }, 403);
+  const id = conceptIdParam(c);
+  if (!id) return c.json({ error: "Invalid document id." }, 400);
+  const raw = await knowledgeServiceFromEnv(c.env).readRaw(scope, id);
+  if (raw === null) return c.json({ error: "No such document." }, 404);
+  const name = `${id.split("/").pop() ?? id}.md`;
+  return c.body(raw, 200, {
+    "Content-Type": "text/markdown; charset=utf-8",
+    "Content-Disposition": `attachment; filename="${name}"`,
+    "Cache-Control": "no-store",
+  });
+}
+
+/** "<course>-knowledge-<YYYY-MM-DD>-<HHMM>Z": the course by name and the
+ *  moment of download to the minute (UTC, marked as such), so a folder of
+ *  these stays legible without opening any of them. */
+async function exportBaseName(c: Context<AppEnv>, scope: string): Promise<string> {
+  const title = await getCourseTitle(makeDb(c.env.DATABASE_URL), scope);
+  const slug = title
+    ? title.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+    : "";
+  const course = slug || `course-${scope.slice(0, 8)}`;
+  const now = new Date();
+  const stamp = `${now.toISOString().slice(0, 10)}-${now.toISOString().slice(11, 13)}${now.toISOString().slice(14, 16)}Z`;
+  return `${course}-knowledge-${stamp}`;
+}
+
+/** The whole bundle as a zip of its Markdown files. Originals are not
+ *  included: pulling every stored upload through the server per request is
+ *  a queued job, not a click. */
+export async function exportKnowledgeHandler(c: Context<AppEnv>) {
+  const scope = instructorScope(c);
+  if (!scope) return c.json({ error: "Not permitted." }, 403);
+  const zip = await knowledgeServiceFromEnv(c.env).exportBundle(scope);
+  if (zip === null) return c.json({ error: "This course has no knowledge base yet." }, 404);
+  const name = `${await exportBaseName(c, scope)}.zip`;
+  return c.body(zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.byteLength) as ArrayBuffer, 200, {
+    "Content-Type": "application/zip",
+    "Content-Disposition": `attachment; filename="${name}"`,
+    "Cache-Control": "no-store",
+  });
 }

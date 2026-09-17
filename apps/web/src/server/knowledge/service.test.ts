@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { unzipSync, strFromU8 } from "fflate";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { okfAvailable } from "./okfCli";
@@ -74,6 +75,26 @@ describe.skipIf(!okfAvailable(OKF))("OkfKnowledgeService (real binary)", () => {
     // Without the scope the lecture, which scores highest, is the first hit.
     const unscoped = await svc.search(COURSE_A, "elasticity price", 2);
     expect(unscoped[0]!.conceptId).toBe("lectures/elasticity");
+  });
+
+  it("reads a concept's raw file, frontmatter included, for download", async () => {
+    await svc.create(COURSE_A, { id: "lectures/intro", type: "lecture", title: "Intro", description: "Markets", body: "# Intro\n\nSupply and demand." });
+    const raw = await svc.readRaw(COURSE_A, "lectures/intro");
+    expect(raw).toContain("title:");
+    expect(raw).toContain("Supply and demand.");
+    expect(await svc.readRaw(COURSE_A, "lectures/missing")).toBeNull();
+    expect(await svc.readRaw(COURSE_B, "lectures/intro")).toBeNull();
+  });
+
+  it("exports the whole bundle as a zip of its Markdown files, paths preserved", async () => {
+    await svc.create(COURSE_A, { id: "lectures/intro", type: "lecture", title: "Intro", description: "", body: "Body A" });
+    await svc.create(COURSE_A, { id: "syllabus", type: "syllabus", title: "Syllabus", description: "", body: "Body B" });
+    const zip = await svc.exportBundle(COURSE_A);
+    expect(zip).not.toBeNull();
+    const files = unzipSync(zip!);
+    expect(Object.keys(files).sort()).toEqual(expect.arrayContaining(["index.md", "lectures/intro.md", "log.md", "syllabus.md"]));
+    expect(strFromU8(files["lectures/intro.md"]!)).toContain("Body A");
+    expect(await svc.exportBundle(COURSE_B)).toBeNull();
   });
 
   it("searches and shows within one course only", async () => {

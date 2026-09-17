@@ -30,41 +30,51 @@ function renderTree(over: Partial<React.ComponentProps<typeof KnowledgeFolderTre
 describe("KnowledgeFolderTree", () => {
   it("shows only the children of expanded folders", () => {
     renderTree();
-    expect(screen.getByRole("treeitem", { name: /week1/ })).toBeTruthy();
-    expect(screen.queryByRole("treeitem", { name: /lab/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /week1/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /lab/ })).toBeNull();
   });
 
   it("reveals a folder's children once it is expanded", () => {
     renderTree({ expanded: new Set(["", "week1"]) });
-    expect(screen.getByRole("treeitem", { name: /lab/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /lab/ })).toBeTruthy();
   });
 
   it("toggles a folder from its chevron without selecting it", () => {
     const { onToggle, onSelect } = renderTree();
-    fireEvent.click(screen.getByRole("button", { name: "Expand week1" }));
+    fireEvent.click(document.querySelector('[data-toggle="week1"]')!);
     expect(onToggle).toHaveBeenCalledWith("week1");
     expect(onSelect).not.toHaveBeenCalled();
   });
 
+  it("expands and collapses from the keyboard with the arrow keys", () => {
+    const { onToggle } = renderTree();
+    const week1 = screen.getByRole("button", { name: /week1/ });
+    fireEvent.keyDown(week1, { key: "ArrowLeft" });
+    expect(onToggle).not.toHaveBeenCalled();
+    fireEvent.keyDown(week1, { key: "ArrowRight" });
+    expect(onToggle).toHaveBeenCalledWith("week1");
+    expect(week1.getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("selects a folder from its name", () => {
     const { onSelect } = renderTree();
-    fireEvent.click(screen.getByRole("treeitem", { name: /week1/ }));
+    fireEvent.click(screen.getByRole("button", { name: /week1/ }));
     expect(onSelect).toHaveBeenCalledWith("week1");
   });
 
   it("shows the recursive count and marks folders with documents needing attention", () => {
     renderTree();
-    const week1 = screen.getByRole("treeitem", { name: /week1/ });
+    const week1 = screen.getByRole("button", { name: /week1/ });
     expect(week1.textContent).toMatch(/2/);
     // The root and week1 both contain the pending document.
     expect(screen.getAllByTitle("1 needs attention")).toHaveLength(2);
-    expect(screen.getByRole("treeitem", { name: /week2/ }).textContent).toMatch(/0/);
+    expect(screen.getByRole("button", { name: /week2/ }).textContent).toMatch(/0/);
   });
 
   it("marks the selected folder", () => {
     renderTree({ selected: "week1" });
-    expect(screen.getByRole("treeitem", { name: /week1/ }).getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByRole("treeitem", { name: /Knowledge base/ }).getAttribute("aria-selected")).toBe("false");
+    expect(screen.getByRole("button", { name: /week1/ }).getAttribute("aria-current")).toBe("true");
+    expect(screen.getByRole("button", { name: /Knowledge base/ }).getAttribute("aria-current")).toBeNull();
   });
 
   it("offers Collapse all", () => {
@@ -75,6 +85,7 @@ describe("KnowledgeFolderTree", () => {
 
   it("gives a folder with no subfolders no chevron", () => {
     renderTree();
-    expect(screen.queryByRole("button", { name: /Expand week2/ })).toBeNull();
+    expect(document.querySelector('[data-toggle="week2"]')).toBeNull();
+    expect(screen.getByRole("button", { name: /week2/ }).getAttribute("aria-expanded")).toBeNull();
   });
 });

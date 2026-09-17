@@ -20,6 +20,8 @@ import {
   listDocumentsHandler,
   searchKnowledgeHandler,
   updateDocumentHandler,
+  downloadDocumentHandler,
+  exportKnowledgeHandler,
 } from "./knowledgeDocuments";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
@@ -32,13 +34,15 @@ const TEST_ENV = { DATABASE_URL: "ignored" } as unknown as Env;
 
 const svc = {
   list: vi.fn(), show: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(),
-  createDirectory: vi.fn(), validate: vi.fn(), search: vi.fn(),
+  createDirectory: vi.fn(), validate: vi.fn(), search: vi.fn(), readRaw: vi.fn(), exportBundle: vi.fn(),
 };
 vi.mock("../knowledge/service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../knowledge/service")>();
   return { ...actual, knowledgeServiceFromEnv: () => svc };
 });
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
+const getCourseTitle = vi.fn();
+vi.mock("../repositories/courses", () => ({ getCourseTitle: (...a: unknown[]) => getCourseTitle(...a) }));
 
 const CONCEPT = {
   id: "lectures/module-1/intro", kind: "concept" as const, type: "lecture", title: "Intro", description: "Markets",
@@ -78,6 +82,8 @@ function appWith(role: "instructor" | "student" = "instructor") {
   a.delete("/api/courses/:courseId/knowledge/documents/:documentId", deleteDocumentHandler);
   a.get("/api/courses/:courseId/knowledge/documents/:documentId/links", documentLinksHandler);
   a.get("/api/courses/:courseId/knowledge/search", searchKnowledgeHandler);
+  a.get("/api/courses/:courseId/knowledge/documents/:documentId/download", downloadDocumentHandler);
+  a.get("/api/courses/:courseId/knowledge/export", exportKnowledgeHandler);
   return a;
 }
 function app() {
@@ -163,6 +169,38 @@ describe("knowledge document routes over the bundle", () => {
     const bad = await app().request(`/api/courses/${COURSE_ID}/knowledge/search?q=markets&dir=..%2Fetc`, {}, TEST_ENV);
     expect(bad.status).toBe(400);
   });
+  it("downloads one document as a Markdown attachment named after its last path segment", async () => {
+    svc.readRaw.mockResolvedValue("---\ntitle: Intro\n---\n# Intro");
+    const res = await app().request(`${base}/${ENC}/download`, {}, TEST_ENV);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/markdown");
+    expect(res.headers.get("content-disposition")).toBe('attachment; filename="intro.md"');
+    expect(await res.text()).toContain("# Intro");
+    expect(svc.readRaw).toHaveBeenCalledWith(COURSE_ID, CONCEPT.id);
+    svc.readRaw.mockResolvedValue(null);
+    expect((await app().request(`${base}/${ENC}/download`, {}, TEST_ENV)).status).toBe(404);
+  });
+
+  it("exports the bundle as a zip attachment", async () => {
+    svc.exportBundle.mockResolvedValue(new Uint8Array([80, 75, 3, 4]));
+    getCourseTitle.mockResolvedValue("STATS 311 · Autumn 2026");
+    const res = await app().request(`/api/courses/${COURSE_ID}/knowledge/export`, {}, TEST_ENV);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/zip");
+    // Course name, then the moment of download to the minute (UTC), so a
+    // folder of these stays legible.
+    expect(res.headers.get("content-disposition")).toMatch(
+      /^attachment; filename="stats-311-autumn-2026-knowledge-\d{4}-\d{2}-\d{2}-\d{4}Z\.zip"$/,
+    );
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(new Uint8Array([80, 75, 3, 4]));
+    getCourseTitle.mockResolvedValue(null);
+    const unnamed = await app().request(`/api/courses/${COURSE_ID}/knowledge/export`, {}, TEST_ENV);
+    expect(unnamed.headers.get("content-disposition")).toMatch(/^attachment; filename="course-11111111-knowledge-/);
+    svc.exportBundle.mockResolvedValue(null);
+    expect((await app().request(`/api/courses/${COURSE_ID}/knowledge/export`, {}, TEST_ENV)).status).toBe(404);
+    expect((await appWith("student").request(`/api/courses/${COURSE_ID}/knowledge/export`, {}, TEST_ENV)).status).toBe(403);
+  });
+
   it("searches with a clamped limit", async () => {
     svc.search.mockResolvedValue([{ conceptId: CONCEPT.id, title: "Intro", type: "lecture", description: "Markets", score: 2 }]);
     const res = await app().request(`/api/courses/${COURSE_ID}/knowledge/search?q=markets&limit=50`, {}, TEST_ENV);

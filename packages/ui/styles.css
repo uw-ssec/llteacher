@@ -6612,30 +6612,390 @@ body {
    documents pane (their processed OKF output) and conflating the two into
    one grid would blur that distinction. */
 
+/* -- KnowledgeView: search first --------------------------------------------
+   The search field is the tallest thing on the page; the rail is a real
+   collapsible tree; the pane below it swaps between results, a folder's own
+   documents, and -- at rest -- what needs attention and what changed. Raw
+   uploads live in a closed disclosure at the bottom. Every color here is a
+   token or one of the warm tints the console already uses for hover and
+   active states; statuses reuse StatusBadge's own kinds. */
+
 .admin-knowledge {
-  display: grid;
-  grid-template-columns: 220px 1fr;
-  gap: var(--space-4);
-  margin-block-start: var(--space-4);
+  gap: var(--space-5);
 }
 
-.admin-knowledge__tree {
+.admin-knowledge__label {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.admin-knowledge__hint {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.admin-knowledge__mono {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.admin-knowledge__muted {
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.admin-knowledge__section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-block-end: var(--space-3);
+}
+
+.admin-knowledge__empty {
+  margin: 0;
+  padding: var(--space-6) var(--space-4);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 4px;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.admin-knowledge__empty b {
+  color: var(--color-text);
+  font-weight: var(--weight-semibold);
+}
+
+.admin-knowledge__table-wrap {
+  overflow-x: auto;
+}
+
+.admin-knowledge__doc-table,
+.admin-knowledge__uploads-table {
+  margin-block-start: 0;
+  font-size: var(--font-size-sm);
+}
+
+.admin-knowledge__doc-path {
+  margin-block-start: 2px;
+}
+
+/* Upload progress: a bar under the header, not a line that looks like a hint. */
+
+.admin-knowledge__progress {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: var(--space-1);
+}
+
+.admin-knowledge__progress-bar {
+  inline-size: 100%;
+  block-size: 4px;
+  accent-color: var(--color-accent);
+}
+
+/* Status strip: the four health numbers that stay visible. */
+
+.admin-knowledge__strip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.admin-knowledge__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: var(--space-1) var(--space-3) var(--space-1) 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  background-color: var(--color-bg);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.admin-knowledge__chip b {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0;
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-knowledge__chip--button {
+  cursor: pointer;
+  transition: border-color 140ms ease-out, color 140ms ease-out;
+}
+
+.admin-knowledge__chip--button:hover {
+  border-color: var(--color-accent-warm);
+  color: var(--color-text);
+}
+
+.admin-knowledge__chip--button[aria-pressed="true"] {
+  border-color: var(--color-accent);
+  background-color: var(--color-accent-faint);
+  color: var(--color-accent);
+}
+
+.admin-knowledge__dot {
+  inline-size: 6px;
+  block-size: 6px;
+  border-radius: 50%;
+  background-color: var(--color-text-muted);
+}
+
+.admin-knowledge__chip--ok .admin-knowledge__dot { background-color: var(--color-success); }
+.admin-knowledge__chip--progress .admin-knowledge__dot { background-color: #5B4FAB; } /* .admin-status--scheduled */
+.admin-knowledge__chip--warn .admin-knowledge__dot { background-color: var(--color-warning); }
+
+.admin-knowledge__strip-sep {
+  inline-size: 1px;
+  block-size: 18px;
+  background-color: var(--color-border-strong);
+  margin-inline: var(--space-1);
+}
+
+/* Search hero: .list-controls__search-input scaled up, same focus rule. */
+
+.admin-knowledge__search-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  block-size: 60px;
+  padding-inline: var(--space-4) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background-color: var(--color-surface);
+  transition: border-color 140ms ease-out, box-shadow 140ms ease-out;
+}
+
+.admin-knowledge__search-field:focus-within {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+
+.admin-knowledge__search-lead {
+  flex: none;
+  color: var(--color-text-muted);
+}
+
+.admin-knowledge__search-input {
+  flex: 1;
+  min-inline-size: 0;
+  block-size: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-lg);
+  color: var(--color-text);
+}
+
+.admin-knowledge__search-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+/* Chrome and Safari draw their own clear button on type="search"; the field
+   has its own, so hiding this avoids two side by side. */
+.admin-knowledge__search-input::-webkit-search-cancel-button,
+.admin-knowledge__uploads-filter::-webkit-search-cancel-button {
+  appearance: none;
+  -webkit-appearance: none;
+  display: none;
+}
+
+.admin-knowledge__scope {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  padding: 3px 6px 3px 10px;
+  border: 1px solid var(--color-accent);
+  border-radius: 999px;
+  background-color: var(--color-accent-faint);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-accent);
+  white-space: nowrap;
+}
+
+.admin-knowledge__scope-clear,
+.admin-knowledge__search-clear {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.admin-knowledge__search-clear {
+  color: var(--color-text-muted);
+}
+
+.admin-knowledge__search-clear:hover,
+.admin-knowledge__scope-clear:hover {
+  background-color: rgba(133, 117, 77, 0.1);
+  color: var(--color-text);
+}
+
+.admin-knowledge__search-go {
+  display: grid;
+  place-items: center;
+  flex: none;
+  inline-size: 44px;
+  block-size: 44px;
+  border: 0;
+  border-radius: 4px;
+  background-color: var(--color-accent);
+  color: #FFFFFF;
+  cursor: pointer;
+  transition: background-color 140ms ease-out;
+}
+
+.admin-knowledge__search-go:hover,
+.admin-knowledge__search-go:focus-visible {
+  background-color: var(--color-accent-hover);
+  outline: none;
+}
+
+.admin-knowledge__search-hint {
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  margin: var(--space-2) var(--space-1) 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.admin-knowledge__search-hint kbd {
+  padding: 1px 6px;
+  border: 1px solid var(--color-border-strong);
+  border-block-end-width: 2px;
+  border-radius: 4px;
+  background-color: var(--color-surface-raised);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+/* Body: rail + pane. */
+
+.admin-knowledge__body {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: var(--space-6);
+}
+
+@media (max-width: 800px) {
+  .admin-knowledge__body {
+    grid-template-columns: 1fr;
+    gap: var(--space-4);
+  }
+}
+
+.admin-knowledge__rail {
   padding-inline-end: var(--space-3);
   border-inline-end: 1px solid var(--color-border);
+  min-inline-size: 0;
+}
+
+@media (max-width: 800px) {
+  .admin-knowledge__rail {
+    padding-inline-end: 0;
+    padding-block-end: var(--space-3);
+    border-inline-end: 0;
+    border-block-end: 1px solid var(--color-border);
+  }
+}
+
+.admin-knowledge__rail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-block-end: var(--space-2);
+}
+
+.admin-knowledge__tree,
+.admin-knowledge__tree-children {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.admin-knowledge__tree-children {
+  margin-inline-start: 12px;
+  padding-inline-start: 4px;
+  border-inline-start: 1px solid var(--color-border);
+}
+
+.admin-knowledge__node {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 4px;
+}
+
+.admin-knowledge__node:hover {
+  background-color: rgba(133, 117, 77, 0.06);
+}
+
+.admin-knowledge__node--selected {
+  background-color: rgba(133, 117, 77, 0.1);
+}
+
+.admin-knowledge__chevron {
+  display: grid;
+  place-items: center;
+  flex: none;
+  inline-size: 18px;
+  block-size: 18px;
+  border-radius: 4px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.admin-knowledge__chevron svg {
+  transition: transform 140ms ease-out;
+}
+
+.admin-knowledge__chevron--open svg {
+  transform: rotate(90deg);
+}
+
+.admin-knowledge__chevron--leaf {
+  visibility: hidden;
+  cursor: default;
+}
+
+.admin-knowledge__chevron:not(.admin-knowledge__chevron--leaf):hover {
+  background-color: var(--color-border);
+  color: var(--color-text);
 }
 
 .admin-knowledge__folder {
   display: flex;
   align-items: center;
   gap: 0.5em;
-  padding-block: 6px;
-  padding-inline-end: var(--space-2);
-  background: none;
+  flex: 1;
+  min-inline-size: 0;
+  padding: 5px 6px 5px 2px;
   border: 0;
-  border-radius: 4px;
+  background: none;
   font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
@@ -6643,94 +7003,612 @@ body {
   cursor: pointer;
 }
 
-.admin-knowledge__folder:hover,
-.admin-knowledge__folder:focus-visible {
-  background-color: rgba(133, 117, 77, 0.06);
+.admin-knowledge__node:hover .admin-knowledge__folder,
+.admin-knowledge__node--selected .admin-knowledge__folder {
   color: var(--color-text);
-  outline: none;
 }
 
-.admin-knowledge__folder--active {
-  background-color: rgba(133, 117, 77, 0.1);
-  color: var(--color-text);
+.admin-knowledge__node--selected .admin-knowledge__folder {
   font-weight: var(--weight-medium);
 }
 
-.admin-knowledge__listing {
+.admin-knowledge__folder:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 18%, transparent);
+  border-radius: 4px;
+}
+
+.admin-knowledge__folder-name {
+  flex: 1;
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-knowledge__count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-knowledge__count--attention {
+  color: #5B4FAB; /* .admin-status--scheduled: something inside is not indexed */
+  font-weight: var(--weight-medium);
+}
+
+.admin-knowledge__count--attention::before {
+  content: "\25CF  ";
+  font-size: 8px;
+  vertical-align: 1px;
+}
+
+.admin-knowledge__pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
   min-inline-size: 0;
 }
 
-/* -- Uploaded-files strip ---------------------------------------------------
-   Deliberately plain, not another catalog table: these are raw uploads, not
-   OKF records, and a PDF sitting at `pending` with its reason showing is the
-   honest-status design (#40 does not exist yet) -- it should read as a
-   status list, not as content the console is proud of. */
+/* Breadcrumb for a selected folder. */
 
-.admin-knowledge__materials {
-  margin-block-start: var(--space-6);
-}
-
-.admin-knowledge__materials h2 {
-  font-family: var(--font-sans);
-  font-size: var(--font-size-sm);
-  font-weight: var(--weight-semibold);
-  color: var(--color-text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin: 0 0 var(--space-3);
-}
-
-.admin-knowledge__material-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.admin-knowledge__material {
+.admin-knowledge__crumbs {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-}
-
-.admin-knowledge__material-name {
+  gap: 2px;
+  margin-block-end: var(--space-2);
   font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
-  color: var(--color-text);
-}
-
-.admin-knowledge__material-note {
-  flex-basis: 100%;
-  font-family: var(--font-sans);
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
 }
 
-/* -- KnowledgeSearchBox — instructor search over the OKF bundle (#42) -----
-   Runs the same search a student would use, so results read as a preview of
-   student-facing recall rather than an admin lookup tool. */
-
-.admin-knowledge-search {
-  margin-block: var(--space-3);
+.admin-knowledge__crumb {
+  padding: 0 2px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  font: inherit;
+  color: var(--color-text-secondary);
+  cursor: pointer;
 }
 
-.admin-knowledge-search__form {
+.admin-knowledge__crumb:hover {
+  color: var(--color-accent);
+  background-color: var(--color-accent-faint);
+}
+
+.admin-knowledge__crumb--current {
+  color: var(--color-text);
+}
+
+/* Needs attention. */
+
+.admin-knowledge__attention {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.admin-knowledge__attention-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.admin-knowledge__attention-row {
+  display: grid;
+  grid-template-columns: 3px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-block-start: 1px solid var(--color-border);
+}
+
+.admin-knowledge__attention-row:first-child {
+  border-block-start: 0;
+}
+
+.admin-knowledge__attention-stripe {
+  inline-size: 3px;
+  block-size: 100%;
+  min-block-size: 28px;
+  border-radius: 2px;
+  background-color: #5B4FAB; /* .admin-status--scheduled */
+}
+
+.admin-knowledge__attention-row--failed .admin-knowledge__attention-stripe {
+  background-color: var(--color-warning); /* .admin-status--missing */
+}
+
+.admin-knowledge__attention-body {
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+}
+
+.admin-knowledge__attention-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-knowledge__attention-reason {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-knowledge__attention-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-3);
+  border-block-start: 1px solid var(--color-border);
+  background-color: var(--color-surface-raised);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.admin-knowledge__attention-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* Results: one list, one toggle. */
+
+.admin-knowledge__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-block-end: var(--space-3);
+}
+
+.admin-knowledge__seg {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 6px;
+  background-color: var(--color-surface);
+}
+
+.admin-knowledge__seg button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.admin-knowledge__seg button[aria-pressed="true"] {
+  background-color: var(--color-bg);
+  color: var(--color-accent);
+  font-weight: var(--weight-medium);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.admin-knowledge__seg-count {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-knowledge__seg button[aria-pressed="true"] .admin-knowledge__seg-count {
+  color: var(--color-accent);
+}
+
+.admin-knowledge__sort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.admin-knowledge__sort select {
+  padding: 5px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background-color: var(--color-surface);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.admin-knowledge__result-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.admin-knowledge__result {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px;
+  gap: var(--space-4);
+  padding: var(--space-3);
+  border-block-start: 1px solid var(--color-border);
+  border-radius: 4px;
+}
+
+.admin-knowledge__result--name {
+  grid-template-columns: minmax(0, 1fr);
+  padding-block: var(--space-2);
+}
+
+.admin-knowledge__result:first-child {
+  border-block-start: 0;
+}
+
+.admin-knowledge__result:hover {
+  background-color: rgba(133, 117, 77, 0.06);
+}
+
+.admin-knowledge__result-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-inline-size: 0;
+}
+
+.admin-knowledge__result-open {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.admin-knowledge__result-open:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 18%, transparent);
+  border-radius: 4px;
+}
+
+.admin-knowledge__result-title {
+  font-size: var(--font-size-base);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.admin-knowledge__result:hover .admin-knowledge__result-title {
+  color: var(--color-accent);
+}
+
+.admin-knowledge__result-desc {
+  max-inline-size: 72ch;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.admin-knowledge__result mark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background-color: rgba(255, 199, 0, 0.4); /* Spirit Gold, as the pulse ring tints it */
+  color: inherit;
+}
+
+.admin-knowledge__result-meta {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  flex-wrap: wrap;
 }
 
-.admin-knowledge-search__results {
-  display: grid;
+.admin-knowledge__type {
+  padding: 3px 9px;
+  border-radius: 999px;
+  background-color: rgba(122, 117, 112, 0.08); /* .admin-status--draft */
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.admin-knowledge__result-path {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.admin-knowledge__result-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-1);
+}
+
+.admin-knowledge__score {
+  display: inline-flex;
+  align-items: center;
   gap: var(--space-2);
-  margin-block: var(--space-2) 0;
-  padding-inline-start: var(--space-4);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-knowledge__score-bar {
+  display: inline-block;
+  inline-size: 64px;
+  block-size: 4px;
+  border-radius: 2px;
+  background-color: var(--color-border);
+  overflow: hidden;
+}
+
+.admin-knowledge__score-bar i {
+  display: block;
+  block-size: 100%;
+  background-color: var(--color-accent-warm);
+}
+
+.admin-knowledge__show-all {
+  display: flex;
+  justify-content: center;
+  padding-block-start: var(--space-3);
+  border-block-start: 1px solid var(--color-border);
+}
+
+@media (max-width: 800px) {
+  .admin-knowledge__result {
+    grid-template-columns: 1fr;
+  }
+  .admin-knowledge__result-side {
+    flex-direction: row;
+    align-items: center;
+  }
+}
+
+/* All uploads: closed by default. */
+
+.admin-knowledge__uploads {
+  padding-block-start: var(--space-4);
+  border-block-start: 1px solid var(--color-border);
+}
+
+.admin-knowledge__uploads-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  list-style: none;
+  cursor: pointer;
+}
+
+.admin-knowledge__uploads-summary::-webkit-details-marker {
+  display: none;
+}
+
+.admin-knowledge__uploads[open] .admin-knowledge__uploads-summary .admin-knowledge__chevron svg {
+  transform: rotate(90deg);
+}
+
+.admin-knowledge__uploads-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-block: var(--space-4) var(--space-2);
+}
+
+.admin-knowledge__uploads-filter {
+  inline-size: auto;
+  min-inline-size: 260px;
+  padding-inline-start: var(--space-3);
+}
+
+.admin-knowledge__pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-block-start: var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+/* -- ActionMenu: the console's overflow menu ---------------------------------
+   Progressive disclosure for headers: the actions with state stay visible,
+   the rest sit behind a "More" button. Same surface, border, and focus rules
+   as every other control here. */
+
+.admin-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.admin-menu__trigger {
+  padding: 6px 8px;
+}
+
+.admin-menu__list {
+  position: absolute;
+  inset-block-start: calc(100% + 6px);
+  inset-inline-end: 0;
+  z-index: var(--z-overlay);
+  min-inline-size: 260px;
+  padding: 6px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 6px;
+  background-color: var(--color-bg);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.07), 0 8px 24px rgba(0, 0, 0, 0.06);
+}
+
+.admin-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  inline-size: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  text-align: start;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.admin-menu__item:hover,
+.admin-menu__item:focus-visible {
+  background-color: rgba(133, 117, 77, 0.06);
+  outline: none;
+}
+
+.admin-menu__item:disabled {
+  color: var(--color-text-muted);
+  cursor: default;
+}
+
+.admin-menu__item:disabled:hover {
+  background-color: transparent;
+}
+
+.admin-menu__icon {
+  display: inline-flex;
+  color: var(--color-text-muted);
+}
+
+.admin-menu__hint {
+  margin-inline-start: auto;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.admin-menu__group {
+  padding: 6px 10px 2px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.admin-menu__group:not(:first-child) {
+  margin-block-start: 6px;
+  border-block-start: 1px solid var(--color-border);
+  padding-block-start: 10px;
+}
+
+/* -- Row download tools ------------------------------------------------------
+   Icon links revealed on hover and keyboard focus; quiet until wanted. */
+
+.admin-knowledge__row-tools {
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.admin-knowledge__result:hover .admin-knowledge__row-tools,
+.admin-knowledge__result:focus-within .admin-knowledge__row-tools,
+tr:hover .admin-knowledge__row-tools,
+tr:focus-within .admin-knowledge__row-tools {
+  opacity: 1;
+}
+
+.admin-knowledge__icon-link {
+  display: inline-grid;
+  place-items: center;
+  inline-size: 30px;
+  block-size: 30px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--color-text-secondary);
+  text-decoration: none;
+}
+
+.admin-knowledge__icon-link:hover {
+  background-color: rgba(133, 117, 77, 0.1);
+  color: var(--color-text);
+}
+
+.admin-knowledge__icon-link:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .admin-knowledge__row-tools { transition: none; }
+}
+
+/* -- Document view header: view toggle and unsaved status -------------------- */
+
+.admin-knowledge-doc__view {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 6px;
+  background-color: var(--color-surface);
+}
+
+.admin-knowledge-doc__view button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.admin-knowledge-doc__view button[aria-pressed="true"] {
+  background-color: var(--color-bg);
+  color: var(--color-accent);
+  font-weight: var(--weight-medium);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.admin-knowledge-doc__view button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+
+.admin-knowledge-doc__unsaved {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-warning);
+}
+
+.admin-knowledge-doc__unsaved::before {
+  content: "";
+  inline-size: 6px;
+  block-size: 6px;
+  border-radius: 50%;
+  background-color: var(--color-warning);
 }
 
 /* -- KnowledgeDocumentView — one OKF concept, edited by hand (#42) --------

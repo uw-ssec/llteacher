@@ -142,12 +142,13 @@ type View =
      lives in this same View union instead of local state: it must survive
      a drill-in and back, not just a re-render. Undefined means "root",
      matching KnowledgeView's own default. */
-  | { kind: "knowledge"; directory?: string }
-  /* Carries `returnDirectory` -- the browser's `directory` at the moment
-     this document was opened -- so "back" lands on the exact folder the
-     instructor was looking at, not the browser's root default. Same
-     carried-state convention as transcript-detail's `list` above. */
-  | { kind: "knowledge-document"; documentId: string; returnDirectory?: string };
+  | { kind: "knowledge"; directory?: string; expanded?: string[] }
+  /* Carries `returnDirectory` and `returnExpanded` -- the browser's selected
+     folder and open folders at the moment this document was opened -- so
+     "back" lands on the exact rail the instructor was looking at, not the
+     browser's defaults. Same carried-state convention as transcript-detail's
+     `list` above. */
+  | { kind: "knowledge-document"; documentId: string; returnDirectory?: string; returnExpanded?: string[] };
 
 const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "homeworks":          "Instructor Console · Homeworks",
@@ -635,11 +636,20 @@ export default function App() {
                       <KnowledgeView
                         courseId={CURRENT_COURSE_ID}
                         initialDirectory={view.directory}
+                        initialExpanded={view.expanded}
                         onDirectoryChange={(directory) =>
                           setView((prev) => (prev.kind === "knowledge" ? { ...prev, directory } : prev))
                         }
+                        onExpandedChange={(expanded) =>
+                          setView((prev) => (prev.kind === "knowledge" ? { ...prev, expanded } : prev))
+                        }
                         onOpenDocument={(documentId) =>
-                          setView({ kind: "knowledge-document", documentId, returnDirectory: view.directory })
+                          setView({
+                            kind: "knowledge-document",
+                            documentId,
+                            returnDirectory: view.directory,
+                            returnExpanded: view.expanded,
+                          })
                         }
                       />
                     )}
@@ -648,7 +658,9 @@ export default function App() {
                       <KnowledgeDocumentView
                         courseId={CURRENT_COURSE_ID}
                         documentId={view.documentId}
-                        onBack={() => setView({ kind: "knowledge", directory: view.returnDirectory })}
+                        onBack={() =>
+                          setView({ kind: "knowledge", directory: view.returnDirectory, expanded: view.returnExpanded })
+                        }
                       />
                     )}
                   </>

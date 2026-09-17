@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, fireEvent, within } from "@testing-library/react";
 import { KnowledgeView } from "./KnowledgeView";
 
 afterEach(cleanup);
@@ -95,14 +95,117 @@ describe("KnowledgeView", () => {
     expect(screen.getByRole("button", { name: /Knowledge base/ })).toBeTruthy();
   });
 
-  it("shows root documents first and switches on directory click", async () => {
+  it("shows recent documents at rest and only the folder's own once one is selected", async () => {
     stubFetch();
     render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
     await waitFor(() => screen.getByText("Syllabus"));
-    expect(screen.queryByText("Lecture 1")).toBeNull();
+    expect(screen.getByText(/Recently updated/)).toBeTruthy();
+    expect(screen.getByText("Lecture 1")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /week1/ }));
     await waitFor(() => screen.getByText("Lecture 1"));
+    expect(screen.queryByText("Syllabus")).toBeNull();
+    // A breadcrumb names where the listing is.
+    expect(screen.getByRole("navigation", { name: "Breadcrumb" }).textContent).toMatch(/week1/);
+  });
+
+  it("puts the search field first and focuses it on load", async () => {
+    stubFetch();
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+    expect(document.activeElement).toBe(screen.getByRole("searchbox", { name: "Search the knowledge base" }));
+  });
+
+  it("replaces the overview with results while there is a query, and restores it on clear", async () => {
+    stubFetch();
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search the knowledge base" }), { target: { value: "lect" } });
+    expect(screen.queryByText(/Recently updated/)).toBeNull();
+    expect(screen.getByRole("region", { name: "Search results" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(screen.getByText(/Recently updated/)).toBeTruthy();
+  });
+
+  it("runs the content search on Enter with the selected folder as scope", async () => {
+    const fetchMock = stubFetch();
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+    fireEvent.click(screen.getByRole("button", { name: /week1/ }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search the knowledge base" }), { target: { value: "intro" } });
+    fireEvent.submit(screen.getByRole("search"));
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/knowledge/search?q=intro&dir=week1"))).toBe(true),
+    );
+  });
+
+  it("reveals a folder from a result's path, selecting and expanding it", async () => {
+    stubFetch();
+    const onDirectoryChange = vi.fn();
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} onDirectoryChange={onDirectoryChange} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search the knowledge base" }), { target: { value: "lecture" } });
+    fireEvent.click(screen.getByRole("button", { name: /File names/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Show folder week1" }));
+    expect(onDirectoryChange).toHaveBeenCalledWith("week1");
+    const rail = within(screen.getByRole("navigation", { name: "Folders" }));
+    expect(rail.getByRole("button", { name: /week1/ }).getAttribute("aria-current")).toBe("true");
+  });
+
+  it("names the last indexed time in the eyebrow instead of repeating the count", async () => {
+    stubFetch({
+      documents: { documents: [DOCUMENTS[0], { ...DOCUMENTS[1], updatedAt: "2026-09-17T14:05:00.000Z" }] },
+    });
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText(/Last indexed/));
+    const eyebrow = screen.getByText(/Last indexed/);
+    expect(eyebrow.textContent).toMatch(/Sep 17, 2026/);
+    // The count lives in the status strip; the eyebrow must not repeat it.
+    expect(eyebrow.textContent).not.toMatch(/documents/i);
+  });
+
+  it("filters the pane to pending uploads from the status strip", async () => {
+    stubFetch();
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+    fireEvent.click(screen.getByRole("button", { name: /pending/ }));
+    expect(screen.queryByText(/Recently updated/)).toBeNull();
+    const list = screen.getByRole("list", { name: "Uploads needing attention" });
+    expect(within(list).getByText("paper.pdf")).toBeTruthy();
+    expect(within(list).queryByText("lecture1.vtt")).toBeNull();
+  });
+
+  it("retries every failed upload from one button", async () => {
+    const fetchMock = stubFetch({
+      materials: { materials: [
+        { ...MATERIALS[1], id: "f1", originalFilename: "a.docx", status: "failed" },
+        { ...MATERIALS[1], id: "f2", originalFilename: "b.docx", status: "failed" },
+        MATERIALS[1],
+      ] },
+    });
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("a.docx"));
+    fireEvent.click(screen.getByRole("button", { name: "Retry all failed" }));
+    await waitFor(() => {
+      const reingests = fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/reingest")).map(([u]) => String(u));
+      expect(reingests).toEqual(["/api/courses/c1/materials/f1/reingest", "/api/courses/c1/materials/f2/reingest"]);
+    });
+  });
+
+  it("restores expanded folders from initialExpanded and reports changes", async () => {
+    stubFetch({
+      documents: { documents: [...DOCUMENTS, { ...DOCUMENTS[0], id: "d3", path: "week1/lab/notes", title: "Lab notes" }] },
+    });
+    const onExpandedChange = vi.fn();
+    render(
+      <KnowledgeView courseId="c1" onOpenDocument={vi.fn()} initialExpanded={["", "week1"]} onExpandedChange={onExpandedChange} />,
+    );
+    // Scoped to the rail: "Syllabus" in the recent table also matches /lab/.
+    const rail = () => within(screen.getByRole("navigation", { name: "Folders" }));
+    await waitFor(() => rail().getByRole("button", { name: /^lab/ }));
+    fireEvent.keyDown(rail().getByRole("button", { name: /week1/ }), { key: "ArrowLeft" });
+    expect(onExpandedChange).toHaveBeenCalledWith([""]);
+    expect(rail().queryByRole("button", { name: /^lab/ })).toBeNull();
   });
 
   it("shows a pending material's error detail rather than claiming it is ready", async () => {
@@ -354,6 +457,10 @@ describe("KnowledgeView", () => {
       },
     });
     render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText(/All uploads/));
+    // A ready upload is nothing to act on, so it sits only in the closed
+    // disclosure at the bottom -- opened here to prove it did arrive.
+    fireEvent.click(screen.getByText(/All uploads/));
     await waitFor(() => screen.getByText("lecture1.vtt"));
     expect(screen.queryByRole("button", { name: /Retry/i })).toBeNull();
   });
@@ -449,5 +556,28 @@ describe("KnowledgeView", () => {
     await waitFor(() => screen.getByText("Syllabus"));
     fireEvent.click(screen.getByRole("button", { name: /week1/i }));
     expect(onDirectoryChange).toHaveBeenCalledWith("week1");
+  });
+
+  it("offers the whole knowledge base as a zip from the header", async () => {
+    stubFetch();
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+    const link = screen.getByRole("link", { name: /Download all/ }) as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe("/api/courses/c1/knowledge/export");
+  });
+
+  it("offers a download on each row of a folder listing", async () => {
+    stubFetch();
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+    fireEvent.click(screen.getByRole("button", { name: /week1/ }));
+    await waitFor(() => screen.getByText("Lecture 1"));
+    expect(screen.getByRole("link", { name: "Download Markdown for Lecture 1" }).getAttribute("href")).toBe(
+      "/api/courses/c1/knowledge/documents/week1%2Flecture/download",
+    );
+    // Lecture 1 came from upload m1; the original is one click away too.
+    expect(screen.getByRole("link", { name: "Download original upload for Lecture 1" }).getAttribute("href")).toBe(
+      "/api/courses/c1/materials/m1/download",
+    );
   });
 });

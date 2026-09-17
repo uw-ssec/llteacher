@@ -126,6 +126,7 @@ export async function getMaterialForReingest(
   storageKey: string | null;
   relativePath: string | null;
   documentPath: string | null;
+  contentType: string | null;
 } | null> {
   const [row] = await db
     .select({
@@ -134,6 +135,7 @@ export async function getMaterialForReingest(
       storageKey: courseMaterials.storageKey,
       relativePath: courseMaterials.relativePath,
       documentPath: courseMaterials.documentPath,
+      contentType: courseMaterials.contentType,
     })
     .from(courseMaterials)
     .where(and(eq(courseMaterials.id, materialId), eq(courseMaterials.courseId, scope)));
