@@ -52,6 +52,10 @@ export function KnowledgeView({
 }: KnowledgeViewProps) {
   const [directory, setDirectoryState] = useState(initialDirectory ?? "");
   const [uploadError, setUploadError] = useState<string | null>(null);
+  /** Non-null only while handleFiles is running. A folder upload posts one
+   *  request per file in sequence, so a 500-file folder is a minutes-long
+   *  operation that, without this, looked exactly like a page doing nothing. */
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const [retryError, setRetryError] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
 
@@ -129,8 +133,15 @@ export function KnowledgeView({
     if (files.length === 0) return;
     const failures: string[] = [];
     let successCount = 0;
+    let done = 0;
     setUploadError(null);
+    setUploadProgress({ done: 0, total: files.length });
     for (const file of files) {
+      // Counted before the work, so the line names the file being uploaded
+      // right now ("Uploading 12 of 529") rather than the last one finished.
+      // Client-side rejections below count too: they are files gone through.
+      done += 1;
+      setUploadProgress({ done, total: files.length });
       const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
       if (!ALLOWED_EXTENSIONS.includes(extension)) {
         failures.push(`${file.name}: unsupported file type .${extension}`);
@@ -148,6 +159,7 @@ export function KnowledgeView({
         failures.push(`${file.name}: ${(err as Error)?.message ?? "upload failed"}`);
       }
     }
+    setUploadProgress(null);
     // Only reload the two listings when something actually landed server-side
     // -- a purely client-side rejection (bad extension/size, every file) has
     // nothing new to fetch, and the pre-existing "rejects a disallowed file"
@@ -191,7 +203,7 @@ export function KnowledgeView({
       <PageHeader
         eyebrow={`KNOWLEDGE · ${all.length} DOCUMENTS`}
         title="Knowledge base"
-        subtitle="Uploaded materials become OKF documents. Group them into collections to ground an assignment."
+        subtitle="Uploaded materials become OKF documents the tutor can search."
         actions={
           <>
             <label className="admin-button admin-button--primary">
@@ -199,7 +211,7 @@ export function KnowledgeView({
               <input
                 type="file"
                 multiple
-                aria-label="Upload material"
+                aria-label="Upload files"
                 className="admin-visually-hidden"
                 accept={ALLOWED_EXTENSIONS.map((e) => `.${e}`).join(",")}
                 onChange={(event) => {
@@ -230,7 +242,18 @@ export function KnowledgeView({
         }
       />
 
-      {uploadError && <p className="admin-field-error">{uploadError}</p>}
+      {/* Deliberately NOT its own live region: this view already has one
+          (the announcement <div> above), and a second one updating once per
+          file would read 529 interruptions aloud. */}
+      {uploadProgress && (
+        <p className="admin-form-hint">
+          Uploading {uploadProgress.done} of {uploadProgress.total}…
+        </p>
+      )}
+      {/* The failures message is one "\n"-joined line per file, so it needs
+          the newlines rendered rather than collapsed into one run-on
+          sentence -- hence the --multiline modifier. */}
+      {uploadError && <p className="admin-field-error admin-field-error--multiline">{uploadError}</p>}
       <KnowledgeSearchBox courseId={courseId} onOpenDocument={onOpenDocument} />
 
       {documents.loading && <ViewLoading label="Loading the knowledge base…" />}

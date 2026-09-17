@@ -63,8 +63,82 @@ export async function extractMaterial(job: ExtractionJob): Promise<{ status: "re
   }
 }
 
+/* --------------------------------------------------------------------------
+   The extraction queue (I-1, final review).
+
+   A folder upload posts one request per file, and each handler used to fire
+   its own bare `setImmediate(extractMaterial)`. 500 files therefore meant
+   500 extractions running at once, each holding its whole upload in memory
+   as an ArrayBuffer and each contending for the same per-course write lock.
+   A FIFO queue with a fixed concurrency of 2 bounds both: at most two
+   decompressions run at a time, and the backlog is a list of jobs rather
+   than a wavefront of half-finished ones.
+
+   In-process only, deliberately: the deployment is a single ECS task (see
+   the service's own write-lock comment), and the queue's whole job is to
+   pace work this process has already accepted. A restart drops the backlog,
+   which is why a queued material stays at `pending` in the database with a
+   Retry button next to it rather than being marked ready optimistically.
+   -------------------------------------------------------------------------- */
+
+const MAX_CONCURRENT_EXTRACTIONS = 2;
+
+const queue: ExtractionJob[] = [];
+const inFlight = new Set<Promise<void>>();
+let drainWaiters: Array<() => void> = [];
+
+/** How many jobs are waiting for a slot (not counting those already running). */
+export function pendingExtractions(): number {
+  return queue.length;
+}
+
+function settleDrainWaiters(): void {
+  if (queue.length > 0 || inFlight.size > 0) return;
+  const waiters = drainWaiters;
+  drainWaiters = [];
+  for (const waiter of waiters) waiter();
+}
+
+/** Starts jobs until the concurrency limit is reached or the queue is empty.
+ *  Called on every enqueue and again as each job settles. */
+function pump(): void {
+  while (inFlight.size < MAX_CONCURRENT_EXTRACTIONS && queue.length > 0) {
+    const job = queue.shift()!;
+    const running: Promise<void> = extractMaterial(job)
+      .then(() => undefined)
+      .catch((err) => logServerError("extract.job", err, { materialId: job.materialId }))
+      .finally(() => {
+        inFlight.delete(running);
+        pump();
+        settleDrainWaiters();
+      });
+    inFlight.add(running);
+  }
+}
+
 export function scheduleExtraction(job: ExtractionJob): void {
-  setImmediate(() => {
-    extractMaterial(job).catch((err) => logServerError("extract.job", err, { materialId: job.materialId }));
+  queue.push(job);
+  // Still deferred to the next tick, for the same reason the pre-queue
+  // version was: the request handler that enqueued this answers 201 first.
+  setImmediate(pump);
+}
+
+/** Resolves once nothing is queued or running, or once `timeoutMs` passes --
+ *  whichever comes first. The timeout is what keeps a shutdown bounded: a
+ *  stuck extraction must not hold SIGTERM open past the orchestrator's own
+ *  kill deadline. */
+export function drainExtractions(timeoutMs: number): Promise<void> {
+  if (queue.length === 0 && inFlight.size === 0) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    timer.unref?.();
+    drainWaiters.push(finish);
   });
 }

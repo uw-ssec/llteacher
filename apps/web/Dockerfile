@@ -28,4 +28,9 @@ ENV NODE_ENV=production PORT=8080 KNOWLEDGE_ROOT=/mnt/knowledge
 RUN mkdir -p /mnt/knowledge
 WORKDIR /repo/apps/web
 EXPOSE 8080
-CMD ["npm", "run", "start"]
+# tsx directly, not `npm run start`: npm would be PID 1 and does not forward
+# SIGTERM to the child it spawned, so ECS's stop signal would never reach the
+# server's own shutdown handler and every stop would end in SIGKILL. The path
+# is relative to this WORKDIR (/repo/apps/web) and resolves into the hoisted
+# workspace root's /repo/node_modules/.bin.
+CMD ["../../node_modules/.bin/tsx", "src/server/node.ts"]

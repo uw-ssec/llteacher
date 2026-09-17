@@ -24,7 +24,12 @@ string, pagination cursors, and worked `curl` examples — see:
 
 ## Node runtime (replaces the Worker)
 
-- `brew install okf-memory/tap/okf` (pin 0.3.0; `okf version` must print v0.3.0).
+- Install okf with `brew install okf-memory/tap/okf`, then confirm `okf version` prints v0.3.0 — the
+  version the container image pins and the one the service's behaviour (search ranking, index.md and
+  log.md formats) is tested against. If brew installs a different version, download the
+  `okf-darwin-arm64` asset from the
+  [v0.3.0 release](https://github.com/okf-memory/okf-agent-memory/releases/tag/v0.3.0), `chmod +x` it,
+  and put it somewhere earlier on your `PATH` than the brew shim (or point `OKF_BINARY` straight at it).
 - `mkdir -p .knowledge` and set `KNOWLEDGE_ROOT=$(pwd)/.knowledge` (git-ignored). okf refuses a symlinked
   root, so the app resolves it with realpath; on macOS `/tmp` is a symlink and will not work.
 - Run the API with `npm run start` (PORT defaults to 8080) and the SPA with `npm run dev` as before.

@@ -48,6 +48,15 @@ export const MAX_HISTORY_MESSAGES = 40;
  *  Socratic question in the same turn -- without it, streamText stops the
  *  moment a tool call is emitted.
  *
+ *  7, not the original 5: #41 gave the tutor searchKnowledge and
+ *  showKnowledge, and the shape those two produce on a real question is
+ *  search, show, search again (the first concept named something the model
+ *  had not thought to look for), show, and only THEN the text the student
+ *  reads. That is 5 steps of tool work before a single word is generated,
+ *  so a 5-step ceiling cut the turn off at exactly the point where it had
+ *  gathered everything and said nothing. 7 leaves the two-search shape room
+ *  to finish and still bounds the turn.
+ *
  *  Shared rather than a literal at that one call site because it is also a
  *  BUDGET input. Each step generates its own completion (assistant text
  *  and/or tool calls), and every completed step's output is part of the
@@ -55,5 +64,7 @@ export const MAX_HISTORY_MESSAGES = 40;
  *  against the window is `max_completion_tokens` times this number, not
  *  once. lib/context-window.ts's resolveHistoryTokenBudget reserves on that
  *  basis; if this number ever changes, the reservation has to change with
- *  it, and two copies of a 5 in two files is exactly how it wouldn't. */
-export const MAX_TURN_STEPS = 5;
+ *  it, and two copies of a 5 in two files is exactly how it wouldn't. (It
+ *  did change, from 5 to 7, and nothing had to move with it -- which is the
+ *  property this constant exists for.) */
+export const MAX_TURN_STEPS = 7;

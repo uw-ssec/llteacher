@@ -3,7 +3,7 @@ import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { okfAvailable } from "./okfCli";
-import { OkfKnowledgeService, ConceptIdError, ConceptExistsError } from "./service";
+import { OkfKnowledgeService, ConceptIdError, ConceptExistsError, knowledgeServiceFromEnv } from "./service";
 
 const OKF = process.env.OKF_BINARY ?? "okf";
 const COURSE_A = "11111111-2222-4333-8444-555555555555";
@@ -75,6 +75,46 @@ describe.skipIf(!okfAvailable(OKF))("OkfKnowledgeService (real binary)", () => {
     expect(updated?.resource).toBe("llteacher://materials/m-9");
     expect(updated?.frontmatter.status).toBe("generated");
     expect(await svc.update(COURSE_A, "missing", { body: "x" })).toBeNull();
+  });
+
+  /* I-5 (final review): an okf-upgrade guard. Everything else in this file
+     would keep passing if a future okf changed its ranking -- they assert
+     which ids come back, not in what order. Search ordering is what decides
+     which concept the tutor opens first on a chat turn, so a silent change
+     to it is a behaviour change in the product. If this one fails after
+     bumping okf, the ranking moved: re-read the release notes before
+     re-pinning the version, do not just relax the assertion. */
+  it("ranks a title+body match above a body-only match and excludes non-matches", async () => {
+    await svc.create(COURSE_A, {
+      id: "elasticity", type: "lecture", title: "Elasticity of demand",
+      description: "How quantity responds to price", body: "Elasticity measures responsiveness.",
+    });
+    await svc.create(COURSE_A, {
+      id: "revenue", type: "lecture", title: "Total revenue",
+      description: "Revenue and the demand curve", body: "Revenue rises when elasticity is low.",
+    });
+    await svc.create(COURSE_A, {
+      id: "histograms", type: "lecture", title: "Histograms",
+      description: "Reading a distribution", body: "Bins partition the range of a variable.",
+    });
+
+    const hits = await svc.search(COURSE_A, "elasticity", 5);
+    expect(hits.map((h) => h.conceptId)).toEqual(["elasticity", "revenue"]);
+    for (const hit of hits) expect(hit.score).toBeGreaterThan(0);
+  });
+
+  // I-1: create and update skip the whole-bundle backlink scan, so the
+  // concept they hand back reports no inbound links even when some exist.
+  // show() itself, which is what the console renders, still reports them.
+  it("omits inbound links from a write's return value but not from show()", async () => {
+    await svc.create(COURSE_A, { id: "target", type: "note", title: "Target", description: "d", body: "t" });
+    await svc.create(COURSE_A, { id: "source", type: "note", title: "Source", description: "d", body: "s" });
+    await svc.relate(COURSE_A, "source", "target", "source cites target");
+
+    const updated = await svc.update(COURSE_A, "target", { body: "t2" });
+    expect(updated?.inbound).toEqual([]);
+    expect((await svc.show(COURSE_A, "target"))?.inbound).toEqual(["source"]);
+    expect((await svc.show(COURSE_A, "target", { includeInbound: false }))?.inbound).toEqual([]);
   });
 
   it("relates two concepts and reports outbound and inbound links", async () => {
@@ -188,5 +228,31 @@ describe.skipIf(!okfAvailable(OKF))("OkfKnowledgeService (real binary)", () => {
     await svc.createDirectory(COURSE_A, "new-dir");
     const afterCreateDirectory = await svc.list(COURSE_A);
     expect(afterCreateDirectory.some((x) => x.kind === "index" && x.id === "new-dir/index")).toBe(true);
+  });
+});
+
+/* I-2 (final review): the factory used to build a fresh OkfKnowledgeService
+   per call, and the 15s list() cache lives on the instance -- so the cache
+   was constructed and discarded inside a single request and could never be
+   hit. No okf binary needed: this is about instance identity. */
+describe("knowledgeServiceFromEnv", () => {
+  it("returns the same instance for the same root and binary, and a new one per root", () => {
+    const rootA = mkdtempSync(path.join(tmpdir(), "kb-env-a-"));
+    const rootB = mkdtempSync(path.join(tmpdir(), "kb-env-b-"));
+    const envA = { KNOWLEDGE_ROOT: rootA, OKF_BINARY: OKF } as unknown as Env;
+    const envB = { KNOWLEDGE_ROOT: rootB, OKF_BINARY: OKF } as unknown as Env;
+
+    expect(knowledgeServiceFromEnv(envA)).toBe(knowledgeServiceFromEnv(envA));
+    // A second env object naming the same root is still the same instance --
+    // the key is the value, not the object identity of `env`.
+    expect(knowledgeServiceFromEnv({ ...envA } as unknown as Env)).toBe(knowledgeServiceFromEnv(envA));
+    expect(knowledgeServiceFromEnv(envB)).not.toBe(knowledgeServiceFromEnv(envA));
+  });
+
+  it("keys on the binary as well, so overriding OKF_BINARY does not reuse the wrong service", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "kb-env-c-"));
+    const withDefault = knowledgeServiceFromEnv({ KNOWLEDGE_ROOT: root } as unknown as Env);
+    const withOverride = knowledgeServiceFromEnv({ KNOWLEDGE_ROOT: root, OKF_BINARY: "/usr/local/bin/okf" } as unknown as Env);
+    expect(withOverride).not.toBe(withDefault);
   });
 });

@@ -48,18 +48,62 @@ function presentationOrder(files: Record<string, Uint8Array>): string[] | null {
   return order.length > 0 ? order : null;
 }
 
+/** Per-entry MAX_PART_BYTES stops one huge slide; this stops ten thousand
+ *  merely large ones. A deck is many entries, so the per-entry guard alone
+ *  bounds nothing in aggregate: 5,000 slides of 49 MB each pass it
+ *  individually and decompress to a quarter of a terabyte. 4 x MAX_PART_BYTES
+ *  (200 MB) is far above any real deck and far below what would hurt. */
+export const MAX_TOTAL_PART_BYTES = 4 * MAX_PART_BYTES;
+
+/** Accumulates the DECLARED decompressed sizes of the entries a filter wants,
+ *  and stops admitting them once they pass the aggregate cap. Declared,
+ *  because a zip's central directory is all there is to go on before
+ *  anything is inflated -- which is the point: the refusal has to happen
+ *  inside the filter callback, so the bytes past the cap are never
+ *  decompressed at all rather than measured afterwards. A zip that lies
+ *  about its sizes is not defended against here, exactly as MAX_PART_BYTES
+ *  is not; the 25 MB upload cap bounds how big the lie can be.
+ *
+ *  Exported for its own unit test: constructing a genuine 200 MB-declared
+ *  pptx in a test is not cheap, and the arithmetic is the part that can be
+ *  wrong. */
+export function makeSizeBudget(limit: number) {
+  let total = 0;
+  let exceeded = false;
+  return {
+    /** True when this entry fits inside what is left of the budget. */
+    admit(originalSize: number): boolean {
+      if (total + originalSize > limit) {
+        exceeded = true;
+        return false;
+      }
+      total += originalSize;
+      return true;
+    },
+    get exceeded(): boolean {
+      return exceeded;
+    },
+  };
+}
+
 export async function extractPptx(filename: string, bytes: ArrayBuffer): Promise<ExtractionOutcome> {
   let files: Record<string, Uint8Array>;
+  const budget = makeSizeBudget(MAX_TOTAL_PART_BYTES);
   try {
     files = unzipSync(new Uint8Array(bytes), {
       filter: (f) =>
         f.originalSize <= MAX_PART_BYTES &&
         (SLIDE_RE.test(f.name) ||
           f.name === "ppt/presentation.xml" ||
-          f.name === "ppt/_rels/presentation.xml.rels"),
+          f.name === "ppt/_rels/presentation.xml.rels") &&
+        budget.admit(f.originalSize),
     });
   } catch {
     return { kind: "unsupported", reason: "pptx could not be unzipped" };
+  }
+
+  if (budget.exceeded) {
+    return { kind: "unsupported", reason: "pptx slides exceed 200 MB decompressed" };
   }
 
   const byPresentationOrder = presentationOrder(files);

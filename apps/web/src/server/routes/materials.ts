@@ -157,9 +157,14 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
   await setMaterialStorageKey(db, scope, material.id, key);
 
   // Extraction runs off the request path: on Node there is no per-request
-  // CPU cap, so this schedules the write for the next tick (setImmediate)
-  // rather than making the instructor wait on it synchronously. The
-  // handler answers 201 pending immediately; the console polls status.
+  // CPU cap, so this enqueues the write rather than making the instructor
+  // wait on it synchronously. The handler answers 201 pending immediately;
+  // the console polls status.
+  //
+  // The queue runs two jobs at a time (extract/job.ts), so the memory held
+  // by queued upload bytes is bounded by what this instructor has uploaded
+  // and not yet had extracted -- not, as before the queue, by every upload
+  // being decompressed at once.
   scheduleExtraction({
     db,
     courseId: scope,

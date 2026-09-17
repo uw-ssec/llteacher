@@ -37,30 +37,14 @@ export function parentDirectories(path: string): string[] {
   return directories;
 }
 
-/** parseLinks.ts's LINK_RE matches a link label as `[^\]]*` -- it stops at
- *  the first literal `]`, with no backslash-unescaping, because that file
- *  is deliberately not a full markdown parser. So a title containing `]`
- *  cannot be made safe with ordinary CommonMark-style `\]` escaping here:
- *  the backslash would still leave a bare `]` for that regex to stop on,
- *  producing exactly the malformed, mis-parsed entry this exists to
- *  prevent (M-8 / final review deferred item 14). Substituting the
- *  visually-equivalent fullwidth bracket keeps the rendered listing legible
- *  while guaranteeing no literal `]` reaches the label. */
-function safeLinkLabel(label: string): string {
-  return label.replace(/\]/g, "］");
-}
-
-export function renderIndex(directoryPath: string, entries: IndexEntry[]): string {
-  const heading = directoryPath === "" ? "Knowledge base" : directoryPath;
-  if (entries.length === 0) return `## ${heading}\n\nNo documents yet.\n`;
-
-  const lines = entries.map((entry) => {
-    const label = safeLinkLabel(entry.title ?? entry.path.split("/").pop() ?? entry.path);
-    const suffix = entry.description ? ` - ${entry.description}` : "";
-    return `* [${label}](/${entry.path})${suffix}`;
-  });
-  return `## ${heading}\n\n${lines.join("\n")}\n`;
-}
+/* A `renderIndex` used to live here, rendering index.md in this module's own
+   guessed-at format. It is gone (final review): the service writes okf's
+   OWN index format instead -- `# Heading` on one line, `* [Title](base.md)`
+   bullets directly beneath, relative basename hrefs -- byte-matched against
+   what the real 0.1.5 binary emits, so an index this app regenerates is
+   indistinguishable from one okf wrote. See renderIndexBody and
+   renderOkfIndex in service.ts. Nothing imported renderIndex but its own
+   tests. IndexEntry stayed, because that is the shape both of them take. */
 
 const LOG_HEADER = "# Log";
 

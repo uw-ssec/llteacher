@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { zipSync, strToU8 } from "fflate";
 import { extract, sniffTranscript } from "./index";
-import { decodeXml } from "./types";
+import { decodeXml, MAX_PART_BYTES } from "./types";
+import { MAX_TOTAL_PART_BYTES, makeSizeBudget } from "./pptx";
 
 const enc = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer;
 const zip = (files: Record<string, string>) =>
@@ -59,11 +60,7 @@ describe("extract", () => {
   });
   it("rejects a docx zip bomb: an oversized word/document.xml is never decompressed", async () => {
     const bytes = zip({ "word/document.xml": " ".repeat(51 * 1024 * 1024) });
-    const start = performance.now();
     const out = await extract("Bomb.docx", bytes);
-    const elapsedMs = performance.now() - start;
-    // eslint-disable-next-line no-console
-    console.log(`zip bomb test: extract() took ${elapsedMs.toFixed(1)}ms`);
     expect(out).toMatchObject({ kind: "unsupported" });
     expect((out as { reason: string }).reason).toMatch(/50 MB/);
   });
@@ -123,5 +120,41 @@ describe("extract", () => {
 describe("decodeXml", () => {
   it("decodes hex numeric entities before decimal and named entities", () => {
     expect(decodeXml("&#x2019;&#39;&amp;lt;")).toBe("’'&lt;");
+  });
+});
+
+/* Final review: MAX_PART_BYTES caps ONE zip entry, which bounds nothing for
+   a format that is many entries -- 5,000 slides of 49 MB each clear the
+   per-entry guard individually and decompress to a quarter of a terabyte.
+   The aggregate cap is tested through its helper rather than through a real
+   200 MB pptx, because building one costs 200 MB of test memory to prove
+   arithmetic that is right here in front of us. */
+describe("pptx aggregate size budget", () => {
+  it("caps the total at four times the per-entry limit", () => {
+    expect(MAX_TOTAL_PART_BYTES).toBe(4 * MAX_PART_BYTES);
+    expect(MAX_TOTAL_PART_BYTES).toBe(200 * 1024 * 1024);
+  });
+
+  it("admits entries until the budget is spent, then refuses the rest", () => {
+    const budget = makeSizeBudget(100);
+    expect(budget.admit(60)).toBe(true);
+    expect(budget.admit(40)).toBe(true); // exactly at the limit still fits
+    expect(budget.exceeded).toBe(false);
+    expect(budget.admit(1)).toBe(false);
+    expect(budget.exceeded).toBe(true);
+  });
+
+  it("refuses many small entries whose sum passes the cap, not just one big one", () => {
+    const budget = makeSizeBudget(100);
+    // Ten entries of 11 bytes: each is tiny, the ninth is where the sum bites.
+    const admitted = Array.from({ length: 10 }, () => budget.admit(11)).filter(Boolean).length;
+    expect(admitted).toBe(9);
+    expect(budget.exceeded).toBe(true);
+  });
+
+  it("a deck within the cap decompresses normally", async () => {
+    const slide = (t: string) => `<?xml version="1.0"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="x"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>${t}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`;
+    const out = await extract("Small.pptx", zip({ "ppt/slides/slide1.xml": slide("Only") }));
+    expect(out).toMatchObject({ kind: "extracted", type: "slides" });
   });
 });

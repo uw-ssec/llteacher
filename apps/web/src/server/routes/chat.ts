@@ -178,11 +178,20 @@ import type { ConceptCitation } from "../repositories/citations";
    follow-up text in the same turn via stopWhen below. */
 /** #41: showKnowledge truncates a concept's body to this many characters
  *  before returning it to the model, so one oversized concept can't blow
- *  the context budget. Tool-result bodies are NOT counted against the
- *  history token budget (MAX_HISTORY_MESSAGES / MAX_TURN_STEPS trim by
- *  message count, not content size), so up to MAX_TURN_STEPS - 1 opens in a
- *  single turn can each add up to this many characters to what the model
- *  sees this step. */
+ *  the context budget.
+ *
+ *  Corrected in the final review: an earlier version of this comment said
+ *  tool-result bodies are "NOT counted against the history token budget".
+ *  They are -- just not on the turn that produces them. Within the CURRENT
+ *  turn the bodies accumulate in streamText's own step state, which the
+ *  history budget never sees, so up to MAX_TURN_STEPS - 1 opens can each
+ *  add this many characters to what the model is sent that step, unbudgeted.
+ *  Once the turn is persisted, those tool parts are part of the message, and
+ *  lib/context-window.ts estimates a message by stringifying ALL of its
+ *  parts -- so on every LATER turn a 12,000-character body counts in full
+ *  against the budget and can push older messages out. That is the reason
+ *  for a cap here at all: the ceiling is per-turn unbudgeted exposure AND
+ *  the per-message weight it leaves behind. */
 export const SHOW_BODY_MAX_CHARS = 12_000;
 
 export const TOOLS: ToolSet = {
@@ -411,8 +420,18 @@ export const TOOLS: ToolSet = {
     execute: async (input: { query: string; limit?: number }, options: ToolCallOptions) => {
       const ctx = options.experimental_context as HintToolContext;
       const limit = Math.min(SEARCH_LIMIT_MAX, Math.max(1, Math.floor(input.limit ?? SEARCH_LIMIT_DEFAULT)));
-      const hits = await ctx.knowledge.search(ctx.courseId, input.query, limit);
-      return { hits };
+      // A search failure is "the bundle had nothing for you", never an error
+      // handed back to the model: runOkf rejects with okf's own stderr in the
+      // message, and an un-caught tool error puts that text straight into the
+      // conversation for the model to read and possibly repeat to a student.
+      // showKnowledge already swallows its own failures the same way.
+      try {
+        const hits = await ctx.knowledge.search(ctx.courseId, input.query, limit);
+        return { hits };
+      } catch (err) {
+        logServerError("searchKnowledge", err, { courseId: ctx.courseId });
+        return { hits: [] };
+      }
     },
   },
   showKnowledge: {
@@ -2645,7 +2664,7 @@ export async function chatHandler(c: Context<AppEnv>) {
         // latency, no cost.
         // #317 review, #349 (requirement 3): result.totalUsage, not
         // result.usage -- the AI SDK documents result.usage as "the token
-        // usage of the LAST STEP" only. stopWhen: stepCountIs(5) above
+        // usage of the LAST STEP" only. stopWhen: stepCountIs(MAX_TURN_STEPS) above
         // makes multi-step turns (a tool call, then a follow-up text
         // step) a designed path, and providers bill per call: result.usage
         // alone silently dropped every earlier step's tokens from cost

@@ -334,7 +334,7 @@ describe("classifyTurn", () => {
 // server-side execute() that returns a sentinel (never real R output; this
 // Worker never runs R, see TOOLS.executeRCode's own doc comment) so the
 // model's tool call always resolves and the conversation can continue in
-// the same turn (stopWhen: stepCountIs(5) below). The actual execution
+// the same turn (stopWhen: stepCountIs(MAX_TURN_STEPS) below). The actual execution
 // happens client-side (packages/ui's CodeExecution renderer, wired to
 // apps/web's useRExecution hook) -- out of reach for a route-level test,
 // per the issue's own Testing Strategy ("mock chat.ts and test that
@@ -2968,12 +2968,14 @@ describe("POST /api/chat", () => {
     //
     // 25,400, not the 127,000 the neighbouring tests use: since the turn
     // budget reserves max_completion_tokens x MAX_TURN_STEPS rather than x1,
-    // 127,000 now reserves 635,000 tokens and floors the 262K window too --
-    // which would make BOTH calls keep 5 messages and quietly turn this test
-    // into a tautology that no longer distinguishes the two windows. The
-    // figure below reserves the same 127,000 in total, so the arithmetic this
-    // test was written around is unchanged: the default window floors, the
-    // 262K one has ~134K left and keeps everything.
+    // 127,000 reserves far more than either window holds and floors the 262K
+    // one too -- which would make BOTH calls keep 5 messages and quietly turn
+    // this test into a tautology that no longer distinguishes the two
+    // windows. The figure below keeps the 128K default floored while leaving
+    // the 262K window room for the whole ~8K-token history, which is the
+    // arithmetic this test is written around. It has slack in it: the
+    // reservation is 25,400 x MAX_TURN_STEPS (177,800 at 7 steps), so the
+    // 262K window still has ~84K free for ~8K of history.
     const maxCompletionTokens = 25_400;
     createConversationMock.mockResolvedValue({ id: "22222222-2222-2222-2222-222222222222", ownerUserId: "u1", courseId: "55555555-5555-5555-5555-555555555555" });
 

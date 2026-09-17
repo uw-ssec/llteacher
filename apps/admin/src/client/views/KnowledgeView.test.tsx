@@ -122,7 +122,7 @@ describe("KnowledgeView", () => {
     render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
     await waitFor(() => screen.getByText("Syllabus"));
 
-    const input = screen.getByLabelText("Upload material") as HTMLInputElement;
+    const input = screen.getByLabelText("Upload files") as HTMLInputElement;
     const bad = new File(["MZ"], "evil.exe", { type: "application/octet-stream" });
     fireEvent.change(input, { target: { files: [bad] } });
 
@@ -156,7 +156,7 @@ describe("KnowledgeView", () => {
     render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
     await waitFor(() => screen.getByText("Syllabus"));
 
-    const input = screen.getByLabelText("Upload material") as HTMLInputElement;
+    const input = screen.getByLabelText("Upload files") as HTMLInputElement;
     const good = new File(["hello"], "notes.txt", { type: "text/plain" });
     fireEvent.change(input, { target: { files: [good] } });
 
@@ -170,12 +170,21 @@ describe("KnowledgeView", () => {
   // the folder structure.
   it("uploads multiple files sequentially, carrying relativePath when the browser set one", async () => {
     const postBodies: FormData[] = [];
+    // The first POST is held open so the progress line has a moment to be
+    // observed mid-run -- a folder upload is one request per file, and the
+    // whole point of the indicator is that it is visible while that is
+    // happening, not after.
+    let releaseFirstPost = () => {};
+    const firstPostHeld = new Promise<void>((resolve) => {
+      releaseFirstPost = resolve;
+    });
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (init?.method === "POST" && url.endsWith("/materials")) {
           postBodies.push(init.body as FormData);
+          if (postBodies.length === 1) await firstPostHeld;
           return new Response(JSON.stringify({ id: `m${postBodies.length}`, status: "pending" }), {
             status: 200,
           });
@@ -196,12 +205,18 @@ describe("KnowledgeView", () => {
     const fileB = new File(["b"], "b.txt", { type: "text/plain" });
     Object.defineProperty(fileB, "webkitRelativePath", { value: "Module 1/b.txt" });
 
-    const input = screen.getByLabelText("Upload material") as HTMLInputElement;
+    const input = screen.getByLabelText("Upload files") as HTMLInputElement;
     fireEvent.change(input, { target: { files: [fileA, fileB] } });
+
+    // Visible DURING the run, naming the file in flight...
+    await waitFor(() => expect(screen.getByText(/Uploading 1 of 2/)).toBeTruthy());
+    releaseFirstPost();
 
     await waitFor(() => expect(postBodies.length).toBe(2));
     expect(postBodies[0].get("relativePath")).toBeNull();
     expect(postBodies[1].get("relativePath")).toBe("Module 1/b.txt");
+    // ...and gone once the batch is finished.
+    await waitFor(() => expect(screen.queryByText(/Uploading \d+ of/)).toBeNull());
   });
 
   it("reports which file failed when one of several uploads fails", async () => {
@@ -232,7 +247,7 @@ describe("KnowledgeView", () => {
     const fileA = new File(["a"], "a.txt", { type: "text/plain" });
     const fileB = new File(["b"], "b.txt", { type: "text/plain" });
 
-    const input = screen.getByLabelText("Upload material") as HTMLInputElement;
+    const input = screen.getByLabelText("Upload files") as HTMLInputElement;
     fireEvent.change(input, { target: { files: [fileA, fileB] } });
 
     await waitFor(() => expect(screen.getByText(/1 of 2 files failed/i)).toBeTruthy());
@@ -348,7 +363,7 @@ describe("KnowledgeView", () => {
     render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
     await waitFor(() => screen.getByText("Syllabus"));
 
-    const input = screen.getByLabelText("Upload material") as HTMLInputElement;
+    const input = screen.getByLabelText("Upload files") as HTMLInputElement;
     const good = new File(["hello"], "notes.txt", { type: "text/plain" });
     fireEvent.change(input, { target: { files: [good] } });
 

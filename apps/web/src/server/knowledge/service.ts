@@ -53,7 +53,10 @@ export interface KnowledgeService {
   ensureBundle(courseId: string): Promise<void>;
   list(courseId: string): Promise<ConceptSummary[]>;
   search(courseId: string, query: string, limit?: number): Promise<SearchHit[]>;
-  show(courseId: string, conceptId: string): Promise<Concept | null>;
+  /** `includeInbound` defaults to true. Pass false to skip the whole-bundle
+   *  backlink scan when the caller does not render inbound links -- see
+   *  show()'s own comment. */
+  show(courseId: string, conceptId: string, opts?: { includeInbound?: boolean }): Promise<Concept | null>;
   create(courseId: string, input: CreateConcept): Promise<Concept>;
   update(courseId: string, conceptId: string, patch: { body?: string; title?: string; description?: string }): Promise<Concept | null>;
   relate(courseId: string, from: string, to: string, context: string): Promise<void>;
@@ -132,11 +135,27 @@ function renderIndexBody(entries: IndexEntry[]): string {
 // concept file's frontmatter on every message in a conversation. 15s keeps a
 // concept a teacher just created showing up well within one editing
 // session, while still collapsing the common case of several chat turns in
-// a row. NOTE: this cache is only exact within a single process -- correct
-// for this quarter's single-task deployment (one Worker instance per
-// course's traffic), but a future multi-instance deployment would need a
-// shared invalidation signal instead.
+// a row.
+//
+// The cache lives on the service INSTANCE, and the instance is what
+// knowledgeServiceFromEnv memoises per (root, binary) -- so a hit spans
+// requests within one process, which is the only way a 15s TTL can ever be
+// hit at all. Writes made through this same instance invalidate it
+// immediately (invalidateListCache, below). A write that lands some other
+// way -- another process, or an operator editing the bundle on disk -- is
+// invisible for up to the TTL, which is the deliberate trade and correct
+// for this quarter's single-task deployment. A future multi-instance
+// deployment would need a shared invalidation signal instead.
 const LIST_CACHE_TTL_MS = 15_000;
+
+/** I-1 (final review): withWriteLock's own 10 s default was sized for "one
+ *  instructor, one console request at a time". A folder upload now queues
+ *  extractions two at a time (extract/job.ts), and each okf create is a
+ *  process spawn, so a waiter can legitimately sit behind several hundred
+ *  milliseconds of work per queued file. 30 s is still a bound -- a genuinely
+ *  wedged writer fails rather than hanging the request forever -- but it is
+ *  no longer a bound that a normal-sized upload can trip. */
+const WRITE_LOCK_TIMEOUT_MS = 30_000;
 
 // Frontmatter lives at the top of every concept file and `list()` never
 // looks at the body, so reading the whole file just to throw the body away
@@ -204,7 +223,7 @@ export class OkfKnowledgeService implements KnowledgeService {
   // instead of repeating the pair at each of the five write methods.
   private async withCourseLock<T>(courseId: string, fn: () => Promise<T>): Promise<T> {
     await this.ensureCourseDir(courseId);
-    return withWriteLock(this.lockPath(courseId), fn);
+    return withWriteLock(this.lockPath(courseId), fn, { timeoutMs: WRITE_LOCK_TIMEOUT_MS });
   }
 
   async ensureBundle(courseId: string): Promise<void> {
@@ -267,7 +286,19 @@ export class OkfKnowledgeService implements KnowledgeService {
     }));
   }
 
-  async show(courseId: string, conceptId: string): Promise<Concept | null> {
+  /** I-1 (final review): inbound links are computed by reading EVERY concept
+   *  file in the bundle and parsing its links. That is fine for an
+   *  instructor opening one document, and badly wrong inside a write: create
+   *  and update both end by re-reading what they just wrote, and doing it
+   *  with the backlink scan attached made a folder-upload's per-file write
+   *  O(bundle) while holding the per-course write lock. Neither of those two
+   *  callers uses `inbound`, so they pass `includeInbound: false` and the
+   *  scan happens only where it is actually rendered. */
+  async show(
+    courseId: string,
+    conceptId: string,
+    opts: { includeInbound?: boolean } = {},
+  ): Promise<Concept | null> {
     const file = this.conceptFile(courseId, conceptId);
     const dir = this.bundleDir(courseId);
     let raw: string;
@@ -282,7 +313,7 @@ export class OkfKnowledgeService implements KnowledgeService {
       parseLinks(body, conceptId).map((l) => l.targetPath),
       dir,
     );
-    const inbound = await this.inboundFor(courseId, conceptId);
+    const inbound = (opts.includeInbound ?? true) ? await this.inboundFor(courseId, conceptId) : [];
     return {
       id: conceptId,
       kind: kindOf(conceptId),
@@ -340,7 +371,7 @@ export class OkfKnowledgeService implements KnowledgeService {
         throw err;
       }
       this.invalidateListCache(courseId);
-      const created = await this.show(courseId, input.id);
+      const created = await this.show(courseId, input.id, { includeInbound: false });
       if (!created) throw new Error(`okf create reported success but ${input.id} is missing`);
       return created;
     });
@@ -371,7 +402,7 @@ export class OkfKnowledgeService implements KnowledgeService {
         await fs.writeFile(file, setFrontmatterKeys(raw, keep));
       }
       this.invalidateListCache(courseId);
-      return this.show(courseId, conceptId);
+      return this.show(courseId, conceptId, { includeInbound: false });
     });
   }
 
@@ -527,6 +558,23 @@ async function walkMarkdown(dir: string, rel: string): Promise<string[]> {
   return out;
 }
 
+/** I-2 (final review): one service instance per (root, binary), reused for
+ *  the life of the process. The instance owns the list() cache, so building
+ *  a new one per request -- as this factory used to -- meant that cache was
+ *  born and died inside a single request and could never once be hit. Keyed
+ *  on the root AS GIVEN, before the constructor's realpath: two envs naming
+ *  the same directory differently are rare, and resolving here would mean a
+ *  filesystem call on the request path just to look up a cache. */
+const serviceInstances = new Map<string, OkfKnowledgeService>();
+
 export function knowledgeServiceFromEnv(env: Env): KnowledgeService {
-  return new OkfKnowledgeService({ root: env.KNOWLEDGE_ROOT, binary: env.OKF_BINARY ?? "okf" });
+  const root = env.KNOWLEDGE_ROOT;
+  const binary = env.OKF_BINARY ?? "okf";
+  const key = `${root}|${binary}`;
+  let service = serviceInstances.get(key);
+  if (!service) {
+    service = new OkfKnowledgeService({ root, binary });
+    serviceInstances.set(key, service);
+  }
+  return service;
 }

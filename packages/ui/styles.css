@@ -6525,6 +6525,20 @@ body {
   flex-shrink: 0;
 }
 
+/* A field error that is a LIST -- the knowledge upload's "3 of 12 files
+   failed:" followed by one "\n"-separated line per file. Without pre-line
+   those newlines collapse and twelve filenames run together as one
+   sentence. The dot marker aligns to the first line rather than the middle
+   of a tall block, which is why align-items is overridden too. */
+.admin-field-error--multiline {
+  align-items: flex-start;
+  white-space: pre-line;
+}
+
+.admin-field-error--multiline::before {
+  margin-block-start: 0.5em;
+}
+
 /* #172 (FUN-002): read-only homework view for a non-authoring grader. */
 .admin-record-row__title-static {
   font-size: var(--font-size-sm);

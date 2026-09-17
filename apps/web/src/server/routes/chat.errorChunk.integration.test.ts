@@ -352,7 +352,7 @@ function succeedingModel(replyText: string): LanguageModelV2 {
 // #342's own issue text), this reaches onFinish through `cancel()`, not
 // `flush()`, with `isAborted: false` and `finishReason: undefined`.
 //
-// Two steps, matching chatHandler's own `stopWhen: stepCountIs(5)` design
+// Two steps, matching chatHandler's own `stopWhen: stepCountIs(MAX_TURN_STEPS)` design
 // (a tool call, then follow-up text in the same turn) and Cordero's exact
 // #342 example: step 1 is a genuinely COMPLETE, resolved showDefinition
 // tool call; step 2 is text cancelled mid-delta, never reaching text-end.
