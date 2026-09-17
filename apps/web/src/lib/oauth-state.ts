@@ -7,12 +7,41 @@
  * (RFC 9700) SS2.1 and SS4.7.1, and PKCE (RFC 7636).
  */
 
-export const OAUTH_STATE_COOKIE = "llt_oauth_state";
-export const OAUTH_VERIFIER_COOKIE = "llt_oauth_verifier";
-/** A validated in-app location to restore after the hosted sign-in flow. */
-export const OAUTH_RETURN_TO_COOKIE = "llt_oauth_return_to";
+/**
+ * All short-lived AuthKit bindings live in one cookie. Some local ALB
+ * emulators preserve only one Set-Cookie header, so separate state, verifier,
+ * and return-path cookies would lose CSRF or PKCE protection in that path.
+ */
+export const OAUTH_TRANSACTION_COOKIE = "llt_oauth_transaction";
 /** Covers the AuthKit hosted-UI round trip; not the session lifetime. */
 export const OAUTH_TTL_SECONDS = 600;
+
+export interface OAuthTransaction {
+  state: string;
+  verifier: string;
+  returnTo?: string;
+}
+
+export function serializeOAuthTransaction(transaction: OAuthTransaction): string {
+  return Buffer.from(JSON.stringify(transaction)).toString("base64url");
+}
+
+/** Fails closed when a cookie is malformed or was not created by this flow. */
+export function parseOAuthTransaction(value: string | undefined): OAuthTransaction | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Record<string, unknown>;
+    if (typeof parsed.state !== "string" || typeof parsed.verifier !== "string") return undefined;
+    if (parsed.returnTo !== undefined && typeof parsed.returnTo !== "string") return undefined;
+    return {
+      state: parsed.state,
+      verifier: parsed.verifier,
+      ...(typeof parsed.returnTo === "string" ? { returnTo: parsed.returnTo } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
 
 export function generateState(): string {
   return randomUrlSafeString(32);

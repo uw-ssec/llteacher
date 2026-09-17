@@ -18,13 +18,13 @@ import {
   unsealSessionIgnoringExpiry,
 } from "../../lib/session";
 import {
-  OAUTH_STATE_COOKIE,
-  OAUTH_RETURN_TO_COOKIE,
-  OAUTH_VERIFIER_COOKIE,
+  OAUTH_TRANSACTION_COOKIE,
   OAUTH_TTL_SECONDS,
   generateState,
   generatePkceVerifier,
   computeCodeChallenge,
+  parseOAuthTransaction,
+  serializeOAuthTransaction,
 } from "../../lib/oauth-state";
 import { decodeJwt } from "jose";
 import { extractSession } from "../middleware/auth";
@@ -46,10 +46,8 @@ export async function loginHandler(c: Context<AppEnv>) {
     path: "/",
     maxAge: OAUTH_TTL_SECONDS,
   };
-  setCookie(c, OAUTH_STATE_COOKIE, state, oauthCookieOptions);
-  setCookie(c, OAUTH_VERIFIER_COOKIE, verifier, oauthCookieOptions);
   const returnTo = safeReturnTo(c.req.query("returnTo"));
-  if (returnTo) setCookie(c, OAUTH_RETURN_TO_COOKIE, returnTo, oauthCookieOptions);
+  setCookie(c, OAUTH_TRANSACTION_COOKIE, serializeOAuthTransaction({ state, verifier, returnTo }), oauthCookieOptions);
 
   const authorizationUrl = workos.userManagement.getAuthorizationUrl({
     clientId: c.env.WORKOS_CLIENT_ID,
@@ -65,12 +63,11 @@ export async function loginHandler(c: Context<AppEnv>) {
 export async function callbackHandler(c: Context<AppEnv>) {
   const code = c.req.query("code");
   const returnedState = c.req.query("state");
-  const expectedState = getCookie(c, OAUTH_STATE_COOKIE);
-  const verifier = getCookie(c, OAUTH_VERIFIER_COOKIE);
-  const returnTo = safeReturnTo(getCookie(c, OAUTH_RETURN_TO_COOKIE));
-  deleteCookie(c, OAUTH_STATE_COOKIE, { path: "/" });
-  deleteCookie(c, OAUTH_VERIFIER_COOKIE, { path: "/" });
-  deleteCookie(c, OAUTH_RETURN_TO_COOKIE, { path: "/" });
+  const transaction = parseOAuthTransaction(getCookie(c, OAUTH_TRANSACTION_COOKIE));
+  const expectedState = transaction?.state;
+  const verifier = transaction?.verifier;
+  const returnTo = safeReturnTo(transaction?.returnTo);
+  deleteCookie(c, OAUTH_TRANSACTION_COOKIE, { path: "/" });
 
   if (!code) {
     return c.text("Missing authorization code", 400);
