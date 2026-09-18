@@ -49,13 +49,14 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv): Env {
     BLIND_INDEX_KEY: requireValue(env, "BLIND_INDEX_KEY"),
     WORKOS_WEBHOOK_SECRET: requireValue(env, "WORKOS_WEBHOOK_SECRET"),
     // The knowledge base (#42): uploads land in S3-compatible storage and the
-    // OKF bundle lives under KNOWLEDGE_ROOT (EFS in production). OKF_BINARY
-    // and OCR_MODEL are optional overrides.
-    STORAGE_ENDPOINT: requireValue(env, "STORAGE_ENDPOINT"),
-    STORAGE_BUCKET: requireValue(env, "STORAGE_BUCKET"),
-    STORAGE_ACCESS_KEY_ID: requireValue(env, "STORAGE_ACCESS_KEY_ID"),
-    STORAGE_SECRET_ACCESS_KEY: requireValue(env, "STORAGE_SECRET_ACCESS_KEY"),
-    KNOWLEDGE_ROOT: requireValue(env, "KNOWLEDGE_ROOT"),
+    // OKF bundle lives under KNOWLEDGE_ROOT (EFS in production). All optional
+    // here so a stack that has not provisioned them yet (#81) still starts;
+    // the storage and knowledge factories refuse clearly when asked for.
+    STORAGE_ENDPOINT: env.STORAGE_ENDPOINT,
+    STORAGE_BUCKET: env.STORAGE_BUCKET,
+    STORAGE_ACCESS_KEY_ID: env.STORAGE_ACCESS_KEY_ID,
+    STORAGE_SECRET_ACCESS_KEY: env.STORAGE_SECRET_ACCESS_KEY,
+    KNOWLEDGE_ROOT: env.KNOWLEDGE_ROOT,
     OKF_BINARY: env.OKF_BINARY,
     OCR_MODEL: env.OCR_MODEL,
   };

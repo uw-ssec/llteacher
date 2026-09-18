@@ -693,8 +693,19 @@ async function walkMarkdown(dir: string, rel: string): Promise<string[]> {
  *  filesystem call on the request path just to look up a cache. */
 const serviceInstances = new Map<string, OkfKnowledgeService>();
 
+/** Thrown when KNOWLEDGE_ROOT is unset (#81 has not mounted the bundle
+ *  filesystem yet). Chat already degrades to "no knowledge" on any failure
+ *  here; the console's knowledge routes report it rather than a generic 503. */
+export class KnowledgeNotConfiguredError extends Error {
+  constructor() {
+    super("The knowledge base is not configured: set KNOWLEDGE_ROOT to the bundle directory.");
+    this.name = "KnowledgeNotConfiguredError";
+  }
+}
+
 export function knowledgeServiceFromEnv(env: Env): KnowledgeService {
   const root = env.KNOWLEDGE_ROOT;
+  if (!root) throw new KnowledgeNotConfiguredError();
   const binary = env.OKF_BINARY ?? "okf";
   const key = `${root}|${binary}`;
   let service = serviceInstances.get(key);

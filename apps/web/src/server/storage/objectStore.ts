@@ -122,12 +122,25 @@ export function s3ObjectStore(config: S3StoreConfig): ObjectStore {
 
 /** One place that turns Env into a store, so no route reaches for the
  *  credential names itself. */
+/** Thrown when a deployment has not provisioned object storage (#81): the
+ *  upload routes fail with this rather than a confusing S3 error. */
+export class StorageNotConfiguredError extends Error {
+  constructor() {
+    super("Object storage is not configured: set STORAGE_ENDPOINT, STORAGE_BUCKET, STORAGE_ACCESS_KEY_ID, and STORAGE_SECRET_ACCESS_KEY.");
+    this.name = "StorageNotConfiguredError";
+  }
+}
+
 export function storageFromEnv(env: Env): ObjectStore {
+  const { STORAGE_ENDPOINT, STORAGE_BUCKET, STORAGE_ACCESS_KEY_ID, STORAGE_SECRET_ACCESS_KEY } = env;
+  if (!STORAGE_ENDPOINT || !STORAGE_BUCKET || !STORAGE_ACCESS_KEY_ID || !STORAGE_SECRET_ACCESS_KEY) {
+    throw new StorageNotConfiguredError();
+  }
   return s3ObjectStore({
-    endpoint: env.STORAGE_ENDPOINT,
-    bucket: env.STORAGE_BUCKET,
-    accessKeyId: env.STORAGE_ACCESS_KEY_ID,
-    secretAccessKey: env.STORAGE_SECRET_ACCESS_KEY,
+    endpoint: STORAGE_ENDPOINT,
+    bucket: STORAGE_BUCKET,
+    accessKeyId: STORAGE_ACCESS_KEY_ID,
+    secretAccessKey: STORAGE_SECRET_ACCESS_KEY,
   });
 }
 

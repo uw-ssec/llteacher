@@ -28,8 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
   && apt-get purge -y curl && apt-get autoremove -y \
   && rm -rf /tmp/okf /tmp/checksums.txt /var/lib/apt/lists/*
 ENV NODE_ENV=production \
-    PORT=8080 \
-    KNOWLEDGE_ROOT=/mnt/knowledge
+    PORT=8080
 
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules

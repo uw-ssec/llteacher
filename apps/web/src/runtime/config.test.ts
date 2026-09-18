@@ -63,6 +63,15 @@ describe("loadRuntimeConfig", () => {
     (appUrl) => expect(() => loadRuntimeConfig({ ...runtimeEnvironment, APP_URL: appUrl })).toThrow("APP_URL"),
   );
 
+  it("starts without the storage and knowledge variables, leaving those features unconfigured", () => {
+    const { STORAGE_ENDPOINT, STORAGE_BUCKET, STORAGE_ACCESS_KEY_ID, STORAGE_SECRET_ACCESS_KEY, KNOWLEDGE_ROOT, ...bare } = runtimeEnvironment;
+    void [STORAGE_ENDPOINT, STORAGE_BUCKET, STORAGE_ACCESS_KEY_ID, STORAGE_SECRET_ACCESS_KEY, KNOWLEDGE_ROOT];
+    const config = loadRuntimeConfig(bare);
+    expect(config.DATABASE_URL).toBe(bare.DATABASE_URL);
+    expect(config.KNOWLEDGE_ROOT).toBeUndefined();
+    expect(config.STORAGE_BUCKET).toBeUndefined();
+  });
+
   it("returns the Node runtime bindings without a Worker ASSETS binding", () => {
     expect(loadRuntimeConfig({ ...runtimeEnvironment, ASSETS: "worker-only" })).toEqual(runtimeEnvironment);
   });

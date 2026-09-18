@@ -594,14 +594,17 @@ declare global {
        than a Worker binding. Buckets are branch-aware — branching the
        database forks its buckets copy-on-write — which is why this is not
        R2. The AWS move (#81) changes these four values, not the code. */
-    STORAGE_ENDPOINT: string;
-    STORAGE_BUCKET: string;
-    STORAGE_ACCESS_KEY_ID: string;
-    STORAGE_SECRET_ACCESS_KEY: string;
+    /** Object storage for uploads. Optional at the runtime boundary: a
+     *  deployment that has not provisioned it yet (#81) still serves chat and
+     *  the console, with uploads refused clearly. */
+    STORAGE_ENDPOINT?: string;
+    STORAGE_BUCKET?: string;
+    STORAGE_ACCESS_KEY_ID?: string;
+    STORAGE_SECRET_ACCESS_KEY?: string;
     /** Directory holding every course's OKF bundle:
      *  `${KNOWLEDGE_ROOT}/courses/{courseId}/knowledge/`. EFS mount in
      *  production, `./.knowledge` locally. Passed to okf as a realpath. */
-    KNOWLEDGE_ROOT: string;
+    KNOWLEDGE_ROOT?: string;
     /** Path to the okf binary. Defaults to "okf" on PATH. */
     OKF_BINARY?: string;
   }
