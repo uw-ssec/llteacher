@@ -37,19 +37,8 @@ export default defineConfig({
       build: {
         rollupOptions: {
           output: {
-            /* KaTeX is ~290 kB and changes only on dependency upgrade, whereas
-               app code changes every deploy. Left in the main chunk, every
-               deploy invalidates it for every returning student; split out, it
-               is fetched once and cached.
-
-               It stays a STATIC import rather than a lazy one on purpose: the
-               transcript hydrates persisted history on first paint, so lazily
-               loaded KaTeX would render raw \(...\) for a frame -- reproducing
-               the exact bug this was added to fix. Chunking gets the caching
-               win without that flash. */
-            manualChunks: {
-              katex: ["katex", "rehype-katex"],
-            },
+            // Keep stable math assets cached across application deployments.
+            manualChunks: { katex: ["katex", "rehype-katex"] },
           },
         },
       },

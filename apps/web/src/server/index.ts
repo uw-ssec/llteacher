@@ -67,6 +67,30 @@ import {
 } from "./routes/promptTemplates";
 import { listLlmModelsHandler } from "./routes/llmModels";
 import {
+  listMaterialsHandler,
+  uploadMaterialHandler,
+  deleteMaterialHandler,
+  reingestMaterialHandler,
+  downloadMaterialHandler,
+} from "./routes/materials";
+import {
+  cleanupDocumentHandler,
+  listDocumentsHandler,
+  createDocumentHandler,
+  getDocumentHandler,
+  updateDocumentHandler,
+  deleteDocumentHandler,
+  documentLinksHandler,
+  searchKnowledgeHandler,
+  downloadDocumentHandler,
+  exportKnowledgeHandler,
+  deleteDirectoryHandler,
+  deleteKnowledgeBaseHandler,
+  getKnowledgeInstructionHandler,
+  putKnowledgeInstructionHandler,
+  putKnowledgeInstructionDefaultHandler,
+} from "./routes/knowledgeDocuments";
+import {
   deleteCanvasCredentialHandler,
   getCanvasCredentialHandler,
   setCanvasCredentialHandler,
@@ -403,6 +427,78 @@ app.post("/api/courses/:courseId/canvas/sync", requireInstructorOf()(syncCanvasC
 // than who may read the same data inside the console.
 app.post("/api/courses/:courseId/exports", requireInstructorOf()(createExportHandler));
 
+// ---- Knowledge management (#42) ----
+// All instructor-of-course, all nested under :courseId so requireInstructorOf
+// guards tenancy straight from the path.
+app.get("/api/courses/:courseId/materials", requireInstructorOf()(listMaterialsHandler));
+app.post("/api/courses/:courseId/materials", requireInstructorOf()(uploadMaterialHandler));
+app.delete(
+  "/api/courses/:courseId/materials/:materialId",
+  requireInstructorOf()(deleteMaterialHandler),
+);
+app.post(
+  "/api/courses/:courseId/materials/:materialId/reingest",
+  requireInstructorOf()(reingestMaterialHandler),
+);
+app.get(
+  "/api/courses/:courseId/materials/:materialId/download",
+  requireInstructorOf()(downloadMaterialHandler),
+);
+
+// Collections routes (knowledgeCollections.ts) are intentionally unregistered this quarter; see the 2026-09-15 spec.
+app.get(
+  "/api/courses/:courseId/knowledge/documents",
+  requireInstructorOf()(listDocumentsHandler),
+);
+app.post(
+  "/api/courses/:courseId/knowledge/documents",
+  requireInstructorOf()(createDocumentHandler),
+);
+app.get(
+  "/api/courses/:courseId/knowledge/documents/:documentId",
+  requireInstructorOf()(getDocumentHandler),
+);
+app.put(
+  "/api/courses/:courseId/knowledge/documents/:documentId",
+  requireInstructorOf()(updateDocumentHandler),
+);
+app.delete(
+  "/api/courses/:courseId/knowledge/documents/:documentId",
+  requireInstructorOf()(deleteDocumentHandler),
+);
+app.get(
+  "/api/courses/:courseId/knowledge/documents/:documentId/links",
+  requireInstructorOf()(documentLinksHandler),
+);
+app.post("/api/courses/:courseId/knowledge/documents/:documentId/cleanup", requireInstructorOf()(cleanupDocumentHandler));
+app.get(
+  "/api/courses/:courseId/knowledge/search",
+  requireInstructorOf()(searchKnowledgeHandler),
+);
+app.get(
+  "/api/courses/:courseId/knowledge/documents/:documentId/download",
+  requireInstructorOf()(downloadDocumentHandler),
+);
+app.get(
+  "/api/courses/:courseId/knowledge/export",
+  requireInstructorOf()(exportKnowledgeHandler),
+);
+app.delete(
+  "/api/courses/:courseId/knowledge/directories/:directory",
+  requireInstructorOf()(deleteDirectoryHandler),
+);
+app.delete("/api/courses/:courseId/knowledge", requireInstructorOf()(deleteKnowledgeBaseHandler));
+app.get("/api/courses/:courseId/knowledge/instruction", requireInstructorOf()(getKnowledgeInstructionHandler));
+app.put("/api/courses/:courseId/knowledge/instruction", requireInstructorOf()(putKnowledgeInstructionHandler));
+app.put("/api/courses/:courseId/knowledge/instruction/default", requireInstructorOf()(putKnowledgeInstructionDefaultHandler));
+
+// #172 audit (CMP-005): an unmatched /api/* path fell through to the SPA
+// catch-all below, which serves index.html with a 200. A client calling a
+// route its server doesn't have yet -- the realistic rolling-deploy skew
+// when the admin bundle leads the Worker -- therefore saw `r.ok === true`
+// and only failed when JSON.parse choked on HTML. That failed closed by
+// accident of content type, not by design. A JSON 404 makes a missing API
+// route unambiguous for every current and future client.
 // #172 audit (CMP-005): an unmatched /api/* path must be an unambiguous JSON
 // 404. The Node adapter delegates API paths here before either SPA fallback,
 // so clients never receive index.html for a missing API route.

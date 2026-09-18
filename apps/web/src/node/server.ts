@@ -4,7 +4,9 @@ import { Hono } from "hono";
 import type { Server } from "node:http";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
-import { closeDb } from "../db/client";
+import { closeDb, makeDb } from "../db/client";
+import { drainExtractions } from "../server/knowledge/extract/job";
+import { recoverInterruptedExtractions } from "../server/repositories/materials";
 import { loadRuntimeConfig } from "../runtime/config";
 import { app } from "../server";
 
@@ -81,8 +83,14 @@ export async function closeNodeServer(server: Server, timeoutMs = 25_000): Promi
     timer.unref();
     server.close((error) => finish(error ?? undefined));
   });
+  // #40: an extraction in flight (a PDF being OCR'd) gets up to this long to
+  // finish before the pool closes under it; whatever is still running is
+  // marked interrupted on the next start (see startNodeServer).
+  await drainExtractions(EXTRACTION_DRAIN_MS);
   await closeDb();
 }
+
+const EXTRACTION_DRAIN_MS = 20_000;
 
 export type ShutdownDependencies = {
   close(server: Server): Promise<void>;
@@ -115,7 +123,15 @@ export function registerShutdownHandlers(server: Server, dependencies: ShutdownD
 }
 
 export function startNodeServer(): Server {
-  const server = createNodeServer(loadRuntimeConfig(process.env));
+  const config = loadRuntimeConfig(process.env);
+  // Materials left at `processing` by a task that died mid-extraction are
+  // moved to `failed` with a reason, so the console never shows a spinner
+  // for work nothing is doing. Best effort; a failure here must not stop
+  // the server from serving.
+  void recoverInterruptedExtractions(makeDb(config.DATABASE_URL)).catch((error: unknown) => {
+    console.error("Failed to recover interrupted extractions", error);
+  });
+  const server = createNodeServer(config);
   registerShutdownHandlers(server);
   return server;
 }

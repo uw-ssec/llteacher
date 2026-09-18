@@ -41,6 +41,7 @@ function toWriteBody(values: LLMConfigFormValues): LlmConfigWriteBody {
     fallbackLlmConfigId: values.fallbackLlmConfigId,
     isActive: values.isActive,
     isDefault: values.isDefault,
+    knowledgeEnabled: values.knowledgeEnabled,
   };
 }
 

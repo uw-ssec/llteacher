@@ -24,7 +24,7 @@
    layer are substituted.
    -------------------------------------------------------------------------- */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import { Hono } from "hono";
 import { simulateReadableStream } from "ai";
 import type {
@@ -32,13 +32,28 @@ import type {
   LanguageModelV2CallOptions,
   LanguageModelV2StreamPart,
 } from "@ai-sdk/provider";
+import { mkdtempSync, realpathSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { chatHandler } from "./chat";
 import type { AuthContext } from "../middleware/roles";
 import { fakeAuthContext as buildFakeAuthContext, fakeMembership } from "../testing/authContext";
 import type { AppEnv } from "../context";
 
 const COURSE_ID = "55555555-5555-5555-5555-555555555555";
-const TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "sk-env" } as Env;
+
+// #41 fix review: exercise the REAL OkfKnowledgeService against a real, empty
+// bundle root rather than mocking "../knowledge/service" away -- see the
+// identical comment in chat.errorChunk.integration.test.ts for the full
+// rationale. A temp dir with no course subtree reproduces the exact "empty
+// bundle" behaviour (list() -> [], withholds both knowledge tools and the
+// <course_knowledge> listing) that every expectation in this file was
+// written against.
+let TEST_ENV: Env;
+beforeAll(() => {
+  const KNOWLEDGE_ROOT = realpathSync(mkdtempSync(path.join(os.tmpdir(), "kb-")));
+  TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "sk-env", KNOWLEDGE_ROOT } as Env;
+});
 
 /* The two configs this suite resolves. Their generation parameters differ
    DELIBERATELY: the fallback's own temperature/maxCompletionTokens must not

@@ -32,16 +32,30 @@
    together, so neither #3's nor #144's own mocked suite can catch it.
    -------------------------------------------------------------------------- */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import { Hono } from "hono";
 import { simulateReadableStream } from "ai";
 import type { LanguageModelV2, LanguageModelV2StreamPart } from "@ai-sdk/provider";
+import { mkdtempSync, realpathSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { chatHandler } from "./chat";
 import type { AuthContext } from "../middleware/roles";
 import { fakeAuthContext as buildFakeAuthContext, fakeMembership } from "../testing/authContext";
 import type { AppEnv } from "../context";
 
-const TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "test-key" } as Env;
+// #41 fix review: exercise the REAL OkfKnowledgeService against a real,
+// empty bundle root rather than mocking "../knowledge/service" away -- a
+// temp directory with no course subtree gives the exact same "empty
+// bundle" behaviour (list() -> [], withholds both knowledge tools and the
+// <course_knowledge> listing) that every expectation in this file was
+// written against, while also proving the real constructor (realpathSync)
+// and the real list() path don't 500 the turn on their own.
+let TEST_ENV: Env;
+beforeAll(() => {
+  const KNOWLEDGE_ROOT = realpathSync(mkdtempSync(path.join(os.tmpdir(), "kb-")));
+  TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "test-key", KNOWLEDGE_ROOT } as Env;
+});
 
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 
@@ -338,7 +352,7 @@ function succeedingModel(replyText: string): LanguageModelV2 {
 // #342's own issue text), this reaches onFinish through `cancel()`, not
 // `flush()`, with `isAborted: false` and `finishReason: undefined`.
 //
-// Two steps, matching chatHandler's own `stopWhen: stepCountIs(5)` design
+// Two steps, matching chatHandler's own `stopWhen: stepCountIs(MAX_TURN_STEPS)` design
 // (a tool call, then follow-up text in the same turn) and Cordero's exact
 // #342 example: step 1 is a genuinely COMPLETE, resolved showDefinition
 // tool call; step 2 is text cancelled mid-delta, never reaching text-end.

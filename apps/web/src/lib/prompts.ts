@@ -3,6 +3,7 @@ import type { Db } from "../db/client";
 import { homeworks, promptTemplates, sections } from "../db/schema";
 import type { CourseScope, OrgScope } from "../server/repositories/scope";
 import { deriveHomeworkStatus, isUnreleased } from "../server/repositories/homeworks";
+import type { ConceptSummary } from "../server/knowledge/service";
 
 /* --------------------------------------------------------------------------
    Prompt assembly (#25) -- replaces chat.ts's hardcoded SYSTEM_PROMPT with
@@ -543,12 +544,85 @@ export function toolUsageParagraph(toolNames: readonly string[]): string {
  *  empty) appends nothing, which is what every pure prompt-assembly test
  *  fixture that isn't about tools wants.
  *
+ *  `knowledgeListing`: appended after the section block and before the
+ *  guardrail. Non-empty listing is pushed to the prompt so the model sees
+ *  the course knowledge base's table of contents. Omitted or empty appends
+ *  nothing.
+ *
  *  #397: VOICE_CONSTRAINTS is appended unconditionally, after everything
  *  else (including the tool-usage paragraph). It is the one part of the
  *  assembled prompt no template can drop, because it governs register
  *  rather than pedagogy -- and because the emoji/em-dash output this fixes
  *  was produced under a real (non-default) template, so a conditional
  *  append would have left the bug in place. */
+
+export const KNOWLEDGE_LISTING_MAX_CHARS = 6000;
+
+import { KNOWLEDGE_GUARD, KNOWLEDGE_INSTRUCTION_DEFAULT } from "@llteacher/ui/api";
+
+/** Re-exported from the shared package so the console and the server read
+ *  one definition. See @llteacher/ui/api for the text itself. */
+export { KNOWLEDGE_GUARD };
+export const KNOWLEDGE_INSTRUCTION = KNOWLEDGE_INSTRUCTION_DEFAULT;
+
+/** The instruction paragraph for a turn: the course's own text when set,
+ *  else the default; the guard sentence is appended either way. */
+export function knowledgeInstructionFor(custom?: string | null): string {
+  const text = oneLine(custom ?? "");
+  if (text === "") return KNOWLEDGE_INSTRUCTION;
+  return text.endsWith(KNOWLEDGE_GUARD) ? text : `${text} ${KNOWLEDGE_GUARD}`;
+}
+
+function oneLine(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+/** Progressive disclosure, okf style: the model sees the bundle's table of
+ *  contents (titles and descriptions grouped by directory) and searches from
+ *  there. Empty input yields "", so assembleSystemPrompt adds nothing. The cap
+ *  bounds the entire block: opening tag + content + omitted message + closing
+ *  tag, all joined with newlines. */
+export function knowledgeListingParagraph(concepts: readonly ConceptSummary[], instruction?: string | null): string {
+  const items = concepts.filter((c) => c.kind === "concept");
+  if (items.length === 0) return "";
+  const byDir = new Map<string, ConceptSummary[]>();
+  for (const c of items) {
+    const dir = c.id.includes("/") ? c.id.slice(0, c.id.lastIndexOf("/")) : "(root)";
+    byDir.set(dir, [...(byDir.get(dir) ?? []), c]);
+  }
+  const dirs = [...byDir.keys()].sort((a, b) => (a === "(root)" ? -1 : b === "(root)" ? 1 : a.localeCompare(b)));
+  // Flatten to lines first; each entry knows whether it is a heading or a concept row.
+  const flat: Array<{ text: string; isRow: boolean }> = [];
+  for (const dir of dirs) {
+    flat.push({ text: `## ${dir}`, isRow: false });
+    for (const c of byDir.get(dir)!) {
+      const title = oneLine(c.title ?? c.id) || c.id;
+      const description = c.description ? oneLine(c.description) : "";
+      flat.push({ text: `- ${c.id}: ${title}.${description ? ` ${description}` : ""}`, isRow: true });
+    }
+  }
+  // Reserve budget for the longest possible tail message and closing tag.
+  const close = "</course_knowledge>";
+  const longestTail = `- ... and ${items.length} more; use searchKnowledge to find them`;
+  const budget = KNOWLEDGE_LISTING_MAX_CHARS - (longestTail.length + 1) - (close.length + 1);
+  // Emit a contiguous prefix that fits the budget, then drop a heading left with no rows under it.
+  const open = "<course_knowledge>";
+  const lines: string[] = [open];
+  let used = open.length;
+  let emittedRows = 0;
+  for (const entry of flat) {
+    if (used + entry.text.length + 1 > budget) break;
+    lines.push(entry.text);
+    used += entry.text.length + 1;
+    if (entry.isRow) emittedRows++;
+  }
+  if (lines.length > 1 && lines[lines.length - 1]!.startsWith("## ")) lines.pop();
+  const omitted = items.length - emittedRows;
+  if (omitted > 0) lines.push(`- ... and ${omitted} more; use searchKnowledge to find them`);
+  lines.push(close, "", knowledgeInstructionFor(instruction));
+  return lines.join("\n");
+}
+
 export function assembleSystemPrompt(
   templateContent: string,
   section?: PromptSectionContext,
@@ -556,6 +630,7 @@ export function assembleSystemPrompt(
   isHintRequest = false,
   markCompleteInstruction?: string,
   toolNames: readonly string[] = [],
+  knowledgeListing = "",
 ): string {
   const parts = [templateContent.trim()];
   if (section) {
@@ -568,6 +643,7 @@ export function assembleSystemPrompt(
       ].join("\n"),
     );
   }
+  if (knowledgeListing) parts.push(knowledgeListing);
   if (isDefaultPrompt) parts.push(TUTOR_GUARDRAIL);
   const toolUsage = toolUsageParagraph(toolNames);
   if (toolUsage) parts.push(toolUsage);

@@ -38,6 +38,8 @@ import { StudentsView } from "./views/StudentsView";
 import { CanvasIntegrationView } from "./views/CanvasIntegrationView";
 import { GradingPanel } from "./views/GradingPanel";
 import { ExportView } from "./views/ExportView";
+import { KnowledgeView } from "./views/KnowledgeView";
+import { KnowledgeDocumentView } from "./views/KnowledgeDocumentView";
 import { apiClient, setUnauthorizedHandler } from "./lib/api-client";
 import { useApiResource } from "./lib/useApiResource";
 import { useAuth, type CourseRole } from "./components/AuthProvider";
@@ -142,7 +144,20 @@ type View =
       sectionTitle: string;
       sectionId: string;
       studentId: string;
-    };
+    }
+  /* #42/#23: the bundle browser. `directory` is the rail's own selection,
+     lifted here (via KnowledgeView's onDirectoryChange) rather than left as
+     purely-internal useState -- same reason transcript-list's `offset`
+     lives in this same View union instead of local state: it must survive
+     a drill-in and back, not just a re-render. Undefined means "root",
+     matching KnowledgeView's own default. */
+  | { kind: "knowledge"; directory?: string; expanded?: string[] }
+  /* Carries `returnDirectory` and `returnExpanded` -- the browser's selected
+     folder and open folders at the moment this document was opened -- so
+     "back" lands on the exact rail the instructor was looking at, not the
+     browser's defaults. Same carried-state convention as transcript-detail's
+     `list` above. */
+  | { kind: "knowledge-document"; documentId: string; returnDirectory?: string; returnExpanded?: string[] };
 
 const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "homeworks":          "Instructor Console · Homeworks",
@@ -160,6 +175,8 @@ const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "canvas":             "Instructor Console · Canvas",
   "exports":            "Instructor Console · Export",
   "grade":              "Instructor Console · Grading",
+  "knowledge":          "Instructor Console · Knowledge",
+  "knowledge-document": "Instructor Console · Knowledge · Document",
 };
 
 export default function App() {
@@ -247,6 +264,8 @@ export default function App() {
         ? "homeworks"
         : view.kind === "create-llm-config" || view.kind === "edit-llm-config"
           ? "llm-configs"
+        : view.kind === "knowledge" || view.kind === "knowledge-document"
+          ? "knowledge"
         : (view.kind as AdminNavKey);
 
   const navigate = (key: AdminNavKey) => {
@@ -671,6 +690,57 @@ export default function App() {
                   <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
                 )
               )}
+
+              {/* #42: the knowledge surface -- bundle browser and document
+                  editor. Grouped under one guard (like the llm-configs trio
+                  above) because both share the same authoring/course gate,
+                  then split by kind below. authorOnly in the sidebar already
+                  keeps a TA from reaching this by clicking, but a stale view
+                  state is guarded here too, same as every other authorOnly
+                  surface in this file (#172). */}
+              {(view.kind === "knowledge" || view.kind === "knowledge-document") &&
+                (!canAuthor ? (
+                  <EmptyView
+                    label="Only instructors can manage this course's knowledge base"
+                    body={NOT_INSTRUCTOR_BODY}
+                  />
+                ) : !CURRENT_COURSE_ID ? (
+                  <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
+                ) : (
+                  <>
+                    {view.kind === "knowledge" && (
+                      <KnowledgeView
+                        courseId={CURRENT_COURSE_ID}
+                        initialDirectory={view.directory}
+                        initialExpanded={view.expanded}
+                        onDirectoryChange={(directory) =>
+                          setView((prev) => (prev.kind === "knowledge" ? { ...prev, directory } : prev))
+                        }
+                        onExpandedChange={(expanded) =>
+                          setView((prev) => (prev.kind === "knowledge" ? { ...prev, expanded } : prev))
+                        }
+                        onOpenDocument={(documentId) =>
+                          setView({
+                            kind: "knowledge-document",
+                            documentId,
+                            returnDirectory: view.directory,
+                            returnExpanded: view.expanded,
+                          })
+                        }
+                      />
+                    )}
+
+                    {view.kind === "knowledge-document" && (
+                      <KnowledgeDocumentView
+                        courseId={CURRENT_COURSE_ID}
+                        documentId={view.documentId}
+                        onBack={() =>
+                          setView({ kind: "knowledge", directory: view.returnDirectory, expanded: view.returnExpanded })
+                        }
+                      />
+                    )}
+                  </>
+                ))}
             </div>
           </div>
         </main>

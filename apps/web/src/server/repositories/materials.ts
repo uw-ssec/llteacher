@@ -1,8 +1,215 @@
-import { eq } from "drizzle-orm";
+import { and, eq, like } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { courseMaterials } from "../../db/schema";
 import type { CourseScope } from "./scope";
 
-export async function listMaterialsForCourse(db: Db, scope: CourseScope) {
-  return db.select().from(courseMaterials).where(eq(courseMaterials.courseId, scope));
+export interface MaterialSummary {
+  id: string;
+  title: string;
+  sourceType: (typeof courseMaterials.$inferSelect)["sourceType"];
+  originalFilename: string | null;
+  byteSize: number | null;
+  contentType: string | null;
+  status: (typeof courseMaterials.$inferSelect)["status"];
+  errorDetail: string | null;
+  uploadedAt: string;
+  relativePath: string | null;
+  documentPath: string | null;
+}
+
+/** Explicit projection, not select(). Same reasoning as llmConfigs'
+ *  CONFIG_COLUMNS: Drizzle emits the column list from the compiled schema,
+ *  so an additive column deployed ahead of its migration takes this route
+ *  down with "column does not exist" instead of degrading. storageKey and
+ *  checksum are deliberately absent -- nothing in the console renders them,
+ *  and a storage key is not something to hand a browser. */
+const MATERIAL_COLUMNS = {
+  id: courseMaterials.id,
+  title: courseMaterials.title,
+  sourceType: courseMaterials.sourceType,
+  originalFilename: courseMaterials.originalFilename,
+  byteSize: courseMaterials.byteSize,
+  contentType: courseMaterials.contentType,
+  status: courseMaterials.status,
+  errorDetail: courseMaterials.errorDetail,
+  uploadedAt: courseMaterials.uploadedAt,
+  relativePath: courseMaterials.relativePath,
+  documentPath: courseMaterials.documentPath,
+} as const;
+
+export async function listMaterialsForCourse(
+  db: Db,
+  scope: CourseScope,
+): Promise<MaterialSummary[]> {
+  const rows = await db
+    .select(MATERIAL_COLUMNS)
+    .from(courseMaterials)
+    .where(eq(courseMaterials.courseId, scope))
+    .orderBy(courseMaterials.uploadedAt);
+  return rows.map((r) => ({ ...r, uploadedAt: r.uploadedAt.toISOString() }));
+}
+
+export interface InsertMaterialInput {
+  title: string;
+  sourceType: (typeof courseMaterials.$inferInsert)["sourceType"];
+  originalFilename: string;
+  relativePath?: string | null;
+  storageKey: string;
+  byteSize: number;
+  contentType: string | null;
+  checksum: string;
+  status: "pending" | "processing" | "ready" | "failed";
+  errorDetail?: string | null;
+  uploadedById: string;
+}
+
+export async function insertMaterial(
+  db: Db,
+  scope: CourseScope,
+  input: InsertMaterialInput,
+): Promise<{ id: string }> {
+  const [row] = await db
+    .insert(courseMaterials)
+    .values({
+      courseId: scope,
+      title: input.title,
+      sourceType: input.sourceType,
+      originalFilename: input.originalFilename,
+      relativePath: input.relativePath ?? null,
+      storageKey: input.storageKey,
+      byteSize: input.byteSize,
+      contentType: input.contentType,
+      checksum: input.checksum,
+      status: input.status,
+      errorDetail: input.errorDetail ?? null,
+      uploadedById: input.uploadedById,
+    })
+    .returning({ id: courseMaterials.id });
+  return row;
+}
+
+export async function deleteMaterial(
+  db: Db,
+  scope: CourseScope,
+  materialId: string,
+): Promise<{ storageKey: string | null; documentPath: string | null } | null> {
+  const [row] = await db
+    .delete(courseMaterials)
+    .where(
+      and(eq(courseMaterials.id, materialId), eq(courseMaterials.courseId, scope)),
+    )
+    .returning({ storageKey: courseMaterials.storageKey, documentPath: courseMaterials.documentPath });
+  return row ?? null;
+}
+
+export async function setMaterialStorageKey(
+  db: Db,
+  scope: CourseScope,
+  materialId: string,
+  storageKey: string,
+): Promise<void> {
+  await db
+    .update(courseMaterials)
+    .set({ storageKey, updatedAt: new Date() })
+    .where(
+      and(eq(courseMaterials.id, materialId), eq(courseMaterials.courseId, scope)),
+    );
+}
+
+export async function getMaterialForReingest(
+  db: Db,
+  scope: CourseScope,
+  materialId: string,
+): Promise<{
+  id: string;
+  originalFilename: string | null;
+  storageKey: string | null;
+  relativePath: string | null;
+  documentPath: string | null;
+  contentType: string | null;
+} | null> {
+  const [row] = await db
+    .select({
+      id: courseMaterials.id,
+      originalFilename: courseMaterials.originalFilename,
+      storageKey: courseMaterials.storageKey,
+      relativePath: courseMaterials.relativePath,
+      documentPath: courseMaterials.documentPath,
+      contentType: courseMaterials.contentType,
+    })
+    .from(courseMaterials)
+    .where(and(eq(courseMaterials.id, materialId), eq(courseMaterials.courseId, scope)));
+  return row ?? null;
+}
+
+export async function setMaterialDocumentPath(
+  db: Db,
+  scope: CourseScope,
+  materialId: string,
+  documentPath: string | null,
+): Promise<void> {
+  await db
+    .update(courseMaterials)
+    .set({ documentPath, updatedAt: new Date() })
+    .where(and(eq(courseMaterials.id, materialId), eq(courseMaterials.courseId, scope)));
+}
+
+export async function setMaterialStatus(
+  db: Db,
+  scope: CourseScope,
+  materialId: string,
+  status: "pending" | "processing" | "ready" | "failed",
+  errorDetail: string | null,
+): Promise<void> {
+  await db
+    .update(courseMaterials)
+    .set({ status, errorDetail, updatedAt: new Date() })
+    .where(and(eq(courseMaterials.id, materialId), eq(courseMaterials.courseId, scope)));
+}
+
+/** Run before accepting requests in the single-process deployment. A prior
+ * process cannot finish these jobs; retain their paths so Retry updates them. */
+export async function recoverInterruptedExtractions(db: Db): Promise<void> {
+  await db.update(courseMaterials)
+    .set({ status: "failed", errorDetail: "Extraction was interrupted by a restart. Retry ingestion.", updatedAt: new Date() })
+    .where(eq(courseMaterials.status, "processing"));
+}
+
+/** The material that produced one document, deleted; its storage key comes
+ *  back so the caller can drop the stored file. Null if none. */
+export async function deleteMaterialByDocumentPath(
+  db: Db,
+  scope: CourseScope,
+  documentPath: string,
+): Promise<{ storageKey: string | null } | null> {
+  const [row] = await db
+    .delete(courseMaterials)
+    .where(and(eq(courseMaterials.courseId, scope), eq(courseMaterials.documentPath, documentPath)))
+    .returning({ storageKey: courseMaterials.storageKey });
+  return row ?? null;
+}
+
+/** Every material whose document sits under `prefix` (a directory path with
+ *  its trailing slash), deleted. */
+export async function deleteMaterialsByDocumentPrefix(
+  db: Db,
+  scope: CourseScope,
+  prefix: string,
+): Promise<Array<{ storageKey: string | null }>> {
+  const escaped = prefix.replace(/[%_\\]/g, (ch) => `\\${ch}`);
+  return db
+    .delete(courseMaterials)
+    .where(and(eq(courseMaterials.courseId, scope), like(courseMaterials.documentPath, `${escaped}%`)))
+    .returning({ storageKey: courseMaterials.storageKey });
+}
+
+/** Every material of the course, deleted. */
+export async function deleteAllMaterials(
+  db: Db,
+  scope: CourseScope,
+): Promise<Array<{ storageKey: string | null }>> {
+  return db
+    .delete(courseMaterials)
+    .where(eq(courseMaterials.courseId, scope))
+    .returning({ storageKey: courseMaterials.storageKey });
 }

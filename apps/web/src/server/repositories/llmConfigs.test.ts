@@ -154,6 +154,7 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
     provider: "openrouter",
     modelName: "google/gemma-4-31b-it:free",
     basePrompt: "You are a tutor.",
+    knowledgeEnabled: true,
     temperature: 0.7,
     maxCompletionTokens: 1000,
     fallbackLlmConfigId: null,

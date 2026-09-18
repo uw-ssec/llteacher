@@ -26,6 +26,11 @@ const runtimeConfig = {
   ENCRYPTION_KEY: "encryption-key",
   BLIND_INDEX_KEY: "blind-index-key",
   WORKOS_WEBHOOK_SECRET: "webhook-secret",
+  STORAGE_ENDPOINT: "http://localhost:9000",
+  STORAGE_BUCKET: "llteacher-materials",
+  STORAGE_ACCESS_KEY_ID: "minioadmin",
+  STORAGE_SECRET_ACCESS_KEY: "minioadmin",
+  KNOWLEDGE_ROOT: "/tmp",
 } satisfies Env;
 
 let buildRoot: string;

@@ -3820,6 +3820,50 @@ describe("App section transcript load-older", () => {
   });
 });
 
+describe("staff landing", () => {
+  it.each(["instructor", "ta", "admin"])("does not request student homework for staff-only %s", async (role) => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ role }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryRouter><AuthProvider><App /></AuthProvider></MemoryRouter>);
+    await screen.findByText("Your teaching workspace");
+    expect(fetchMock.mock.calls).toHaveLength(1);
+  });
+
+  it("lists the staff member's courses with their role, without a second request", async () => {
+    const courses = [
+      { id: "c1", title: "STAT 311 · Elements of Statistical Methods", role: "instructor", canViewSolutions: true, canViewDrafts: true },
+      { id: "c2", title: "BIOL 180", role: "ta", canViewSolutions: false, canViewDrafts: false },
+    ];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ role: "instructor", courses }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryRouter><AuthProvider><App /></AuthProvider></MemoryRouter>);
+    const ledger = await screen.findByRole("list");
+    const rows = within(ledger).getAllByRole("listitem");
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain("STAT 311");
+    expect(rows[0].textContent).toContain("Instructor");
+    expect(rows[1].textContent).toContain("TA");
+    expect(screen.getByText("Teaching · 2 courses")).toBeTruthy();
+    expect(fetchMock.mock.calls).toHaveLength(1);
+  });
+
+  it("keeps homework available for mixed staff and student memberships", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = url === "/api/profile"
+        ? { role: "instructor", studentStats: { submissionsCount: 0, completedSections: 0 } }
+        : url === "/api/hello" ? { ping_id: "test-ping" } : { homeworks: [] };
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryRouter><AuthProvider><App /></AuthProvider></MemoryRouter>);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/student/homeworks"));
+    expect(screen.queryByText("Your teaching workspace")).toBeNull();
+  });
+});
+
 /* #309: a count-shaped regression guard for the per-token re-render cost
    Message.tsx's own doc comment names (MessageMarkdown's memo()) --
    "App.tsx rebuilds EVERY turn's `content` from scratch on every render, and

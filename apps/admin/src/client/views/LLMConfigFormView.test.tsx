@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
-import { LLMConfigFormView } from "./LLMConfigFormView";
+import { LLMConfigFormView, type LLMConfigFormValues } from "./LLMConfigFormView";
 
 afterEach(() => {
   cleanup();
@@ -108,5 +108,36 @@ describe("LLMConfigFormView — importing a base prompt", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     pickFile(input, "tutor.md", "# Edited externally");
     await waitFor(() => expect(textarea.value).toBe("# Edited externally"));
+  });
+
+});
+
+describe("LLMConfigFormView — knowledge base access", () => {
+  it("is on by default and travels with the saved values when switched off", async () => {
+    const onSave = vi.fn(async (_values: LLMConfigFormValues) => {});
+    render(<LLMConfigFormView onSave={onSave} onCancel={() => {}} />);
+    const box = screen.getByRole("checkbox", { name: /search the course knowledge base/i }) as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "Closed book" } });
+    fireEvent.change(screen.getByLabelText(/^base prompt$/i), { target: { value: "Be brief." } });
+    fireEvent.click(box);
+    fireEvent.submit(document.querySelector("form")!);
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls[0]![0]).toMatchObject({ knowledgeEnabled: false });
+  });
+
+  it("reflects a stored off setting when editing", () => {
+    render(
+      <LLMConfigFormView
+        onSave={async () => {}}
+        onCancel={() => {}}
+        initialConfig={{
+          id: "cfg", recordNumber: 1, name: "Closed book", provider: "openrouter", modelName: "m", basePrompt: "",
+          temperature: 0.7, maxCompletionTokens: 1000, fallbackLlmConfigId: null, isDefault: false, isActive: true,
+          knowledgeEnabled: false, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z",
+        }}
+      />,
+    );
+    expect((screen.getByRole("checkbox", { name: /search the course knowledge base/i }) as HTMLInputElement).checked).toBe(false);
   });
 });

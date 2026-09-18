@@ -5,6 +5,7 @@ import { Sidebar, TopNav, ConversationView, AlertDialog, Button, ErrorBoundary }
 import type { RCodeResult } from "@llteacher/ui";
 import { useRExecution } from "./hooks/useRExecution";
 import { useAuth } from "./components/AuthProvider";
+import { AccountShell, StaffHome } from "./components/AccountShell";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
 import { ResponseFeedback } from "./components/ResponseFeedback";
 import { TutorConversationsList } from "./views/TutorConversationsList";
@@ -159,6 +160,13 @@ const TUTOR_SIDEBAR_COLLAPSED_KEY = "llteacher:tutor-sidebar-collapsed";
    ========================================================================== */
 
 export default function App() {
+  const { loading, isAuthenticated, staffOnly } = useAuth();
+  if (loading) return null;
+  if (isAuthenticated && staffOnly) return <AccountShell title="Teaching"><StaffHome /></AccountShell>;
+  return <StudentApp />;
+}
+
+function StudentApp() {
   const { status: workerStatus, loading: workerLoading } = useWorkerStatus();
   const { isAuthenticated, loading: authLoading, error: authError, login, logout, email, displayName } = useAuth();
   const userInitials = getUserInitials({ email, displayName });

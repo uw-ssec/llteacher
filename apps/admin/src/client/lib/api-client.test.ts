@@ -202,3 +202,130 @@ describe("request shapes (#33)", () => {
     expect(result.configs[0]!.name).toBe("Socratic");
   });
 });
+
+describe("apiClient.knowledge", () => {
+  // The brief's own verbatim `vi.fn(async () => new Response(...))` fails
+  // `tsc -b`: a callback declared with zero parameters makes vitest infer
+  // `mock.calls` as `[][]`, and indexing an empty tuple is TS2493. `stub()`
+  // above already exists in this file for exactly this shape, so every case
+  // here (including the three lifted straight from the brief) goes through
+  // it instead of repeating the untyped literal.
+  it("lists documents under the course path", async () => {
+    const fetchMock = stub(() => json({ documents: [] }));
+
+    await apiClient.knowledge.listDocuments("c1", { signal: null });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/courses/c1/knowledge/documents");
+  });
+
+  it("sends an upload as multipart without a JSON content-type", async () => {
+    const fetchMock = stub(() => json({ id: "m1" }, 201));
+
+    const file = new File(["hi"], "a.txt", { type: "text/plain" });
+    await apiClient.knowledge.uploadMaterial("c1", file, { signal: null });
+
+    const init = fetchMock.mock.calls[0]![1]!;
+    expect(init.body).toBeInstanceOf(FormData);
+    // Letting the browser set the multipart boundary is the point: an
+    // explicit content-type here produces a body the server cannot parse.
+    expect(new Headers(init.headers).get("content-type")).toBeNull();
+  });
+
+  it("sends relativePath as a form field only when given", async () => {
+    const fetchMock = stub(() => json({ id: "m1", status: "pending" }));
+
+    await apiClient.knowledge.uploadMaterial(
+      "c1",
+      new File(["x"], "a.txt"),
+      { signal: null },
+      "Module 1/a.txt",
+    );
+
+    const body = fetchMock.mock.calls[0]![1]!.body as FormData;
+    expect(body.get("relativePath")).toBe("Module 1/a.txt");
+  });
+
+  it("uploads the file under the 'file' form field", async () => {
+    const fetchMock = stub(() => json({ id: "m1" }, 201));
+
+    const file = new File(["hi"], "a.txt", { type: "text/plain" });
+    await apiClient.knowledge.uploadMaterial("c1", file, { signal: null });
+
+    const init = fetchMock.mock.calls[0]![1]!;
+    const form = init.body as FormData;
+    expect(form.get("file")).toBe(file);
+  });
+
+  it("posts to the reingest endpoint and reports whether a document was created", async () => {
+    const fetchMock = stub(() => json({ status: "pending", documentCreated: false }));
+
+    const result = await apiClient.knowledge.reingestMaterial("c1", "m1", { signal: null });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/courses/c1/materials/m1/reingest");
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({ method: "POST" });
+    expect(result.documentCreated).toBe(false);
+  });
+
+  it("sends the folder scope as dir when one is given", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({ hits: [] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await apiClient.knowledge.search("c1", "markets", { signal: null }, "week1/lab");
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      "/api/courses/c1/knowledge/search?q=markets&dir=week1%2Flab",
+    );
+  });
+
+  it("builds download links that ride the session cookie, with ids encoded", () => {
+    expect(apiClient.knowledge.documentDownloadUrl("c1", "week1/lecture")).toBe(
+      "/api/courses/c1/knowledge/documents/week1%2Flecture/download",
+    );
+    expect(apiClient.knowledge.materialDownloadUrl("c1", "m 1")).toBe("/api/courses/c1/materials/m%201/download");
+    expect(apiClient.knowledge.exportUrl("c1")).toBe("/api/courses/c1/knowledge/export");
+  });
+
+  it("sends the delete requests for a document with its upload, a folder, and the whole base", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ documents: 1, uploads: 1 }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await apiClient.knowledge.deleteDocument("c1", "week1/lecture", { signal: null }, { withUpload: true });
+    await apiClient.knowledge.deleteDirectory("c1", "week1/lab", { signal: null }, { withUploads: false });
+    await apiClient.knowledge.deleteKnowledgeBase("c1", { confirm: "DELETE", withUploads: true }, { signal: null });
+    const calls = fetchMock.mock.calls.map(([u, i]) => [String(u), (i as RequestInit).method, (i as RequestInit).body]);
+    expect(calls[0]).toEqual(["/api/courses/c1/knowledge/documents/week1%2Flecture?withUpload=1", "DELETE", undefined]);
+    expect(calls[1]).toEqual(["/api/courses/c1/knowledge/directories/week1%2Flab", "DELETE", undefined]);
+    expect(calls[2]).toEqual(["/api/courses/c1/knowledge", "DELETE", JSON.stringify({ confirm: "DELETE", withUploads: true })]);
+  });
+
+  it("reads and writes the course's tutor instruction", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ instruction: null, default: "d", maxChars: 2000 }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await apiClient.knowledge.getInstruction("c1", { signal: null });
+    await apiClient.knowledge.setInstruction("c1", "Search first.", { signal: null });
+    await apiClient.knowledge.setInstruction("c1", null, { signal: null });
+    await apiClient.knowledge.setInstructionDefault("c1", "Search first.", { signal: null });
+    const calls = fetchMock.mock.calls.map(([u, i]) => [String(u), (i as RequestInit).method, (i as RequestInit).body]);
+    expect(calls[0]).toEqual(["/api/courses/c1/knowledge/instruction", "GET", undefined]);
+    expect(calls[1]).toEqual(["/api/courses/c1/knowledge/instruction", "PUT", JSON.stringify({ instruction: "Search first." })]);
+    expect(calls[2]).toEqual(["/api/courses/c1/knowledge/instruction", "PUT", JSON.stringify({ instruction: null })]);
+    expect(calls[3]).toEqual(["/api/courses/c1/knowledge/instruction/default", "PUT", JSON.stringify({ instruction: "Search first." })]);
+  });
+
+  it("encodes the search query", async () => {
+    const fetchMock = stub(() => json({ hits: [] }));
+
+    await apiClient.knowledge.search("c1", "supply & demand", { signal: null });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "/api/courses/c1/knowledge/search?q=supply+%26+demand",
+    );
+  });
+
+  it("encodes a document id containing a slash so it cannot escape its path segment", async () => {
+    const fetchMock = stub(() => new Response(null, { status: 204 }));
+
+    await apiClient.knowledge.deleteDocument("c1", "../admin", { signal: null });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "/api/courses/c1/knowledge/documents/..%2Fadmin",
+    );
+  });
+});

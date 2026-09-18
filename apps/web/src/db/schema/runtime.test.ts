@@ -14,7 +14,7 @@ import {
   submissions,
   grades,
   citations,
-  courseMaterials,
+  knowledgeDocuments,
   materialChunks,
   llmCallLogs,
   studentProfiles,
@@ -349,22 +349,13 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
       .insert(messages)
       .values({ conversationId: conversationAId, role: "user", parts: [{ type: "text", text: "x" }] })
       .returning({ id: messages.id });
-    const [membership] = await db
-      .select({ id: courseMemberships.id })
-      .from(courseMemberships)
-      .where(eq(courseMemberships.courseId, courseAId));
-    const [material] = await db
-      .insert(courseMaterials)
-      .values({
-        courseId: courseAId,
-        uploadedById: membership.id,
-        sourceType: "pdf",
-        title: "m",
-      })
-      .returning({ id: courseMaterials.id });
+    const [doc] = await db
+      .insert(knowledgeDocuments)
+      .values({ courseId: courseAId, path: "citation-both-set-test", type: "concept" })
+      .returning({ id: knowledgeDocuments.id });
     const [chunk] = await db
       .insert(materialChunks)
-      .values({ materialId: material.id, ordinal: 0, text: "t", tokenCount: 1 })
+      .values({ documentId: doc.id, ordinal: 0, text: "t", tokenCount: 1 })
       .returning({ id: materialChunks.id });
 
     await expect(
@@ -389,17 +380,13 @@ describe.skipIf(!DATABASE_URL)("submissions, grades, citations schema", () => {
       .insert(messages)
       .values({ conversationId: conversationAId, role: "user", parts: [{ type: "text", text: "span-test" }] })
       .returning({ id: messages.id });
-    const [membership] = await db
-      .select({ id: courseMemberships.id })
-      .from(courseMemberships)
-      .where(eq(courseMemberships.courseId, courseAId));
-    const [material] = await db
-      .insert(courseMaterials)
-      .values({ courseId: courseAId, uploadedById: membership.id, sourceType: "pdf", title: "m" })
-      .returning({ id: courseMaterials.id });
+    const [doc] = await db
+      .insert(knowledgeDocuments)
+      .values({ courseId: courseAId, path: "citation-span-test", type: "concept" })
+      .returning({ id: knowledgeDocuments.id });
     const [chunk] = await db
       .insert(materialChunks)
-      .values({ materialId: material.id, ordinal: 0, text: "t", tokenCount: 1 })
+      .values({ documentId: doc.id, ordinal: 0, text: "t", tokenCount: 1 })
       .returning({ id: materialChunks.id });
 
     // Half-set: span_end NULL makes `span_end >= 0` evaluate to SQL NULL,

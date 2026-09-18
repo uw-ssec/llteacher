@@ -344,6 +344,48 @@
       "when": 1789451658344,
       "tag": "0048_courses_canvas_course_name",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1789451718344,
+      "tag": "0049_aspiring_madame_web",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1789451778344,
+      "tag": "0050_dizzy_mentor",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1789451838344,
+      "tag": "0051_curly_reaper",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1789451898344,
+      "tag": "0052_okf_bundle_knowledge_base",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1789451958344,
+      "tag": "0053_knowledge_toggle",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1789452018344,
+      "tag": "0054_knowledge_instruction_default",
+      "breakpoints": true
     }
   ]
 }

@@ -571,6 +571,8 @@ declare global {
        LLMOXIE_DEFAULT_BASE_URL in lib/ai.ts -- see the reasoning there for
        why a generated Azure hostname should not be a compile-time constant. */
     LLMOXIE_BASE_URL?: string;
+    /** Vision OCR model served by the configured LLMoxie gateway. */
+    OCR_MODEL?: string;
     /* #343: opt-in degradation. When the platform gateway's own key
        (LLMOXIE_API_KEY) is missing, a default config falls back to
        openrouter using THIS model id -- which must be one the deployment's
@@ -588,6 +590,23 @@ declare global {
     // once in the dashboard as a single Endpoint delivering events for
     // every organization under that project.
     WORKOS_WEBHOOK_SECRET: string;
+    /* #42: Neon Object Storage, reached over the S3 wire protocol rather
+       than a Worker binding. Buckets are branch-aware — branching the
+       database forks its buckets copy-on-write — which is why this is not
+       R2. The AWS move (#81) changes these four values, not the code. */
+    /** Object storage for uploads. Optional at the runtime boundary: a
+     *  deployment that has not provisioned it yet (#81) still serves chat and
+     *  the console, with uploads refused clearly. */
+    STORAGE_ENDPOINT?: string;
+    STORAGE_BUCKET?: string;
+    STORAGE_ACCESS_KEY_ID?: string;
+    STORAGE_SECRET_ACCESS_KEY?: string;
+    /** Directory holding every course's OKF bundle:
+     *  `${KNOWLEDGE_ROOT}/courses/{courseId}/knowledge/`. EFS mount in
+     *  production, `./.knowledge` locally. Passed to okf as a realpath. */
+    KNOWLEDGE_ROOT?: string;
+    /** Path to the okf binary. Defaults to "okf" on PATH. */
+    OKF_BINARY?: string;
   }
 }
 

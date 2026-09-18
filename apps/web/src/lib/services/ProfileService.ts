@@ -173,7 +173,8 @@ export class ProfileService {
           ...resolveTaCapabilities(m),
         }))
         .sort((a, b) => ROLE_PRIORITY_RANK[a.role] - ROLE_PRIORITY_RANK[b.role]);
-    } else if (primaryRole === "student") {
+    }
+    if (memberships.some((membership) => membership.role === "student")) {
       // TODO: real submission/completion counts once the conversation +
       // submission tables land (multi-tenant-data-model.md §6.3, M2). No
       // per-student runtime data exists in the schema yet -- issues

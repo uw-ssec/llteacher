@@ -30,6 +30,23 @@ BLIND_INDEX_KEY="base64-encoded-32-byte-key"
 # page (issue #95) -- not a key you generate yourself.
 WORKOS_WEBHOOK_SECRET="whsec_placeholder"
 
+# Neon Object Storage (#42), reached over the S3 wire protocol -- not a
+# Worker binding. For local dev against MinIO:
+#   docker run -d -p 9000:9000 -e MINIO_ROOT_USER=minioadmin \
+#     -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data
+STORAGE_ENDPOINT="http://localhost:9000"
+STORAGE_BUCKET="llteacher-materials"
+STORAGE_ACCESS_KEY_ID="minioadmin"
+STORAGE_SECRET_ACCESS_KEY="minioadmin"
+
+# Node knowledge runtime (create this directory before starting the API).
+KNOWLEDGE_ROOT=".knowledge"
+OKF_BINARY="okf"
+PORT="8080"
+
+# Scanned-PDF OCR uses the LLMoxie gateway above, with low reasoning effort.
+# The gateway must expose this exact model and support image inputs.
+OCR_MODEL=gpt-5.4-mini
 # --- #343: opt-in degradation when the platform gateway key is missing ------
 # Migration 0035 makes llmoxie every org's default provider with no credential
 # row, so an unset LLMOXIE_API_KEY is a 500 for every student on every turn --

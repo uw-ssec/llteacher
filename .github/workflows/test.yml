@@ -117,6 +117,14 @@ jobs:
       - name: Install psql
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
 
+      - name: Install okf 0.3.0
+        run: |
+          curl -fsSL -o /tmp/okf https://github.com/okf-memory/okf-agent-memory/releases/download/v0.3.0/okf-linux-amd64
+          curl -fsSL -o /tmp/checksums.txt https://github.com/okf-memory/okf-agent-memory/releases/download/v0.3.0/checksums.txt
+          cd /tmp && grep -E ' +bin/okf-linux-amd64$' checksums.txt | sed -E 's# +bin/okf-linux-amd64$#  okf#' > okf.sha256 && test -s okf.sha256 && sha256sum -c okf.sha256
+          sudo install -m 0755 /tmp/okf /usr/local/bin/okf
+          okf version
+
       - name: Apply Postgres extensions
         run: psql "$DATABASE_URL" -f apps/web/src/db/init/01_extensions.sql
 
@@ -169,6 +177,11 @@ jobs:
             --env ENCRYPTION_KEY=encryption-key \
             --env BLIND_INDEX_KEY=blind-index-key \
             --env WORKOS_WEBHOOK_SECRET=webhook-secret \
+            --env STORAGE_ENDPOINT=http://localhost:9000 \
+            --env STORAGE_BUCKET=llteacher-materials \
+            --env STORAGE_ACCESS_KEY_ID=minioadmin \
+            --env STORAGE_SECRET_ACCESS_KEY=minioadmin \
+            --env KNOWLEDGE_ROOT=/tmp \
             llteacher-ci:latest
           trap 'docker logs llteacher-ci; docker rm --force llteacher-ci' EXIT
           for _ in $(seq 1 20); do curl --fail --silent http://127.0.0.1:8080/ && break; sleep 1; done

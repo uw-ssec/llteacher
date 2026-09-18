@@ -181,6 +181,11 @@ function parseConfigBody(raw: unknown): { input: LlmConfigInput } | { error: str
     };
   }
 
+  // Optional so older clients keep working; default on, matching the column.
+  if (b.knowledgeEnabled !== undefined && typeof b.knowledgeEnabled !== "boolean") {
+    return { error: "knowledgeEnabled must be a boolean" };
+  }
+
   return {
     input: {
       name,
@@ -192,6 +197,7 @@ function parseConfigBody(raw: unknown): { input: LlmConfigInput } | { error: str
       fallbackLlmConfigId,
       isActive: b.isActive,
       isDefault: b.isDefault,
+      knowledgeEnabled: b.knowledgeEnabled ?? true,
     },
   };
 }

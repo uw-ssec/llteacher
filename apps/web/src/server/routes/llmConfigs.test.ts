@@ -298,6 +298,14 @@ describe("POST/PATCH validation (#31)", () => {
     expect(res.status).toBe(409);
   });
 
+  it("stores the knowledge switch, defaulting to on, and rejects a non-boolean", async () => {
+    await post({ ...VALID_BODY, knowledgeEnabled: false });
+    expect(createMock.mock.calls.at(-1)![2]).toMatchObject({ knowledgeEnabled: false });
+    await post(VALID_BODY);
+    expect(createMock.mock.calls.at(-1)![2]).toMatchObject({ knowledgeEnabled: true });
+    expect((await post({ ...VALID_BODY, knowledgeEnabled: "no" })).status).toBe(400);
+  });
+
   it("creates and audits against the course's org", async () => {
     const res = await post(VALID_BODY);
     expect(res.status).toBe(201);

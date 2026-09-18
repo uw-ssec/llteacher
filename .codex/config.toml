@@ -1,0 +1,2 @@
+# Project model selection. Provider/auth remain user-level by Codex design.
+model = "ssec-gpt-6-astra"

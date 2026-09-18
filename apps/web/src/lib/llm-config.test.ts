@@ -22,6 +22,7 @@ const baseConfig: ResolvedLLMConfig = {
   temperature: 0.7,
   maxCompletionTokens: 1000,
   credentialId: null,
+  knowledgeEnabled: true,
   fallbackLlmConfigId: null,
   basePrompt: "",
   pricePerMillionInputTokens: null,
@@ -45,6 +46,11 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
     ENCRYPTION_KEY: "unused",
     BLIND_INDEX_KEY: "unused",
     WORKOS_WEBHOOK_SECRET: "unused",
+    STORAGE_ENDPOINT: "unused",
+    STORAGE_BUCKET: "unused",
+    STORAGE_ACCESS_KEY_ID: "unused",
+    STORAGE_SECRET_ACCESS_KEY: "unused",
+    KNOWLEDGE_ROOT: "/tmp/unused",
     ...overrides,
   };
 }

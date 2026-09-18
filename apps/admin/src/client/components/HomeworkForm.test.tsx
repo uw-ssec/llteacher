@@ -19,6 +19,7 @@ const LLM_CONFIGS: LlmConfigPayload[] = [
     fallbackLlmConfigId: null,
     isDefault: true,
     isActive: true,
+  knowledgeEnabled: true,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
   },
@@ -27,6 +28,7 @@ const LLM_CONFIGS: LlmConfigPayload[] = [
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("HomeworkForm", () => {
@@ -319,4 +321,5 @@ describe("HomeworkForm", () => {
     expect(saveButton.getAttribute("aria-busy")).toBe("true");
     expect(screen.getByRole("status").textContent).toBe("Saving homework…");
   });
+
 });

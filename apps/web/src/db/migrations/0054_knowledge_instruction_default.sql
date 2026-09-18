@@ -1,0 +1,1 @@
+ALTER TABLE "organizations" ADD COLUMN "knowledge_instruction_default" text;

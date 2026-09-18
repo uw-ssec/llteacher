@@ -7,6 +7,7 @@ import { TenancyMismatchError, IdempotencyKeyConflictError } from "./errors";
 import { getOrgScopeForCourse } from "./organizations";
 import { resolvePromptTemplate } from "../../lib/prompts";
 import type { LlmProvider } from "../../lib/llm-config";
+import { conceptCitationsInsert, type ConceptCitation } from "./citations";
 
 export const DEFAULT_CONVERSATIONS_PAGE_SIZE = 50;
 // #317 review, #326: exported so getSectionConversationMessages
@@ -680,6 +681,7 @@ export async function finalizeAssistantTurn(
     latencyMs: number;
     errorFlag: boolean;
   },
+  citations: ConceptCitation[] = [],
 ): Promise<void> {
   // Statements are built against `target` (the outer db on the batch path,
   // the transaction handle on the fallback path) -- building against the
@@ -714,19 +716,23 @@ export async function finalizeAssistantTurn(
       errorFlag: llmLog.errorFlag,
     });
 
-    return assistantMessage
-      ? [
-          releaseLock,
-          target.insert(messages).values({
-            id: assistantMessage.id,
-            conversationId,
-            role: "assistant",
-            parts: assistantMessage.parts,
-            clientMessageId: null,
-          }),
-          logInsert,
-        ]
-      : [releaseLock, logInsert];
+    if (!assistantMessage) return [releaseLock, logInsert];
+
+    const statements: BatchStatement[] = [
+      releaseLock,
+      target.insert(messages).values({
+        id: assistantMessage.id,
+        conversationId,
+        role: "assistant",
+        parts: assistantMessage.parts,
+        clientMessageId: null,
+      }),
+      logInsert,
+    ];
+    if (citations.length > 0) {
+      statements.push(conceptCitationsInsert(target, assistantMessage.id, citations));
+    }
+    return statements;
   }
 
   if (typeof db.batch === "function") {

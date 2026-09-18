@@ -116,6 +116,10 @@ export const organizations = pgTable(
     name: text("name").notNull(),
     workosOrganizationId: text("workos_organization_id").notNull(),
     canvasAccountId: text("canvas_account_id"),
+    /** The organisation's own default "when to search the knowledge base"
+     *  guidance, used by any course without its own. Null means the
+     *  built-in text. Set from a course's Knowledge tab. */
+    knowledgeInstructionDefault: text("knowledge_instruction_default"),
     requiresFerpa: boolean("requires_ferpa").notNull().default(true),
     requiresHipaa: boolean("requires_hipaa").notNull().default(false),
     dataResidency: text("data_residency"),
@@ -234,6 +238,11 @@ export const courses = pgTable(
     code: text("code").notNull(),
     term: text("term").notNull(),
     title: text("title").notNull(),
+    /** The instructor's own "when to search the knowledge base" guidance,
+     *  injected into the chat system prompt in place of the default. Null
+     *  means the default. Edited from the Knowledge tab, never shown in an
+     *  LLM config's base prompt. */
+    knowledgeInstruction: text("knowledge_instruction"),
     // #317 review, #325: course-level override between the per-homework
     // override and the org default in resolveLLMConfig (lib/llm-config.ts)
     // -- lets one course under a shared org (e.g. one of the four CDI

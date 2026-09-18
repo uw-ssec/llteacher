@@ -19,18 +19,24 @@ import { useEffect, useRef, useState } from "react";
 import { CaretRight } from "@phosphor-icons/react";
 
 export interface TopNavProps {
-  /** Short course code, e.g. "STATS 311" */
-  course: string;
-  /** Term string, e.g. "Autumn 2026". #294: optional -- a caller with no
-   *  real term data source should omit it rather than assert a specific
-   *  term, and the breadcrumb below drops it from the joined string
-   *  entirely rather than rendering an empty segment. */
+  /** Short course code, e.g. "STATS 311". OPTIONAL (#294): the student app
+   *  has no data source for this yet, and a hardcoded literal here is worse
+   *  than an absent segment -- it asserts a specific course to every student
+   *  in every course. Omitted segments simply do not appear in the
+   *  breadcrumb. */
+  course?: string;
+  /** Term string, e.g. "Autumn 2026". Optional for the same #294 reason. */
   term?: string;
   /** Trailing breadcrumb segment. Student app: homework name. Admin app:
       the current view label (e.g. "HOMEWORKS", "LLM CONFIGS"). */
   homework: string;
   /** Two-letter user initials for the avatar chip */
-  userInitials: string;
+  /** Two-letter user initials for the avatar chip. OPTIONAL (#294): absent
+   *  while the profile is loading, when signed out, or when the account has
+   *  no display name. The chip then shows a neutral placeholder rather than
+   *  fabricated letters -- the defect this fixes was a hardcoded "AC" shown
+   *  to every student, initials belonging to no signed-in user. */
+  userInitials?: string;
   /** Admin mode: swaps the affiliation tag's leading bullet for a
       Heritage Gold dot + "Admin" label. The dot is the at-a-glance
       "you are in the instructor console" cue across the bar. */
@@ -95,13 +101,11 @@ export function TopNav({
     handler?.();
   };
 
-  // #294: `term` is optional -- a caller with no real term data source
-  // omits it rather than asserting a specific one, and this drops it from
-  // the joined string entirely so the breadcrumb reads "COURSE ·
-  // HOMEWORK" instead of "COURSE ·  · HOMEWORK" (an empty segment plus a
-  // doubled separator).
+  /* #294: built from whichever segments the caller actually has. Course and
+     term are omitted rather than defaulted, because the failure this fixes
+     was a confidently-wrong label, not a missing one. */
   const breadcrumbText = [course, term, homework]
-    .filter((segment): segment is string => Boolean(segment))
+    .filter((segment): segment is string => typeof segment === "string" && segment.trim() !== "")
     .map((segment) => segment.toUpperCase())
     .join(" · ");
 
@@ -143,7 +147,13 @@ export function TopNav({
           aria-expanded={menuOpen}
           onClick={() => setMenuOpen((prev) => !prev)}
         >
-          <span className="top-nav__user-initials">{userInitials}</span>
+          {/* #294: a neutral dot, not invented letters. aria-hidden because
+              the chip's own aria-label already names the control -- the
+              placeholder is decoration, and reading it out would announce a
+              character that means nothing. */}
+          <span className="top-nav__user-initials" aria-hidden={!userInitials || undefined}>
+            {userInitials || "\u00B7"}
+          </span>
           <span
             className="top-nav__user-chevron"
             aria-hidden="true"

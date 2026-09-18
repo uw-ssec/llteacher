@@ -10,7 +10,12 @@ import {
   SECTION_CONVERSATION_PROMPTS,
   toolUsageParagraph,
   VOICE_CONSTRAINTS,
+  knowledgeListingParagraph,
+  KNOWLEDGE_INSTRUCTION,
+  KNOWLEDGE_GUARD,
+  KNOWLEDGE_LISTING_MAX_CHARS,
 } from "./prompts";
+import type { ConceptSummary } from "../server/knowledge/service";
 import { TOOLS, toolsForConversation } from "../server/routes/chat";
 
 describe("sectionGreeting (#305, #397)", () => {
@@ -534,5 +539,83 @@ describe("assembleSystemPrompt -- markSectionComplete stopping-rule wording (#16
     expect(lower).toContain("unblock");
     expect(lower).toContain("pedantic");
     expect(lower).toContain("does not submit");
+  });
+});
+
+function concept(id: string, title: string, description = "desc"): ConceptSummary {
+  return { id, kind: "concept", type: "lecture", title, description, resource: null, updatedAt: "2026-09-15T00:00:00.000Z" };
+}
+
+describe("knowledgeListingParagraph", () => {
+  it("is empty when there are no concepts, ignoring index and log rows", () => {
+    expect(knowledgeListingParagraph([])).toBe("");
+    expect(knowledgeListingParagraph([{ ...concept("index", "x"), kind: "index" }, { ...concept("log", "x"), kind: "log" }])).toBe("");
+  });
+  it("groups by directory and ends with the instruction", () => {
+    const out = knowledgeListingParagraph([concept("lectures/m1/intro", "Intro", "Markets"), concept("syllabus", "Syllabus")]);
+    expect(out).toContain("<course_knowledge>");
+    expect(out.indexOf("## (root)")).toBeLessThan(out.indexOf("## lectures/m1"));
+    expect(out).toContain("- lectures/m1/intro: Intro. Markets");
+    expect(out).toContain("- syllabus: Syllabus. desc");
+    expect(out.trim().endsWith(KNOWLEDGE_INSTRUCTION)).toBe(true);
+  });
+  it("uses the instructor's own instruction when given, and always ends with the fixed guard", () => {
+    const out = knowledgeListingParagraph([concept("syllabus", "Syllabus")], "Search the course notes before every reply.");
+    expect(out).toContain("Search the course notes before every reply.");
+    expect(out).not.toContain(KNOWLEDGE_INSTRUCTION);
+    expect(out.trim().endsWith(KNOWLEDGE_GUARD)).toBe(true);
+    // The default instruction itself ends with the same guard sentence.
+    expect(KNOWLEDGE_INSTRUCTION.endsWith(KNOWLEDGE_GUARD)).toBe(true);
+    // Blank custom text falls back to the default rather than dropping the guidance.
+    expect(knowledgeListingParagraph([concept("syllabus", "Syllabus")], "   ").trim().endsWith(KNOWLEDGE_INSTRUCTION)).toBe(true);
+  });
+  it("truncates past the cap and says how many were omitted", () => {
+    const many = Array.from({ length: 400 }, (_, i) => concept(`d/c-${i}`, `Concept ${i}`, "x".repeat(40)));
+    const out = knowledgeListingParagraph(many);
+    expect(out.indexOf("</course_knowledge>") + "</course_knowledge>".length).toBeLessThanOrEqual(KNOWLEDGE_LISTING_MAX_CHARS);
+    expect(out).toMatch(/- \.\.\. and \d+ more; use searchKnowledge to find them/);
+  });
+  it("counts every omitted concept and never leaves a heading without rows", () => {
+    const many = [
+      ...Array.from({ length: 150 }, (_, i) => concept(`a/c-${i}`, `Concept ${i}`, "x".repeat(40))),
+      ...Array.from({ length: 150 }, (_, i) => concept(`b/c-${i}`, `Concept ${i}`, "x".repeat(40))),
+    ];
+    const out = knowledgeListingParagraph(many);
+    const body = out.slice(0, out.indexOf("</course_knowledge>"));
+    const rendered = body.split("\n").filter((l) => l.startsWith("- ") && !l.startsWith("- ...")).length;
+    const n = Number(/- \.\.\. and (\d+) more/.exec(out)![1]);
+    expect(rendered + n).toBe(300);
+    const lines = body.split("\n");
+    lines.forEach((l, i) => {
+      if (l.startsWith("## ")) expect(lines[i + 1]?.startsWith("- ") && !lines[i + 1]?.startsWith("- ...")).toBe(true);
+    });
+    expect(out.indexOf("</course_knowledge>") + "</course_knowledge>".length).toBeLessThanOrEqual(KNOWLEDGE_LISTING_MAX_CHARS);
+  });
+  it("keeps directories as a contiguous prefix of the sorted order", () => {
+    const many = ["a", "b", "c"].flatMap((d) =>
+      Array.from({ length: 80 }, (_, i) => concept(`${d}/c-${i}`, `Concept ${i}`, "x".repeat(40))),
+    );
+    const out = knowledgeListingParagraph(many);
+    const headings = out.split("\n").filter((l) => l.startsWith("## "));
+    expect(headings.length).toBeGreaterThan(0);
+    expect(headings).toEqual(["## a", "## b", "## c"].slice(0, headings.length));
+  });
+  it("collapses newlines in titles and descriptions to one line", () => {
+    const out = knowledgeListingParagraph([concept("x", "Two\nline title", "Desc with\n\nbreaks  and   spaces")]);
+    expect(out).toContain("- x: Two line title. Desc with breaks and spaces");
+  });
+});
+
+describe("assembleSystemPrompt with knowledge", () => {
+  it("places the listing after the section block and before the guardrail", () => {
+    const section = { homeworkTitle: "HW1", sectionTitle: "S1", sectionContent: "Solve." };
+    const out = assembleSystemPrompt("T", section, true, false, undefined, [], "<course_knowledge>K</course_knowledge>");
+    expect(out.indexOf("</section_content>")).toBeLessThan(out.indexOf("<course_knowledge>"));
+    expect(out.indexOf("<course_knowledge>")).toBeLessThan(out.indexOf(TUTOR_GUARDRAIL));
+  });
+  it("adds nothing for an empty listing", () => {
+    expect(assembleSystemPrompt("T", undefined, false, false, undefined, [], "")).toBe(
+      assembleSystemPrompt("T", undefined, false, false, undefined, []),
+    );
   });
 });

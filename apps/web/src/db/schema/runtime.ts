@@ -864,9 +864,15 @@ export const citations = pgTable(
     gradeId: uuid("grade_id").references(() => grades.id, {
       onDelete: "cascade",
     }),
-    materialChunkId: uuid("material_chunk_id")
-      .notNull()
-      .references(() => materialChunks.id, { onDelete: "cascade" }),
+    materialChunkId: uuid("material_chunk_id").references(() => materialChunks.id, {
+      onDelete: "cascade",
+    }),
+    /** OKF concept id the tutor opened via showKnowledge. Exactly one of
+     *  material_chunk_id / concept_path is set (see the CHECK). The chunk
+     *  column stays for the day embeddings return. */
+    conceptPath: text("concept_path"),
+    conceptTitle: text("concept_title"),
+    courseId: uuid("course_id").references(() => courses.id, { onDelete: "cascade" }),
     organizationId: uuid("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
@@ -884,9 +890,14 @@ export const citations = pgTable(
     // #127 review, #135.
     index("citations_message_idx").on(t.messageId),
     index("citations_grade_idx").on(t.gradeId),
+    index("citations_course_idx").on(t.courseId),
     check(
       "citations_single_source_chk",
       sql`num_nonnulls(${t.messageId}, ${t.gradeId}) = 1`,
+    ),
+    check(
+      "citations_single_target_chk",
+      sql`num_nonnulls(${t.materialChunkId}, ${t.conceptPath}) = 1`,
     ),
     // Both null (no span -- citation covers the whole chunk) or both set
     // and sane; a half-set span is as meaningless as a backwards one.

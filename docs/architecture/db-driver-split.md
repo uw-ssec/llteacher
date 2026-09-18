@@ -1,5 +1,27 @@
 # DB Driver Split: `client.ts` vs `nodeClient.ts`
 
+## 2026-09-16: the split is retired
+
+`apps/web` now runs on plain Node (see the task-1 runtime migration), not the
+Cloudflare Worker this doc was written against. `client.ts`'s `makeDb` no
+longer uses `@neondatabase/serverless`'s HTTP driver -- it's node-postgres
+(`pg`) over a real TCP connection, with a `Pool` cached per `databaseUrl` so
+the process reuses one pool instead of opening a new one per call. The
+Worker is no longer a deploy target at all (`apps/web/package.json`'s
+`deploy` script, which ran `wrangler deploy`, has been removed).
+
+`nodeClient.ts`'s `makeNodeDb` still exists, but its reason for existing has
+changed: it is no longer the *only* client that can reach plain Postgres --
+`makeDb` can now too. It remains as the **un-pooled** client: it opens a
+fresh, uncached `Pool` on every call, which is fine for its two callers
+(Vitest integration tests and the `db:seed` script), each a short-lived
+process that calls it once, but would leak connections under `makeDb`'s
+request-per-call usage pattern. So the split survives, just for a different
+reason than the one the rest of this document describes below (kept as
+historical record of why the split was first introduced).
+
+## Original context (superseded above; kept for history)
+
 Two Drizzle clients exist for `apps/web`'s Postgres database, deliberately, for different runtimes. This doc explains why, whether it's a prod risk (it isn't), and what to reconsider later.
 
 - `apps/web/src/db/client.ts` — `makeDb()`. Used by **all production route/middleware code** (`server/routes/*.ts`, `server/middleware/*.ts`, `server/repositories/*.ts` at request time).
@@ -32,6 +54,8 @@ NeonDbError: Error connecting to database: fetch failed
 This is not a flaky-connection or wrong-port problem. It is a protocol mismatch — the client is trying to speak HTTP-to-a-Neon-proxy to a server that only speaks Postgres-wire-protocol-over-TCP. No amount of retrying, port-forwarding, or URL fiddling fixes it; the two sides are running fundamentally different protocols on the wire.
 
 ## Does this affect production?
+
+*(Historical, as of the original 2026-08-03 writing -- no longer true; see the 2026-09-16 section at the top.)*
 
 **No.** Production's Cloudflare Worker connects to a real Neon-hosted Postgres project, which does run Neon's HTTP proxy. `makeDb()` works exactly as intended there — this is genuinely the correct, in fact the *only*, viable driver for the Worker runtime. Nothing about this issue or its fix touches `client.ts` or any file that imports it for production request handling.
 

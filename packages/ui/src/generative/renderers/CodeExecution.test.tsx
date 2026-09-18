@@ -70,7 +70,7 @@ describe("CodeExecution", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /run/i }));
     await waitFor(() => expect(document.querySelector("canvas.code-execution__plot")).toBeTruthy());
-    expect(drawImage).toHaveBeenCalledWith(fakeBitmap, 0, 0);
+    await waitFor(() => expect(drawImage).toHaveBeenCalledWith(fakeBitmap, 0, 0));
 
     vi.restoreAllMocks();
   });

@@ -13,8 +13,8 @@ export default defineConfig({
       // apps/web's Vite server (port 2311) proxies this request onward to the
       // Node server; this hop keeps browser cookies same-origin at 2312.
       "/api": {
-        target: "http://localhost:2311",
-        changeOrigin: true,
+        target: process.env.LLTEACHER_API_URL ?? "http://localhost:8080",
+        changeOrigin: false,
       },
     },
   },

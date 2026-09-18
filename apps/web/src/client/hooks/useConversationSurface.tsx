@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
-import { MessageMarkdown, renderToolPart, isToolPart } from "@llteacher/ui";
+import { MessageMarkdown, renderToolPart, isToolPart, SourcesList } from "@llteacher/ui";
+import { sourcesFromParts } from "../sourcesFromParts";
 import type { MessageData, RCodeResult } from "@llteacher/ui";
 
 /* ==========================================================================
@@ -194,6 +195,8 @@ function buildMessageData(
             if (!isToolPart(part)) return null;
             return renderToolPart(part, `tool-${m.id}-${i}`, { onRunRCode });
           })}
+          {/* #41: every concept the tutor opened this turn, once the reply is complete. */}
+          {!isStreaming && <SourcesList sources={sourcesFromParts(m.parts)} />}
           {isStopped && (
             <p className="message__stopped-note">
               You stopped this response. It wasn&rsquo;t saved, so the tutor won&rsquo;t remember it.

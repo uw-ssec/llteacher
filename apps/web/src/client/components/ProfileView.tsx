@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AccountShell } from "./AccountShell";
 import { ProfileEditForm } from "./ProfileEditForm";
 import { UnauthenticatedHome } from "./UnauthenticatedHome";
 import { useAuth } from "./AuthProvider";
@@ -57,12 +58,19 @@ export function ProfileView() {
 
   if (authLoading) return null;
   if (!isAuthenticated) return <UnauthenticatedHome onLogin={login} error={authError} />;
-  if (loading) return <p>Loading profile…</p>;
-  if (!profile) return <p>Unable to load profile.</p>;
+  const heading = (
+    <>
+      <a className="account-back" href="/">← Home</a>
+      <h1 className="account-title account-title--compact">Profile</h1>
+    </>
+  );
+  if (loading) return <AccountShell title="Profile">{heading}<p role="status">Loading profile…</p></AccountShell>;
+  if (!profile) return <AccountShell title="Profile">{heading}<p role="alert">Unable to load profile.</p><button onClick={() => setReloadKey((k) => k + 1)}>Try again</button></AccountShell>;
 
   return (
+    <AccountShell title="Profile">
     <div className="profile-view">
-      <h1>Profile</h1>
+      {heading}
       <p>{profile.email}</p>
       {profile.role && <p>Role: {profile.role}</p>}
       <p>Member of {profile.courseCount} course(s)</p>
@@ -104,5 +112,6 @@ export function ProfileView() {
 
       <ProfileEditForm initialDisplayName={profile.displayName} onSave={handleSave} />
     </div>
+    </AccountShell>
   );
 }

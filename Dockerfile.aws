@@ -16,6 +16,17 @@ RUN npm run build --workspace=llteacher-web && npm run build --workspace=llteach
 FROM node:24-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
 
 WORKDIR /app
+# The knowledge base is an OKF bundle served by the pinned okf binary
+# (search, validate, create); poppler renders scanned-PDF pages for OCR.
+ARG TARGETARCH
+ARG OKF_VERSION=0.3.0
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl poppler-utils \
+  && curl -fsSL -o /tmp/okf "https://github.com/okf-memory/okf-agent-memory/releases/download/v${OKF_VERSION}/okf-linux-${TARGETARCH}" \
+  && curl -fsSL -o /tmp/checksums.txt "https://github.com/okf-memory/okf-agent-memory/releases/download/v${OKF_VERSION}/checksums.txt" \
+  && cd /tmp && grep -E ' +bin/okf-linux-'"${TARGETARCH}"'$' checksums.txt | sed -E 's# +bin/okf-linux-'"${TARGETARCH}"'$#  okf#' > okf.sha256 && test -s okf.sha256 && sha256sum -c okf.sha256 \
+  && install -m 0755 /tmp/okf /usr/local/bin/okf \
+  && apt-get purge -y curl && apt-get autoremove -y \
+  && rm -rf /tmp/okf /tmp/checksums.txt /var/lib/apt/lists/*
 ENV NODE_ENV=production \
     PORT=8080
 

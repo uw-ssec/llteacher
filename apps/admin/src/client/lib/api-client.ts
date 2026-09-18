@@ -32,15 +32,21 @@
    -------------------------------------------------------------------------- */
 
 import type {
+  KnowledgeInstructionPayload,
   AddTaResultPayload,
   CourseTaPayload,
+  DocumentLinksPayload,
   ExportRequestBody,
   GradeDraftPayload,
   GradeListPayload,
+  KnowledgeDocumentListPayload,
+  KnowledgeDocumentPayload,
   LlmConfigListPayload,
   LlmConfigPayload,
   LlmConfigTestPayload,
   LlmConfigWriteBody,
+  MaterialListPayload,
+  MaterialStatus,
   RosterImportPayload,
   RosterListPayload,
 } from "@llteacher/ui/api";
@@ -159,7 +165,12 @@ async function request<T>(
       // the default omits credentials on a cross-origin request.
       credentials: "same-origin",
       headers: {
-        ...(init.body ? { "content-type": "application/json" } : {}),
+        // A FormData body carries its own multipart content-type INCLUDING the
+        // boundary, which only the browser can generate. Stamping JSON here
+        // produced a body the Worker could not parse (#42).
+        ...(init.body && !(init.body instanceof FormData)
+          ? { "content-type": "application/json" }
+          : {}),
         ...init.headers,
       },
     });
@@ -348,6 +359,161 @@ export const apiClient = {
         `/api/courses/${encode(courseId)}/exports`,
         { method: "POST", body: JSON.stringify(body) },
         { timeoutMs: 60_000, ...opts },
+      ),
+  },
+
+  knowledge: {
+    listMaterials: (courseId: string, opts: RequestOptions) =>
+      request<MaterialListPayload>(
+        `/api/courses/${encode(courseId)}/materials`,
+        { method: "GET" },
+        opts,
+      ),
+    /** Multipart, and deliberately without a content-type header: the
+     *  browser must set the multipart boundary itself, and an explicit
+     *  header here produces a body the server cannot parse. `request`
+     *  skips its JSON default when the body is FormData. */
+    uploadMaterial: (
+      courseId: string,
+      file: File,
+      opts: RequestOptions,
+      relativePath?: string,
+    ) => {
+      const form = new FormData();
+      form.set("file", file);
+      if (relativePath) form.set("relativePath", relativePath);
+      return request<{ id: string; status: MaterialStatus }>(
+        `/api/courses/${encode(courseId)}/materials`,
+        { method: "POST", body: form },
+        opts,
+      );
+    },
+    deleteMaterial: (courseId: string, materialId: string, opts: RequestOptions) =>
+      request<null>(
+        `/api/courses/${encode(courseId)}/materials/${encode(materialId)}`,
+        { method: "DELETE" },
+        opts,
+      ),
+    /** Re-runs tier-1 conversion server-side. Honest about the no-op case: for a
+     *  format the pipeline still cannot extract, the response comes back
+     *  `pending` with `documentCreated: false` rather than pretending it worked. */
+    reingestMaterial: (courseId: string, materialId: string, opts: RequestOptions) =>
+      request<{ status: MaterialStatus; documentCreated: boolean }>(
+        `/api/courses/${encode(courseId)}/materials/${encode(materialId)}/reingest`,
+        { method: "POST" },
+        opts,
+      ),
+
+    listDocuments: (courseId: string, opts: RequestOptions) =>
+      request<KnowledgeDocumentListPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/documents`,
+        { method: "GET" },
+        opts,
+      ),
+    getDocument: (courseId: string, documentId: string, opts: RequestOptions) =>
+      request<KnowledgeDocumentPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/documents/${encode(documentId)}`,
+        { method: "GET" },
+        opts,
+      ),
+    createDocument: (
+      courseId: string,
+      body: { path: string; kind: "concept" | "index"; type?: string; title?: string; body?: string },
+      opts: RequestOptions,
+    ) =>
+      request<KnowledgeDocumentPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/documents`,
+        { method: "POST", body: JSON.stringify(body) },
+        opts,
+      ),
+    cleanupDocument: (courseId: string, documentId: string, body: string, opts: RequestOptions) =>
+      request<{ body: string; warnings: string[] }>(
+        `/api/courses/${encode(courseId)}/knowledge/documents/${encode(documentId)}/cleanup`,
+        { method: "POST", body: JSON.stringify({ body }) },
+        { timeoutMs: 130_000, ...opts },
+      ),
+    updateDocument: (
+      courseId: string,
+      documentId: string,
+      body: { body: string; expectedBody?: string },
+      opts: RequestOptions,
+    ) =>
+      request<KnowledgeDocumentPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/documents/${encode(documentId)}`,
+        { method: "PUT", body: JSON.stringify(body) },
+        opts,
+      ),
+    /** `withUpload` also removes the upload the document came from, so it
+     *  cannot sit at "ready" pointing at nothing. */
+    deleteDocument: (courseId: string, documentId: string, opts: RequestOptions, options?: { withUpload?: boolean }) =>
+      request<null>(
+        `/api/courses/${encode(courseId)}/knowledge/documents/${encode(documentId)}${options?.withUpload ? "?withUpload=1" : ""}`,
+        { method: "DELETE" },
+        opts,
+      ),
+    deleteDirectory: (courseId: string, directory: string, opts: RequestOptions, options?: { withUploads?: boolean }) =>
+      request<{ documents: number; uploads: number }>(
+        `/api/courses/${encode(courseId)}/knowledge/directories/${encode(directory)}${options?.withUploads ? "?withUploads=1" : ""}`,
+        { method: "DELETE" },
+        opts,
+      ),
+    /** Guarded server-side by the typed phrase; the console asks for it too. */
+    deleteKnowledgeBase: (courseId: string, body: { confirm: string; withUploads: boolean }, opts: RequestOptions) =>
+      request<{ documents: number; uploads: number }>(
+        `/api/courses/${encode(courseId)}/knowledge`,
+        { method: "DELETE", body: JSON.stringify(body) },
+        { timeoutMs: 120_000, ...opts },
+      ),
+    documentLinks: (courseId: string, documentId: string, opts: RequestOptions) =>
+      request<DocumentLinksPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/documents/${encode(documentId)}/links`,
+        { method: "GET" },
+        opts,
+      ),
+    /** Download links are plain URLs for an <a download>: the browser sends
+     *  the session cookie itself, the server answers with an attachment, and
+     *  nothing has to pass through a Blob. */
+    documentDownloadUrl: (courseId: string, documentId: string) =>
+      `/api/courses/${encode(courseId)}/knowledge/documents/${encode(documentId)}/download`,
+    materialDownloadUrl: (courseId: string, materialId: string) =>
+      `/api/courses/${encode(courseId)}/materials/${encode(materialId)}/download`,
+    exportUrl: (courseId: string) => `/api/courses/${encode(courseId)}/knowledge/export`,
+    /** The course's "when to search" guidance for the tutor, with the default
+     *  it replaces. Lives on the Knowledge tab; never part of a base prompt. */
+    getInstruction: (courseId: string, opts: RequestOptions) =>
+      request<KnowledgeInstructionPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/instruction`,
+        { method: "GET" },
+        opts,
+      ),
+    setInstruction: (courseId: string, instruction: string | null, opts: RequestOptions) =>
+      request<KnowledgeInstructionPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/instruction`,
+        { method: "PUT", body: JSON.stringify({ instruction }) },
+        opts,
+      ),
+    /** Makes the text the default for every course in the organisation. */
+    setInstructionDefault: (courseId: string, instruction: string | null, opts: RequestOptions) =>
+      request<KnowledgeInstructionPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/instruction/default`,
+        { method: "PUT", body: JSON.stringify({ instruction }) },
+        opts,
+      ),
+    /** Same search the student-facing tutor tools call, so what an
+     *  instructor finds here is what the tutor can find. */
+    search: (courseId: string, q: string, opts: RequestOptions, dir?: string) =>
+      request<{
+        hits: Array<{
+          conceptId: string;
+          title: string;
+          type: string;
+          description: string;
+          score: number;
+        }>;
+      }>(
+        `/api/courses/${encode(courseId)}/knowledge/search?${new URLSearchParams(dir ? { q, dir } : { q })}`,
+        {},
+        opts,
       ),
   },
 };
