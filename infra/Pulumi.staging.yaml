@@ -1,0 +1,6 @@
+config:
+  aws:region: us-east-1
+  llteacher-infra:environment: staging
+  llteacher-infra:domainName: staging.llteacher.com
+  # Set with: pulumi config set hostedZoneId <route53-zone-id> --stack staging
+  llteacher-infra:imageTag: latest

@@ -144,6 +144,13 @@ staticfiles/
 node_modules/
 .turbo/
 .turbo-cache/
+.worktrees/
+
+# Filesystem Pulumi state and persistent Floci emulator data are local only.
+/.pulumi/
+/.floci/
+/infra/Pulumi.local.yaml
+/infra/dist/
 
 # Local meeting notes (not for the shared repo)
 /docs/notes/
@@ -163,3 +170,4 @@ node_modules/
 # scan is not a substitute for keeping it out of git entirely.
 /evals/datasets/flagged-feedback-export.json
 .claude/checkpoints/
+.codex/checkpoints/

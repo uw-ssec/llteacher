@@ -213,6 +213,9 @@ export async function runMigrations(databaseUrl: string): Promise<void> {
   const db = drizzle(pool);
   const stageOneDir = buildStageOneDir();
   try {
+    // PostgreSQL exposes pgvector only after this per-database extension is
+    // enabled. Run it before any migration can declare a vector column.
+    await pool.query("CREATE EXTENSION IF NOT EXISTS vector");
     await applyMigrationsFolder(pool, db, stageOneDir);
     await applyMigrationsFolder(pool, db, MIGRATIONS_DIR);
   } finally {

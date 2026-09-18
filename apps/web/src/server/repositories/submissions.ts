@@ -565,20 +565,9 @@ export interface OverdueSubmissionCandidate {
 
 /** How many candidates one call may return for one organization.
  *
- *  Final review: the sweep had no bound at all. On the neon-http driver
- *  every statement is a Cloudflare subrequest, and the job does one
- *  sequential insert per candidate (jobs/autoSubmitOverdue.ts), so the
- *  candidate count IS the per-invocation subrequest count. The cron is
- *  hourly, but the FIRST production run has no lower bound on due date --
- *  it would try to sweep the entire historical backlog of past-due,
- *  student-written, unsubmitted sections in one invocation. Worse, that
- *  failure would not converge: nothing marks a candidate "seen", so an
- *  oversized run would blow the same limit every hour forever.
- *
- *  The bound is what makes the job's existing self-draining design actually
- *  work: a candidate this run does not reach is not consumed, so the next
- *  hourly run picks it up, instead of failing whole. This constant is the
- *  single-org path's own cap -- production no longer runs that path (see
+ *  This constant bounds one organization's result processing and keeps a
+ *  first-run historical backlog from monopolizing memory. It is the
+ *  single-org path's own cap -- production does not run that path (see
  *  autoSubmitOverdueSectionsForOrg's own doc comment); the batched path
  *  production actually runs drains under its OWN, smaller cap instead,
  *  OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT (below) -- see that constant's
@@ -586,16 +575,8 @@ export interface OverdueSubmissionCandidate {
  *  restating an absolute rate here that would go stale the next time either
  *  cap moves independently of the other.
  *
- *  Per-org, and deliberately NOT the only bound. The starvation objection
- *  that motivated a per-org cap is real -- a shared budget consumed by
- *  whichever orgs listAllOrgScopes returns first would permanently starve
- *  the rest -- but "orgs x this" is not a ceiling the platform can actually
- *  pay: each candidate is one neon-http subrequest and Cloudflare allows
- *  1000 per invocation, so two orgs carrying a full backlog exceed it (see
- *  #416). The job therefore ALSO enforces a run-level subrequest budget,
- *  and answers the starvation objection by rotating which org the sweep
- *  starts from rather than by removing the bound. See
- *  AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET in jobs/autoSubmitOverdue.ts. */
+ *  The scheduled ECS path uses a smaller fixed per-org cap for each batched
+ *  query and visits every batch in the run. */
 export const OVERDUE_SUBMISSION_CANDIDATE_LIMIT = 500;
 
 /** Every section in `scope` that is past due, has a live conversation the
@@ -758,18 +739,10 @@ export async function findOverdueSubmissionCandidates(
 /* --------------------------------------------------------------------------
    #437: the same candidate read, batched across many organizations.
 
-   Before this, the scheduled sweep (jobs/autoSubmitOverdue.ts) spent one
-   subrequest on findOverdueSubmissionCandidates PER organization, whether or
-   not that organization had any backlog at all. AUTO_SUBMIT_RUN_SUBREQUEST_
-   BUDGET (900) was therefore actually a cap on organizations swept per run,
-   not on backlog processed -- a platform past ~899 orgs deferred the tail of
-   the org list every single hour before any candidate was even read.
-
    This function answers one query for a whole BATCH of organizations at
    once (`organization_id IN (...)` in place of `= scope`), so the run loop
    can spend a single subrequest covering AUTO_SUBMIT_ORG_BATCH_SIZE orgs
-   instead of one each. The budget now scales with backlog (inserts) plus
-   the number of BATCHES, not the number of tenants.
+   instead of one each.
    -------------------------------------------------------------------------- */
 
 /** #437 review: a SEPARATE safety cap from OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
@@ -784,18 +757,11 @@ export async function findOverdueSubmissionCandidates(
  *  exactly the scenario OVERDUE_SUBMISSION_CANDIDATE_LIMIT's own doc
  *  comment says this job must survive, not a hypothetical one -- would ask
  *  Postgres to return up to `AUTO_SUBMIT_ORG_BATCH_SIZE * 500` = 50,000 rows
- *  in a single round trip, and hand that result set to a Cloudflare Worker
+ *  in a single round trip, and hand that result set to the Node process
  *  to hold in memory and iterate over in JS. That is a real resource cost
- *  (query latency, response payload size over the neon-http driver's HTTP
- *  transport, Worker memory) that exists independent of whether any of
- *  those rows end up inserted this run -- so it cannot be bounded by the
- *  run's subrequest budget (AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET), which is a
- *  count of INSERTS attempted, not a bound on SELECT payload size. An
- *  earlier version of this code conflated the two (narrowed this query by
- *  remaining budget), which is what caused the throughput regression
- *  documented on AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET (#437 review, Important
- *  #2) -- so this cap is fixed and budget-independent, exactly as that
- *  fix's budget allocation is now row-count-independent.
+ *  (query latency and process memory) that exists independent of whether
+ *  any of those rows end up inserted this run. This cap is therefore fixed
+ *  and independent of run duration or organization count.
  *
  *  IMPORTANT -- this bounds the returned, per-org-grouped result this
  *  function hands back, NOT the underlying SELECT's own row count.
@@ -840,17 +806,8 @@ export const OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT = 50;
  *  backlog cannot crowd another org sharing this batch out of the result
  *  entirely just because its due dates happen to sort later.
  *
- *  #437 review (Important): this is a FIXED safety cap on the query's own
- *  result-set size, independent of the caller's remaining run budget. An
- *  earlier version narrowed `perOrgLimit` by whatever subrequest budget the
- *  run had left, which conflated "how many rows may this SELECT return"
- *  (a resource-cost bound) with "how many inserts may this run afford"
- *  (a Cloudflare-subrequest-count bound) and caused a throughput regression
- *  when fixed naively -- see OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT's doc
- *  comment. The caller (autoSubmitOverdueSectionsForScopes) now allocates
- *  its insert budget entirely separately, per candidate actually consumed
- *  from whatever this function returns; it does not pass a budget-derived
- *  value here.
+ *  This fixed safety cap is independent of the number of organizations and
+ *  keeps each organization's share of a batched result predictable.
  *
  *  Grouped by scope (not a flat list) because the run loop's insert phase is
  *  still per-organization -- AutoSubmitOrgSummary, and #414's per-org

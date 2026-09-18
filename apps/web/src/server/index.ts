@@ -1,6 +1,4 @@
 import { Hono } from "hono";
-import { makeDb } from "../db/client";
-import { autoSubmitOverdueSections } from "./jobs/autoSubmitOverdue";
 import { helloHandler } from "./routes/hello";
 import { chatHandler } from "./routes/chat";
 import { loginHandler, callbackHandler, logoutHandler } from "./routes/auth";
@@ -87,11 +85,8 @@ import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "./utils/errors";
 import { TenancyMismatchError, IdempotencyKeyConflictError, PromptTemplateConflictError } from "./repositories/errors";
 import type { AppEnv } from "./context";
 
-/** Exported (in addition to being wrapped by the default export below) so
- *  the route-level suites can keep calling `app.request(path, init, env)`.
- *  The default export is no longer the Hono instance itself: a Worker with
- *  a Cron Trigger has to export an object carrying both `fetch` and
- *  `scheduled` (#167). */
+/** Exported so route-level suites can call `app.request(path, init, env)` and
+ *  the Node adapter can delegate `/api/*` traffic to this API-only app. */
 export const app = new Hono<AppEnv>();
 
 // Catches anything thrown by middleware/handlers that isn't already handled
@@ -139,11 +134,8 @@ app.onError((err, c) => {
 // channel is available where the browser supports it -- see useWebR.ts's own
 // doc comment for why this is an optimization, not a hard requirement (webR
 // falls back to its PostMessage channel without it, no service worker
-// involved either way). Applied globally, not scoped to the chat routes,
-// because COOP/COEP are page-level properties (the top-level document's
-// headers, not a per-fetch header) -- Hono has no narrower unit to attach
-// them to that would still take effect for the initial HTML response the
-// ASSETS catch-all serves below.
+// involved either way). The Node entry point applies the same headers to
+// both SPA shells, while this middleware protects every API response.
 //
 // Verified safe for the one thing on this domain that could plausibly break
 // under it: WorkOS AuthKit login (routes/auth.ts) is a full top-level
@@ -169,6 +161,7 @@ app.use("/api/*", rolesMiddleware);
 // API routes — registered directly on `app` rather than via app.route(prefix, sub)
 // to avoid Hono's prefix-stripping behavior that can cause /api/hello to not
 // match a sub-app's `/` handler.
+app.get("/api/health", (c) => c.json({ status: "ok" }));
 app.get("/api/hello", helloHandler);
 app.post("/api/chat", chatHandler);
 app.get("/api/auth/login", loginHandler);
@@ -410,56 +403,7 @@ app.post("/api/courses/:courseId/canvas/sync", requireInstructorOf()(syncCanvasC
 // than who may read the same data inside the console.
 app.post("/api/courses/:courseId/exports", requireInstructorOf()(createExportHandler));
 
-// #172 audit (CMP-005): an unmatched /api/* path fell through to the SPA
-// catch-all below, which serves index.html with a 200. A client calling a
-// route its server doesn't have yet -- the realistic rolling-deploy skew
-// when the admin bundle leads the Worker -- therefore saw `r.ok === true`
-// and only failed when JSON.parse choked on HTML. That failed closed by
-// accident of content type, not by design. A JSON 404 makes a missing API
-// route unambiguous for every current and future client.
+// #172 audit (CMP-005): an unmatched /api/* path must be an unambiguous JSON
+// 404. The Node adapter delegates API paths here before either SPA fallback,
+// so clients never receive index.html for a missing API route.
 app.all("/api/*", (c) => c.json({ error: "Not found" }, 404));
-
-// Everything else: delegate to the static asset binding.
-// In dev, this proxies to Vite's pipeline (so HMR + source maps work).
-// In prod, it serves built assets, falling back to index.html for SPA routes
-// per the `not_found_handling: "single-page-application"` setting in wrangler.jsonc.
-app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));
-
-/** #167: the Cron Trigger entry point -- the first scheduled work in this
- *  system. Wired to the `triggers.crons` schedule in wrangler.jsonc; that
- *  file's expression is the whole configuration surface, deliberately (an
- *  admin screen for a cron string would be a second source of truth for
- *  something only a deployer can change anyway).
- *
- *  Awaited, not fired into `ctx.waitUntil` and forgotten: `scheduled()`'s
- *  own returned promise is what the runtime waits on, and a rejection here
- *  is what marks the invocation failed in the Cron Trigger's own success
- *  metrics. waitUntil would let the invocation report success while the
- *  sweep was still running or already dead.
- *
- *  Failures are logged and re-thrown rather than swallowed: the sweep
- *  already isolates failures internally, at whatever granularity each
- *  phase batches at -- per-candidate for an insert, per-BATCH of
- *  organizations for the shared candidate SELECT (#437,
- *  autoSubmitOverdueSectionsForScopes/submitCandidates in
- *  jobs/autoSubmitOverdue.ts; production no longer calls the older,
- *  strictly-per-org autoSubmitOverdueSectionsForOrg) -- so anything
- *  reaching here is the whole run failing -- a DB outage, a missing
- *  binding -- and the next scheduled run picks the same candidates up
- *  again, since nothing about a candidate is consumed by a failed
- *  attempt. */
-async function scheduled(
-  _controller: ScheduledController,
-  env: Env,
-  _ctx: ExecutionContext,
-): Promise<void> {
-  const db = makeDb(env.DATABASE_URL);
-  try {
-    await autoSubmitOverdueSections(db);
-  } catch (err) {
-    logServerError("scheduled", err, { cron: "autoSubmitOverdue" });
-    throw err;
-  }
-}
-
-export default { fetch: app.fetch, scheduled } satisfies ExportedHandler<Env>;

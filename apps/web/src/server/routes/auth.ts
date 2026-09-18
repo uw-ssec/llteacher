@@ -18,12 +18,13 @@ import {
   unsealSessionIgnoringExpiry,
 } from "../../lib/session";
 import {
-  OAUTH_STATE_COOKIE,
-  OAUTH_VERIFIER_COOKIE,
+  OAUTH_TRANSACTION_COOKIE,
   OAUTH_TTL_SECONDS,
   generateState,
   generatePkceVerifier,
   computeCodeChallenge,
+  parseOAuthTransaction,
+  serializeOAuthTransaction,
 } from "../../lib/oauth-state";
 import { decodeJwt } from "jose";
 import { extractSession } from "../middleware/auth";
@@ -32,7 +33,7 @@ import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "../utils/errors";
 
 export async function loginHandler(c: Context<AppEnv>) {
   const workos = getWorkOS(c.env.WORKOS_API_KEY);
-  const secureCookie = c.req.url.startsWith("https://");
+  const secureCookie = c.env.APP_URL.startsWith("https://");
 
   const state = generateState();
   const verifier = generatePkceVerifier();
@@ -45,8 +46,8 @@ export async function loginHandler(c: Context<AppEnv>) {
     path: "/",
     maxAge: OAUTH_TTL_SECONDS,
   };
-  setCookie(c, OAUTH_STATE_COOKIE, state, oauthCookieOptions);
-  setCookie(c, OAUTH_VERIFIER_COOKIE, verifier, oauthCookieOptions);
+  const returnTo = safeReturnTo(c.req.query("returnTo"));
+  setCookie(c, OAUTH_TRANSACTION_COOKIE, serializeOAuthTransaction({ state, verifier, returnTo }), oauthCookieOptions);
 
   const authorizationUrl = workos.userManagement.getAuthorizationUrl({
     clientId: c.env.WORKOS_CLIENT_ID,
@@ -62,10 +63,11 @@ export async function loginHandler(c: Context<AppEnv>) {
 export async function callbackHandler(c: Context<AppEnv>) {
   const code = c.req.query("code");
   const returnedState = c.req.query("state");
-  const expectedState = getCookie(c, OAUTH_STATE_COOKIE);
-  const verifier = getCookie(c, OAUTH_VERIFIER_COOKIE);
-  deleteCookie(c, OAUTH_STATE_COOKIE, { path: "/" });
-  deleteCookie(c, OAUTH_VERIFIER_COOKIE, { path: "/" });
+  const transaction = parseOAuthTransaction(getCookie(c, OAUTH_TRANSACTION_COOKIE));
+  const expectedState = transaction?.state;
+  const verifier = transaction?.verifier;
+  const returnTo = safeReturnTo(transaction?.returnTo);
+  deleteCookie(c, OAUTH_TRANSACTION_COOKIE, { path: "/" });
 
   if (!code) {
     return c.text("Missing authorization code", 400);
@@ -146,13 +148,13 @@ export async function callbackHandler(c: Context<AppEnv>) {
 
     setCookie(c, SESSION_COOKIE_NAME, sealed, {
       httpOnly: true,
-      secure: c.req.url.startsWith("https://"),
+      secure: c.env.APP_URL.startsWith("https://"),
       sameSite: "Lax",
       path: "/",
       maxAge: SESSION_TTL_SECONDS,
     });
 
-    return c.redirect("/");
+    return c.redirect(returnTo ?? "/");
   } catch (err) {
     // DB down, misconfigured secrets, etc. -- never surface the real error
     // (e.g. a connection string) to the browser mid-login.
@@ -190,10 +192,9 @@ export async function logoutHandler(c: Context<AppEnv>) {
 
   if (workosSessionId) {
     const workos = getWorkOS(c.env.WORKOS_API_KEY);
-    const origin = c.req.header("origin") ?? new URL(c.req.url).origin;
     const logoutUrl = workos.userManagement.getLogoutUrl({
       sessionId: workosSessionId,
-      returnTo: `${origin}/`,
+      returnTo: `${c.env.APP_URL}/`,
     });
     return c.redirect(logoutUrl);
   }
@@ -228,8 +229,13 @@ function decodeSessionId(accessToken: string): string | undefined {
 }
 
 function callbackUrl(c: Context<AppEnv>): string {
-  const origin = c.req.header("origin") ?? new URL(c.req.url).origin;
-  return `${origin}/api/auth/callback`;
+  return `${c.env.APP_URL}/api/auth/callback`;
+}
+
+/** Prevent an OAuth callback from becoming an open redirect. */
+function safeReturnTo(value: string | undefined): string | undefined {
+  if (!value || !value.startsWith("/") || value.startsWith("//")) return undefined;
+  return value;
 }
 
 function disallowedDomainPage(reason: string): string {

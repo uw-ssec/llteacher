@@ -5,8 +5,8 @@
     "noEmit": false,
     "emitDeclarationOnly": true,
     "outDir": "./dist/.tsbuildinfo-worker",
-    "types": ["@cloudflare/workers-types"],
-    "lib": ["ES2022", "WebWorker"]
+    "types": ["node"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
   },
-  "include": ["src/server", "src/shared", "src/db", "src/lib", "scripts"]
+  "include": ["src/server", "src/node", "src/runtime", "src/shared", "src/db", "src/lib", "scripts"]
 }

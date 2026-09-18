@@ -1,0 +1,42 @@
+name: local AWS contract
+
+on:
+  pull_request:
+    paths: ["infra/**", "Dockerfile.aws", "apps/web/**", "apps/admin/**", ".github/workflows/local-aws.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  local-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: docker/setup-buildx-action@v3
+      - name: Install dependencies
+        run: npm ci
+      - name: Install local AWS prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libnss3-tools mkcert
+          ./infra/scripts/install-local-cert.sh
+      - name: Validate local-only deployment guardrails
+        run: |
+          npm test --workspace=infra
+          npm run typecheck --workspace=infra
+          bash -n infra/scripts/*.sh
+          npm run aws:local:migration-guard
+          PULUMI_STACK=local ./infra/scripts/run-local-migrations-retry.test.sh
+          PULUMI_STACK=local ./infra/scripts/tls-proxy-up.test.sh
+          PULUMI_STACK=local ./infra/scripts/local-test.test.sh
+          PULUMI_STACK=local ./infra/scripts/verify-local-stack.test.sh
+          ! rg -n 'configure-aws-credentials|AWS_DEPLOY_ROLE|secrets\.AWS' .github/workflows/local-aws.yml
+      - name: Exercise the local AWS deployment path
+        run: |
+          docker network create llteacher-floci-ci
+          FLOCI_DOCKER_NETWORK=llteacher-floci-ci npm run aws:local:test

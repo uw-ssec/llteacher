@@ -4,19 +4,14 @@ import * as schema from "./schema";
 import type { Db } from "./client";
 
 /**
- * DB client for anything that runs as a plain Node process rather than
- * inside the Cloudflare Worker -- Vitest integration tests and the
- * `db:seed` script (`apps/web/scripts/seed.ts`).
+ * Dedicated database client for integration tests and one-off Node scripts
+ * such as `apps/web/scripts/seed.ts`. The application runtime uses the
+ * process-owned, closeable `makeDb` client instead.
  *
- * Production code (`makeDb` in client.ts) uses @neondatabase/serverless's
- * HTTP driver -- the only driver that works inside a Cloudflare Worker (no
- * raw TCP sockets there). That driver speaks Neon's HTTP proxy protocol and
- * cannot reach a plain Postgres server, so it can't be pointed at the local
- * or CI pgvector container. This client uses node-postgres (`pg`, already a
- * devDependency for the drizzle-kit CLI, which has the same constraint)
- * over a real TCP connection instead -- works against local/CI Postgres
- * *and* a real Neon database, since Neon also speaks plain Postgres wire
- * protocol over TCP+SSL, not just HTTP.
+ * Both clients use node-postgres over the standard PostgreSQL wire protocol.
+ * This helper remains separate because test suites and short-lived scripts
+ * need an independently constructed handle rather than the application's
+ * process singleton.
  *
  * The result is cast to `Db` at the boundary: both are drizzle-orm
  * PgDatabase instances over the same `schema`, differing only in a
@@ -25,12 +20,9 @@ import type { Db } from "./client";
  * query builder (select/insert/update/delete/query.*), never a raw
  * `.execute()` call whose shape depends on that parameter, so the runtime
  * behavior is identical -- this cast reflects verified compatibility, not
- * a hidden risk. One exception: `db.batch` is a driver-capability method
- * that genuinely differs (present on neon-http, absent at runtime here) --
- * repositories/homeworks.ts's updateHomework feature-detects it via
- * `typeof db.batch === "function"` rather than calling it unconditionally,
- * so this cast's underlying claim still holds; the next `.batch()` call
- * site should do the same.
+ * a hidden risk. The shared `Db` type retains a compatibility-only `batch`
+ * member for repository code that feature-detects it; node-postgres does not
+ * expose that method at runtime, so those code paths use transactions.
  */
 export function makeNodeDb(databaseUrl: string): Db {
   const pool = new Pool({ connectionString: databaseUrl });

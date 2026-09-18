@@ -1,6 +1,6 @@
 # llteacher-web
 
-TypeScript / React 19 / Vite / Tailwind 4 / Hono / Cloudflare Workers / Drizzle / Neon port of LLteacher.
+TypeScript / React 19 / Vite / Tailwind 4 / Hono / Node.js / Drizzle / PostgreSQL port of LLteacher.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the routes-vs-repositories convention and how tenancy scoping is enforced.
 
@@ -18,15 +18,27 @@ string, pagination cursors, and worked `curl` examples — see:
 ## Setup
 
 1. `npm install`
-2. Copy `.dev.vars.example` to `.dev.vars` and fill in real values.
-3. `npm run db:migrate` (after Drizzle schema exists in Phase 1).
-4. `npm run dev` to start Vite + Wrangler in dev mode.
+2. Configure the Node process environment. `DATABASE_URL` is required; the
+   production secrets are `OPENROUTER_API_KEY`, `LLMOXIE_API_KEY`,
+   `SESSION_SECRET`, `ENCRYPTION_KEY`, `BLIND_INDEX_KEY`, `WORKOS_API_KEY`,
+   `WORKOS_CLIENT_ID`, and `WORKOS_WEBHOOK_SECRET`. `LLMOXIE_BASE_URL` and
+   `LLM_DEGRADED_MODEL` are optional. Load these through your shell, a local
+   environment manager, or the container runtime; the app does not parse a
+   local environment file itself.
+3. `npm run db:migrate`.
+4. In one terminal, run `npm run node:serve --workspace=llteacher-web` to
+   start the Node API and static server (default port `3000`, or `PORT`).
+5. In another terminal at the repository root, run `npm run dev` once. It
+   starts the web Vite server on `2311` and the admin Vite server on `2312`.
+   Web Vite proxies `/api` to `NODE_API_URL` (default
+   `http://localhost:3000`); admin Vite forwards API requests through that
+   web proxy.
 
 ## Deploying
 
-`npm run deploy` runs `db:migrate` then `wrangler deploy` -- neither step
-provisions secrets, so these must already be set on the target environment
-(`wrangler secret put <NAME>`) before the first deploy that needs them:
+The ECS task definition supplies the same environment configuration as the
+Node process. Set non-secret values in task configuration and inject secrets
+through the configured secrets manager before deployment. In particular:
 
 - `OPENROUTER_API_KEY` -- required from Phase 1 on.
 - `LLMOXIE_API_KEY` -- **required as of #178/#317's migration 0035**, not
@@ -34,23 +46,22 @@ provisions secrets, so these must already be set on the target environment
   `provider = 'llmoxie'` with no instructor-visible credential, so a missing
   binding here is a 500 on every student's every chat turn, in every org --
   not a narrow case that only affects openrouter-only deployments. Declared
-  as a required (non-optional) `Env` property in `src/shared/types.ts`
-  specifically so `tsc`/`wrangler types` catch its absence before deploy,
-  rather than at the first student's first message.
+  as a required (non-optional) `Env` property in `src/shared/types.ts` so
+  TypeScript and runtime configuration validation catch its absence before a
+  student's first message.
 - `LLMOXIE_BASE_URL` -- optional; unset falls back to the gateway's own
   default host (`lib/ai.ts`'s `LLMOXIE_DEFAULT_BASE_URL`).
 - `SESSION_SECRET`, `ENCRYPTION_KEY`, `BLIND_INDEX_KEY`, `WORKOS_API_KEY`,
-  `WORKOS_WEBHOOK_SECRET` -- see `.dev.vars.example` for what each is for;
-  same requirement (must exist on the target before deploy).
+  `WORKOS_WEBHOOK_SECRET` -- all must be set before the service starts.
 
-`wrangler.jsonc` also registers a Cloudflare Cron Trigger (`"crons": ["17 *
-* * *"]`, `wrangler deploy` provisions it automatically) -- the first
-scheduled job in this system. It fires the Worker's `scheduled()` export
-hourly, at minute 17, to run `autoSubmitOverdueSections` (#167): an
-unattended sweep that writes `submissions` rows for section conversations
-past their homework's deadline. There is no student or instructor request
-behind these writes, so if you're auditing "what can write to `submissions`
-outside an HTTP request," this is it.
+Deploy in this order: build and publish the image, run `npm run db:migrate`
+as a one-off migration task using the new image and production environment,
+confirm that migration succeeds, then update the ECS service to the new image.
+Do not update the service before its database migration has completed.
+
+The web server does not run the overdue-submission sweep. Schedule it as a
+separate one-off ECS task using the same image and environment configuration
+as the service.
 
 ## Seeding a dev dataset
 
@@ -59,9 +70,9 @@ npm run db:seed             # seed once
 npm run db:seed -- --reset  # wipe seeded data and re-seed
 ```
 
-Requires `DATABASE_URL`, `ENCRYPTION_KEY`, and `BLIND_INDEX_KEY` in your shell
-env (or `.dev.vars` sourced into it) -- PII fields are encrypted the same way
-the app encrypts them at write time.
+Requires `DATABASE_URL`, `ENCRYPTION_KEY`, and `BLIND_INDEX_KEY` in the Node
+process environment -- PII fields are encrypted the same way the app encrypts
+them at write time.
 
 Seeded accounts (Django parity): `teacher1`/`teacher2` (instructors),
 `student1`/`student2`/`student3` (students), all under org `seed-org` /

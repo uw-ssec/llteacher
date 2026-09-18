@@ -2,7 +2,7 @@
 /* --------------------------------------------------------------------------
    Materializes webR's release assets (~46MB, 170 files: the JS loader,
    R.wasm, and the R package/library filesystem) into Vite's public dir so
-   they get served same-origin, through the same ASSETS binding as every
+   they get served same-origin, through the same Node static server as every
    other static file this app ships -- see useWebR.ts's own doc comment for
    why self-hosting replaced the CDN load (#368, #369).
 

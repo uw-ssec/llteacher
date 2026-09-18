@@ -546,9 +546,10 @@ export interface CanvasSyncResponse {
   errors: { canvasEnrollmentId: string; message: string }[];
 }
 
-// Cloudflare Worker bindings + secrets. Augmented in Phase 1+.
+// Node runtime configuration + secrets. Augmented in Phase 1+.
 declare global {
   interface Env {
+    APP_URL: string;
     DATABASE_URL: string;
     WORKOS_API_KEY: string;
     WORKOS_CLIENT_ID: string;
@@ -561,7 +562,7 @@ declare global {
        "openrouter-only configs never read it" case, it's a platform-wide
        500 on every message. resolveApiKey previously cast Env away
        entirely (`c.env as unknown as Record<string, string | undefined>`),
-       which meant neither tsc nor `wrangler types` could flag an absent
+       which meant neither tsc nor the runtime configuration tests could flag an absent
        secret at all; that cast is now confined to one narrow,
        allowlist-gated helper (llm-config.ts's readEnvSecret) instead of
        erasing the whole Env contract at the chat.ts call site. */
@@ -578,7 +579,6 @@ declare global {
        degradation: a missing platform credential still fails loudly rather
        than silently answering from a model nobody chose. */
     LLM_DEGRADED_MODEL?: string;
-    ASSETS: Fetcher;
     // Auth (M1): sealed session cookie key + IdentityCipher keys.
     SESSION_SECRET: string;
     ENCRYPTION_KEY: string;
