@@ -45,7 +45,7 @@ beforeAll(() => {
     },
   }, "llteacher-infra", "test");
   pulumi.runtime.setAllConfig({
-    "llteacher-infra:databasePassword": "database-password",
+    "llteacher-infra:databasePassword": "database/pass",
     "llteacher-infra:runtimeSecrets": JSON.stringify({
       WORKOS_API_KEY: "workos-api-key",
       WORKOS_CLIENT_ID: "workos-client-id",
@@ -123,6 +123,16 @@ describe("production resource graph", () => {
       publiclyAccessible: false,
       skipFinalSnapshot: false,
     });
+  });
+
+  it("percent-encodes the database password in the connection URL secret", async () => {
+    const secretString = resource(
+      "aws:secretsmanager/secretVersion:SecretVersion",
+      "llteacher-production-database-url-value",
+    ).inputs.secretString as { value: string };
+    expect(secretString.value).toBe(
+      "postgres://llteacher:database%2Fpass@llteacher-production-postgres.database.test:5432/llteacher",
+    );
   });
 
   it("scopes EventBridge pass-role and configures retry and dead-letter handling", async () => {

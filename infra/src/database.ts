@@ -40,9 +40,10 @@ export function createDataResources(name: string, config: InfraConfig, network: 
   const databaseUrlSecret = new aws.secretsmanager.Secret(`${name}-database-url`, {
     description: "LLTeacher Postgres URL; pgvector is enabled by the migration bootstrap.",
   }, options);
+  const encodedPassword = password.apply((value) => encodeURIComponent(value));
   const databaseUrlSecretVersion = new aws.secretsmanager.SecretVersion(`${name}-database-url-value`, {
     secretId: databaseUrlSecret.id,
-    secretString: pulumi.interpolate`postgres://llteacher:${password}@${instance.address}:${instance.port}/llteacher`,
+    secretString: pulumi.interpolate`postgres://llteacher:${encodedPassword}@${instance.address}:${instance.port}/llteacher`,
   }, options);
   const runtimeSecretValue = new pulumi.Config().getSecret("runtimeSecrets");
   if (!config.isLocal && !runtimeSecretValue) {
