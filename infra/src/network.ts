@@ -1,15 +1,18 @@
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
+import type { InfraConfig } from "./config.js";
 
 export interface Network {
   albSecurityGroup: aws.ec2.SecurityGroup;
   appSecurityGroup: aws.ec2.SecurityGroup;
   databaseSecurityGroup: aws.ec2.SecurityGroup;
+  appSubnetIds: pulumi.Output<string[]>;
+  databaseSubnetIds: pulumi.Output<string[]>;
   publicSubnetIds: pulumi.Output<string[]>;
   vpc: aws.ec2.Vpc;
 }
 
-export function createNetwork(name: string, provider: aws.Provider): Network {
+export function createNetwork(name: string, provider: aws.Provider, config: InfraConfig): Network {
   const options = { provider };
   const vpc = new aws.ec2.Vpc(`${name}-vpc`, {
     cidrBlock: "10.42.0.0/16",
@@ -25,7 +28,7 @@ export function createNetwork(name: string, provider: aws.Provider): Network {
     vpcId: vpc.id,
     routes: [{ cidrBlock: "0.0.0.0/0", gatewayId: internetGateway.id }],
   }, options);
-  const subnets = ["10.42.1.0/24", "10.42.2.0/24"].map((cidrBlock, index) => {
+  const publicSubnets = ["10.42.1.0/24", "10.42.2.0/24"].map((cidrBlock, index) => {
     const subnet = new aws.ec2.Subnet(`${name}-public-${index + 1}`, {
       availabilityZone: `us-east-1${index === 0 ? "a" : "b"}`,
       cidrBlock,
@@ -38,6 +41,36 @@ export function createNetwork(name: string, provider: aws.Provider): Network {
     }, options);
     return subnet;
   });
+  const privateSubnets = config.isLocal ? publicSubnets : ["10.42.11.0/24", "10.42.12.0/24"].map((cidrBlock, index) => {
+    const subnet = new aws.ec2.Subnet(`${name}-private-${index + 1}`, {
+      availabilityZone: `us-east-1${index === 0 ? "a" : "b"}`,
+      cidrBlock,
+      mapPublicIpOnLaunch: false,
+      vpcId: vpc.id,
+    }, options);
+    return subnet;
+  });
+
+  if (!config.isLocal) {
+    const natAddress = new aws.ec2.Eip(`${name}-nat-address`, { domain: "vpc" }, {
+      ...options,
+      dependsOn: [internetGateway],
+    });
+    const natGateway = new aws.ec2.NatGateway(`${name}-nat-gateway`, {
+      allocationId: natAddress.id,
+      subnetId: publicSubnets[0].id,
+    }, options);
+    const privateRouteTable = new aws.ec2.RouteTable(`${name}-private-routes`, {
+      routes: [{ cidrBlock: "0.0.0.0/0", natGatewayId: natGateway.id }],
+      vpcId: vpc.id,
+    }, options);
+    privateSubnets.forEach((subnet, index) => {
+      new aws.ec2.RouteTableAssociation(`${name}-private-route-${index + 1}`, {
+        routeTableId: privateRouteTable.id,
+        subnetId: subnet.id,
+      }, options);
+    });
+  }
 
   const albSecurityGroup = new aws.ec2.SecurityGroup(`${name}-alb-sg`, {
     description: "Public HTTPS ingress to LLTeacher",
@@ -57,5 +90,15 @@ export function createNetwork(name: string, provider: aws.Provider): Network {
     vpcId: vpc.id,
   }, options);
 
-  return { albSecurityGroup, appSecurityGroup, databaseSecurityGroup, publicSubnetIds: pulumi.all(subnets.map((subnet) => subnet.id)), vpc };
+  const publicSubnetIds = pulumi.all(publicSubnets.map((subnet) => subnet.id));
+  const privateSubnetIds = pulumi.all(privateSubnets.map((subnet) => subnet.id));
+  return {
+    albSecurityGroup,
+    appSecurityGroup,
+    appSubnetIds: privateSubnetIds,
+    databaseSecurityGroup,
+    databaseSubnetIds: privateSubnetIds,
+    publicSubnetIds,
+    vpc,
+  };
 }

@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+source_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+test_dir=$(mktemp -d)
+trap 'status=$?; rm -rf "$test_dir"; exit "$status"' EXIT
+mkdir -p "$test_dir/infra/scripts" "$test_dir/.floci/certs"
+cp "$source_root/infra/scripts/local-test.sh" "$test_dir/infra/scripts/local-test.sh"
+touch "$test_dir/.floci/certs/llteacher.local.pem"
+cat > "$test_dir/infra/scripts/local-up.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'local-up\n' >> "$LLTEACHER_TEST_LOG"
+EOF
+cat > "$test_dir/infra/scripts/verify-local-stack.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'ca=%s\n' "$LLTEACHER_LOCAL_CA" >> "$LLTEACHER_TEST_LOG"
+EOF
+chmod +x "$test_dir/infra/scripts/"*.sh
 
-# The setup script creates this repository-local certificate. The test runner
-# must use it rather than rediscovering a machine-specific mkcert CA location.
-grep -Fq 'LLTEACHER_LOCAL_CA="${LLTEACHER_LOCAL_CA:-$root/.floci/certs/llteacher.local.pem}"' \
-  "$root/infra/scripts/local-test.sh"
-! grep -Fq 'mkcert -CAROOT' "$root/infra/scripts/local-test.sh"
+LLTEACHER_TEST_LOG="$test_dir/log" "$test_dir/infra/scripts/local-test.sh"
+grep -Fq 'local-up' "$test_dir/log"
+grep -Fq "ca=$test_dir/.floci/certs/llteacher.local.pem" "$test_dir/log"

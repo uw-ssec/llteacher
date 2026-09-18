@@ -170,3 +170,4 @@ node_modules/
 # scan is not a substitute for keeping it out of git entirely.
 /evals/datasets/flagged-feedback-export.json
 .claude/checkpoints/
+.codex/checkpoints/

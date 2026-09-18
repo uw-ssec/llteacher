@@ -15,7 +15,7 @@ export interface Database {
 export function createDataResources(name: string, config: InfraConfig, network: Network, provider: aws.Provider): Database {
   const options = { provider };
   const subnetGroup = new aws.rds.SubnetGroup(`${name}-db-subnets`, {
-    subnetIds: network.publicSubnetIds,
+    subnetIds: network.databaseSubnetIds,
   }, options);
   const password = new pulumi.Config().requireSecret("databasePassword");
   const instance = new aws.rds.Instance(`${name}-postgres`, {
@@ -26,12 +26,17 @@ export function createDataResources(name: string, config: InfraConfig, network: 
     engineVersion: "16",
     instanceClass: "db.t3.micro",
     password,
+    backupRetentionPeriod: config.isLocal ? 0 : 7,
+    copyTagsToSnapshot: !config.isLocal,
+    deleteAutomatedBackups: config.isLocal,
+    deletionProtection: !config.isLocal,
+    finalSnapshotIdentifier: config.isLocal ? undefined : `${name}-postgres-final`,
     publiclyAccessible: false,
-    skipFinalSnapshot: true,
+    skipFinalSnapshot: config.isLocal,
     storageEncrypted: true,
     username: "llteacher",
     vpcSecurityGroupIds: [network.databaseSecurityGroup.id],
-  }, options);
+  }, config.isLocal ? options : { ...options, protect: true });
   const databaseUrlSecret = new aws.secretsmanager.Secret(`${name}-database-url`, {
     description: "LLTeacher Postgres URL; pgvector is enabled by the migration bootstrap.",
   }, options);

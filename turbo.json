@@ -4,14 +4,13 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".wrangler/**"],
+      "outputs": ["dist/**"],
       "inputs": [
         "src/**",
         "public/**",
         "package.json",
         "tsconfig*.json",
         "vite.config.ts",
-        "wrangler.jsonc",
         "drizzle.config.ts"
       ]
     },

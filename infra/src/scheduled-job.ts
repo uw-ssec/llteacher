@@ -16,6 +16,7 @@ export function createOverdueJob(name: string, config: InfraConfig, app: Applica
     memory: "512",
     networkMode: "awsvpc",
     requiresCompatibilities: ["FARGATE"],
+    taskRoleArn: app.taskRole.arn,
     containerDefinitions: pulumi.all([app.repository.repositoryUrl, logGroup.name, data.databaseUrlSecret.arn]).apply(([repositoryUrl, logGroupName, databaseSecretArn]) => JSON.stringify([{
       name: "overdue-job",
       image: `${repositoryUrl}:${app.imageTag}`,
@@ -28,10 +29,6 @@ export function createOverdueJob(name: string, config: InfraConfig, app: Applica
   const role = new aws.iam.Role(`${name}-eventbridge-role`, {
     assumeRolePolicy: JSON.stringify({ Version: "2012-10-17", Statement: [{ Action: "sts:AssumeRole", Effect: "Allow", Principal: { Service: "events.amazonaws.com" } }] }),
   }, options);
-  new aws.iam.RolePolicy(`${name}-eventbridge-run-task`, {
-    policy: pulumi.all([taskDefinition.arn]).apply(([taskArn]) => JSON.stringify({ Version: "2012-10-17", Statement: [{ Action: "ecs:RunTask", Effect: "Allow", Resource: taskArn }, { Action: "iam:PassRole", Effect: "Allow", Resource: "*" }] })),
-    role: role.id,
-  }, options);
   // Floci currently loops an ECS task-state event back through the EventBridge
   // ECS target. Keep the local rule represented but disabled; staging and
   // production run the real hourly overdue-submission sweep.
@@ -39,11 +36,54 @@ export function createOverdueJob(name: string, config: InfraConfig, app: Applica
     isEnabled: !config.isLocal,
     scheduleExpression: "rate(1 hour)",
   }, options);
+  new aws.iam.RolePolicy(`${name}-eventbridge-run-task`, {
+    policy: pulumi.all([taskDefinition.arn, app.executionRole.arn, app.taskRole.arn]).apply(([taskArn, executionRoleArn, taskRoleArn]) => JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [
+        { Action: "ecs:RunTask", Effect: "Allow", Resource: taskArn },
+        { Action: "iam:PassRole", Effect: "Allow", Resource: [executionRoleArn, taskRoleArn] },
+      ],
+    })),
+    role: role.id,
+  }, options);
+  const deadLetterQueue = config.isLocal ? undefined : new aws.sqs.Queue(`${name}-overdue-dlq`, {
+    messageRetentionSeconds: 1_209_600,
+  }, options);
+  if (deadLetterQueue) {
+    new aws.sqs.QueuePolicy(`${name}-overdue-dlq-policy`, {
+      policy: pulumi.all([deadLetterQueue.arn, rule.arn]).apply(([queueArn, ruleArn]) => JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [{
+          Action: "sqs:SendMessage",
+          Condition: { ArnEquals: { "aws:SourceArn": ruleArn } },
+          Effect: "Allow",
+          Principal: { Service: "events.amazonaws.com" },
+          Resource: queueArn,
+        }],
+      })),
+      queueUrl: deadLetterQueue.url,
+    }, options);
+    new aws.cloudwatch.MetricAlarm(`${name}-overdue-dlq-visible`, {
+      alarmDescription: "The overdue-submission job exhausted EventBridge retries.",
+      comparisonOperator: "GreaterThanThreshold",
+      dimensions: { QueueName: deadLetterQueue.name },
+      evaluationPeriods: 1,
+      metricName: "ApproximateNumberOfMessagesVisible",
+      namespace: "AWS/SQS",
+      period: 300,
+      statistic: "Maximum",
+      threshold: 0,
+    }, options);
+  }
   new aws.cloudwatch.EventTarget(`${name}-overdue-target`, {
     arn: app.cluster.arn,
+    ...(deadLetterQueue ? {
+      deadLetterConfig: { arn: deadLetterQueue.arn },
+      retryPolicy: { maximumEventAgeInSeconds: 3600, maximumRetryAttempts: 3 },
+    } : {}),
     ecsTarget: {
       launchType: "FARGATE",
-      networkConfiguration: { assignPublicIp: true, securityGroups: [network.appSecurityGroup.id], subnets: network.publicSubnetIds },
+      networkConfiguration: { assignPublicIp: config.isLocal, securityGroups: [network.appSecurityGroup.id], subnets: network.appSubnetIds },
       taskCount: 1,
       taskDefinitionArn: taskDefinition.arn,
     },

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { loadInfraConfig } from "./config.js";
+import { resolveApplicationImage } from "./provider.js";
 
 type Values = Record<string, string | undefined>;
 
@@ -58,6 +59,25 @@ describe("loadInfraConfig", () => {
     ).toThrow('The staging stack must not set "flociEndpoint".');
   });
 
+  it("requires a Route 53 hosted zone for staging and production certificate validation", () => {
+    expect(() =>
+      loadInfraConfig(
+        config({
+          environment: "production",
+          domainName: "llteacher.example.com",
+          imageTag: "release-2026-09-15",
+        }),
+      ),
+    ).toThrow('The production stack requires a "hostedZoneId" configuration value.');
+
+    expect(loadInfraConfig(config({
+      environment: "staging",
+      domainName: "staging.llteacher.example.com",
+      hostedZoneId: "Z123456789",
+      imageTag: "candidate",
+    }))).toMatchObject({ hostedZoneId: "Z123456789" });
+  });
+
   it("rejects an unknown deployment environment", () => {
     expect(() =>
       loadInfraConfig(
@@ -93,5 +113,23 @@ describe("loadInfraConfig", () => {
       imageTag: "local",
       endpoints: { floci: "http://localhost:4566" },
     });
+  });
+});
+
+describe("resolveApplicationImage", () => {
+  it("uses canonical ECR locally and the provider repository in AWS", () => {
+    const base = {
+      environment: "local",
+      isLocal: true,
+      domainName: "llteacher.local",
+      deployApp: true,
+      provisionService: true,
+      imageTag: "sha-123",
+      endpoints: { floci: "http://localhost:4566" },
+    } as const;
+    expect(resolveApplicationImage(base, "llteacher-local", "localhost:5000/repository"))
+      .toBe("000000000000.dkr.ecr.us-east-1.amazonaws.com/llteacher-local/app:sha-123");
+    expect(resolveApplicationImage({ ...base, environment: "production", isLocal: false }, "llteacher-production", "123.dkr.ecr.us-east-1.amazonaws.com/app"))
+      .toBe("123.dkr.ecr.us-east-1.amazonaws.com/app:sha-123");
   });
 });

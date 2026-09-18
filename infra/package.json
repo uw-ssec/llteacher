@@ -11,8 +11,8 @@
     "pulumi:cloud": "npm run build && PULUMI_BACKEND_URL=https://api.pulumi.com pulumi"
   },
   "dependencies": {
-    "@pulumi/aws": "^7.46.0",
-    "@pulumi/pulumi": "^3.262.0"
+    "@pulumi/aws": "7.46.0",
+    "@pulumi/pulumi": "3.262.0"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

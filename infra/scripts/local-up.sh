@@ -31,6 +31,20 @@ if ! pulumi -C "$root/infra" config get databasePassword --stack local >/dev/nul
   pulumi -C "$root/infra" config set --stack local --secret databasePassword "$local_database_password"
   unset local_database_password
 fi
+if ! pulumi -C "$root/infra" config get runtimeSecrets --stack local >/dev/null 2>&1; then
+  local_runtime_secrets=$(jq -cn \
+    --arg WORKOS_API_KEY "$(openssl rand -base64 32)" \
+    --arg WORKOS_CLIENT_ID "$(openssl rand -base64 32)" \
+    --arg OPENROUTER_API_KEY "$(openssl rand -base64 32)" \
+    --arg LLMOXIE_API_KEY "$(openssl rand -base64 32)" \
+    --arg SESSION_SECRET "$(openssl rand -base64 32)" \
+    --arg ENCRYPTION_KEY "$(openssl rand -base64 32)" \
+    --arg BLIND_INDEX_KEY "$(openssl rand -base64 32)" \
+    --arg WORKOS_WEBHOOK_SECRET "$(openssl rand -base64 32)" \
+    '$ARGS.named')
+  pulumi -C "$root/infra" config set --stack local --secret runtimeSecrets "$local_runtime_secrets"
+  unset local_runtime_secrets
+fi
 npm run build --workspace=infra
 if ! repo=$(pulumi -C "$root/infra" stack output ecrRepositoryUrl --stack local 2>/dev/null); then
   # ECR must exist before the first local image can be built. This bootstrap
@@ -42,7 +56,13 @@ if ! repo=$(pulumi -C "$root/infra" stack output ecrRepositoryUrl --stack local 
 fi
 image_tag="local-$(date +%s)"
 image_uri="000000000000.dkr.ecr.us-east-1.amazonaws.com/${repo#*/}:$image_tag"
-docker build --tag "$image_uri" --file "$root/Dockerfile.aws" "$root"
+docker_build=(docker build)
+if [[ "${CI:-}" == "true" ]]; then
+  docker_build=(docker buildx build --load \
+    --cache-from type=gha,scope=llteacher-aws \
+    --cache-to type=gha,mode=max,scope=llteacher-aws)
+fi
+"${docker_build[@]}" --tag "$image_uri" --file "$root/Dockerfile.aws" "$root"
 # Floci resolves this canonical ECR-shaped image directly from the local Docker
 # daemon. Its CreateRepository URI is intentionally not used here: that is the
 # registry proxy address, not the local-image lookup key.

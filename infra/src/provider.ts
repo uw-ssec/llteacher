@@ -35,3 +35,15 @@ export function createAwsProvider(config: InfraConfig): aws.Provider {
     skipRequestingAccountId: true,
   });
 }
+
+/** Keeps Floci's canonical-ECR compatibility quirk out of app resources. */
+export function resolveApplicationImage(
+  config: InfraConfig,
+  name: string,
+  repositoryUrl: string,
+): string {
+  const repository = config.isLocal
+    ? `000000000000.dkr.ecr.us-east-1.amazonaws.com/${name}/app`
+    : repositoryUrl;
+  return `${repository}:${config.imageTag}`;
+}

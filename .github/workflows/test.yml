@@ -142,13 +142,24 @@ jobs:
       - name: Build
         run: npm run build
 
+      - uses: docker/setup-buildx-action@v3
+
       # The production target is the Node/ECS image, not a Cloudflare Worker.
       # Build it and verify the two SPA entry points from a running container;
       # fake values are enough because neither page accesses external services.
       - name: Validate ECS application image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.aws
+          load: true
+          tags: llteacher-ci:latest
+          cache-from: type=gha,scope=llteacher-aws
+          cache-to: type=gha,mode=max,scope=llteacher-aws
+      - name: Exercise ECS application image
         run: |
-          docker build --tag llteacher-ci:latest --file Dockerfile.aws .
           docker run --detach --name llteacher-ci --publish 8080:8080 \
+            --env APP_URL=http://127.0.0.1:8080 \
             --env DATABASE_URL=postgres://user:password@localhost:5432/llteacher \
             --env WORKOS_API_KEY=workos-api-key \
             --env WORKOS_CLIENT_ID=workos-client-id \

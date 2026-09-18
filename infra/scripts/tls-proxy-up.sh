@@ -11,4 +11,4 @@ docker rm --force llteacher-local-tls >/dev/null 2>&1 || true
 docker run -d --name llteacher-local-tls -p 443:443 \
   --add-host=host.docker.internal:host-gateway \
   -v "$cert_dir:/certs:ro" -v "$root/infra/Caddyfile:/etc/caddy/Caddyfile:ro" \
-  caddy:2-alpine >/dev/null
+  caddy:2-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e >/dev/null

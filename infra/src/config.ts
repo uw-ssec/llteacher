@@ -6,6 +6,7 @@ export interface InfraConfig {
   environment: Environment;
   isLocal: boolean;
   domainName: string;
+  hostedZoneId?: string;
   deployApp: boolean;
   provisionService: boolean;
   imageTag: string;
@@ -42,6 +43,7 @@ function loadEnvironment(config: ConfigReader): Environment {
 export function loadInfraConfig(config: ConfigReader = new pulumi.Config()): InfraConfig {
   const environment = loadEnvironment(config);
   const flociEndpoint = config.get("flociEndpoint");
+  const hostedZoneId = config.get("hostedZoneId");
   const deployApp = config.get("deployApp") !== "false";
   const provisionService = config.get("provisionService") !== "false";
 
@@ -53,10 +55,15 @@ export function loadInfraConfig(config: ConfigReader = new pulumi.Config()): Inf
     throw new Error(`The ${environment} stack must not set "flociEndpoint".`);
   }
 
+  if (environment !== "local" && !hostedZoneId) {
+    throw new Error(`The ${environment} stack requires a "hostedZoneId" configuration value.`);
+  }
+
   return {
     environment,
     isLocal: environment === "local",
     domainName: config.require("domainName"),
+    ...(hostedZoneId === undefined ? {} : { hostedZoneId }),
     deployApp,
     provisionService,
     imageTag: config.require("imageTag"),

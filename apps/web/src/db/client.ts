@@ -16,10 +16,17 @@ export type Db = NodeDb & {
 
 let pool: Pool | undefined;
 let db: Db | undefined;
+let activeDatabaseUrl: string | undefined;
 
 export function makeDb(databaseUrl: string): Db {
-  if (db) return db;
+  if (db) {
+    if (databaseUrl !== activeDatabaseUrl) {
+      throw new Error("makeDb received a different DATABASE_URL while the pool is active; call closeDb before changing databases");
+    }
+    return db;
+  }
 
+  activeDatabaseUrl = databaseUrl;
   pool = new Pool({ connectionString: databaseUrl, max: 10 });
   // node-postgres emits this for an idle client whose connection failed. An
   // unhandled EventEmitter "error" would terminate the whole ECS task.
@@ -34,5 +41,6 @@ export async function closeDb(): Promise<void> {
   const currentPool = pool;
   pool = undefined;
   db = undefined;
+  activeDatabaseUrl = undefined;
   await currentPool?.end();
 }

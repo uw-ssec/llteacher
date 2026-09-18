@@ -549,6 +549,7 @@ export interface CanvasSyncResponse {
 // Node runtime configuration + secrets. Augmented in Phase 1+.
 declare global {
   interface Env {
+    APP_URL: string;
     DATABASE_URL: string;
     WORKOS_API_KEY: string;
     WORKOS_CLIENT_ID: string;

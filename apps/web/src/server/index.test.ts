@@ -11,6 +11,7 @@ import { TenancyMismatchError, PromptTemplateConflictError } from "./repositorie
 const SESSION_SECRET = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
 
 const ENV = {
+  APP_URL: "https://llteacher.test",
   WORKOS_API_KEY: "sk_test_x",
   WORKOS_CLIENT_ID: "client_x",
   SESSION_SECRET,

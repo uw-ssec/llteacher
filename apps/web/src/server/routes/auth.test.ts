@@ -15,6 +15,7 @@ import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 
 const TEST_ENV = {
+  APP_URL: "https://llteacher.example.edu",
   SESSION_SECRET: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
   ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
   BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
@@ -123,6 +124,19 @@ describe("GET /login", () => {
     const res = await auth.request("/login", {}, TEST_ENV);
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toContain("workos.com");
+  });
+
+  it("uses APP_URL even when forwarded-host is hostile", async () => {
+    await auth.request("/login", {
+      headers: {
+        "x-forwarded-host": "attacker.example",
+        "x-forwarded-proto": "http",
+      },
+    }, TEST_ENV);
+
+    expect(getAuthorizationUrl).toHaveBeenCalledWith(expect.objectContaining({
+      redirectUri: "https://llteacher.example.edu/api/auth/callback",
+    }));
   });
 
   it("passes state and a PKCE S256 code challenge to WorkOS", async () => {
@@ -433,7 +447,10 @@ describe("POST /logout", () => {
 
     expect(res.status).toBe(302);
     expect(getLogoutUrl).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionId: "session_xyz" }),
+      expect.objectContaining({
+        sessionId: "session_xyz",
+        returnTo: "https://llteacher.example.edu/",
+      }),
     );
     expect(res.headers.get("location")).toContain("workos.com");
     const setCookie = res.headers.get("set-cookie") ?? "";

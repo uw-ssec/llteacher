@@ -22,7 +22,7 @@ function createNodeApp(config: Env, options: NodeServerOptions) {
   const nodeApp = new Hono();
   const webBuildDir = options.webBuildDir ?? defaultWebBuildDir;
   const adminBuildDir = options.adminBuildDir ?? defaultAdminBuildDir;
-  const api = (c: { req: { raw: Request } }) => app.fetch(requestForApi(c.req.raw), config);
+  const api = (c: { req: { raw: Request } }) => app.fetch(c.req.raw, config);
 
   nodeApp.use("*", async (c, next) => {
     await next();
@@ -52,34 +52,6 @@ function createNodeApp(config: Env, options: NodeServerOptions) {
 }
 
 /**
- * ECS only accepts API traffic from the ALB security group, so the ALB's
- * forwarding headers are the authoritative public request origin. Rebuilding
- * the Request here lets authentication generate HTTPS callback URLs and secure
- * cookies even though the ALB reaches the task over its private HTTP listener.
- */
-function requestForApi(request: Request): Request {
-  const proto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
-  const host = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
-  if (!proto && !host) return request;
-
-  const url = new URL(request.url);
-  if (proto === "https" || proto === "http") url.protocol = `${proto}:`;
-  if (host) url.host = host;
-  const headers = new Headers(request.headers);
-  // Hono derives c.req.url from Host in a few helpers, so keep it consistent
-  // with the reconstructed public URL as well.
-  if (host) headers.set("host", host);
-  if (proto === "https" || proto === "http") headers.set("origin", url.origin);
-  const init: RequestInit & { duplex: "half" } = {
-    body: request.body,
-    duplex: "half",
-    headers,
-    method: request.method,
-  };
-  return new Request(url, init);
-}
-
-/**
  * Starts the Hono Node adapter. Optional build directories and port make the
  * factory testable while production uses PORT and the container build paths.
  */
@@ -93,30 +65,58 @@ export function createNodeServer(config: Env, options: NodeServerOptions = {}): 
 }
 
 /** Stops accepting requests before releasing the process-owned database pool. */
-export async function closeNodeServer(server: Server): Promise<void> {
+export async function closeNodeServer(server: Server, timeoutMs = 25_000): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    server.close((error) => (error ? reject(error) : resolve()));
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      error ? reject(error) : resolve();
+    };
+    const timer = setTimeout(() => {
+      server.closeAllConnections();
+      finish();
+    }, timeoutMs);
+    timer.unref();
+    server.close((error) => finish(error ?? undefined));
   });
   await closeDb();
 }
 
-export function startNodeServer(): Server {
-  const server = createNodeServer(loadRuntimeConfig(process.env));
+export type ShutdownDependencies = {
+  close(server: Server): Promise<void>;
+  once(signal: "SIGINT" | "SIGTERM", handler: () => void): void;
+  exit(code: number): void;
+  error(message: string, error: unknown): void;
+};
+
+export function registerShutdownHandlers(server: Server, dependencies: ShutdownDependencies = {
+  close: closeNodeServer,
+  once: (signal, handler) => process.once(signal, handler),
+  exit: (code) => process.exit(code),
+  error: (message, error) => console.error(message, error),
+}): void {
   let closing = false;
   const shutdown = () => {
     if (closing) return;
     closing = true;
-    void closeNodeServer(server).then(
-      () => process.exit(0),
+    void dependencies.close(server).then(
+      () => dependencies.exit(0),
       (error: unknown) => {
-        console.error("Failed to shut down Node server", error);
-        process.exit(1);
+        dependencies.error("Failed to shut down Node server", error);
+        dependencies.exit(1);
       },
     );
   };
 
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  dependencies.once("SIGINT", shutdown);
+  dependencies.once("SIGTERM", shutdown);
+}
+
+export function startNodeServer(): Server {
+  const server = createNodeServer(loadRuntimeConfig(process.env));
+  registerShutdownHandlers(server);
   return server;
 }
 

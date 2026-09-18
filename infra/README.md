@@ -20,10 +20,10 @@ production environments.
 
 | Resource | Why it is needed |
 | --- | --- |
-| VPC, two public subnets, internet gateway, and route table | Provide an isolated, routable network for the load balancer, application, and database. |
+| VPC, public ALB subnets, private app/database subnets, internet gateway, and NAT gateway | Keep ECS and RDS off the public internet while preserving controlled outbound access. |
 | Load balancer, application, and database security groups | Restrict inbound traffic between the internet, load balancer, ECS tasks, and PostgreSQL. |
 | Application Load Balancer, target group, and HTTPS listener | Route one HTTPS origin to the web app, admin app, and API. |
-| ACM certificate | Terminate trusted HTTPS in staging and production. |
+| Route 53 validation record and ACM certificate validation | Prove domain ownership and ensure the HTTPS listener receives an issued certificate. |
 | ECS cluster, Fargate service, and task definitions | Run the Node application and the scheduled overdue-work job without managing servers. |
 | ECR repository | Store versioned application container images for AWS deployments. |
 | RDS PostgreSQL 16, DB subnet group, and pgvector | Persist application data and provide vector search. |
@@ -31,7 +31,7 @@ production environments.
 | Private S3 bucket and public-access block | Store course materials without exposing them publicly. |
 | IAM roles and policies | Give ECS and deployment jobs only the AWS permissions they require. |
 | CloudWatch log groups | Collect application and scheduled-job logs. |
-| EventBridge rule and target | Run the overdue-work task every hour. |
+| EventBridge rule, target, retry policy, SQS dead-letter queue, and alarm | Run overdue work hourly and surface exhausted retries. |
 
 ## 3. Deploy locally with Floci
 
@@ -111,8 +111,16 @@ Local generated state is intentionally ignored by Git:
 ## 5. Staging and production
 
 Staging and production use the same Pulumi program without Floci endpoint
-overrides. They require a real AWS account, Pulumi Cloud state, externally
-validated ACM certificates, real ECR pushes, and valid secret values.
+overrides. Set `llteacher-infra:hostedZoneId` to the Route 53 zone containing
+the configured domain before previewing. The application and database use
+private subnets; the ALB alone uses public subnets. RDS keeps seven days of
+automated backups, requires a final snapshot, enables deletion protection,
+and is protected from accidental Pulumi deletion.
+
+The release workflow accepts staging only from `refs/heads/staging` and
+production only from a tag. It registers the new task definition at zero
+desired tasks, runs `infra/scripts/run-aws-migrations.sh`, and enables the
+service only after migrations succeed.
 
 Both environments require a Pulumi secret named `runtimeSecrets`. Its JSON
 object contains `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `OPENROUTER_API_KEY`,

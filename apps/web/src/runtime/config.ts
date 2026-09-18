@@ -1,7 +1,32 @@
-function requireDatabaseUrl(env: NodeJS.ProcessEnv): string {
-  const databaseUrl = env.DATABASE_URL;
-  if (!databaseUrl) throw new Error("DATABASE_URL is required");
-  return databaseUrl;
+function requireValue(env: NodeJS.ProcessEnv, name: string): string {
+  const value = env[name];
+  if (!value) throw new Error(`${name} is required`);
+  return value;
+}
+
+export function loadDatabaseUrl(env: NodeJS.ProcessEnv): string {
+  return requireValue(env, "DATABASE_URL");
+}
+
+function requireAppOrigin(env: NodeJS.ProcessEnv): string {
+  const value = requireValue(env, "APP_URL");
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("APP_URL must be an absolute HTTP(S) origin");
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:")
+    || url.pathname !== "/"
+    || url.search
+    || url.hash
+    || url.username
+    || url.password
+  ) {
+    throw new Error("APP_URL must be an absolute HTTP(S) origin with no path, query, hash, or credentials");
+  }
+  return url.origin;
 }
 
 /**
@@ -11,16 +36,17 @@ function requireDatabaseUrl(env: NodeJS.ProcessEnv): string {
  */
 export function loadRuntimeConfig(env: NodeJS.ProcessEnv): Env {
   return {
-    DATABASE_URL: requireDatabaseUrl(env),
-    WORKOS_API_KEY: env.WORKOS_API_KEY ?? "",
-    WORKOS_CLIENT_ID: env.WORKOS_CLIENT_ID ?? "",
-    OPENROUTER_API_KEY: env.OPENROUTER_API_KEY ?? "",
-    LLMOXIE_API_KEY: env.LLMOXIE_API_KEY ?? "",
+    APP_URL: requireAppOrigin(env),
+    DATABASE_URL: loadDatabaseUrl(env),
+    WORKOS_API_KEY: requireValue(env, "WORKOS_API_KEY"),
+    WORKOS_CLIENT_ID: requireValue(env, "WORKOS_CLIENT_ID"),
+    OPENROUTER_API_KEY: requireValue(env, "OPENROUTER_API_KEY"),
+    LLMOXIE_API_KEY: requireValue(env, "LLMOXIE_API_KEY"),
     LLMOXIE_BASE_URL: env.LLMOXIE_BASE_URL,
     LLM_DEGRADED_MODEL: env.LLM_DEGRADED_MODEL,
-    SESSION_SECRET: env.SESSION_SECRET ?? "",
-    ENCRYPTION_KEY: env.ENCRYPTION_KEY ?? "",
-    BLIND_INDEX_KEY: env.BLIND_INDEX_KEY ?? "",
-    WORKOS_WEBHOOK_SECRET: env.WORKOS_WEBHOOK_SECRET ?? "",
+    SESSION_SECRET: requireValue(env, "SESSION_SECRET"),
+    ENCRYPTION_KEY: requireValue(env, "ENCRYPTION_KEY"),
+    BLIND_INDEX_KEY: requireValue(env, "BLIND_INDEX_KEY"),
+    WORKOS_WEBHOOK_SECRET: requireValue(env, "WORKOS_WEBHOOK_SECRET"),
   };
 }

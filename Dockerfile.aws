@@ -1,5 +1,5 @@
 # Build the student and admin SPAs once, then run the Node API against them.
-FROM node:24-bookworm-slim AS build
+FROM node:24-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS build
 
 WORKDIR /app
 
@@ -13,7 +13,7 @@ RUN npm ci
 COPY . .
 RUN npm run build --workspace=llteacher-web && npm run build --workspace=llteacher-admin
 
-FROM node:24-bookworm-slim AS runtime
+FROM node:24-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
 
 WORKDIR /app
 ENV NODE_ENV=production \

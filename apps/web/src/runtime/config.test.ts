@@ -16,6 +16,7 @@ import { closeDb, makeDb } from "../db/client";
 import { loadRuntimeConfig } from "./config";
 
 const runtimeEnvironment = {
+  APP_URL: "https://llteacher.example.edu",
   DATABASE_URL: "postgres://llteacher:password@localhost:5432/llteacher",
   WORKOS_API_KEY: "workos-api-key",
   WORKOS_CLIENT_ID: "workos-client-id",
@@ -31,8 +32,31 @@ const runtimeEnvironment = {
 
 describe("loadRuntimeConfig", () => {
   it("rejects a runtime without DATABASE_URL", () => {
-    expect(() => loadRuntimeConfig({})).toThrow("DATABASE_URL is required");
+    const environment: NodeJS.ProcessEnv = { ...runtimeEnvironment };
+    delete environment.DATABASE_URL;
+    expect(() => loadRuntimeConfig(environment)).toThrow("DATABASE_URL is required");
   });
+
+  it.each([
+    "APP_URL",
+    "WORKOS_API_KEY",
+    "WORKOS_CLIENT_ID",
+    "OPENROUTER_API_KEY",
+    "LLMOXIE_API_KEY",
+    "SESSION_SECRET",
+    "ENCRYPTION_KEY",
+    "BLIND_INDEX_KEY",
+    "WORKOS_WEBHOOK_SECRET",
+  ])("rejects a runtime without %s", (name) => {
+    const environment: NodeJS.ProcessEnv = { ...runtimeEnvironment };
+    delete environment[name];
+    expect(() => loadRuntimeConfig(environment)).toThrow(`${name} is required`);
+  });
+
+  it.each(["ftp://llteacher.example.edu", "https://llteacher.example.edu/path", "not a url"])(
+    "rejects an invalid APP_URL origin (%s)",
+    (appUrl) => expect(() => loadRuntimeConfig({ ...runtimeEnvironment, APP_URL: appUrl })).toThrow("APP_URL"),
+  );
 
   it("returns the Node runtime bindings without a Worker ASSETS binding", () => {
     expect(loadRuntimeConfig({ ...runtimeEnvironment, ASSETS: "worker-only" })).toEqual(runtimeEnvironment);
@@ -65,5 +89,14 @@ describe("makeDb", () => {
     expect(poolEnd).toHaveBeenCalledOnce();
     expect(Pool).toHaveBeenCalledTimes(2);
     expect(rebuiltDb).not.toBe(db);
+  });
+
+  it("rejects a different URL while the process pool is active", async () => {
+    await closeDb();
+    makeDb(runtimeEnvironment.DATABASE_URL!);
+
+    expect(() => makeDb("postgres://other:secret@localhost/other")).toThrow(
+      "closeDb",
+    );
   });
 });

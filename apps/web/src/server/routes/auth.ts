@@ -33,7 +33,7 @@ import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "../utils/errors";
 
 export async function loginHandler(c: Context<AppEnv>) {
   const workos = getWorkOS(c.env.WORKOS_API_KEY);
-  const secureCookie = c.req.url.startsWith("https://");
+  const secureCookie = c.env.APP_URL.startsWith("https://");
 
   const state = generateState();
   const verifier = generatePkceVerifier();
@@ -148,7 +148,7 @@ export async function callbackHandler(c: Context<AppEnv>) {
 
     setCookie(c, SESSION_COOKIE_NAME, sealed, {
       httpOnly: true,
-      secure: c.req.url.startsWith("https://"),
+      secure: c.env.APP_URL.startsWith("https://"),
       sameSite: "Lax",
       path: "/",
       maxAge: SESSION_TTL_SECONDS,
@@ -192,10 +192,9 @@ export async function logoutHandler(c: Context<AppEnv>) {
 
   if (workosSessionId) {
     const workos = getWorkOS(c.env.WORKOS_API_KEY);
-    const origin = publicOrigin(c);
     const logoutUrl = workos.userManagement.getLogoutUrl({
       sessionId: workosSessionId,
-      returnTo: `${origin}/`,
+      returnTo: `${c.env.APP_URL}/`,
     });
     return c.redirect(logoutUrl);
   }
@@ -230,16 +229,7 @@ function decodeSessionId(accessToken: string): string | undefined {
 }
 
 function callbackUrl(c: Context<AppEnv>): string {
-  return `${publicOrigin(c)}/api/auth/callback`;
-}
-
-function publicOrigin(c: Context<AppEnv>): string {
-  const forwardedProto = c.req.header("x-forwarded-proto")?.split(",")[0]?.trim();
-  const forwardedHost = c.req.header("x-forwarded-host")?.split(",")[0]?.trim();
-  if ((forwardedProto === "https" || forwardedProto === "http") && forwardedHost) {
-    return `${forwardedProto}://${forwardedHost}`;
-  }
-  return c.req.header("origin") ?? new URL(c.req.url).origin;
+  return `${c.env.APP_URL}/api/auth/callback`;
 }
 
 /** Prevent an OAuth callback from becoming an open redirect. */

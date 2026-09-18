@@ -35,6 +35,7 @@ const baseConfig: ResolvedLLMConfig = {
  *  minimal-but-real Env rather than casting a bag of arbitrary keys. */
 function fakeEnv(overrides: Partial<Env> = {}): Env {
   return {
+    APP_URL: "https://llteacher.test",
     DATABASE_URL: "postgres://unused",
     WORKOS_API_KEY: "unused",
     WORKOS_CLIENT_ID: "unused",

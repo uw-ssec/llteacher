@@ -47,20 +47,16 @@
    eligible sections exactly once.
 
    ---------------------------------------------------------------------------
-   Design decision 3 -- bounded per invocation (final review).
+   Design decision 3 -- bounded database payloads, complete ECS runs.
 
    Each org's candidate read is capped at OVERDUE_SUBMISSION_CANDIDATE_LIMIT
    for the single-org path, or the smaller OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT
    for the batched path this file now uses (repositories/submissions.ts --
    see that constant's own doc comment for why the batched path needs a
-   separate, smaller cap). On the neon-http driver every statement is
-   a Cloudflare subrequest and the loop below inserts one at a time, so the
-   candidate count is the invocation's subrequest count; the first
-   production run, which has no lower bound on due date, would otherwise
-   have tried to sweep the whole historical backlog at once and then failed
-   identically every hour, since nothing here marks a candidate "seen".
-   That same absence of bookkeeping is what makes the cap safe: a candidate
-   this run does not reach is untouched, so the next hourly run takes it.
+   separate, smaller cap). The job now runs as a dedicated ECS task rather
+   than a Cloudflare Worker, so there is no invocation-wide subrequest
+   budget. Every organization batch is processed in one scheduled run while
+   the fixed per-query caps continue to bound database result processing.
 
    ---------------------------------------------------------------------------
    Tenancy.
@@ -134,9 +130,7 @@ export interface AutoSubmitRunSummary extends AutoSubmitOrgSummary {
    *  batch's org ids) and the sweep moves to the next batch. Non-zero means
    *  this run covered less than the platform. */
   orgsFailed: number;
-  /** #416: organizations this run did not reach, because the run-level
-   *  subrequest budget was exhausted first. They are not skipped
-   *  permanently -- the next run starts from a rotated offset. */
+  /** Retained for log/consumer compatibility. ECS runs do not defer orgs. */
   orgsDeferred: number;
 }
 
@@ -148,94 +142,9 @@ function emptyRunSummary(): AutoSubmitRunSummary {
   return { ...emptyOrgSummary(), orgsFailed: 0, orgsDeferred: 0 };
 }
 
-/* #416: how many neon-http subrequests one invocation of the whole sweep may
-   spend. Cloudflare allows 1000 per Worker invocation; this leaves headroom
-   for the request's own overhead and for the platform-wide org read.
-
-   Why a run-level budget is needed at all, given the per-org candidate cap:
-   that cap bounds one org's inserts, but every org in the platform is swept
-   in a SINGLE invocation, so the costs add. The cost model (pre-#437) was
-
-       1 (listAllOrgScopes) + 1 per org attempted (its candidate SELECT)
-         + 1 per candidate (its insert)
-
-   Two orgs each carrying a full 500-row first-run backlog already exceed
-   1000. Without this the 1001st fetch throws mid-loop, and -- before #414's
-   per-org isolation -- killed the entire sweep, identically, every hour.
-
-   Starvation, which is why the per-org cap was per-org in the first place:
-   a shared budget consumed by whichever orgs come back first would
-   permanently starve the tail. Answered by rotation rather than by dropping
-   the budget -- see the offset in autoSubmitOverdueSections.
-
-   #437: that cost model had a second-order consequence nobody had stated --
-   "1 per org attempted" made the SELECT cost scale with TENANT COUNT, so a
-   platform above ~899 organizations deferred the tail of the org list every
-   run before any backlog was even considered, regardless of whether those
-   orgs had a single candidate between them. The candidate SELECT is now
-   batched across AUTO_SUBMIT_ORG_BATCH_SIZE organizations at once (one
-   subrequest covers the whole batch -- findOverdueSubmissionCandidatesForOrgs),
-   so the cost model is
-
-       1 (listAllOrgScopes) + 1 per BATCH attempted (its candidate SELECT)
-         + 1 per candidate (its insert, unchanged)
-
-   which is what actually protects the budget now: it scales with backlog
-   PER BATCH (at most AUTO_SUBMIT_ORG_BATCH_SIZE orgs' worth of inserts
-   sharing one SELECT), not with how many tenants exist. A healthy platform
-   of mostly-idle orgs now covers AUTO_SUBMIT_ORG_BATCH_SIZE times as many
-   organizations per run as before, for the same budget -- the ~899-org
-   ceiling this issue found is now, at the chosen batch size, an
-   ~89,900-org one, and reaching it at all requires that many orgs to be
-   idle for their SELECT cost to stay at 1-per-batch; a real backlog spends
-   the same insert subrequests either way, so the two problems this budget
-   protects against (a single invocation exceeding Cloudflare's cap, and one
-   busy tenant starving the rest) are both still bounded exactly as before.
-
-   #437 review (Important #2): an earlier version of this batching queried
-   each batch with a PRE-DIVIDED per-org limit
-   (floor(remaining-budget / batch-size)) so the batch's absolute worst case
-   -- every org in it maxed out -- could never overspend. That protected the
-   budget but silently gutted single-org throughput for the realistic mixed
-   case this file's own docs describe ("two orgs each carrying a full
-   500-row first-run backlog"): at defaults, the very first batch's
-   pre-divided limit was floor(898/100) = 8, so a genuinely backlogged org
-   sharing a batch with 99 idle ones now drained at ~8/run instead of the
-   up-to-500/run the pre-#437 per-org loop gave whichever org came first --
-   an unstated ~60x throughput regression for exactly the scenario the
-   budget was introduced to handle safely, not to slow down. Fixed by
-   allocating the budget PER CANDIDATE ACTUALLY CONSUMED, in org order,
-   after the batch's SELECT returns each org's real (not pre-guessed)
-   candidates -- see autoSubmitOverdueSectionsForScopes. An idle org ahead
-   of a busy one in the same batch costs nothing, so the busy one still gets
-   up to whatever the batch's query actually returned for it worth of the
-   remaining budget, exactly as a lone org would pre-#437; only once the
-   budget for inserts is actually exhausted does the rest of that batch (and
-   every later one) get deferred.
-
-   #437 review (a further, separate finding on the same fix): removing the
-   budget-derived narrowing above also removed the only thing that had been
-   bounding the batched SELECT's own result-set size -- see
-   OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT (repositories/submissions.ts)
-   for that fixed, budget-independent cap, and why it is deliberately
-   smaller than the single-org path's OVERDUE_SUBMISSION_CANDIDATE_LIMIT.
-   The two bounds are intentionally separate concerns: this constant caps
-   INSERTS one invocation may attempt (a Cloudflare-subrequest-count bound,
-   spent per candidate actually consumed); that one caps ROWS one SELECT may
-   return (a query-payload/Worker-memory bound, fixed regardless of how much
-   insert budget remains). Deriving either from the other is exactly what
-   caused the two regressions found in review -- keeping them independent is
-   the fix, not a coincidence of how the code happens to be organized. */
-export const AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET = 900;
-
 /* #437: how many organizations one candidate SELECT covers.
  *
- * The tradeoff is narrower than it first looks, because #437 review's
- * Important #2 removed the other half of it: the query itself is no longer
- * shrunk by remaining run budget (see AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET's
- * doc comment), so a larger batch does not reserve a larger worst-case
- * budget commitment up front -- the budget is spent per candidate actually
- * consumed, not per batch capacity. What batch size actually trades off:
+ * What batch size trades off:
  *
  * - Larger raises the org-reach ceiling (fewer batches needed to cover the
  *   whole platform, so fewer SELECT subrequests on a healthy, mostly-idle
@@ -353,17 +262,6 @@ export async function autoSubmitOverdueSectionsForScopes(
   const startedAt = Date.now();
 
   const total = emptyRunSummary();
-  /* Spent on the org-list read that produced `orgScopes` -- listAllOrgScopes
-     in production (autoSubmitOverdueSections below), nothing at all when a
-     test calls this function directly with a hand-built list. Charged
-     unconditionally anyway: this function's budget accounting is meant to
-     model the real invocation's cost, and the one production caller always
-     pays it, so a test bypassing the query should still see the same
-     accounting production would. Everything below decrements from the same
-     pool, so the bound is on the INVOCATION, which is what Cloudflare
-     actually meters. */
-  let subrequestsSpent = 1;
-
   /* #416 starvation guard: a fixed iteration order plus a shared budget
      would sweep the same prefix of organizations every hour and never reach
      the tail. Rotating the start offset by the hour means every org is
@@ -393,29 +291,10 @@ export async function autoSubmitOverdueSectionsForScopes(
      rest of the run) rather than just one org, which is the batching
      tradeoff stated on AUTO_SUBMIT_ORG_BATCH_SIZE.
 
-     #437 review (Important #2): the batch's SELECT is NOT shrunk by
-     remaining budget -- it always asks for up to each org's standing
-     per-BATCH candidate cap (findOverdueSubmissionCandidatesForOrgs's own
-     default, OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT -- deliberately
-     smaller than the single-org path's OVERDUE_SUBMISSION_CANDIDATE_LIMIT;
-     see that constant's doc comment for why), regardless of how much run
-     budget is left. Only the INSERT side is budget-limited, and it's
-     limited per CANDIDATE ACTUALLY CONSUMED as the inner loop below walks
-     the batch in order, not per org upfront -- see
-     AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET's doc comment for why an earlier,
-     pre-divided version of this silently regressed single-org throughput,
-     and for why the SELECT's own result-set size is a separate bound from
-     the insert budget rather than derived from it. */
+     The query applies its fixed, per-org candidate cap independently to
+     bound downstream processing without making later batches unreachable. */
   let i = 0;
-  outer: while (i < rotatedScopes.length) {
-    const remaining = AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET - subrequestsSpent;
-    // One for the batch's SELECT, one for at least a single insert; below
-    // that there is no useful work left to start.
-    if (remaining < 2) {
-      total.orgsDeferred = rotatedScopes.length - i;
-      break;
-    }
-
+  while (i < rotatedScopes.length) {
     const batchSize = Math.min(AUTO_SUBMIT_ORG_BATCH_SIZE, rotatedScopes.length - i);
     const batchScopes = rotatedScopes.slice(i, i + batchSize);
 
@@ -437,10 +316,9 @@ export async function autoSubmitOverdueSectionsForScopes(
       // function's own default), not narrowed by remaining run budget: see
       // the comment above this loop for why that narrowing was removed.
       candidatesByOrg = await findOverdueSubmissionCandidatesForOrgs(db, batchScopes);
-      subrequestsSpent += 1;
     } catch (err) {
       /* #414's per-org isolation is now per-BATCH for the SELECT: a failure
-         here (a transient neon-http error, a statement timeout on a slow
+         here (a transient database error, a statement timeout on a slow
          backlog SELECT) takes out every org in this batch's coverage for
          this run, but -- as before -- does not escape the loop, so the next
          batch is still attempted and the summary line below still emits.
@@ -448,8 +326,6 @@ export async function autoSubmitOverdueSectionsForScopes(
          higher org-count ceiling; AUTO_SUBMIT_ORG_BATCH_SIZE is the knob if
          that tradeoff needs to move. */
       total.orgsFailed += batchScopes.length;
-      // The SELECT was still attempted and still cost a subrequest.
-      subrequestsSpent += 1;
       // #437 field rename, same AUTO_SUBMIT_LOG_CONTEXT: this used to log a
       // single `organizationId` per per-org failure. It's now
       // `organizationIds` (plural, an array) plus `batchSize`, since one
@@ -466,41 +342,15 @@ export async function autoSubmitOverdueSectionsForScopes(
       continue;
     }
 
-    // Walk the batch IN ORDER, spending the run's remaining insert budget
-    // on whichever org needs it, as it's actually needed -- not divided
-    // evenly up front. An idle org ahead of a busy one costs nothing, so
-    // the busy one still gets up to the full remaining budget, exactly as
-    // a lone org would have pre-#437. Deliberately OUTSIDE the try above
-    // (see this loop's own preceding comment) -- submitCandidates isolates
-    // its own per-candidate failures, so nothing here is expected to throw.
+    // Keep writes per organization so one candidate failure remains isolated.
     for (let j = 0; j < batchScopes.length; j++) {
-      const budgetForInserts = AUTO_SUBMIT_RUN_SUBREQUEST_BUDGET - subrequestsSpent;
-      if (budgetForInserts < 1) {
-        // Nothing left to spend on an insert. Everything from here on --
-        // the rest of THIS batch, and every batch after it -- is
-        // deferred to the next run, same as the outer `remaining < 2`
-        // check above but discovered mid-batch instead of between them.
-        total.orgsDeferred = rotatedScopes.length - (i + j);
-        break outer;
-      }
       const scope = batchScopes[j]!;
-      // Sliced to what the run can still afford, not to a pre-guessed
-      // share -- an org whose real candidates (already capped at
-      // OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT by the query itself)
-      // exceed this is not "deferred" (its SELECT already ran, and this
-      // run genuinely worked some of it); the untouched remainder is
-      // simply still there, unconsumed, for the next run -- the same
-      // self-draining property both candidate-limit constants rely on.
-      const candidates = (candidatesByOrg.get(scope) ?? []).slice(0, budgetForInserts);
+      const candidates = candidatesByOrg.get(scope) ?? [];
       const orgSummary = await submitCandidates(db, scope, candidates);
       total.candidates += orgSummary.candidates;
       total.submitted += orgSummary.submitted;
       total.skipped += orgSummary.skipped;
       total.failed += orgSummary.failed;
-      // One insert attempted per candidate. Candidates the org did not
-      // have cost nothing, so a healthy platform of mostly-idle orgs
-      // spends ~1 per BATCH (not per org) and reaches all of them.
-      subrequestsSpent += orgSummary.candidates;
     }
 
     i += batchSize;
@@ -513,8 +363,7 @@ export async function autoSubmitOverdueSectionsForScopes(
      suspiciously low `submitted`. */
   logServerInfo(AUTO_SUBMIT_LOG_CONTEXT, "auto-submit sweep complete", {
     organizations: orgScopes.length,
-    organizationsSwept: orgScopes.length - total.orgsDeferred,
-    subrequestsSpent,
+    organizationsSwept: orgScopes.length,
     ...total,
     durationMs: Date.now() - startedAt,
   });

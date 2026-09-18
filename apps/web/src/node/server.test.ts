@@ -13,9 +13,10 @@ vi.mock("../lib/workos", () => ({
 }));
 vi.mock("../server/middleware/roles", () => ({ rolesMiddleware: async (_c: unknown, next: () => Promise<void>) => next() }));
 
-import { closeNodeServer, createNodeServer } from "./server";
+import { closeNodeServer, createNodeServer, registerShutdownHandlers } from "./server";
 
 const runtimeConfig = {
+  APP_URL: "https://llteacher.local",
   DATABASE_URL: "postgres://llteacher:password@localhost:5432/llteacher",
   WORKOS_API_KEY: "workos-api-key",
   WORKOS_CLIENT_ID: "workos-client-id",
@@ -131,11 +132,11 @@ describe("createNodeServer", () => {
     expect(await response.json()).toEqual({ error: "Not found" });
   });
 
-  it("uses the HTTPS public origin forwarded by the ALB for API requests", async () => {
+  it("uses the configured public origin and ignores hostile forwarding headers", async () => {
     const response = await request("/api/auth/login", {
       headers: {
-        "x-forwarded-host": "llteacher.local",
-        "x-forwarded-proto": "https",
+        "x-forwarded-host": "attacker.example",
+        "x-forwarded-proto": "http",
       },
     });
 
@@ -157,5 +158,39 @@ describe("createNodeServer", () => {
     server = undefined;
 
     expect(closeDb).toHaveBeenCalledOnce();
+  });
+
+  it("force-closes connections when graceful shutdown exceeds its deadline", async () => {
+    vi.useFakeTimers();
+    const forceClose = vi.fn();
+    const stalledServer = {
+      close: vi.fn(),
+      closeAllConnections: forceClose,
+    } as unknown as Server;
+
+    const shutdown = closeNodeServer(stalledServer, 25_000);
+    await vi.advanceTimersByTimeAsync(25_000);
+    await shutdown;
+
+    expect(forceClose).toHaveBeenCalledOnce();
+    expect(closeDb).toHaveBeenCalledOnce();
+    vi.useRealTimers();
+  });
+
+  it.each(["SIGINT", "SIGTERM"] as const)("runs bounded shutdown once for %s", async (signal) => {
+    const handlers = new Map<string, () => void>();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const exit = vi.fn();
+    registerShutdownHandlers({} as Server, {
+      close,
+      once: (name, handler) => { handlers.set(name, handler); },
+      exit,
+      error: vi.fn(),
+    });
+
+    handlers.get(signal)?.();
+    handlers.get(signal)?.();
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+    expect(close).toHaveBeenCalledOnce();
   });
 });
