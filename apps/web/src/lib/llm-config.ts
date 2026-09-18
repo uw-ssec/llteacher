@@ -106,6 +106,8 @@ export interface ResolvedLLMConfig {
    *  call site does that `?? DEFAULT_MARK_COMPLETE_INSTRUCTION` fallback,
    *  not this module, so this stays a plain passthrough of the column. */
   markCompleteInstruction: string | null;
+  /** Whether the tutor may search the course knowledge base on this config. */
+  knowledgeEnabled: boolean;
 }
 
 const LLM_CONFIG_COLUMNS = {
@@ -120,6 +122,7 @@ const LLM_CONFIG_COLUMNS = {
   credentialId: llmConfigs.credentialId,
   fallbackLlmConfigId: llmConfigs.fallbackLlmConfigId,
   basePrompt: llmConfigs.basePrompt,
+  knowledgeEnabled: llmConfigs.knowledgeEnabled,
 } as const;
 
 /** #364: the single "load THIS config row, under THIS org" primitive. Every

@@ -4388,6 +4388,13 @@ body {
   white-space: nowrap;
 }
 
+/* A disabled control must look disabled: Save while nothing changed, Delete
+   before the phrase is typed. Applies to every variant. */
+.admin-button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .admin-button--primary {
   background-color: var(--color-accent);
   color: #FFFFFF;
@@ -7634,6 +7641,51 @@ tr:focus-within .admin-knowledge__row-tools {
   block-size: 6px;
   border-radius: 50%;
   background-color: var(--color-warning);
+}
+
+/* -- Tutor instruction disclosure (Knowledge tab) ---------------------------- */
+
+.admin-knowledge__instruction {
+  margin-block-start: var(--space-4);
+}
+
+.admin-knowledge__instruction-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-block-start: var(--space-4);
+  max-inline-size: 72ch;
+}
+
+.admin-knowledge__instruction-text {
+  inline-size: 100%;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background-color: var(--color-surface);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text);
+  resize: vertical;
+}
+
+.admin-knowledge__instruction-text:focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+
+.admin-knowledge__instruction-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.admin-knowledge__instruction-actions > span:last-child {
+  display: inline-flex;
+  gap: var(--space-2);
 }
 
 /* -- ConfirmDialog: the destructive-action modal ------------------------------

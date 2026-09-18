@@ -295,6 +295,20 @@ describe("apiClient.knowledge", () => {
     expect(calls[2]).toEqual(["/api/courses/c1/knowledge", "DELETE", JSON.stringify({ confirm: "DELETE", withUploads: true })]);
   });
 
+  it("reads and writes the course's tutor instruction", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ instruction: null, default: "d", maxChars: 2000 }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await apiClient.knowledge.getInstruction("c1", { signal: null });
+    await apiClient.knowledge.setInstruction("c1", "Search first.", { signal: null });
+    await apiClient.knowledge.setInstruction("c1", null, { signal: null });
+    await apiClient.knowledge.setInstructionDefault("c1", "Search first.", { signal: null });
+    const calls = fetchMock.mock.calls.map(([u, i]) => [String(u), (i as RequestInit).method, (i as RequestInit).body]);
+    expect(calls[0]).toEqual(["/api/courses/c1/knowledge/instruction", "GET", undefined]);
+    expect(calls[1]).toEqual(["/api/courses/c1/knowledge/instruction", "PUT", JSON.stringify({ instruction: "Search first." })]);
+    expect(calls[2]).toEqual(["/api/courses/c1/knowledge/instruction", "PUT", JSON.stringify({ instruction: null })]);
+    expect(calls[3]).toEqual(["/api/courses/c1/knowledge/instruction/default", "PUT", JSON.stringify({ instruction: "Search first." })]);
+  });
+
   it("encodes the search query", async () => {
     const fetchMock = stub(() => json({ hits: [] }));
 

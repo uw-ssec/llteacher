@@ -4,7 +4,9 @@ import { z } from "zod";
 import type { AppEnv } from "../context";
 import { instructorScope } from "../utils/guards";
 import { makeDb } from "../../db/client";
-import { getCourseTitle } from "../repositories/courses";
+import { getCourseTitle, getKnowledgeInstructionParts, setKnowledgeInstruction, setKnowledgeInstructionDefault } from "../repositories/courses";
+import { getOrgScopeForCourse } from "../repositories/organizations";
+import { KNOWLEDGE_INSTRUCTION } from "../../lib/prompts";
 import { deleteAllMaterials, deleteMaterialByDocumentPath, deleteMaterialsByDocumentPrefix } from "../repositories/materials";
 import { storageFromEnv } from "../storage/objectStore";
 import { logServerError } from "../utils/errors";
@@ -281,4 +283,61 @@ export async function exportKnowledgeHandler(c: Context<AppEnv>) {
     "Content-Disposition": `attachment; filename="${name}"`,
     "Cache-Control": "no-store",
   });
+}
+
+/** Cap on the instructor's own instruction: it is one paragraph in the
+ *  system prompt, not a second prompt. */
+export const KNOWLEDGE_INSTRUCTION_MAX_CHARS = 2000;
+
+/** Both layers plus the resolved default, so the console can show what
+ *  "reset" would restore and offer "set as default" honestly. */
+function instructionPayload(parts: { instruction: string | null; orgDefault: string | null }) {
+  return {
+    instruction: parts.instruction,
+    orgDefault: parts.orgDefault,
+    default: parts.orgDefault ?? KNOWLEDGE_INSTRUCTION,
+    builtin: KNOWLEDGE_INSTRUCTION,
+    maxChars: KNOWLEDGE_INSTRUCTION_MAX_CHARS,
+  };
+}
+
+const instructionBody = z.object({ instruction: z.string().max(KNOWLEDGE_INSTRUCTION_MAX_CHARS).nullable() });
+
+export async function getKnowledgeInstructionHandler(c: Context<AppEnv>) {
+  const scope = instructorScope(c);
+  if (!scope) return c.json({ error: "Not permitted." }, 403);
+  const parts = await getKnowledgeInstructionParts(makeDb(c.env.DATABASE_URL), scope);
+  return c.json(instructionPayload(parts));
+}
+
+/** Null or blank means "back to the default". The guard sentence is not
+ *  stored here; the prompt assembly appends it whatever this says. */
+export async function putKnowledgeInstructionHandler(c: Context<AppEnv>) {
+  const scope = instructorScope(c);
+  if (!scope) return c.json({ error: "Not permitted." }, 403);
+  const parsed = instructionBody.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) {
+    return c.json({ error: `The instruction must be text of at most ${KNOWLEDGE_INSTRUCTION_MAX_CHARS} characters.` }, 400);
+  }
+  const db = makeDb(c.env.DATABASE_URL);
+  const text = parsed.data.instruction?.trim() || null;
+  await setKnowledgeInstruction(db, scope, text);
+  return c.json(instructionPayload(await getKnowledgeInstructionParts(db, scope)));
+}
+
+/** Makes the given text the default for every course in the organisation
+ *  that has no text of its own. Null clears it back to the built-in. */
+export async function putKnowledgeInstructionDefaultHandler(c: Context<AppEnv>) {
+  const scope = instructorScope(c);
+  if (!scope) return c.json({ error: "Not permitted." }, 403);
+  const db = makeDb(c.env.DATABASE_URL);
+  const orgScope = await getOrgScopeForCourse(db, scope);
+  if (!orgScope) return c.json({ error: "Not permitted." }, 403);
+  const parsed = instructionBody.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) {
+    return c.json({ error: `The instruction must be text of at most ${KNOWLEDGE_INSTRUCTION_MAX_CHARS} characters.` }, 400);
+  }
+  const text = parsed.data.instruction?.trim() || null;
+  await setKnowledgeInstructionDefault(db, orgScope, text);
+  return c.json(instructionPayload(await getKnowledgeInstructionParts(db, scope)));
 }

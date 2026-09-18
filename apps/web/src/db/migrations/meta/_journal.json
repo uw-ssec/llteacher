@@ -337,6 +337,20 @@
       "when": 1789590351453,
       "tag": "0047_okf_bundle_knowledge_base",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1789676164133,
+      "tag": "0048_knowledge_toggle",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1789682706593,
+      "tag": "0049_knowledge_instruction_default",
+      "breakpoints": true
     }
   ]
 }

@@ -12,6 +12,7 @@ import {
   VOICE_CONSTRAINTS,
   knowledgeListingParagraph,
   KNOWLEDGE_INSTRUCTION,
+  KNOWLEDGE_GUARD,
   KNOWLEDGE_LISTING_MAX_CHARS,
 } from "./prompts";
 import type { ConceptSummary } from "../server/knowledge/service";
@@ -557,6 +558,16 @@ describe("knowledgeListingParagraph", () => {
     expect(out).toContain("- lectures/m1/intro: Intro. Markets");
     expect(out).toContain("- syllabus: Syllabus. desc");
     expect(out.trim().endsWith(KNOWLEDGE_INSTRUCTION)).toBe(true);
+  });
+  it("uses the instructor's own instruction when given, and always ends with the fixed guard", () => {
+    const out = knowledgeListingParagraph([concept("syllabus", "Syllabus")], "Search the course notes before every reply.");
+    expect(out).toContain("Search the course notes before every reply.");
+    expect(out).not.toContain(KNOWLEDGE_INSTRUCTION);
+    expect(out.trim().endsWith(KNOWLEDGE_GUARD)).toBe(true);
+    // The default instruction itself ends with the same guard sentence.
+    expect(KNOWLEDGE_INSTRUCTION.endsWith(KNOWLEDGE_GUARD)).toBe(true);
+    // Blank custom text falls back to the default rather than dropping the guidance.
+    expect(knowledgeListingParagraph([concept("syllabus", "Syllabus")], "   ").trim().endsWith(KNOWLEDGE_INSTRUCTION)).toBe(true);
   });
   it("truncates past the cap and says how many were omitted", () => {
     const many = Array.from({ length: 400 }, (_, i) => concept(`d/c-${i}`, `Concept ${i}`, "x".repeat(40)));

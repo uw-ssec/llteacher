@@ -37,6 +37,7 @@ export interface LlmConfigRecord {
   fallbackLlmConfigId: string | null;
   isDefault: boolean;
   isActive: boolean;
+  knowledgeEnabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -81,6 +82,7 @@ const CONFIG_COLUMNS = {
   fallbackLlmConfigId: llmConfigs.fallbackLlmConfigId,
   isDefault: llmConfigs.isDefault,
   isActive: llmConfigs.isActive,
+  knowledgeEnabled: llmConfigs.knowledgeEnabled,
   createdAt: llmConfigs.createdAt,
   updatedAt: llmConfigs.updatedAt,
 };
@@ -171,6 +173,7 @@ export interface LlmConfigInput {
   fallbackLlmConfigId: string | null;
   isActive: boolean;
   isDefault: boolean;
+  knowledgeEnabled: boolean;
 }
 
 /** Promotes one config to the org default, clearing whichever held it.
@@ -232,6 +235,7 @@ export async function createLlmConfig(
       fallbackLlmConfigId: input.fallbackLlmConfigId,
       isActive: input.isActive,
       isDefault: false,
+      knowledgeEnabled: input.knowledgeEnabled,
     })
     .returning({ id: llmConfigs.id });
 
@@ -263,6 +267,7 @@ export async function updateLlmConfig(
       temperature: input.temperature,
       maxCompletionTokens: input.maxCompletionTokens,
       fallbackLlmConfigId: input.fallbackLlmConfigId,
+      knowledgeEnabled: input.knowledgeEnabled,
       isActive: input.isActive,
       updatedAt: new Date(),
     })
@@ -360,6 +365,7 @@ export async function cloneLlmConfig(
       fallbackLlmConfigId: source.fallbackLlmConfigId,
       isActive: source.isActive,
       isDefault: false,
+      knowledgeEnabled: source.knowledgeEnabled,
     })
     .returning({ id: llmConfigs.id });
   return getLlmConfig(db, scope, created!.id);

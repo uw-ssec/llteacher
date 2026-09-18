@@ -32,6 +32,7 @@
    -------------------------------------------------------------------------- */
 
 import type {
+  KnowledgeInstructionPayload,
   AddTaResultPayload,
   CourseTaPayload,
   DocumentLinksPayload,
@@ -477,6 +478,27 @@ export const apiClient = {
     materialDownloadUrl: (courseId: string, materialId: string) =>
       `/api/courses/${encode(courseId)}/materials/${encode(materialId)}/download`,
     exportUrl: (courseId: string) => `/api/courses/${encode(courseId)}/knowledge/export`,
+    /** The course's "when to search" guidance for the tutor, with the default
+     *  it replaces. Lives on the Knowledge tab; never part of a base prompt. */
+    getInstruction: (courseId: string, opts: RequestOptions) =>
+      request<KnowledgeInstructionPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/instruction`,
+        { method: "GET" },
+        opts,
+      ),
+    setInstruction: (courseId: string, instruction: string | null, opts: RequestOptions) =>
+      request<KnowledgeInstructionPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/instruction`,
+        { method: "PUT", body: JSON.stringify({ instruction }) },
+        opts,
+      ),
+    /** Makes the text the default for every course in the organisation. */
+    setInstructionDefault: (courseId: string, instruction: string | null, opts: RequestOptions) =>
+      request<KnowledgeInstructionPayload>(
+        `/api/courses/${encode(courseId)}/knowledge/instruction/default`,
+        { method: "PUT", body: JSON.stringify({ instruction }) },
+        opts,
+      ),
     /** Same search the student-facing tutor tools call, so what an
      *  instructor finds here is what the tutor can find. */
     search: (courseId: string, q: string, opts: RequestOptions, dir?: string) =>

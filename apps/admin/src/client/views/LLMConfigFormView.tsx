@@ -50,6 +50,9 @@ export interface LLMConfigFormValues {
   /** #98: the config to fall back to when this one's provider fails.
    *  One level, never a chain -- see streamWithFallback. */
   fallbackLlmConfigId: string | null;
+  /** Whether a tutor on this config may search the course knowledge base.
+   *  What the tutor is told about searching lives on the Knowledge tab. */
+  knowledgeEnabled: boolean;
 }
 
 export interface LLMConfigFormViewProps {
@@ -126,6 +129,7 @@ export function LLMConfigFormView({
     isDefault: initialConfig?.isDefault ?? false,
     isActive: initialConfig?.isActive ?? true,
     fallbackLlmConfigId: initialConfig?.fallbackLlmConfigId ?? null,
+    knowledgeEnabled: initialConfig?.knowledgeEnabled ?? true,
   });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -482,6 +486,21 @@ export function LLMConfigFormView({
               <span>
                 Inactive configurations stay on record but can&apos;t be selected for new
                 homeworks.
+              </span>
+            </span>
+          </label>
+
+          <label className="admin-form-check">
+            <input
+              type="checkbox"
+              checked={values.knowledgeEnabled}
+              onChange={(e) => set("knowledgeEnabled", e.target.checked)}
+            />
+            <span className="admin-form-check__label">
+              Let the tutor search the course knowledge base
+              <span>
+                Off makes this a closed-book tutor: it is not told the knowledge base exists.
+                What it is told when on is set on the Knowledge tab, not here.
               </span>
             </span>
           </label>

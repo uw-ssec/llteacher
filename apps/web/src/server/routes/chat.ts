@@ -79,6 +79,7 @@
    hardcoded -- see resolveLLMConfig's own call site below.
    -------------------------------------------------------------------------- */
 
+import { getKnowledgeInstruction } from "../repositories/courses";
 import type { Context } from "hono";
 import {
   streamText,
@@ -1604,7 +1605,6 @@ export async function chatHandler(c: Context<AppEnv>) {
   } catch (err) {
     logServerError("chatHandler.knowledge", err, { courseId: conv.courseId });
   }
-  const knowledgeListing = knowledgeListingParagraph(knowledgeConcepts);
   const openedConcepts = new Map<string, string>();
 
   // #317 review, #325: `isDefaultPrompt` tracks whether resolution ever
@@ -1985,6 +1985,22 @@ export async function chatHandler(c: Context<AppEnv>) {
   // the prompt now describing the catalog, two independent
   // toolsForConversation calls could describe a different set than the model
   // was actually offered the moment either call site's arguments drifted.
+  // The config's knowledge switch (default on). Off means no listing, no
+  // instruction, and no tools this turn: a closed-book config must not show
+  // the model documents it cannot open. When on, the course's own "when to
+  // search" text replaces the default; a lookup failure keeps the default
+  // rather than failing the turn.
+  let knowledgeInstruction: string | null = null;
+  if (resolvedLLMConfig.knowledgeEnabled) {
+    try {
+      knowledgeInstruction = await getKnowledgeInstruction(db, conv.courseId);
+    } catch (err) {
+      logServerError("chatHandler.knowledgeInstruction", err, { courseId: conv.courseId });
+    }
+  }
+  const knowledgeListing = resolvedLLMConfig.knowledgeEnabled
+    ? knowledgeListingParagraph(knowledgeConcepts, knowledgeInstruction)
+    : "";
   const turnTools = toolsForConversation(conv.sectionId, {
     withholdRequestHint: isHintGranted,
     withholdKnowledge: knowledgeListing === "",

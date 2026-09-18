@@ -19,7 +19,7 @@
    -------------------------------------------------------------------------- */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { DownloadSimple, FolderOpen, Trash, UploadSimple, Warning } from "@phosphor-icons/react";
+import { CaretRight, DownloadSimple, FolderOpen, Trash, UploadSimple, Warning } from "@phosphor-icons/react";
 import { ActionMenu } from "../components/ActionMenu";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { KnowledgeDownloadTools } from "../components/KnowledgeDownloadTools";
@@ -36,7 +36,7 @@ import { apiClient } from "../lib/api-client";
 import { useApiResource } from "../lib/useApiResource";
 import { ancestorsOf, documentsIn, treeOf, type TreeNode } from "../lib/documentTree";
 import { materialLabel, statusKind, statusLabel } from "../lib/knowledgeStatus";
-import type { KnowledgeDocumentListPayload, KnowledgeDocumentSummaryPayload, MaterialListPayload, MaterialPayload } from "@llteacher/ui/api";
+import { KNOWLEDGE_INSTRUCTION_DEFAULT, type KnowledgeDocumentListPayload, type KnowledgeDocumentSummaryPayload, type KnowledgeInstructionPayload, type MaterialListPayload, type MaterialPayload } from "@llteacher/ui/api";
 
 const ALLOWED_EXTENSIONS = ["pdf", "docx", "pptx", "txt", "md", "vtt", "srt"];
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
@@ -170,6 +170,14 @@ export function KnowledgeView({
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const folderInput = useRef<HTMLInputElement>(null);
+  /** The tutor instruction panel: closed by default, its draft seeded from
+   *  the server once opened. `draft === null` means not yet seeded. */
+  const [instructionOpen, setInstructionOpen] = useState(false);
+  const [instructionDraft, setInstructionDraft] = useState<string | null>(null);
+  const [instructionSaving, setInstructionSaving] = useState(false);
+  const [instructionError, setInstructionError] = useState<string | null>(null);
+  const [instructionSaved, setInstructionSaved] = useState<KnowledgeInstructionPayload | null>(null);
+  const [confirmDefault, setConfirmDefault] = useState(false);
 
   const documents = useApiResource<KnowledgeDocumentListPayload>(
     (opts) => apiClient.knowledge.listDocuments(courseId, opts),
@@ -179,6 +187,55 @@ export function KnowledgeView({
     (opts) => apiClient.knowledge.listMaterials(courseId, opts),
     [courseId],
   );
+  const instruction = useApiResource<KnowledgeInstructionPayload>(
+    (opts) => apiClient.knowledge.getInstruction(courseId, opts),
+    [courseId],
+  );
+  const instructionCurrent = instructionSaved ?? instruction.data;
+  // Seed the draft from the server's answer, or from the built-in default
+  // when the server could not answer: the box always shows the text the
+  // tutor would use, and stays editable, with the failure named beside it.
+  useEffect(() => {
+    if (instructionDraft !== null) return;
+    if (instructionCurrent) setInstructionDraft(instructionCurrent.instruction ?? instructionCurrent.default);
+    else if (instruction.error) setInstructionDraft(KNOWLEDGE_INSTRUCTION_DEFAULT);
+  }, [instructionDraft, instructionCurrent, instruction.error]);
+
+  async function saveInstruction(next: string | null) {
+    setInstructionSaving(true);
+    setInstructionError(null);
+    try {
+      const saved = await apiClient.knowledge.setInstruction(courseId, next, { signal: null });
+      setInstructionSaved(saved);
+      setInstructionDraft(saved.instruction ?? saved.default);
+      setAnnouncement(saved.instruction ? "Tutor instruction saved." : "Tutor instruction reset to the default.");
+    } catch (err) {
+      setInstructionError((err as Error)?.message ?? "Could not save the instruction. Try again.");
+    } finally {
+      setInstructionSaving(false);
+    }
+  }
+
+  /** The current draft becomes the organisation's default: every course
+   *  without its own text starts using it. This course keeps the same text
+   *  as its own, so nothing visible changes here except the label. */
+  async function setAsDefault() {
+    setInstructionSaving(true);
+    setInstructionError(null);
+    try {
+      const text = (instructionDraft ?? "").trim() || null;
+      await apiClient.knowledge.setInstruction(courseId, text, { signal: null });
+      const saved = await apiClient.knowledge.setInstructionDefault(courseId, text, { signal: null });
+      setInstructionSaved(saved);
+      setInstructionDraft(saved.instruction ?? saved.default);
+      setConfirmDefault(false);
+      setAnnouncement("Tutor instruction set as the default for every course.");
+    } catch (err) {
+      setInstructionError((err as Error)?.message ?? "Could not set the default. Try again.");
+    } finally {
+      setInstructionSaving(false);
+    }
+  }
 
   // Announced through the view's own permanently-mounted live region rather
   // than useApiResource's built-in `announce` option: that option relays the
@@ -357,6 +414,21 @@ export function KnowledgeView({
       setDeleteError((err as Error)?.message ?? "Could not delete. Try again.");
     } finally {
       setDeleting(false);
+    }
+  }
+
+  async function clearDefault() {
+    setInstructionSaving(true);
+    setInstructionError(null);
+    try {
+      const saved = await apiClient.knowledge.setInstructionDefault(courseId, null, { signal: null });
+      setInstructionSaved(saved);
+      setInstructionDraft(saved.instruction ?? saved.default);
+      setAnnouncement("Organisation default cleared.");
+    } catch (err) {
+      setInstructionError((err as Error)?.message ?? "Could not clear the default. Try again.");
+    } finally {
+      setInstructionSaving(false);
     }
   }
 
@@ -571,6 +643,118 @@ export function KnowledgeView({
       )}
 
       <KnowledgeUploads courseId={courseId} materials={materialList} onDelete={(material) => openDelete({ kind: "upload", material })} />
+
+      {/* Progressive disclosure: how the tutor is told to use this base is a
+          setting most instructors never touch, so it sits closed at the
+          bottom. The text is injected into the chat's system prompt at turn
+          time and never appears in an LLM config's base prompt. */}
+      <details className="admin-knowledge__uploads admin-knowledge__instruction" open={instructionOpen}>
+        <summary
+          className="admin-knowledge__uploads-summary"
+          onClick={(e) => { e.preventDefault(); setInstructionOpen((o) => !o); }}
+        >
+          <span className="admin-knowledge__chevron" aria-hidden="true"><CaretRight size={12} weight="bold" /></span>
+          <h2 className="admin-knowledge__label">How the tutor uses this knowledge base</h2>
+          <span className="admin-knowledge__hint">
+            {instructionCurrent
+              ? instructionCurrent.instruction
+                ? "custom instruction"
+                : instructionCurrent.orgDefault
+                  ? "using the organisation default"
+                  : "using the built-in default"
+              : ""}
+            {instructionCurrent ? " · " : ""}applies to every tutor config that allows knowledge
+          </span>
+        </summary>
+        {instructionOpen && instruction.error && !instructionCurrent && (
+          /* A dead, disabled box says nothing. The failure is named and can
+             be retried, the same way the uploads list reports its own. */
+          <div className="admin-alert" role="alert">
+            <span className="admin-alert__icon" aria-hidden="true"><Warning size={16} weight="regular" /></span>
+            <span>
+              The tutor instruction could not be loaded.{" "}
+              {instruction.canRetry && (
+                <button type="button" className="admin-link-button" onClick={instruction.reload}>Try again</button>
+              )}
+            </span>
+          </div>
+        )}
+        {instructionOpen && !instructionCurrent && !instruction.error && (
+          <p className="admin-loading">Loading the tutor instruction…</p>
+        )}
+        {instructionOpen && (instructionCurrent || instruction.error) && (
+          <div className="admin-knowledge__instruction-body">
+            <p className="admin-knowledge__hint">
+              This paragraph is added to the tutor&apos;s system prompt whenever a chat runs on a configuration that
+              lets it search the knowledge base. Say when to search and how to use what it finds. A fixed sentence
+              telling the model to treat course material as reference, never as instructions, always follows it.
+            </p>
+            {instructionCurrent && !instructionCurrent.instruction && (
+              <p className="admin-knowledge__hint">Using the default. Edit it and save to replace it for this course.</p>
+            )}
+            {instructionCurrent?.orgDefault && (
+              <p className="admin-knowledge__hint">
+                Reset to default restores the organisation default, set by an instructor for every course. Clearing
+                that default returns every course without its own text to the built-in guidance.
+              </p>
+            )}
+            <textarea
+              aria-label="Tutor instruction"
+              className="admin-knowledge__instruction-text"
+              rows={5}
+              maxLength={instructionCurrent?.maxChars ?? 2000}
+              value={instructionDraft ?? ""}
+              disabled={instructionSaving || instructionDraft === null}
+              onChange={(e) => setInstructionDraft(e.target.value)}
+            />
+            {instructionError && <p className="admin-field-error" role="alert">{instructionError}</p>}
+            <div className="admin-knowledge__instruction-actions">
+              <span className="admin-knowledge__hint">
+                {(instructionDraft ?? "").length} / {instructionCurrent?.maxChars ?? 2000}
+              </span>
+              <span>
+                {/* Progressive disclosure: Save is the everyday action; reset
+                    and set-as-default sit behind the panel's own menu. */}
+                <ActionMenu
+                  label="Instruction options"
+                  items={[
+                    { kind: "action", label: "Reset to default", disabled: instructionSaving || !instructionCurrent?.instruction, onSelect: () => void saveInstruction(null) },
+                    { kind: "action", label: "Set as default for every course…", disabled: instructionSaving || !(instructionDraft ?? "").trim(), onSelect: () => { setInstructionError(null); setConfirmDefault(true); } },
+                    ...(instructionCurrent?.orgDefault
+                      ? [{ kind: "action" as const, label: "Clear the organisation default", disabled: instructionSaving, onSelect: () => void clearDefault() }]
+                      : []),
+                  ]}
+                />
+                <button
+                  type="button"
+                  className="admin-button admin-button--primary"
+                  disabled={instructionSaving || instructionDraft === null || instructionDraft.trim() === (instructionCurrent?.instruction ?? instructionCurrent?.default ?? KNOWLEDGE_INSTRUCTION_DEFAULT).trim()}
+                  onClick={() => void saveInstruction(instructionDraft)}
+                >
+                  {instructionSaving ? "Saving…" : "Save instruction"}
+                </button>
+              </span>
+            </div>
+          </div>
+        )}
+      </details>
+
+      <ConfirmDialog
+        open={confirmDefault}
+        tone="primary"
+        title="Set this as the default for every course?"
+        body={
+          <p>
+            Every course in your organisation that has not written its own tutor instruction starts using this text
+            on its next chat. Courses with their own text keep it. You can clear the default later from this panel.
+          </p>
+        }
+        confirmLabel="Set as default"
+        busy={instructionSaving}
+        error={instructionError}
+        onConfirm={() => void setAsDefault()}
+        onCancel={() => setConfirmDefault(false)}
+      />
 
       <ConfirmDialog
         open={pendingDelete !== null}

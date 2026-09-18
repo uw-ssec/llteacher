@@ -25,10 +25,13 @@ export type ConfirmDialogProps = {
   /** The exact phrase the instructor must type before confirm enables. */
   typeToConfirm?: string;
   error?: string | null;
+  /** "danger" (default) for deletes; "primary" for a consequential but
+   *  reversible change, such as setting a default for every course. */
+  tone?: "danger" | "primary";
 };
 
 export function ConfirmDialog({
-  open, title, body, confirmLabel, onConfirm, onCancel, busy = false, checkbox, typeToConfirm, error,
+  open, title, body, confirmLabel, onConfirm, onCancel, busy = false, checkbox, typeToConfirm, error, tone = "danger",
 }: ConfirmDialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -91,7 +94,7 @@ export function ConfirmDialog({
           <button ref={cancelRef} type="button" className="admin-button admin-button--ghost" disabled={busy} onClick={onCancel}>
             Cancel
           </button>
-          <button type="button" className="admin-button admin-button--danger" disabled={busy || !phraseOk} onClick={onConfirm}>
+          <button type="button" className={tone === "danger" ? "admin-button admin-button--danger" : "admin-button admin-button--primary"} disabled={busy || !phraseOk} onClick={onConfirm}>
             {busy ? `${confirmLabel.replace(/e$/, "")}ing…` : confirmLabel}
           </button>
         </div>

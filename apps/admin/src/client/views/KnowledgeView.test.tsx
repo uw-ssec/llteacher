@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, fireEvent, within } from "@testing-library/react";
 import { KnowledgeView } from "./KnowledgeView";
+import { KNOWLEDGE_INSTRUCTION_DEFAULT } from "@llteacher/ui/api";
 
 afterEach(cleanup);
 // Belt-and-suspenders: if a fake-timer test's assertion throws before it
@@ -66,6 +67,15 @@ const MATERIALS = [
 function stubFetch(overrides: Record<string, unknown> = {}) {
   const mock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input);
+    if (url.endsWith("/knowledge/instruction/default") && _init?.method === "PUT") {
+      const text = JSON.parse(String(_init.body)).instruction;
+      return new Response(JSON.stringify({ instruction: text, orgDefault: text, default: text ?? "Default guidance.", builtin: "Default guidance.", maxChars: 2000 }), { status: 200 });
+    }
+    if (url.endsWith("/knowledge/instruction")) {
+      return _init?.method === "PUT"
+        ? new Response(JSON.stringify({ instruction: JSON.parse(String(_init.body)).instruction, orgDefault: null, default: "Default guidance.", builtin: "Default guidance.", maxChars: 2000 }), { status: 200 })
+        : new Response(JSON.stringify(overrides.instruction ?? { instruction: null, orgDefault: null, default: "Default guidance.", builtin: "Default guidance.", maxChars: 2000 }), { status: 200 });
+    }
     if (_init?.method === "DELETE") {
       return url.includes("/materials/")
         ? new Response(null, { status: 204 })
@@ -492,8 +502,8 @@ describe("KnowledgeView", () => {
     });
     render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
     await vi.advanceTimersByTimeAsync(12_000);
-    // Two initial loads (documents + materials) and nothing more.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Three initial loads (documents, materials, tutor instruction) and nothing more.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     vi.useRealTimers();
   });
 
@@ -502,7 +512,7 @@ describe("KnowledgeView", () => {
     const fetchMock = stubFetch({ materials: { materials: [MATERIALS[1]] } });
     render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
     for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(1_000);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     vi.useRealTimers();
   });
 
@@ -525,8 +535,8 @@ describe("KnowledgeView", () => {
     for (let i = 0; i < 10; i++) {
       await vi.advanceTimersByTimeAsync(1_000);
     }
-    // Two initial loads, plus at least one poll tick's reload of both.
-    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4);
+    // Three initial loads, plus at least one poll tick's reload of documents and materials.
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(5);
     vi.useRealTimers();
   });
 
@@ -638,5 +648,80 @@ describe("KnowledgeView", () => {
       expect(String(del?.[0])).toBe("/api/courses/c1/knowledge");
       expect(JSON.parse(String((del?.[1] as RequestInit).body))).toEqual({ confirm: "DELETE", withUploads: true });
     });
+  });
+
+  it("keeps the tutor instruction behind a closed disclosure, prefilled with the default", async () => {
+    stubFetch();
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+    expect(screen.queryByRole("textbox", { name: /tutor instruction/i })).toBeNull();
+    fireEvent.click(screen.getByText(/How the tutor uses this knowledge base/));
+    const box = (await screen.findByRole("textbox", { name: /tutor instruction/i })) as HTMLTextAreaElement;
+    expect(box.value).toBe("Default guidance.");
+    expect(screen.getByText(/Using the default/)).toBeTruthy();
+  });
+
+  it("saves an edited instruction and restores the default", async () => {
+    const fetchMock = stubFetch({ instruction: { instruction: "Search the notes first.", orgDefault: null, default: "Default guidance.", builtin: "Default guidance.", maxChars: 2000 } });
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+    fireEvent.click(screen.getByText(/How the tutor uses this knowledge base/));
+    const box = (await screen.findByRole("textbox", { name: /tutor instruction/i })) as HTMLTextAreaElement;
+    expect(box.value).toBe("Search the notes first.");
+    fireEvent.change(box, { target: { value: "Always search before answering." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save instruction" }));
+    await waitFor(() => {
+      const put = fetchMock.mock.calls.find(([u, i]) => String(u).endsWith("/knowledge/instruction") && (i as RequestInit)?.method === "PUT");
+      expect(JSON.parse(String((put?.[1] as RequestInit).body))).toEqual({ instruction: "Always search before answering." });
+    });
+    // Reset lives behind the panel's own More menu, not as a third button.
+    expect(screen.queryByRole("button", { name: /Reset to default/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Instruction options" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Reset to default/ }));
+    await waitFor(() => {
+      const puts = fetchMock.mock.calls.filter(([u, i]) => String(u).endsWith("/knowledge/instruction") && (i as RequestInit)?.method === "PUT");
+      expect(JSON.parse(String((puts.at(-1)?.[1] as RequestInit).body))).toEqual({ instruction: null });
+    });
+    await waitFor(() => expect((screen.getByRole("textbox", { name: /tutor instruction/i }) as HTMLTextAreaElement).value).toBe("Default guidance."));
+  });
+
+  it("says when the tutor instruction could not load, instead of showing a dead box", async () => {
+    const mock = stubFetch();
+    mock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/knowledge/instruction")) return new Response(JSON.stringify({ error: "nope" }), { status: 500 });
+      if (url.includes("/knowledge/documents")) return new Response(JSON.stringify({ documents: DOCUMENTS }), { status: 200 });
+      if (url.includes("/materials")) return new Response(JSON.stringify({ materials: MATERIALS }), { status: 200 });
+      return new Response(null, { status: 404 });
+    });
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+    fireEvent.click(screen.getByText(/How the tutor uses this knowledge base/));
+    await waitFor(() => screen.getByText(/instruction could not be loaded/i));
+    expect(screen.getByRole("button", { name: /Try again/ })).toBeTruthy();
+    // The built-in default ships with the console, so the box is never empty:
+    // it shows the text the tutor would use today and stays editable.
+    const box = screen.getByRole("textbox", { name: /tutor instruction/i }) as HTMLTextAreaElement;
+    expect(box.value).toBe(KNOWLEDGE_INSTRUCTION_DEFAULT);
+    expect(box.disabled).toBe(false);
+  });
+
+  it("sets the current text as the default for every course, after a confirmation", async () => {
+    const fetchMock = stubFetch();
+    render(<KnowledgeView courseId="c1" onOpenDocument={vi.fn()} />);
+    await waitFor(() => screen.getByText("Syllabus"));
+    fireEvent.click(screen.getByText(/How the tutor uses this knowledge base/));
+    const box = (await screen.findByRole("textbox", { name: /tutor instruction/i })) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "Search first, always." } });
+    fireEvent.click(screen.getByRole("button", { name: "Instruction options" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Set as default/ }));
+    await screen.findByRole("dialog", { name: /default for every course/i });
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/instruction/default"))).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Set as default" }));
+    await waitFor(() => {
+      const put = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/knowledge/instruction/default"));
+      expect(JSON.parse(String((put?.[1] as RequestInit).body))).toEqual({ instruction: "Search first, always." });
+    });
+    await waitFor(() => expect(screen.getByText(/organisation default/i)).toBeTruthy());
   });
 });

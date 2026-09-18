@@ -24,7 +24,11 @@ import {
   exportKnowledgeHandler,
   deleteDirectoryHandler,
   deleteKnowledgeBaseHandler,
+  getKnowledgeInstructionHandler,
+  putKnowledgeInstructionHandler,
+  putKnowledgeInstructionDefaultHandler,
 } from "./knowledgeDocuments";
+import { KNOWLEDGE_INSTRUCTION } from "../../lib/prompts";
 import { memoryObjectStore } from "../storage/objectStore";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
@@ -46,7 +50,17 @@ vi.mock("../knowledge/service", async (importOriginal) => {
 });
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 const getCourseTitle = vi.fn();
-vi.mock("../repositories/courses", () => ({ getCourseTitle: (...a: unknown[]) => getCourseTitle(...a) }));
+const getKnowledgeInstructionParts = vi.fn();
+const setKnowledgeInstruction = vi.fn();
+const setKnowledgeInstructionDefault = vi.fn();
+vi.mock("../repositories/courses", () => ({
+  getCourseTitle: (...a: unknown[]) => getCourseTitle(...a),
+  getKnowledgeInstructionParts: (...a: unknown[]) => getKnowledgeInstructionParts(...a),
+  setKnowledgeInstruction: (...a: unknown[]) => setKnowledgeInstruction(...a),
+  setKnowledgeInstructionDefault: (...a: unknown[]) => setKnowledgeInstructionDefault(...a),
+}));
+const getOrgScopeForCourse = vi.fn();
+vi.mock("../repositories/organizations", () => ({ getOrgScopeForCourse: (...a: unknown[]) => getOrgScopeForCourse(...a) }));
 const deleteMaterialByDocumentPath = vi.fn();
 const deleteMaterialsByDocumentPrefix = vi.fn();
 const deleteAllMaterials = vi.fn();
@@ -103,6 +117,9 @@ function appWith(role: "instructor" | "student" = "instructor") {
   a.get("/api/courses/:courseId/knowledge/export", exportKnowledgeHandler);
   a.delete("/api/courses/:courseId/knowledge/directories/:directory", deleteDirectoryHandler);
   a.delete("/api/courses/:courseId/knowledge", deleteKnowledgeBaseHandler);
+  a.get("/api/courses/:courseId/knowledge/instruction", getKnowledgeInstructionHandler);
+  a.put("/api/courses/:courseId/knowledge/instruction", putKnowledgeInstructionHandler);
+  a.put("/api/courses/:courseId/knowledge/instruction/default", putKnowledgeInstructionDefaultHandler);
   return a;
 }
 function app() {
@@ -272,6 +289,49 @@ describe("knowledge document routes over the bundle", () => {
     expect(await keep.json()).toEqual({ documents: 1121, uploads: 0 });
     expect(deleteAllMaterials).not.toHaveBeenCalled();
     expect((await appWith("student").request(`/api/courses/${COURSE_ID}/knowledge`, json({ confirm: "DELETE" }), TEST_ENV)).status).toBe(403);
+  });
+
+  it("reads the course's tutor instruction with the default it would fall back to", async () => {
+    getKnowledgeInstructionParts.mockResolvedValue({ instruction: null, orgDefault: null });
+    const res = await app().request(`/api/courses/${COURSE_ID}/knowledge/instruction`, {}, TEST_ENV);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ instruction: null, orgDefault: null, default: KNOWLEDGE_INSTRUCTION, builtin: KNOWLEDGE_INSTRUCTION, maxChars: 2000 });
+    // An organisation default becomes what "the default" means for its courses.
+    getKnowledgeInstructionParts.mockResolvedValue({ instruction: "Course text.", orgDefault: "Org text." });
+    expect(await (await app().request(`/api/courses/${COURSE_ID}/knowledge/instruction`, {}, TEST_ENV)).json()).toEqual({
+      instruction: "Course text.", orgDefault: "Org text.", default: "Org text.", builtin: KNOWLEDGE_INSTRUCTION, maxChars: 2000,
+    });
+    expect((await appWith("student").request(`/api/courses/${COURSE_ID}/knowledge/instruction`, {}, TEST_ENV)).status).toBe(403);
+  });
+
+  it("sets and clears the organisation-wide default from a course", async () => {
+    getOrgScopeForCourse.mockResolvedValue("org-1");
+    setKnowledgeInstructionDefault.mockResolvedValue(undefined);
+    getKnowledgeInstructionParts.mockResolvedValue({ instruction: "Course text.", orgDefault: "Course text." });
+    const put = (body: unknown) => app().request(`/api/courses/${COURSE_ID}/knowledge/instruction/default`, { method: "PUT", body: JSON.stringify(body), headers: { "content-type": "application/json" } }, TEST_ENV);
+    const res = await put({ instruction: " Course text. " });
+    expect(res.status).toBe(200);
+    expect(setKnowledgeInstructionDefault).toHaveBeenCalledWith({}, "org-1", "Course text.");
+    expect(await res.json()).toMatchObject({ orgDefault: "Course text.", default: "Course text." });
+    await put({ instruction: null });
+    expect(setKnowledgeInstructionDefault).toHaveBeenLastCalledWith({}, "org-1", null);
+    expect((await put({ instruction: "x".repeat(2001) })).status).toBe(400);
+    getOrgScopeForCourse.mockResolvedValue(null);
+    expect((await put({ instruction: "y" })).status).toBe(403);
+  });
+
+  it("saves, caps, and clears the course's tutor instruction", async () => {
+    const put = (body: unknown) => app().request(`/api/courses/${COURSE_ID}/knowledge/instruction`, { method: "PUT", body: JSON.stringify(body), headers: { "content-type": "application/json" } }, TEST_ENV);
+    setKnowledgeInstruction.mockResolvedValue(undefined);
+    getKnowledgeInstructionParts.mockResolvedValue({ instruction: "Search the notes first.", orgDefault: null });
+    expect((await put({ instruction: "  Search the notes first.  " })).status).toBe(200);
+    expect(setKnowledgeInstruction).toHaveBeenCalledWith({}, COURSE_ID, "Search the notes first.");
+    expect((await put({ instruction: "x".repeat(2001) })).status).toBe(400);
+    expect((await put({ instruction: null })).status).toBe(200);
+    expect(setKnowledgeInstruction).toHaveBeenLastCalledWith({}, COURSE_ID, null);
+    // Blank text means "back to the default", stored as null rather than "".
+    await put({ instruction: "   " });
+    expect(setKnowledgeInstruction).toHaveBeenLastCalledWith({}, COURSE_ID, null);
   });
 
   it("searches with a clamped limit", async () => {

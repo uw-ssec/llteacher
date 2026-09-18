@@ -3,7 +3,8 @@ import { eq } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import { organizations, courses } from "../../db/schema";
-import { getCourseTitle } from "./courses";
+import { getCourseTitle, getKnowledgeInstruction, getKnowledgeInstructionParts, setKnowledgeInstruction, setKnowledgeInstructionDefault } from "./courses";
+import { unsafeCourseScope, unsafeOrgScope } from "./scope";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -34,5 +35,27 @@ describe.skipIf(!DATABASE_URL)("courses repository", () => {
   it("returns the course title, and null for an unknown course", async () => {
     expect(await getCourseTitle(db, courseId)).toBe("STATS 311 · Autumn 2026");
     expect(await getCourseTitle(db, crypto.randomUUID())).toBeNull();
+  });
+
+  it("stores and clears the course's tutor instruction", async () => {
+    const scope = unsafeCourseScope(courseId);
+    expect(await getKnowledgeInstruction(db, courseId)).toBeNull();
+    await setKnowledgeInstruction(db, scope, "Search the notes first.");
+    expect(await getKnowledgeInstruction(db, courseId)).toBe("Search the notes first.");
+    await setKnowledgeInstruction(db, scope, null);
+    expect(await getKnowledgeInstruction(db, courseId)).toBeNull();
+  });
+
+  it("falls back to the organisation's default, and reports both parts", async () => {
+    const scope = unsafeCourseScope(courseId);
+    await setKnowledgeInstruction(db, scope, null);
+    await setKnowledgeInstructionDefault(db, unsafeOrgScope(orgId), "Org text.");
+    expect(await getKnowledgeInstruction(db, courseId)).toBe("Org text.");
+    await setKnowledgeInstruction(db, scope, "Course text.");
+    expect(await getKnowledgeInstruction(db, courseId)).toBe("Course text.");
+    expect(await getKnowledgeInstructionParts(db, courseId)).toEqual({ instruction: "Course text.", orgDefault: "Org text." });
+    await setKnowledgeInstructionDefault(db, unsafeOrgScope(orgId), null);
+    await setKnowledgeInstruction(db, scope, null);
+    expect(await getKnowledgeInstruction(db, courseId)).toBeNull();
   });
 });

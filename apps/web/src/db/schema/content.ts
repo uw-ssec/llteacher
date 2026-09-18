@@ -122,6 +122,11 @@ export const llmConfigs = pgTable(
     // needs a model to run on. Resolution order is documented on
     // resolveLlmConfig in repositories/llmConfigs.ts.
     basePrompt: text("base_prompt").notNull().default(""),
+    /** Whether a tutor running on this config may search the course
+     *  knowledge base. Off removes the listing, the instruction, and the
+     *  tools from the turn -- a closed-book assignment's lever. Default on
+     *  so existing configs keep today's behaviour. */
+    knowledgeEnabled: boolean("knowledge_enabled").notNull().default(true),
     temperature: doublePrecision("temperature").notNull().default(0.7),
     maxCompletionTokens: integer("max_completion_tokens")
       .notNull()

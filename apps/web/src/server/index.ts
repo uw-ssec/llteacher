@@ -86,6 +86,9 @@ import {
   exportKnowledgeHandler,
   deleteDirectoryHandler,
   deleteKnowledgeBaseHandler,
+  getKnowledgeInstructionHandler,
+  putKnowledgeInstructionHandler,
+  putKnowledgeInstructionDefaultHandler,
 } from "./routes/knowledgeDocuments";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
@@ -438,6 +441,9 @@ app.delete(
   requireInstructorOf()(deleteDirectoryHandler),
 );
 app.delete("/api/courses/:courseId/knowledge", requireInstructorOf()(deleteKnowledgeBaseHandler));
+app.get("/api/courses/:courseId/knowledge/instruction", requireInstructorOf()(getKnowledgeInstructionHandler));
+app.put("/api/courses/:courseId/knowledge/instruction", requireInstructorOf()(putKnowledgeInstructionHandler));
+app.put("/api/courses/:courseId/knowledge/instruction/default", requireInstructorOf()(putKnowledgeInstructionDefaultHandler));
 
 // #172 audit (CMP-005): an unmatched /api/* path fell through to the SPA
 // catch-all below, which serves index.html with a 200. A client calling a
