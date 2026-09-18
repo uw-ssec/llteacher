@@ -1,0 +1,22 @@
+{
+  "name": "llteacher-evals",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Answer-leakage / tutor-behavior eval harness (#89). Standalone package -- not Workers runtime code -- that imports apps/web/src/lib/{prompts,ai}.ts directly by relative path to test the REAL prompt builder and LLM client, per this repo's own scale (see README.md).",
+  "scripts": {
+    "typecheck": "tsc -b",
+    "test": "vitest run",
+    "tutor:eval": "tsx tutor-behavior.ts"
+  },
+  "dependencies": {
+    "ai": "5.0.195",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.23.5",
+    "typescript": "^7.0.0",
+    "vitest": "^2.1.0"
+  }
+}

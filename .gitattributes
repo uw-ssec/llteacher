@@ -1,2 +1,5 @@
 # SCM syntax highlighting & preventing 3-way merges
 pixi.lock merge=binary linguist-language=YAML linguist-generated=true -diff
+# #311: drizzle-kit's own generated snapshot/journal output -- not
+# hand-authored, so it shouldn't count toward diffs/blame/language stats.
+apps/web/src/db/migrations/meta/** linguist-generated=true -diff

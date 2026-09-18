@@ -1,66 +1,46 @@
 import { createAuthProvider, type AuthSessionState } from "@llteacher/ui";
 import type { CourseMembershipSummary } from "../../shared/types";
 
-/** #434 review: the context value is `AuthSessionState & WebAuthExtra`, so
- *  this alias was quietly dropping `displayName` from anything that used it.
- *  Nothing imports it today, which is why it went unnoticed -- but an
- *  exported type that does not describe what `useAuth()` returns is a trap
- *  for the first caller that does. Matches apps/admin's counterpart, which
- *  declares the intersection. */
-export type AuthState = AuthSessionState & WebAuthExtra;
-
-/** #294: the signed-in student's own display name, read off GET /api/profile.
- *  The nav used to render a hardcoded `userInitials="AC"` -- initials
- *  belonging to no signed-in user, shown to every student. The data was
- *  already fetched by this provider; only the parse was missing. */
-export interface WebAuthExtra {
-  displayName: string | null;
+/** #294: the two identity fields App.tsx needs to derive real user initials
+ *  for TopNav -- GET /api/profile always returns `email`, but `displayName`
+ *  is nullable for a user who never set one. The staff fields let the app
+ *  land course staff who hold no student membership on the teaching
+ *  workspace without a second request. */
+export interface AuthExtra {
+  email?: string;
+  displayName?: string | null;
   staffOnly: boolean;
-  /** Courses where the caller holds a staff role, already present on the
-   *  profile body this provider fetches -- the teaching workspace lists them
-   *  without a second request. */
+  /** Courses where the caller holds a staff role, from the same profile body. */
   staffCourses: CourseMembershipSummary[];
 }
 
+export type AuthState = AuthSessionState & AuthExtra;
+
 const STAFF_ROLES = ["instructor", "ta", "admin"];
 
-function parseDisplayName(body: unknown): WebAuthExtra {
-  const displayName = (body as { displayName?: unknown } | null)?.displayName;
-  const profile = body as { role?: string; studentStats?: unknown; courses?: unknown } | null;
-  const staffOnly = STAFF_ROLES.includes(profile?.role ?? "") && !profile?.studentStats;
-  const staffCourses = Array.isArray(profile?.courses)
-    ? (profile.courses as CourseMembershipSummary[]).filter((c) => STAFF_ROLES.includes(c.role))
-    : [];
-  return { staffOnly, staffCourses, displayName: typeof displayName === "string" && displayName.trim() !== "" ? displayName : null };
-}
-
-export const { AuthProvider, useAuth } = createAuthProvider<WebAuthExtra>({
-  parseExtra: parseDisplayName,
-  defaultExtra: { displayName: null, staffOnly: false, staffCourses: [] },
+export const { AuthProvider, useAuth } = createAuthProvider<AuthExtra>({
+  defaultExtra: { email: undefined, displayName: null, staffOnly: false, staffCourses: [] },
+  parseExtra: (body) => {
+    const b = body as { email?: unknown; displayName?: unknown; role?: string; studentStats?: unknown; courses?: unknown };
+    const staffOnly = STAFF_ROLES.includes(b.role ?? "") && !b.studentStats;
+    const staffCourses = Array.isArray(b.courses)
+      ? (b.courses as CourseMembershipSummary[]).filter((c) => STAFF_ROLES.includes(c.role))
+      : [];
+    return {
+      email: typeof b.email === "string" ? b.email : undefined,
+      displayName: typeof b.displayName === "string" ? b.displayName : null,
+      staffOnly,
+      staffCourses,
+    };
+  },
 });
 
-/** Two-letter initials for the avatar chip, or null when there is no name to
- *  derive them from -- the chip renders a neutral placeholder rather than
- *  inventing letters (#294).
- *
- *  #434 review: takes the FIRST TWO whitespace-separated parts, matching
- *  apps/admin's two existing call sites exactly -- "Ada Byron Lovelace"
- *  gives "AB". This originally took first+last ("AL"), which is arguably the
- *  better reading of a person's initials but meant the same student saw
- *  different letters in the student nav and the admin console. Agreeing with
- *  the app that already shipped is worth more than being right alone.
- *
- *  It is still a third copy of this logic. Unifying all three in
- *  @llteacher/ui, next to createAuthProvider, and settling which convention
- *  is actually wanted is tracked separately -- doing it here would mean a
- *  behaviour change in apps/admin inside a PR about the student nav. */
-export function initialsFrom(displayName: string | null): string | null {
+/** Two-letter initials for the account pages' avatar, or null when there is
+ *  no name to derive them from. First two whitespace-separated parts, the
+ *  same convention apps/admin uses. */
+export function initialsFrom(displayName: string | null | undefined): string | null {
   if (!displayName) return null;
   const parts = displayName.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return null;
-  return parts
-    .map((p) => p[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
+  return parts.map((p) => p[0]).join("").slice(0, 2).toUpperCase();
 }

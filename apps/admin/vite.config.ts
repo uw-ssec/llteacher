@@ -3,12 +3,15 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
+  base: "/admin/",
   root: "src/client",
   server: {
     port: 2312,
     strictPort: true,
     proxy: {
-      // Both SPAs use the same Node API and preserve the browser origin.
+      // apps/admin shares the Node API with the web SPA. In development,
+      // apps/web's Vite server (port 2311) proxies this request onward to the
+      // Node server; this hop keeps browser cookies same-origin at 2312.
       "/api": {
         target: process.env.LLTEACHER_API_URL ?? "http://localhost:8080",
         changeOrigin: false,
@@ -20,7 +23,7 @@ export default defineConfig({
     strictPort: true,
   },
   build: {
-    outDir: "../../dist/client",
+    outDir: "../../dist/admin",
     emptyOutDir: true,
   },
   plugins: [react(), tailwindcss()],

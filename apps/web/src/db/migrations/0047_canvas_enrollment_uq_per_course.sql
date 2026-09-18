@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS "course_memberships_canvas_enrollment_uq";--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "course_memberships_canvas_enrollment_uq" ON "course_memberships" USING btree ("course_id","canvas_enrollment_id") WHERE "course_memberships"."canvas_enrollment_id" IS NOT NULL;

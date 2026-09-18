@@ -1,0 +1,8 @@
+config:
+  aws:region: us-east-1
+  llteacher-infra:environment: local
+  llteacher-infra:domainName: llteacher.local
+  llteacher-infra:flociEndpoint: http://localhost:4566
+  llteacher-infra:imageTag: local
+  llteacher-infra:provisionService: "true"
+  llteacher-infra:deployApp: "true"

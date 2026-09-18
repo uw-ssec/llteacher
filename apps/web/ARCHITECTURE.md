@@ -224,6 +224,84 @@ against an erroring model and would catch a `step-start` regression in CI;
 the replay-chunk shapes have thinner coverage, so treat any bump of these
 three packages as a deliberate, reviewed change, not a routine update.
 
+## Capacity Assumptions
+
+#311: this project has no load-tested numbers yet -- everything below is a
+deliberate, written-down judgment call for a **pilot-scale university course
+tool**, not a measured limit. Treat it as the starting assumption to revisit
+once real usage exists, not as a spec.
+
+**Pilot-scale assumption.** ~50 concurrent students actively chatting per
+course section, ~10 sections per organization, a handful of organizations in
+the pilot. That puts peak concurrent in-flight chat turns for the whole
+deployment in the low hundreds, not thousands -- `RATE_LIMIT_MAX_PER_MINUTE`
+(`repositories/rateLimits.ts`, 20 requests/user/minute) is sized to catch a
+runaway client at that scale, not to shape normal usage; it would need
+revisiting before a scale-up.
+
+**Per-course/global model budget.** No hard per-course or per-organization
+spend cap exists yet -- `llm_call_logs` records cost per call
+(`finalizeAssistantTurn`) so spend is observable after the fact, but nothing
+stops a course from exceeding a budget in real time. `MAX_TURN_STEPS` (5,
+`shared/chat-limits.ts`) and `MAX_HISTORY_MESSAGES` (40, same file) bound the
+worst case for a SINGLE turn's cost, not a course's aggregate. A real budget
+enforcement point (reject or degrade once a course crosses a monthly spend
+threshold) is unbuilt; at pilot scale, `llm_call_logs`-based alerting is the
+accepted stand-in.
+
+**The `messages` row-count threshold for the online migration pattern.**
+"Migrations Touching `messages`" above already names the *mechanism*
+(nullable add, backfill, `SET NOT NULL`, avoid non-`CONCURRENTLY` DDL on a
+populated table); the number that mechanism becomes mandatory at is a
+judgment call: **treat `messages` as needing the online pattern once it
+passes roughly 1,000,000 rows or one full academic term of pilot usage,
+whichever comes first.** #313's own estimate (~600K rows/cohort/term for the
+much smaller `chat_rate_limit_windows` table) is the closest existing
+data point; `messages` grows faster (every turn writes at least one row,
+often two) so a single term at pilot scale plausibly crosses six figures on
+its own. Below that line, an ordinary blocking DDL migration during a
+maintenance window is an accepted risk; above it, treat 0018/0021/0023's
+nullable-backfill-`NOT NULL` shape and `CONCURRENTLY` index builds as
+required, not optional.
+
+**Rail/transcript page caps.** Three independent caps, deliberately not
+unified into one constant because they bound different things:
+`DEFAULT_CONVERSATIONS_PAGE_SIZE` (50, `repositories/conversations.ts`) --
+the tutor rail's own conversation list; `DEFAULT_MESSAGES_PAGE_SIZE` (200,
+same file) -- one page of a single conversation's transcript, paged further
+back via `before` (#280); `MAX_HISTORY_MESSAGES` (40, `shared/chat-limits.ts`)
+-- how much of that transcript the MODEL actually sees on a turn, independent
+of how much the student can scroll. All three are comfortably above what a
+real conversation or rail is expected to hold at pilot scale; none has been
+tested against a pathological outlier (a single conversation with tens of
+thousands of messages).
+
+**Neon compute size vs. round-trips per turn.** `chat.ts`'s "#279 DB
+round-trip budget" tests (`routes/chat.test.ts`) pin a normal turn at five
+distinct repository round-trips before the model call (rate-limit
+reservation, ownership read, lock claim, history read, message insert) plus
+one more `db.batch`/`db.transaction` group in `finalizeAssistantTurn` after
+it -- roughly six Neon HTTP round-trips per turn on the production
+(`neon-http`) driver, each its own request (no connection pooling, no
+pipelining -- see `db/client.ts`). At the pilot concurrency assumed above
+(low hundreds of simultaneous turns, human-paced, not a burst), Neon's
+smallest autoscaling compute size is expected to be sufficient; this has not
+been load-tested. Revisit compute sizing before increasing either the
+concurrent-student assumption above or `MAX_TURN_STEPS` (more steps per turn
+multiplies round-trips, not just token cost).
+
+**`messages` retention.** No deletion job exists. Decision: **kept
+indefinitely for now; revisit once the table crosses the same
+~1,000,000-row / one-term threshold named above**, at which point an
+archival or cold-storage strategy (not a straight delete -- `messages` is
+graded-work evidence, per "Section Submissions Are One Per (Student,
+Section)" below) should be designed rather than bolted on reactively.
+
+**`db/migrations/meta/`** (drizzle-kit's own generated snapshot/journal
+files) is marked `linguist-generated` in `.gitattributes` -- it's
+machine-written output from `drizzle-kit generate`, not hand-authored, and
+diffing it in review or attributing it in `git blame` is noise.
+
 ## Client Architecture Notes
 
 Two decisions live in code comments in `apps/web/src/client/` rather than

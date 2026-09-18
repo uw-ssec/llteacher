@@ -320,6 +320,16 @@ export function StudentsView({ courseId, courseTitle }: { courseId: string; cour
                                   name on file)" for someone who simply has
                                   not signed in reads as a data problem. */}
                               {m.displayName || (m.status === "pending" ? m.email.split("@")[0] : "—")}
+                              {/* #61's own acceptance checklist: "Student
+                                  list shows Canvas-synced users with a
+                                  Canvas badge." Static, not a filter --
+                                  .admin-source-badge (styles.css), not
+                                  .admin-chip. */}
+                              {m.fromCanvas && (
+                                <span className="admin-source-badge" style={{ marginLeft: 6 }}>
+                                  Canvas
+                                </span>
+                              )}
                             </span>
                             <span className="admin-submission-row__name-id">{m.email}</span>
                           </span>

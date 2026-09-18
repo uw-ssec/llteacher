@@ -13,8 +13,10 @@ import {
   Books,
   CaretDoubleLeft,
   CaretDoubleRight,
+  CloudArrowDown,
   ClipboardText,
   DownloadSimple,
+  Flag,
   ShieldCheck,
   Sparkle,
   Users,
@@ -24,9 +26,11 @@ import {
 export type AdminNavKey =
   | "homeworks"
   | "submissions"
+  | "feedback"
   | "llm-configs"
   | "students"
   | "ta-permissions"
+  | "canvas"
   | "exports"
   | "knowledge";
 
@@ -65,6 +69,10 @@ type NavItem = {
 const NAV_ITEMS: NavItem[] = [
   { key: "homeworks",    label: "Homeworks",   icon: <BookOpen size={15} weight="regular" />,      description: "Course assignments" },
   { key: "submissions",  label: "Submissions", icon: <ClipboardText size={15} weight="regular" />, description: "Student work" },
+  // #90: grader-tier (requireGraderOf), same tier as Submissions directly
+  // above -- not authorOnly, so a TA sees it too, matching that route's own
+  // GRADER_ROLES gate.
+  { key: "feedback",     label: "Feedback",    icon: <Flag size={15} weight="regular" />,          description: "Flagged tutor responses" },
   // #31: authorOnly since the configs became real. While this list was
   // fixture-driven it was harmless static data for a TA to look at; the
   // routes behind it are requireInstructorOf, so leaving the entry visible
@@ -81,6 +89,11 @@ const NAV_ITEMS: NavItem[] = [
   // labelled Students that listed the one role it does not show.
   { key: "students",     label: "Students",       icon: <Users size={15} weight="regular" />,      description: "Course roster", authorOnly: true },
   { key: "ta-permissions", label: "TA permissions", icon: <ShieldCheck size={15} weight="regular" />, description: "Grant solutions and drafts", authorOnly: true },
+  // #73/#74: the Canvas token is an org-wide credential and the sync is a
+  // roster-changing action, so this is authorOnly alongside Students/TA
+  // permissions -- a TA reads the roster, they do not manage where it
+  // comes from.
+  { key: "canvas",       label: "Canvas",         icon: <CloudArrowDown size={15} weight="regular" />, description: "Token and roster sync", authorOnly: true },
   { key: "exports",      label: "Export",         icon: <DownloadSimple size={15} weight="regular" />, description: "Records and transcripts", authorOnly: true },
 ];
 

@@ -20,6 +20,7 @@ import type { AppEnv } from "../context";
  *  itself via a signature over the request body instead. "Public" here
  *  means "no user session required," not "no auth at all." */
 export const PUBLIC_API_PATHS = new Set([
+  "/api/health",
   "/api/auth/login",
   "/api/auth/callback",
   "/api/auth/logout",

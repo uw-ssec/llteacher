@@ -128,4 +128,31 @@ describe("recordTranscriptAccess", () => {
       }),
     );
   });
+
+  // #90 review, Important #1: routes/feedback.ts's listCourseFeedbackHandler
+  // reuses this exact hook for its own FERPA-relevant list read, widened
+  // with a distinct "feedback-list" action rather than a second audit
+  // helper.
+  it("writes a FEEDBACK_LIST_VIEWED audit event for a feedback-list read, distinct from TRANSCRIPT_LIST_VIEWED", async () => {
+    const db = {} as unknown as Db;
+    const orgScope = unsafeOrgScope("org-1");
+
+    await recordTranscriptAccess(db, orgScope, {
+      viewerId: "viewer-5",
+      courseId: "course-5",
+      action: "feedback-list",
+    });
+
+    expect(recordAuditEvent).toHaveBeenCalledWith(
+      db,
+      orgScope,
+      expect.objectContaining({
+        actorUserId: "viewer-5",
+        action: AUDIT_ACTIONS.FEEDBACK_LIST_VIEWED,
+        targetType: "course",
+        targetId: "course-5",
+      }),
+    );
+    expect(AUDIT_ACTIONS.FEEDBACK_LIST_VIEWED).not.toBe(AUDIT_ACTIONS.TRANSCRIPT_LIST_VIEWED);
+  });
 });

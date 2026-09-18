@@ -1,6 +1,6 @@
 # llteacher-web
 
-TypeScript / React 19 / Vite / Tailwind 4 / Hono / Cloudflare Workers / Drizzle / Neon port of LLteacher.
+TypeScript / React 19 / Vite / Tailwind 4 / Hono / Node.js / Drizzle / PostgreSQL port of LLteacher.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the routes-vs-repositories convention and how tenancy scoping is enforced.
 
@@ -18,61 +18,70 @@ string, pagination cursors, and worked `curl` examples — see:
 ## Setup
 
 1. `npm install`
-2. Copy `.dev.vars.example` to `.dev.vars` and fill in real values.
-3. `npm run db:migrate` (after Drizzle schema exists in Phase 1).
-4. Create `.knowledge`, run `npm run start` for the Node API, then `npm run dev` for Vite.
-   Both SPAs proxy `/api` to `http://localhost:8080`; set `LLTEACHER_API_URL` when using another API port.
+2. Configure the Node process environment. `DATABASE_URL` is required; the
+   production secrets are `OPENROUTER_API_KEY`, `LLMOXIE_API_KEY`,
+   `SESSION_SECRET`, `ENCRYPTION_KEY`, `BLIND_INDEX_KEY`, `WORKOS_API_KEY`,
+   `WORKOS_CLIENT_ID`, and `WORKOS_WEBHOOK_SECRET`. `LLMOXIE_BASE_URL` and
+   `LLM_DEGRADED_MODEL` are optional. Load these through your shell, a local
+   environment manager, or the container runtime; the app does not parse a
+   local environment file itself.
+3. `npm run db:migrate`.
+4. In one terminal, run `npm run node:serve --workspace=llteacher-web` to
+   start the Node API and static server (default port `3000`, or `PORT`).
+5. In another terminal at the repository root, run `npm run dev` once. It
+   starts the web Vite server on `2311` and the admin Vite server on `2312`.
+   Web Vite proxies `/api` to `NODE_API_URL` (default
+   `http://localhost:3000`); admin Vite forwards API requests through that
+   web proxy.
 
-## Node runtime (replaces the Worker)
+## Knowledge base runtime
 
-- Install okf with `brew install okf-memory/tap/okf`, then confirm `okf version` prints v0.3.0 — the
-  version the container image pins and the one the service's behaviour (search ranking, index.md and
-  log.md formats) is tested against. If brew installs a different version, download the
-  `okf-darwin-arm64` asset from the
+The course knowledge base is an OKF bundle on disk, searched by the pinned `okf` binary.
+
+- Install okf with `brew install okf-memory/tap/okf` and confirm `okf version` prints v0.3.0, the version
+  the container image pins and the service's tests run against. If brew installs another version,
+  download the `okf-darwin-arm64` asset from the
   [v0.3.0 release](https://github.com/okf-memory/okf-agent-memory/releases/tag/v0.3.0), `chmod +x` it,
-  and put it somewhere earlier on your `PATH` than the brew shim (or point `OKF_BINARY` straight at it).
+  and put it earlier on your `PATH` (or point `OKF_BINARY` at it).
 - `mkdir -p .knowledge` and set `KNOWLEDGE_ROOT=$(pwd)/.knowledge` (git-ignored). okf refuses a symlinked
   root, so the app resolves it with realpath; on macOS `/tmp` is a symlink and will not work.
-- Run the API with `npm run start` (loads `.dev.vars` when present; PORT defaults to 8080) and the SPA with `npm run dev`.
-- Production mounts EFS at `/mnt/knowledge`; the ECS service runs a single task this quarter because the
-  bundle has one writer per course and okf has no locking of its own beyond the app's lock file.
-
-### Container image
-
-`apps/web/Dockerfile` builds the Node runtime with the pinned `okf` binary installed at
-`/usr/local/bin/okf`. Build it from the **repo root**, not from `apps/web` -- the build needs the
-monorepo's `package-lock.json` and the workspace packages it depends on:
-
-```bash
-docker build -f apps/web/Dockerfile -t llteacher-web .
-docker run --rm llteacher-web okf version
-```
-
-Because the build context is the repo root, a `.dockerignore` placed in `apps/web/` would never be
-read -- Docker only looks for `.dockerignore` at the root of the context. Instead this Dockerfile
-relies on BuildKit's per-Dockerfile ignore file, `apps/web/Dockerfile.dockerignore` (matched as
-`<Dockerfile path>.dockerignore`), which keeps `node_modules`, `dist`, `.knowledge`, `.dev.vars`, and
-`.wrangler` out of the build context without touching the root `.dockerignore` (that one belongs to
-the legacy Python image).
-
-The image currently ships with `devDependencies` installed because the server entry point runs
-through `tsx` rather than compiled JS; trimming the runtime image to production dependencies only
-is a follow-up.
-
-Env vars the image cares about: `KNOWLEDGE_ROOT` (knowledge bundle root; `/mnt/knowledge` in the
-image default), `OKF_BINARY` (override the `okf` executable path/name; defaults to `okf` on `PATH`,
-which resolves to `/usr/local/bin/okf` in this image), and `PORT` (defaults to `8080`).
-
-See [`docs/architecture/db-driver-split.md`](../../docs/architecture/db-driver-split.md) for why the
-Cloudflare Worker entry point is retired in favor of this Node server.
+- Uploads go to S3-compatible object storage: `STORAGE_ENDPOINT`, `STORAGE_BUCKET`,
+  `STORAGE_ACCESS_KEY_ID`, `STORAGE_SECRET_ACCESS_KEY`. For local dev, MinIO works
+  (`docker run -d -p 9000:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data`).
+- Scanned PDFs are OCR'd through the LLMoxie gateway with `OCR_MODEL` (optional); page renders need
+  `poppler-utils`, which the runtime image installs.
+- Production mounts EFS at `/mnt/knowledge` (`KNOWLEDGE_ROOT`) and runs a single task, because a course
+  bundle has one writer and okf has no locking beyond the app's own lock file. In-flight extraction jobs
+  drain for up to 20 seconds on shutdown, and interrupted ones are marked on the next start.
 
 ## Deploying
 
-The Cloudflare Worker deploy path (`npm run deploy` / `wrangler deploy`) is
-retired -- there is no `deploy` script anymore. The app ships as the
-container image built from `apps/web/Dockerfile` and runs on AWS ECS Fargate
-instead. See [Node runtime (replaces the Worker)](#node-runtime-replaces-the-worker)
-above for local setup, env vars, and how to build and run that image.
+The ECS task definition supplies the same environment configuration as the
+Node process. Set non-secret values in task configuration and inject secrets
+through the configured secrets manager before deployment. In particular:
+
+- `OPENROUTER_API_KEY` -- required from Phase 1 on.
+- `LLMOXIE_API_KEY` -- **required as of #178/#317's migration 0035**, not
+  optional. Every org's default `llm_configs` row now points at
+  `provider = 'llmoxie'` with no instructor-visible credential, so a missing
+  binding here is a 500 on every student's every chat turn, in every org --
+  not a narrow case that only affects openrouter-only deployments. Declared
+  as a required (non-optional) `Env` property in `src/shared/types.ts` so
+  TypeScript and runtime configuration validation catch its absence before a
+  student's first message.
+- `LLMOXIE_BASE_URL` -- optional; unset falls back to the gateway's own
+  default host (`lib/ai.ts`'s `LLMOXIE_DEFAULT_BASE_URL`).
+- `SESSION_SECRET`, `ENCRYPTION_KEY`, `BLIND_INDEX_KEY`, `WORKOS_API_KEY`,
+  `WORKOS_WEBHOOK_SECRET` -- all must be set before the service starts.
+
+Deploy in this order: build and publish the image, run `npm run db:migrate`
+as a one-off migration task using the new image and production environment,
+confirm that migration succeeds, then update the ECS service to the new image.
+Do not update the service before its database migration has completed.
+
+The web server does not run the overdue-submission sweep. Schedule it as a
+separate one-off ECS task using the same image and environment configuration
+as the service.
 
 ## Seeding a dev dataset
 
@@ -81,9 +90,9 @@ npm run db:seed             # seed once
 npm run db:seed -- --reset  # wipe seeded data and re-seed
 ```
 
-Requires `DATABASE_URL`, `ENCRYPTION_KEY`, and `BLIND_INDEX_KEY` in your shell
-env (or `.dev.vars` sourced into it) -- PII fields are encrypted the same way
-the app encrypts them at write time.
+Requires `DATABASE_URL`, `ENCRYPTION_KEY`, and `BLIND_INDEX_KEY` in the Node
+process environment -- PII fields are encrypted the same way the app encrypts
+them at write time.
 
 Seeded accounts (Django parity): `teacher1`/`teacher2` (instructors),
 `student1`/`student2`/`student3` (students), all under org `seed-org` /

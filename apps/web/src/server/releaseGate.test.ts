@@ -45,6 +45,11 @@ const EXPECTED: Record<string, ReleaseGatePosture> = {
   // routes/instructor/transcripts.ts's own comments at each check).
   "GET /api/courses/:courseId/instructor/transcripts": "gates-unreleased",
   "GET /api/courses/:courseId/instructor/transcripts/:conversationId": "gates-unreleased",
+  // #90: a flag's section/homework titles are unreleased content under the
+  // identical #208/#366 rule the transcript list above already carries --
+  // listCourseFeedbackHandler consults canViewDraftsIn itself before
+  // returning a row whose homework is currently unreleased.
+  "GET /api/courses/:courseId/instructor/feedback": "gates-unreleased",
 };
 
 function graderTierRoutes(): Record<string, ReleaseGatePosture> {

@@ -1,0 +1,4 @@
+name: llteacher-infra
+runtime: nodejs
+main: dist
+description: LLTeacher local-first AWS infrastructure

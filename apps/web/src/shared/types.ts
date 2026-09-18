@@ -1,5 +1,7 @@
 import type { CourseRole } from "../server/middleware/roles";
-import type { ConversationKind } from "../db/schema";
+import type { ConversationKind, FeedbackReason } from "../db/schema";
+
+export type { FeedbackReason };
 
 export type HelloResponse = {
   message: string;
@@ -159,11 +161,18 @@ export interface StudentHomeworkListResponse {
    carries ownerUserId/courseId/sectionId/isDeleted/deletedAt, none of which
    any client reads -- every row returned is already scoped to the caller's
    own, so this was never a cross-tenant leak, but it needlessly widened the
-   public wire contract). GET/POST/PATCH /api/conversations all project to
-   this shape server-side (routes/conversations.ts's toConversationSummary).
-   POST's response has no messageCount key at all -- a brand-new conversation
-   never has messages yet -- callers (useTutorConversations) default it to 0
-   rather than treating its absence as a fetch bug. */
+   public wire contract). GET/POST/PATCH /api/conversations (list, create,
+   rename) and #438's single-conversation GET /api/conversations/:id all
+   project to this shape server-side (routes/conversations.ts's
+   toConversationSummary). POST's response has no messageCount key at all --
+   a brand-new conversation never has messages yet -- callers
+   (useTutorConversations) default it to 0 rather than treating its absence
+   as a fetch bug. #438: GET /api/conversations/:id is the one route in this
+   family that DOES include messageCount on every response (like the list
+   route, unlike POST/PATCH) -- it exists specifically to answer "what is
+   this one conversation's real count right now"
+   (useTutorConversations.ts's reconcileConversationCount), so a response
+   missing that field would defeat the route's entire purpose. */
 export interface ConversationSummary {
   id: string;
   kind: ConversationKind;
@@ -211,6 +220,56 @@ export interface ConversationMessageResponse {
    *  routes always sent it; the history route dropped it, so the transcript
    *  could not show a per-turn time. */
   createdAt: string;
+}
+
+/* #90: student feedback flags on AI tutor responses. */
+
+export interface FlagResponseBody {
+  reason: FeedbackReason;
+  comment?: string;
+}
+
+export interface FlagResponseResult {
+  id: string;
+  reason: FeedbackReason;
+  comment: string | null;
+  flaggedAt: string;
+}
+
+export interface CourseFeedbackListItemResponse {
+  id: string;
+  conversationId: string;
+  /** Null once the underlying message row has been cleared (ON DELETE SET
+   *  NULL, db/schema/runtime.ts) -- responseSnapshot below is what an
+   *  instructor still reads in that case, not a join back to `messages`. */
+  messageId: string | null;
+  studentId: string;
+  studentName: string;
+  reason: FeedbackReason;
+  comment: string | null;
+  /** The flagged message's `parts` exactly as they stood at flag time --
+   *  same shape as ConversationMessageResponse.parts (unknown; cast to the
+   *  AI SDK's UIMessage['parts'] at the render boundary the same way that
+   *  field already is). */
+  responseSnapshot: unknown;
+  /** #90 review (Minor #5): mirrors the instructor transcript list's own
+   *  isDeleted -- a student's soft-deleted conversation stays INCLUDED
+   *  here (never filtered), just flagged, same "shown, flagged" rule
+   *  TranscriptListView's own dagger marker already renders for the
+   *  identical case. */
+  isDeleted: boolean;
+  sectionId: string;
+  sectionTitle: string;
+  homeworkId: string;
+  homeworkTitle: string;
+  flaggedAt: string;
+}
+
+export interface CourseFeedbackListResponse {
+  items: CourseFeedbackListItemResponse[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 export interface SectionResponse {
@@ -428,9 +487,69 @@ import type {
 export type { ParticipationStatus, SubmissionCell, StudentSubmissionRow };
 export type HomeworkSubmissionsResponse = HomeworkSubmissionsMatrix;
 
-// Cloudflare Worker bindings + secrets. Augmented in Phase 1+.
+/* -- Canvas integration (#73/#74) ------------------------------------------ */
+
+export interface CanvasCredentialResponse {
+  credential: {
+    id: string;
+    maskedToken: string;
+    canvasBaseUrl: string;
+    expiresAt: string | null;
+    rotatedAt: string | null;
+  } | null;
+}
+
+export interface CanvasCredentialBody {
+  token: string;
+  canvasBaseUrl: string;
+  /** ISO date string, or omitted/null for "no expiry recorded." */
+  expiresAt?: string | null;
+}
+
+export type CanvasValidateResponse =
+  | { ok: true; canvasUserId: string; name: string | null }
+  | { ok: false; message: string };
+
+export interface CanvasCourseOption {
+  canvasCourseId: string;
+  name: string;
+  courseCode: string | null;
+  term: string | null;
+}
+
+export interface CanvasCourseListResponse {
+  courses: CanvasCourseOption[];
+}
+
+export interface CanvasLinkBody {
+  canvasCourseId: string;
+}
+
+export interface CanvasLinkResponse {
+  lmsIntegrationId: string;
+  canvasCourseId: string;
+}
+
+export interface CanvasSyncStatusResponse {
+  canvasCourseId: string | null;
+  canvasCourseName: string | null;
+  lastSyncStatus: "idle" | "syncing" | "success" | "error";
+  lastSyncCounts: { added: number; updated: number; removed: number } | null;
+  lastSyncErrorMessage: string | null;
+  lastSyncedAt: string | null;
+}
+
+export interface CanvasSyncResponse {
+  added: number;
+  updated: number;
+  removed: number;
+  errors: { canvasEnrollmentId: string; message: string }[];
+}
+
+// Node runtime configuration + secrets. Augmented in Phase 1+.
 declare global {
   interface Env {
+    APP_URL: string;
     DATABASE_URL: string;
     WORKOS_API_KEY: string;
     WORKOS_CLIENT_ID: string;
@@ -443,7 +562,7 @@ declare global {
        "openrouter-only configs never read it" case, it's a platform-wide
        500 on every message. resolveApiKey previously cast Env away
        entirely (`c.env as unknown as Record<string, string | undefined>`),
-       which meant neither tsc nor `wrangler types` could flag an absent
+       which meant neither tsc nor the runtime configuration tests could flag an absent
        secret at all; that cast is now confined to one narrow,
        allowlist-gated helper (llm-config.ts's readEnvSecret) instead of
        erasing the whole Env contract at the chat.ts call site. */
@@ -454,7 +573,14 @@ declare global {
     LLMOXIE_BASE_URL?: string;
     /** Vision OCR model served by the configured LLMoxie gateway. */
     OCR_MODEL?: string;
-    ASSETS: Fetcher;
+    /* #343: opt-in degradation. When the platform gateway's own key
+       (LLMOXIE_API_KEY) is missing, a default config falls back to
+       openrouter using THIS model id -- which must be one the deployment's
+       OpenRouter account can serve, since llmoxie catalogue names like
+       `gpt-5.3-codex` are not OpenRouter slugs. Unset (the default) means no
+       degradation: a missing platform credential still fails loudly rather
+       than silently answering from a model nobody chose. */
+    LLM_DEGRADED_MODEL?: string;
     // Auth (M1): sealed session cookie key + IdentityCipher keys.
     SESSION_SECRET: string;
     ENCRYPTION_KEY: string;

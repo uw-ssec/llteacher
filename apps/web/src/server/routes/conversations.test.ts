@@ -19,6 +19,7 @@ const updateConversationTitleMock = vi.fn();
 const softDeleteConversationMock = vi.fn();
 const getOwnedConversationOrNullMock = vi.fn();
 const getMessagesForConversationMock = vi.fn();
+const getConversationMessageCountMock = vi.fn();
 vi.mock("../repositories/conversations", () => ({
   listConversationsForOwner: (...args: unknown[]) => listConversationsForOwnerMock(...args),
   createConversation: (...args: unknown[]) => createConversationMock(...args),
@@ -28,6 +29,8 @@ vi.mock("../repositories/conversations", () => ({
   softDeleteConversation: (...args: unknown[]) => softDeleteConversationMock(...args),
   getOwnedConversationOrNull: (...args: unknown[]) => getOwnedConversationOrNullMock(...args),
   getMessagesForConversation: (...args: unknown[]) => getMessagesForConversationMock(...args),
+  // #438: backs GET /api/conversations/:id's messageCount field.
+  getConversationMessageCount: (...args: unknown[]) => getConversationMessageCountMock(...args),
   // #281: the route imports this real value (not just a mocked function) to
   // resolve the default page size when `limit` is omitted.
   DEFAULT_CONVERSATIONS_PAGE_SIZE: 50,
@@ -102,6 +105,7 @@ beforeEach(() => {
   softDeleteConversationMock.mockReset();
   getOwnedConversationOrNullMock.mockReset();
   getMessagesForConversationMock.mockReset();
+  getConversationMessageCountMock.mockReset();
   reserveRateLimitSlotMock.mockReset().mockResolvedValue(1);
 });
 
@@ -410,6 +414,70 @@ describe("POST /api/conversations", () => {
   });
 });
 
+// #438: the targeted reconciliation read the tutor rail's client asks for
+// once a chat turn's stream settles (useTutorConversations.ts's
+// reconcileConversationCount), instead of guessing whether the server
+// persisted one row or two for that turn. Ownership tests mirror
+// PATCH/DELETE/GET-messages' 404-not-403 pattern exactly (same
+// getOwnedConversationOrNull helper), not a new one.
+describe("GET /api/conversations/:id", () => {
+  it("returns 401 when there is no authContext", async () => {
+    const res = await request(buildApp(undefined), "/api/conversations/22222222-2222-2222-2222-222222222222");
+    expect(res.status).toBe(401);
+    expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
+  });
+
+  // #267
+  it("404s (not 503) on a malformed id, without reaching the repository layer", async () => {
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/not-a-uuid");
+    expect(res.status).toBe(404);
+    expect(getOwnedConversationOrNullMock).not.toHaveBeenCalled();
+  });
+
+  it("404s when getOwnedConversationOrNull returns null (not found, not owned, or soft-deleted)", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(null);
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222");
+    expect(res.status).toBe(404);
+    expect(getConversationMessageCountMock).not.toHaveBeenCalled();
+  });
+
+  it("returns the conversation's summary plus its real messageCount", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+    getConversationMessageCountMock.mockResolvedValue(7);
+
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222");
+
+    expect(res.status).toBe(200);
+    // #438 review: scope (the conversation's own courseId) is now passed
+    // through, not just the id -- matching getMessagesForConversation's
+    // call shape.
+    expect(getConversationMessageCountMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "course-a",
+      "22222222-2222-2222-2222-222222222222",
+    );
+    expect(await res.json()).toEqual({
+      id: "22222222-2222-2222-2222-222222222222",
+      kind: "tutor",
+      title: "New Conversation",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:05:00.000Z",
+      messageCount: 7,
+    });
+  });
+
+  it("returns messageCount 0 (not undefined/missing) for a conversation with no messages yet", async () => {
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+    getConversationMessageCountMock.mockResolvedValue(0);
+
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222");
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { messageCount: number };
+    expect(body.messageCount).toBe(0);
+  });
+});
+
 describe("PATCH /api/conversations/:id", () => {
   it("returns 401 when there is no authContext", async () => {
     const res = await patchConv(buildApp(undefined), "22222222-2222-2222-2222-222222222222", { title: "New title" });
@@ -462,6 +530,36 @@ describe("PATCH /api/conversations/:id", () => {
     const res = await patchConv(buildApp(fakeAuthContext()), "22222222-2222-2222-2222-222222222222", { title: "x".repeat(101) });
     expect(res.status).toBe(400);
     expect(updateConversationTitleMock).not.toHaveBeenCalled();
+  });
+
+  // #453 (Cordero review, PR440): closes the loop end-to-end between
+  // deriveTutorConversationTitle's own UTF-16 ceiling
+  // (shared/tutorConversationTitle.ts) and THIS route's real schema -- not
+  // just that both happen to reference the same constant (that's pinned in
+  // tutorConversationTitle.test.ts), but that a title
+  // deriveTutorConversationTitle actually PRODUCES for the worst case (60
+  // code points, every one an astral-plane surrogate pair) is genuinely
+  // ACCEPTED by this endpoint, which is the real, reachable auto-title PATCH
+  // App.tsx's fire-and-forget renameConversation call makes.
+  it("accepts the title deriveTutorConversationTitle produces for an all-astral-plane 60-code-point first message", async () => {
+    const { deriveTutorConversationTitle } = await import("../../shared/tutorConversationTitle");
+    const allEmojiTitle = deriveTutorConversationTitle([{ type: "text", text: "😀".repeat(60) }]);
+    expect(allEmojiTitle).not.toBeNull();
+
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow());
+    updateConversationTitleMock.mockResolvedValue(fakeConversationRow({ title: allEmojiTitle! }));
+
+    const res = await patchConv(buildApp(fakeAuthContext()), "22222222-2222-2222-2222-222222222222", {
+      title: allEmojiTitle!,
+    });
+
+    expect(res.status).toBe(200);
+    expect(updateConversationTitleMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "course-a",
+      "22222222-2222-2222-2222-222222222222",
+      allEmojiTitle,
+    );
   });
 
   it("400s when the request body is not valid JSON", async () => {

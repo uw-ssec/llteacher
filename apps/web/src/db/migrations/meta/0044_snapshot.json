@@ -1,5 +1,5 @@
 {
-  "id": "ca5e8496-3598-4faa-b13e-b9d1c52173e6",
+  "id": "a157dfa9-fe71-4b11-8ce4-f75566f52678",
   "prevId": "808293cf-aa91-4a54-b12c-4cb160b1ca74",
   "version": "7",
   "dialect": "postgresql",
@@ -1697,215 +1697,6 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.knowledge_documents": {
-      "name": "knowledge_documents",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "course_id": {
-          "name": "course_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "path": {
-          "name": "path",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "kind": {
-          "name": "kind",
-          "type": "knowledge_document_kind",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'concept'"
-        },
-        "type": {
-          "name": "type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "title": {
-          "name": "title",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "description": {
-          "name": "description",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "tags": {
-          "name": "tags",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "frontmatter": {
-          "name": "frontmatter",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "body": {
-          "name": "body",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "''"
-        },
-        "body_original": {
-          "name": "body_original",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "index_status": {
-          "name": "index_status",
-          "type": "knowledge_index_status",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'pending'"
-        },
-        "source_material_id": {
-          "name": "source_material_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "edited_by_id": {
-          "name": "edited_by_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "edited_at": {
-          "name": "edited_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "knowledge_documents_course_path_uq": {
-          "name": "knowledge_documents_course_path_uq",
-          "columns": [
-            {
-              "expression": "course_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "path",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "knowledge_documents_source_material_idx": {
-          "name": "knowledge_documents_source_material_idx",
-          "columns": [
-            {
-              "expression": "source_material_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "knowledge_documents_course_id_courses_id_fk": {
-          "name": "knowledge_documents_course_id_courses_id_fk",
-          "tableFrom": "knowledge_documents",
-          "tableTo": "courses",
-          "columnsFrom": [
-            "course_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "knowledge_documents_source_material_id_course_materials_id_fk": {
-          "name": "knowledge_documents_source_material_id_course_materials_id_fk",
-          "tableFrom": "knowledge_documents",
-          "tableTo": "course_materials",
-          "columnsFrom": [
-            "source_material_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "knowledge_documents_edited_by_id_course_memberships_id_fk": {
-          "name": "knowledge_documents_edited_by_id_course_memberships_id_fk",
-          "tableFrom": "knowledge_documents",
-          "tableTo": "course_memberships",
-          "columnsFrom": [
-            "edited_by_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "knowledge_documents_concept_type_chk": {
-          "name": "knowledge_documents_concept_type_chk",
-          "value": "\"knowledge_documents\".\"kind\" <> 'concept' OR \"knowledge_documents\".\"type\" IS NOT NULL"
-        },
-        "knowledge_documents_reserved_basename_chk": {
-          "name": "knowledge_documents_reserved_basename_chk",
-          "value": "(\"knowledge_documents\".\"kind\" = 'concept' AND split_part(\"knowledge_documents\".\"path\", '/', -1) NOT IN ('index', 'log'))\n       OR (\"knowledge_documents\".\"kind\" = 'index'   AND split_part(\"knowledge_documents\".\"path\", '/', -1) = 'index')\n       OR (\"knowledge_documents\".\"kind\" = 'log'     AND \"knowledge_documents\".\"path\" = 'log')"
-        }
-      },
       "isRLSEnabled": false
     },
     "public.llm_configs": {
@@ -4338,6 +4129,177 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.response_feedback": {
+      "name": "response_feedback",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "conversation_id": {
+          "name": "conversation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "message_id": {
+          "name": "message_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "student_id": {
+          "name": "student_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "reason": {
+          "name": "reason",
+          "type": "feedback_reason",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "comment": {
+          "name": "comment",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "response_snapshot": {
+          "name": "response_snapshot",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "flagged_at": {
+          "name": "flagged_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "response_feedback_conversation_idx": {
+          "name": "response_feedback_conversation_idx",
+          "columns": [
+            {
+              "expression": "conversation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "response_feedback_student_idx": {
+          "name": "response_feedback_student_idx",
+          "columns": [
+            {
+              "expression": "student_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "response_feedback_message_idx": {
+          "name": "response_feedback_message_idx",
+          "columns": [
+            {
+              "expression": "message_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "response_feedback_message_student_uq": {
+          "name": "response_feedback_message_student_uq",
+          "columns": [
+            {
+              "expression": "message_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "student_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "response_feedback_conversation_id_conversations_id_fk": {
+          "name": "response_feedback_conversation_id_conversations_id_fk",
+          "tableFrom": "response_feedback",
+          "tableTo": "conversations",
+          "columnsFrom": [
+            "conversation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "response_feedback_message_id_messages_id_fk": {
+          "name": "response_feedback_message_id_messages_id_fk",
+          "tableFrom": "response_feedback",
+          "tableTo": "messages",
+          "columnsFrom": [
+            "message_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "response_feedback_student_id_users_id_fk": {
+          "name": "response_feedback_student_id_users_id_fk",
+          "tableFrom": "response_feedback",
+          "tableTo": "users",
+          "columnsFrom": [
+            "student_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.section_answers": {
       "name": "section_answers",
       "schema": "",
@@ -4839,24 +4801,6 @@
         "request_hint"
       ]
     },
-    "public.knowledge_document_kind": {
-      "name": "knowledge_document_kind",
-      "schema": "public",
-      "values": [
-        "concept",
-        "index",
-        "log"
-      ]
-    },
-    "public.knowledge_index_status": {
-      "name": "knowledge_index_status",
-      "schema": "public",
-      "values": [
-        "pending",
-        "indexed",
-        "failed"
-      ]
-    },
     "public.llm_provider": {
       "name": "llm_provider",
       "schema": "public",
@@ -4880,16 +4824,6 @@
         "other"
       ]
     },
-    "public.material_status": {
-      "name": "material_status",
-      "schema": "public",
-      "values": [
-        "pending",
-        "processing",
-        "ready",
-        "failed"
-      ]
-    },
     "public.section_type": {
       "name": "section_type",
       "schema": "public",
@@ -4904,6 +4838,16 @@
       "values": [
         "section",
         "tutor"
+      ]
+    },
+    "public.feedback_reason": {
+      "name": "feedback_reason",
+      "schema": "public",
+      "values": [
+        "incorrect",
+        "gave_away_answer",
+        "confusing",
+        "other"
       ]
     },
     "public.message_role": {

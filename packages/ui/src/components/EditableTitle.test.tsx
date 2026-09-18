@@ -172,7 +172,33 @@ describe("EditableTitle", () => {
     expect(screen.getByLabelText("Edit title")).toBeTruthy();
   });
 
-  it("on a rejected save, reverts the displayed title, shows an inline error, and exits edit mode", async () => {
+  // #291: a rejected save (network/server failure) used to revert the
+  // input to the last saved title and close edit mode, discarding
+  // whatever the student had typed on a merely transient failure -- and
+  // left the error with no dismiss affordance short of reopening the
+  // editor. It now stays in edit mode with the attempted text intact.
+  it("on a rejected save, stays in edit mode with the typed value intact and shows an inline error", async () => {
+    const onSave = vi.fn().mockRejectedValue(new Error("Title already in use"));
+    render(<EditableTitle value="Original title" onSave={onSave} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Original title" }));
+
+    const input = screen.getByLabelText("Edit title") as HTMLInputElement;
+    await userEvent.clear(input);
+    await userEvent.type(input, "Attempted new title{Enter}");
+
+    expect(onSave).toHaveBeenCalledWith("Attempted new title");
+    // Still editing, with the student's own text -- not reverted, not
+    // discarded.
+    expect((await screen.findByRole("alert")).textContent).toBe("Title already in use");
+    const stillEditing = screen.getByLabelText("Edit title") as HTMLInputElement;
+    expect(stillEditing).toBe(input);
+    expect(stillEditing.value).toBe("Attempted new title");
+    expect(screen.queryByRole("button", { name: "Rename: Original title" })).toBeNull();
+  });
+
+  // #291: a correction dismisses the error naturally, on the next
+  // keystroke -- it used to persist until the editor was reopened.
+  it("clears the inline error on the next keystroke after a rejected save", async () => {
     const onSave = vi.fn().mockRejectedValue(new Error("Title already in use"));
     render(<EditableTitle value="Original title" onSave={onSave} />);
     await userEvent.click(screen.getByRole("button", { name: "Rename: Original title" }));
@@ -180,14 +206,25 @@ describe("EditableTitle", () => {
     const input = screen.getByLabelText("Edit title");
     await userEvent.clear(input);
     await userEvent.type(input, "Attempted new title{Enter}");
+    expect(await screen.findByRole("alert")).toBeTruthy();
 
-    expect(onSave).toHaveBeenCalledWith("Attempted new title");
-    // Reverted to the old title (Testing Strategy #2's "UI reverts to the
-    // old title AND shows inline error") -- not left showing the failed
-    // attempt, and no longer editing.
-    expect(await screen.findByRole("button", { name: "Rename: Original title" })).toBeTruthy();
-    expect(screen.queryByLabelText("Edit title")).toBeNull();
-    expect(screen.getByRole("alert").textContent).toBe("Title already in use");
+    await userEvent.type(input, "!");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  // #291: same for the client-side validation errors, which already
+  // stayed in edit mode but did not previously clear on typing either.
+  it("clears the empty-title validation error on the next keystroke", async () => {
+    render(<EditableTitle value="Original title" onSave={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Rename: Original title" }));
+
+    const input = screen.getByLabelText("Edit title");
+    await userEvent.clear(input);
+    await userEvent.type(input, "   {Enter}");
+    expect(await screen.findByRole("alert")).toBeTruthy();
+
+    await userEvent.type(input, "x");
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("disables the input while a save is in flight, preventing overlapping submits", async () => {
@@ -308,17 +345,22 @@ describe("EditableTitle", () => {
       expect(document.activeElement).toBe(pencil);
     });
 
-    it("restores focus to the pencil after a failed save (alongside the reverted title and inline error)", async () => {
+    // #291: a failed save no longer closes edit mode (see EditableTitle's
+    // own doc comment), so there is no pencil to return focus to -- the
+    // input itself is refocused instead, once isSubmitting's disabling of
+    // it clears (a disabled element cannot hold focus).
+    it("refocuses the (still open) input after a failed save, alongside the typed value and inline error", async () => {
       const onSave = vi.fn().mockRejectedValue(new Error("Title already in use"));
       render(<EditableTitle value="Original title" onSave={onSave} />);
       await userEvent.click(screen.getByRole("button", { name: "Rename: Original title" }));
 
-      const input = screen.getByLabelText("Edit title");
+      const input = screen.getByLabelText("Edit title") as HTMLInputElement;
       await userEvent.clear(input);
       await userEvent.type(input, "Attempted new title{Enter}");
 
-      const pencil = await screen.findByRole("button", { name: "Rename: Original title" });
-      expect(document.activeElement).toBe(pencil);
+      await screen.findByRole("alert");
+      expect(document.activeElement).toBe(input);
+      expect(input.value).toBe("Attempted new title");
       expect(screen.getByRole("alert").textContent).toBe("Title already in use");
     });
   });
@@ -433,75 +475,5 @@ describe("EditableTitle limit and keybinding disclosure (#310)", () => {
     await userEvent.type(input, "  0123456789abc  {Enter}");
     expect(onSave).not.toHaveBeenCalled();
     expect(screen.getByRole("alert").textContent).toMatch(/10 characters or fewer/i);
-  });
-});
-
-describe("EditableTitle rename error lifecycle (#291)", () => {
-  it("returns focus to the pencil when the error is dismissed, instead of dropping it to <body>", async () => {
-    /* #434 review: the dismiss button lives INSIDE the role="alert" span it
-       removes, so clicking it unmounts the focused element. This is the same
-       defect #298 was filed for in this component -- fixed there for the
-       edit-mode exits, and reintroduced by a control added later. */
-    const onSave = vi.fn().mockRejectedValue(new Error("nope"));
-    render(<EditableTitle value="Chat A" onSave={onSave} />);
-    await userEvent.click(screen.getByRole("button", { name: "Rename: Chat A" }));
-    const input = screen.getByLabelText("Edit title");
-    await userEvent.clear(input);
-    await userEvent.type(input, "New title{Enter}");
-
-    const dismiss = await screen.findByRole("button", { name: "Dismiss rename error" });
-    await userEvent.click(dismiss);
-
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: /^Rename:/ }));
-    expect(document.activeElement).not.toBe(document.body);
-  });
-
-  it("offers a dismiss control and clears the error when it is used", async () => {
-    const onSave = vi.fn().mockRejectedValue(new Error("Conversation not found"));
-    render(<EditableTitle value="Chat A" onSave={onSave} />);
-    const user = userEvent.setup();
-
-    await user.click(screen.getByRole("button", { name: "Rename: Chat A" }));
-    await user.clear(screen.getByRole("textbox"));
-    await user.type(screen.getByRole("textbox"), "New title{Enter}");
-
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Conversation not found");
-
-    await user.click(screen.getByRole("button", { name: "Dismiss rename error" }));
-    expect(screen.queryByRole("alert")).toBeNull();
-  });
-
-  it("clears the error when the student activates the row instead", async () => {
-    // Selecting the conversation IS doing something else with it; the stale
-    // failure should not follow them into the next thing they do.
-    const onSave = vi.fn().mockRejectedValue(new Error("Conversation not found"));
-    const onActivateValue = vi.fn();
-    render(
-      <EditableTitle
-        value="Chat A"
-        onSave={onSave}
-        onActivateValue={onActivateValue}
-        activateLabel="Open Chat A"
-      />,
-    );
-    const user = userEvent.setup();
-
-    await user.click(screen.getByRole("button", { name: "Rename: Chat A" }));
-    await user.clear(screen.getByRole("textbox"));
-    await user.type(screen.getByRole("textbox"), "New title{Enter}");
-    await screen.findByRole("alert");
-
-    await user.click(screen.getByRole("button", { name: "Open Chat A" }));
-    expect(onActivateValue).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("alert")).toBeNull();
-  });
-
-  it("does NOT offer a dismiss for a caller-supplied error, which the caller owns", async () => {
-    render(
-      <EditableTitle value="Chat A" onSave={vi.fn()} error="Upstream problem" />,
-    );
-    expect(screen.getByRole("alert").textContent).toContain("Upstream problem");
-    expect(screen.queryByRole("button", { name: "Dismiss rename error" })).toBeNull();
   });
 });

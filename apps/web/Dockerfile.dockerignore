@@ -1,9 +1,0 @@
-node_modules
-dist
-.knowledge
-.dev.vars
-.wrangler
-.git
-.superpowers
-.codex
-**/.turbo

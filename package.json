@@ -6,14 +6,25 @@
   "workspaces": [
     "apps/web",
     "apps/admin",
-    "packages/*"
+    "packages/*",
+    "evals",
+    "infra"
   ],
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
+    "node:serve": "npm run node:serve --workspace=llteacher-web",
+    "node:run-overdue-job": "npm run node:run-overdue-job --workspace=llteacher-web",
+    "db:migrate": "npm run db:migrate --workspace=llteacher-web",
+    "aws:local:up": "PULUMI_STACK=local ./infra/scripts/local-up.sh",
+    "aws:local:test": "PULUMI_STACK=local ./infra/scripts/local-test.sh",
+    "aws:local:migration-guard": "./infra/scripts/run-local-migrations.test.sh",
+    "aws:local:down": "PULUMI_STACK=local ./infra/scripts/floci-down.sh",
+    "aws:local:verify": "PULUMI_STACK=local ./infra/scripts/verify-local-stack.sh",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "clean": "turbo run clean && rm -rf node_modules"
+    "clean": "turbo run clean && rm -rf node_modules",
+    "tutor:eval": "npm run tutor:eval --workspace=evals"
   },
   "devDependencies": {
     "turbo": "^2.3.0"

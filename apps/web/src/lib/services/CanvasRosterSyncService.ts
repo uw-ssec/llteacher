@@ -1,0 +1,354 @@
+/* --------------------------------------------------------------------------
+   #74: syncing a course's roster from Canvas.
+
+   Fetch-then-write, always -- every enrollment page is pulled and held in
+   memory (canvas-api.ts's fetchAllPages) before any write starts, so a
+   mid-fetch failure (pagination error, revoked token, exhausted rate-limit
+   retries) leaves the roster completely untouched rather than half-synced.
+   The route layer is what marks lms_integrations as "error" when this
+   throws; this module never writes a partial result.
+
+   Three write passes, diffed on courseMemberships.canvasEnrollmentId --
+   see docs/superpowers/plans/2026-09-10-m11-canvas-integration.md's
+   "Design decisions" #4 for the full reasoning, restated briefly at each
+   pass below:
+
+     A. KNOWN rows (canvasEnrollmentId already on a membership here) ->
+        direct role/canvasRole update, restoring if previously dropped by
+        THIS mechanism. Canvas is authoritative for a row it already owns,
+        so this bypasses upsertCourseMembers' deliberate "don't auto-
+        promote a role conflict" refusal -- that refusal protects a
+        MANUALLY curated membership, which this is not.
+     B. NEW-to-Canvas rows -> resolved by email through
+        roster.ts's upsertCourseMembers (the one provisioning pipeline --
+        see that file's own header), then canvasEnrollmentId/canvasRole
+        stamped onto whatever membership it resolved to. A genuine
+        role_conflict here (Canvas says one role, an existing MANUALLY
+        added active membership says another) is reported as a per-row
+        error, not silently overridden -- the same refusal, this time
+        correctly protecting a manually curated row.
+     C. REMOVED rows -- active, canvasEnrollmentId set, not present in
+        this sync's enrollment set -- soft-dropped with
+        droppedReason "roster_removal", the same enum value roster.ts's
+        manual removal already uses.
+   -------------------------------------------------------------------------- */
+
+import { and, eq, inArray, isNotNull, isNull } from "drizzle-orm";
+import type { Db } from "../../db/client";
+import { courseMemberships } from "../../db/schema";
+import type { CourseScope } from "../../server/repositories/scope";
+import {
+  allowedDomainsForCourse,
+  upsertCourseMembers,
+  type CourseRole,
+  type ProvisionResult,
+} from "../../server/repositories/roster";
+import { listCanvasEnrollments, type CanvasEnrollmentType } from "../canvas-api";
+import type { IdentityCipher } from "../crypto/identity-cipher";
+
+/** #74's role mapping table (Design decision #5). Kept here, once, rather
+ *  than re-derived at any call site. */
+const CANVAS_ROLE_MAP: Partial<Record<CanvasEnrollmentType, CourseRole>> = {
+  TeacherEnrollment: "instructor",
+  TaEnrollment: "ta",
+  StudentEnrollment: "student",
+  ObserverEnrollment: "observer",
+  // No direct llteacher equivalent for a content-authoring, non-grading
+  // Canvas role; instructor is the closest available authority tier.
+  DesignerEnrollment: "instructor",
+};
+
+export interface CanvasSyncCounts {
+  added: number;
+  updated: number;
+  removed: number;
+}
+
+export interface CanvasSyncRowError {
+  canvasEnrollmentId: string;
+  message: string;
+}
+
+export interface CanvasSyncResult extends CanvasSyncCounts {
+  errors: CanvasSyncRowError[];
+}
+
+export async function syncCanvasRoster(
+  db: Db,
+  cipher: IdentityCipher,
+  scope: CourseScope,
+  canvasCourseId: string,
+  credential: { token: string; canvasBaseUrl: string },
+): Promise<CanvasSyncResult> {
+  // ---- Fetch phase: everything or nothing reaches the writes below. ----
+  const enrollments = await listCanvasEnrollments(
+    credential.canvasBaseUrl,
+    credential.token,
+    canvasCourseId,
+  );
+
+  const errors: CanvasSyncRowError[] = [];
+  const mapped: { canvasEnrollmentId: string; canvasRole: string; email: string; displayName?: string; role: CourseRole }[] = [];
+  for (const e of enrollments) {
+    const role = CANVAS_ROLE_MAP[e.type];
+    if (!role) {
+      errors.push({
+        canvasEnrollmentId: e.canvasEnrollmentId,
+        message: `Skipped: "${e.type}" has no equivalent role in this app.`,
+      });
+      continue;
+    }
+    if (!e.email) {
+      errors.push({
+        canvasEnrollmentId: e.canvasEnrollmentId,
+        message: "Skipped: this Canvas enrollment has no email address on file.",
+      });
+      continue;
+    }
+    mapped.push({
+      canvasEnrollmentId: e.canvasEnrollmentId,
+      canvasRole: e.type,
+      email: e.email,
+      displayName: e.name ?? undefined,
+      role,
+    });
+  }
+
+  // #10 (functionality/flexibility review, PR #457): a person enrolled in
+  // two sections of the same Canvas course (routine, not an edge case)
+  // maps to two entries above with the same email and different
+  // canvasEnrollmentIds. llteacher has exactly one membership per
+  // (user, course) -- course_memberships_user_course_uq -- so without
+  // this, whichever entry's stamp landed last (an arbitrary function of
+  // Canvas's own listing order) silently overwrote the other's, and if
+  // the two carried different roles, the loser's canvasEnrollmentId hit
+  // upsertCourseMembers' deliberate role-conflict refusal on EVERY future
+  // sync, forever, with no fix available to the instructor. Deduplicated
+  // here -- before the known/new split below -- to the highest-authority
+  // role among the duplicates (nobody should lose access to whichever
+  // role Canvas happened to list first); the loser never reaches either
+  // pass, so it can never generate a role-conflict error. The winning
+  // canvasEnrollmentId is chosen the same way on every sync (role
+  // authority doesn't change sync to sync), so it converges to the same
+  // "known" row every time rather than flip-flopping.
+  const ROLE_AUTHORITY: Record<CourseRole, number> = { instructor: 4, admin: 4, ta: 3, observer: 2, student: 1 };
+  const dedupedByEmail = new Map<string, (typeof mapped)[number]>();
+  for (const m of mapped) {
+    const existing = dedupedByEmail.get(m.email);
+    if (!existing || ROLE_AUTHORITY[m.role] > ROLE_AUTHORITY[existing.role]) {
+      dedupedByEmail.set(m.email, m);
+    }
+  }
+  const deduped = [...dedupedByEmail.values()];
+
+  // ---- Pass A: rows this sync already owns. ----
+  const incomingIds = deduped.map((m) => m.canvasEnrollmentId);
+  const knownRows =
+    incomingIds.length > 0
+      ? await db
+          .select({ id: courseMemberships.id, canvasEnrollmentId: courseMemberships.canvasEnrollmentId })
+          .from(courseMemberships)
+          .where(
+            and(eq(courseMemberships.courseId, scope), inArray(courseMemberships.canvasEnrollmentId, incomingIds)),
+          )
+      : [];
+  const knownByCanvasId = new Map(knownRows.map((r) => [r.canvasEnrollmentId!, r.id]));
+
+  // #8 (performance/functionality/scalability/compatibility review, PR
+  // #457): one UPDATE per enrolled student here reintroduced the exact
+  // shape issue #355 already fixed once (see roster.ts's own header) --
+  // ~300 round trips at 300 students, exceeding the Workers free-tier
+  // subrequest cap at ~42. The SET clause is identical for every row in a
+  // group (role/canvasRole/timestamps, and -- #4 below -- the capability
+  // flags), so grouping by (role, canvasRole) collapses this to at most a
+  // handful of statements, bounded by the number of distinct Canvas role
+  // types (~5), not by course size. Mirrors roster.ts's own
+  // `restoresByRole` pattern rather than inventing a new one.
+  const now = new Date();
+  let updated = 0;
+  const groupsA = new Map<
+    string,
+    { role: CourseRole; canvasRole: string; rows: { membershipId: string; canvasEnrollmentId: string }[] }
+  >();
+  for (const m of deduped) {
+    const membershipId = knownByCanvasId.get(m.canvasEnrollmentId);
+    if (!membershipId) continue;
+    const key = `${m.role}::${m.canvasRole}`;
+    const group = groupsA.get(key) ?? { role: m.role, canvasRole: m.canvasRole, rows: [] };
+    group.rows.push({ membershipId, canvasEnrollmentId: m.canvasEnrollmentId });
+    groupsA.set(key, group);
+  }
+  for (const group of groupsA.values()) {
+    try {
+      await db
+        .update(courseMemberships)
+        .set({
+          role: group.role,
+          canvasRole: group.canvasRole,
+          droppedAt: null,
+          droppedReason: null,
+          lastSyncedAt: now,
+          updatedAt: now,
+          // #4 (security review, PR #457): every other role/restore write
+          // in this codebase clears these on a role change (roster.ts,
+          // UserIdentityService.ts, users.ts) -- this one didn't, so a TA
+          // demoted by Canvas kept the solutions/drafts grant. The DB's
+          // own course_memberships_capabilities_require_ta constraint
+          // (identity.ts), written specifically to catch a role-change
+          // path that forgets this, rejected the write outright on
+          // demotion -- which is worse than silently allowing it: the
+          // rejection was swallowed into the per-row error array below
+          // while the sync still reported "success", and promotion (which
+          // hits no such constraint) sailed through unconstrained.
+          ...(group.role !== "ta" ? { canViewSolutions: false, canViewDrafts: false } : {}),
+        })
+        .where(and(eq(courseMemberships.courseId, scope), inArray(courseMemberships.id, group.rows.map((r) => r.membershipId))));
+      updated += group.rows.length;
+    } catch (err) {
+      const message = describeError(err);
+      for (const row of group.rows) {
+        errors.push({ canvasEnrollmentId: row.canvasEnrollmentId, message });
+      }
+    }
+  }
+
+  // ---- Pass B: rows new to this sync -- resolved through the one shared
+  // provisioning pipeline, stamped with their Canvas identity in the SAME
+  // insert statement for the dominant "added" case (#8's fix threaded
+  // into upsertCourseMembers itself -- see roster.ts). Only "restored" and
+  // "already_enrolled" rows (a previously-dropped or manually-added
+  // membership Canvas now also reports) still need a stamp applied here,
+  // and that set is normally small next to the whole roster. `deduped`
+  // (built above) already guarantees at most one entry per email, so
+  // #10's duplicate-enrollment case can't produce two competing entries
+  // here. ----
+  const newToCanvas = deduped.filter((m) => !knownByCanvasId.has(m.canvasEnrollmentId));
+  let added = 0;
+  if (newToCanvas.length > 0) {
+    const allowedDomains = await allowedDomainsForCourse(db, scope);
+    const results = await upsertCourseMembers(
+      db,
+      scope,
+      cipher,
+      newToCanvas.map((m) => ({
+        email: m.email,
+        displayName: m.displayName,
+        role: m.role,
+        canvasEnrollmentId: m.canvasEnrollmentId,
+        canvasRole: m.canvasRole,
+      })),
+      allowedDomains,
+    );
+
+    const toStamp: { membershipId: string; canvasEnrollmentId: string; canvasRole: string }[] = [];
+    for (let i = 0; i < results.length; i++) {
+      const result = results[i]!;
+      const source = newToCanvas[i]!;
+      if (result.status === "added") {
+        // Already stamped by upsertCourseMembers' own INSERT.
+        added++;
+        continue;
+      }
+      if (result.status === "restored" || result.status === "already_enrolled") {
+        if (result.membershipId) {
+          toStamp.push({
+            membershipId: result.membershipId,
+            canvasEnrollmentId: source.canvasEnrollmentId,
+            canvasRole: source.canvasRole,
+          });
+          if (result.status === "restored") updated++;
+        }
+        continue;
+      }
+      // invalid_email / disallowed_domain / role_conflict: a real, reportable
+      // outcome, not a sync bug -- see this module's own header on why
+      // role_conflict here is deliberately NOT auto-resolved.
+      errors.push({
+        canvasEnrollmentId: source.canvasEnrollmentId,
+        message: friendlyProvisionMessage(result, source.email),
+      });
+    }
+
+    for (const row of toStamp) {
+      try {
+        await db
+          .update(courseMemberships)
+          .set({ canvasEnrollmentId: row.canvasEnrollmentId, canvasRole: row.canvasRole, lastSyncedAt: now, updatedAt: now })
+          .where(eq(courseMemberships.id, row.membershipId));
+      } catch (err) {
+        errors.push({ canvasEnrollmentId: row.canvasEnrollmentId, message: describeError(err) });
+      }
+    }
+  }
+
+  // ---- Pass C: rows this sync no longer sees. ----
+  // Deliberately NOT scoped to `knownRows` from Pass A above -- that set is
+  // exactly the rows THIS round's incoming enrollments matched, i.e. the
+  // ones that must NOT be removed. What this pass needs is every row ANY
+  // prior sync stamped with a canvasEnrollmentId (isNotNull, not "was in
+  // this round"), so a person present in a previous sync but absent from
+  // this one is actually caught as a removal. `isNotNull` also excludes
+  // never-synced rows -- a manually added member Canvas has simply never
+  // heard of is not this pass's business to drop.
+  //
+  // #9 (functionality review, PR #457): built from every enrollment THIS
+  // SYNC FETCHED (`enrollments`), not from `mapped` (only the ones that
+  // parsed cleanly). A row that fails to map -- an unmapped Canvas role
+  // type, a missing email -- is still a real, currently-active Canvas
+  // enrollment; it was excluded from `mapped` above and reported as a
+  // per-row error, but it must NOT also read as "no longer enrolled"
+  // here. Before this fix, a systemic parsing failure (e.g. Canvas
+  // changing a field this code assumes exists) could soft-drop most or
+  // all of a previously-synced roster in one sync, reported as success.
+  const allFetchedIdSet = new Set(enrollments.map((e) => e.canvasEnrollmentId));
+  const activeCanvasMemberships = await db
+    .select({ id: courseMemberships.id, canvasEnrollmentId: courseMemberships.canvasEnrollmentId })
+    .from(courseMemberships)
+    .where(
+      and(
+        eq(courseMemberships.courseId, scope),
+        isNull(courseMemberships.droppedAt),
+        isNotNull(courseMemberships.canvasEnrollmentId),
+      ),
+    );
+  const toRemoveIds = activeCanvasMemberships
+    .filter((r) => !allFetchedIdSet.has(r.canvasEnrollmentId!))
+    .map((r) => r.id);
+
+  let removed = 0;
+  if (toRemoveIds.length > 0) {
+    await db
+      .update(courseMemberships)
+      .set({
+        droppedAt: new Date(),
+        droppedReason: "roster_removal",
+        canViewSolutions: false,
+        canViewDrafts: false,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(courseMemberships.courseId, scope), inArray(courseMemberships.id, toRemoveIds)));
+    removed = toRemoveIds.length;
+  }
+
+  return { added, updated, removed, errors };
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : "An unexpected error occurred while writing this row.";
+}
+
+/** #7 (usability review, PR #457): `role_conflict` results from
+ *  `upsertCourseMembers` carry `existingRole` but no `message` (only
+ *  invalid_email/disallowed_domain set one) -- the old fallback
+ *  (`Could not enroll x@y.com (role_conflict).`) leaked that raw
+ *  ProvisionStatus enum value straight into instructor-facing copy
+ *  instead of explaining what actually happened. Mirrors the tone/copy
+ *  table RosterImportPanel.tsx already keeps for the same ProvisionStatus
+ *  values, scoped to what a Canvas sync context needs to say. */
+function friendlyProvisionMessage(result: ProvisionResult, email: string): string {
+  if (result.message) return result.message;
+  if (result.status === "role_conflict") {
+    return `${email} is already on this course as ${result.existingRole ?? "a different role"} (added outside Canvas sync) -- change their role manually if it should match Canvas.`;
+  }
+  return `Could not enroll ${email} (${result.status}).`;
+}

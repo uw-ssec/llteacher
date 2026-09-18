@@ -39,7 +39,6 @@ import {
 const SESSION_SECRET = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
 
 const ENV = {
-  ASSETS: { fetch: async () => new Response("not found", { status: 404 }) },
   WORKOS_API_KEY: "sk_test_x",
   WORKOS_CLIENT_ID: "client_x",
   SESSION_SECRET,

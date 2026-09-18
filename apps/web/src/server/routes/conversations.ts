@@ -38,11 +38,18 @@ import {
   softDeleteConversation,
   getOwnedConversationOrNull,
   getMessagesForConversation,
+  getConversationMessageCount,
   DEFAULT_CONVERSATIONS_PAGE_SIZE,
 } from "../repositories/conversations";
 import type { ConversationKind } from "../../db/schema";
 import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
 import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from "../repositories/rateLimits";
+// #287: the canonical "untouched default title" sentinel, shared with
+// chat.ts's (effectively dead, see its own doc comment) auto-title branch
+// and App.tsx's client-side auto-title-on-first-message fix -- so every
+// caller that needs to create a title-less row, or decide whether a row is
+// still safe to auto-title, agrees on exactly one string.
+import { DEFAULT_TUTOR_CONVERSATION_TITLE, MAX_CONVERSATION_TITLE_UTF16_LENGTH } from "../../shared/tutorConversationTitle";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type {
@@ -84,11 +91,16 @@ const MAX_TUTOR_CONVERSATIONS_PER_COURSE = 300;
 
 const createConversationSchema = z.object({
   courseId: z.string().uuid(),
-  title: z.string().trim().min(1).max(100).optional(),
+  // #453: shared with deriveTutorConversationTitle's own UTF-16 ceiling
+  // (tutorConversationTitle.ts) -- see that constant's own doc comment for
+  // why a literal `100` here, independent of that one, is exactly the kind
+  // of duplicated-limit drift that let an emoji-heavy auto-title 400
+  // silently against this schema in the first place.
+  title: z.string().trim().min(1).max(MAX_CONVERSATION_TITLE_UTF16_LENGTH).optional(),
 });
 
 const updateConversationSchema = z.object({
-  title: z.string().trim().min(1).max(100),
+  title: z.string().trim().min(1).max(MAX_CONVERSATION_TITLE_UTF16_LENGTH),
 });
 
 // #218: projects a raw `conversations` row to the wire contract -- drops
@@ -257,10 +269,47 @@ export async function createConversationHandler(c: Context<AppEnv>) {
     ownerUserId: authContext.session.userId,
     sectionId: null,
     kind: "tutor",
-    title: parsed.data.title || "New Conversation",
+    title: parsed.data.title || DEFAULT_TUTOR_CONVERSATION_TITLE,
   });
 
   return c.json(toConversationSummary(created), 201);
+}
+
+// #438: GET /api/conversations/:id -- returns this ONE conversation's
+// current summary + messageCount. This is the reconciliation read
+// trackTutorTurnCompletion's caller (App.tsx) triggers once a tutor chat
+// turn's stream has fully settled: the client cannot tell, from the stream
+// alone, whether chat.ts's onFinish persisted one row (the student's
+// message only) or two (plus a reply) for that turn, so instead of
+// guessing a delta it asks this route for the real count
+// (useTutorConversations.ts's reconcileConversationCount). Same ownership
+// pattern as PATCH/DELETE/GET-messages below (getOwnedConversationOrNull ->
+// 404, never 403, on "doesn't exist or isn't yours").
+export async function getConversationHandler(c: Context<AppEnv>) {
+  const authContext = c.get("authContext") as AuthContext | undefined;
+  if (!authContext) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const id = c.req.param("id");
+  // #267: same reasoning as updateConversationHandler's guard below.
+  if (!id || !UUID_RE.test(id)) {
+    return c.json({ error: "Conversation not found" }, 404);
+  }
+  const db = makeDb(c.env.DATABASE_URL);
+
+  const existing = await getOwnedConversationOrNull(db, id, authContext.session.userId, authContext.isMemberOf);
+  if (!existing) {
+    return c.json({ error: "Conversation not found" }, 404);
+  }
+
+  // Row just read back and ownership-checked -- the sanctioned case for
+  // this cast per scope.ts's unsafeCourseScope docstring (same pattern as
+  // updateConversationHandler below).
+  const scope = unsafeCourseScope(existing.courseId);
+  const messageCount = await getConversationMessageCount(db, scope, id);
+  const body: ConversationListItemResponse = { ...toConversationSummary(existing), messageCount };
+  return c.json(body);
 }
 
 export async function updateConversationHandler(c: Context<AppEnv>) {
@@ -428,5 +477,6 @@ export const conversationsRoutes = new Hono<AppEnv>();
 conversationsRoutes.get("/", listConversationsHandler);
 conversationsRoutes.post("/", createConversationHandler);
 conversationsRoutes.get("/:id/messages", listConversationMessagesHandler);
+conversationsRoutes.get("/:id", getConversationHandler);
 conversationsRoutes.patch("/:id", updateConversationHandler);
 conversationsRoutes.delete("/:id", deleteConversationHandler);

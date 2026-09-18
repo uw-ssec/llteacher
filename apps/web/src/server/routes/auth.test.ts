@@ -6,12 +6,16 @@ import {
   loadSessionKey,
   sealSession,
 } from "../../lib/session";
-import { OAUTH_STATE_COOKIE, OAUTH_VERIFIER_COOKIE } from "../../lib/oauth-state";
+import {
+  OAUTH_TRANSACTION_COOKIE,
+  parseOAuthTransaction,
+} from "../../lib/oauth-state";
 import { auditEvents } from "../../db/schema";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 
 const TEST_ENV = {
+  APP_URL: "https://llteacher.example.edu",
   SESSION_SECRET: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
   ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
   BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
@@ -94,19 +98,17 @@ beforeEach(() => {
   auditInserts = [];
 });
 
-/** Simulates a real browser: hits /login to capture the state+PKCE cookies
- *  WorkOS would echo back, then builds the /callback request those cookies
+/** Simulates a real browser: hits /login to capture the state+PKCE transaction
+ *  cookie WorkOS would echo back, then builds the /callback request that cookie
  *  and a matching `state` query param. */
-async function loginThenBuildCallbackRequest(codeQueryString = "code=good") {
-  const loginRes = await auth.request("/login", {}, TEST_ENV);
+async function loginThenBuildCallbackRequest(codeQueryString = "code=good", returnTo?: string) {
+  const loginRes = await auth.request(returnTo ? `/login?returnTo=${returnTo}` : "/login", {}, TEST_ENV);
   const setCookieHeader = loginRes.headers.get("set-cookie") ?? "";
-  const state = extractCookieValue(setCookieHeader, OAUTH_STATE_COOKIE);
-  const cookieHeader = setCookieHeader
-    .split(", ")
-    .map((c) => c.split(";")[0])
-    .join("; ");
+  const transaction = parseOAuthTransaction(extractCookieValue(setCookieHeader, OAUTH_TRANSACTION_COOKIE));
+  if (!transaction) throw new Error("OAuth transaction cookie was not readable");
+  const cookieHeader = setCookieHeader.split(";")[0];
   return {
-    path: `/callback?${codeQueryString}&state=${state}`,
+    path: `/callback?${codeQueryString}&state=${transaction.state}`,
     headers: { cookie: cookieHeader },
   };
 }
@@ -124,6 +126,19 @@ describe("GET /login", () => {
     expect(res.headers.get("location")).toContain("workos.com");
   });
 
+  it("uses APP_URL even when forwarded-host is hostile", async () => {
+    await auth.request("/login", {
+      headers: {
+        "x-forwarded-host": "attacker.example",
+        "x-forwarded-proto": "http",
+      },
+    }, TEST_ENV);
+
+    expect(getAuthorizationUrl).toHaveBeenCalledWith(expect.objectContaining({
+      redirectUri: "https://llteacher.example.edu/api/auth/callback",
+    }));
+  });
+
   it("passes state and a PKCE S256 code challenge to WorkOS", async () => {
     await auth.request("/login", {}, TEST_ENV);
     expect(getAuthorizationUrl).toHaveBeenCalledWith(
@@ -135,12 +150,33 @@ describe("GET /login", () => {
     );
   });
 
-  it("sets HttpOnly state and PKCE verifier cookies", async () => {
+  it("sets an HttpOnly OAuth transaction cookie", async () => {
     const res = await auth.request("/login", {}, TEST_ENV);
     const setCookie = res.headers.get("set-cookie") ?? "";
-    expect(setCookie).toContain(OAUTH_STATE_COOKIE);
-    expect(setCookie).toContain(OAUTH_VERIFIER_COOKIE);
+    expect(setCookie).toContain(OAUTH_TRANSACTION_COOKIE);
     expect(setCookie).toContain("HttpOnly");
+  });
+
+  it("sets one OAuth transaction cookie so every binding survives a proxy that preserves one Set-Cookie header", async () => {
+    const res = await auth.request("/login?returnTo=/admin", {}, TEST_ENV);
+    const setCookie = res.headers.get("set-cookie") ?? "";
+
+    expect(setCookie).toContain("llt_oauth_transaction=");
+    expect(setCookie.split(", ")).toHaveLength(1);
+  });
+
+  it("remembers a safe local return destination", async () => {
+    const res = await auth.request("/login?returnTo=/admin", {}, TEST_ENV);
+
+    const transaction = parseOAuthTransaction(extractCookieValue(res.headers.get("set-cookie") ?? "", OAUTH_TRANSACTION_COOKIE));
+    expect(transaction?.returnTo).toBe("/admin");
+  });
+
+  it("does not remember an external return destination", async () => {
+    const res = await auth.request("/login?returnTo=https://attacker.example", {}, TEST_ENV);
+
+    const transaction = parseOAuthTransaction(extractCookieValue(res.headers.get("set-cookie") ?? "", OAUTH_TRANSACTION_COOKIE));
+    expect(transaction?.returnTo).toBeUndefined();
   });
 });
 
@@ -215,6 +251,18 @@ describe("GET /callback", () => {
     expect(setCookie).toContain("HttpOnly");
   });
 
+  it("returns an admin sign-in flow to /admin", async () => {
+    authenticateWithCode.mockResolvedValue({
+      user: { id: "workos_1", email: "cdcore@uw.edu", firstName: "Cordero" },
+      accessToken: fakeAccessToken(),
+    });
+    const { path, headers } = await loginThenBuildCallbackRequest("code=good", "/admin");
+    const res = await auth.request(path, { headers }, TEST_ENV);
+
+    expect(res.headers.get("location")).toBe("/admin");
+    expect(res.headers.get("set-cookie")).toContain(`${OAUTH_TRANSACTION_COOKIE}=;`);
+  });
+
   it("audits user.provisioned (#147) when a new user logs in and their WorkOS org has a matching local row", async () => {
     dbOrgFindFirstImpl = async () => ({ id: "org-1", allowedDomains: ["uw.edu"] });
     authenticateWithCode.mockResolvedValue({
@@ -275,7 +323,7 @@ describe("GET /callback", () => {
     expect(auditInserts).toHaveLength(0);
   });
 
-  it("clears the oauth state/verifier cookies after use, on both success and failure", async () => {
+  it("clears the OAuth transaction cookie after use, on both success and failure", async () => {
     authenticateWithCode.mockResolvedValue({
       user: { id: "workos_1", email: "cdcore@uw.edu", firstName: "Cordero" },
       accessToken: fakeAccessToken(),
@@ -283,8 +331,7 @@ describe("GET /callback", () => {
     const { path, headers } = await loginThenBuildCallbackRequest();
     const res = await auth.request(path, { headers }, TEST_ENV);
     const setCookie = res.headers.get("set-cookie") ?? "";
-    expect(setCookie).toContain(`${OAUTH_STATE_COOKIE}=;`);
-    expect(setCookie).toContain(`${OAUTH_VERIFIER_COOKIE}=;`);
+    expect(setCookie).toContain(`${OAUTH_TRANSACTION_COOKIE}=;`);
   });
 
   it("shows a generic error page (and logs the real error) when provisioning fails", async () => {
@@ -400,7 +447,10 @@ describe("POST /logout", () => {
 
     expect(res.status).toBe(302);
     expect(getLogoutUrl).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionId: "session_xyz" }),
+      expect.objectContaining({
+        sessionId: "session_xyz",
+        returnTo: "https://llteacher.example.edu/",
+      }),
     );
     expect(res.headers.get("location")).toContain("workos.com");
     const setCookie = res.headers.get("set-cookie") ?? "";
