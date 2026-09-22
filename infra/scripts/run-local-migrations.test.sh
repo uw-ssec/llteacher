@@ -8,7 +8,7 @@ log="$test_dir/aws.log"
 
 printf '%s\n' '#!/usr/bin/env bash' \
   'set -euo pipefail' \
-  'printf "region=%s\\n" "${AWS_DEFAULT_REGION:-}" >> "$AWS_LOG"' \
+  'printf "region=%s default_region=%s\\n" "${AWS_REGION:-}" "${AWS_DEFAULT_REGION:-}" >> "$AWS_LOG"' \
   'printf "%s\\n" "$*" >> "$AWS_LOG"' \
   'case "$*" in' \
   '  *"ecs describe-services"*) echo "{\"subnets\":[\"subnet-1\"],\"securityGroups\":[\"sg-1\"],\"assignPublicIp\":\"ENABLED\"}" ;;' \
@@ -22,14 +22,14 @@ printf '%s\n' '#!/usr/bin/env bash' \
 chmod +x "$test_dir/aws"
 
 set +e
-PATH="$test_dir:$PATH" AWS_LOG="$log" PULUMI_STACK=local LLTEACHER_LOCAL_MIGRATION_ATTEMPTS=1 "$root/infra/scripts/run-local-migrations.sh"
+PATH="$test_dir:$PATH" AWS_LOG="$log" PULUMI_STACK=local AWS_REGION=eu-west-1 AWS_DEFAULT_REGION=us-east-1 LLTEACHER_LOCAL_MIGRATION_ATTEMPTS=1 "$root/infra/scripts/run-local-migrations.sh"
 exit_code=$?
 set -e
 
 test "$exit_code" -ne 0
 ! grep -q 'ecs update-service' "$log"
 grep -Fq 'rds describe-db-instances' "$log"
-grep -Fq 'region=us-west-2' "$log"
+grep -Fq 'region=us-west-2 default_region=us-west-2' "$log"
 grep -Fq 'rds wait db-instance-available --db-instance-identifier llteacher-local-postgres-test' "$log"
 grep -Fq '"command":["npm","--workspace=apps/web","run","db:migrate"]' "$log"
 echo "migration failure prevented service update"

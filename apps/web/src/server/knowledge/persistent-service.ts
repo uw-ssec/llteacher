@@ -128,6 +128,7 @@ export class PersistentKnowledgeService implements KnowledgeService {
   private readonly storage: ObjectStore;
   private readonly delegates = new Map<string, OkfKnowledgeService>();
   private readonly durable = new Map<string, ArrayBuffer | null>();
+  private readonly loaded = new Set<string>();
   private readonly queues = new Map<string, Promise<void>>();
 
   constructor(opts: { root: string; binary: string; storage: ObjectStore }) {
@@ -170,7 +171,12 @@ export class PersistentKnowledgeService implements KnowledgeService {
 
   private async load(courseId: string): Promise<void> {
     const id = this.normalizedCourse(courseId);
-    if (this.durable.has(id)) return;
+    if (this.loaded.has(id)) return;
+    if (this.durable.has(id)) {
+      await this.restore(id, this.durable.get(id) ?? null);
+      this.loaded.add(id);
+      return;
+    }
     const body = await this.storage.get(knowledgeSnapshotKey(id));
     if (body === null) {
       const entries = await fs.readdir(this.courseDir(id)).catch((error: NodeJS.ErrnoException) => {
@@ -183,6 +189,7 @@ export class PersistentKnowledgeService implements KnowledgeService {
     }
     await this.restore(id, body);
     this.durable.set(id, body);
+    this.loaded.add(id);
   }
 
   private async snapshot(courseId: string): Promise<ArrayBuffer> {
@@ -214,7 +221,18 @@ export class PersistentKnowledgeService implements KnowledgeService {
         }
         return result;
       } catch (error) {
-        if (mutation) await this.restore(id, this.durable.get(id) ?? null);
+        if (mutation) {
+          // A failed restore may have already removed or partially rewritten
+          // the working tree. Poison loaded state before attempting rollback;
+          // only a complete restore may allow another operation to proceed.
+          this.loaded.delete(id);
+          const durable = this.durable.get(id);
+          if (durable === undefined && !this.durable.has(id)) {
+            throw new Error("Knowledge durable state is unavailable after a failed mutation", { cause: error });
+          }
+          await this.restore(id, durable ?? null);
+          this.loaded.add(id);
+        }
         throw error;
       }
     } finally {

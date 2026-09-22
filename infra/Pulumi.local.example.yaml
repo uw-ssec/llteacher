@@ -2,7 +2,7 @@ config:
   aws:region: us-west-2
   llteacher-infra:environment: local
   llteacher-infra:domainName: llteacher.local
-  llteacher-infra:domainReady: "true"
+  llteacher-infra:domainReady: "false"
   llteacher-infra:storageEndpoint: http://host.docker.internal:4566
   llteacher-infra:appOrigin: http://localhost:8080
   llteacher-infra:flociEndpoint: http://localhost:4566

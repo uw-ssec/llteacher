@@ -63,6 +63,12 @@ in local and AWS environments. Floci's ALB data plane uses HTTP, even when an
 HTTPS listener is modeled; it cannot prove real TLS, IAM isolation, public DNS,
 or AWS networking enforcement. Those require real-AWS verification.
 
+The committed local example leaves `domainReady=false`, so the normal bootstrap
+origin is `http://localhost:8080`. If an existing local stack explicitly has
+`domainReady=true`, the launcher preserves that resource graph and derives
+`APP_URL` plus smoke checks from Floci's plaintext port 8443 mapping. This tests
+the conditional listener graph only; it does not establish local or AWS TLS.
+
 Local state lives in ignored `.floci/data`, `.pulumi/local`,
 `infra/Pulumi.local.yaml`, and the owner-only `.floci/pulumi-passphrase`.
 Retain them together. Do not delete volumes/state or run `pulumi destroy` as

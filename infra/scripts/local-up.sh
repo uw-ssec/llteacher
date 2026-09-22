@@ -24,7 +24,14 @@ pulumi -C "$root/infra" config set --stack local domainName llteacher.local
 pulumi -C "$root/infra" config set --stack local flociEndpoint http://localhost:4566
 pulumi -C "$root/infra" config set --stack local aws:region us-west-2
 pulumi -C "$root/infra" config set --stack local flociTaskEndpoint http://host.docker.internal:4566
-pulumi -C "$root/infra" config set --stack local appOrigin http://localhost:8080
+# Floci exposes its modeled HTTP and HTTPS listeners as plaintext host sockets.
+# Preserve an explicitly enabled domain graph while keeping HTTP bootstrap the
+# default; verification derives the same socket from domainReady.
+local_app_port=8080
+if [[ "$(pulumi -C "$root/infra" config get domainReady --stack local 2>/dev/null || true)" == "true" ]]; then
+  local_app_port=8443
+fi
+pulumi -C "$root/infra" config set --stack local appOrigin "http://localhost:$local_app_port"
 if ! pulumi -C "$root/infra" config get imageTag --stack local >/dev/null 2>&1; then
   pulumi -C "$root/infra" config set --stack local imageTag local-bootstrap
 fi

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -19,8 +19,41 @@ function root(): string {
   return mkdtempSync(path.join(tmpdir(), "persistent-kb-"));
 }
 
-function service(storage: ObjectStore, knowledgeRoot = root()): PersistentKnowledgeService {
-  return new PersistentKnowledgeService({ root: knowledgeRoot, binary: OKF, storage });
+function service(storage: ObjectStore, knowledgeRoot = root(), binary = OKF): PersistentKnowledgeService {
+  return new PersistentKnowledgeService({ root: knowledgeRoot, binary, storage });
+}
+
+function fakeOkfBinary(): string {
+  const directory = root();
+  const binary = path.join(directory, "okf-test-double.mjs");
+  writeFileSync(binary, `#!/usr/bin/env node
+import fs from "node:fs";
+import path from "node:path";
+const [command, ...args] = process.argv.slice(2);
+if (command === "version") process.exit(0);
+if (command === "init") {
+  fs.mkdirSync(args[0], { recursive: true });
+  fs.writeFileSync(path.join(args[0], "index.md"), "# Knowledge Base\\n");
+  console.log("initialized");
+  process.exit(0);
+}
+if (command === "create") {
+  const [id, directory] = args;
+  const value = (flag) => args[args.indexOf(flag) + 1];
+  const file = path.join(directory, id + ".md");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "---\\ntype: " + value("--type") + "\\ntitle: " + value("--title") + "\\ndescription: " + value("--desc") + "\\n---\\n");
+  console.log("null");
+  process.exit(0);
+}
+if (command === "update") {
+  console.log("null");
+  process.exit(0);
+}
+process.exit(2);
+`);
+  chmodSync(binary, 0o755);
+  return binary;
 }
 
 const create = {
@@ -226,5 +259,71 @@ describe.skipIf(!okfAvailable(OKF))("PersistentKnowledgeService (real okf and fi
     release();
     await creating;
     expect((await reading)?.body.trim()).toBe("First body");
+  });
+});
+
+describe("PersistentKnowledgeService rollback poisoning", () => {
+  it("reloads the last durable snapshot after rollback restoration fails partway", async () => {
+    const backing = memoryObjectStore();
+    let failNextPut = false;
+    let failRollbackWrite: (() => void) | undefined;
+    const storage: ObjectStore = {
+      ...backing,
+      async put(key, body, opts) {
+        if (failNextPut) {
+          failNextPut = false;
+          failRollbackWrite?.();
+          throw new Error("storage unavailable");
+        }
+        await backing.put(key, body, opts);
+      },
+    };
+    const binary = fakeOkfBinary();
+    const current = service(storage, root(), binary);
+    await current.create(COURSE_A, { ...create, id: "first", title: "First" });
+    await current.create(COURSE_A, { ...create, id: "second", title: "Second", body: "Second body" });
+
+    const realWriteFile = fs.writeFile;
+    const write = vi.spyOn(fs, "writeFile");
+    failRollbackWrite = () => {
+      write.mockImplementationOnce(realWriteFile);
+      write.mockRejectedValueOnce(new Error("rollback write failed"));
+    };
+    failNextPut = true;
+    await expect(current.update(COURSE_A, "first", { body: "Unsaved body" })).rejects.toThrow("rollback write failed");
+    write.mockRestore();
+
+    await current.create(COURSE_A, { ...create, id: "third", title: "Third", body: "Third body" });
+    const restarted = service(backing, root(), binary);
+    expect((await restarted.show(COURSE_A, "first"))?.body.trim()).toBe("First body");
+    expect((await restarted.show(COURSE_A, "second"))?.body.trim()).toBe("Second body");
+    expect((await restarted.show(COURSE_A, "third"))?.body.trim()).toBe("Third body");
+  });
+
+  it("reloads an initially empty durable snapshot after rollback cleanup fails", async () => {
+    const backing = memoryObjectStore();
+    let failNextPut = true;
+    const storage: ObjectStore = {
+      ...backing,
+      async put(key, body, opts) {
+        if (failNextPut) {
+          failNextPut = false;
+          throw new Error("storage unavailable");
+        }
+        await backing.put(key, body, opts);
+      },
+    };
+    const binary = fakeOkfBinary();
+    const current = service(storage, root(), binary);
+    await current.list(COURSE_A);
+    const remove = vi.spyOn(fs, "rm").mockRejectedValueOnce(new Error("rollback cleanup failed"));
+
+    await expect(current.create(COURSE_A, { ...create, id: "unsaved" })).rejects.toThrow("rollback cleanup failed");
+    remove.mockRestore();
+    await current.create(COURSE_A, { ...create, id: "saved", title: "Saved", body: "Saved body" });
+
+    const restarted = service(backing, root(), binary);
+    expect(await restarted.show(COURSE_A, "unsaved")).toBeNull();
+    expect((await restarted.show(COURSE_A, "saved"))?.body.trim()).toBe("Saved body");
   });
 });
