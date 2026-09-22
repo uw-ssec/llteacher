@@ -1,3 +1,7 @@
+/** Small storage boundary shared by materials and knowledge persistence.
+ * AWS uses the default refreshing credential chain; explicit endpoint credentials
+ * support local emulators. Missing objects return null, while other failures
+ * remain errors so callers cannot mistake an outage for an empty course. */
 import { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 
 export interface StoredObject {

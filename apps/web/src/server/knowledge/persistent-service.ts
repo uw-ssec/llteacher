@@ -1,6 +1,12 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { unzipSync, zipSync } from "fflate";
+import {
+  digest, encodeManifest, exactArrayBuffer, knowledgeBlobKey, knowledgeManifestKey, KnowledgePersistenceError,
+  knowledgeSnapshotKey, MAX_EXPANDED_BYTES, MAX_FILES, parseLegacy, parseManifest,
+  readManifestFiles, safeSnapshotPath, type DurableKnowledge, type FileReference,
+  type KnowledgeFiles, type KnowledgeManifest,
+} from "./persistence-format";
+export { knowledgeSnapshotKey } from "./persistence-format";
 import type { ObjectStore } from "../storage/objectStore";
 import {
   ConceptIdError,
@@ -14,107 +20,48 @@ import {
 } from "./service";
 
 const COURSE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const MAX_COMPRESSED_BYTES = 16 * 1024 * 1024;
-const MAX_EXPANDED_BYTES = 64 * 1024 * 1024;
-const MAX_FILES = 10_000;
+interface CachedFile { stamp: string; reference: FileReference }
+type FileCache = Map<string, CachedFile>;
 
-export function knowledgeSnapshotKey(courseId: string): string {
-  return `courses/${courseId.toLowerCase()}/knowledge/snapshot.zip`;
-}
-
-function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-}
-
-function safeSnapshotPath(name: string): boolean {
-  if (name === "" || name.includes("\\") || name.startsWith("/") || path.posix.isAbsolute(name)) return false;
-  const parts = name.split("/");
-  if (parts.some((part) => part === "" || part === "." || part === "..")) return false;
-  if (parts[0] === "knowledge") return parts.length > 1 && name.endsWith(".md");
-  if (parts[0] === "originals") return parts.length > 1 && name.endsWith(".txt");
-  return false;
-}
-
-function rejectSymlinkEntries(bytes: Uint8Array): void {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const firstEocd = Math.max(0, bytes.byteLength - 65_557);
-  let eocd = -1;
-  for (let offset = bytes.byteLength - 22; offset >= firstEocd; offset -= 1) {
-    if (view.getUint32(offset, true) === 0x06054b50) { eocd = offset; break; }
-  }
-  if (eocd < 0) throw new Error("Unsafe knowledge snapshot: invalid zip directory");
-  const entries = view.getUint16(eocd + 10, true);
-  let offset = view.getUint32(eocd + 16, true);
-  for (let index = 0; index < entries; index += 1) {
-    if (offset + 46 > bytes.byteLength || view.getUint32(offset, true) !== 0x02014b50) {
-      throw new Error("Unsafe knowledge snapshot: invalid zip directory");
-    }
-    const originOs = view.getUint8(offset + 5);
-    const mode = view.getUint32(offset + 38, true) >>> 16;
-    if (originOs === 3 && (mode & 0o170000) === 0o120000) {
-      throw new Error("Knowledge snapshot contains a symbolic link");
-    }
-    const nameLength = view.getUint16(offset + 28, true);
-    const extraLength = view.getUint16(offset + 30, true);
-    const commentLength = view.getUint16(offset + 32, true);
-    offset += 46 + nameLength + extraLength + commentLength;
-  }
-}
-
-function parseSnapshot(body: ArrayBuffer): Record<string, Uint8Array> {
-  if (body.byteLength > MAX_COMPRESSED_BYTES) throw new Error("Knowledge snapshot exceeds the compressed size limit");
-  rejectSymlinkEntries(new Uint8Array(body));
-  let files = 0;
+async function collectFiles(base: string, cache: FileCache): Promise<{ manifest: KnowledgeManifest; cache: FileCache; changed: Map<string, Uint8Array> }> {
+  const files: Record<string, FileReference> = Object.create(null);
+  const next: FileCache = new Map();
+  const changed = new Map<string, Uint8Array>();
+  let count = 0;
   let expanded = 0;
-  const unzipped = unzipSync(new Uint8Array(body), {
-    filter(entry) {
-      if (!safeSnapshotPath(entry.name)) throw new Error(`Unsafe snapshot path: ${entry.name}`);
-      files += 1;
-      expanded += entry.originalSize;
-      if (files > MAX_FILES) throw new Error("Knowledge snapshot exceeds the file count limit");
-      if (expanded > MAX_EXPANDED_BYTES) throw new Error("Knowledge snapshot exceeds the expanded size limit");
-      return true;
-    },
-  });
-  const actualExpanded = Object.values(unzipped).reduce((total, file) => total + file.byteLength, 0);
-  if (actualExpanded > MAX_EXPANDED_BYTES) throw new Error("Knowledge snapshot exceeds the expanded size limit");
-  return unzipped;
-}
-
-async function collectFiles(
-  base: string,
-  prefix: "knowledge" | "originals",
-  extension: ".md" | ".txt",
-  out: Record<string, Uint8Array>,
-  limits: { files: number; expanded: number },
-): Promise<void> {
-  const current = path.join(base, prefix);
   async function walk(dir: string, relative: string): Promise<void> {
-    for (const entry of await fs.readdir(dir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return [];
+    const stat = await fs.lstat(dir, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
       throw error;
-    })) {
-      const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
+    });
+    if (!stat) return;
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("Refusing to persist symlink or unsafe directory");
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      const name = relative + "/" + entry.name;
       const child = path.join(dir, entry.name);
-      const stat = await fs.lstat(child);
-      if (stat.isSymbolicLink()) throw new Error(`Refusing to persist symlink: ${prefix}/${childRelative}`);
-      if (stat.isDirectory()) {
-        await walk(child, childRelative);
-      } else if (stat.isFile()) {
-        if (!entry.name.endsWith(extension)) throw new Error(`Refusing to persist unsafe file: ${prefix}/${childRelative}`);
-        limits.files += 1;
-        limits.expanded += stat.size;
-        if (limits.files > MAX_FILES) throw new Error("Knowledge snapshot exceeds the file count limit");
-        if (limits.expanded > MAX_EXPANDED_BYTES) throw new Error("Knowledge snapshot exceeds the expanded size limit");
+      const stat = await fs.lstat(child, { bigint: true });
+      if (stat.isSymbolicLink()) throw new Error("Refusing to persist symlink");
+      if (stat.isDirectory()) { await walk(child, name); continue; }
+      if (!stat.isFile() || !safeSnapshotPath(name)) throw new Error("Refusing to persist unsafe file");
+      if (++count > MAX_FILES) throw new Error("Knowledge snapshot exceeds the file count limit");
+      expanded += Number(stat.size);
+      if (expanded > MAX_EXPANDED_BYTES) throw new Error("Knowledge snapshot exceeds the expanded size limit");
+      const stamp = [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
+      let reference = cache.get(name)?.stamp === stamp ? cache.get(name)!.reference : undefined;
+      if (!reference) {
         const bytes = new Uint8Array(await fs.readFile(child));
-        if (bytes.byteLength !== stat.size) throw new Error(`Knowledge file changed while snapshotting: ${prefix}/${childRelative}`);
-        out[`${prefix}/${childRelative}`] = bytes;
-      } else {
-        throw new Error(`Refusing to persist unsafe file: ${prefix}/${childRelative}`);
+        const after = await fs.lstat(child, { bigint: true });
+        if (bytes.byteLength !== Number(stat.size) || [after.dev, after.ino, after.size, after.mtimeNs, after.ctimeNs].join(":") !== stamp) throw new Error("Knowledge file changed while snapshotting");
+        reference = { sha256: digest(bytes), size: bytes.byteLength };
+        changed.set(reference.sha256, bytes);
       }
+      files[name] = reference;
+      next.set(name, { stamp, reference });
     }
   }
-  await walk(current, "");
+  await walk(path.join(base, "knowledge"), "knowledge");
+  await walk(path.join(base, "originals"), "originals");
+  return { manifest: { version: 1, files }, cache: next, changed };
 }
 
 /**
@@ -127,7 +74,8 @@ export class PersistentKnowledgeService implements KnowledgeService {
   private readonly binary: string;
   private readonly storage: ObjectStore;
   private readonly delegates = new Map<string, OkfKnowledgeService>();
-  private readonly durable = new Map<string, ArrayBuffer | null>();
+  private readonly durable = new Map<string, DurableKnowledge>();
+  private readonly caches = new Map<string, FileCache>();
   private readonly loaded = new Set<string>();
   private readonly queues = new Map<string, Promise<void>>();
 
@@ -156,17 +104,28 @@ export class PersistentKnowledgeService implements KnowledgeService {
     return delegate;
   }
 
-  private async restore(courseId: string, body: ArrayBuffer | null): Promise<void> {
+  private async restore(courseId: string, durable: DurableKnowledge): Promise<void> {
     const courseDir = this.courseDir(courseId);
-    const files = body === null ? {} : parseSnapshot(body);
-    await fs.rm(courseDir, { recursive: true, force: true });
-    await fs.mkdir(courseDir, { recursive: true });
-    for (const [relative, bytes] of Object.entries(files)) {
-      const target = path.join(courseDir, ...relative.split("/"));
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.writeFile(target, bytes);
+    const files: KnowledgeFiles = durable === null ? {} : "legacy" in durable
+      ? await parseLegacy(courseId, durable.legacy)
+      : await readManifestFiles(this.storage, courseId, durable.manifest);
+    // Validate/download everything before touching the existing local cache.
+    // Stage writes so an interrupted restore cannot expose a partial bundle.
+    await fs.mkdir(path.dirname(courseDir), { recursive: true });
+    const staging = await fs.mkdtemp(courseDir + ".restore-");
+    try {
+      for (const [relative, bytes] of Object.entries(files)) {
+        const target = path.join(staging, ...relative.split("/"));
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        await fs.writeFile(target, bytes);
+      }
+      await fs.rm(courseDir, { recursive: true, force: true });
+      await fs.rename(staging, courseDir);
+    } finally {
+      await fs.rm(staging, { recursive: true, force: true });
     }
-    this.delegates.delete(this.normalizedCourse(courseId));
+    this.caches.delete(courseId);
+    this.delegates.delete(courseId);
   }
 
   private async load(courseId: string): Promise<void> {
@@ -177,8 +136,15 @@ export class PersistentKnowledgeService implements KnowledgeService {
       this.loaded.add(id);
       return;
     }
-    const body = await this.storage.get(knowledgeSnapshotKey(id));
-    if (body === null) {
+    const manifestBody = await this.storage.get(knowledgeManifestKey(id));
+    let durable: DurableKnowledge;
+    if (manifestBody !== null) {
+      durable = { manifest: parseManifest(id, manifestBody) };
+    } else {
+      const legacy = await this.storage.get(knowledgeSnapshotKey(id));
+      durable = legacy === null ? null : { legacy };
+    }
+    if (durable === null) {
       const entries = await fs.readdir(this.courseDir(id)).catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return [];
         throw error;
@@ -187,20 +153,27 @@ export class PersistentKnowledgeService implements KnowledgeService {
         throw new Error("Knowledge snapshot migration required: remote snapshot is missing while local course files exist; local files were preserved");
       }
     }
-    await this.restore(id, body);
-    this.durable.set(id, body);
+    await this.restore(id, durable);
+    this.durable.set(id, durable);
     this.loaded.add(id);
   }
 
-  private async snapshot(courseId: string): Promise<ArrayBuffer> {
-    const files: Record<string, Uint8Array> = {};
-    const limits = { files: 0, expanded: 0 };
-    const courseDir = this.courseDir(courseId);
-    await collectFiles(courseDir, "knowledge", ".md", files, limits);
-    await collectFiles(courseDir, "originals", ".txt", files, limits);
-    const zipped = zipSync(files);
-    if (zipped.byteLength > MAX_COMPRESSED_BYTES) throw new Error("Knowledge snapshot exceeds the compressed size limit");
-    return exactArrayBuffer(zipped);
+  private async persist(courseId: string): Promise<void> {
+    const snapshot = await collectFiles(this.courseDir(courseId), this.caches.get(courseId) ?? new Map());
+    const previous = this.durable.get(courseId);
+    const prior = previous && "manifest" in previous ? previous.manifest : null;
+    const body = encodeManifest(snapshot.manifest);
+    const known = new Set(Object.values(prior?.files ?? {}).map(file => file.sha256));
+    for (const [hash, bytes] of snapshot.changed) {
+      if (!known.has(hash)) await this.storage.put(knowledgeBlobKey(courseId, hash), exactArrayBuffer(bytes), { contentType: "application/octet-stream" });
+    }
+    // Publishing a single object is atomic in S3. Orphaned blobs from failed
+    // attempts are intentionally retained; no live or previous data is deleted.
+    if (!prior || JSON.stringify(prior) !== JSON.stringify(snapshot.manifest)) {
+      await this.storage.put(knowledgeManifestKey(courseId), body, { contentType: "application/json" });
+    }
+    this.durable.set(courseId, { manifest: snapshot.manifest });
+    this.caches.set(courseId, snapshot.cache);
   }
 
   private async serialized<T>(courseId: string, mutation: boolean, operation: (service: OkfKnowledgeService) => Promise<T>): Promise<T> {
@@ -215,9 +188,7 @@ export class PersistentKnowledgeService implements KnowledgeService {
       try {
         const result = await operation(this.delegate(id));
         if (mutation) {
-          const body = await this.snapshot(id);
-          await this.storage.put(knowledgeSnapshotKey(id), body, { contentType: "application/zip" });
-          this.durable.set(id, body);
+          await this.persist(id);
         }
         return result;
       } catch (error) {
@@ -235,6 +206,11 @@ export class PersistentKnowledgeService implements KnowledgeService {
         }
         throw error;
       }
+    } catch (error) {
+      if (error instanceof KnowledgePersistenceError) {
+        console.error(JSON.stringify({ event: "knowledge_persistence_corrupt", code: error.code, courseId: error.courseId, key: error.key }));
+      }
+      throw error;
     } finally {
       release();
       if (this.queues.get(id) === current) this.queues.delete(id);

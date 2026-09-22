@@ -1,7 +1,8 @@
 import { promises as fs, realpathSync } from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { zipSync, strToU8 } from "fflate";
+import { strToU8 } from "fflate";
+import { zipFiles } from "./persistence-format";
 import { runOkf } from "./okfCli";
 import { withWriteLock } from "./writeLock";
 import { isValidConceptId } from "./conceptId";
@@ -295,7 +296,7 @@ export class OkfKnowledgeService implements KnowledgeService {
     for (const rel of files) {
       entries[rel] = strToU8(await fs.readFile(path.join(dir, rel), "utf8"));
     }
-    return zipSync(entries, { level: 6 });
+    return zipFiles(entries);
   }
 
   private bundleDir(courseId: string): string {

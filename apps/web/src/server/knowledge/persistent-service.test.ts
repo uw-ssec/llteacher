@@ -65,6 +65,105 @@ const create = {
 };
 
 describe.skipIf(!okfAvailable(OKF))("PersistentKnowledgeService (real okf and filesystem)", () => {
+  it("uploads changed blobs only, commits the manifest last, and does not reread unchanged files", async () => {
+    const backing = memoryObjectStore();
+    const puts: string[] = [];
+    const storage: ObjectStore = { ...backing, async put(key, body, opts) {
+      puts.push(key);
+      await backing.put(key, body, opts);
+    } };
+    const localRoot = root();
+    const svc = service(storage, localRoot);
+    await svc.create(COURSE_A, create);
+    await svc.create(COURSE_A, { ...create, id: "untouched" });
+    const manifestKey = `courses/${COURSE_A}/knowledge/manifest.json`;
+    const before = await backing.get(manifestKey);
+    expect(before).not.toBeNull();
+    puts.length = 0;
+    const read = vi.spyOn(fs, "readFile");
+    await svc.update(COURSE_A, "lesson", { body: "changed" });
+    const untouched = path.join(localRoot, "courses", COURSE_A, "knowledge", "untouched.md");
+    // update's own inbound-link scan can read other concepts; persistence must
+    // reuse unchanged originals, which the delegate does not read here.
+    const original = path.join(localRoot, "courses", COURSE_A, "originals", "untouched.txt");
+    expect(read.mock.calls.some(([candidate]) => candidate === original)).toBe(false);
+    read.mockRestore();
+    const prior = JSON.parse(new TextDecoder().decode(before!));
+    const next = JSON.parse(new TextDecoder().decode((await backing.get(manifestKey))!));
+    expect(next.files["knowledge/untouched.md"]).toEqual(prior.files["knowledge/untouched.md"]);
+    expect(puts).not.toContain(`courses/${COURSE_A}/knowledge/blobs/${prior.files["knowledge/untouched.md"].sha256}`);
+    expect(puts.at(-1)).toBe(manifestKey);
+    expect(puts).not.toContain(knowledgeSnapshotKey(COURSE_A));
+    expect(existsSync(untouched)).toBe(true);
+    puts.length = 0;
+    const reread = vi.spyOn(fs, "readFile");
+    await svc.ensureBundle(COURSE_A);
+    expect(reread.mock.calls.some(([candidate]) => candidate === untouched)).toBe(false);
+    reread.mockRestore();
+    expect(puts).toEqual([]);
+  });
+
+  it("preserves durable knowledge when manifest publication fails after blob uploads", async () => {
+    const backing = memoryObjectStore();
+    const svc = service(backing);
+    await svc.create(COURSE_A, create);
+    const failing = service({ ...backing, async put(key, body, opts) {
+      if (key.endsWith("manifest.json")) throw new Error("manifest unavailable");
+      await backing.put(key, body, opts);
+    } });
+    await expect(failing.update(COURSE_A, "lesson", { body: "unsaved" })).rejects.toThrow("manifest unavailable");
+    expect((await failing.show(COURSE_A, "lesson"))?.body.trim()).toBe("First body");
+    expect((await service(backing).show(COURSE_A, "lesson"))?.body.trim()).toBe("First body");
+  });
+
+  it("fails closed on corrupt manifests without falling back to legacy or deleting local files", async () => {
+    const storage = memoryObjectStore();
+    const localRoot = root();
+    const file = path.join(localRoot, "courses", COURSE_A, "knowledge", "preserve.md");
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, "preserve");
+    await storage.put(`courses/${COURSE_A}/knowledge/manifest.json`, new TextEncoder().encode("invalid").buffer, {});
+    const error = await service(storage, localRoot).list(COURSE_A).catch(error => error);
+    expect(error).toMatchObject({ code: "KNOWLEDGE_CORRUPT_MANIFEST", courseId: COURSE_A, key: `courses/${COURSE_A}/knowledge/manifest.json` });
+    expect(readFileSync(file, "utf8")).toBe("preserve");
+  });
+
+  it("emits a structured operator diagnostic when a request encounters corrupt durable knowledge", async () => {
+    const storage = memoryObjectStore();
+    const key = `courses/${COURSE_A}/knowledge/manifest.json`;
+    await storage.put(key, new TextEncoder().encode("private invalid content").buffer, {});
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(service(storage).list(COURSE_A)).rejects.toThrow("KNOWLEDGE_CORRUPT_MANIFEST");
+      expect(log).toHaveBeenCalledWith(JSON.stringify({ event: "knowledge_persistence_corrupt", code: "KNOWLEDGE_CORRUPT_MANIFEST", courseId: COURSE_A, key }));
+      expect(JSON.stringify(log.mock.calls)).not.toContain("private invalid content");
+    } finally { log.mockRestore(); }
+  });
+
+  it("reports corrupt blobs distinctly while preserving local files", async () => {
+    const storage = memoryObjectStore();
+    await service(storage).create(COURSE_A, create);
+    const key = `courses/${COURSE_A}/knowledge/manifest.json`;
+    const body = await storage.get(key);
+    expect(body).not.toBeNull();
+    const manifest = JSON.parse(new TextDecoder().decode(body!));
+    const blob = `courses/${COURSE_A}/knowledge/blobs/${manifest.files["knowledge/lesson.md"].sha256}`;
+    await storage.put(blob, new TextEncoder().encode("corrupt").buffer, {});
+    await expect(service(storage).list(COURSE_A)).rejects.toMatchObject({ code: "KNOWLEDGE_CORRUPT_BLOB", key: blob });
+  });
+
+  it("reads legacy ZIP and migrates on mutation without deleting the original ZIP", async () => {
+    const storage = memoryObjectStore();
+    const legacy = zipSync({ "knowledge/index.md": strToU8("# Knowledge Base\n"), "knowledge/lesson.md": strToU8("---\ntitle: Legacy\ntype: lecture\n---\nLegacy body\n"), "originals/lesson.txt": strToU8("Original legacy") }).buffer;
+    await storage.put(knowledgeSnapshotKey(COURSE_A), legacy, {});
+    const svc = service(storage);
+    expect((await svc.show(COURSE_A, "lesson"))?.body.trim()).toBe("Legacy body");
+    expect(await storage.get(`courses/${COURSE_A}/knowledge/manifest.json`)).toBeNull();
+    await svc.update(COURSE_A, "lesson", { body: "Migrated" });
+    expect(await storage.get(`courses/${COURSE_A}/knowledge/manifest.json`)).not.toBeNull();
+    expect(await storage.get(knowledgeSnapshotKey(COURSE_A))).toEqual(legacy);
+    expect((await service(storage).show(COURSE_A, "lesson"))?.bodyOriginal).toBe("Original legacy");
+  });
   it("fails closed without deleting legacy local knowledge when the remote snapshot is missing", async () => {
     const storage = memoryObjectStore();
     const localRoot = root();
