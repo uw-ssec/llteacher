@@ -124,6 +124,27 @@ function buildStageOneDir(): string {
 // have executed it.
 const STATEMENT_BREAKPOINT = "--> statement-breakpoint";
 const CONCURRENT_INDEX_PATTERN = /^\s*create\s+index\s+concurrently/i;
+const CONCURRENT_INDEX_NAME_PATTERN =
+  /^\s*create\s+(?:unique\s+)?index\s+concurrently\s+(?:if\s+not\s+exists\s+)?(?:"((?:[^"]|"")+)"|([a-z_][a-z0-9_$]*))\s+on\b/i;
+
+function concurrentIndexName(statement: string): string {
+  const match = CONCURRENT_INDEX_NAME_PATTERN.exec(statement);
+  const name = match?.[1]?.replaceAll('""', '"') ?? match?.[2];
+  if (!name) throw new Error("Unable to parse repository concurrent-index migration statement");
+  return name;
+}
+
+async function removeInvalidConcurrentIndex(pool: Pool, statement: string): Promise<void> {
+  const name = concurrentIndexName(statement);
+  const status = await pool.query<{ indisvalid: boolean }>(
+    "SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1)",
+    [name],
+  );
+  if (status.rows[0]?.indisvalid === false) {
+    const quotedName = `"${name.replaceAll('"', '""')}"`;
+    await pool.query(`DROP INDEX CONCURRENTLY IF EXISTS ${quotedName}`);
+  }
+}
 
 /** Splits one migration file's raw SQL into the statements safe to run
  *  inside drizzle's batched transaction, and any `CREATE INDEX
@@ -201,6 +222,7 @@ export async function applyMigrationsFolder(
   try {
     await migrate(db, { migrationsFolder: prepared.folder });
     for (const statement of prepared.concurrentStatements) {
+      await removeInvalidConcurrentIndex(pool, statement);
       await pool.query(statement);
     }
   } finally {
