@@ -15,7 +15,8 @@ RUN npm run build --workspace=llteacher-web && npm run build --workspace=llteach
 # Recreate, rather than prune, the runtime tree. Pruning the monorepo-wide
 # install retains production dependencies from unrelated infra/eval workspaces.
 RUN rm -rf node_modules apps/*/node_modules packages/*/node_modules evals/node_modules infra/node_modules \
-  && npm ci --omit=dev --workspace=llteacher-web --workspace=@llteacher/ui --include-workspace-root=false
+  && npm ci --omit=dev --workspace=llteacher-web --workspace=@llteacher/ui --include-workspace-root=false \
+  && rm -rf node_modules/typescript node_modules/vite
 
 FROM node:24-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
 
