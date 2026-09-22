@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
+    "test": "vitest run && node --test scripts/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "pulumi:local": "npm run build && PULUMI_BACKEND_URL=file://$PWD/.pulumi/local pulumi --stack local",
     "pulumi:cloud": "npm run build && PULUMI_BACKEND_URL=https://api.pulumi.com pulumi"
