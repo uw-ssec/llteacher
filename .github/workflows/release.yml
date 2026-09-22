@@ -9,6 +9,10 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
 jobs:
   test:
     name: test release artifact
@@ -55,6 +59,8 @@ jobs:
       - run: npm test
       - run: npm run build
       - uses: docker/setup-buildx-action@v3
+      - name: Install infrastructure dependencies
+        run: npm ci && npm run build --workspace=infra
       - name: Build release image
         uses: docker/build-push-action@v6
         with:
@@ -100,6 +106,8 @@ jobs:
             repository=$(aws ecr describe-repositories --repository-names "$repository_name" --query 'repositories[0].repositoryUri' --output text)
           fi
           echo "repository=$repository" >> "$GITHUB_OUTPUT"
+      - name: Preview candidate infrastructure
+        run: pulumi -C infra preview --stack "$STACK" --non-interactive
       - name: Build and push application image
         id: image
         env:
@@ -154,7 +162,11 @@ jobs:
           version=$(curl --fail --retry 12 --retry-delay 5 --silent "$app_url/api/health" | jq -er '.version')
           test "$version" = "$GITHUB_SHA"
       - name: Record rollback reference
+        if: always()
         run: |
-          echo "Rollback reference: task definition ${{ steps.candidate.outputs.previous_task_definition }}"
-          echo "Rollback reference: image digest ${{ steps.candidate.outputs.previous_digest }}"
-          echo "Rotating an ECS secret requires a forced deployment/new task revision."
+          {
+            echo "## Release rollback reference"
+            echo "Previous task definition: ${{ steps.candidate.outputs.previous_task_definition }}"
+            echo "Previous image digest: ${{ steps.candidate.outputs.previous_digest }}"
+            echo "Rotating an ECS secret requires a forced deployment/new task revision."
+          } >> "$GITHUB_STEP_SUMMARY"
