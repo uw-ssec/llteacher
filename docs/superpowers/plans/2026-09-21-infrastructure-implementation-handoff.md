@@ -20,6 +20,10 @@ secret and non-secret deployment-role/stack variables. See [operations](../../..
 Knowledge Markdown and originals persist to the existing S3 bucket and restore
 into a fresh task filesystem. Failed writes/failed rollback restores cannot
 publish a partially recovered tree. The application remains a single writer.
+The PR review update replaces whole-course ZIP persistence with changed-file
+blobs and an atomic manifest. Legacy ZIPs are decoded off the event loop and
+retained after migration. See [review disposition](2026-09-21-pr461-review-disposition.md)
+and [operator recovery](../../knowledge-recovery.md).
 
 ## Original implementation verification (before PR review fixes)
 
@@ -66,7 +70,7 @@ the rest of Milestone 12 are not claimed complete.
 | Preserve old service through candidate registration/migrations | Avoid premature interruption | Additional release-state configuration |
 | Ephemeral test DB credentials in CI | Exercise real database tests | Separate isolated test configuration |
 | HTTP bootstrap; HTTPS gate for public authenticated testing | No production domain selected | Domain setup is still required |
-| Existing S3 for knowledge snapshots, not EFS | Keep durable data without another service | Snapshot I/O and single-writer limit |
+| Existing S3 for knowledge manifests and immutable blobs, not EFS | Keep durable data without another service | Metadata scans, retained history, and single-writer limit |
 | Verified RDS TLS with regional CA bundle | Secure PostgreSQL connection | Maintain the CA bundle lifecycle |
 | Refuse legacy local files without a remote snapshot | Prevent accidental deletion/upload | Explicit legacy migration step |
 | One task, stop-before-start replacement | Avoid concurrent filesystem writers | Brief deployment downtime |
