@@ -24,7 +24,6 @@ chmod +x "$test_dir/curl"
 set +e
 PATH="$test_dir:$PATH" \
   PULUMI_STACK=local \
-  LLTEACHER_LOCAL_CA=test-ca.pem \
   LLTEACHER_LOCAL_HEALTH_ATTEMPTS=2 \
   LLTEACHER_LOCAL_HEALTH_DELAY_SECONDS=0 \
   LLTEACHER_TEST_CURL_COUNTER="$counter" \
@@ -34,5 +33,5 @@ set -e
 
 test "$verify_status" = "0"
 
-# One transient failure, one successful readiness probe, then three endpoint checks.
+# One transient failure, one successful readiness probe, then three HTTP endpoint checks.
 test "$(cat "$counter")" = "5"

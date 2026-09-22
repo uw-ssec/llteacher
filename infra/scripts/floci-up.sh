@@ -4,13 +4,11 @@ set -euo pipefail
 if [[ "${PULUMI_STACK:-local}" != "local" ]]; then echo "Refusing non-local stack" >&2; exit 2; fi
 root=$(cd "$(dirname "$0")/../.." && pwd)
 mkdir -p "$root/.floci/data" "$root/.pulumi/local"
-run_args=(-d --name llteacher-floci -p 4566:4566 -p 8443:443)
-if [[ -n "${FLOCI_DOCKER_NETWORK:-}" ]]; then
-  run_args+=(--network "$FLOCI_DOCKER_NETWORK" -e "FLOCI_SERVICES_DOCKER_NETWORK=$FLOCI_DOCKER_NETWORK")
-fi
+docker network inspect llteacher-local >/dev/null 2>&1 || docker network create --label org.llteacher.local=true llteacher-local >/dev/null
+run_args=(-d --name llteacher-floci --network llteacher-local --label org.llteacher.local=true -p 127.0.0.1:4566:4566 -p 127.0.0.1:8443:443)
 docker start llteacher-floci >/dev/null 2>&1 || docker run "${run_args[@]}" \
   -e FLOCI_STORAGE_MODE=hybrid \
-  -e FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE=pgvector/pgvector:pg16 \
+  -e FLOCI_SERVICES_DOCKER_NETWORK=llteacher-local -e FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE=pgvector/pgvector:pg16 \
   -v /var/run/docker.sock:/var/run/docker.sock -v "$root/.floci/data:/app/data" floci/floci:2.1.0 >/dev/null
 attempts="${FLOCI_HEALTH_ATTEMPTS:-60}"
 delay_seconds="${FLOCI_HEALTH_DELAY_SECONDS:-1}"

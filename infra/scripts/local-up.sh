@@ -3,7 +3,6 @@ set -euo pipefail
 if [[ "${PULUMI_STACK:-local}" != "local" ]]; then echo "Refusing non-local stack" >&2; exit 2; fi
 root=$(cd "$(dirname "$0")/../.." && pwd)
 "$root/infra/scripts/floci-up.sh"
-"$root/infra/scripts/tls-proxy-up.sh"
 export PULUMI_BACKEND_URL="file://$root/.pulumi/local"
 # Keep the local backend decryptable across normal up/down cycles without
 # requiring a developer to remember a manually chosen passphrase. This file is
@@ -23,6 +22,7 @@ fi
 pulumi -C "$root/infra" config set --stack local environment local
 pulumi -C "$root/infra" config set --stack local domainName llteacher.local
 pulumi -C "$root/infra" config set --stack local flociEndpoint http://localhost:4566
+pulumi -C "$root/infra" config set --stack local appOrigin http://localhost:8080
 if ! pulumi -C "$root/infra" config get imageTag --stack local >/dev/null 2>&1; then
   pulumi -C "$root/infra" config set --stack local imageTag local-bootstrap
 fi
@@ -54,15 +54,10 @@ if ! repo=$(pulumi -C "$root/infra" stack output ecrRepositoryUrl --stack local 
   pulumi -C "$root/infra" up --stack local --yes
   repo=$(pulumi -C "$root/infra" stack output ecrRepositoryUrl --stack local)
 fi
-image_tag="local-$(date +%s)"
-image_uri="000000000000.dkr.ecr.us-east-1.amazonaws.com/${repo#*/}:$image_tag"
-docker_build=(docker build)
-if [[ "${CI:-}" == "true" ]]; then
-  docker_build=(docker buildx build --load \
-    --cache-from type=gha,scope=llteacher-aws \
-    --cache-to type=gha,mode=max,scope=llteacher-aws)
-fi
-"${docker_build[@]}" --tag "$image_uri" --file "$root/Dockerfile.aws" "$root"
+image_tag="local"
+image_uri="000000000000.dkr.ecr.us-west-2.amazonaws.com/llteacher-local/app:$image_tag"
+docker buildx inspect llteacher-local-builder >/dev/null 2>&1 || docker buildx create --name llteacher-local-builder --driver docker-container --use
+docker buildx build --builder llteacher-local-builder --load --label org.llteacher.local=true --tag "$image_uri" --file "$root/Dockerfile.aws" "$root"
 # Floci resolves this canonical ECR-shaped image directly from the local Docker
 # daemon. Its CreateRepository URI is intentionally not used here: that is the
 # registry proxy address, not the local-image lookup key.
@@ -73,4 +68,6 @@ pulumi -C "$root/infra" up --stack local --yes
 "$root/infra/scripts/run-local-migrations.sh"
 pulumi -C "$root/infra" config set --stack local deployApp true
 pulumi -C "$root/infra" up --stack local --yes
+image_id=$(docker image inspect --format '{{.Id}}' "$image_uri")
+"$root/infra/scripts/local-image-cleanup.sh" "$image_id"
 echo "Local ECS service deployed. Run npm run aws:local:verify after the ALB becomes healthy."
