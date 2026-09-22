@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: production-release
@@ -59,25 +58,46 @@ jobs:
       - run: npm test
       - run: npm run build
       - uses: docker/setup-buildx-action@v3
-      - name: Install infrastructure dependencies
-        run: npm ci && npm run build --workspace=infra
       - name: Build release image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.aws
           load: true
-          tags: llteacher-release-test:latest
+          platforms: linux/amd64
+          tags: llteacher-release:${{ github.sha }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+      - name: Smoke test and save release image
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          docker run --rm --entrypoint node "llteacher-release:$GITHUB_SHA" -e "const fs=require('node:fs'); for (const p of ['apps/web/dist/index.html','apps/admin/dist/index.html','apps/web/scripts/migrate.ts',process.env.NODE_EXTRA_CA_CERTS]) fs.accessSync(p); require.resolve('tsx'); require.resolve('pg');"
+          docker run --rm --entrypoint okf "llteacher-release:$GITHUB_SHA" --version
+          mkdir release-artifact
+          docker save --output release-artifact/image.tar "llteacher-release:$GITHUB_SHA"
+          docker image inspect --format '{{.Id}}' "llteacher-release:$GITHUB_SHA" > release-artifact/image.id
+          printf '%s\n' "$GITHUB_SHA" > release-artifact/commit.sha
+          cd release-artifact
+          sha256sum image.tar image.id commit.sha > checksums.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-image-${{ github.sha }}
+          path: release-artifact/
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: error
 
   production:
     name: Deploy production
     needs: test
     runs-on: ubuntu-latest
     environment: production
+    permissions:
+      contents: read
+      id-token: write
     timeout-minutes: 35
     if: >-
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
-      (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag')
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
     env:
       AWS_REGION: us-west-2
       STACK: ${{ vars.PULUMI_STACK }}
@@ -88,6 +108,17 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Validate release target
+        env:
+          DEPLOY_ROLE: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          source infra/scripts/aws-release-common.sh
+          validate_release_target "$STACK"
+          [[ "$DEPLOY_ROLE" =~ ^arn:aws:iam::[0-9]{12}:role/.+ ]] || exit 1
+          [[ "$GITHUB_SHA" =~ ^[a-f0-9]{40}$ ]] || exit 1
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Install and build infrastructure on deployment runner
+        run: npm ci && npm run build --workspace=infra
       - uses: pulumi/actions@v6
         with:
           command: version
@@ -95,80 +126,84 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-west-2
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-image-${{ github.sha }}
+          path: release-artifact/
+      - name: Verify and load tested release image
+        run: |
+          cd release-artifact
+          sha256sum -c checksums.txt
+          test "$(cat commit.sha)" = "$GITHUB_SHA"
+          docker load --input image.tar
+          test "$(docker image inspect --format '{{.Id}}' "llteacher-release:$GITHUB_SHA")" = "$(cat image.id)"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "llteacher-release:$GITHUB_SHA")" = "$GITHUB_SHA"
       - name: Refresh encrypted stack configuration
         run: pulumi -C infra config refresh --stack "$STACK" --non-interactive
       - name: Bootstrap base infrastructure only when ECR is absent
         id: base
-        run: |
-          repository_name="llteacher-production/app"
-          if ! aws ecr describe-repositories --repository-names "$repository_name" >/dev/null 2>&1; then
-            repository=$(./infra/scripts/bootstrap-aws-infra.sh "$STACK")
-          else
-            repository=$(aws ecr describe-repositories --repository-names "$repository_name" --query 'repositories[0].repositoryUri' --output text)
-          fi
-          echo "repository=$repository" >> "$GITHUB_OUTPUT"
-      - name: Preview candidate infrastructure
-        run: pulumi -C infra preview --stack "$STACK" --non-interactive
-      - name: Build and push application image
+        run: bash infra/scripts/prepare-aws-release.sh "$STACK" repository
+      - name: Push tested application image
         id: image
         env:
           REPOSITORY: ${{ steps.base.outputs.repository }}
         run: |
+          source infra/scripts/aws-release-common.sh
+          validate_release_target "$STACK"
+          validate_repository "$REPOSITORY"
           aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${REPOSITORY%%/*}"
-          docker build --file Dockerfile.aws --tag "$REPOSITORY:${GITHUB_SHA}" .
+          docker tag "llteacher-release:$GITHUB_SHA" "$REPOSITORY:$GITHUB_SHA"
           docker push "$REPOSITORY:${GITHUB_SHA}"
           digest=$(aws ecr describe-images --repository-name llteacher-production/app --image-ids imageTag="$GITHUB_SHA" --query 'imageDetails[0].imageDigest' --output text)
-          test "$digest" != None
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || exit 1
+          docker pull "$REPOSITORY@$digest"
+          test "$(docker image inspect --format '{{.Id}}' "$REPOSITORY@$digest")" = "$(cat release-artifact/image.id)"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Register candidate while retaining the current service
         id: candidate
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
-        run: |
-          previous=$(pulumi -C infra stack output serviceTaskDefinition --stack "$STACK" 2>/dev/null || true)
-          previous_digest=$(pulumi -C infra stack output imageDigest --stack "$STACK" 2>/dev/null || true)
-          pulumi -C infra config set --stack "$STACK" imageDigest "$IMAGE_DIGEST"
-          pulumi -C infra config set --stack "$STACK" buildSha "$GITHUB_SHA"
-          pulumi -C infra config set --stack "$STACK" serviceTaskDefinition "$previous"
-          # A running service remains pinned to its old task through migration.
-          # With no prior ARN (the first release), create only the candidate task.
-          if [[ -n "$previous" && "$previous" != "null" ]]; then
-            pulumi -C infra config set --stack "$STACK" provisionService true
-            pulumi -C infra config set --stack "$STACK" deployApp true
-          else
-            pulumi -C infra config set --stack "$STACK" provisionService false
-            pulumi -C infra config set --stack "$STACK" deployApp false
-          fi
-          pulumi -C infra up --stack "$STACK" --yes --non-interactive
-          candidate=$(pulumi -C infra stack output candidateTaskDefinitionArn --stack "$STACK")
-          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
-          echo "previous_task_definition=$previous" >> "$GITHUB_OUTPUT"
-          echo "previous_digest=$previous_digest" >> "$GITHUB_OUTPUT"
+        run: bash infra/scripts/prepare-aws-release.sh "$STACK" candidate
       - name: Run candidate migrations
-        run: ./infra/scripts/run-aws-migrations.sh production "${{ steps.candidate.outputs.candidate }}"
+        env:
+          CANDIDATE: ${{ steps.candidate.outputs.candidate }}
+        run: bash infra/scripts/run-aws-migrations.sh "$STACK" "$CANDIDATE"
       - name: Activate migrated candidate
         env:
           CANDIDATE: ${{ steps.candidate.outputs.candidate }}
         run: |
+          source infra/scripts/aws-release-common.sh
+          validate_release_target "$STACK"
+          validate_task_definition "$CANDIDATE"
           pulumi -C infra config set --stack "$STACK" serviceTaskDefinition "$CANDIDATE"
           pulumi -C infra config set --stack "$STACK" provisionService true
           pulumi -C infra config set --stack "$STACK" deployApp true
           pulumi -C infra up --stack "$STACK" --yes --non-interactive
-          cluster=$(pulumi -C infra stack output clusterName --stack "$STACK")
-          service=$(pulumi -C infra stack output serviceName --stack "$STACK")
+          stack="$STACK"
+          read_outputs
+          cluster=$(jq -er '.clusterName' <<< "$outputs")
+          service=$(jq -er '.serviceName' <<< "$outputs")
+          validate_name "$cluster"
+          validate_name "$service"
           aws ecs wait services-stable --cluster "$cluster" --services "$service"
       - name: Verify deployed version
         run: |
-          app_url=$(pulumi -C infra stack output appUrl --stack "$STACK")
+          source infra/scripts/aws-release-common.sh
+          stack="$STACK"
+          validate_release_target "$stack"
+          read_outputs
+          app_url=$(jq -er '.appUrl | select(type == "string" and test("^https?://[A-Za-z0-9.-]+/?$"))' <<< "$outputs")
           version=$(curl --fail --retry 12 --retry-delay 5 --silent "$app_url/api/health" | jq -er '.version')
           test "$version" = "$GITHUB_SHA"
       - name: Record rollback reference
         if: always()
+        env:
+          PREVIOUS_TASK: ${{ steps.candidate.outputs.previous_task_definition }}
+          PREVIOUS_DIGEST: ${{ steps.candidate.outputs.previous_digest }}
         run: |
           {
             echo "## Release rollback reference"
-            echo "Previous task definition: ${{ steps.candidate.outputs.previous_task_definition }}"
-            echo "Previous image digest: ${{ steps.candidate.outputs.previous_digest }}"
+            echo "Previous task definition: ${PREVIOUS_TASK:-not captured (or first release)}"
+            echo "Previous image digest: ${PREVIOUS_DIGEST:-not captured (or first release)}"
             echo "Rotating an ECS secret requires a forced deployment/new task revision."
           } >> "$GITHUB_STEP_SUMMARY"

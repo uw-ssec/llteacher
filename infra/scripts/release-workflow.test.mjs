@@ -1,0 +1,70 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+const require = createRequire(import.meta.url);
+const workflow = require('js-yaml').load(readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8'));
+test('production runner installs and builds infrastructure before any Pulumi use', () => {
+  const steps = workflow.jobs.production.steps;
+  const firstPulumi = steps.findIndex(s => s.uses?.startsWith('pulumi/') || s.run?.includes('pulumi '));
+  assert(steps.slice(0,firstPulumi).some(s => s.run?.includes('npm ci')));
+  assert(steps.slice(0,firstPulumi).some(s => s.run?.includes('npm run build --workspace=infra')));
+});
+test('OIDC belongs exclusively to protected tag-only production job', () => {
+  assert.equal(workflow.permissions['id-token'], undefined);
+  assert.equal(workflow.jobs.production.permissions['id-token'], 'write');
+  assert.equal(workflow.jobs.production.environment, 'production');
+  assert.match(workflow.jobs.production.if, /refs\/tags\/v/);
+  assert.equal(workflow.jobs.test.permissions?.['id-token'], undefined);
+});
+test('production consumes tested saved image with no second Docker build', () => {
+  const tests=workflow.jobs.test.steps, production=workflow.jobs.production.steps;
+  assert.equal([...tests,...production].filter(s => s.uses?.startsWith('docker/build-push-action')).length,1);
+  assert(tests.some(s => s.run?.includes('docker save')));
+  assert(tests.some(s => s.uses?.startsWith('actions/upload-artifact')));
+  assert(production.some(s => s.uses?.startsWith('actions/download-artifact')));
+  assert(production.some(s => s.run?.includes('sha256sum -c') && s.run.includes('docker load')));
+  assert(!production.some(s => s.run?.match(/docker build\b/)));
+});
+test('migration receives same qualified stack and rollback summary survives candidate failures', () => {
+  const steps=workflow.jobs.production.steps;
+  const migration=steps.find(s => s.run?.includes('run-aws-migrations.sh'));
+  assert.match(migration.run,/"\$STACK"/);
+  const summary=steps.find(s => s.run?.includes('GITHUB_STEP_SUMMARY'));
+  assert.equal(summary.if,'always()');
+  assert.match(summary.env.PREVIOUS_DIGEST,/steps.candidate.outputs.previous_digest/);
+});
+test('all workflow shell steps parse under bash', () => {
+  for (const job of Object.values(workflow.jobs)) for (const step of job.steps) if (step.run) {
+    const result=spawnSync('bash',['-n'],{input:step.run,encoding:'utf8'});
+    assert.equal(result.status,0,`${step.name}: ${result.stderr}`);
+  }
+});
+test('artifact verification loads exactly the tested image and refuses altered bytes, commits or image identity', t => {
+  const step=workflow.jobs.production.steps.find(s=>s.name==='Verify and load tested release image');
+  assert(step);
+  const sha='b'.repeat(40), id=`sha256:${'c'.repeat(64)}`;
+  for (const scenario of ['valid','tamper','wrong-commit','wrong-image','wrong-label']) {
+    const dir=mkdtempSync(join(tmpdir(),'release-artifact-test-'));
+    t.after(()=>rmSync(dir,{recursive:true,force:true}));
+    const artifact=join(dir,'release-artifact'); mkdirSync(artifact);
+    const contents={'image.tar':'saved image fixture','image.id':`${id}\n`,'commit.sha':`${scenario==='wrong-commit'?'a'.repeat(40):sha}\n`};
+    for(const [name,data] of Object.entries(contents)) writeFileSync(join(artifact,name),data);
+    writeFileSync(join(artifact,'checksums.txt'),Object.entries(contents).map(([name,data])=>`${createHash('sha256').update(data).digest('hex')}  ${name}`).join('\n')+'\n');
+    if(scenario==='tamper') writeFileSync(join(artifact,'image.tar'),'altered artifact');
+    writeFileSync(join(dir,'docker'),`#!/usr/bin/env node
+const fs=require('node:fs'); const a=process.argv.slice(2);
+if(a[0]==='load') fs.writeFileSync(process.env.FIXTURE+'/loaded','yes');
+else if(a.includes('{{.Id}}')) console.log(process.env.SCENARIO==='wrong-image'?'sha256:wrong':process.env.IMAGE_ID);
+else console.log(process.env.SCENARIO==='wrong-label'?'wrong':process.env.GITHUB_SHA);
+`,{mode:0o755});
+    const result=spawnSync('bash',['-euo','pipefail','-c',step.run],{cwd:dir,encoding:'utf8',env:{...process.env,PATH:`${dir}:${process.env.PATH}`,FIXTURE:dir,GITHUB_SHA:sha,IMAGE_ID:id,SCENARIO:scenario}});
+    if(scenario==='valid') assert.equal(result.status,0,result.stderr);
+    else assert.notEqual(result.status,0,scenario);
+    if(scenario==='tamper'||scenario==='wrong-commit') assert.equal(existsSync(join(dir,'loaded')),false);
+  }
+});
