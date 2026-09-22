@@ -1,19 +1,30 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { access } from "node:fs/promises";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
 import { SESSION_COOKIE_NAME, createSessionPayload, loadSessionKey, sealSession } from "../lib/session";
-const { closeDb } = vi.hoisted(() => ({ closeDb: vi.fn().mockResolvedValue(undefined) }));
+const { autoSubmitOverdueSections, closeDb, makeDb, recoverInterruptedExtractions, startOverdueScheduler, withSessionAdvisoryLock } = vi.hoisted(() => ({
+  autoSubmitOverdueSections: vi.fn().mockResolvedValue(undefined),
+  closeDb: vi.fn().mockResolvedValue(undefined),
+  makeDb: vi.fn(() => ({ query: {} })),
+  recoverInterruptedExtractions: vi.fn().mockResolvedValue(undefined),
+  startOverdueScheduler: vi.fn((_options?: unknown) => ({ stop: vi.fn().mockResolvedValue(undefined) })),
+  withSessionAdvisoryLock: vi.fn(async (_key: number, work: () => Promise<unknown>) => ({ acquired: true, value: await work() })),
+}));
 const { getAuthorizationUrl } = vi.hoisted(() => ({ getAuthorizationUrl: vi.fn(() => "https://workos.test/login") }));
 
-vi.mock("../db/client", () => ({ closeDb, makeDb: vi.fn() }));
+vi.mock("../db/client", () => ({ closeDb, makeDb, withSessionAdvisoryLock }));
+vi.mock("../server/jobs/autoSubmitOverdue", () => ({ autoSubmitOverdueSections }));
+vi.mock("../server/repositories/materials", () => ({ recoverInterruptedExtractions }));
+vi.mock("./overdue-scheduler", () => ({ startOverdueScheduler }));
 vi.mock("../lib/workos", () => ({
   getWorkOS: () => ({ userManagement: { getAuthorizationUrl } }),
 }));
 vi.mock("../server/middleware/roles", () => ({ rolesMiddleware: async (_c: unknown, next: () => Promise<void>) => next() }));
 
-import { closeNodeServer, createNodeServer, registerShutdownHandlers } from "./server";
+import { closeNodeServer, createNodeServer, registerShutdownHandlers, startNodeServer } from "./server";
 
 const runtimeConfig = {
   APP_URL: "https://llteacher.local",
@@ -38,6 +49,13 @@ let server: Server | undefined;
 
 beforeEach(async () => {
   closeDb.mockClear();
+  makeDb.mockClear();
+  withSessionAdvisoryLock.mockClear();
+  autoSubmitOverdueSections.mockClear();
+  recoverInterruptedExtractions.mockClear();
+  recoverInterruptedExtractions.mockResolvedValue(undefined);
+  startOverdueScheduler.mockClear();
+  startOverdueScheduler.mockReturnValue({ stop: vi.fn().mockResolvedValue(undefined) });
   buildRoot = await mkdtemp(join(tmpdir(), "llteacher-node-server-"));
   await mkdir(join(buildRoot, "web"));
   await mkdir(join(buildRoot, "admin"));
@@ -122,7 +140,7 @@ describe("createNodeServer", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("application/json");
-    expect(await response.json()).toEqual({ status: "ok" });
+    expect(await response.json()).toMatchObject({ status: "ok" });
   });
 
   it("returns the API app's JSON 404 for unknown API paths", async () => {
@@ -163,6 +181,45 @@ describe("createNodeServer", () => {
     server = undefined;
 
     expect(closeDb).toHaveBeenCalledOnce();
+  });
+
+  it("stops and awaits background work before draining extractions and closing the database", async () => {
+    const events: string[] = [];
+    const background = { stop: vi.fn(async () => { events.push("scheduler stopped"); }) };
+    server = createNodeServer(runtimeConfig, {
+      adminBuildDir: join(buildRoot, "admin"), port: 0, webBuildDir: join(buildRoot, "web"),
+    });
+    await new Promise<void>((resolve) => server!.once("listening", resolve));
+
+    await closeNodeServer(server, 25_000, async () => {
+      await background.stop();
+      events.push(`database closed: ${closeDb.mock.calls.length}`);
+    });
+    server = undefined;
+
+    expect(events).toEqual(["scheduler stopped", "database closed: 0"]);
+    expect(closeDb).toHaveBeenCalledOnce();
+  });
+
+  it("initializes storage and starts the locked overdue scheduler", async () => {
+    const knowledgeRoot = join(buildRoot, "nested", "knowledge");
+    const started = startNodeServer({
+      adminBuildDir: join(buildRoot, "admin"),
+      config: { ...runtimeConfig, KNOWLEDGE_ROOT: knowledgeRoot },
+      port: 0,
+      webBuildDir: join(buildRoot, "web"),
+    });
+    server = started;
+    await new Promise<void>((resolve) => server!.once("listening", resolve));
+
+    await expect(access(knowledgeRoot)).resolves.toBeUndefined();
+    expect(makeDb).toHaveBeenCalledWith(runtimeConfig.DATABASE_URL);
+    expect(recoverInterruptedExtractions).toHaveBeenCalledOnce();
+    expect(startOverdueScheduler).toHaveBeenCalledOnce();
+    const schedulerOptions = startOverdueScheduler.mock.calls[0]![0] as { run(): Promise<unknown> };
+    await schedulerOptions.run();
+    expect(withSessionAdvisoryLock).toHaveBeenCalledWith(0x4c4c5453, expect.any(Function));
+    expect(autoSubmitOverdueSections).toHaveBeenCalledOnce();
   });
 
   it("force-closes connections when graceful shutdown exceeds its deadline", async () => {
