@@ -481,7 +481,9 @@ Update `infra/README.md` to document, in order:
    no Pulumi access token is used.
 10. Export `AWS_PROFILE=default`, `AWS_REGION=us-west-2`, and the exact backend;
     run `pulumi login`, then initialize `production` with secrets provider
-    `awskms://alias/llteacher-pulumi-state?region=us-west-2&awssdk=v2&profile=default`.
+    `awskms://alias/llteacher-pulumi-state?region=us-west-2&awssdk=v2`.
+    Keep the profile in the local operator environment only; never persist a
+    profile query parameter, which would override GitHub OIDC environment credentials.
 11. Set non-secret configuration and use hidden input or secure stdin for
     `databasePassword` and `runtimeSecrets`; never copy local development
     credentials automatically.

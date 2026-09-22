@@ -792,14 +792,18 @@ if it already exists; that is a resume/reconciliation task, not a fresh init.
 ```bash
 jq -e 'all(.[]; .name != "production" and (.name | endswith("/production") | not))' "$BOOTSTRAP_TMP/stacks.json"
 test ! -e infra/Pulumi.production.yaml || stop 'Existing production config: reconcile before init.'
-pulumi -C infra stack init production --secrets-provider 'awskms://alias/llteacher-pulumi-state?region=us-west-2&awssdk=v2&profile=default'
+pulumi -C infra stack init production --secrets-provider 'awskms://alias/llteacher-pulumi-state?region=us-west-2&awssdk=v2'
 ```
+
+Keep `AWS_PROFILE=default` in the local operator environment only. The persisted
+secrets-provider URL must omit a profile so GitHub Actions can use the temporary
+OIDC environment credentials without requiring a shared credentials file.
 
 **Verification:**
 
 ```bash
 pulumi -C infra stack --stack production --show-urns
-node --input-type=module -e 'import fs from "node:fs"; import yaml from "js-yaml"; const c=yaml.load(fs.readFileSync("infra/Pulumi.production.yaml","utf8")); if(c.secretsprovider !== "awskms://alias/llteacher-pulumi-state?region=us-west-2&awssdk=v2&profile=default") process.exit(1);'
+node --input-type=module -e 'import fs from "node:fs"; import yaml from "js-yaml"; const c=yaml.load(fs.readFileSync("infra/Pulumi.production.yaml","utf8")); if(c.secretsprovider !== "awskms://alias/llteacher-pulumi-state?region=us-west-2&awssdk=v2") process.exit(1);'
 ```
 
 #### 11. Production configuration and secure secret entry

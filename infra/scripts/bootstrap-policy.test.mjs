@@ -14,7 +14,7 @@ test('bootstrap guide covers fail-closed identity, policy and boundary checks wi
     'PermissionsBoundary.PermissionsBoundaryArn', 'create-policy-version', 'list-attached-role-policies',
     'github-compute-policy.json', 'github-data-policy.json', 'runtime-permissions-boundary.json',
     'llteacher-production-runtime-boundary', 'jq --arg',
-    'awskms://alias/llteacher-pulumi-state?region=us-west-2&awssdk=v2&profile=default']) {
+    'awskms://alias/llteacher-pulumi-state?region=us-west-2&awssdk=v2']) {
     assert(bootstrap.includes(command), `missing bootstrap safeguard: ${command}`);
   }
   assert.doesNotMatch(bootstrap, /put-role-policy|pulumi[^\n]*\bup\b|--show-secrets|--debug/);
@@ -25,6 +25,20 @@ test('bootstrap guide covers fail-closed identity, policy and boundary checks wi
     const parsed = spawnSync('bash', ['-n'], { input: shell, encoding: 'utf8' });
     assert.equal(parsed.status, 0, parsed.stderr);
   }
+});
+
+test('persisted KMS provider URLs allow OIDC credentials without requiring a local shared profile', () => {
+  for (const path of ['../README.md', '../../docs/superpowers/plans/2026-09-22-s3-pulumi-backend-implementation.md']) {
+    const document = readFileSync(new URL(path, import.meta.url), 'utf8');
+    const providers = [...document.matchAll(/awskms:\/\/[^\s'"`]+/g)].map(match => new URL(match[0]));
+    assert(providers.length > 0, `${path}: missing KMS provider URL`);
+    for (const provider of providers) {
+      assert.equal(provider.searchParams.has('profile'), false, `${path}: persisted profile overrides OIDC credentials`);
+      assert.equal(provider.href, 'awskms://alias/llteacher-pulumi-state?region=us-west-2&awssdk=v2');
+    }
+  }
+  const guide = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+  assert.match(guide, /export AWS_PROFILE=default AWS_REGION=us-west-2/);
 });
 
 const account = '055237683908';
