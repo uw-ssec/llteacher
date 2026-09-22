@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const scripts = dirname(fileURLToPath(import.meta.url));
-const stack = 'example/llteacher-infra/production';
+const stack = 'production';
+const backend = 's3://llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra';
 const arn = 'arn:aws:ecs:us-west-2:123456789012:task-definition/llteacher-production-app:7';
 const digest = `sha256:${'a'.repeat(64)}`;
 function fixture(t, scenario = {}) {
@@ -39,7 +40,7 @@ else if(cmd.includes('ecs describe-tasks')) {
 } else { console.error('Unexpected call '+tool+' '+cmd); process.exit(91); }
 `;
   for (const tool of ['aws', 'pulumi']) writeFileSync(join(dir, tool), stub, { mode: 0o755 });
-  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, FIXTURE: dir, AWS_REGION: 'us-west-2', GITHUB_OUTPUT: join(dir, 'output'), GITHUB_SHA: 'b'.repeat(40), IMAGE_DIGEST: `sha256:${'c'.repeat(64)}`, LLTEACHER_AWS_MIGRATION_ATTEMPTS: '2', LLTEACHER_AWS_MIGRATION_DELAY_SECONDS: '0' };
+  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, FIXTURE: dir, AWS_REGION: 'us-west-2', PULUMI_BACKEND_URL: backend, GITHUB_OUTPUT: join(dir, 'output'), GITHUB_SHA: 'b'.repeat(40), IMAGE_DIGEST: `sha256:${'c'.repeat(64)}`, LLTEACHER_AWS_MIGRATION_ATTEMPTS: '2', LLTEACHER_AWS_MIGRATION_DELAY_SECONDS: '0' };
   return {
     run: (script, args = [stack], overrides = {}) => spawnSync('bash', [join(scripts, script), ...args], { env: { ...env, ...overrides }, encoding: 'utf8' }),
     calls: () => { try { return readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').map(JSON.parse); } catch { return []; } },
@@ -111,12 +112,41 @@ test('migration rejects invalid candidate and network contracts without launchin
   const f=fixture(t,{outputs:{clusterName:'',appSubnetIds:[],appSecurityGroupId:'None'}});
   failure(f.run('run-aws-migrations.sh',[stack,arn])); noMutation(f);
 });
-test('all helpers reject empty region and unqualified or wrong-project stack before API calls', t => {
+test('all helpers reject non-production stacks before API calls', t => {
   for (const script of ['bootstrap-aws-infra.sh','prepare-aws-release.sh','run-aws-migrations.sh']) {
-    for (const invalid of ['production','example/wrong/production','']) {
+    for (const invalid of ['', 'local', 'example/llteacher-infra/production', 'staging']) {
       const f=fixture(t); failure(f.run(script,[invalid, ...(script==='run-aws-migrations.sh'?[arn]:script==='prepare-aws-release.sh'?['repository']:[])])); assert.equal(f.calls().length,0);
     }
-    const f=fixture(t); failure(f.run(script,[stack,...(script==='run-aws-migrations.sh'?[arn]:script==='prepare-aws-release.sh'?['repository']:[])],{AWS_REGION:''})); assert.equal(f.calls().length,0);
+  }
+});
+
+test('all helpers reject empty or altered Pulumi backends before API calls', t => {
+  for (const script of ['bootstrap-aws-infra.sh','prepare-aws-release.sh','run-aws-migrations.sh']) {
+    const args = [stack, ...(script==='run-aws-migrations.sh'?[arn]:script==='prepare-aws-release.sh'?['repository']:[])];
+    for (const PULUMI_BACKEND_URL of ['', `${backend}-wrong`]) {
+      const f=fixture(t); failure(f.run(script,args,{PULUMI_BACKEND_URL})); assert.equal(f.calls().length,0);
+    }
+  }
+});
+
+test('all helpers reject empty or wrong regions before API calls', t => {
+  for (const script of ['bootstrap-aws-infra.sh','prepare-aws-release.sh','run-aws-migrations.sh']) {
+    const args = [stack, ...(script==='run-aws-migrations.sh'?[arn]:script==='prepare-aws-release.sh'?['repository']:[])];
+    for (const AWS_REGION of ['', 'us-east-1']) {
+      const f=fixture(t); failure(f.run(script,args,{AWS_REGION})); assert.equal(f.calls().length,0);
+    }
+  }
+});
+
+test('release validation rejects a different AWS account', () => {
+  const command = `. "${join(scripts, 'aws-release-common.sh')}"; validate_aws_account "$1"`;
+  for (const account of ['', '000000000000', '055237683909']) {
+    const result = spawnSync('bash', ['-c', command, 'validate', account], {
+      env: { ...process.env, AWS_REGION: 'us-west-2', PULUMI_BACKEND_URL: backend },
+      encoding: 'utf8',
+    });
+    failure(result);
+    assert.match(result.stderr, /AWS account must be 055237683908/);
   }
 });
 

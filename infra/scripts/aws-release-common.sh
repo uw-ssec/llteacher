@@ -2,11 +2,19 @@
 # Shared production contract. Callers use set -euo pipefail.
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 die() { echo "$*" >&2; exit 1; }
+readonly LLTEACHER_PRODUCTION_STACK=production
+readonly LLTEACHER_PRODUCTION_BACKEND='s3://llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra'
+readonly LLTEACHER_PRODUCTION_ACCOUNT=055237683908
+
 validate_release_target() {
-  [[ "${1:-}" =~ ^[A-Za-z0-9_-]+/llteacher-infra/production$ ]] || die 'Use a fully qualified organization/llteacher-infra/production stack.'
+  [[ "${1:-}" == "$LLTEACHER_PRODUCTION_STACK" ]] || die 'PULUMI_STACK must be production.'
+  [[ "${PULUMI_BACKEND_URL:-}" == "$LLTEACHER_PRODUCTION_BACKEND" ]] || die "PULUMI_BACKEND_URL must be $LLTEACHER_PRODUCTION_BACKEND."
   [[ "${AWS_REGION:-}" == us-west-2 ]] || die 'AWS_REGION must be us-west-2.'
   # AWS CLI also consults AWS_DEFAULT_REGION; a stale local default must not win.
   export AWS_DEFAULT_REGION="$AWS_REGION"
+}
+validate_aws_account() {
+  [[ "${1:-}" == "$LLTEACHER_PRODUCTION_ACCOUNT" ]] || die "AWS account must be $LLTEACHER_PRODUCTION_ACCOUNT."
 }
 validate_task_definition() {
   [[ "$1" =~ ^arn:aws:ecs:us-west-2:[0-9]{12}:task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*$ ]] || die 'Invalid production task-definition ARN.'

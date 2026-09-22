@@ -3,7 +3,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/aws-release-common.sh"
 stack="${1:-}"
 validate_release_target "$stack"
-[[ $# -eq 2 ]] || die "Usage: $0 organization/llteacher-infra/production repository|candidate"
+[[ $# -eq 2 ]] || die "Usage: $0 production repository|candidate"
 case "$2" in
   repository)
     read_outputs

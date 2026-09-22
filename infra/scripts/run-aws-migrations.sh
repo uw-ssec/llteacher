@@ -4,7 +4,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/aws-release-common.sh"
 stack="${1:-}"
 task_definition="${2:-}"
-[[ $# -eq 2 ]] || die "Usage: $0 organization/llteacher-infra/production <candidate-task-definition-arn>"
+[[ $# -eq 2 ]] || die "Usage: $0 production <candidate-task-definition-arn>"
 validate_release_target "$stack"
 validate_task_definition "$task_definition"
 read_outputs
