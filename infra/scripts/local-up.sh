@@ -22,6 +22,8 @@ fi
 pulumi -C "$root/infra" config set --stack local environment local
 pulumi -C "$root/infra" config set --stack local domainName llteacher.local
 pulumi -C "$root/infra" config set --stack local flociEndpoint http://localhost:4566
+pulumi -C "$root/infra" config set --stack local aws:region us-west-2
+pulumi -C "$root/infra" config set --stack local flociTaskEndpoint http://host.docker.internal:4566
 pulumi -C "$root/infra" config set --stack local appOrigin http://localhost:8080
 if ! pulumi -C "$root/infra" config get imageTag --stack local >/dev/null 2>&1; then
   pulumi -C "$root/infra" config set --stack local imageTag local-bootstrap
@@ -63,6 +65,7 @@ docker buildx build --builder llteacher-local-builder --load --label org.llteach
 # registry proxy address, not the local-image lookup key.
 pulumi -C "$root/infra" config set --stack local provisionService true
 pulumi -C "$root/infra" config set --stack local imageTag "$image_tag"
+pulumi -C "$root/infra" config set --stack local buildSha "$(docker image inspect --format '{{.Id}}' "$image_uri")"
 pulumi -C "$root/infra" config set --stack local deployApp false
 pulumi -C "$root/infra" up --stack local --yes
 "$root/infra/scripts/run-local-migrations.sh"

@@ -5,7 +5,7 @@ if [[ "${PULUMI_STACK:-local}" != "local" ]]; then echo "Refusing non-local stac
 root=$(cd "$(dirname "$0")/../.." && pwd)
 mkdir -p "$root/.floci/data" "$root/.pulumi/local"
 docker network inspect llteacher-local >/dev/null 2>&1 || docker network create --label org.llteacher.local=true llteacher-local >/dev/null
-run_args=(-d --name llteacher-floci --network llteacher-local --label org.llteacher.local=true -p 127.0.0.1:4566:4566 -p 127.0.0.1:8443:443)
+run_args=(-d --name llteacher-floci --network llteacher-local --label org.llteacher.local=true --label com.docker.compose.project=llteacher-local -p 127.0.0.1:4566:4566 -p 127.0.0.1:8080:80 -p 127.0.0.1:8443:443)
 docker start llteacher-floci >/dev/null 2>&1 || docker run "${run_args[@]}" \
   -e FLOCI_STORAGE_MODE=hybrid \
   -e FLOCI_SERVICES_DOCKER_NETWORK=llteacher-local -e FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE=pgvector/pgvector:pg16 \

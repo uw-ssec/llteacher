@@ -80,7 +80,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag')
     env:
       AWS_REGION: us-west-2
-      STACK: production
+      STACK: ${{ vars.PULUMI_STACK }}
       PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -96,12 +96,14 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-west-2
       - uses: docker/setup-buildx-action@v3
+      - name: Refresh encrypted stack configuration
+        run: pulumi -C infra config refresh --stack "$STACK" --non-interactive
       - name: Bootstrap base infrastructure only when ECR is absent
         id: base
         run: |
           repository_name="llteacher-production/app"
           if ! aws ecr describe-repositories --repository-names "$repository_name" >/dev/null 2>&1; then
-            repository=$(./infra/scripts/bootstrap-aws-infra.sh production)
+            repository=$(./infra/scripts/bootstrap-aws-infra.sh "$STACK")
           else
             repository=$(aws ecr describe-repositories --repository-names "$repository_name" --query 'repositories[0].repositoryUri' --output text)
           fi
