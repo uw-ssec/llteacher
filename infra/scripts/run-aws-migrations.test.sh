@@ -9,7 +9,8 @@ printf '0' > "$test_dir/count"
 cat > "$test_dir/pulumi" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
-  *"appSubnetIds"*) echo '["subnet-private-a","subnet-private-b"]' ;;
+  *"clusterName"*) echo llteacher-production-cluster ;;
+  *"appSubnetIds"*) echo '["subnet-public-a","subnet-public-b"]' ;;
   *"appSecurityGroupId"*) echo sg-app ;;
   *"logGroupNames"*) echo '["/llteacher/app","/llteacher/job"]' ;;
   *) exit 90 ;;
@@ -44,10 +45,12 @@ PATH="$test_dir:$PATH" \
   LLTEACHER_TEST_COUNT="$test_dir/count" \
   LLTEACHER_AWS_MIGRATION_ATTEMPTS=2 \
   LLTEACHER_AWS_MIGRATION_DELAY_SECONDS=0 \
-  "$root/infra/scripts/run-aws-migrations.sh" staging
+  "$root/infra/scripts/run-aws-migrations.sh" production 'arn:aws:ecs:us-west-2:123:task-definition/llteacher-production-app:7'
 
 test "$(cat "$test_dir/count")" = 2
-grep -Fq 'subnet-private-a' "$calls"
+grep -Fq 'subnet-public-a' "$calls"
 grep -Fq 'sg-app' "$calls"
-grep -Fq 'logs tail /llteacher/app' "$calls"
+grep -Fq 'assignPublicIp":"ENABLED' "$calls"
+grep -Fq 'arn:aws:ecs:us-west-2:123:task-definition/llteacher-production-app:7' "$calls"
+grep -Fq 'timeout "$wait_seconds" aws ecs wait tasks-stopped' "$root/infra/scripts/run-aws-migrations.sh"
 ! grep -Fq 'describe-services' "$calls"

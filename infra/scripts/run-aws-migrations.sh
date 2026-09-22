@@ -2,22 +2,30 @@
 set -euo pipefail
 
 stack="${1:-${PULUMI_STACK:-}}"
-if [[ -z "$stack" || "$stack" == "local" ]]; then
-  echo "Usage: $0 <staging|production>" >&2
+task_definition="${2:-}"
+if [[ "$stack" != "production" || -z "$task_definition" || $# -ne 2 ]]; then
+  echo "Usage: $0 production <candidate-task-definition-arn>" >&2
   exit 2
 fi
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-cluster="llteacher-$stack-cluster"
-task_definition="llteacher-$stack-app"
+cluster=$(pulumi -C "$root/infra" stack output clusterName --stack "$stack")
 attempts="${LLTEACHER_AWS_MIGRATION_ATTEMPTS:-6}"
 delay_seconds="${LLTEACHER_AWS_MIGRATION_DELAY_SECONDS:-10}"
+wait_seconds="${LLTEACHER_AWS_MIGRATION_WAIT_SECONDS:-600}"
 
 subnets=$(pulumi -C "$root/infra" stack output appSubnetIds --json --stack "$stack")
 security_group=$(pulumi -C "$root/infra" stack output appSecurityGroupId --stack "$stack")
-log_group=$(pulumi -C "$root/infra" stack output logGroupNames --json --stack "$stack" | jq -r '.[0]')
 network=$(jq -cn --argjson subnets "$subnets" --arg security_group "$security_group" \
-  '{awsvpcConfiguration:{subnets:$subnets,securityGroups:[$security_group],assignPublicIp:"DISABLED"}}')
+  '{awsvpcConfiguration:{subnets:$subnets,securityGroups:[$security_group],assignPublicIp:"ENABLED"}}')
+
+wait_for_stop() {
+  if command -v timeout >/dev/null; then
+    timeout "$wait_seconds" aws ecs wait tasks-stopped --cluster "$cluster" --tasks "$1"
+  else
+    aws ecs wait tasks-stopped --cluster "$cluster" --tasks "$1"
+  fi
+}
 
 for ((attempt = 1; attempt <= attempts; attempt++)); do
   echo "Running database migration attempt $attempt/$attempts" >&2
@@ -33,7 +41,7 @@ for ((attempt = 1; attempt <= attempts; attempt++)); do
   if [[ -z "$task" ]]; then
     jq '{failures}' <<<"$response" >&2
   else
-    aws ecs wait tasks-stopped --cluster "$cluster" --tasks "$task" || true
+    wait_for_stop "$task" || true
     description=$(aws ecs describe-tasks --cluster "$cluster" --tasks "$task" --output json)
     exit_code=$(jq -r '.tasks[0].containers[0].exitCode // -1' <<<"$description")
     if [[ "$exit_code" == "0" ]]; then
@@ -42,7 +50,6 @@ for ((attempt = 1; attempt <= attempts; attempt++)); do
     jq '.tasks[0] | {lastStatus, stoppedReason, containers: [.containers[] | {name, exitCode, reason}]}' <<<"$description" >&2
   fi
 
-  aws logs tail "$log_group" --since 10m >&2 || true
   if (( attempt < attempts )); then
     sleep "$delay_seconds"
   fi

@@ -1,36 +1,81 @@
 name: release
 
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      environment:
-        description: Target deployment environment
-        required: true
-        type: choice
-        options: [staging, production]
-      image_tag:
-        description: Immutable image tag to publish
-        required: true
-        type: string
 
 permissions:
   contents: read
   id-token: write
 
 jobs:
-  release:
-    name: Deploy ${{ inputs.environment }}
+  test:
+    name: test release artifact
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
-    timeout-minutes: 30
-    if: >-
-      (inputs.environment == 'staging' && github.ref == 'refs/heads/staging') ||
-      (inputs.environment == 'production' && startsWith(github.ref, 'refs/tags/'))
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: llteacher
+          POSTGRES_PASSWORD: dev
+          POSTGRES_DB: llteacher
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U llteacher -d llteacher"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     env:
+      DATABASE_URL: postgres://llteacher:dev@localhost:5432/llteacher
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate ephemeral test keys
+        run: |
+          echo "ENCRYPTION_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+          echo "BLIND_INDEX_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+      - name: Install database client and OKF
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+          curl -fsSL -o /tmp/okf https://github.com/okf-memory/okf-agent-memory/releases/download/v0.3.0/okf-linux-amd64
+          curl -fsSL -o /tmp/checksums.txt https://github.com/okf-memory/okf-agent-memory/releases/download/v0.3.0/checksums.txt
+          cd /tmp && grep -E ' +bin/okf-linux-amd64$' checksums.txt | sed -E 's# +bin/okf-linux-amd64$#  okf#' > okf.sha256
+          sha256sum -c /tmp/okf.sha256
+          sudo install -m 0755 /tmp/okf /usr/local/bin/okf
+      - name: Initialize test database
+        run: |
+          psql "$DATABASE_URL" -f apps/web/src/db/init/01_extensions.sql
+          npm run db:migrate --workspace=llteacher-web
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - uses: docker/setup-buildx-action@v3
+      - name: Build release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.aws
+          load: true
+          tags: llteacher-release-test:latest
+
+  production:
+    name: Deploy production
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 35
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+      (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag')
+    env:
+      AWS_REGION: us-west-2
+      STACK: production
       PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
-      AWS_REGION: us-east-1
-      STACK: ${{ inputs.environment }}
-      IMAGE_TAG: ${{ inputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -42,39 +87,74 @@ jobs:
           command: version
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: us-east-1
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-west-2
       - uses: docker/setup-buildx-action@v3
-      - name: Install and build
-        run: npm ci && npm run build --workspace=infra
-      - name: Preview infrastructure
-        run: pulumi -C infra preview --stack "$STACK" --non-interactive
-      - name: Build and publish application image
-        id: image
+      - name: Bootstrap base infrastructure only when ECR is absent
+        id: base
         run: |
-          repository=$(pulumi -C infra stack output ecrRepositoryUrl --stack "$STACK")
-          aws ecr get-login-password | docker login --username AWS --password-stdin "${repository%%/*}"
-          echo "tag=$repository:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          repository_name="llteacher-production/app"
+          if ! aws ecr describe-repositories --repository-names "$repository_name" >/dev/null 2>&1; then
+            repository=$(./infra/scripts/bootstrap-aws-infra.sh production)
+          else
+            repository=$(aws ecr describe-repositories --repository-names "$repository_name" --query 'repositories[0].repositoryUri' --output text)
+          fi
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
       - name: Build and push application image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.aws
-          push: true
-          tags: ${{ steps.image.outputs.tag }}
-          cache-from: type=gha,scope=llteacher-aws
-          cache-to: type=gha,mode=max,scope=llteacher-aws
-      - name: Register the new revision without starting it
+        id: image
+        env:
+          REPOSITORY: ${{ steps.base.outputs.repository }}
         run: |
-          pulumi -C infra config set --stack "$STACK" imageTag "$IMAGE_TAG"
-          pulumi -C infra config set --stack "$STACK" deployApp false
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${REPOSITORY%%/*}"
+          docker build --file Dockerfile.aws --tag "$REPOSITORY:${GITHUB_SHA}" .
+          docker push "$REPOSITORY:${GITHUB_SHA}"
+          digest=$(aws ecr describe-images --repository-name llteacher-production/app --image-ids imageTag="$GITHUB_SHA" --query 'imageDetails[0].imageDigest' --output text)
+          test "$digest" != None
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Register candidate while retaining the current service
+        id: candidate
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          previous=$(pulumi -C infra stack output serviceTaskDefinition --stack "$STACK" 2>/dev/null || true)
+          previous_digest=$(pulumi -C infra stack output imageDigest --stack "$STACK" 2>/dev/null || true)
+          pulumi -C infra config set --stack "$STACK" imageDigest "$IMAGE_DIGEST"
+          pulumi -C infra config set --stack "$STACK" buildSha "$GITHUB_SHA"
+          pulumi -C infra config set --stack "$STACK" serviceTaskDefinition "$previous"
+          # A running service remains pinned to its old task through migration.
+          # With no prior ARN (the first release), create only the candidate task.
+          if [[ -n "$previous" && "$previous" != "null" ]]; then
+            pulumi -C infra config set --stack "$STACK" provisionService true
+            pulumi -C infra config set --stack "$STACK" deployApp true
+          else
+            pulumi -C infra config set --stack "$STACK" provisionService false
+            pulumi -C infra config set --stack "$STACK" deployApp false
+          fi
           pulumi -C infra up --stack "$STACK" --yes --non-interactive
-      - name: Run migrations before service update
-        run: ./infra/scripts/run-aws-migrations.sh "$STACK"
-      - name: Start the migrated service and check HTTPS
+          candidate=$(pulumi -C infra stack output candidateTaskDefinitionArn --stack "$STACK")
+          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+          echo "previous_task_definition=$previous" >> "$GITHUB_OUTPUT"
+          echo "previous_digest=$previous_digest" >> "$GITHUB_OUTPUT"
+      - name: Run candidate migrations
+        run: ./infra/scripts/run-aws-migrations.sh production "${{ steps.candidate.outputs.candidate }}"
+      - name: Activate migrated candidate
+        env:
+          CANDIDATE: ${{ steps.candidate.outputs.candidate }}
         run: |
+          pulumi -C infra config set --stack "$STACK" serviceTaskDefinition "$CANDIDATE"
+          pulumi -C infra config set --stack "$STACK" provisionService true
           pulumi -C infra config set --stack "$STACK" deployApp true
           pulumi -C infra up --stack "$STACK" --yes --non-interactive
-          aws ecs wait services-stable --cluster "llteacher-$STACK-cluster" --services "llteacher-$STACK-app"
+          cluster=$(pulumi -C infra stack output clusterName --stack "$STACK")
+          service=$(pulumi -C infra stack output serviceName --stack "$STACK")
+          aws ecs wait services-stable --cluster "$cluster" --services "$service"
+      - name: Verify deployed version
+        run: |
           app_url=$(pulumi -C infra stack output appUrl --stack "$STACK")
-          curl --fail --retry 12 --retry-delay 5 "$app_url/api/health"
+          version=$(curl --fail --retry 12 --retry-delay 5 --silent "$app_url/api/health" | jq -er '.version')
+          test "$version" = "$GITHUB_SHA"
+      - name: Record rollback reference
+        run: |
+          echo "Rollback reference: task definition ${{ steps.candidate.outputs.previous_task_definition }}"
+          echo "Rollback reference: image digest ${{ steps.candidate.outputs.previous_digest }}"
+          echo "Rotating an ECS secret requires a forced deployment/new task revision."
