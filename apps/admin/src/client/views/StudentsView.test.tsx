@@ -59,7 +59,8 @@ const rosterResponse = (members: unknown[]) =>
     headers: { "content-type": "application/json" },
   });
 
-const renderView = () => render(<StudentsView courseId="c1" courseTitle="STATS 311" />);
+const renderView = (onGoToCanvas: () => void = vi.fn()) =>
+  render(<StudentsView courseId="c1" courseTitle="STATS 311" onGoToCanvas={onGoToCanvas} />);
 
 describe("StudentsView (#32)", () => {
   it("distinguishes an invited person from an active one", async () => {
@@ -324,5 +325,141 @@ describe("StudentsView audit fixes", () => {
     expect(screen.getByText("bad@gmail.com")).toBeTruthy();
     // And it is dismissable by the instructor, not by the app.
     expect(screen.getByRole("button", { name: /^Done$/ })).toBeTruthy();
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #460: Import from Canvas, alongside CSV import.
+   -------------------------------------------------------------------------- */
+describe("Import from Canvas (#460)", () => {
+  const syncResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+  it("shows a pending state, then the result, and refreshes the roster -- without asking for the token", async () => {
+    let resolveSync: (r: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      resolveSync = resolve;
+    });
+    let rosterCalls = 0;
+    const fetchMock = stub((url) => {
+      if (url.includes("/canvas/sync")) return pending as unknown as Response;
+      rosterCalls += 1;
+      return rosterResponse(rosterCalls === 1 ? [ACTIVE] : [ACTIVE, PENDING]);
+    });
+    renderView();
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    const button = screen.getByRole("button", { name: /Import from Canvas/i });
+    fireEvent.click(button);
+    // Duplicate clicks while an import is already running must not issue a
+    // second request -- the disabled attribute is belt, the busy guard in
+    // the handler is suspenders, same convention RosterImportPanel's own
+    // commit() already uses.
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(screen.getByRole("button", { name: /Importing…/i })).toBeTruthy();
+
+    resolveSync(syncResponse({ added: 1, updated: 1, removed: 0, errors: [] }));
+    await waitFor(() => expect(screen.getAllByText(/Imported from Canvas\./i).length).toBeGreaterThan(0));
+    expect(screen.getAllByText(/1 added, 1 updated, 0 removed/i).length).toBeGreaterThan(0);
+    // The roster reloads without a page reload -- the newly-added person
+    // (from the second GET the reload triggers) shows up.
+    await waitFor(() => screen.getByText("Invited"));
+
+    const syncCalls = fetchMock.mock.calls.filter((c) => String(c[0]).includes("/canvas/sync"));
+    expect(syncCalls).toHaveLength(1);
+    expect((syncCalls[0]![1] as RequestInit).method).toBe("POST");
+    // The saved org token is spent server-side; nothing about it is sent
+    // from here.
+    expect(String((syncCalls[0]![1] as RequestInit).body ?? "")).toBe("");
+  });
+
+  it("shows an actionable error and a working Go to Canvas action when no token is saved", async () => {
+    stub((url) =>
+      url.includes("/canvas/sync")
+        ? syncResponse(
+            { error: "Set up your organization's Canvas API token first (Canvas Integration settings)." },
+            409,
+          )
+        : rosterResponse([ACTIVE]),
+    );
+    const onGoToCanvas = vi.fn();
+    renderView(onGoToCanvas);
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Import from Canvas/i }));
+    await waitFor(() =>
+      expect(screen.getAllByText(/A Canvas API token is missing or unavailable/i).length).toBeGreaterThan(0),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Go to Canvas/i }));
+    expect(onGoToCanvas).toHaveBeenCalledTimes(1);
+  });
+
+  it("distinguishes a rejected/expired token from a missing one, offering the same Canvas-tab action", async () => {
+    stub((url) =>
+      url.includes("/canvas/sync")
+        ? syncResponse(
+            { error: "Canvas rejected this token. It may have expired or been revoked -- check Canvas Integration settings." },
+            502,
+          )
+        : rosterResponse([ACTIVE]),
+    );
+    renderView();
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Import from Canvas/i }));
+    await waitFor(() =>
+      expect(screen.getAllByText(/Canvas rejected the saved API token/i).length).toBeGreaterThan(0),
+    );
+    expect(screen.getByRole("button", { name: /Go to Canvas/i })).toBeTruthy();
+  });
+
+  it("explains that linking is required, and never imports a guessed course, when none is linked yet", async () => {
+    stub((url) =>
+      url.includes("/canvas/sync")
+        ? syncResponse({ error: "Link this course to a Canvas course first." }, 409)
+        : rosterResponse([ACTIVE]),
+    );
+    renderView();
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Import from Canvas/i }));
+    await waitFor(() =>
+      expect(screen.getAllByText(/isn't linked to a Canvas course yet/i).length).toBeGreaterThan(0),
+    );
+    expect(screen.getByRole("button", { name: /Go to Canvas/i })).toBeTruthy();
+  });
+
+  it("shows the real failure category for a network/server error, not a false missing-token claim", async () => {
+    stub((url) =>
+      url.includes("/canvas/sync")
+        ? syncResponse({ error: "Could not reach Canvas. Check the instance URL and try again." }, 502)
+        : rosterResponse([ACTIVE]),
+    );
+    renderView();
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Import from Canvas/i }));
+    await waitFor(() =>
+      expect(screen.getAllByText(/Could not reach Canvas\. Check the instance URL/i).length).toBeGreaterThan(0),
+    );
+    // Not a token/link problem, so no Canvas-tab action is offered for it.
+    expect(screen.queryByRole("button", { name: /Go to Canvas/i })).toBeNull();
+  });
+
+  it("leaves the existing roster on screen when an import fails", async () => {
+    stub((url) =>
+      url.includes("/canvas/sync") ? syncResponse({ error: "Link this course to a Canvas course first." }, 409) : rosterResponse([ACTIVE]),
+    );
+    renderView();
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Import from Canvas/i }));
+    await waitFor(() =>
+      expect(screen.getAllByText(/isn't linked to a Canvas course yet/i).length).toBeGreaterThan(0),
+    );
+    // Nothing about the roster underneath the error changed.
+    expect(screen.getByText("Ada Lovelace")).toBeTruthy();
   });
 });
