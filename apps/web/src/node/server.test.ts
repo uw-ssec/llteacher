@@ -201,6 +201,23 @@ describe("createNodeServer", () => {
     expect(closeDb).toHaveBeenCalledOnce();
   });
 
+  it("bounds the entire shutdown even when background work never stops", async () => {
+    let release!: () => void;
+    const background = new Promise<void>((resolve) => { release = resolve; });
+    const closingServer = {
+      close: (done: () => void) => done(),
+      closeAllConnections: vi.fn(),
+    } as unknown as Server;
+
+    await expect(closeNodeServer(closingServer, 20, () => background))
+      .rejects.toThrow("Shutdown deadline exceeded");
+    expect(closingServer.closeAllConnections).toHaveBeenCalledOnce();
+    expect(closeDb).not.toHaveBeenCalled();
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(closeDb).not.toHaveBeenCalled();
+  }, 1_000);
+
   it("initializes storage and starts the locked overdue scheduler", async () => {
     const knowledgeRoot = join(buildRoot, "nested", "knowledge");
     const started = startNodeServer({
@@ -231,11 +248,12 @@ describe("createNodeServer", () => {
     } as unknown as Server;
 
     const shutdown = closeNodeServer(stalledServer, 25_000);
+    const rejected = expect(shutdown).rejects.toThrow("Shutdown deadline exceeded");
     await vi.advanceTimersByTimeAsync(25_000);
-    await shutdown;
+    await rejected;
 
     expect(forceClose).toHaveBeenCalledOnce();
-    expect(closeDb).toHaveBeenCalledOnce();
+    expect(closeDb).not.toHaveBeenCalled();
     vi.useRealTimers();
   });
 

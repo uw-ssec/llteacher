@@ -1,5 +1,21 @@
 const HOUR_MS = 3_600_000;
 
+// Never log database messages, query parameters, or arbitrary error codes:
+// those may contain credentials or student data. Known categories aid triage.
+function diagnosticCategory(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+  switch (code) {
+    case "ECONNREFUSED": return " (connection_refused)";
+    case "ECONNRESET": return " (connection_reset)";
+    case "ETIMEDOUT": return " (connection_timeout)";
+    case "40001": return " (serialization_failure)";
+    case "40P01": return " (deadlock)";
+    case "53300": return " (database_connection_limit)";
+    case "57P01": return " (database_shutdown)";
+    default: return "";
+  }
+}
+
 export type OverdueSchedulerOptions = {
   run(): Promise<unknown>;
   error(message: string): void;
@@ -22,7 +38,7 @@ export function startOverdueScheduler(options: OverdueSchedulerOptions): Overdue
       return;
     }
     active = options.run()
-      .catch(() => options.error("Overdue-submission sweep failed"))
+      .catch((error: unknown) => options.error(`Overdue-submission sweep failed${diagnosticCategory(error)}`))
       .then(() => undefined)
       .finally(() => {
         active = undefined;

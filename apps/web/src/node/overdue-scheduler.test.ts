@@ -56,4 +56,19 @@ describe("startOverdueScheduler", () => {
     await stopping;
     expect(stopped).toBe(true);
   });
+
+  it.each([
+    ["ECONNREFUSED", " (connection_refused)"],
+    ["40001", " (serialization_failure)"],
+    ["password=secret", ""],
+  ])("reports only allowlisted diagnostic codes: %s", async (code, suffix) => {
+    const error = vi.fn();
+    const scheduler = startOverdueScheduler({
+      run: vi.fn().mockRejectedValue(Object.assign(new Error("password=secret"), { code })),
+      error,
+    });
+    await vi.waitFor(() => expect(error).toHaveBeenCalledWith(`Overdue-submission sweep failed${suffix}`));
+    expect(error.mock.calls.flat().join(" ")).not.toContain("password=secret");
+    await scheduler.stop();
+  });
 });

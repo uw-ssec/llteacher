@@ -21,7 +21,7 @@ Knowledge Markdown and originals persist to the existing S3 bucket and restore
 into a fresh task filesystem. Failed writes/failed rollback restores cannot
 publish a partially recovered tree. The application remains a single writer.
 
-## Verification
+## Original implementation verification (before PR review fixes)
 
 - Five-workspace type checking passed.
 - Full test run passed: 3,215 Vitest tests, 12 skipped; 18 native Node tests
@@ -38,14 +38,18 @@ publish a partially recovered tree. The application remains a single writer.
   alone in 1.9 seconds; the complete run with serialized workspaces then passed.
   No test was skipped or timeout increased to hide the failure.
 
-No real AWS resources were applied, no release workflow was remotely run, and
-no Git changes were pushed. Those operations still require owner approval.
+No real AWS resources were applied. The branch was subsequently pushed as
+[PR #461](https://github.com/uw-ssec/llteacher/pull/461). The feature-branch
+[release validation run](https://github.com/uw-ssec/llteacher/actions/runs/35680592466)
+passed its artifact job and skipped production deployment. This does not verify
+AWS permissions or prove a real production release succeeds.
 
 ## Limits before public testing
 
-Local WorkOS and LLM provider values are placeholders. Supply development
-credentials securely and configure the matching WorkOS callback before testing
-login or AI calls. Floci models the AWS resource APIs but does not prove real
+Local WorkOS and LiteLLM credentials have been loaded from the owner's existing
+development secrets; the local callback uses `http://localhost:8080`. Keep those
+credentials out of Git and preserve the existing encryption keys and database.
+Floci models the AWS resource APIs but does not prove real
 IAM isolation or TLS behavior; its modeled HTTPS listener serves plaintext locally.
 
 Before public AWS testing: complete reviewed OIDC/IAM/Pulumi bootstrap, supply

@@ -26,6 +26,8 @@ export type StartNodeServerOptions = NodeServerOptions & {
 
 const defaultWebBuildDir = resolve(import.meta.dirname, "../../dist/client");
 const defaultAdminBuildDir = resolve(import.meta.dirname, "../../../admin/dist/admin");
+// ASCII "LLTS": stable database-wide lock for LLTeacher's overdue sweep.
+const OVERDUE_SWEEP_LOCK_KEY = 0x4c4c5453;
 
 function createNodeApp(config: Env, options: NodeServerOptions) {
   const nodeApp = new Hono();
@@ -79,27 +81,29 @@ export async function closeNodeServer(
   timeoutMs = 25_000,
   stopBackgroundWork: () => Promise<void> = async () => {},
 ): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      error ? reject(error) : resolve();
-    };
-    const timer = setTimeout(() => {
+  // One budget for HTTP, background work, extraction drain, and pool closure;
+  // ECS's default 30-second stop window must not be spent again at every stage.
+  let timer!: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
       server.closeAllConnections();
-      finish();
+      reject(new Error("Shutdown deadline exceeded"));
     }, timeoutMs);
     timer.unref();
-    server.close((error) => finish(error ?? undefined));
   });
-  await stopBackgroundWork();
-  // #40: an extraction in flight (a PDF being OCR'd) gets up to this long to
-  // finish before the pool closes under it; whatever is still running is
-  // marked interrupted on the next start (see startNodeServer).
-  await drainExtractions(EXTRACTION_DRAIN_MS);
-  await closeDb();
+  try {
+    await Promise.race([deadline, new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    })]);
+    await Promise.race([deadline, stopBackgroundWork()]);
+    // #40: interrupted extractions are recovered at next start. On deadline
+    // failure, the signal handler exits; do not close the pool underneath work
+    // that is still running or continue cleanup after a timed-out stage settles.
+    await Promise.race([deadline, drainExtractions(EXTRACTION_DRAIN_MS)]);
+    await Promise.race([deadline, closeDb()]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 const EXTRACTION_DRAIN_MS = 20_000;
@@ -147,7 +151,7 @@ export function startNodeServer(options: StartNodeServerOptions = {}): Server {
   });
   const scheduler = startOverdueScheduler({
     run: async () => {
-      await withSessionAdvisoryLock(0x4c4c5453, () => autoSubmitOverdueSections(db));
+      await withSessionAdvisoryLock(OVERDUE_SWEEP_LOCK_KEY, () => autoSubmitOverdueSections(db));
     },
     error: (message) => console.error(message),
   });
