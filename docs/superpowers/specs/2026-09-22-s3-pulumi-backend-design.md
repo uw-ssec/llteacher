@@ -103,7 +103,17 @@ The GitHub `production` environment must have required reviewers and deployment
 tag restrictions. The release workflow remains limited to version tags, and its
 existing `production-release` concurrency group continues to serialize updates.
 
-The deployment role receives:
+The deployment role receives four focused managed policies: the KMS-parameterized
+state policy (`github-deploy-policy.template.json`), regional compute policy
+(`github-compute-policy.json`), data/global policy (`github-data-policy.json`),
+and network policy (`github-network-policy.json`). Their IAM names are respectively
+`llteacher-production-deploy-state`, `llteacher-production-deploy-compute`,
+`llteacher-production-deploy-data`, and `llteacher-production-deploy-network`.
+Each compact rendered document must be below 6,144 characters. This supersedes
+the three-policy split: correct EC2 resource/tag constraints require a separate
+network policy to fit the quota without obscuring service boundaries.
+
+Together they grant:
 
 - `s3:ListBucket` only as needed for the Pulumi backend prefix.
 - Object read, write, and delete operations only under that prefix, including
@@ -113,8 +123,23 @@ The deployment role receives:
 - Reviewed creation, read, update, and deletion actions required for the
   LLTeacher VPC, ECS/ECR, RDS, application S3 bucket, Secrets Manager,
   CloudWatch Logs, Route 53, ACM, and prefixed IAM resources.
-- `iam:PassRole` only for `llteacher-production-*` ECS task and execution roles
+- `iam:PassRole` only for `llteacher-production-execution-role-*` and
+  `llteacher-production-task-role-*` ECS runtime roles
   and only when passed to `ecs-tasks.amazonaws.com`.
+
+Production VPCs, internet gateways, route tables, subnets, security groups, and
+ACM certificates carry `LLTeacherStack=production` from creation. Network and
+certificate mutations require that existing ownership; create operations require
+matching request tags, and network creation inside a VPC requires an owned VPC.
+EC2 creation tagging is limited by `ec2:CreateAction`. Later EC2 tag writes require
+an explicit non-null tag-key list and cannot touch the ownership key; ACM tag writes
+cannot claim unowned certificates, change ownership, or remove it. Discovery remains
+separate, with regional `ec2:Describe*`
+and ACM listing/issuance on `*` where required. ACM issuance also requires request
+ownership; account/region-scoped certificate metadata reads remain available for
+provider refresh and post-delete polling. Pre-existing unowned application
+resources require account-owner-reviewed migration/replacement before granting
+deployment access; never bulk-tag resources to adopt them. Local Floci is unchanged.
 
 The role does not receive `AdministratorAccess`, unrelated bucket access,
 wildcard KMS cryptographic access, or authority to administer or delete the
@@ -122,7 +147,13 @@ state key. AWS actions that cannot be resource-scoped may use `Resource: "*"`
 only with the available region, service, account, name, and tag conditions.
 
 The main Pulumi stack continues to own application runtime roles. It does not
-own the GitHub deployment role. Application task roles never receive access to
+own the GitHub deployment role. Both production runtime roles require the separate
+bootstrap-owned `llteacher-production-runtime-boundary` policy, which permits only
+ECR pull/log writes, exact production runtime-secret reads, and application-bucket
+access, never Pulumi state/KMS/IAM administration. Deployment `iam:CreateRole`
+requires that exact boundary; no boundary mutation actions are granted. Existing
+unbounded runtime roles require privileged migration/replacement. The boundary is
+not attached as a deployment grant. Application task roles never receive access to
 the Pulumi state bucket or state key.
 
 ## Release workflow changes

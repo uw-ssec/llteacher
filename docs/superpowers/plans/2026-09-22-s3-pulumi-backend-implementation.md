@@ -232,13 +232,18 @@ git commit -m "ci: use S3 Pulumi production backend"
 - Create: `infra/bootstrap/pulumi-state-bucket-policy.json`
 - Create: `infra/bootstrap/github-oidc-trust-policy.json`
 - Create: `infra/bootstrap/github-deploy-policy.template.json`
+- Create: `infra/bootstrap/github-compute-policy.json`
+- Create: `infra/bootstrap/github-data-policy.json`
+- Create: `infra/bootstrap/github-network-policy.json`
+- Create: `infra/bootstrap/runtime-permissions-boundary.json`
 - Create: `infra/scripts/bootstrap-policy.test.mjs`
+- Modify: `infra/src/app.ts`, `infra/src/network.ts`, `infra/src/dns.ts`, `infra/src/resources.test.ts`
 
 **Interfaces:**
 - Consumes: fixed account, region, bucket, prefix, repository, environment, and role names; runtime substitution `${KMS_KEY_ARN}`.
 - Produces: syntactically valid, least-privilege policy inputs for the documented AWS CLI bootstrap.
 
-- [ ] **Step 1: Write structural tests for the four policy documents**
+- [ ] **Step 1: Write structural tests for all eight policy documents**
 
 Create `infra/scripts/bootstrap-policy.test.mjs`. Parse each JSON file and assert:
 
@@ -268,8 +273,18 @@ Tests must prove:
 - No statement grants `Action: "*"`, `iam:*`, `s3:*` with Allow, or
   `AdministratorAccess`.
 - IAM role lifecycle and `iam:PassRole` resources match only
-  `arn:aws:iam::055237683908:role/llteacher-production-*`, and pass-role is
+  `arn:aws:iam::055237683908:role/llteacher-production-execution-role-*` and
+  `arn:aws:iam::055237683908:role/llteacher-production-task-role-*`, and pass-role is
   conditioned on `iam:PassedToService=ecs-tasks.amazonaws.com`.
+- Creation requires the exact bootstrap-owned runtime permissions boundary;
+  deployment grants cannot alter/remove boundaries or modify the deploy role.
+- Each of four deployment managed policies and the separate runtime boundary
+  fits below 6,144 compact JSON characters after rendering. The boundary excludes
+  state, KMS and IAM administration and permits only the runtime capability union.
+- EC2 and ACM mutations reject unrelated/untagged resources. New resources require
+  `LLTeacherStack=production` request tags; ownership cannot be claimed by standalone
+  tagging, changed, or removed. Production resource mocks prove tags are supplied
+  at creation and both runtime roles receive the boundary; local Floci is unaffected.
 - Regional deployment statements are conditioned on
   `aws:RequestedRegion=us-west-2`; global IAM and Route 53 statements are
   separate.
@@ -308,20 +323,30 @@ Create an OIDC trust policy with the exact provider principal, action
 `sts.amazonaws.com` and subject
 `repo:uw-ssec/llteacher:environment:production`.
 
-- [ ] **Step 4: Add the parameterized deployment permission policy**
+- [ ] **Step 4: Add four focused deployment policies and the runtime boundary**
 
-Create a valid JSON policy template with these independently reviewable
-statements:
+Create the KMS-parameterized state template, static compute, data/global, and
+network policies. Use IAM names `llteacher-production-deploy-state`,
+`llteacher-production-deploy-compute`, `llteacher-production-deploy-data`, and
+`llteacher-production-deploy-network`. This supersedes the earlier three-policy
+split: correct EC2 resource/tag authorization exceeds the single compute/network
+policy quota. Preserve readable service statements and test each policy's size.
+The separate `llteacher-production-runtime-boundary` is bootstrap-owned, never a
+deploy-role grant. It allows only ECR pull/log writes, exact runtime secret reads,
+and exact application-bucket access. Require its exact ARN on runtime role creation.
 
-- `PulumiStateList`: `s3:ListBucket` and `s3:GetBucketLocation` on the exact
+Use these independently reviewable statement groups:
+
+- `PulumiStateList`: `s3:ListBucket` on the exact
   state bucket, with `s3:prefix` limited to `llteacher-infra/.pulumi` and
-  `llteacher-infra/.pulumi/*`.
+  `llteacher-infra/.pulumi/*`. Separate `s3:GetBucketLocation` on that exact
+  bucket without the unsupported prefix condition.
 - `PulumiStateObjects`: `s3:GetObject`, `s3:GetObjectVersion`, `s3:PutObject`,
   and `s3:DeleteObject` on the exact backend object prefix.
 - `PulumiStateKms`: `kms:Encrypt`, `kms:Decrypt`, `kms:ReEncrypt*`,
   `kms:GenerateDataKey*`, and `kms:DescribeKey` on `${KMS_KEY_ARN}`.
 - `CallerIdentity`: `sts:GetCallerIdentity` on `*`.
-- `Ec2Networking`: `ec2:Describe*`, `ec2:CreateVpc`,
+- Network policy: `ec2:Describe*`, `ec2:CreateVpc`,
   `ec2:ModifyVpcAttribute`, `ec2:DeleteVpc`, `ec2:CreateInternetGateway`,
   `ec2:AttachInternetGateway`, `ec2:DetachInternetGateway`,
   `ec2:DeleteInternetGateway`, `ec2:CreateRouteTable`,
@@ -333,7 +358,17 @@ statements:
   `ec2:AuthorizeSecurityGroupEgress`, `ec2:RevokeSecurityGroupIngress`,
   `ec2:RevokeSecurityGroupEgress`, `ec2:DeleteSecurityGroup`,
   `ec2:CreateTags`, and `ec2:DeleteTags`, with
-  `aws:RequestedRegion=us-west-2`.
+  `aws:RequestedRegion=us-west-2`. Only discovery uses `Resource: "*"`.
+  Split creates onto exact account/region resource-type ARNs with production
+  request ownership tags; separately authorize the owned parent VPC for subnet,
+  route-table, and security-group creation. Existing mutations require resource
+  ownership tags. Creation tagging requires `ec2:CreateAction` matching the five
+  create APIs and production request ownership. Later tagging requires existing
+  ownership, a non-null tag-key list, and cannot touch the `LLTeacherStack` key.
+  The non-null check blocks DeleteTags with no tag list (which deletes all tags).
+  Set these ownership tags
+  in production network resources at creation; stop for privileged review before
+  adopting existing untagged resources.
 - `ElasticLoadBalancing`: `elasticloadbalancing:Describe*`,
   `elasticloadbalancing:CreateLoadBalancer`,
   `elasticloadbalancing:ModifyLoadBalancerAttributes`,
@@ -357,7 +392,7 @@ statements:
   LLTeacher cluster, service, and task-definition families where supported.
 - `EcrAuthorization`: `ecr:GetAuthorizationToken` on `*` with the regional
   condition. `EcrRepository`: `ecr:CreateRepository`, `ecr:DeleteRepository`,
-  `ecr:DescribeRepositories`, `ecr:DescribeImages`,
+  `ecr:DescribeRepositories`, `ecr:DescribeImages`, `ecr:ListTagsForResource`,
   `ecr:PutLifecyclePolicy`, `ecr:GetLifecyclePolicy`,
   `ecr:DeleteLifecyclePolicy`, `ecr:TagResource`, `ecr:UntagResource`,
   `ecr:BatchCheckLayerAvailability`, `ecr:GetDownloadUrlForLayer`,
@@ -369,18 +404,19 @@ statements:
   `rds:CreateDBSubnetGroup`, `rds:ModifyDBSubnetGroup`,
   `rds:DeleteDBSubnetGroup`, `rds:CreateDBInstance`, `rds:ModifyDBInstance`,
   and `rds:DeleteDBInstance`, with the regional condition and
-  `llteacher-production-*` resources where supported.
+  `llteacher-production-*` resources where supported. `CreateDBInstance` alone
+  also permits default PostgreSQL 16 parameter/option groups, never modifying them.
 - `ApplicationS3`: `s3:CreateBucket`, `s3:DeleteBucket`, `s3:ListBucket`,
-  `s3:GetBucket*`, `s3:PutBucketVersioning`, `s3:PutEncryptionConfiguration`,
+  `s3:GetBucket*`, `s3:GetEncryptionConfiguration`, `s3:GetLifecycleConfiguration`,
+  `s3:GetReplicationConfiguration`, `s3:GetAccelerateConfiguration`,
+  `s3:PutBucketVersioning`, `s3:PutEncryptionConfiguration`,
   `s3:PutBucketPublicAccessBlock`, `s3:PutLifecycleConfiguration`,
-  `s3:PutBucketTagging`, `s3:DeleteBucketEncryption`,
-  `s3:DeleteBucketPublicAccessBlock`, `s3:DeleteBucketPolicy`,
-  `s3:DeleteBucketTagging`, and `s3:DeleteLifecycleConfiguration` only for
+  and `s3:PutBucketTagging` only for
   `arn:aws:s3:::llteacher-production-*` and its objects, with
   `s3:LocationConstraint=us-west-2` on bucket creation.
 - `SecretsManager`: `secretsmanager:CreateSecret`,
   `secretsmanager:DeleteSecret`, `secretsmanager:DescribeSecret`,
-  `secretsmanager:PutSecretValue`, `secretsmanager:TagResource`,
+  `secretsmanager:PutSecretValue`, `secretsmanager:GetSecretValue`, `secretsmanager:TagResource`,
   `secretsmanager:UntagResource`, `secretsmanager:GetResourcePolicy`,
   `secretsmanager:PutResourcePolicy`, and
   `secretsmanager:DeleteResourcePolicy` on
@@ -388,15 +424,23 @@ statements:
 - `CloudWatchLogs`: `logs:CreateLogGroup`, `logs:DeleteLogGroup`,
   `logs:DescribeLogGroups`, `logs:PutRetentionPolicy`,
   `logs:DeleteRetentionPolicy`, `logs:TagResource`, `logs:UntagResource`, and
-  `logs:ListTagsForResource` on `/ecs/llteacher-production-*` log groups, with
-  the regional condition where supported.
+  `logs:ListTagsForResource` on actual `llteacher-production-app-logs-*` auto-named
+  log group ARNs (including required `:*` forms), with the regional condition.
+  `DescribeLogGroups` is a separate wildcard discovery statement.
 - `Acm`: `acm:RequestCertificate`, `acm:DeleteCertificate`,
   `acm:DescribeCertificate`, `acm:ListCertificates`, `acm:ListTagsForCertificate`,
   `acm:AddTagsToCertificate`, and `acm:RemoveTagsFromCertificate`, with the
-  regional condition and account-scoped certificate ARNs where supported.
+  regional condition. RequestCertificate uses `*` with production request ownership
+  and ListCertificates uses `*`; metadata reads use account/region certificate ARNs
+  without ownership conditions for refresh/deletion polling. Deletion requires
+  resource ownership; tag additions require existing ownership and cannot change
+  its value, and removals cannot remove the ownership key. Tag production certificate
+  requests in Pulumi and audit existing ownership before granting deployment access.
 - `ManageLlteacherRoles`: IAM role and inline-policy lifecycle actions only on
-  `arn:aws:iam::055237683908:role/llteacher-production-*`.
-- `PassLlteacherTaskRoles`: `iam:PassRole` on that same role prefix, conditioned
+  the execution-role/task-role ARN families above. Split CreateRole to require
+  `iam:PermissionsBoundary=arn:aws:iam::055237683908:policy/llteacher-production-runtime-boundary`;
+  omit Put/DeleteRolePermissionsBoundary entirely.
+- `PassLlteacherTaskRoles`: `iam:PassRole` on those same role families, conditioned
   on `iam:PassedToService=ecs-tasks.amazonaws.com`.
 - `ManageLlteacherRoute53`: only the hosted-zone and record-change actions
   needed by the optional LLTeacher production zone; list actions remain the
@@ -433,7 +477,7 @@ git commit -m "infra: define production bootstrap policies"
 - Test: `infra/scripts/bootstrap-policy.test.mjs`
 
 **Interfaces:**
-- Consumes: the four policy documents from Task 3 and the workflow variables from Task 2.
+- Consumes: all eight policy documents from Task 3 (four deployment managed policies, one boundary, key/bucket/trust policies) and the workflow variables from Task 2.
 - Produces: an operator procedure that creates/verifies bootstrap resources without printing secrets or creating application resources.
 
 - [ ] **Step 1: Add failing documentation contract assertions**

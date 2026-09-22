@@ -305,7 +305,7 @@ if read_optional NotFoundException "$BOOTSTRAP_TMP/key.json" kms describe-key --
 if read_optional 404 "$BOOTSTRAP_TMP/bucket.json" s3api head-bucket --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID"; then BUCKET_EXISTS=true; else BUCKET_EXISTS=false; fi
 if read_optional NoSuchEntity "$BOOTSTRAP_TMP/oidc.json" iam get-open-id-connect-provider --open-id-connect-provider-arn "$OIDC_ARN"; then OIDC_EXISTS=true; else OIDC_EXISTS=false; fi
 if read_optional NoSuchEntity "$BOOTSTRAP_TMP/role.json" iam get-role --role-name "$DEPLOY_ROLE"; then ROLE_EXISTS=true; else ROLE_EXISTS=false; fi
-for policy_name in llteacher-production-runtime-boundary llteacher-production-deploy-state llteacher-production-deploy-compute llteacher-production-deploy-data; do
+for policy_name in llteacher-production-runtime-boundary llteacher-production-deploy-state llteacher-production-deploy-compute llteacher-production-deploy-data llteacher-production-deploy-network; do
   if read_optional NoSuchEntity "$BOOTSTRAP_TMP/$policy_name.json" iam get-policy --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$policy_name"; then
     jq '.Policy | {Arn, DefaultVersionId, AttachmentCount}' "$BOOTSTRAP_TMP/$policy_name.json"
   else
@@ -559,9 +559,9 @@ The [AWS CLI provider command](https://docs.aws.amazon.com/cli/latest/reference/
 can retrieve the thumbprint when omitted; do not paste a guessed certificate
 thumbprint. An existing provider mismatch requires account-owner review.
 
-#### 6. Render and review all four managed policies
+#### 6. Render and review all five managed policies
 
-There are **three deployment policies** (state, compute, data/global), each
+There are **four deployment policies** (state, compute, data/global, network), each
 below AWS's 6,144-character managed-policy limit, plus the separate runtime
 permissions boundary. Do not combine them into an inline deployment policy.
 The boundary `llteacher-production-runtime-boundary` must exist **before any
@@ -574,15 +574,33 @@ non-secret permission JSON; displaying them is required for policy review.
 jq --arg key "$KMS_KEY_ARN" 'walk(if type == "string" and . == "${KMS_KEY_ARN}" then $key else . end)' \
   infra/bootstrap/github-deploy-policy.template.json >"$BOOTSTRAP_TMP/deploy-state.json"
 jq -e '[.. | strings | select(contains("${"))] | length == 0' "$BOOTSTRAP_TMP/deploy-state.json"
-POLICY_NAMES=(llteacher-production-runtime-boundary llteacher-production-deploy-state llteacher-production-deploy-compute llteacher-production-deploy-data)
-POLICY_FILES=(infra/bootstrap/runtime-permissions-boundary.json "$BOOTSTRAP_TMP/deploy-state.json" infra/bootstrap/github-compute-policy.json infra/bootstrap/github-data-policy.json)
+POLICY_NAMES=(llteacher-production-runtime-boundary llteacher-production-deploy-state llteacher-production-deploy-compute llteacher-production-deploy-data llteacher-production-deploy-network)
+POLICY_FILES=(infra/bootstrap/runtime-permissions-boundary.json "$BOOTSTRAP_TMP/deploy-state.json" infra/bootstrap/github-compute-policy.json infra/bootstrap/github-data-policy.json infra/bootstrap/github-network-policy.json)
 for policy_file in "${POLICY_FILES[@]}"; do
-  test "$(jq -c . "$policy_file" | tr -d '\n' | wc -m | tr -d ' ')" -le 6144 || stop 'Oversized managed policy.'
+  test "$(jq -c . "$policy_file" | tr -d '\n' | wc -m | tr -d ' ')" -lt 6144 || stop 'Oversized managed policy.'
   jq . "$policy_file"
 done
 ```
 
-Review the EC2 discovery actions scoped to `us-west-2` with wildcard resources
+Network creation requires `LLTeacherStack=production` request tags; mutation
+requires that ownership tag on existing resources. Pulumi sets it atomically on
+production VPCs, internet gateways, route tables, subnets, and security groups.
+Creation inside a VPC also requires an already-owned VPC. EC2 tag-on-create is
+limited by `ec2:CreateAction`; later tag writes cannot add, change, or remove the
+ownership key. The separate network policy keeps these readable resource/tag
+conditions below the per-policy quota; it supersedes the earlier three-policy split.
+Later tag writes require an explicit tag-key list; omitting it cannot delete all tags.
+
+ACM certificate requests likewise require the production ownership tag. Certificate
+deletion and tag changes require existing ownership, and ownership cannot be changed
+or removed. Pulumi tags production certificate requests. Account/region-scoped
+certificate metadata reads remain unconditioned on tags so refresh and post-delete
+polling can observe missing certificates. Only ACM issuance/listing require wildcard
+resources; issuance still requires the request tag. See the official
+[EC2 tagging authorization](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/supported-iam-actions-tagging.html)
+and [ACM authorization reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_acm.html).
+
+Review EC2 discovery (`ec2:Describe*`) scoped to `us-west-2` with wildcard resources
 and the Route 53 hosted-zone wildcard `arn:aws:route53:::hostedzone/*` as
 explicit scope exceptions. Route 53 permits changes across the account's hosted
 zones and cannot be restricted by the application's zone name here. IAM
@@ -590,12 +608,12 @@ lifecycle and `iam:PassRole` cover only `llteacher-production-execution-role-*`
 and `llteacher-production-task-role-*`, excluding the deployment role.
 
 Repeat the following check/mutation/verification blocks for `POLICY_INDEX=0`,
-then `1`, `2`, and `3`, in that order. Do not run them as an unattended loop.
+then `1`, `2`, `3`, and `4`, in that order. Do not run them as an unattended loop.
 
 **Read-only check:**
 
 ```bash
-POLICY_INDEX=0 # repeat with 1, 2, then 3 only after verifying the preceding policy
+POLICY_INDEX=0 # repeat with 1, 2, 3, then 4 only after verifying the preceding policy
 POLICY_NAME=${POLICY_NAMES[$POLICY_INDEX]}
 POLICY_FILE=${POLICY_FILES[$POLICY_INDEX]}
 POLICY_ARN="arn:aws:iam::$ACCOUNT_ID:policy/$POLICY_NAME"
@@ -648,7 +666,29 @@ aws_bootstrap iam create-policy-version --policy-arn "$POLICY_ARN" --policy-docu
 **Verification:** repeat the default-version read and exact comparison above,
 then restart inventory. Do not delete policy versions to make room automatically.
 
-#### 7. Audit runtime boundaries before granting deployment access
+#### 7. Audit ownership and runtime boundaries before granting deployment access
+
+**Read-only ownership inventory:** compare the exact resource IDs/ARNs from the
+production Pulumi state with this inventory. Do not infer ownership from a name
+alone or add the ownership tag to every returned resource.
+
+```bash
+aws_bootstrap ec2 describe-vpcs
+aws_bootstrap ec2 describe-internet-gateways
+aws_bootstrap ec2 describe-route-tables
+aws_bootstrap ec2 describe-subnets
+aws_bootstrap ec2 describe-security-groups
+aws_bootstrap acm list-certificates
+# For each exact, reviewed production certificate ARN:
+# aws_bootstrap acm list-tags-for-certificate --certificate-arn "$CERTIFICATE_ARN"
+```
+
+Every existing LLTeacher production network resource and certificate must already
+carry `LLTeacherStack=production`. Missing or conflicting tags mean **stop for
+privileged migration/replacement** after account-owner review of exact IDs against
+state. The deployment role intentionally cannot claim an existing unowned resource.
+Do not relax the policies to make adoption succeed. New resources get tags from
+Pulumi at creation; local Floci resources remain unaffected.
 
 **Read-only check and verification:** enumerate all existing roles with either
 runtime prefix and retrieve each exact boundary. An unbounded or differently
@@ -718,14 +758,14 @@ present. Review any existing deploy-role boundary as well; stop if unexpected.
 aws_bootstrap iam get-role --role-name "$DEPLOY_ROLE" | jq -e '.Role.PermissionsBoundary == null'
 aws_bootstrap iam list-role-policies --role-name "$DEPLOY_ROLE" | jq -e '.PolicyNames | length == 0'
 aws_bootstrap iam list-attached-role-policies --role-name "$DEPLOY_ROLE" >"$BOOTSTRAP_TMP/attachments.json"
-jq -e --arg prefix "arn:aws:iam::$ACCOUNT_ID:policy/llteacher-production-deploy-" 'all(.AttachedPolicies[]; .PolicyArn == ($prefix + "state") or .PolicyArn == ($prefix + "compute") or .PolicyArn == ($prefix + "data"))' "$BOOTSTRAP_TMP/attachments.json"
+jq -e --arg prefix "arn:aws:iam::$ACCOUNT_ID:policy/llteacher-production-deploy-" 'all(.AttachedPolicies[]; .PolicyArn == ($prefix + "state") or .PolicyArn == ($prefix + "compute") or .PolicyArn == ($prefix + "data") or .PolicyArn == ($prefix + "network"))' "$BOOTSTRAP_TMP/attachments.json"
 ```
 
-**Mutation — after the runtime-role audit succeeds:** attach the three reviewed
+**Mutation — after ownership and runtime-role audits succeed:** attach the four reviewed
 policies; repeating an existing attachment is harmless.
 
 ```bash
-for policy_name in llteacher-production-deploy-state llteacher-production-deploy-compute llteacher-production-deploy-data; do
+for policy_name in llteacher-production-deploy-state llteacher-production-deploy-compute llteacher-production-deploy-data llteacher-production-deploy-network; do
   aws_bootstrap iam attach-role-policy --role-name "$DEPLOY_ROLE" --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$policy_name"
 done
 ```
@@ -735,8 +775,8 @@ version against the reviewed JSON. Re-run step 7 before enabling releases.
 
 ```bash
 aws_bootstrap iam list-attached-role-policies --role-name "$DEPLOY_ROLE" >"$BOOTSTRAP_TMP/attachments.json"
-jq -e --arg prefix "arn:aws:iam::$ACCOUNT_ID:policy/llteacher-production-deploy-" '([.AttachedPolicies[].PolicyArn] | sort) == ([$prefix + "state", $prefix + "compute", $prefix + "data"] | sort)' "$BOOTSTRAP_TMP/attachments.json"
-for index in 1 2 3; do
+jq -e --arg prefix "arn:aws:iam::$ACCOUNT_ID:policy/llteacher-production-deploy-" '([.AttachedPolicies[].PolicyArn] | sort) == ([$prefix + "state", $prefix + "compute", $prefix + "data", $prefix + "network"] | sort)' "$BOOTSTRAP_TMP/attachments.json"
+for index in 1 2 3 4; do
   POLICY_ARN="arn:aws:iam::$ACCOUNT_ID:policy/${POLICY_NAMES[$index]}"
   VERSION_ID=$(aws_bootstrap iam get-policy --policy-arn "$POLICY_ARN" --query Policy.DefaultVersionId --output text)
   aws_bootstrap iam get-policy-version --policy-arn "$POLICY_ARN" --version-id "$VERSION_ID" --query PolicyVersion.Document >"$BOOTSTRAP_TMP/live-policy.json"

@@ -12,7 +12,9 @@ test('bootstrap guide covers fail-closed identity, policy and boundary checks wi
     'get-bucket-versioning', 'get-bucket-encryption', 'get-bucket-policy', 'get-bucket-tagging',
     'get-bucket-lifecycle-configuration', 'get-open-id-connect-provider', 'list-roles',
     'PermissionsBoundary.PermissionsBoundaryArn', 'create-policy-version', 'list-attached-role-policies',
-    'github-compute-policy.json', 'github-data-policy.json', 'runtime-permissions-boundary.json',
+    'github-compute-policy.json', 'github-data-policy.json', 'github-network-policy.json', 'runtime-permissions-boundary.json',
+    'LLTeacherStack=production', 'describe-vpcs', 'describe-internet-gateways', 'describe-route-tables',
+    'describe-subnets', 'describe-security-groups', 'list-tags-for-certificate',
     'llteacher-production-runtime-boundary', 'jq --arg',
     'awskms://alias/llteacher-pulumi-state?region=us-west-2&awssdk=v2']) {
     assert(bootstrap.includes(command), `missing bootstrap safeguard: ${command}`);
@@ -25,6 +27,19 @@ test('bootstrap guide covers fail-closed identity, policy and boundary checks wi
     const parsed = spawnSync('bash', ['-n'], { input: shell, encoding: 'utf8' });
     assert.equal(parsed.status, 0, parsed.stderr);
   }
+});
+
+test('bootstrap inventory, creation and attachment verification cover four deployment policies and a separate boundary', () => {
+  const guide = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+  const grants = ['state', 'compute', 'data', 'network'].map(name => `llteacher-production-deploy-${name}`);
+  const managed = ['llteacher-production-runtime-boundary', ...grants];
+  assert(guide.includes(`POLICY_NAMES=(${managed.join(' ')})`));
+  assert(guide.includes(`for policy_name in ${managed.join(' ')}; do`), 'inventory includes every policy');
+  assert(guide.includes(`for policy_name in ${grants.join(' ')}; do`), 'attach only the four deployment grants');
+  assert(guide.includes('for index in 1 2 3 4; do'), 'verify all four attachments');
+  assert(guide.includes('[$prefix + "state", $prefix + "compute", $prefix + "data", $prefix + "network"]'));
+  assert.match(guide, /four deployment policies/);
+  assert.match(guide, /all five managed policies/);
 });
 
 test('persisted KMS provider URLs allow OIDC credentials without requiring a local shared profile', () => {
@@ -55,7 +70,7 @@ const bucketArn = `arn:aws:s3:::${bucket}`;
 const kmsToken = '${KMS_KEY_ARN}';
 const boundaryFile = 'runtime-permissions-boundary.json';
 const boundaryArn = `arn:aws:iam::${account}:policy/llteacher-production-runtime-boundary`;
-const files = ['pulumi-state-kms-key-policy.json', 'pulumi-state-bucket-policy.json', 'github-oidc-trust-policy.json', 'github-deploy-policy.template.json', 'github-compute-policy.json', 'github-data-policy.json'];
+const files = ['pulumi-state-kms-key-policy.json', 'pulumi-state-bucket-policy.json', 'github-oidc-trust-policy.json', 'github-deploy-policy.template.json', 'github-compute-policy.json', 'github-data-policy.json', 'github-network-policy.json'];
 const read = name => readFileSync(new URL(`../bootstrap/${name}`, import.meta.url), 'utf8');
 const policy = name => JSON.parse(read(name));
 const deploy = () => files.slice(3).flatMap(file => policy(file).Statement);
@@ -71,6 +86,108 @@ function statement(sid) {
 function sameMembers(actual, expected) {
   assert.deepEqual([...actual].sort(), [...expected].sort());
 }
+
+// Evaluate only the literal IAM operators used in the ownership policies.
+// This exercises deny cases in the real documents, not an AWS simulator.
+function globMatches(pattern, value) {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*').replaceAll('?', '.');
+  return new RegExp(`^${escaped}$`).test(value);
+}
+function policyAllows(action, resource, context = {}) {
+  return deploy().some(s => s.Effect === 'Allow'
+    && actions(s).some(a => globMatches(a, action))
+    && resources(s).some(r => globMatches(r, resource))
+    && Object.entries(s.Condition ?? {}).every(([operator, entries]) => Object.entries(entries).every(([key, expected]) => {
+      const actual = context[key];
+      if (operator === 'StringEquals' || operator === 'ArnEquals') return actual !== undefined && array(expected).includes(actual);
+      if (operator === 'StringEqualsIfExists') return actual === undefined || array(expected).includes(actual);
+      if (operator === 'Null') return (actual === undefined) === (expected === 'true');
+      if (operator === 'ForAllValues:StringNotEquals') return array(actual ?? []).every(v => !array(expected).includes(v));
+      assert.fail(`Unsupported ownership-test operator: ${operator}`);
+    })));
+}
+
+test('EC2 mutations reject unrelated and untagged VPCs, routes, subnets and security groups', () => {
+  const cases = [
+    ['ec2:ModifyVpcAttribute', 'vpc/vpc-test'], ['ec2:DeleteVpc', 'vpc/vpc-test'],
+    ['ec2:CreateRoute', 'route-table/rtb-test'], ['ec2:ReplaceRoute', 'route-table/rtb-test'],
+    ['ec2:DeleteRoute', 'route-table/rtb-test'], ['ec2:DeleteRouteTable', 'route-table/rtb-test'],
+    ['ec2:AssociateRouteTable', 'subnet/subnet-test'], ['ec2:DisassociateRouteTable', 'route-table/rtb-test'],
+    ['ec2:ModifySubnetAttribute', 'subnet/subnet-test'], ['ec2:DeleteSubnet', 'subnet/subnet-test'],
+    ['ec2:AuthorizeSecurityGroupIngress', 'security-group/sg-test'], ['ec2:AuthorizeSecurityGroupEgress', 'security-group/sg-test'],
+    ['ec2:RevokeSecurityGroupIngress', 'security-group/sg-test'], ['ec2:RevokeSecurityGroupEgress', 'security-group/sg-test'],
+    ['ec2:DeleteSecurityGroup', 'security-group/sg-test'], ['ec2:AttachInternetGateway', 'vpc/vpc-test'],
+    ['ec2:DetachInternetGateway', 'internet-gateway/igw-test'], ['ec2:DeleteInternetGateway', 'internet-gateway/igw-test'],
+  ];
+  for (const [action, suffix] of cases) {
+    const resource = `arn:aws:ec2:${region}:${account}:${suffix}`;
+    for (const owner of [undefined, 'unrelated', 'staging']) {
+      assert.equal(policyAllows(action, resource, { 'aws:RequestedRegion': region, 'aws:ResourceTag/LLTeacherStack': owner }), false, `${action} ${owner}`);
+    }
+    assert(policyAllows(action, resource, { 'aws:RequestedRegion': region, 'aws:ResourceTag/LLTeacherStack': 'production' }), action);
+    assert.equal(policyAllows(action, resource.replace(account, '111111111111'), { 'aws:RequestedRegion': region, 'aws:ResourceTag/LLTeacherStack': 'production' }), false, `${action} wrong account`);
+    assert.equal(policyAllows(action, resource, { 'aws:RequestedRegion': 'us-east-1', 'aws:ResourceTag/LLTeacherStack': 'production' }), false, `${action} wrong region`);
+  }
+});
+
+test('EC2 creates require ownership request tags and owned parent VPCs', () => {
+  const creates = [
+    ['ec2:CreateVpc', 'vpc/vpc-new'], ['ec2:CreateInternetGateway', 'internet-gateway/igw-new'],
+    ['ec2:CreateRouteTable', 'route-table/rtb-new'], ['ec2:CreateSubnet', 'subnet/subnet-new'],
+    ['ec2:CreateSecurityGroup', 'security-group/sg-new'],
+  ];
+  for (const [action, suffix] of creates) {
+    const resource = `arn:aws:ec2:${region}:${account}:${suffix}`;
+    assert(policyAllows(action, resource, { 'aws:RequestedRegion': region, 'aws:RequestTag/LLTeacherStack': 'production' }), action);
+    for (const owner of [undefined, 'unrelated']) assert.equal(policyAllows(action, resource, { 'aws:RequestedRegion': region, 'aws:RequestTag/LLTeacherStack': owner }), false, action);
+  }
+  for (const action of ['ec2:CreateRouteTable', 'ec2:CreateSubnet', 'ec2:CreateSecurityGroup']) {
+    const vpc = `arn:aws:ec2:${region}:${account}:vpc/vpc-parent`;
+    assert(policyAllows(action, vpc, { 'aws:RequestedRegion': region, 'aws:ResourceTag/LLTeacherStack': 'production' }), action);
+    // New-resource request tags must never authorize a different parent VPC.
+    assert.equal(policyAllows(action, vpc, { 'aws:RequestedRegion': region, 'aws:RequestTag/LLTeacherStack': 'production', 'aws:ResourceTag/LLTeacherStack': 'unrelated' }), false, action);
+  }
+});
+
+test('EC2 tagging can neither claim unrelated resources nor change or remove ownership', () => {
+  for (const [kind, createAction] of [
+    ['vpc/vpc-test', 'CreateVpc'], ['internet-gateway/igw-test', 'CreateInternetGateway'],
+    ['route-table/rtb-test', 'CreateRouteTable'], ['subnet/subnet-test', 'CreateSubnet'],
+    ['security-group/sg-test', 'CreateSecurityGroup'],
+  ]) {
+    const resource = `arn:aws:ec2:${region}:${account}:${kind}`;
+    const request = { 'aws:RequestedRegion': region, 'aws:TagKeys': ['LLTeacherStack'], 'aws:RequestTag/LLTeacherStack': 'production' };
+    assert(policyAllows('ec2:CreateTags', resource, { ...request, 'ec2:CreateAction': createAction }));
+    assert.equal(policyAllows('ec2:CreateTags', resource, request), false);
+    assert.equal(policyAllows('ec2:CreateTags', resource, { ...request, 'aws:ResourceTag/LLTeacherStack': 'unrelated' }), false);
+    for (const action of ['ec2:CreateTags', 'ec2:DeleteTags']) {
+      const owned = { ...request, 'aws:ResourceTag/LLTeacherStack': 'production' };
+      assert.equal(policyAllows(action, resource, owned), false, action);
+      assert(policyAllows(action, resource, { ...owned, 'aws:TagKeys': ['Name'] }), action);
+      // DeleteTags with no tag list deletes all user tags; a vacuous set match
+      // must not permit it to strip the ownership tag.
+      assert.equal(policyAllows(action, resource, { ...owned, 'aws:TagKeys': undefined }), false, `${action} missing tag keys`);
+    }
+  }
+});
+
+test('ACM issuance requires ownership and existing certificates cannot be claimed or stripped of ownership', () => {
+  const cert = `arn:aws:acm:${region}:${account}:certificate/test`;
+  const regional = { 'aws:RequestedRegion': region };
+  assert(policyAllows('acm:RequestCertificate', '*', { ...regional, 'aws:RequestTag/LLTeacherStack': 'production' }));
+  assert.equal(policyAllows('acm:RequestCertificate', '*', regional), false);
+  for (const action of ['acm:DeleteCertificate', 'acm:AddTagsToCertificate', 'acm:RemoveTagsFromCertificate']) {
+    for (const owner of [undefined, 'unrelated']) {
+      assert.equal(policyAllows(action, cert, { ...regional, 'aws:ResourceTag/LLTeacherStack': owner, 'aws:RequestTag/LLTeacherStack': 'production', 'aws:TagKeys': ['LLTeacherStack'] }), false, `${action} ${owner}`);
+    }
+    assert(policyAllows(action, cert, { ...regional, 'aws:ResourceTag/LLTeacherStack': 'production', 'aws:TagKeys': ['Name'] }), action);
+  }
+  assert.equal(policyAllows('acm:AddTagsToCertificate', cert, { ...regional, 'aws:ResourceTag/LLTeacherStack': 'production', 'aws:RequestTag/LLTeacherStack': 'unrelated', 'aws:TagKeys': ['LLTeacherStack'] }), false);
+  assert.equal(policyAllows('acm:RemoveTagsFromCertificate', cert, { ...regional, 'aws:ResourceTag/LLTeacherStack': 'production', 'aws:TagKeys': ['LLTeacherStack'] }), false);
+  // Provider deletion polling must be able to observe an absent certificate;
+  // no resource tags exist after deletion, so reads cannot depend on them.
+  assert(policyAllows('acm:DescribeCertificate', cert, regional));
+});
 
 for (const file of [...files, boundaryFile]) {
   test(`${file} is a complete policy document`, () => {
@@ -216,16 +333,17 @@ test('runtime boundary permits only image pulls, app log writes, app secret read
   }
 });
 
-test('three focused deployment policies fit the AWS managed-policy size limit after substitution', () => {
+test('four focused deployment policies fit the AWS managed-policy size limit after substitution', () => {
   for (const file of files.slice(3)) {
     const rendered = JSON.parse(read(file).replace(kmsToken, `arn:aws:kms:${region}:${account}:key/12345678-1234-1234-1234-123456789abc`));
     assert(JSON.stringify(rendered).length < 6144, `${file} exceeds the managed-policy limit`);
   }
   assert(policy(files[3]).Statement.every(s => s.Sid.startsWith('PulumiState')));
-  const computeServices = new Set(['ec2', 'elasticloadbalancing', 'ecs', 'ecr', 'logs']);
+  const computeServices = new Set(['elasticloadbalancing', 'ecs', 'ecr', 'logs']);
   assert(policy(files[4]).Statement.every(s => actions(s).every(a => computeServices.has(a.split(':')[0]))));
   const dataServices = new Set(['sts', 'rds', 's3', 'secretsmanager', 'acm', 'iam', 'route53']);
   assert(policy(files[5]).Statement.every(s => actions(s).every(a => dataServices.has(a.split(':')[0]))));
+  assert(policy(files[6]).Statement.every(s => actions(s).every(a => a.startsWith('ec2:'))));
 });
 
 test('regional services require us-west-2 and global IAM and DNS stay separate', () => {

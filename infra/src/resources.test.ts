@@ -114,6 +114,19 @@ function resource(type: string, name: string): RecordedResource {
 }
 
 describe("production resource graph", () => {
+  it("tags every production network resource and certificate at creation for policy ownership", () => {
+    const ownedTypes = new Set([
+      "aws:ec2/vpc:Vpc", "aws:ec2/internetGateway:InternetGateway", "aws:ec2/routeTable:RouteTable",
+      "aws:ec2/subnet:Subnet", "aws:ec2/securityGroup:SecurityGroup", "aws:acm/certificate:Certificate",
+    ]);
+    const owned = resources.filter(r => r.name.startsWith("llteacher-production-") && ownedTypes.has(r.type));
+    expect(owned).toHaveLength(11);
+    for (const r of owned) expect(r.inputs.tags, r.name).toMatchObject({ LLTeacherStack: "production" });
+    for (const r of resources.filter(r => r.name.startsWith("llteacher-local-") && ownedTypes.has(r.type))) {
+      expect(r.inputs.tags ?? {}, r.name).not.toHaveProperty("LLTeacherStack");
+    }
+  });
+
   it("validates the ACM certificate through Route 53 before creating the listener", async () => {
     expect(resources.some(({ type }) => type === "aws:route53/record:Record")).toBe(true);
     expect(resources.some(({ type }) => type === "aws:acm/certificateValidation:CertificateValidation")).toBe(true);

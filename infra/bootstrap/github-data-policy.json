@@ -116,7 +116,6 @@
       "Sid": "AcmDiscovery",
       "Effect": "Allow",
       "Action": [
-        "acm:RequestCertificate",
         "acm:ListCertificates"
       ],
       "Resource": "*",
@@ -127,19 +126,70 @@
       }
     },
     {
+      "Sid": "AcmRequest",
+      "Effect": "Allow",
+      "Action": "acm:RequestCertificate",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2",
+          "aws:RequestTag/LLTeacherStack": "production"
+        }
+      }
+    },
+    {
       "Sid": "Acm",
       "Effect": "Allow",
+      "Action": "acm:DeleteCertificate",
+      "Resource": "arn:aws:acm:us-west-2:055237683908:certificate/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2",
+          "aws:ResourceTag/LLTeacherStack": "production"
+        }
+      }
+    },
+    {
+      "Sid": "AcmInspect",
+      "Effect": "Allow",
       "Action": [
-        "acm:DeleteCertificate",
         "acm:DescribeCertificate",
-        "acm:ListTagsForCertificate",
-        "acm:AddTagsToCertificate",
-        "acm:RemoveTagsFromCertificate"
+        "acm:ListTagsForCertificate"
       ],
       "Resource": "arn:aws:acm:us-west-2:055237683908:certificate/*",
       "Condition": {
         "StringEquals": {
           "aws:RequestedRegion": "us-west-2"
+        }
+      }
+    },
+    {
+      "Sid": "AcmTagOwned",
+      "Effect": "Allow",
+      "Action": "acm:AddTagsToCertificate",
+      "Resource": "arn:aws:acm:us-west-2:055237683908:certificate/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2",
+          "aws:ResourceTag/LLTeacherStack": "production"
+        },
+        "StringEqualsIfExists": {
+          "aws:RequestTag/LLTeacherStack": "production"
+        }
+      }
+    },
+    {
+      "Sid": "AcmUntagOwned",
+      "Effect": "Allow",
+      "Action": "acm:RemoveTagsFromCertificate",
+      "Resource": "arn:aws:acm:us-west-2:055237683908:certificate/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2",
+          "aws:ResourceTag/LLTeacherStack": "production"
+        },
+        "ForAllValues:StringNotEquals": {
+          "aws:TagKeys": "LLTeacherStack"
         }
       }
     },
