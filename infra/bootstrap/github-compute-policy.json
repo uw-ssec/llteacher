@@ -156,6 +156,7 @@
         "ecr:DeleteRepository",
         "ecr:DescribeRepositories",
         "ecr:DescribeImages",
+        "ecr:ListTagsForResource",
         "ecr:PutLifecyclePolicy",
         "ecr:GetLifecyclePolicy",
         "ecr:DeleteLifecyclePolicy",

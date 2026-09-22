@@ -1,0 +1,86 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EcrAuthorization",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2"
+        }
+      }
+    },
+    {
+      "Sid": "PullApplicationImage",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage"
+      ],
+      "Resource": "arn:aws:ecr:us-west-2:055237683908:repository/llteacher-production/app",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2"
+        }
+      }
+    },
+    {
+      "Sid": "WriteApplicationLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:us-west-2:055237683908:log-group:llteacher-production-app-logs-*:log-stream:*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2"
+        }
+      }
+    },
+    {
+      "Sid": "ReadApplicationSecrets",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": [
+        "arn:aws:secretsmanager:us-west-2:055237683908:secret:llteacher-production-database-url-*",
+        "arn:aws:secretsmanager:us-west-2:055237683908:secret:llteacher-production-runtime-*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2"
+        }
+      }
+    },
+    {
+      "Sid": "ListCourseStorage",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::llteacher-production-materials-*",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "courses/*/materials/*",
+            "courses/*/knowledge/*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ReadWriteCourseStorage",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::llteacher-production-materials-*/courses/*/materials/*",
+        "arn:aws:s3:::llteacher-production-materials-*/courses/*/knowledge/*"
+      ]
+    }
+  ]
+}

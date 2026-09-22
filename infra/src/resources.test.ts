@@ -186,6 +186,19 @@ describe("production resource graph", () => {
     expect(policy.Statement).toEqual([{ Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: ["arn:aws:test:us-east-1:000000000000:llteacher-production-database-url", "arn:aws:test:us-east-1:000000000000:llteacher-production-runtime"] }]);
   });
 
+  it("requires the bootstrap-owned runtime boundary on both production IAM roles", () => {
+    for (const suffix of ["execution-role", "task-role"]) {
+      expect(resource("aws:iam/role:Role", `llteacher-production-${suffix}`).inputs.permissionsBoundary)
+        .toBe("arn:aws:iam::055237683908:policy/llteacher-production-runtime-boundary");
+    }
+  });
+
+  it("does not attach the production runtime boundary to local Floci roles", () => {
+    for (const suffix of ["execution-role", "task-role"]) {
+      expect(resource("aws:iam/role:Role", `llteacher-local-${suffix}`).inputs).not.toHaveProperty("permissionsBoundary");
+    }
+  });
+
   it("injects secrets separately from ordinary task configuration", () => {
     const [container] = JSON.parse(String(resource("aws:ecs/taskDefinition:TaskDefinition", "llteacher-production-app-task").inputs.containerDefinitions));
     expect(container.secrets.map((s: { name: string }) => s.name).sort()).toEqual(["DATABASE_URL", "WORKOS_API_KEY", "WORKOS_CLIENT_ID", "WORKOS_WEBHOOK_SECRET", "OPENROUTER_API_KEY", "LLMOXIE_API_KEY", "SESSION_SECRET", "ENCRYPTION_KEY", "BLIND_INDEX_KEY"].sort());

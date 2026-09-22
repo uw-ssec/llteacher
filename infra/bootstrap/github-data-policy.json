@@ -144,10 +144,23 @@
       }
     },
     {
+      "Sid": "CreateLlteacherRoles",
+      "Effect": "Allow",
+      "Action": "iam:CreateRole",
+      "Resource": [
+        "arn:aws:iam::055237683908:role/llteacher-production-execution-role-*",
+        "arn:aws:iam::055237683908:role/llteacher-production-task-role-*"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::055237683908:policy/llteacher-production-runtime-boundary"
+        }
+      }
+    },
+    {
       "Sid": "ManageLlteacherRoles",
       "Effect": "Allow",
       "Action": [
-        "iam:CreateRole",
         "iam:GetRole",
         "iam:DeleteRole",
         "iam:TagRole",

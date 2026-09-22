@@ -29,8 +29,12 @@ export function createApplication(name: string, config: InfraConfig, network: Ne
   const repository = new aws.ecr.Repository(`${name}-app`, { forceDelete: config.isLocal, name: `${name}/app` }, options);
   const logGroup = new aws.cloudwatch.LogGroup(`${name}-app-logs`, { retentionInDays: config.isLocal ? 7 : 30 }, options);
   const cluster = new aws.ecs.Cluster(`${name}-cluster`, { name: `${name}-cluster` }, options);
-  const executionRole = new aws.iam.Role(`${name}-execution-role`, { assumeRolePolicy }, options);
-  const taskRole = new aws.iam.Role(`${name}-task-role`, { assumeRolePolicy }, options);
+  // Bootstrap owns this policy; the deploy role cannot change or remove it.
+  const permissionsBoundary = config.environment === "production" && !config.isLocal
+    ? "arn:aws:iam::055237683908:policy/llteacher-production-runtime-boundary"
+    : undefined;
+  const executionRole = new aws.iam.Role(`${name}-execution-role`, { assumeRolePolicy, permissionsBoundary }, options);
+  const taskRole = new aws.iam.Role(`${name}-task-role`, { assumeRolePolicy, permissionsBoundary }, options);
   const executionPolicy = new aws.iam.RolePolicyAttachment(`${name}-execution-policy`, {
     policyArn: "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy",
     role: executionRole.name,

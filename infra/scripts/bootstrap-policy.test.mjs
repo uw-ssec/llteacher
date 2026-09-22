@@ -14,6 +14,8 @@ const runtimeRoles = [
 ];
 const bucketArn = `arn:aws:s3:::${bucket}`;
 const kmsToken = '${KMS_KEY_ARN}';
+const boundaryFile = 'runtime-permissions-boundary.json';
+const boundaryArn = `arn:aws:iam::${account}:policy/llteacher-production-runtime-boundary`;
 const files = ['pulumi-state-kms-key-policy.json', 'pulumi-state-bucket-policy.json', 'github-oidc-trust-policy.json', 'github-deploy-policy.template.json', 'github-compute-policy.json', 'github-data-policy.json'];
 const read = name => readFileSync(new URL(`../bootstrap/${name}`, import.meta.url), 'utf8');
 const policy = name => JSON.parse(read(name));
@@ -31,7 +33,7 @@ function sameMembers(actual, expected) {
   assert.deepEqual([...actual].sort(), [...expected].sort());
 }
 
-for (const file of files) {
+for (const file of [...files, boundaryFile]) {
   test(`${file} is a complete policy document`, () => {
     const document = policy(file);
     assert.equal(document.Version, '2012-10-17');
@@ -113,10 +115,10 @@ test('IAM lifecycle and ECS pass-role access cover only runtime roles, excluding
   for (const s of deploy().filter(s => actions(s).some(a => a.startsWith('iam:')))) {
     sameMembers(resources(s), runtimeRoles);
     for (const resource of resources(s)) assert(!deployRole.startsWith(resource.slice(0, -1)));
-    assert(['ManageLlteacherRoles', 'AttachLlteacherExecutionPolicy', 'PassLlteacherTaskRoles'].includes(s.Sid));
+    assert(['CreateLlteacherRoles', 'ManageLlteacherRoles', 'AttachLlteacherExecutionPolicy', 'PassLlteacherTaskRoles'].includes(s.Sid));
   }
   sameMembers(actions(statement('ManageLlteacherRoles')), [
-    'iam:CreateRole', 'iam:GetRole', 'iam:DeleteRole', 'iam:TagRole', 'iam:UntagRole',
+    'iam:GetRole', 'iam:DeleteRole', 'iam:TagRole', 'iam:UntagRole',
     'iam:ListRoleTags', 'iam:ListRolePolicies', 'iam:GetRolePolicy', 'iam:PutRolePolicy',
     'iam:DeleteRolePolicy', 'iam:ListAttachedRolePolicies',
   ]);
@@ -127,6 +129,52 @@ test('IAM lifecycle and ECS pass-role access cover only runtime roles, excluding
   const attach = statement('AttachLlteacherExecutionPolicy');
   sameMembers(actions(attach), ['iam:AttachRolePolicy', 'iam:DetachRolePolicy']);
   assert.deepEqual(attach.Condition, { ArnEquals: { 'iam:PolicyARN': 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy' } });
+});
+
+test('runtime role creation requires the fixed boundary and deployment cannot change boundaries', () => {
+  const create = statement('CreateLlteacherRoles');
+  assert.deepEqual(actions(create), ['iam:CreateRole']);
+  sameMembers(resources(create), runtimeRoles);
+  assert.deepEqual(create.Condition, { ArnEquals: { 'iam:PermissionsBoundary': boundaryArn } });
+  assert.equal(withAction(deploy(), 'iam:CreateRole').length, 1);
+  const forbidden = ['iam:PutRolePermissionsBoundary', 'iam:DeleteRolePermissionsBoundary',
+    'iam:CreatePolicy', 'iam:DeletePolicy', 'iam:CreatePolicyVersion', 'iam:DeletePolicyVersion', 'iam:SetDefaultPolicyVersion'];
+  for (const s of deploy()) {
+    assert(actions(s).every(a => !forbidden.includes(a)), s.Sid);
+    assert(!resources(s).includes(boundaryArn), s.Sid);
+  }
+});
+
+test('ECR provider refresh can read tags only on the production repository', () => {
+  const readers = withAction(deploy(), 'ecr:ListTagsForResource');
+  assert.equal(readers.length, 1);
+  assert.equal(readers[0].Sid, 'EcrRepository');
+  assert.deepEqual(resources(readers[0]), [`arn:aws:ecr:${region}:${account}:repository/llteacher-production/app`]);
+});
+
+test('runtime boundary permits only image pulls, app log writes, app secret reads and course storage', () => {
+  const boundary = policy(boundaryFile);
+  assert(JSON.stringify(boundary).length < 6144);
+  const regional = { StringEquals: { 'aws:RequestedRegion': region } };
+  assert.deepEqual(boundary.Statement, [
+    { Sid: 'EcrAuthorization', Effect: 'Allow', Action: 'ecr:GetAuthorizationToken', Resource: '*', Condition: regional },
+    { Sid: 'PullApplicationImage', Effect: 'Allow', Action: ['ecr:BatchCheckLayerAvailability', 'ecr:GetDownloadUrlForLayer', 'ecr:BatchGetImage'], Resource: `arn:aws:ecr:${region}:${account}:repository/llteacher-production/app`, Condition: regional },
+    { Sid: 'WriteApplicationLogs', Effect: 'Allow', Action: ['logs:CreateLogStream', 'logs:PutLogEvents'], Resource: `arn:aws:logs:${region}:${account}:log-group:llteacher-production-app-logs-*:log-stream:*`, Condition: regional },
+    { Sid: 'ReadApplicationSecrets', Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: [
+      `arn:aws:secretsmanager:${region}:${account}:secret:llteacher-production-database-url-*`,
+      `arn:aws:secretsmanager:${region}:${account}:secret:llteacher-production-runtime-*`,
+    ], Condition: regional },
+    { Sid: 'ListCourseStorage', Effect: 'Allow', Action: 's3:ListBucket', Resource: 'arn:aws:s3:::llteacher-production-materials-*', Condition: { StringLike: { 's3:prefix': ['courses/*/materials/*', 'courses/*/knowledge/*'] } } },
+    { Sid: 'ReadWriteCourseStorage', Effect: 'Allow', Action: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject'], Resource: [
+      'arn:aws:s3:::llteacher-production-materials-*/courses/*/materials/*',
+      'arn:aws:s3:::llteacher-production-materials-*/courses/*/knowledge/*',
+    ] },
+  ]);
+  for (const s of boundary.Statement) {
+    assert(actions(s).every(a => !a.startsWith('kms:') && !a.startsWith('iam:') && !a.startsWith('sts:')));
+    assert(resources(s).every(r => !r.includes(bucket) && !r.includes('.pulumi')));
+    if (resources(s).includes('*')) assert.deepEqual(actions(s), ['ecr:GetAuthorizationToken']);
+  }
 });
 
 test('three focused deployment policies fit the AWS managed-policy size limit after substitution', () => {
