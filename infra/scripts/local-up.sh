@@ -72,6 +72,7 @@ pulumi -C "$root/infra" up --stack local --yes
 # Floci resolves local tags when it creates Docker-backed tasks. Remove any
 # superseded labelled image after the service is stopped so migration and app
 # tasks cannot reuse a stale image behind the stable local tag.
+"$root/infra/scripts/wait-for-local-ecs-stop.sh"
 "$root/infra/scripts/local-image-cleanup.sh" "$image_id" images-only
 "$root/infra/scripts/run-local-migrations.sh"
 pulumi -C "$root/infra" config set --stack local deployApp true
