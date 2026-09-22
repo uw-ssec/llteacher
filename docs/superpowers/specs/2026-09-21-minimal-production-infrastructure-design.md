@@ -47,6 +47,12 @@ student SPA at `/`, the admin SPA at `/admin`, and the API under `/api`. This
 keeps one origin, avoids CORS and CDN invalidation, preserves SSE streaming,
 and requires no server operating-system maintenance.
 
+For this single-process release, replacement stops the old app task before
+starting its successor (`minimumHealthyPercent: 0`, `maximumPercent: 100`).
+This introduces brief deployment downtime but avoids simultaneous extraction
+recovery and filesystem writers. Migrations run while the existing task is
+still serving; only successful migrations permit that replacement.
+
 The ECS task also runs two low-volume background loops:
 
 - the existing course-material extraction queue; and
@@ -86,6 +92,12 @@ is selected, the ALB-generated hostname may be used for an HTTP smoke test.
 Production launch requires registrar delegation to the hosted zone and a
 successfully validated HTTPS listener.
 
+DNS setup is staged: supplying `domainName` creates the zone, certificate,
+validation record, and alias; enabling `domainReady` after registrar delegation
+waits for certificate validation and enables HTTPS. Without a domain the stack
+exposes an HTTP bootstrap endpoint. This is not approval to launch authenticated
+production traffic without TLS. Each mode has the same graph in Floci and AWS.
+
 Route 53 and IAM are global services. All resources that have an AWS region,
 including ACM for the ALB, use `us-west-2`.
 
@@ -100,6 +112,14 @@ The materials bucket is private and receives public-access blocking,
 versioning, a documented noncurrent-version lifecycle, encryption, and Pulumi
 protection in production. The application task receives only the object/list
 permissions it uses.
+
+The same bucket also stores durable per-course knowledge snapshots, including
+Markdown and pre-edit originals. OKF operates on a temporary local working
+copy restored on first use. Mutations complete only after the snapshot is
+stored; failed writes restore the last durable state. Per-course operations
+are serialized inside the single app process. This avoids an extra EFS
+filesystem, mount targets and security group, at the cost of snapshot I/O and
+the single-writer deployment constraint. Multi-task scaling is deferred.
 
 Keep two Secrets Manager secrets:
 
@@ -202,6 +222,8 @@ coherent. It does not replace a real-AWS preview and deployment smoke test.
   advisory locking, clean shutdown, and focused tests.
 - Keep course extraction in-process for this release and verify failed/pending
   recovery and retry behavior.
+- Persist knowledge files in the existing S3 bucket so replacing a task does
+  not lose authored/extracted content or pre-edit originals.
 - Preserve migration-before-deploy and add invalid concurrent-index detection
   so a failed index build cannot be mistaken for success on the next release.
 - Expose a versioned health response suitable for deployment verification.
@@ -229,20 +251,23 @@ After authorization, one protected release workflow performs:
 2. install dependencies, lint, typecheck, run tests, build all workspaces, and
    build the production Docker image;
 3. authenticate to AWS with GitHub OIDC and short-lived credentials;
-4. bootstrap or update the base Pulumi resources, including ECR, in
-   `us-west-2` without starting an unavailable image;
+4. on the first release only, bootstrap base Pulumi resources, including ECR,
+   in `us-west-2` without starting an unavailable image; preserve any existing
+   service on subsequent releases;
 5. push the commit-SHA image to ECR and resolve its immutable digest;
 6. run `pulumi preview` for the production stack using that digest;
-7. update infrastructure/task definition without starting the new service;
+7. create the candidate task definition while pinning an existing service to
+   its current task definition (or keeping the service absent on first release);
 8. run migrations as a one-off ECS task inside the VPC;
 9. stop immediately if migration or invalid-index validation fails;
 10. update the ECS service to the exact tested image digest;
 11. wait for service stability and verify health/version through the ALB; and
 12. retain the prior task definition/image digest for rollback.
 
-The workflow never receives a long-lived AWS access key or a plaintext
-database URL. Pulumi state for AWS uses a protected shared backend; local and
-CI Floci stacks use filesystem state.
+The deployment job never receives a long-lived AWS access key or a plaintext
+production database URL. The separate test job uses a disposable PostgreSQL
+service with test-only credentials. Pulumi state for AWS uses a protected
+shared backend; developer-local Floci uses filesystem state.
 
 ## Local disk discipline
 
@@ -256,7 +281,7 @@ The implementation must:
 - use one replaceable local tag or deterministic content tag;
 - remove only superseded LLTeacher local tags after a successful deployment;
 - use a smaller multi-stage runtime image and omit build-only dependencies;
-- use disposable Floci storage in CI and one named/persistent local RDS volume;
+- use one persistent developer-local RDS volume; no Floci deployment runs in CI;
 - provide a scoped cleanup command that lists what it will remove and never
   prunes unrelated Docker images, volumes, or caches; and
 - report image/cache/volume usage after local deployment.
