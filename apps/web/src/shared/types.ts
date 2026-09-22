@@ -598,6 +598,7 @@ declare global {
      *  deployment that has not provisioned it yet (#81) still serves chat and
      *  the console, with uploads refused clearly. */
     STORAGE_ENDPOINT?: string;
+    AWS_REGION?: string;
     STORAGE_BUCKET?: string;
     STORAGE_ACCESS_KEY_ID?: string;
     STORAGE_SECRET_ACCESS_KEY?: string;

@@ -8,8 +8,8 @@ export interface Database {
   databaseUrlSecretVersion: aws.secretsmanager.SecretVersion;
   instance: aws.rds.Instance;
   materialsBucket: aws.s3.Bucket;
-  runtimeSecret?: aws.secretsmanager.Secret;
-  runtimeSecretVersion?: aws.secretsmanager.SecretVersion;
+  runtimeSecret: aws.secretsmanager.Secret;
+  runtimeSecretVersion: aws.secretsmanager.SecretVersion;
 }
 
 export function createDataResources(name: string, config: InfraConfig, network: Network, provider: aws.Provider): Database {
@@ -43,22 +43,28 @@ export function createDataResources(name: string, config: InfraConfig, network: 
   const encodedPassword = password.apply((value) => encodeURIComponent(value));
   const databaseUrlSecretVersion = new aws.secretsmanager.SecretVersion(`${name}-database-url-value`, {
     secretId: databaseUrlSecret.id,
-    secretString: pulumi.interpolate`postgres://llteacher:${encodedPassword}@${instance.address}:${instance.port}/llteacher`,
+    secretString: pulumi.interpolate`postgres://llteacher:${encodedPassword}@${instance.address}:${instance.port}/llteacher${config.isLocal ? "" : "?sslmode=verify-full"}`,
   }, options);
-  const runtimeSecretValue = new pulumi.Config().getSecret("runtimeSecrets");
-  if (!config.isLocal && !runtimeSecretValue) {
-    throw new Error('The staging and production stacks require a secret "runtimeSecrets" JSON value.');
-  }
-  const runtimeSecret = runtimeSecretValue === undefined ? undefined : new aws.secretsmanager.Secret(`${name}-runtime`, {
+  const runtimeSecretValue = new pulumi.Config().requireSecret("runtimeSecrets");
+  const runtimeSecret = new aws.secretsmanager.Secret(`${name}-runtime`, {
     description: "LLTeacher WorkOS, LLM provider, and application encryption settings.",
   }, options);
-  const runtimeSecretVersion = runtimeSecret === undefined ? undefined : new aws.secretsmanager.SecretVersion(`${name}-runtime-value`, {
+  const runtimeSecretVersion = new aws.secretsmanager.SecretVersion(`${name}-runtime-value`, {
     secretId: runtimeSecret.id,
     secretString: runtimeSecretValue!,
   }, options);
   const materialsBucket = new aws.s3.Bucket(`${name}-materials`, {
     forceDestroy: false,
+    serverSideEncryptionConfiguration: { rule: { applyServerSideEncryptionByDefault: { sseAlgorithm: "AES256" } } },
+  }, { ...options, protect: !config.isLocal });
+  const versioning = new aws.s3.BucketVersioningV2(`${name}-materials-versioning`, {
+    bucket: materialsBucket.id,
+    versioningConfiguration: { status: "Enabled" },
   }, options);
+  new aws.s3.BucketLifecycleConfigurationV2(`${name}-materials-lifecycle`, {
+    bucket: materialsBucket.id,
+    rules: [{ id: "expire-noncurrent", status: "Enabled", noncurrentVersionExpiration: { noncurrentDays: 30 } }],
+  }, { ...options, dependsOn: [versioning] });
   new aws.s3.BucketPublicAccessBlock(`${name}-materials-private`, {
     blockPublicAcls: true,
     blockPublicPolicy: true,

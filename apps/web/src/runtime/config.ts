@@ -37,6 +37,7 @@ function requireAppOrigin(env: NodeJS.ProcessEnv): string {
 export function loadRuntimeConfig(env: NodeJS.ProcessEnv): Env {
   return {
     APP_URL: requireAppOrigin(env),
+    AWS_REGION: env.AWS_REGION,
     DATABASE_URL: loadDatabaseUrl(env),
     WORKOS_API_KEY: requireValue(env, "WORKOS_API_KEY"),
     WORKOS_CLIENT_ID: requireValue(env, "WORKOS_CLIENT_ID"),
@@ -48,10 +49,8 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv): Env {
     ENCRYPTION_KEY: requireValue(env, "ENCRYPTION_KEY"),
     BLIND_INDEX_KEY: requireValue(env, "BLIND_INDEX_KEY"),
     WORKOS_WEBHOOK_SECRET: requireValue(env, "WORKOS_WEBHOOK_SECRET"),
-    // The knowledge base (#42): uploads land in S3-compatible storage and the
-    // OKF bundle lives under KNOWLEDGE_ROOT (EFS in production). All optional
-    // here so a stack that has not provisioned them yet (#81) still starts;
-    // the storage and knowledge factories refuse clearly when asked for.
+    // AWS uses the SDK task-role credential chain. Local storage uses an
+    // endpoint and explicit emulator credentials.
     STORAGE_ENDPOINT: env.STORAGE_ENDPOINT,
     STORAGE_BUCKET: env.STORAGE_BUCKET,
     STORAGE_ACCESS_KEY_ID: env.STORAGE_ACCESS_KEY_ID,

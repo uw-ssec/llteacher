@@ -8,9 +8,9 @@ const flociServices: Array<keyof aws.types.input.ProviderEndpoint> = [
   "ecr",
   "ecs",
   "elbv2",
-  "events",
   "iam",
   "rds",
+  "route53",
   "s3",
   "secretsmanager",
 ];
@@ -20,7 +20,7 @@ const flociServices: Array<keyof aws.types.input.ProviderEndpoint> = [
  * stack. The non-local stacks deliberately inherit AWS's normal endpoints.
  */
 export function createAwsProvider(config: InfraConfig): aws.Provider {
-  if (!config.isLocal) return new aws.Provider("aws", {});
+  if (!config.isLocal) return new aws.Provider("aws", { region: config.region as aws.Region });
 
   const endpoint = config.endpoints.floci!;
   const endpoints = Object.fromEntries(flociServices.map((service) => [service, endpoint]));
@@ -28,7 +28,7 @@ export function createAwsProvider(config: InfraConfig): aws.Provider {
     accessKey: "test",
     secretKey: "test",
     endpoints: [endpoints],
-    region: "us-east-1",
+    region: config.region as aws.Region,
     s3UsePathStyle: true,
     skipCredentialsValidation: true,
     skipMetadataApiCheck: true,
@@ -43,7 +43,7 @@ export function resolveApplicationImage(
   repositoryUrl: string,
 ): string {
   const repository = config.isLocal
-    ? `000000000000.dkr.ecr.us-east-1.amazonaws.com/${name}/app`
+    ? `000000000000.dkr.ecr.${config.region}.amazonaws.com/${name}/app`
     : repositoryUrl;
-  return `${repository}:${config.imageTag}`;
+  return config.imageDigest ? `${repository}@${config.imageDigest}` : `${repository}:${config.imageTag}`;
 }

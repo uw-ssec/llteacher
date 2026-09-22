@@ -30,7 +30,7 @@ export function createNetwork(name: string, provider: aws.Provider, config: Infr
   }, options);
   const publicSubnets = ["10.42.1.0/24", "10.42.2.0/24"].map((cidrBlock, index) => {
     const subnet = new aws.ec2.Subnet(`${name}-public-${index + 1}`, {
-      availabilityZone: `us-east-1${index === 0 ? "a" : "b"}`,
+      availabilityZone: `${config.region}${index === 0 ? "a" : "b"}`,
       cidrBlock,
       mapPublicIpOnLaunch: true,
       vpcId: vpc.id,
@@ -41,9 +41,9 @@ export function createNetwork(name: string, provider: aws.Provider, config: Infr
     }, options);
     return subnet;
   });
-  const privateSubnets = config.isLocal ? publicSubnets : ["10.42.11.0/24", "10.42.12.0/24"].map((cidrBlock, index) => {
+  const privateSubnets = ["10.42.11.0/24", "10.42.12.0/24"].map((cidrBlock, index) => {
     const subnet = new aws.ec2.Subnet(`${name}-private-${index + 1}`, {
-      availabilityZone: `us-east-1${index === 0 ? "a" : "b"}`,
+      availabilityZone: `${config.region}${index === 0 ? "a" : "b"}`,
       cidrBlock,
       mapPublicIpOnLaunch: false,
       vpcId: vpc.id,
@@ -51,31 +51,10 @@ export function createNetwork(name: string, provider: aws.Provider, config: Infr
     return subnet;
   });
 
-  if (!config.isLocal) {
-    const natAddress = new aws.ec2.Eip(`${name}-nat-address`, { domain: "vpc" }, {
-      ...options,
-      dependsOn: [internetGateway],
-    });
-    const natGateway = new aws.ec2.NatGateway(`${name}-nat-gateway`, {
-      allocationId: natAddress.id,
-      subnetId: publicSubnets[0].id,
-    }, options);
-    const privateRouteTable = new aws.ec2.RouteTable(`${name}-private-routes`, {
-      routes: [{ cidrBlock: "0.0.0.0/0", natGatewayId: natGateway.id }],
-      vpcId: vpc.id,
-    }, options);
-    privateSubnets.forEach((subnet, index) => {
-      new aws.ec2.RouteTableAssociation(`${name}-private-route-${index + 1}`, {
-        routeTableId: privateRouteTable.id,
-        subnetId: subnet.id,
-      }, options);
-    });
-  }
-
   const albSecurityGroup = new aws.ec2.SecurityGroup(`${name}-alb-sg`, {
     description: "Public HTTPS ingress to LLTeacher",
     egress: [{ cidrBlocks: ["0.0.0.0/0"], fromPort: 0, protocol: "-1", toPort: 0 }],
-    ingress: [{ cidrBlocks: ["0.0.0.0/0"], fromPort: 443, protocol: "tcp", toPort: 443 }],
+    ingress: [{ cidrBlocks: ["0.0.0.0/0"], fromPort: config.domainReady ? 443 : 80, protocol: "tcp", toPort: config.domainReady ? 443 : 80 }],
     vpcId: vpc.id,
   }, options);
   const appSecurityGroup = new aws.ec2.SecurityGroup(`${name}-app-sg`, {
@@ -95,7 +74,7 @@ export function createNetwork(name: string, provider: aws.Provider, config: Infr
   return {
     albSecurityGroup,
     appSecurityGroup,
-    appSubnetIds: privateSubnetIds,
+    appSubnetIds: publicSubnetIds,
     databaseSecurityGroup,
     databaseSubnetIds: privateSubnetIds,
     publicSubnetIds,

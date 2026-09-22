@@ -1,135 +1,37 @@
 import { describe, expect, it } from "vitest";
-
 import { loadInfraConfig } from "./config.js";
 import { resolveApplicationImage } from "./provider.js";
-
-type Values = Record<string, string | undefined>;
-
-function config(values: Values) {
-  return {
-    get: (key: string) => values[key],
-    require: (key: string) => {
-      const value = values[key];
-      if (value === undefined) {
-        throw new Error(`missing ${key}`);
-      }
-      return value;
-    },
-  };
+function reader(values: Record<string, string>) {
+  return { get: (key: string) => values[key], require: (key: string) => {
+    if (!values[key]) throw new Error(`missing ${key}`);
+    return values[key];
+  } };
 }
-
-describe("loadInfraConfig", () => {
-  it("requires a Floci endpoint for the local stack", () => {
-    expect(() =>
-      loadInfraConfig(
-        config({
-          environment: "local",
-          domainName: "llteacher.local",
-          deployApp: "false",
-          provisionService: "false",
-          imageTag: "local",
-        }),
-      ),
-    ).toThrow('The local stack requires a "flociEndpoint" configuration value.');
+const aws = reader({ region: "us-west-2" });
+const settings = { environment: "local", flociEndpoint: "http://localhost:4566", imageTag: "sha-123" };
+describe("deployment config", () => {
+  it("enforces the regional deployment boundary", () => {
+    expect(loadInfraConfig(reader(settings), aws).region).toBe("us-west-2");
+    expect(() => loadInfraConfig(reader(settings), reader({ region: "us-east-1" }))).toThrow("us-west-2");
   });
-
-  it("rejects a Floci endpoint for the production stack", () => {
-    expect(() =>
-      loadInfraConfig(
-        config({
-          environment: "production",
-          domainName: "llteacher.example.com",
-          imageTag: "release-2026-09-15",
-          flociEndpoint: "http://localhost:4566",
-        }),
-      ),
-    ).toThrow('The production stack must not set "flociEndpoint".');
+  it("allows domainless HTTP bootstrap and explicit later DNS readiness", () => {
+    expect(loadInfraConfig(reader({ environment: "production", imageTag: "bootstrap" }), aws)).toMatchObject({ domainName: undefined, domainReady: false });
+    expect(() => loadInfraConfig(reader({ ...settings, domainReady: "true" }), aws)).toThrow("domainName");
   });
-
-  it("rejects a Floci endpoint for the staging stack", () => {
-    expect(() =>
-      loadInfraConfig(
-        config({
-          environment: "staging",
-          domainName: "staging.llteacher.com",
-          imageTag: "candidate",
-          flociEndpoint: "http://localhost:4566",
-        }),
-      ),
-    ).toThrow('The staging stack must not set "flociEndpoint".');
+  it("isolates endpoint overrides to local", () => {
+    expect(() => loadInfraConfig(reader({ ...settings, environment: "production" }), aws)).toThrow("must not set");
+    expect(() => loadInfraConfig(reader({ environment: "local", imageTag: "local" }), aws)).toThrow("flociEndpoint");
+    expect(() => loadInfraConfig(reader({ ...settings, flociEndpoint: "https://ecs.us-west-2.amazonaws.com" }), aws)).toThrow("local emulator");
   });
-
-  it("requires a Route 53 hosted zone for staging and production certificate validation", () => {
-    expect(() =>
-      loadInfraConfig(
-        config({
-          environment: "production",
-          domainName: "llteacher.example.com",
-          imageTag: "release-2026-09-15",
-        }),
-      ),
-    ).toThrow('The production stack requires a "hostedZoneId" configuration value.');
-
-    expect(loadInfraConfig(config({
-      environment: "staging",
-      domainName: "staging.llteacher.example.com",
-      hostedZoneId: "Z123456789",
-      imageTag: "candidate",
-    }))).toMatchObject({ hostedZoneId: "Z123456789" });
+  it("limits an emulator origin override to local HTTP origins", () => {
+    expect(loadInfraConfig(reader({ ...settings, appOrigin: "http://localhost:8080" }), aws).appOrigin).toBe("http://localhost:8080");
+    expect(() => loadInfraConfig(reader({ environment: "production", imageTag: "a", appOrigin: "http://localhost:8080" }), aws)).toThrow("appOrigin");
   });
-
-  it("rejects an unknown deployment environment", () => {
-    expect(() =>
-      loadInfraConfig(
-        config({
-          environment: "test",
-          domainName: "llteacher.test",
-          imageTag: "test",
-        }),
-      ),
-    ).toThrow(
-      'The "environment" configuration value must be local, staging, or production.',
-    );
-  });
-
-  it("returns non-secret local deployment settings", () => {
-    expect(
-      loadInfraConfig(
-        config({
-          environment: "local",
-          domainName: "llteacher.local",
-          deployApp: "false",
-          provisionService: "false",
-          imageTag: "local",
-          flociEndpoint: "http://localhost:4566",
-        }),
-      ),
-    ).toEqual({
-      environment: "local",
-      isLocal: true,
-      domainName: "llteacher.local",
-      deployApp: false,
-      provisionService: false,
-      imageTag: "local",
-      endpoints: { floci: "http://localhost:4566" },
-    });
-  });
-});
-
-describe("resolveApplicationImage", () => {
-  it("uses canonical ECR locally and the provider repository in AWS", () => {
-    const base = {
-      environment: "local",
-      isLocal: true,
-      domainName: "llteacher.local",
-      deployApp: true,
-      provisionService: true,
-      imageTag: "sha-123",
-      endpoints: { floci: "http://localhost:4566" },
-    } as const;
-    expect(resolveApplicationImage(base, "llteacher-local", "localhost:5000/repository"))
-      .toBe("000000000000.dkr.ecr.us-east-1.amazonaws.com/llteacher-local/app:sha-123");
-    expect(resolveApplicationImage({ ...base, environment: "production", isLocal: false }, "llteacher-production", "123.dkr.ecr.us-east-1.amazonaws.com/app"))
-      .toBe("123.dkr.ecr.us-east-1.amazonaws.com/app:sha-123");
+  it("resolves canonical local images and immutable AWS digests", () => {
+    const local = loadInfraConfig(reader(settings), aws);
+    expect(resolveApplicationImage(local, "llteacher-local", "localhost:5000/app")).toBe("000000000000.dkr.ecr.us-west-2.amazonaws.com/llteacher-local/app:sha-123");
+    const prod = loadInfraConfig(reader({ environment: "production", imageTag: "sha-123", imageDigest: `sha256:${"a".repeat(64)}` }), aws);
+    expect(resolveApplicationImage(prod, "llteacher-production", "123.dkr.ecr.us-west-2.amazonaws.com/app")).toBe(`123.dkr.ecr.us-west-2.amazonaws.com/app@sha256:${"a".repeat(64)}`);
+    expect(() => loadInfraConfig(reader({ ...settings, imageDigest: "latest" }), aws)).toThrow("imageDigest");
   });
 });

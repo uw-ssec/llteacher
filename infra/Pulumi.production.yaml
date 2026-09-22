@@ -1,6 +1,7 @@
 config:
-  aws:region: us-east-1
+  aws:region: us-west-2
   llteacher-infra:environment: production
-  llteacher-infra:domainName: llteacher.com
-  # Set with: pulumi config set hostedZoneId <route53-zone-id> --stack production
-  llteacher-infra:imageTag: latest
+  # Select domainName, apply, delegate the zone, then set domainReady: "true".
+  llteacher-infra:imageTag: bootstrap
+  llteacher-infra:provisionService: "false"
+  llteacher-infra:deployApp: "false"

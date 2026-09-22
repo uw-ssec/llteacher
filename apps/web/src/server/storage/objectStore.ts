@@ -1,24 +1,4 @@
-/* --------------------------------------------------------------------------
-   Object storage for uploaded materials (#42).
-
-   Backed by Neon Object Storage, which speaks the real S3 wire protocol. Two
-   reasons it beats a Cloudflare binding here, beyond avoiding a second
-   vendor account:
-
-     · Its buckets are BRANCH-AWARE. Branching a Neon database forks its
-       buckets with it, copy-on-write -- so a preview branch gets its own
-       materials instantly, without copying a byte. Nothing in R2 does that,
-       and this project already branches its database for development.
-
-     · It is S3, so the AWS + Pulumi move (#81) changes an endpoint and a
-       pair of credentials, not this file's shape.
-
-   The four-method interface is what keeps that migration cheap: nothing
-   outside this file imports an S3 type, so a future implementation swap
-   touches one module and no callers.
-   -------------------------------------------------------------------------- */
-
-import { AwsClient } from "aws4fetch";
+import { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 
 export interface StoredObject {
   key: string;
@@ -67,55 +47,48 @@ export function materialStorageKey(
 }
 
 export interface S3StoreConfig {
-  endpoint: string;
+  endpoint?: string;
   bucket: string;
-  accessKeyId: string;
-  secretAccessKey: string;
+  accessKeyId?: string;
+  secretAccessKey?: string;
   region?: string;
 }
 
 export function s3ObjectStore(config: S3StoreConfig): ObjectStore {
-  const client = new AwsClient({
-    accessKeyId: config.accessKeyId,
-    secretAccessKey: config.secretAccessKey,
-    service: "s3",
-    region: config.region ?? "us-east-2",
+  const client = new S3Client({
+    endpoint: config.endpoint,
+    forcePathStyle: Boolean(config.endpoint),
+    region: config.region ?? "us-west-2",
+    // Omitting credentials activates the SDK chain, including refreshing ECS
+    // task-role credentials. Explicit credentials are for local emulators.
+    ...(config.endpoint && config.accessKeyId && config.secretAccessKey ? {
+      credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+    } : {}),
   });
-  const url = (key: string) =>
-    `${config.endpoint.replace(/\/$/, "")}/${config.bucket}/${key
-      .split("/")
-      .map(encodeURIComponent)
-      .join("/")}`;
+  async function run<T>(operation: "put" | "get" | "delete" | "head", fn: () => Promise<T>): Promise<T | null> {
+    try { return await fn(); } catch (error) {
+      const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+      if (status === 404 && operation !== "put") return null;
+      if (status) throw new StorageError(operation, status);
+      throw error;
+    }
+  }
 
   return {
     async put(key, body, opts) {
-      const res = await client.fetch(url(key), {
-        method: "PUT",
-        body,
-        headers: opts.contentType ? { "content-type": opts.contentType } : {},
-      });
-      if (!res.ok) throw new StorageError("put", res.status);
+      await run("put", () => client.send(new PutObjectCommand({ Bucket: config.bucket, Key: key, Body: new Uint8Array(body), ContentType: opts.contentType })));
     },
     async get(key) {
-      const res = await client.fetch(url(key), { method: "GET" });
-      if (res.status === 404) return null;
-      if (!res.ok) throw new StorageError("get", res.status);
-      return await res.arrayBuffer();
+      const result = await run("get", () => client.send(new GetObjectCommand({ Bucket: config.bucket, Key: key })));
+      if (!result?.Body) return null;
+      return new Uint8Array(await result.Body.transformToByteArray()).buffer;
     },
     async delete(key) {
-      const res = await client.fetch(url(key), { method: "DELETE" });
-      // S3 returns 204 for a delete of a key that was never there. Treat 404
-      // the same way so callers can delete idempotently.
-      if (!res.ok && res.status !== 404) {
-        throw new StorageError("delete", res.status);
-      }
+      await run("delete", () => client.send(new DeleteObjectCommand({ Bucket: config.bucket, Key: key })));
     },
     async head(key) {
-      const res = await client.fetch(url(key), { method: "HEAD" });
-      if (res.status === 404) return null;
-      if (!res.ok) throw new StorageError("head", res.status);
-      const size = Number(res.headers.get("content-length") ?? "0");
-      return { key, size, contentType: res.headers.get("content-type") };
+      const result = await run("head", () => client.send(new HeadObjectCommand({ Bucket: config.bucket, Key: key })));
+      return result ? { key, size: result.ContentLength ?? 0, contentType: result.ContentType ?? null } : null;
     },
   };
 }
@@ -126,14 +99,14 @@ export function s3ObjectStore(config: S3StoreConfig): ObjectStore {
  *  upload routes fail with this rather than a confusing S3 error. */
 export class StorageNotConfiguredError extends Error {
   constructor() {
-    super("Object storage is not configured: set STORAGE_ENDPOINT, STORAGE_BUCKET, STORAGE_ACCESS_KEY_ID, and STORAGE_SECRET_ACCESS_KEY.");
+    super("Object storage is not configured: set STORAGE_BUCKET; local endpoints also require STORAGE_ACCESS_KEY_ID and STORAGE_SECRET_ACCESS_KEY.");
     this.name = "StorageNotConfiguredError";
   }
 }
 
 export function storageFromEnv(env: Env): ObjectStore {
   const { STORAGE_ENDPOINT, STORAGE_BUCKET, STORAGE_ACCESS_KEY_ID, STORAGE_SECRET_ACCESS_KEY } = env;
-  if (!STORAGE_ENDPOINT || !STORAGE_BUCKET || !STORAGE_ACCESS_KEY_ID || !STORAGE_SECRET_ACCESS_KEY) {
+  if (!STORAGE_BUCKET || (STORAGE_ENDPOINT && (!STORAGE_ACCESS_KEY_ID || !STORAGE_SECRET_ACCESS_KEY))) {
     throw new StorageNotConfiguredError();
   }
   return s3ObjectStore({
@@ -141,6 +114,7 @@ export function storageFromEnv(env: Env): ObjectStore {
     bucket: STORAGE_BUCKET,
     accessKeyId: STORAGE_ACCESS_KEY_ID,
     secretAccessKey: STORAGE_SECRET_ACCESS_KEY,
+    region: env.AWS_REGION,
   });
 }
 
