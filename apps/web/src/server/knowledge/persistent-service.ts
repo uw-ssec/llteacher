@@ -81,7 +81,13 @@ function parseSnapshot(body: ArrayBuffer): Record<string, Uint8Array> {
   return unzipped;
 }
 
-async function collectFiles(base: string, prefix: "knowledge" | "originals", extension: ".md" | ".txt", out: Record<string, Uint8Array>): Promise<void> {
+async function collectFiles(
+  base: string,
+  prefix: "knowledge" | "originals",
+  extension: ".md" | ".txt",
+  out: Record<string, Uint8Array>,
+  limits: { files: number; expanded: number },
+): Promise<void> {
   const current = path.join(base, prefix);
   async function walk(dir: string, relative: string): Promise<void> {
     for (const entry of await fs.readdir(dir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
@@ -96,7 +102,13 @@ async function collectFiles(base: string, prefix: "knowledge" | "originals", ext
         await walk(child, childRelative);
       } else if (stat.isFile()) {
         if (!entry.name.endsWith(extension)) throw new Error(`Refusing to persist unsafe file: ${prefix}/${childRelative}`);
-        out[`${prefix}/${childRelative}`] = new Uint8Array(await fs.readFile(child));
+        limits.files += 1;
+        limits.expanded += stat.size;
+        if (limits.files > MAX_FILES) throw new Error("Knowledge snapshot exceeds the file count limit");
+        if (limits.expanded > MAX_EXPANDED_BYTES) throw new Error("Knowledge snapshot exceeds the expanded size limit");
+        const bytes = new Uint8Array(await fs.readFile(child));
+        if (bytes.byteLength !== stat.size) throw new Error(`Knowledge file changed while snapshotting: ${prefix}/${childRelative}`);
+        out[`${prefix}/${childRelative}`] = bytes;
       } else {
         throw new Error(`Refusing to persist unsafe file: ${prefix}/${childRelative}`);
       }
@@ -160,18 +172,25 @@ export class PersistentKnowledgeService implements KnowledgeService {
     const id = this.normalizedCourse(courseId);
     if (this.durable.has(id)) return;
     const body = await this.storage.get(knowledgeSnapshotKey(id));
+    if (body === null) {
+      const entries = await fs.readdir(this.courseDir(id)).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      });
+      if (entries.length > 0) {
+        throw new Error("Knowledge snapshot migration required: remote snapshot is missing while local course files exist; local files were preserved");
+      }
+    }
     await this.restore(id, body);
     this.durable.set(id, body);
   }
 
   private async snapshot(courseId: string): Promise<ArrayBuffer> {
     const files: Record<string, Uint8Array> = {};
+    const limits = { files: 0, expanded: 0 };
     const courseDir = this.courseDir(courseId);
-    await collectFiles(courseDir, "knowledge", ".md", files);
-    await collectFiles(courseDir, "originals", ".txt", files);
-    if (Object.keys(files).length > MAX_FILES) throw new Error("Knowledge snapshot exceeds the file count limit");
-    const expanded = Object.values(files).reduce((total, file) => total + file.byteLength, 0);
-    if (expanded > MAX_EXPANDED_BYTES) throw new Error("Knowledge snapshot exceeds the expanded size limit");
+    await collectFiles(courseDir, "knowledge", ".md", files, limits);
+    await collectFiles(courseDir, "originals", ".txt", files, limits);
     const zipped = zipSync(files);
     if (zipped.byteLength > MAX_COMPRESSED_BYTES) throw new Error("Knowledge snapshot exceeds the compressed size limit");
     return exactArrayBuffer(zipped);

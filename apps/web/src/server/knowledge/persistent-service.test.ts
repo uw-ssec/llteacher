@@ -1,8 +1,9 @@
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { strToU8, zipSync } from "fflate";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { memoryObjectStore, type ObjectStore } from "../storage/objectStore";
 import { okfAvailable } from "./okfCli";
 import {
@@ -31,6 +32,17 @@ const create = {
 };
 
 describe.skipIf(!okfAvailable(OKF))("PersistentKnowledgeService (real okf and filesystem)", () => {
+  it("fails closed without deleting legacy local knowledge when the remote snapshot is missing", async () => {
+    const storage = memoryObjectStore();
+    const localRoot = root();
+    const file = path.join(localRoot, "courses", COURSE_A, "knowledge", "legacy.md");
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, "legacy authored body");
+
+    await expect(service(storage, localRoot).list(COURSE_A)).rejects.toThrow(/migration.*snapshot/i);
+    expect(readFileSync(file, "utf8")).toBe("legacy authored body");
+  });
+
   it("restores knowledge and the pre-edit original into a fresh root", async () => {
     const storage = memoryObjectStore();
     const first = service(storage);
@@ -82,6 +94,15 @@ describe.skipIf(!okfAvailable(OKF))("PersistentKnowledgeService (real okf and fi
     expect((await restarted.show(COURSE_A, "second"))?.body).toContain("Saved later");
   });
 
+  it("keeps the durable snapshot unchanged when a delegate mutation fails", async () => {
+    const storage = memoryObjectStore();
+    const svc = service(storage);
+    await svc.create(COURSE_A, create);
+    await expect(svc.create(COURSE_A, { ...create, body: "must not persist" })).rejects.toThrow();
+    const restarted = service(storage);
+    expect((await restarted.show(COURSE_A, create.id))?.body.trim()).toBe("First body");
+  });
+
   it("fails closed when the initial snapshot read fails", async () => {
     const storage = memoryObjectStore();
     const localRoot = root();
@@ -129,6 +150,57 @@ describe.skipIf(!okfAvailable(OKF))("PersistentKnowledgeService (real okf and fi
     );
 
     await expect(service(storage).list(COURSE_A)).rejects.toThrow(/expanded size/i);
+  });
+
+  it("rejects snapshots over the compressed-size limit", async () => {
+    const storage = memoryObjectStore();
+    await storage.put(knowledgeSnapshotKey(COURSE_A), new ArrayBuffer(16 * 1024 * 1024 + 1), { contentType: "application/zip" });
+    await expect(service(storage).list(COURSE_A)).rejects.toThrow(/compressed size/i);
+  });
+
+  it("rejects snapshots over the file-count limit", async () => {
+    const storage = memoryObjectStore();
+    const files: Record<string, Uint8Array> = {};
+    for (let i = 0; i <= 10_000; i += 1) files[`knowledge/${i}.md`] = new Uint8Array();
+    await storage.put(knowledgeSnapshotKey(COURSE_A), zipSync(files).buffer, { contentType: "application/zip" });
+    await expect(service(storage).list(COURSE_A)).rejects.toThrow(/file count/i);
+  });
+
+  it("rejects unsafe local files and rolls them back", async () => {
+    const storage = memoryObjectStore();
+    const localRoot = root();
+    const svc = service(storage, localRoot);
+    await svc.create(COURSE_A, create);
+    const unsafe = path.join(localRoot, "courses", COURSE_A, "knowledge", "unsafe.bin");
+    writeFileSync(unsafe, "bad");
+    await expect(svc.ensureBundle(COURSE_A)).rejects.toThrow(/unsafe file/i);
+    expect(existsSync(unsafe)).toBe(false);
+  });
+
+  it("rejects local symlinks and rolls them back", async () => {
+    const storage = memoryObjectStore();
+    const localRoot = root();
+    const svc = service(storage, localRoot);
+    await svc.create(COURSE_A, create);
+    const link = path.join(localRoot, "courses", COURSE_A, "knowledge", "link.md");
+    symlinkSync("lesson.md", link);
+    await expect(svc.ensureBundle(COURSE_A)).rejects.toThrow(/symlink/i);
+    expect(existsSync(link)).toBe(false);
+  });
+
+  it("checks local expanded size before reading an oversized file", async () => {
+    const storage = memoryObjectStore();
+    const localRoot = root();
+    const svc = service(storage, localRoot);
+    await svc.create(COURSE_A, create);
+    const huge = path.join(localRoot, "courses", COURSE_A, "knowledge", "huge.md");
+    mkdirSync(path.dirname(huge), { recursive: true });
+    writeFileSync(huge, "");
+    truncateSync(huge, 64 * 1024 * 1024 + 1);
+    const read = vi.spyOn(fs, "readFile");
+    await expect(svc.ensureBundle(COURSE_A)).rejects.toThrow(/expanded size/i);
+    expect(read.mock.calls.some(([candidate]) => candidate === huge)).toBe(false);
+    read.mockRestore();
   });
 
   it("serializes reads behind an in-flight mutation for the same course", async () => {
