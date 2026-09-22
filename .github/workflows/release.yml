@@ -67,11 +67,15 @@ jobs:
           platforms: linux/amd64
           tags: llteacher-release:${{ github.sha }}
           labels: org.opencontainers.image.revision=${{ github.sha }}
-      - name: Smoke test and save release image
+      - name: Smoke test release image
+        env:
+          RELEASE_IMAGE: llteacher-release:${{ github.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          docker run --rm --entrypoint node "llteacher-release:$GITHUB_SHA" -e "const fs=require('node:fs'); for (const p of ['apps/web/dist/index.html','apps/admin/dist/index.html','apps/web/scripts/migrate.ts',process.env.NODE_EXTRA_CA_CERTS]) fs.accessSync(p); require.resolve('tsx'); require.resolve('pg');"
-          docker run --rm --entrypoint okf "llteacher-release:$GITHUB_SHA" --version
+          docker run --rm --entrypoint node "$RELEASE_IMAGE" -e "const fs=require('node:fs'); for (const p of ['apps/web/dist/client/index.html','apps/admin/dist/admin/index.html','apps/web/scripts/migrate.ts',process.env.NODE_EXTRA_CA_CERTS]) fs.accessSync(p); require.resolve('tsx'); require.resolve('pg');"
+          docker run --rm --entrypoint okf "$RELEASE_IMAGE" --version
+      - name: Save tested release image
+        run: |
           mkdir release-artifact
           docker save --output release-artifact/image.tar "llteacher-release:$GITHUB_SHA"
           docker image inspect --format '{{.Id}}' "llteacher-release:$GITHUB_SHA" > release-artifact/image.id
