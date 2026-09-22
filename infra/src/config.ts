@@ -7,6 +7,7 @@ export interface InfraConfig {
   isLocal: boolean;
   region: string;
   domainName?: string;
+  certificateArn?: string;
   domainReady: boolean;
   imageDigest?: string;
   buildSha?: string;
@@ -87,11 +88,20 @@ export function loadInfraConfig(config: ConfigReader = new pulumi.Config(), awsC
     }
   }
 
+  const certificateArn = config.get("certificateArn") || undefined;
+  if (certificateArn && (environment !== "production" || !/^arn:aws:acm:us-west-2:055237683908:certificate\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(certificateArn))) {
+    throw new Error("certificateArn must identify a production ACM certificate in account 055237683908, us-west-2, with a UUID ID.");
+  }
+  if (environment === "production" && domainReady && !certificateArn) {
+    throw new Error("Production domainReady=true requires an operator-provisioned certificateArn.");
+  }
+
   return {
     environment,
     isLocal: environment === "local",
     region,
     domainName,
+    certificateArn,
     appOrigin,
     domainReady,
     imageDigest,

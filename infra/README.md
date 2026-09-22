@@ -15,7 +15,7 @@ console (`/admin`) and API (`/api`). All regional resources use **us-west-2**.
 | Two private database subnets and DB subnet group | Keep RDS inaccessible from the internet. |
 | Three security groups | Internet → ALB → app:8080 → database:5432; no public app-port ingress. |
 | ALB, target group, listener | One origin and task health/routing. HTTP for bootstrap; HTTPS when domain-ready. |
-| Optional managed Route 53 zone, ACM certificate/validation records, alias | Domain ownership and trusted TLS after selecting/delegating a domain. |
+| Optional managed Route 53 zone/alias and operator-owned production ACM certificate | Domain ownership and trusted TLS after selecting/delegating a domain; local/staging retain managed certificates. |
 | ECS cluster, task definition, one service/task; ECR repository | Managed compute and immutable AWS release images. |
 | RDS PostgreSQL 16, encrypted 20 GiB storage | Application data; pgvector initialized by migrations, seven-day production backups. |
 | One private, encrypted, versioned S3 bucket and its safeguards | Uploaded originals and durable knowledge snapshots. |
@@ -178,7 +178,10 @@ migration stops activation. Releases are serialized.
 
 After refresh and before the first AWS mutation, the workflow verifies that the
 S3 stack still says `aws:region=us-west-2`, `environment=production`, and has
-a valid `domainName` with `domainReady=true`. Base infrastructure may be
+a valid `domainName` with `domainReady=true` and a `certificateArn` in the exact
+production account/region. Pulumi reads that existing certificate and verifies its
+domain, ownership tag and `ISSUED` status before attaching it to the listener.
+Base infrastructure may be
 bootstrapped without a domain while `deployApp=false`; the production app cannot
 be activated until HTTPS is ready. Local Floci remains HTTP-capable.
 
@@ -591,12 +594,12 @@ ownership key. The separate network policy keeps these readable resource/tag
 conditions below the per-policy quota; it supersedes the earlier three-policy split.
 Later tag writes require an explicit tag-key list; omitting it cannot delete all tags.
 
-ACM certificate requests likewise require the production ownership tag. Certificate
-deletion and tag changes require existing ownership, and ownership cannot be changed
-or removed. Pulumi tags production certificate requests. Account/region-scoped
-certificate metadata reads remain unconditioned on tags so refresh and post-delete
-polling can observe missing certificates. Only ACM issuance/listing require wildcard
-resources; issuance still requires the request tag. See the official
+Production certificates are provisioned by an operator after choosing the domain,
+not by the deploy role. ACM grants contain only `DescribeCertificate` and
+`ListTagsForCertificate`, scoped to account/region certificate ARNs with existing
+`LLTeacherStack=production` ownership. CI cannot request, list, import, delete, or
+tag certificates. Pulumi consumes the configured `certificateArn` through a read,
+never a lifecycle-managed import; no create-time AddTags grant is needed. See the official
 [EC2 tagging authorization](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/supported-iam-actions-tagging.html)
 and [ACM authorization reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_acm.html).
 
@@ -930,11 +933,128 @@ resource, account, region, backend, stack, replacement, or deletion stops the
 process. Preview may use backend locks, but does not create application resources.
 Do not use a release workflow as a substitute for the separate first-apply gate.
 
-After separately authorized base infrastructure creation, configure `domainName`,
-delegate the exported Route 53 nameservers, verify DNS and ACM, and separately
-preview/review HTTPS activation with `domainReady=true`. Register the WorkOS
-callback `https://<domain>/api/auth/callback`. The first application release needs
-its own approval; domainless HTTP is allowed only while the app is inactive.
+After separately authorized base infrastructure creation, follow the domain
+procedure below. The first application release needs its own approval;
+domainless HTTP is allowed only while the app is inactive.
+
+### Production domain and operator-owned certificate
+
+Run this later, only after the real domain is approved. These are operator commands
+using the account/region/backend checks and `aws_bootstrap`/`stop` helpers above,
+not deploy-role commands. No certificate ARN placeholder belongs in committed config.
+Local Floci and staging keep their existing Pulumi-managed certificate flow.
+These first-domain steps are not a live-domain replacement procedure. If production
+already serves traffic or state owns a certificate/validation record, stop at the
+migration gate below before changing flags or applying anything; do not toggle a
+live service back to HTTP/inactive as a migration shortcut.
+
+First configure `domainName` and keep `domainReady=false`, `deployApp=false`.
+Preview the zone/alias changes, then stop for separate apply approval. After that
+authorized apply, delegate the exported nameservers at the registrar. Production
+creates no ACM certificate or validation CNAME in this phase.
+
+```bash
+read -r -p 'Approved production DNS hostname: ' DOMAIN
+[[ "$DOMAIN" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] || stop 'Invalid domain.'
+pulumi -C infra config set domainName "$DOMAIN" --stack production
+pulumi -C infra config set domainReady false --stack production
+pulumi -C infra config set deployApp false --stack production
+pulumi -C infra preview --stack production --non-interactive
+```
+
+**Read-only check after the approved zone apply and delegation:** find exactly
+one matching public zone, compare its nameservers to the stack output and public
+DNS, and inventory existing certificates. Duplicate zones, unexpected certificates,
+or mismatched nameservers mean stop and review, not automatic adoption.
+
+```bash
+DOMAIN=$(pulumi -C infra config get domainName --stack production)
+aws_bootstrap route53 list-hosted-zones-by-name --dns-name "$DOMAIN" >"$BOOTSTRAP_TMP/domain-zones.json"
+ZONE_ID=$(jq -er --arg name "$DOMAIN." '[.HostedZones[] | select(.Name == $name and .Config.PrivateZone == false)] | if length == 1 then .[0].Id else error("Expected exactly one public zone") end' "$BOOTSTRAP_TMP/domain-zones.json")
+aws_bootstrap route53 get-hosted-zone --id "$ZONE_ID" >"$BOOTSTRAP_TMP/domain-zone.json"
+pulumi -C infra stack output hostedZoneNameServers --json --stack production >"$BOOTSTRAP_TMP/stack-nameservers.json"
+jq -e --slurpfile expected "$BOOTSTRAP_TMP/stack-nameservers.json" '(.DelegationSet.NameServers | sort) == ($expected[0] | sort)' "$BOOTSTRAP_TMP/domain-zone.json" || stop 'Zone is not the reviewed stack zone.'
+dig +short NS "$DOMAIN"
+aws_bootstrap acm list-certificates --includes keyTypes=RSA_1024,RSA_2048,RSA_3072,RSA_4096,EC_prime256v1,EC_secp384r1,EC_secp521r1 >"$BOOTSTRAP_TMP/certificates.json"
+jq --arg domain "$DOMAIN" '[.CertificateSummaryList[] | select(.DomainName == $domain)]' "$BOOTSTRAP_TMP/certificates.json"
+```
+
+**Mutation — new certificate only, after reviewing that inventory:** request the
+exact hostname with DNS validation and ownership tagging in the same operator
+request. If an exact suitable certificate already exists, reuse its reviewed ARN
+instead of issuing another; verify its domain/status/tag below. Never tag an
+unrelated certificate to make it pass. A missing tag on a known existing LLTeacher
+certificate requires a separately approved ownership repair on that exact ARN.
+
+```bash
+CERTIFICATE_ARN=$(aws_bootstrap acm request-certificate --domain-name "$DOMAIN" --validation-method DNS --tags Key=LLTeacherStack,Value=production --idempotency-token llteacherproduction --query CertificateArn --output text)
+[[ "$CERTIFICATE_ARN" =~ ^arn:aws:acm:us-west-2:055237683908:certificate/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]] || stop 'Unexpected certificate ARN.'
+```
+
+**Verification and read-only DNS check:** ACM may take a few seconds to expose
+validation records; if absent, repeat only these reads, not issuance. The request
+token deduplicates only for one hour. Save the returned ARN in the operator record.
+
+```bash
+aws_bootstrap acm describe-certificate --certificate-arn "$CERTIFICATE_ARN" >"$BOOTSTRAP_TMP/certificate.json"
+aws_bootstrap acm list-tags-for-certificate --certificate-arn "$CERTIFICATE_ARN" >"$BOOTSTRAP_TMP/certificate-tags.json"
+jq -e --arg arn "$CERTIFICATE_ARN" --arg domain "$DOMAIN" '.Certificate.CertificateArn == $arn and .Certificate.DomainName == $domain and .Certificate.Type == "AMAZON_ISSUED"' "$BOOTSTRAP_TMP/certificate.json"
+jq -e 'any(.Tags[]; .Key == "LLTeacherStack" and .Value == "production")' "$BOOTSTRAP_TMP/certificate-tags.json"
+jq -e --arg domain "$DOMAIN" '[.Certificate.DomainValidationOptions[] | select(.DomainName == $domain and .ValidationMethod == "DNS") | .ResourceRecord] | if length == 1 and .[0].Type == "CNAME" and (.[0].Name | type == "string") and (.[0].Value | type == "string") then {Name: (.[0].Name | rtrimstr(".") + "."), Type: "CNAME", TTL: 60, ResourceRecords: [{Value: (.[0].Value | rtrimstr(".") + ".")}]} else error("Validation record not ready or unexpected") end' "$BOOTSTRAP_TMP/certificate.json" >"$BOOTSTRAP_TMP/certificate-record.json"
+aws_bootstrap route53 list-resource-record-sets --hosted-zone-id "$ZONE_ID" >"$BOOTSTRAP_TMP/domain-records.json"
+jq --slurpfile desired "$BOOTSTRAP_TMP/certificate-record.json" '[.ResourceRecordSets[] | select(.Name == $desired[0].Name)]' "$BOOTSTRAP_TMP/domain-records.json" >"$BOOTSTRAP_TMP/existing-validation-records.json"
+jq . "$BOOTSTRAP_TMP/certificate-record.json" "$BOOTSTRAP_TMP/existing-validation-records.json"
+```
+
+**Mutation — add only if absent; identical CNAME is reused:** stop on any differing
+record; never UPSERT over an unexpected record. Retain this operator-owned CNAME
+for ACM renewal. Pulumi does not create, import, or remove it in production.
+
+```bash
+if jq -e 'length == 0' "$BOOTSTRAP_TMP/existing-validation-records.json" >/dev/null; then
+  jq '{Changes: [{Action: "CREATE", ResourceRecordSet: .}]}' "$BOOTSTRAP_TMP/certificate-record.json" >"$BOOTSTRAP_TMP/certificate-change.json"
+  CHANGE_ID=$(aws_bootstrap route53 change-resource-record-sets --hosted-zone-id "$ZONE_ID" --change-batch "file://$BOOTSTRAP_TMP/certificate-change.json" --query ChangeInfo.Id --output text)
+  aws_bootstrap route53 wait resource-record-sets-changed --id "$CHANGE_ID"
+else
+  jq -e --slurpfile desired "$BOOTSTRAP_TMP/certificate-record.json" 'length == 1 and .[0] == $desired[0]' "$BOOTSTRAP_TMP/existing-validation-records.json" || stop 'Existing validation record differs.'
+fi
+```
+
+**Verification, then config mutation and preview:** a failed waiter means stop and
+inspect DNS/status; it does not authorize another certificate request. HTTPS
+activation requires an issued certificate whose primary domain exactly matches
+`domainName`, with the production ownership tag. Wildcard/SAN-only matches are not
+accepted by this narrow interface.
+
+```bash
+aws_bootstrap acm wait certificate-validated --certificate-arn "$CERTIFICATE_ARN"
+aws_bootstrap acm describe-certificate --certificate-arn "$CERTIFICATE_ARN" >"$BOOTSTRAP_TMP/certificate.json"
+aws_bootstrap acm list-tags-for-certificate --certificate-arn "$CERTIFICATE_ARN" >"$BOOTSTRAP_TMP/certificate-tags.json"
+jq -e --arg arn "$CERTIFICATE_ARN" --arg domain "$DOMAIN" '.Certificate.CertificateArn == $arn and .Certificate.DomainName == $domain and .Certificate.Status == "ISSUED"' "$BOOTSTRAP_TMP/certificate.json"
+jq -e 'any(.Tags[]; .Key == "LLTeacherStack" and .Value == "production")' "$BOOTSTRAP_TMP/certificate-tags.json"
+pulumi -C infra config set certificateArn "$CERTIFICATE_ARN" --stack production
+pulumi -C infra config set domainReady true --stack production
+pulumi -C infra preview --stack production --non-interactive
+```
+
+Stop for explicit HTTPS apply approval; keep `deployApp=false` until the separate
+first-release approval. The preview should only read the existing certificate,
+not create/import/delete/tag it. Register the WorkOS callback
+`https://<domain>/api/auth/callback` and verify HTTPS after that approved apply.
+See [AWS certificate requests](https://docs.aws.amazon.com/cli/latest/reference/acm/request-certificate.html)
+and [validation waiter](https://docs.aws.amazon.com/cli/latest/reference/acm/wait/certificate-validated.html).
+
+**Existing-stack migration gate:** if state already owns `llteacher-production-certificate`
+or its validation record, do not apply this program directly: removing their resource
+declarations can schedule deletion. Stop for an account-owner-reviewed migration.
+Inventory exact URNs with `pulumi -C infra stack --show-urns --stack production`.
+First preserve the live certificate and renewal CNAME using a separately reviewed
+update of the old declarations with `retainOnDelete: true`, or an explicit
+dependency-aware state detach plan. Only after retained ownership is verified may
+those old managed entries be removed and this read-only ARN configured. Do not use
+a blanket state deletion, `pulumi import`, or a deployment grant broadening as a
+shortcut. The new read uses a distinct `existing-certificate` logical name; neither
+it nor this guide silently migrates state. See [Pulumi retainOnDelete](https://www.pulumi.com/docs/iac/concepts/resources/options/retainondelete/).
 
 ### Rollback and rotation
 

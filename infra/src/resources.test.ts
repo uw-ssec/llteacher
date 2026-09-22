@@ -6,11 +6,13 @@ import type { InfraConfig } from "./config.js";
 import { createDataResources } from "./database.js";
 import { createNetwork, type Network } from "./network.js";
 import { createAwsProvider } from "./provider.js";
+import { createDnsResources } from "./dns.js";
 
 type RecordedResource = {
   name: string;
   type: string;
   inputs: Record<string, unknown>;
+  id?: string;
 };
 
 const resources: RecordedResource[] = [];
@@ -19,7 +21,7 @@ beforeAll(() => {
   pulumi.runtime.setMocks({
     call: (args) => args.inputs,
     newResource: (args) => {
-      resources.push({ name: args.name, type: args.type, inputs: args.inputs });
+      resources.push({ name: args.name, type: args.type, inputs: args.inputs, id: args.id });
       const state: Record<string, unknown> = {
         ...args.inputs,
         arn: `arn:aws:test:us-east-1:000000000000:${args.name}`,
@@ -40,6 +42,7 @@ beforeAll(() => {
       if (args.type === "aws:route53/zone:Zone") state.zoneId = `${args.name}-id`;
       if (args.type === "aws:s3/bucket:Bucket") state.bucket = `${args.name}-bucket`;
       if (args.type === "aws:acm/certificate:Certificate") {
+        if (args.id) Object.assign(state, { arn: args.id, domainName: "llteacher.example.edu", status: "ISSUED", tags: { LLTeacherStack: "production" } });
         state.domainValidationOptions = [{
           domainName: args.inputs.domainName,
           resourceRecordName: `_validation.${args.inputs.domainName}`,
@@ -70,6 +73,7 @@ const productionConfig = {
   isLocal: false,
   domainName: "llteacher.example.edu",
   domainReady: true,
+  certificateArn: "arn:aws:acm:us-west-2:055237683908:certificate/11111111-2222-3333-4444-555555555555",
   region: "us-west-2",
   deployApp: true,
   provisionService: true,
@@ -91,7 +95,7 @@ async function createProductionGraph() {
   const localNetwork = createNetwork("llteacher-local", localProvider, localConfig);
   const localData = createDataResources("llteacher-local", localConfig, localNetwork, localProvider);
   createApplication("llteacher-local", localConfig, localNetwork, localData, localProvider);
-  const pendingConfig = { ...productionConfig, domainReady: false, serviceTaskDefinition: "arn:previous-task" };
+  const pendingConfig = { ...productionConfig, certificateArn: undefined, domainReady: false, serviceTaskDefinition: "arn:previous-task" };
   const pendingNetwork = createNetwork("pending", provider, pendingConfig);
   const pendingData = createDataResources("pending", pendingConfig, pendingNetwork, provider);
   createApplication("pending", pendingConfig, pendingNetwork, pendingData, provider);
@@ -99,6 +103,8 @@ async function createProductionGraph() {
   const bootstrapNetwork = createNetwork("bootstrap", provider, bootstrapConfig);
   const bootstrapData = createDataResources("bootstrap", bootstrapConfig, bootstrapNetwork, provider);
   createApplication("bootstrap", bootstrapConfig, bootstrapNetwork, bootstrapData, provider);
+  const stagingAlb = new aws.lb.LoadBalancer("staging-dns-alb", { subnets: ["subnet-test"] }, { provider });
+  createDnsResources("staging", { ...productionConfig, environment: "staging", certificateArn: undefined }, stagingAlb, provider);
   await pulumi.runtime.disconnect();
   return { app, data, network };
 }
@@ -114,28 +120,33 @@ function resource(type: string, name: string): RecordedResource {
 }
 
 describe("production resource graph", () => {
-  it("tags every production network resource and certificate at creation for policy ownership", () => {
+  it("tags every production network resource at creation for policy ownership", () => {
     const ownedTypes = new Set([
       "aws:ec2/vpc:Vpc", "aws:ec2/internetGateway:InternetGateway", "aws:ec2/routeTable:RouteTable",
-      "aws:ec2/subnet:Subnet", "aws:ec2/securityGroup:SecurityGroup", "aws:acm/certificate:Certificate",
+      "aws:ec2/subnet:Subnet", "aws:ec2/securityGroup:SecurityGroup",
     ]);
     const owned = resources.filter(r => r.name.startsWith("llteacher-production-") && ownedTypes.has(r.type));
-    expect(owned).toHaveLength(11);
+    expect(owned).toHaveLength(10);
     for (const r of owned) expect(r.inputs.tags, r.name).toMatchObject({ LLTeacherStack: "production" });
     for (const r of resources.filter(r => r.name.startsWith("llteacher-local-") && ownedTypes.has(r.type))) {
       expect(r.inputs.tags ?? {}, r.name).not.toHaveProperty("LLTeacherStack");
     }
   });
 
-  it("validates the ACM certificate through Route 53 before creating the listener", async () => {
+  it("reads the exact operator certificate for production HTTPS without creating or importing ACM resources", async () => {
     expect(resources.some(({ type }) => type === "aws:route53/record:Record")).toBe(true);
-    expect(resources.some(({ type }) => type === "aws:acm/certificateValidation:CertificateValidation")).toBe(true);
+    const certificates = resources.filter(({ name, type }) => name.startsWith("llteacher-production-") && type.startsWith("aws:acm/"));
+    expect(certificates).toHaveLength(1);
+    expect(certificates[0].id).toBe("arn:aws:acm:us-west-2:055237683908:certificate/11111111-2222-3333-4444-555555555555");
+    expect(certificates[0].inputs).not.toHaveProperty("tags");
+    expect(resources.filter(({ name }) => name === "llteacher-production-certificate-validation-record")).toEqual([]);
     expect(resource("aws:route53/record:Record", "llteacher-production-app-alias").inputs).toMatchObject({ type: "A", zoneId: "llteacher-production-zone-id", aliases: [{ name: "llteacher-production-alb.elb.test", zoneId: "ZALB", evaluateTargetHealth: true }] });
-    expect(resource("aws:lb/listener:Listener", "llteacher-production-listener").inputs).toMatchObject({ port: 443, protocol: "HTTPS" });
+    expect(resource("aws:lb/listener:Listener", "llteacher-production-listener").inputs).toMatchObject({ port: 443, protocol: "HTTPS", certificateArn: "arn:aws:acm:us-west-2:055237683908:certificate/11111111-2222-3333-4444-555555555555" });
   });
 
   it("allows first DNS delegation without waiting on certificate validation and preserves the serving task", () => {
     expect(resources.filter(({ name, type }) => name.startsWith("pending") && type === "aws:acm/certificateValidation:CertificateValidation")).toEqual([]);
+    expect(resources.filter(({ name, type }) => name.startsWith("pending") && type.startsWith("aws:acm/"))).toEqual([]);
     expect(resource("aws:route53/zone:Zone", "pending-zone")).toBeDefined();
     expect(resource("aws:lb/listener:Listener", "pending-listener").inputs).toMatchObject({ port: 80, protocol: "HTTP" });
     expect(resource("aws:ecs/service:Service", "pending-app-service").inputs).toMatchObject({ desiredCount: 1, taskDefinition: "arn:previous-task" });
@@ -187,9 +198,14 @@ describe("production resource graph", () => {
     expect((resource("aws:secretsmanager/secretVersion:SecretVersion", "llteacher-local-database-url-value").inputs.secretString as { value: string }).value).toBe("postgres://llteacher:database%2Fpass@llteacher-local-postgres.database.test:5432/llteacher");
   });
 
-  it("has identical local and production application graphs without NAT or background services", () => {
+  it("preserves local managed certificate resources while sharing the application graph without NAT", () => {
     const types = (prefix: string) => resources.filter(({ name }) => name.startsWith(prefix)).map(({ type }) => type).sort();
-    expect(types("llteacher-local")).toEqual(types("llteacher-production"));
+    expect(resource("aws:acm/certificate:Certificate", "llteacher-local-certificate").id).toBe("");
+    expect(resource("aws:acm/certificateValidation:CertificateValidation", "llteacher-local-certificate-validation")).toBeDefined();
+    expect(resource("aws:acm/certificate:Certificate", "staging-certificate").id).toBe("");
+    expect(resource("aws:acm/certificateValidation:CertificateValidation", "staging-certificate-validation")).toBeDefined();
+    const applicationTypes = (prefix: string) => types(prefix).filter(type => !type.startsWith("aws:acm/") && !type.startsWith("aws:route53/"));
+    expect(applicationTypes("llteacher-local")).toEqual(applicationTypes("llteacher-production"));
     expect(resources.filter(({ type }) => /natGateway|eip:|eventRule|eventTarget|sqs\/|cloudfront\//i.test(type))).toEqual([]);
     expect(types("llteacher-production").filter((type) => type === "aws:ecs/taskDefinition:TaskDefinition")).toHaveLength(1);
   });

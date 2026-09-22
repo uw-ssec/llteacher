@@ -171,22 +171,19 @@ test('EC2 tagging can neither claim unrelated resources nor change or remove own
   }
 });
 
-test('ACM issuance requires ownership and existing certificates cannot be claimed or stripped of ownership', () => {
+test('deployment can only read an operator-owned ACM certificate and cannot issue, claim, delete or retag any certificate', () => {
   const cert = `arn:aws:acm:${region}:${account}:certificate/test`;
   const regional = { 'aws:RequestedRegion': region };
-  assert(policyAllows('acm:RequestCertificate', '*', { ...regional, 'aws:RequestTag/LLTeacherStack': 'production' }));
-  assert.equal(policyAllows('acm:RequestCertificate', '*', regional), false);
-  for (const action of ['acm:DeleteCertificate', 'acm:AddTagsToCertificate', 'acm:RemoveTagsFromCertificate']) {
-    for (const owner of [undefined, 'unrelated']) {
+  for (const action of ['acm:RequestCertificate', 'acm:ListCertificates', 'acm:DeleteCertificate', 'acm:AddTagsToCertificate', 'acm:RemoveTagsFromCertificate']) {
+    for (const owner of [undefined, 'unrelated', 'production']) {
       assert.equal(policyAllows(action, cert, { ...regional, 'aws:ResourceTag/LLTeacherStack': owner, 'aws:RequestTag/LLTeacherStack': 'production', 'aws:TagKeys': ['LLTeacherStack'] }), false, `${action} ${owner}`);
     }
-    assert(policyAllows(action, cert, { ...regional, 'aws:ResourceTag/LLTeacherStack': 'production', 'aws:TagKeys': ['Name'] }), action);
   }
-  assert.equal(policyAllows('acm:AddTagsToCertificate', cert, { ...regional, 'aws:ResourceTag/LLTeacherStack': 'production', 'aws:RequestTag/LLTeacherStack': 'unrelated', 'aws:TagKeys': ['LLTeacherStack'] }), false);
-  assert.equal(policyAllows('acm:RemoveTagsFromCertificate', cert, { ...regional, 'aws:ResourceTag/LLTeacherStack': 'production', 'aws:TagKeys': ['LLTeacherStack'] }), false);
-  // Provider deletion polling must be able to observe an absent certificate;
-  // no resource tags exist after deletion, so reads cannot depend on them.
-  assert(policyAllows('acm:DescribeCertificate', cert, regional));
+  for (const action of ['acm:DescribeCertificate', 'acm:ListTagsForCertificate']) {
+    assert(policyAllows(action, cert, { ...regional, 'aws:ResourceTag/LLTeacherStack': 'production' }));
+    for (const owner of [undefined, 'unrelated']) assert.equal(policyAllows(action, cert, { ...regional, 'aws:ResourceTag/LLTeacherStack': owner }), false);
+  }
+  sameMembers(deploy().flatMap(actions).filter(a => a.startsWith('acm:')), ['acm:DescribeCertificate', 'acm:ListTagsForCertificate']);
 });
 
 for (const file of [...files, boundaryFile]) {
@@ -375,11 +372,11 @@ test('application S3 grants cannot administer the backend bucket and creation pi
 test('repository, secrets, logs, load balancer and ECS writes target production resources', () => {
   assert.deepEqual(resources(statement('EcrRepository')), [`arn:aws:ecr:${region}:${account}:repository/llteacher-production/app`]);
   assert.deepEqual(resources(statement('SecretsManager')), [`arn:aws:secretsmanager:${region}:${account}:secret:llteacher-production-*`]);
-  for (const sid of ['CloudWatchLogs', 'ElasticLoadBalancing', 'Ecs', 'Rds', 'Acm']) {
+  for (const sid of ['CloudWatchLogs', 'ElasticLoadBalancing', 'Ecs', 'Rds', 'AcmInspect']) {
     for (const resource of resources(statement(sid))) {
       assert(resource.startsWith('arn:aws:'), `${sid}: ${resource}`);
       assert(resource.includes(`:${region}:${account}:`), `${sid}: ${resource}`);
-      if (sid !== 'Acm') assert(/llteacher-production-|targetgroup\/llt-production-app\//.test(resource), `${sid}: ${resource}`);
+      if (sid !== 'AcmInspect') assert(/llteacher-production-|targetgroup\/llt-production-app\//.test(resource), `${sid}: ${resource}`);
       if (sid === 'CloudWatchLogs') assert(resource.includes(':log-group:llteacher-production-app-logs-*'));
     }
   }

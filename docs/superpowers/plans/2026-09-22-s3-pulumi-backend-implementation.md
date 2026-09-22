@@ -281,10 +281,14 @@ Tests must prove:
 - Each of four deployment managed policies and the separate runtime boundary
   fits below 6,144 compact JSON characters after rendering. The boundary excludes
   state, KMS and IAM administration and permits only the runtime capability union.
-- EC2 and ACM mutations reject unrelated/untagged resources. New resources require
+- EC2 mutations reject unrelated/untagged resources. New network resources require
   `LLTeacherStack=production` request tags; ownership cannot be claimed by standalone
   tagging, changed, or removed. Production resource mocks prove tags are supplied
   at creation and both runtime roles receive the boundary; local Floci is unaffected.
+- Production ACM is operator-owned. Tests prove exact account/region/UUID
+  certificateArn configuration, matching domain/tag/ISSUED validation, read-only
+  certificate lookup, no production certificate/validation resource creation,
+  and no ACM listing or write permissions. Local/staging keep managed certificates.
 - Regional deployment statements are conditioned on
   `aws:RequestedRegion=us-west-2`; global IAM and Route 53 statements are
   separate.
@@ -427,15 +431,15 @@ Use these independently reviewable statement groups:
   `logs:ListTagsForResource` on actual `llteacher-production-app-logs-*` auto-named
   log group ARNs (including required `:*` forms), with the regional condition.
   `DescribeLogGroups` is a separate wildcard discovery statement.
-- `Acm`: `acm:RequestCertificate`, `acm:DeleteCertificate`,
-  `acm:DescribeCertificate`, `acm:ListCertificates`, `acm:ListTagsForCertificate`,
-  `acm:AddTagsToCertificate`, and `acm:RemoveTagsFromCertificate`, with the
-  regional condition. RequestCertificate uses `*` with production request ownership
-  and ListCertificates uses `*`; metadata reads use account/region certificate ARNs
-  without ownership conditions for refresh/deletion polling. Deletion requires
-  resource ownership; tag additions require existing ownership and cannot change
-  its value, and removals cannot remove the ownership key. Tag production certificate
-  requests in Pulumi and audit existing ownership before granting deployment access.
+- `AcmInspect`: only `acm:DescribeCertificate` and `acm:ListTagsForCertificate`,
+  with the regional condition, account/region certificate ARNs, and existing
+  `LLTeacherStack=production` resource ownership. No ACM listing or writes.
+  An operator provisions/tags the certificate and renewal CNAME after domain
+  selection and verifies issuance. Production domainReady=true requires the exact
+  certificateArn; Pulumi reads the certificate without importing/managing it and
+  checks ARN/domain/tag/status before attaching HTTPS. Local/staging preserve
+  managed certificates. Document exact operator issue/tag/DNS/wait/verify/config/
+  preview commands and the retain/detach gate for already managed production certs.
 - `ManageLlteacherRoles`: IAM role and inline-policy lifecycle actions only on
   the execution-role/task-role ARN families above. Split CreateRole to require
   `iam:PermissionsBoundary=arn:aws:iam::055237683908:policy/llteacher-production-runtime-boundary`;

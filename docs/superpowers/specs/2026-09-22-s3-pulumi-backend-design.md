@@ -127,19 +127,28 @@ Together they grant:
   `llteacher-production-task-role-*` ECS runtime roles
   and only when passed to `ecs-tasks.amazonaws.com`.
 
-Production VPCs, internet gateways, route tables, subnets, security groups, and
-ACM certificates carry `LLTeacherStack=production` from creation. Network and
-certificate mutations require that existing ownership; create operations require
+Production VPCs, internet gateways, route tables, subnets, and security groups
+carry `LLTeacherStack=production` from creation. Network mutations require
+that existing ownership; create operations require
 matching request tags, and network creation inside a VPC requires an owned VPC.
 EC2 creation tagging is limited by `ec2:CreateAction`. Later EC2 tag writes require
-an explicit non-null tag-key list and cannot touch the ownership key; ACM tag writes
-cannot claim unowned certificates, change ownership, or remove it. Discovery remains
-separate, with regional `ec2:Describe*`
-and ACM listing/issuance on `*` where required. ACM issuance also requires request
-ownership; account/region-scoped certificate metadata reads remain available for
-provider refresh and post-delete polling. Pre-existing unowned application
+an explicit non-null tag-key list and cannot touch the ownership key. Discovery
+remains separate, with regional `ec2:Describe*`. Pre-existing unowned network
 resources require account-owner-reviewed migration/replacement before granting
 deployment access; never bulk-tag resources to adopt them. Local Floci is unchanged.
+
+Production ACM certificates and their renewal validation CNAMEs are operator-owned.
+The non-secret `certificateArn` is required for `domainReady=true`, with exact
+account/region/UUID validation. Pulumi reads (does not import) this existing resource
+and verifies matching ARN, primary domain, ownership tag, and ISSUED status before
+using it for HTTPS. Deploy permissions contain only DescribeCertificate and
+ListTagsForCertificate on production-tagged regional/account certificate ARNs;
+no listing, issuance, import, deletion, or tagging is permitted. This avoids the
+create-time AddTags dependency without allowing CI to claim unrelated certificates.
+`domainReady=false` can create/delegate a zone without a certificate. Local/staging
+retain their existing managed certificate flow. Existing Pulumi-owned production
+certificates/CNAMEs require a separately reviewed retain/detach migration before
+this program is applied; no certificate/renewal record deletion is acceptable.
 
 The role does not receive `AdministratorAccess`, unrelated bucket access,
 wildcard KMS cryptographic access, or authority to administer or delete the
@@ -241,15 +250,17 @@ network exposure, IAM, backup and deletion protection, and recurring costs.
 ### Phase 4: base infrastructure
 
 Run the first `pulumi up` only after separate explicit approval. The base update
-creates networking, ALB, RDS, application storage, secrets, ECR, DNS/ACM when a
+creates networking, ALB, RDS, application storage, secrets, ECR, DNS when a
 domain is configured, and supporting roles. `provisionService=false` and
 `deployApp=false` keep the application service inactive, but ALB, RDS, KMS, and
 storage still incur charges.
 
 ### Phase 5: HTTPS readiness
 
-Delegate the Route 53 hosted zone at the registrar, verify DNS and ACM
-validation, set `domainReady=true`, preview, and apply HTTPS activation. Register
+Delegate the Route 53 hosted zone at the registrar. An authorized operator requests
+the exact-domain certificate with the production tag, creates/verifies its DNS
+validation CNAME, waits for ISSUED, and sets the verified `certificateArn`. Then
+set `domainReady=true`, preview, and separately approve/apply HTTPS activation. Register
 the exact WorkOS callback `https://<domain>/api/auth/callback`. A production
 application release is forbidden before this phase succeeds.
 

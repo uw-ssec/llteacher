@@ -105,6 +105,18 @@ test('all workflow shell steps parse under bash', () => {
     assert.equal(result.status,0,`${step.name}: ${result.stderr}`);
   }
 });
+test('refreshed workflow configuration passes the selected certificate into the release guard', () => {
+  const step = workflow.jobs.production.steps.find(s => s.name === 'Validate refreshed production configuration');
+  const stub = `pulumi() { case "$5" in aws:region) echo us-west-2;; environment) echo production;; domainReady) echo true;; domainName) echo learn.example.edu;; certificateArn) echo "$TEST_CERTIFICATE_ARN";; *) return 1;; esac; }`;
+  for (const certificate of ['', 'arn:aws:acm:us-west-2:055237683908:certificate/11111111-2222-3333-4444-555555555555']) {
+    const result = spawnSync('bash', ['-c', `${stub}\n${step.run}`], {
+      cwd: new URL('../..', import.meta.url), encoding: 'utf8',
+      env: { ...process.env, AWS_REGION: 'us-west-2', STACK: 'production', PULUMI_BACKEND_URL: 's3://llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra', TEST_CERTIFICATE_ARN: certificate },
+    });
+    assert.equal(result.status === 0, certificate !== '', result.stderr);
+    if (!certificate) assert.match(result.stderr, /certificateArn/);
+  }
+});
 test('artifact verification loads exactly the tested image and refuses altered bytes, commits or image identity', t => {
   const step=workflow.jobs.production.steps.find(s=>s.name==='Verify and load tested release image');
   assert(step);

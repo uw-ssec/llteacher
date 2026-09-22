@@ -37,11 +37,12 @@ validate_log_group() {
   [[ -n "$value" && ${#value} -le 512 && "$value" =~ $pattern ]] || die 'Missing or invalid application log group.'
 }
 validate_refreshed_stack_config() {
-  local region="${1:-}" environment="${2:-}" domain_ready="${3:-}" domain_name="${4:-}"
+  local region="${1:-}" environment="${2:-}" domain_ready="${3:-}" domain_name="${4:-}" certificate_arn="${5:-}"
   [[ "$region" == us-west-2 ]] || die "Refreshed stack still uses aws:region ${region:-<unset>}. Inspect existing resources in that region and follow the documented region migration; do not overwrite the region blindly."
   [[ "$environment" == production ]] || die "Refreshed stack environment must be production, got ${environment:-<unset>}."
   [[ "$domain_ready" == true ]] || die 'Production release requires domainReady=true so activation cannot expose login or session traffic over HTTP.'
   [[ "$domain_name" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] || die 'Production release requires a valid domainName for HTTPS activation.'
+  [[ "$certificate_arn" =~ ^arn:aws:acm:us-west-2:055237683908:certificate/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]] || die 'Production release requires a valid operator-provisioned certificateArn in account 055237683908, us-west-2.'
 }
 validate_name() { [[ "$1" =~ ^[A-Za-z0-9_-]{1,255}$ ]] && [[ "$1" != None && "$1" != null ]] || die 'Missing or invalid ECS name.'; }
 validate_repository() {

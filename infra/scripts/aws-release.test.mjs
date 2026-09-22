@@ -192,3 +192,13 @@ test('refreshed production config rejects stale regions and non-HTTPS activation
     assert.match(result.stderr, new RegExp(message));
   }
 });
+
+test('refreshed production config requires the exact-account regional certificate ARN before release mutations', () => {
+  const valid = 'arn:aws:acm:us-west-2:055237683908:certificate/11111111-2222-3333-4444-555555555555';
+  const command = `. "${join(scripts, 'aws-release-common.sh')}"; validate_refreshed_stack_config us-west-2 production true learn.example.edu "$1"`;
+  for (const arn of ['', valid.replace('us-west-2', 'us-east-1'), valid.replace('055237683908', '111111111111'), valid.replace('11111111-2222-3333-4444-555555555555', '*'), valid]) {
+    const result = spawnSync('bash', ['-c', command, 'validate', arn], { env: { ...process.env, AWS_REGION: 'us-west-2' }, encoding: 'utf8' });
+    if (arn === valid) assert.equal(result.status, 0, result.stderr);
+    else { failure(result); assert.match(result.stderr, /certificateArn/); }
+  }
+});

@@ -89,8 +89,8 @@ port public because its security group has no internet ingress rule.
 
 ### DNS and TLS
 
-Use a Pulumi-managed Route 53 public hosted zone, DNS-validated regional ACM
-certificate, and Route 53 alias from the selected application domain to the
+Use a Pulumi-managed Route 53 public hosted zone, operator-owned DNS-validated
+regional ACM certificate, and Route 53 alias from the selected application domain to the
 ALB. Domain purchase and registrar ownership are manual business decisions and
 are not performed by Pulumi.
 
@@ -99,11 +99,15 @@ is selected, the ALB-generated hostname may be used for an HTTP smoke test.
 Production launch requires registrar delegation to the hosted zone and a
 successfully validated HTTPS listener.
 
-DNS setup is staged: supplying `domainName` creates the zone, certificate,
-validation record, and alias; enabling `domainReady` after registrar delegation
-waits for certificate validation and enables HTTPS. Without a domain the stack
+DNS setup is staged: supplying `domainName` creates the zone and alias. After
+registrar delegation, an operator provisions/tags/validates the production
+certificate and renewal CNAME. Set its exact `certificateArn` before enabling
+`domainReady`; Pulumi reads and verifies ARN/domain/tag/ISSUED status without
+creating/importing/managing the certificate. Existing managed certificates require
+a reviewed retain/detach migration. Without a domain the stack
 exposes an HTTP bootstrap endpoint. This is not approval to launch authenticated
-production traffic without TLS. Each mode has the same graph in Floci and AWS.
+production traffic without TLS. Local Floci/staging retain managed certificate
+and validation resources; the rest of the application graph remains shared.
 
 Route 53 and IAM are global services. All resources that have an AWS region,
 including ACM for the ALB, use `us-west-2`.
@@ -178,7 +182,7 @@ retention, image tag, domain, and instance size may differ.
 | Compute | 1 ECR repository, ECS cluster, task definition, and service | Store and run one immutable application image without managing a host. |
 | Identity | ECS execution role, task role, managed execution-policy attachment, scoped secret policy, scoped S3 policy | Permit image pulls/logging/secret injection and application S3 access without broad credentials. |
 | Logging | 1 CloudWatch application log group | Central logs with bounded retention. |
-| Ingress | 1 ALB, target group, HTTPS listener, ACM certificate, certificate validation, Route 53 hosted zone, validation record, and ALB alias | Stable custom origin, TLS, health checks, and task replacement without DNS changes. |
+| Ingress | 1 ALB, target group, HTTPS listener, read-only operator ACM certificate, Route 53 hosted zone and ALB alias | Stable custom origin and TLS; production certificate/renewal CNAME lifecycle belongs to the operator. |
 
 This is approximately 40 declared application-stack resources. Most are
 zero-cost control-plane objects. The meaningful recurring cost centers are the
@@ -186,7 +190,7 @@ ALB, one Fargate task, and one RDS instance. Removing the NAT Gateway and the
 separate scheduled task eliminates the largest avoidable fixed/runtime costs.
 
 The state bucket, KMS key/alias, account-wide GitHub OIDC provider, deployment
-role, three scoped managed deployment policies, and managed runtime permissions
+role, four scoped managed deployment policies, and managed runtime permissions
 boundary are account bootstrap resources, not application-stack resources.
 The boundary is created before production runtime roles; existing execution/task
 roles must carry that exact boundary before deployment access is enabled.

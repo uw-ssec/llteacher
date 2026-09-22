@@ -1,7 +1,8 @@
 config:
   aws:region: us-west-2
   llteacher-infra:environment: production
-  # Select domainName, apply, delegate the zone, then set domainReady: "true".
+  # Select domainName, apply/delegate the zone, then provision an operator-owned
+  # ACM certificate. Set its certificateArn and domainReady: "true" only after issuance.
   llteacher-infra:imageTag: bootstrap
   llteacher-infra:provisionService: "false"
   llteacher-infra:deployApp: "false"
