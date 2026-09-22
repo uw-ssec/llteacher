@@ -63,7 +63,8 @@
    created_at-comparison logic here and keeping it in sync forever. The
    convention (apps/web/README.md's "Migrations" section) makes `IF NOT
    EXISTS` mandatory on every CONCURRENTLY index specifically so this is
-   always a no-op re-check, never a re-build.
+   always a no-op re-check, never a re-build. The preflight below enforces
+   that convention before any migration runs.
    -------------------------------------------------------------------------- */
 
 import fs from "node:fs";
@@ -123,9 +124,28 @@ function buildStageOneDir(): string {
 // so a CONCURRENTLY statement is identified the same way drizzle would
 // have executed it.
 const STATEMENT_BREAKPOINT = "--> statement-breakpoint";
-const CONCURRENT_INDEX_PATTERN = /^\s*create\s+index\s+concurrently/i;
+const CONCURRENT_INDEX_PATTERN = /^\s*create\s+(?:unique\s+)?index\s+concurrently\b/i;
+const IDEMPOTENT_CONCURRENT_INDEX_PATTERN =
+  /^\s*create\s+(?:unique\s+)?index\s+concurrently\s+if\s+not\s+exists\b/i;
 const CONCURRENT_INDEX_NAME_PATTERN =
   /^\s*create\s+(?:unique\s+)?index\s+concurrently\s+(?:if\s+not\s+exists\s+)?(?:"((?:[^"]|"")+)"|([a-z_][a-z0-9_$]*))\s+on\b/i;
+
+function validateConcurrentIndexStatements(migrationsFolder: string): void {
+  const journalPath = path.join(migrationsFolder, "meta", "_journal.json");
+  const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as Journal;
+
+  for (const entry of journal.entries) {
+    const content = fs.readFileSync(path.join(migrationsFolder, `${entry.tag}.sql`), "utf8");
+    for (const statement of content.split(STATEMENT_BREAKPOINT)) {
+      if (CONCURRENT_INDEX_PATTERN.test(statement) && !IDEMPOTENT_CONCURRENT_INDEX_PATTERN.test(statement)) {
+        throw new Error(
+          `scripts/migrate.ts: ${entry.tag}.sql contains CREATE INDEX CONCURRENTLY without IF NOT EXISTS. ` +
+            "Concurrent index statements are retried on every deploy; use CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS so reruns are safe.",
+        );
+      }
+    }
+  }
+}
 
 function concurrentIndexName(statement: string): string {
   const match = CONCURRENT_INDEX_NAME_PATTERN.exec(statement);
@@ -214,6 +234,7 @@ export async function applyMigrationsFolder(
   db: NodePgDatabase,
   migrationsFolder: string,
 ): Promise<void> {
+  validateConcurrentIndexStatements(migrationsFolder);
   const prepared = prepareFolderForConcurrentIndexes(migrationsFolder);
   if (!prepared) {
     await migrate(db, { migrationsFolder });
@@ -231,6 +252,7 @@ export async function applyMigrationsFolder(
 }
 
 export async function runMigrations(databaseUrl: string): Promise<void> {
+  validateConcurrentIndexStatements(MIGRATIONS_DIR);
   const pool = new Pool({ connectionString: databaseUrl });
   const db = drizzle(pool);
   const stageOneDir = buildStageOneDir();
