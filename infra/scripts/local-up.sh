@@ -60,6 +60,7 @@ image_tag="local"
 image_uri="000000000000.dkr.ecr.us-west-2.amazonaws.com/llteacher-local/app:$image_tag"
 docker buildx inspect llteacher-local-builder >/dev/null 2>&1 || docker buildx create --name llteacher-local-builder --driver docker-container --use
 docker buildx build --builder llteacher-local-builder --load --label org.llteacher.local=true --tag "$image_uri" --file "$root/Dockerfile.aws" "$root"
+image_id=$(docker image inspect --format '{{.Id}}' "$image_uri")
 # Floci resolves this canonical ECR-shaped image directly from the local Docker
 # daemon. Its CreateRepository URI is intentionally not used here: that is the
 # registry proxy address, not the local-image lookup key.
@@ -68,9 +69,12 @@ pulumi -C "$root/infra" config set --stack local imageTag "$image_tag"
 pulumi -C "$root/infra" config set --stack local buildSha "$(docker image inspect --format '{{.Id}}' "$image_uri")"
 pulumi -C "$root/infra" config set --stack local deployApp false
 pulumi -C "$root/infra" up --stack local --yes
+# Floci resolves local tags when it creates Docker-backed tasks. Remove any
+# superseded labelled image after the service is stopped so migration and app
+# tasks cannot reuse a stale image behind the stable local tag.
+"$root/infra/scripts/local-image-cleanup.sh" "$image_id" images-only
 "$root/infra/scripts/run-local-migrations.sh"
 pulumi -C "$root/infra" config set --stack local deployApp true
 pulumi -C "$root/infra" up --stack local --yes
-image_id=$(docker image inspect --format '{{.Id}}' "$image_uri")
 "$root/infra/scripts/local-image-cleanup.sh" "$image_id"
 echo "Local ECS service deployed. Run npm run aws:local:verify after the ALB becomes healthy."

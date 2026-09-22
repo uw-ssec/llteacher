@@ -15,4 +15,9 @@ PATH="$tmp:$PATH" CALLS="$tmp/calls" "$root/infra/scripts/local-image-cleanup.sh
 grep -Fq 'image rm old' "$tmp/calls"
 ! grep -Fq 'image rm current' "$tmp/calls"
 ! grep -Eq '(system prune|image prune|volume prune)' "$tmp/calls"
-grep -Fq 'builder prune --builder llteacher-local-builder --keep-storage 2GB --force' "$tmp/calls"
+grep -Fq 'buildx prune --builder llteacher-local-builder --keep-storage 2GB --force' "$tmp/calls"
+
+: > "$tmp/calls"
+PATH="$tmp:$PATH" CALLS="$tmp/calls" "$root/infra/scripts/local-image-cleanup.sh" current images-only
+grep -Fq 'image rm old' "$tmp/calls"
+! grep -Fq 'buildx prune' "$tmp/calls"
