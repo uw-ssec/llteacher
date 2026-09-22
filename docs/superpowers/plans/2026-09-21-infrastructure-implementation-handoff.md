@@ -30,6 +30,10 @@ publish a partially recovered tree. The application remains a single writer.
 - Final independent whole-branch review and scoped fix re-review passed.
 - Real Floci-created RDS/ECS, migrations, secret injection, S3 access, and
   knowledge create/edit/fresh-root restore/original/deletion were exercised.
+- The final rebuilt image is `sha256:1e635ef67f2cc7c36884953c3f55fb7c39c1841ee7becf61d1522f52698d7386`
+  (278,412,596 bytes). Its ID matches the running ECS container. Final migrations
+  succeeded; `/`, `/admin`, and `/api/health` returned HTTP 200 at
+  `http://localhost:8080`. The idle dedicated builder is stopped.
 - The first concurrent final run timed out in an unchanged UI test. It passed
   alone in 1.9 seconds; the complete run with serialized workspaces then passed.
   No test was skipped or timeout increased to hide the failure.
@@ -63,6 +67,6 @@ the rest of Milestone 12 are not claimed complete.
 | Refuse legacy local files without a remote snapshot | Prevent accidental deletion/upload | Explicit legacy migration step |
 | One task, stop-before-start replacement | Avoid concurrent filesystem writers | Brief deployment downtime |
 
-Old unused Docker images/cache cleanup reclaimed about 29.9 GB. Persistent
+Old unused Docker images/cache cleanup reclaimed about 30.1 GB. Persistent
 database volumes were retained. Future LLTeacher builds use a stable tag,
 scoped image cleanup, and a dedicated builder with a roughly 2 GB cache target.
