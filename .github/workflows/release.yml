@@ -137,6 +137,8 @@ jobs:
           validate_release_target "$STACK"
           account=$(aws sts get-caller-identity --query Account --output text)
           validate_aws_account "$account"
+          caller_arn=$(aws sts get-caller-identity --query Arn --output text)
+          validate_assumed_deploy_role "$caller_arn"
           pulumi login "$PULUMI_BACKEND_URL"
           pulumi -C infra stack select "$STACK" --non-interactive
       - uses: actions/download-artifact@v4

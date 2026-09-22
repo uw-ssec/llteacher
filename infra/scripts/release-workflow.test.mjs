@@ -45,6 +45,17 @@ test('AWS identity and S3 backend are selected before stack reads or mutations',
   assert.match(steps[select].run, /pulumi login "\$PULUMI_BACKEND_URL"/);
   assert.match(steps[select].run, /stack select "\$STACK" --non-interactive/);
 });
+test('the reviewed deploy role is validated before OIDC and caller identity confirms it', () => {
+  const steps = workflow.jobs.production.steps;
+  const validate = steps.findIndex(s => s.name === 'Validate release target');
+  const oidc = steps.findIndex(s => s.uses?.startsWith('aws-actions/configure-aws-credentials'));
+  const select = steps.find(s => s.name === 'Validate AWS identity and select Pulumi backend');
+  assert(validate >= 0 && oidc > validate);
+  assert.equal(steps[validate].env.DEPLOY_ROLE, '${{ vars.AWS_DEPLOY_ROLE_ARN }}');
+  assert.match(steps[validate].run, /validate_deploy_role "\$DEPLOY_ROLE"/);
+  assert.match(select.run, /--query Arn --output text/);
+  assert.match(select.run, /validate_assumed_deploy_role/);
+});
 test('production runner installs and builds infrastructure before any Pulumi use', () => {
   const steps = workflow.jobs.production.steps;
   const firstPulumi = steps.findIndex(s => s.uses?.startsWith('pulumi/') || s.run?.includes('pulumi '));

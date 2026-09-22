@@ -5,6 +5,7 @@ die() { echo "$*" >&2; exit 1; }
 readonly LLTEACHER_PRODUCTION_STACK=production
 readonly LLTEACHER_PRODUCTION_BACKEND='s3://llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra'
 readonly LLTEACHER_PRODUCTION_ACCOUNT=055237683908
+readonly LLTEACHER_PRODUCTION_DEPLOY_ROLE='arn:aws:iam::055237683908:role/llteacher-production-deploy'
 
 validate_release_target() {
   [[ "${1:-}" == "$LLTEACHER_PRODUCTION_STACK" ]] || die 'PULUMI_STACK must be production.'
@@ -20,7 +21,10 @@ validate_task_definition() {
   [[ "$1" =~ ^arn:aws:ecs:us-west-2:[0-9]{12}:task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*$ ]] || die 'Invalid production task-definition ARN.'
 }
 validate_deploy_role() {
-  [[ "${1:-}" =~ ^arn:aws:iam::[0-9]{12}:role/.+ ]] || die 'AWS_DEPLOY_ROLE_ARN must be a valid IAM role ARN.'
+  [[ "${1:-}" == "$LLTEACHER_PRODUCTION_DEPLOY_ROLE" ]] || die "AWS_DEPLOY_ROLE_ARN must be $LLTEACHER_PRODUCTION_DEPLOY_ROLE."
+}
+validate_assumed_deploy_role() {
+  [[ "${1:-}" =~ ^arn:aws:sts::055237683908:assumed-role/llteacher-production-deploy/[^/]+$ ]] || die 'AWS caller identity must be the assumed llteacher-production-deploy role.'
 }
 validate_release_sha() {
   [[ "${1:-}" =~ ^[a-f0-9]{40}$ ]] || die 'GITHUB_SHA must be a 40-character lowercase hexadecimal commit SHA.'

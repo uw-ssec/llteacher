@@ -150,11 +150,35 @@ test('release validation rejects a different AWS account', () => {
   }
 });
 
+test('release validation requires the exact reviewed deploy role', () => {
+  const command = `. "${join(scripts, 'aws-release-common.sh')}"; validate_deploy_role "$1"`;
+  const valid = 'arn:aws:iam::055237683908:role/llteacher-production-deploy';
+  const accepted = spawnSync('bash', ['-c', command, 'validate', valid], { env: { ...process.env, AWS_REGION: 'us-west-2' }, encoding: 'utf8' });
+  success(accepted);
+  for (const role of ['arn:aws:iam::055237683908:role/UnrelatedAdministrator', 'arn:aws:iam::055237683909:role/llteacher-production-deploy']) {
+    const result = spawnSync('bash', ['-c', command, 'validate', role], { env: { ...process.env, AWS_REGION: 'us-west-2' }, encoding: 'utf8' });
+    failure(result);
+    assert.match(result.stderr, /AWS_DEPLOY_ROLE_ARN must be arn:aws:iam::055237683908:role\/llteacher-production-deploy/);
+  }
+});
+
+test('release validation requires the reviewed assumed deploy role', () => {
+  const command = `. "${join(scripts, 'aws-release-common.sh')}"; validate_assumed_deploy_role "$1"`;
+  const valid = 'arn:aws:sts::055237683908:assumed-role/llteacher-production-deploy/GitHubActions';
+  const accepted = spawnSync('bash', ['-c', command, 'validate', valid], { env: { ...process.env, AWS_REGION: 'us-west-2' }, encoding: 'utf8' });
+  success(accepted);
+  for (const role of ['arn:aws:sts::055237683908:assumed-role/UnrelatedAdministrator/GitHubActions', 'arn:aws:sts::055237683909:assumed-role/llteacher-production-deploy/GitHubActions']) {
+    const result = spawnSync('bash', ['-c', command, 'validate', role], { env: { ...process.env, AWS_REGION: 'us-west-2' }, encoding: 'utf8' });
+    failure(result);
+    assert.match(result.stderr, /AWS caller identity must be the assumed llteacher-production-deploy role/);
+  }
+});
+
 test('release validation helpers explain invalid workflow values', () => {
   const command = `. "${join(scripts, 'aws-release-common.sh')}"; validate_deploy_role bad-role`;
   const result = spawnSync('bash', ['-c', command], { env: { ...process.env, AWS_REGION: 'us-west-2' }, encoding: 'utf8' });
   failure(result);
-  assert.match(result.stderr, /AWS_DEPLOY_ROLE_ARN must be a valid IAM role ARN/);
+  assert.match(result.stderr, /AWS_DEPLOY_ROLE_ARN must be arn:aws:iam::055237683908:role\/llteacher-production-deploy/);
 });
 
 test('refreshed production config rejects stale regions and non-HTTPS activation', () => {
