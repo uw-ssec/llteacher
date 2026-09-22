@@ -34,6 +34,7 @@
 import type {
   KnowledgeInstructionPayload,
   AddTaResultPayload,
+  CanvasSyncResponse,
   CourseTaPayload,
   DocumentLinksPayload,
   ExportRequestBody,
@@ -320,6 +321,19 @@ export const apiClient = {
         `/api/courses/${encode(courseId)}/roster/${encode(membershipId)}`,
         { method: "DELETE" },
         opts,
+      ),
+  },
+
+  canvas: {
+    /** #460: the same course-scoped sync `/canvas` (CanvasIntegrationView)
+     *  already uses -- the org's saved token is spent server-side, never
+     *  threaded through this call. A generous timeout matches that view's
+     *  own 60s budget for a full-course sync. */
+    syncRoster: (courseId: string, opts: RequestOptions) =>
+      request<CanvasSyncResponse>(
+        `/api/courses/${encode(courseId)}/canvas/sync`,
+        { method: "POST" },
+        { timeoutMs: 60_000, ...opts },
       ),
   },
 

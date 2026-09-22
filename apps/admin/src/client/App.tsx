@@ -615,7 +615,11 @@ export default function App() {
                     body={NOT_INSTRUCTOR_BODY}
                   />
                 ) : CURRENT_COURSE_ID ? (
-                  <StudentsView courseId={CURRENT_COURSE_ID} courseTitle={CURRENT_COURSE.title} />
+                  <StudentsView
+                    courseId={CURRENT_COURSE_ID}
+                    courseTitle={CURRENT_COURSE.title}
+                    onGoToCanvas={() => setView({ kind: "canvas" })}
+                  />
                 ) : (
                   <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
                 )

@@ -22,12 +22,12 @@
    -------------------------------------------------------------------------- */
 
 import { useCallback, useMemo, useRef, useState } from "react";
-import { Users, UploadSimple, Warning } from "@phosphor-icons/react";
-import type { RosterMemberPayload, RosterMemberStatus } from "@llteacher/ui/api";
+import { CloudArrowDown, Users, UploadSimple, Warning } from "@phosphor-icons/react";
+import type { CanvasSyncResponse, RosterMemberPayload, RosterMemberStatus } from "@llteacher/ui/api";
 import { PageHeader } from "../components/PageHeader";
 import { ViewEmpty, ViewError, ViewLoading } from "../components/ViewState";
 import { RosterImportPanel } from "../components/RosterImportPanel";
-import { apiClient } from "../lib/api-client";
+import { apiClient, ApiError } from "../lib/api-client";
 import { useApiResource } from "../lib/useApiResource";
 
 /** Copy per status, `satisfies Record<...>` so a status added to the wire
@@ -45,6 +45,28 @@ const STATUS = {
 
 type StatusFilter = "all" | RosterMemberStatus;
 
+/** #460: `/canvas/sync` (canvasSync.ts) reports every one of these
+ *  conditions as a distinct sentence in `error`, already worded for an
+ *  instructor -- classifying by substring (the same convention
+ *  CanvasIntegrationView's own fieldForCredentialError uses) tells us
+ *  whether "Go to Canvas" belongs on the alert without this view having to
+ *  duplicate the server's own token/link checks. Anything unmatched is a
+ *  network/rate-limit/5xx failure: shown as-is, with no Canvas-tab action,
+ *  so it never reads as a credential problem it is not. */
+function classifyCanvasImportError(message: string): string | null {
+  const lower = message.toLowerCase();
+  if (lower.includes("link this course to a canvas course")) {
+    return "This course isn't linked to a Canvas course yet. Link one in the Canvas tab before importing students.";
+  }
+  if (lower.includes("set up your organization's canvas api token")) {
+    return "A Canvas API token is missing or unavailable. Add a token in the Canvas tab before importing students.";
+  }
+  if (lower.includes("rejected this token")) {
+    return "Canvas rejected the saved API token. It may have expired or been revoked — replace it in the Canvas tab before importing students.";
+  }
+  return null;
+}
+
 function relativeTime(iso: string | null): string {
   if (!iso) return "—";
   const then = new Date(iso).getTime();
@@ -59,12 +81,27 @@ function relativeTime(iso: string | null): string {
   return new Date(iso).toLocaleDateString();
 }
 
-export function StudentsView({ courseId, courseTitle }: { courseId: string; courseTitle: string }) {
+export function StudentsView({
+  courseId,
+  courseTitle,
+  onGoToCanvas,
+}: {
+  courseId: string;
+  courseTitle: string;
+  /** #460: opens the console's existing Canvas tab (App.tsx's own view
+   *  state), not an external Canvas URL -- the course context is already
+   *  fixed for the whole console (App.tsx's CURRENT_COURSE), so navigating
+   *  there needs no id of its own to preserve. */
+  onGoToCanvas: () => void;
+}) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [showImport, setShowImport] = useState(false);
   const [live, setLive] = useState<{ text: string; nonce: number }>({ text: "", nonce: 0 });
   const [actionError, setActionError] = useState<string | null>(null);
+  const [canvasImporting, setCanvasImporting] = useState(false);
+  const [canvasResult, setCanvasResult] = useState<CanvasSyncResponse | null>(null);
+  const [canvasError, setCanvasError] = useState<{ message: string; offerCanvasLink: boolean } | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   /** #204's rule, applied here from the start: one permanently-mounted
@@ -148,6 +185,35 @@ export function StudentsView({ courseId, courseTitle }: { courseId: string; cour
     [courseId, roster, announce],
   );
 
+  /** #460: a single click, unlike RosterImportPanel's preview-then-confirm
+   *  -- there is no file to review here, and `/canvas/sync` already IS the
+   *  preview-free commit the org's own "Sync from Canvas" button
+   *  (CanvasIntegrationView) runs, reused as-is so a repeated click hits
+   *  exactly the same idempotent, paginated, authorized service. */
+  const importFromCanvas = useCallback(async () => {
+    if (canvasImporting) return;
+    setCanvasImporting(true);
+    setCanvasResult(null);
+    setCanvasError(null);
+    announce("Importing the roster from Canvas…");
+    try {
+      const result = await apiClient.canvas.syncRoster(courseId, { signal: null });
+      setCanvasResult(result);
+      announce(
+        `Imported from Canvas: ${result.added} added, ${result.updated} updated, ${result.removed} removed` +
+          (result.errors.length > 0 ? `, ${result.errors.length} could not be synced.` : "."),
+      );
+      roster.reload();
+    } catch (err) {
+      const raw = err instanceof ApiError ? err.message : "Could not import the roster from Canvas.";
+      const actionable = classifyCanvasImportError(raw);
+      setCanvasError({ message: actionable ?? raw, offerCanvasLink: actionable !== null });
+      announce(actionable ?? raw);
+    } finally {
+      setCanvasImporting(false);
+    }
+  }, [courseId, canvasImporting, announce, roster]);
+
   return (
     <div className="admin-view">
       <PageHeader
@@ -155,14 +221,25 @@ export function StudentsView({ courseId, courseTitle }: { courseId: string; cour
         title={`Roster · ${courseTitle}`}
         subtitle="Everyone enrolled in this course, including people who have been added but have not signed in yet."
         actions={
-          <button
-            type="button"
-            className="admin-accession__open"
-            onClick={() => setShowImport((v) => !v)}
-          >
-            <UploadSimple size={15} weight="regular" aria-hidden="true" />
-            Import from CSV
-          </button>
+          <>
+            <button
+              type="button"
+              className="admin-accession__open"
+              onClick={() => setShowImport((v) => !v)}
+            >
+              <UploadSimple size={15} weight="regular" aria-hidden="true" />
+              Import from CSV
+            </button>
+            <button
+              type="button"
+              className="admin-accession__open"
+              disabled={canvasImporting}
+              onClick={() => void importFromCanvas()}
+            >
+              <CloudArrowDown size={15} weight="regular" aria-hidden="true" />
+              {canvasImporting ? "Importing…" : "Import from Canvas"}
+            </button>
+          </>
         }
       />
 
@@ -193,6 +270,30 @@ export function StudentsView({ courseId, courseTitle }: { courseId: string; cour
             <Warning size={16} weight="regular" />
           </span>
           <span>{actionError}</span>
+        </div>
+      )}
+
+      {canvasError && (
+        <div className="admin-alert">
+          <span className="admin-alert__icon" aria-hidden="true">
+            <Warning size={16} weight="regular" />
+          </span>
+          <span>{canvasError.message}</span>
+          {canvasError.offerCanvasLink && (
+            <button type="button" className="admin-link-button" onClick={onGoToCanvas} style={{ marginLeft: 8 }}>
+              Go to Canvas
+            </button>
+          )}
+        </div>
+      )}
+
+      {canvasResult && (
+        <div className="admin-form-hint">
+          <p>
+            <strong>Imported from Canvas.</strong> {canvasResult.added} added, {canvasResult.updated} updated,{" "}
+            {canvasResult.removed} removed
+            {canvasResult.errors.length > 0 && `, ${canvasResult.errors.length} could not be synced.`}
+          </p>
         </div>
       )}
 
