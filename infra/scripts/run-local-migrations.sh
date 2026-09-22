@@ -9,7 +9,8 @@ fi
 aws_local=(aws --endpoint-url=http://localhost:4566)
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
 export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}"
-export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+export AWS_REGION="us-west-2"
+export AWS_DEFAULT_REGION="us-west-2"
 
 # A fresh Floci RDS resource is registered by Pulumi before its backing
 # PostgreSQL container accepts connections. Wait for the emulator's RDS

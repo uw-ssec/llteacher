@@ -1,0 +1,50 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PulumiStateList",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::llteacher-pulumi-state-055237683908-us-west-2",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "llteacher-infra/.pulumi",
+            "llteacher-infra/.pulumi/*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "PulumiStateLocation",
+      "Effect": "Allow",
+      "Action": "s3:GetBucketLocation",
+      "Resource": "arn:aws:s3:::llteacher-pulumi-state-055237683908-us-west-2"
+    },
+    {
+      "Sid": "PulumiStateObjects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "arn:aws:s3:::llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra/.pulumi/*"
+    },
+    {
+      "Sid": "PulumiStateKms",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:ReEncrypt*",
+        "kms:GenerateDataKey*",
+        "kms:DescribeKey"
+      ],
+      "Resource": "${KMS_KEY_ARN}"
+    }
+  ]
+}

@@ -1,80 +1,248 @@
 name: release
 
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      environment:
-        description: Target deployment environment
-        required: true
-        type: choice
-        options: [staging, production]
-      image_tag:
-        description: Immutable image tag to publish
-        required: true
-        type: string
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
 
 jobs:
-  release:
-    name: Deploy ${{ inputs.environment }}
+  test:
+    name: test release artifact
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
-    timeout-minutes: 30
-    if: >-
-      (inputs.environment == 'staging' && github.ref == 'refs/heads/staging') ||
-      (inputs.environment == 'production' && startsWith(github.ref, 'refs/tags/'))
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: llteacher
+          POSTGRES_PASSWORD: dev
+          POSTGRES_DB: llteacher
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U llteacher -d llteacher"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
-      AWS_REGION: us-east-1
-      STACK: ${{ inputs.environment }}
-      IMAGE_TAG: ${{ inputs.image_tag }}
+      DATABASE_URL: postgres://llteacher:dev@localhost:5432/llteacher
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate ephemeral test keys
+        run: |
+          echo "ENCRYPTION_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+          echo "BLIND_INDEX_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+      - name: Install database client and OKF
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+          curl -fsSL -o /tmp/okf https://github.com/okf-memory/okf-agent-memory/releases/download/v0.3.0/okf-linux-amd64
+          curl -fsSL -o /tmp/checksums.txt https://github.com/okf-memory/okf-agent-memory/releases/download/v0.3.0/checksums.txt
+          cd /tmp && grep -E ' +bin/okf-linux-amd64$' checksums.txt | sed -E 's# +bin/okf-linux-amd64$#  okf#' > okf.sha256
+          sha256sum -c /tmp/okf.sha256
+          sudo install -m 0755 /tmp/okf /usr/local/bin/okf
+      - name: Initialize test database
+        run: |
+          psql "$DATABASE_URL" -f apps/web/src/db/init/01_extensions.sql
+          npm run db:migrate --workspace=llteacher-web
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - uses: docker/setup-buildx-action@v3
+      - name: Build release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.aws
+          load: true
+          platforms: linux/amd64
+          tags: llteacher-release:${{ github.sha }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+      - name: Smoke test release image
+        env:
+          RELEASE_IMAGE: llteacher-release:${{ github.sha }}
+        run: |
+          source infra/scripts/aws-release-common.sh
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || die 'Smoke-test checkout does not match GITHUB_SHA.'
+          docker run --rm --entrypoint node "$RELEASE_IMAGE" -e "const fs=require('node:fs'); for (const p of ['apps/web/dist/client/index.html','apps/admin/dist/admin/index.html','apps/web/scripts/migrate.ts',process.env.NODE_EXTRA_CA_CERTS]) fs.accessSync(p); require.resolve('tsx'); require.resolve('pg');"
+          docker run --rm --entrypoint okf "$RELEASE_IMAGE" --version
+      - name: Save tested release image
+        run: |
+          mkdir release-artifact
+          docker save --output release-artifact/image.tar "llteacher-release:$GITHUB_SHA"
+          docker image inspect --format '{{.Id}}' "llteacher-release:$GITHUB_SHA" > release-artifact/image.id
+          printf '%s\n' "$GITHUB_SHA" > release-artifact/commit.sha
+          cd release-artifact
+          sha256sum image.tar image.id commit.sha > checksums.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-image-${{ github.sha }}
+          path: release-artifact/
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: error
+
+  production:
+    name: Deploy production
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 35
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
+    env:
+      AWS_REGION: us-west-2
+      STACK: ${{ vars.PULUMI_STACK }}
+      PULUMI_BACKEND_URL: ${{ vars.PULUMI_BACKEND_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Validate release target
+        env:
+          DEPLOY_ROLE: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          source infra/scripts/aws-release-common.sh
+          validate_release_target "$STACK"
+          validate_deploy_role "$DEPLOY_ROLE"
+          validate_release_sha "$GITHUB_SHA"
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || die 'Checked-out commit does not match GITHUB_SHA.'
+      - name: Install and build infrastructure on deployment runner
+        run: npm ci && npm run build --workspace=infra
       - uses: pulumi/actions@v6
         with:
           command: version
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: us-east-1
-      - uses: docker/setup-buildx-action@v3
-      - name: Install and build
-        run: npm ci && npm run build --workspace=infra
-      - name: Preview infrastructure
-        run: pulumi -C infra preview --stack "$STACK" --non-interactive
-      - name: Build and publish application image
-        id: image
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-west-2
+      - name: Validate AWS identity and select Pulumi backend
         run: |
-          repository=$(pulumi -C infra stack output ecrRepositoryUrl --stack "$STACK")
-          aws ecr get-login-password | docker login --username AWS --password-stdin "${repository%%/*}"
-          echo "tag=$repository:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
-      - name: Build and push application image
-        uses: docker/build-push-action@v6
+          source infra/scripts/aws-release-common.sh
+          validate_release_target "$STACK"
+          account=$(aws sts get-caller-identity --query Account --output text)
+          validate_aws_account "$account"
+          caller_arn=$(aws sts get-caller-identity --query Arn --output text)
+          validate_assumed_deploy_role "$caller_arn"
+          pulumi login "$PULUMI_BACKEND_URL"
+          pulumi -C infra stack select "$STACK" --non-interactive
+      - uses: actions/download-artifact@v4
         with:
-          context: .
-          file: Dockerfile.aws
-          push: true
-          tags: ${{ steps.image.outputs.tag }}
-          cache-from: type=gha,scope=llteacher-aws
-          cache-to: type=gha,mode=max,scope=llteacher-aws
-      - name: Register the new revision without starting it
+          name: release-image-${{ github.sha }}
+          path: release-artifact/
+      - name: Verify and load tested release image
         run: |
-          pulumi -C infra config set --stack "$STACK" imageTag "$IMAGE_TAG"
-          pulumi -C infra config set --stack "$STACK" deployApp false
-          pulumi -C infra up --stack "$STACK" --yes --non-interactive
-      - name: Run migrations before service update
-        run: ./infra/scripts/run-aws-migrations.sh "$STACK"
-      - name: Start the migrated service and check HTTPS
+          source infra/scripts/aws-release-common.sh
+          cd release-artifact
+          sha256sum -c checksums.txt
+          [[ "$(cat commit.sha)" == "$GITHUB_SHA" ]] || die 'Artifact commit does not match GITHUB_SHA.'
+          docker load --input image.tar
+          [[ "$(docker image inspect --format '{{.Id}}' "llteacher-release:$GITHUB_SHA")" == "$(cat image.id)" ]] || die 'Loaded image ID does not match the tested artifact.'
+          [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "llteacher-release:$GITHUB_SHA")" == "$GITHUB_SHA" ]] || die 'Loaded image revision label does not match GITHUB_SHA.'
+      - name: Refresh encrypted stack configuration
+        run: pulumi -C infra config refresh --stack "$STACK" --non-interactive
+      - name: Validate refreshed production configuration
         run: |
+          source infra/scripts/aws-release-common.sh
+          validate_release_target "$STACK"
+          region=$(pulumi -C infra config get aws:region --stack "$STACK" 2>/dev/null || true)
+          environment=$(pulumi -C infra config get environment --stack "$STACK" 2>/dev/null || true)
+          domain_ready=$(pulumi -C infra config get domainReady --stack "$STACK" 2>/dev/null || true)
+          domain_name=$(pulumi -C infra config get domainName --stack "$STACK" 2>/dev/null || true)
+          certificate_arn=$(pulumi -C infra config get certificateArn --stack "$STACK" 2>/dev/null || true)
+          validate_refreshed_stack_config "$region" "$environment" "$domain_ready" "$domain_name" "$certificate_arn"
+      - name: Bootstrap base infrastructure only when ECR is absent
+        id: base
+        run: bash infra/scripts/prepare-aws-release.sh "$STACK" repository
+      - name: Push tested application image
+        id: image
+        env:
+          REPOSITORY: ${{ steps.base.outputs.repository }}
+        run: |
+          source infra/scripts/aws-release-common.sh
+          validate_release_target "$STACK"
+          validate_repository "$REPOSITORY"
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${REPOSITORY%%/*}"
+          docker tag "llteacher-release:$GITHUB_SHA" "$REPOSITORY:$GITHUB_SHA"
+          docker push "$REPOSITORY:${GITHUB_SHA}"
+          digest=$(aws ecr describe-images --repository-name llteacher-production/app --image-ids imageTag="$GITHUB_SHA" --query 'imageDetails[0].imageDigest' --output text)
+          validate_image_digest "$digest"
+          docker pull "$REPOSITORY@$digest"
+          [[ "$(docker image inspect --format '{{.Id}}' "$REPOSITORY@$digest")" == "$(cat release-artifact/image.id)" ]] || die 'Registry image ID does not match the tested release artifact.'
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Register candidate while retaining the current service
+        id: candidate
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: bash infra/scripts/prepare-aws-release.sh "$STACK" candidate
+      - name: Run candidate migrations
+        env:
+          CANDIDATE: ${{ steps.candidate.outputs.candidate }}
+        run: bash infra/scripts/run-aws-migrations.sh "$STACK" "$CANDIDATE"
+      - name: Activate migrated candidate
+        env:
+          CANDIDATE: ${{ steps.candidate.outputs.candidate }}
+        run: |
+          source infra/scripts/aws-release-common.sh
+          validate_release_target "$STACK"
+          validate_task_definition "$CANDIDATE"
+          pulumi -C infra config set --stack "$STACK" serviceTaskDefinition "$CANDIDATE"
+          pulumi -C infra config set --stack "$STACK" provisionService true
           pulumi -C infra config set --stack "$STACK" deployApp true
           pulumi -C infra up --stack "$STACK" --yes --non-interactive
-          aws ecs wait services-stable --cluster "llteacher-$STACK-cluster" --services "llteacher-$STACK-app"
-          app_url=$(pulumi -C infra stack output appUrl --stack "$STACK")
-          curl --fail --retry 12 --retry-delay 5 "$app_url/api/health"
+          stack="$STACK"
+          read_outputs
+          cluster=$(jq -er '.clusterName' <<< "$outputs")
+          service=$(jq -er '.serviceName' <<< "$outputs")
+          validate_name "$cluster"
+          validate_name "$service"
+          aws ecs wait services-stable --cluster "$cluster" --services "$service"
+      - name: Verify deployed version
+        run: |
+          source infra/scripts/aws-release-common.sh
+          stack="$STACK"
+          validate_release_target "$stack"
+          read_outputs
+          app_url=$(jq -er '.appUrl | select(type == "string" and test("^https?://[A-Za-z0-9.-]+/?$"))' <<< "$outputs")
+          version=$(curl --fail --retry 12 --retry-delay 5 --silent "$app_url/api/health" | jq -er '.version')
+          [[ "$version" == "$GITHUB_SHA" ]] || die "Deployed version '$version' does not match release '$GITHUB_SHA'."
+      - name: Record rollback reference
+        if: always()
+        env:
+          PREVIOUS_TASK: ${{ steps.candidate.outputs.previous_task_definition }}
+          PREVIOUS_DIGEST: ${{ steps.candidate.outputs.previous_digest }}
+        run: |
+          {
+            echo "## Release rollback reference"
+            echo "Previous task definition: ${PREVIOUS_TASK:-not captured (or first release)}"
+            echo "Previous image digest: ${PREVIOUS_DIGEST:-not captured (or first release)}"
+            echo "Rotating an ECS secret requires a forced deployment/new task revision."
+            if [[ -n "${PREVIOUS_TASK:-}" ]]; then
+              echo
+              echo "After reviewing schema compatibility, run:"
+              echo '```bash'
+              printf 'export STACK=%q\n' "$STACK"
+              printf 'export PREVIOUS_TASK=%q\n' "$PREVIOUS_TASK"
+              echo 'pulumi -C infra config set --stack "$STACK" serviceTaskDefinition "$PREVIOUS_TASK"'
+              echo 'pulumi -C infra config set --stack "$STACK" provisionService true'
+              echo 'pulumi -C infra config set --stack "$STACK" deployApp true'
+              echo 'pulumi -C infra preview --stack "$STACK" --non-interactive'
+              echo 'pulumi -C infra up --stack "$STACK" --yes --non-interactive'
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

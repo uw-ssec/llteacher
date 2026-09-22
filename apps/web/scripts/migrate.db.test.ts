@@ -277,4 +277,67 @@ describe.skipIf(!DATABASE_URL)("scripts/migrate.ts two-stage split (real DB, #34
     },
     60_000,
   );
+
+  it(
+    "rebuilds only the repository-declared concurrent index when its prior build is invalid",
+    async () => {
+      const dbName = `llteacher_migrate_test_invalid_index_${crypto.randomUUID().replace(/-/g, "")}`;
+      dbNames.push(dbName);
+      const scratchUrl = await createScratchDatabase(adminPool, dbName);
+      const throughHead = buildFolderThrough("0041_hint_semantics_and_mark_complete");
+      const pool = new Pool({ connectionString: scratchUrl });
+      const db = drizzle(pool);
+      try {
+        await applyMigrationsFolder(pool, db, throughHead);
+        await pool.query("CREATE TABLE migration_index_fixture (id integer NOT NULL)");
+        await pool.query("INSERT INTO migration_index_fixture (id) VALUES (1), (2)");
+        await pool.query("CREATE INDEX conversations_valid_sentinel_idx ON migration_index_fixture (id)");
+        const sentinelBefore = await pool.query<{ oid: number }>(
+          "SELECT indexrelid::int AS oid FROM pg_index WHERE indexrelid = 'conversations_valid_sentinel_idx'::regclass",
+        );
+
+        await expect(
+          pool.query("CREATE UNIQUE INDEX CONCURRENTLY conversations_recoverable_idx ON migration_index_fixture ((1))"),
+        ).rejects.toThrow();
+        const invalidBefore = await pool.query<{ indisvalid: boolean }>(
+          "SELECT indisvalid FROM pg_index WHERE indexrelid = 'conversations_recoverable_idx'::regclass",
+        );
+        expect(invalidBefore.rows[0]?.indisvalid).toBe(false);
+
+        const journalPath = path.join(throughHead, "meta", "_journal.json");
+        const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+          entries: { idx: number; version: string; when: number; tag: string; breakpoints: boolean }[];
+        };
+        const lastEntry = journal.entries[journal.entries.length - 1]!;
+        const tag = "9999_test_invalid_concurrent_index";
+        journal.entries.push({
+          idx: journal.entries.length,
+          version: lastEntry.version,
+          when: lastEntry.when + 1,
+          tag,
+          breakpoints: true,
+        });
+        fs.writeFileSync(journalPath, JSON.stringify(journal, null, 2));
+        fs.writeFileSync(
+          path.join(throughHead, `${tag}.sql`),
+          "CREATE INDEX CONCURRENTLY IF NOT EXISTS conversations_recoverable_idx ON migration_index_fixture (id);",
+        );
+
+        await applyMigrationsFolder(pool, db, throughHead);
+
+        const recovered = await pool.query<{ indisvalid: boolean }>(
+          "SELECT indisvalid FROM pg_index WHERE indexrelid = 'conversations_recoverable_idx'::regclass",
+        );
+        const sentinelAfter = await pool.query<{ oid: number }>(
+          "SELECT indexrelid::int AS oid FROM pg_index WHERE indexrelid = 'conversations_valid_sentinel_idx'::regclass",
+        );
+        expect(recovered.rows[0]?.indisvalid).toBe(true);
+        expect(sentinelAfter.rows[0]?.oid).toBe(sentinelBefore.rows[0]?.oid);
+      } finally {
+        fs.rmSync(throughHead, { recursive: true, force: true });
+        await pool.end();
+      }
+    },
+    60_000,
+  );
 });

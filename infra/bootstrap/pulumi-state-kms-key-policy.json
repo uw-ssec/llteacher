@@ -1,0 +1,14 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EnableAccountIAMPolicies",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::055237683908:root"
+      },
+      "Action": "kms:*",
+      "Resource": "*"
+    }
+  ]
+}

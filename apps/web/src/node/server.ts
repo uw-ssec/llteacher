@@ -2,13 +2,16 @@ import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import type { Server } from "node:http";
+import { mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
-import { closeDb, makeDb } from "../db/client";
+import { closeDb, makeDb, withSessionAdvisoryLock } from "../db/client";
 import { drainExtractions } from "../server/knowledge/extract/job";
 import { recoverInterruptedExtractions } from "../server/repositories/materials";
 import { loadRuntimeConfig } from "../runtime/config";
 import { app } from "../server";
+import { autoSubmitOverdueSections } from "../server/jobs/autoSubmitOverdue";
+import { startOverdueScheduler } from "./overdue-scheduler";
 
 export type NodeServerOptions = {
   adminBuildDir?: string;
@@ -17,8 +20,14 @@ export type NodeServerOptions = {
   webBuildDir?: string;
 };
 
+export type StartNodeServerOptions = NodeServerOptions & {
+  config?: Env;
+};
+
 const defaultWebBuildDir = resolve(import.meta.dirname, "../../dist/client");
 const defaultAdminBuildDir = resolve(import.meta.dirname, "../../../admin/dist/admin");
+// ASCII "LLTS": stable database-wide lock for LLTeacher's overdue sweep.
+const OVERDUE_SWEEP_LOCK_KEY = 0x4c4c5453;
 
 function createNodeApp(config: Env, options: NodeServerOptions) {
   const nodeApp = new Hono();
@@ -67,27 +76,34 @@ export function createNodeServer(config: Env, options: NodeServerOptions = {}): 
 }
 
 /** Stops accepting requests before releasing the process-owned database pool. */
-export async function closeNodeServer(server: Server, timeoutMs = 25_000): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      error ? reject(error) : resolve();
-    };
-    const timer = setTimeout(() => {
+export async function closeNodeServer(
+  server: Server,
+  timeoutMs = 25_000,
+  stopBackgroundWork: () => Promise<void> = async () => {},
+): Promise<void> {
+  // One budget for HTTP, background work, extraction drain, and pool closure;
+  // ECS's default 30-second stop window must not be spent again at every stage.
+  let timer!: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
       server.closeAllConnections();
-      finish();
+      reject(new Error("Shutdown deadline exceeded"));
     }, timeoutMs);
     timer.unref();
-    server.close((error) => finish(error ?? undefined));
   });
-  // #40: an extraction in flight (a PDF being OCR'd) gets up to this long to
-  // finish before the pool closes under it; whatever is still running is
-  // marked interrupted on the next start (see startNodeServer).
-  await drainExtractions(EXTRACTION_DRAIN_MS);
-  await closeDb();
+  try {
+    await Promise.race([deadline, new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    })]);
+    await Promise.race([deadline, stopBackgroundWork()]);
+    // #40: interrupted extractions are recovered at next start. On deadline
+    // failure, the signal handler exits; do not close the pool underneath work
+    // that is still running or continue cleanup after a timed-out stage settles.
+    await Promise.race([deadline, drainExtractions(EXTRACTION_DRAIN_MS)]);
+    await Promise.race([deadline, closeDb()]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 const EXTRACTION_DRAIN_MS = 20_000;
@@ -122,17 +138,30 @@ export function registerShutdownHandlers(server: Server, dependencies: ShutdownD
   dependencies.once("SIGTERM", shutdown);
 }
 
-export function startNodeServer(): Server {
-  const config = loadRuntimeConfig(process.env);
+export function startNodeServer(options: StartNodeServerOptions = {}): Server {
+  const config = options.config ?? loadRuntimeConfig(process.env);
+  if (config.KNOWLEDGE_ROOT) mkdirSync(config.KNOWLEDGE_ROOT, { recursive: true });
+  const db = makeDb(config.DATABASE_URL);
   // Materials left at `processing` by a task that died mid-extraction are
   // moved to `failed` with a reason, so the console never shows a spinner
   // for work nothing is doing. Best effort; a failure here must not stop
   // the server from serving.
-  void recoverInterruptedExtractions(makeDb(config.DATABASE_URL)).catch((error: unknown) => {
+  void recoverInterruptedExtractions(db).catch((error: unknown) => {
     console.error("Failed to recover interrupted extractions", error);
   });
-  const server = createNodeServer(config);
-  registerShutdownHandlers(server);
+  const scheduler = startOverdueScheduler({
+    run: async () => {
+      await withSessionAdvisoryLock(OVERDUE_SWEEP_LOCK_KEY, () => autoSubmitOverdueSections(db));
+    },
+    error: (message) => console.error(message),
+  });
+  const server = createNodeServer(config, options);
+  registerShutdownHandlers(server, {
+    close: (serverToClose) => closeNodeServer(serverToClose, 25_000, () => scheduler.stop()),
+    once: (signal, handler) => process.once(signal, handler),
+    exit: (code) => process.exit(code),
+    error: (message, error) => console.error(message, error),
+  });
   return server;
 }
 

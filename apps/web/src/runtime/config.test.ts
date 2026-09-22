@@ -17,6 +17,7 @@ import { loadRuntimeConfig } from "./config";
 
 const runtimeEnvironment = {
   APP_URL: "https://llteacher.example.edu",
+  AWS_REGION: "us-west-2",
   DATABASE_URL: "postgres://llteacher:password@localhost:5432/llteacher",
   WORKOS_API_KEY: "workos-api-key",
   WORKOS_CLIENT_ID: "workos-client-id",
