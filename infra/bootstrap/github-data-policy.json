@@ -1,0 +1,229 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CallerIdentity",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
+      "Sid": "RdsDiscovery",
+      "Effect": "Allow",
+      "Action": "rds:Describe*",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2"
+        }
+      }
+    },
+    {
+      "Sid": "Rds",
+      "Effect": "Allow",
+      "Action": [
+        "rds:ListTagsForResource",
+        "rds:AddTagsToResource",
+        "rds:RemoveTagsFromResource",
+        "rds:CreateDBSubnetGroup",
+        "rds:ModifyDBSubnetGroup",
+        "rds:DeleteDBSubnetGroup",
+        "rds:CreateDBInstance",
+        "rds:ModifyDBInstance",
+        "rds:DeleteDBInstance"
+      ],
+      "Resource": [
+        "arn:aws:rds:us-west-2:055237683908:db:llteacher-production-*",
+        "arn:aws:rds:us-west-2:055237683908:subgrp:llteacher-production-*",
+        "arn:aws:rds:us-west-2:055237683908:snapshot:llteacher-production-*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2"
+        }
+      }
+    },
+    {
+      "Sid": "RdsPostgresDefaults",
+      "Effect": "Allow",
+      "Action": "rds:CreateDBInstance",
+      "Resource": [
+        "arn:aws:rds:us-west-2:055237683908:pg:default.postgres16",
+        "arn:aws:rds:us-west-2:055237683908:og:default:postgres-16"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2"
+        }
+      }
+    },
+    {
+      "Sid": "ApplicationS3Create",
+      "Effect": "Allow",
+      "Action": "s3:CreateBucket",
+      "Resource": "arn:aws:s3:::llteacher-production-*",
+      "Condition": {
+        "StringEquals": {
+          "s3:LocationConstraint": "us-west-2"
+        }
+      }
+    },
+    {
+      "Sid": "ApplicationS3",
+      "Effect": "Allow",
+      "Action": [
+        "s3:DeleteBucket",
+        "s3:ListBucket",
+        "s3:GetBucket*",
+        "s3:GetEncryptionConfiguration",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetReplicationConfiguration",
+        "s3:GetAccelerateConfiguration",
+        "s3:PutBucketVersioning",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutBucketTagging"
+      ],
+      "Resource": [
+        "arn:aws:s3:::llteacher-production-*",
+        "arn:aws:s3:::llteacher-production-*/*"
+      ]
+    },
+    {
+      "Sid": "SecretsManager",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:TagResource",
+        "secretsmanager:UntagResource",
+        "secretsmanager:GetResourcePolicy",
+        "secretsmanager:PutResourcePolicy",
+        "secretsmanager:DeleteResourcePolicy"
+      ],
+      "Resource": "arn:aws:secretsmanager:us-west-2:055237683908:secret:llteacher-production-*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2"
+        }
+      }
+    },
+    {
+      "Sid": "AcmDiscovery",
+      "Effect": "Allow",
+      "Action": [
+        "acm:RequestCertificate",
+        "acm:ListCertificates"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2"
+        }
+      }
+    },
+    {
+      "Sid": "Acm",
+      "Effect": "Allow",
+      "Action": [
+        "acm:DeleteCertificate",
+        "acm:DescribeCertificate",
+        "acm:ListTagsForCertificate",
+        "acm:AddTagsToCertificate",
+        "acm:RemoveTagsFromCertificate"
+      ],
+      "Resource": "arn:aws:acm:us-west-2:055237683908:certificate/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2"
+        }
+      }
+    },
+    {
+      "Sid": "ManageLlteacherRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:DeleteRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:ListRoleTags",
+        "iam:ListRolePolicies",
+        "iam:GetRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:ListAttachedRolePolicies"
+      ],
+      "Resource": [
+        "arn:aws:iam::055237683908:role/llteacher-production-execution-role-*",
+        "arn:aws:iam::055237683908:role/llteacher-production-task-role-*"
+      ]
+    },
+    {
+      "Sid": "AttachLlteacherExecutionPolicy",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::055237683908:role/llteacher-production-execution-role-*",
+        "arn:aws:iam::055237683908:role/llteacher-production-task-role-*"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+        }
+      }
+    },
+    {
+      "Sid": "PassLlteacherTaskRoles",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::055237683908:role/llteacher-production-execution-role-*",
+        "arn:aws:iam::055237683908:role/llteacher-production-task-role-*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "Route53Discovery",
+      "Effect": "Allow",
+      "Action": [
+        "route53:CreateHostedZone",
+        "route53:ListHostedZones",
+        "route53:ListHostedZonesByName"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ManageLlteacherRoute53",
+      "Effect": "Allow",
+      "Action": [
+        "route53:GetHostedZone",
+        "route53:DeleteHostedZone",
+        "route53:UpdateHostedZoneComment",
+        "route53:ListResourceRecordSets",
+        "route53:ChangeResourceRecordSets",
+        "route53:ListTagsForResource",
+        "route53:ChangeTagsForResource"
+      ],
+      "Resource": "arn:aws:route53:::hostedzone/*"
+    },
+    {
+      "Sid": "Route53Changes",
+      "Effect": "Allow",
+      "Action": "route53:GetChange",
+      "Resource": "arn:aws:route53:::change/*"
+    }
+  ]
+}
