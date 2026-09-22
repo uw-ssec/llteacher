@@ -103,7 +103,7 @@ M12 planning items**. There are four categories of discrepancy:
 
 | Issue | Consequence for the plan |
 | --- | --- |
-| [#378 — adopt Floci](https://github.com/uw-ssec/llteacher/issues/378) | Preserve the single endpoint override, pinned Floci release, persistent developer/disposable CI modes, end-to-end AWS integration test, documented unsupported behaviors, and a real-AWS preview/test gate. The approved exact-graph rule is compatible, but the issue explicitly rejects treating emulator success as AWS verification. |
+| [#378 — adopt Floci](https://github.com/uw-ssec/llteacher/issues/378) | Preserve the single endpoint override, pinned Floci release, persistent developer mode, end-to-end local AWS integration test, documented unsupported behaviors, and a real-AWS preview/test gate. The release owner has explicitly removed Floci from GitHub Actions, so the issue's disposable-CI requirement is no longer part of this release and must not be represented as satisfied. |
 | [#373 — migration numbering](https://github.com/uw-ssec/llteacher/issues/373) | Keep the PR-open-order numbering convention and `migration-index-collision` CI check when workflows are reorganized. |
 | [#372 — concurrent indexes](https://github.com/uw-ssec/llteacher/issues/372) | Keep `CREATE INDEX CONCURRENTLY` outside Drizzle's transaction for hot tables. Its resolution directly leads to still-open #376's invalid-index recovery requirement. |
 | [#179 — migrate before deploy](https://github.com/uw-ssec/llteacher/issues/179) | Preserve the hard gate: migration task succeeds before the ECS service revision starts. Add the still-requested greppable schema-behind log signature and rollout-order documentation. |
@@ -151,16 +151,15 @@ tracker update.
 ### Gate 2 — CI/CD and production safety
 
 1. Complete #62 monorepo CI and #376 invalid-index checks.
-2. On pull requests, build and boot the immutable image and deploy the same
-   Pulumi graph to disposable Floci; smoke test the app, RDS/pgvector, S3,
-   secrets, upload/retry flow, ALB routes, and scheduler behavior; always destroy the
-   disposable stack and prune only CI-created image tags/caches.
+2. Keep Floci developer-local. Remove the dedicated `local-aws.yml` workflow;
+   the local command applies and smoke-tests the Pulumi graph against Floci.
+   The AWS release workflow must contain no Floci endpoint or lifecycle step.
 3. Provision the GitHub OIDC provider/deploy role through Pulumi. Grant only
    ECR, ECS, Pulumi-managed infrastructure, migration task, and read-only output
    permissions needed by the workflow.
-4. Build once and identify the image by digest. Deploy automatically to staging
-   from the default deployment branch; promote that digest to production by a
-   release tag or protected GitHub environment approval.
+4. In the protected AWS release workflow, install, lint, typecheck, test, build
+   once, and identify the image by digest. Deploy production only from a release
+   tag or explicit protected-environment approval.
 5. Run migrations as an ECS one-off task inside the target VPC. Stop before
    service update on failure. Wait for service stability, then run versioned
    health and smoke checks.
