@@ -6,6 +6,25 @@
 
 **Milestone:** [M12: Infra, Migration & Cutover](https://github.com/uw-ssec/llteacher/milestone/12)
 
+## Execution scope update
+
+The tables below preserve the audit of the linked baseline, not a claim that
+every item has been implemented. The release owner subsequently limited this
+work to a small production-testing stack. The branch implements regional
+configuration, minimal networking, scoped secret injection, S3 safeguards,
+in-process overdue work, concurrent-index recovery, local Floci and AWS-only
+release automation. Knowledge snapshots use the same S3 bucket rather than
+adding EFS; ECS replacement is single-writer and briefly unavailable.
+
+The GitHub workflow targets protected production tag releases; automatic
+staging promotion, full Playwright journeys, production ETL, broad observability,
+DR/cutover drills and Django/Coolify retirement remain separate work. No GitHub
+issue status is changed by this implementation. See the
+[implementation plan](2026-09-21-minimal-production-infrastructure-implementation.md)
+for execution corrections and [operations guide](../../../infra/README.md)
+for bootstrap and remaining release gates. Real AWS apply still needs explicit
+approval.
+
 ## Question and proposed architecture
 
 This audit checks every issue currently assigned to M12 against the approved

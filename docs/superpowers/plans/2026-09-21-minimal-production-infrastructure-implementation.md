@@ -31,6 +31,37 @@
 - Public-IP Fargate must accept traffic only from the ALB and RDS must remain private; Task 2 tests this.
 - Repeated local deploys must not accumulate timestamp tags or delete unrelated images; Task 6 tests this.
 
+## Implementation corrections discovered during execution
+
+These corrections supersede conflicting pseudocode below; the design document
+and implemented tests carry the final contract.
+
+- First-release bootstrap may omit the service, but subsequent candidate
+  registration must preserve its active task definition until migrations pass.
+  Retain old task revisions for migration safety and rollback.
+- `serviceTaskDefinition`, `imageDigest` and `buildSha` form the release contract;
+  record the active task's image for rollback, not a failed candidate's digest.
+- `domainName` is optional for HTTP bootstrap. Prepare the hosted zone and
+  certificate before delegation; `domainReady=true` enables validation and TLS.
+- Production PostgreSQL uses `sslmode=verify-full`; the image trusts the AWS
+  us-west-2 RDS CA bundle. Floci's local PostgreSQL remains plaintext.
+- S3 uses AWS SDK task-role credentials in AWS. The existing bucket also backs
+  knowledge snapshots; temporary task files cannot be the durable source of truth.
+- Desired count one plus stop-before-start replacement prevents concurrent
+  extraction/knowledge writers; brief release downtime is accepted.
+- Keep `tsx` in production dependencies before pruning build-only dependencies.
+- `/api/health` lives in `server/index.ts`, not `routes/hello.ts`.
+- Test-only PostgreSQL credentials are permitted in CI. Production app secrets
+  are not GitHub secrets; `PULUMI_STACK` is an additional nonsecret environment
+  variable. Refresh encrypted stack configuration on a fresh runner.
+- Negative tests intentionally mention rejected regions. Do not delete those
+  fixtures to satisfy a broad text grep.
+- Floci remains local-only. No disposable CI Floci stack is created.
+
+Execution uses parallel subagents with disjoint file ownership, independent
+review, then integrated tests and a real local Floci deployment. No real AWS
+apply is authorized by this plan's implementation.
+
 ---
 
 ### Task 1: Region-aware configuration

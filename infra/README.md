@@ -1,129 +1,186 @@
-# Local AWS-shaped deployment
+# Minimal AWS stack and developer-local Floci
 
-## 1. Required packages
+Production provisioning still requires the release owner's explicit approval.
+This branch prepares the configuration; running local commands does not authorize
+an AWS deployment.
 
-Install these tools before running the infrastructure commands:
+## What runs
 
-1. **Docker Desktop** — runs Floci, Caddy, the application container, and the local PostgreSQL database.
-2. **Node.js 24 and npm 10** — build the monorepo, application image, and Pulumi program.
-3. **Pulumi CLI 3.234 or newer** — provisions the same TypeScript infrastructure program locally and in AWS.
-4. **AWS CLI v2** — inspects Floci's AWS-compatible APIs and real AWS environments.
-5. **mkcert** — creates and trusts the certificate for `https://llteacher.local` (`brew install mkcert` on macOS).
+One Node 24/Hono ECS Fargate task serves the student app (`/`), instructor
+console (`/admin`) and API (`/api`). All regional resources use **us-west-2**.
 
-Run all commands below from the repository root. Install JavaScript dependencies
-once with `npm install`.
-
-## 2. AWS resources
-
-The Pulumi program in `infra/src/` defines one topology for local, staging, and
-production environments.
-
-| Resource | Why it is needed |
+| Resources | Purpose |
 | --- | --- |
-| VPC, public ALB subnets, private app/database subnets, internet gateway, and NAT gateway | Keep ECS and RDS off the public internet while preserving controlled outbound access. |
-| Load balancer, application, and database security groups | Restrict inbound traffic between the internet, load balancer, ECS tasks, and PostgreSQL. |
-| Application Load Balancer, target group, and HTTPS listener | Route one HTTPS origin to the web app, admin app, and API. |
-| Route 53 validation record and ACM certificate validation | Prove domain ownership and ensure the HTTPS listener receives an issued certificate. |
-| ECS cluster, Fargate service, and task definitions | Run the Node application and the scheduled overdue-work job without managing servers. |
-| ECR repository | Store versioned application container images for AWS deployments. |
-| RDS PostgreSQL 16, DB subnet group, and pgvector | Persist application data and provide vector search. |
-| Secrets Manager | Store the database password and application runtime secrets outside the image and source tree. |
-| Private S3 bucket and public-access block | Store course materials without exposing them publicly. |
-| IAM roles and policies | Give ECS and deployment jobs only the AWS permissions they require. |
-| CloudWatch log groups | Collect application and scheduled-job logs. |
-| EventBridge rule, target, retry policy, SQS dead-letter queue, and alarm | Run overdue work hourly and surface exhausted retries. |
+| VPC, internet gateway, public route table, two public subnets/associations | ALB and app egress without a NAT gateway. |
+| Two private database subnets and DB subnet group | Keep RDS inaccessible from the internet. |
+| Three security groups | Internet → ALB → app:8080 → database:5432; no public app-port ingress. |
+| ALB, target group, listener | One origin and task health/routing. HTTP for bootstrap; HTTPS when domain-ready. |
+| Optional managed Route 53 zone, ACM certificate/validation records, alias | Domain ownership and trusted TLS after selecting/delegating a domain. |
+| ECS cluster, task definition, one service/task; ECR repository | Managed compute and immutable AWS release images. |
+| RDS PostgreSQL 16, encrypted 20 GiB storage | Application data; pgvector initialized by migrations, seven-day production backups. |
+| One private, encrypted, versioned S3 bucket and its safeguards | Uploaded originals and durable knowledge snapshots. |
+| Two Secrets Manager secrets/versions | Database connection and structured application credentials. |
+| Execution/task IAM roles, execution-policy attachment, scoped secret/S3 policies | Pull image, write logs, inject secrets, access course objects. |
+| One CloudWatch log group | Bounded application logs. |
 
-## 3. Deploy locally with Floci
+IAM and Route 53 are global. No NAT/EIP, CloudFront, SQS/DLQ, EventBridge,
+separate worker, scheduled ECS task, Redis, or EFS is created. The main recurring
+costs are ALB, one Fargate task, RDS, and stored data—not each control-plane
+object.
 
-Floci emulates the AWS APIs at `http://localhost:4566`. The `local` Pulumi
-stack is hard-wired to that endpoint and cannot access an AWS account. Floci
-runs in persistent `hybrid` storage mode, with resource data under
-`.floci/data`.
+The overdue sweep runs at startup and hourly, with a same-session PostgreSQL
+advisory lock. Extraction remains in-process; interrupted work is visible and
+retryable. Knowledge files use an S3-backed snapshot with a temporary OKF
+working copy. Scaling to multiple app tasks is not supported by this release.
+Replacement stops the old app before starting the new one, so releases cause
+brief downtime. Migrations complete before that replacement.
 
-### First-time setup
+## Run locally
 
-```sh
-./infra/scripts/install-local-cert.sh
-sudo sh -c 'grep -q "llteacher.local" /etc/hosts || echo "127.0.0.1 llteacher.local" >> /etc/hosts'
-```
-
-`mkcert -install` requires human approval to update the operating system trust
-store. An automation agent must pause for the user at that prompt; it must not
-bypass the HTTPS warning or ask the user to disclose a password.
-
-### Deploy and verify
+Prerequisites: Docker Desktop, Node 24/npm, Pulumi CLI, AWS CLI v2, jq, curl,
+OpenSSL and Bash. From repository root:
 
 ```sh
+npm ci
 npm run aws:local:up
-export LLTEACHER_LOCAL_CA="$PWD/.floci/certs/llteacher.local.pem"
 npm run aws:local:verify
 ```
 
-Open the deployed services:
+- App: [http://localhost:8080](http://localhost:8080)
+- Instructor console: [http://localhost:8080/admin](http://localhost:8080/admin)
+- Health/version: [http://localhost:8080/api/health](http://localhost:8080/api/health)
+- Emulator API: [http://localhost:4566](http://localhost:4566)
 
-- Application: [https://llteacher.local](https://llteacher.local)
-- Admin: [https://llteacher.local/admin](https://llteacher.local/admin)
-- Floci API: [http://localhost:4566](http://localhost:4566)
-- Floci dashboard: [http://localhost:4500](http://localhost:4500) when the separate `floci-ui` container is running; the repository scripts do not start that optional container.
+Floci 2.1.0 creates the actual ECS- and RDS-backed Docker containers. There is no
+directly launched substitute app/database and no Caddy TLS proxy. Pulumi uses
+the same conditional resource graph for the same domain/service configuration
+in local and AWS environments. Floci's ALB data plane uses HTTP, even when an
+HTTPS listener is modeled; it cannot prove real TLS, IAM isolation, public DNS,
+or AWS networking enforcement. Those require real-AWS verification.
 
-Stop the local services without deleting their state:
+Local state lives in ignored `.floci/data`, `.pulumi/local`,
+`infra/Pulumi.local.yaml`, and the owner-only `.floci/pulumi-passphrase`.
+Retain them together. Do not delete volumes/state or run `pulumi destroy` as
+a troubleshooting shortcut.
 
-```sh
-npm run aws:local:down
+`aws:local:down` stops local runtime containers without deleting database
+volumes. The launcher uses a replaceable `:local` image, a dedicated build
+cache with a 2 GiB retention target, and scoped unused-image cleanup. It never
+globally prunes Docker data. Image/cache size reports can share underlying
+layers and should not simply be added together.
+
+Local placeholder credentials allow infrastructure/boot tests only. They do
+**not** enable real WorkOS login or LLM calls. Supply development credentials
+through encrypted local Pulumi configuration and register
+`http://localhost:8080/api/auth/callback` in the WorkOS development environment.
+Do not put credentials in shell history, chat, source code, or Docker build args.
+
+## Secrets and normal configuration
+
+The encrypted Pulumi secret `databasePassword` creates the database URL secret.
+The encrypted `runtimeSecrets` JSON object contains:
+
+```text
+WORKOS_API_KEY
+WORKOS_CLIENT_ID
+WORKOS_WEBHOOK_SECRET
+OPENROUTER_API_KEY
+LLMOXIE_API_KEY
+SESSION_SECRET
+ENCRYPTION_KEY
+BLIND_INDEX_KEY
 ```
 
-### What the launcher does
+Use `pulumi config set --secret databasePassword --stack <stack>` for a
+hidden interactive prompt. Load runtime JSON via secure stdin from an owner-only
+file, not a command-line argument or checked-in plaintext file. Pulumi state
+and stack configuration contain ciphertext; protect access to their backend.
 
-1. Starts or reuses the persistent Floci container and the Caddy TLS proxy.
-2. Initializes the file-backed local Pulumi stack and its ignored, owner-only passphrase file.
-3. Creates the shared resources and ECR repository on the first run.
-4. Builds a freshly tagged application image using `Dockerfile.aws`.
-5. Registers the ECS service at zero desired tasks and runs database migrations as a one-off task.
-6. Enables the application service only after migrations succeed.
-7. Serves the application through Caddy on port 443 and Floci's ALB on port 8443.
+ECS reads these values using the **execution role**, which has
+`secretsmanager:GetSecretValue` for exactly those two secret ARNs. The app
+receives normal environment variables and does not fetch the secrets itself.
+The **task role** accesses S3 through the AWS SDK credential chain; production
+has no static storage access keys. Production database connections verify the
+RDS TLS certificate using the regional CA bundle included in the image.
 
-The local RDS emulator uses `pgvector/pgvector:pg16`, matching production.
-Floci's registry proxy can return `503`, so local deployment uses its supported
-canonical-ECR-URI image lookup instead of pushing through the proxy. Production
-CI performs a real ECR push.
+`APP_URL`, `AWS_REGION`, `STORAGE_BUCKET`, `KNOWLEDGE_ROOT`, `PORT`
+and `BUILD_SHA` are ordinary configuration. WorkOS builds the authorization
+URL; its registered callback must be `${APP_URL}/api/auth/callback`.
+Updating a secret does not update an already running process: replace/redeploy
+the task after rotation.
 
-## 4. Agent operating contract
+## GitHub Actions: AWS releases only
 
-When Claude, Codex, or another automation agent runs this deployment:
+`.github/workflows/test.yml` remains ordinary code CI. `release.yml` runs
+build/tests and deploys to AWS, never Floci. Production runs only from release
+tags (including manual dispatch on a tag) and uses a protected GitHub
+`production` environment. Configure required reviewers and tag restrictions
+in GitHub before enabling the first release.
 
-1. Work from the repository root and confirm `PULUMI_STACK=local` before invoking local scripts.
-2. Check existing containers and Git state before changing anything; reuse the current Floci resources.
-3. Never run `pulumi destroy`, delete `.floci/`, delete `.pulumi/`, remove Docker volumes, or reset local resources without explicit user approval.
-4. Never print `.floci/pulumi-passphrase`, Pulumi secret values, database credentials, or application secrets.
-5. Never use `curl --insecure` or bypass a browser certificate warning; install and verify the mkcert root instead.
-6. Treat `npm run aws:local:up` as idempotent: later runs retain resources and deploy a newly tagged image.
-7. Treat `npm run aws:local:verify` exiting successfully as the deployment acceptance check. It verifies `/`, `/admin`, and `/api/health` over HTTPS.
-8. On failure, capture the failing command, `docker ps`, and relevant container or Pulumi logs without exposing secrets. Do not destroy the stack as a troubleshooting shortcut.
+Required GitHub configuration:
 
-Local generated state is intentionally ignored by Git:
+| Kind | Name | Value |
+| --- | --- | --- |
+| Environment secret | `PULUMI_ACCESS_TOKEN` | Access to the protected Pulumi Cloud stack. |
+| Environment variable | `AWS_DEPLOY_ROLE_ARN` | ARN of the GitHub OIDC deployment role. |
+| Environment variable | `PULUMI_STACK` | Fully qualified `organization/llteacher-infra/production`. |
 
-- `.floci/data/` contains persistent Floci resources.
-- `.floci/pulumi-passphrase` decrypts the local Pulumi state.
-- `.pulumi/local/` is the file-backed Pulumi state backend.
-- `infra/Pulumi.local.yaml` contains generated local stack configuration.
-- `infra/Pulumi.local.example.yaml` documents the non-secret baseline.
+No AWS access keys, database URL, WorkOS keys, provider keys or application
+cryptographic keys belong in GitHub secrets. The separate test job uses
+disposable PostgreSQL credentials and ephemeral test encryption keys.
 
-## 5. Staging and production
+The deployment job installs/builds Pulumi, refreshes encrypted Cloud stack
+configuration, authenticates through GitHub OIDC, bootstraps ECR only if absent,
+publishes the commit image and resolves its digest. It previews/registers a
+candidate while retaining the current service task definition, runs that exact
+candidate as a one-off ECS migration, activates it only after success, waits
+for stability and checks that health reports the expected commit. Failed
+migration stops activation. Releases are serialized.
 
-Staging and production use the same Pulumi program without Floci endpoint
-overrides. Set `llteacher-infra:hostedZoneId` to the Route 53 zone containing
-the configured domain before previewing. The application and database use
-private subnets; the ALB alone uses public subnets. RDS keeps seven days of
-automated backups, requires a final snapshot, enables deletion protection,
-and is protected from accidental Pulumi deletion.
+### One-time account/stack bootstrap (after explicit approval)
 
-The release workflow accepts staging only from `refs/heads/staging` and
-production only from a tag. It registers the new task definition at zero
-desired tasks, runs `infra/scripts/run-aws-migrations.sh`, and enables the
-service only after migrations succeed.
+1. Create the account's GitHub OIDC provider for
+   `https://token.actions.githubusercontent.com`, audience `sts.amazonaws.com`.
+2. Create a deployment role trusted only for that provider and subject
+   `repo:uw-ssec/llteacher:environment:production`. GitHub's protected
+   environment and tag restrictions are part of the authorization boundary.
+3. Supply a reviewed deployment policy covering only the app's EC2 networking,
+   ECS/ECR, RDS, S3, Secrets Manager, CloudWatch Logs, Route 53/ACM and IAM
+   lifecycle operations. Scope concrete ARNs and `iam:PassRole` to
+   `llteacher-production-*` execution/task roles and `ecs-tasks.amazonaws.com`.
+   Some create/list/describe actions require wildcard resources; do not replace
+   the policy review with AdministratorAccess. Restrict regional actions to
+   us-west-2 while accommodating global IAM/Route 53 APIs.
+4. Initialize/select `organization/llteacher-infra/production` in Pulumi Cloud.
+   Set environment, region, bootstrap image tag and encrypted secrets, keeping
+   `provisionService=false` and `deployApp=false` for base bootstrap.
+   Save the initial stack/configuration in the backend before the workflow's
+   `config refresh`. First-time bootstrap requires operator credentials and
+   must not be attempted without approval.
+5. Select a domain manually if HTTPS is required. Set `domainName`, apply
+   zone/certificate/records, delegate the exported `hostedZoneNameServers`
+   at the registrar, then set `domainReady=true` and apply validation/TLS.
+   Domain purchase and registrar changes are not automated.
+6. Review preview, cost, backup/deletion protection, OIDC policy, domain and
+   WorkOS callbacks. Authorize the first tag release separately.
 
-Both environments require a Pulumi secret named `runtimeSecrets`. Its JSON
-object contains `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `OPENROUTER_API_KEY`,
-`LLMOXIE_API_KEY`, `SESSION_SECRET`, `ENCRYPTION_KEY`, `BLIND_INDEX_KEY`, and
-`WORKOS_WEBHOOK_SECRET`. Pulumi writes this object to Secrets Manager, and ECS
-reads only the required keys at task start. Never commit or print these values.
+### Rollback and rotation
+
+The workflow records the previous task-definition reference and image digest.
+A code rollback can select the previous task definition after reviewing schema
+compatibility; migrations are not automatically reversed. Never blindly roll
+back across an incompatible migration. Keep the previous ECR image/task
+definition available. A task replacement is required after secret rotation.
+
+## Verification boundaries and deferred work
+
+Run `npm run typecheck`, `npm test`, `npm run build`, infra mock tests,
+and local shell contract tests. Database-gated tests need disposable pgvector
+PostgreSQL; OKF integration tests need the pinned 0.3.0 binary. Local smoke
+checks supplement tests, not real-AWS validation.
+
+SQS workers, multi-task availability, scaling, full disaster recovery, data
+migration/Django retirement, and production cutover remain deferred. See the
+[M12 audit](../docs/superpowers/plans/2026-09-21-m12-infrastructure-milestone-audit.md).
+Existing dependency-audit findings also need triage before a public release.
+Never mark all Milestone 12 issues complete merely because this stack boots.
