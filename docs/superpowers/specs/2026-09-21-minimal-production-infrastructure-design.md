@@ -1,5 +1,12 @@
 # Minimal production infrastructure design
 
+Backend decision updated by the [2026-09-22 S3 backend design](2026-09-22-s3-pulumi-backend-design.md).
+Use stack `production`, bucket `llteacher-pulumi-state-055237683908-us-west-2`,
+backend `s3://llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra`, and
+KMS alias `alias/llteacher-pulumi-state`. The GitHub OIDC subject is exactly
+`repo:uw-ssec/llteacher:environment:production`. Follow the current
+[bootstrap procedure](../../../infra/README.md#one-time-accountstack-bootstrap-after-explicit-approval).
+
 Approved interactively on 2026-09-21 for the September 30 production testing
 release. This design narrows the work from completing all of Milestone 12 to
 deploying a small, maintainable AWS application stack that can be exercised
@@ -141,11 +148,11 @@ requires a new ECS deployment so replacement tasks receive the new value.
 
 Application secrets are not copied into GitHub repository or environment
 secrets. They are entered during the one-time stack bootstrap as encrypted
-Pulumi stack configuration and materialized into AWS Secrets Manager. With the
-selected Pulumi Cloud state backend, GitHub still needs one infrastructure
-credential: `PULUMI_ACCESS_TOKEN`. `AWS_DEPLOY_ROLE_ARN` is an identifier, not
-a secret, and is stored as a protected GitHub environment variable. AWS access
-itself uses GitHub OIDC and short-lived credentials; no AWS access key is
+Pulumi stack configuration and materialized into AWS Secrets Manager. The S3
+backend uses the dedicated KMS key for state encryption and Pulumi secrets.
+GitHub environment variables `AWS_DEPLOY_ROLE_ARN`, `PULUMI_BACKEND_URL`, and
+`PULUMI_STACK=production` are non-secret identifiers. AWS access uses GitHub
+OIDC and short-lived credentials; no Pulumi access token or AWS access key is
 stored in GitHub.
 
 `APP_URL`, `STORAGE_BUCKET`, the AWS region, and the application port are
@@ -178,9 +185,12 @@ zero-cost control-plane objects. The meaningful recurring cost centers are the
 ALB, one Fargate task, and one RDS instance. Removing the NAT Gateway and the
 separate scheduled task eliminates the largest avoidable fixed/runtime costs.
 
-The GitHub OIDC provider, deployment role, and scoped deployment policy are
-account bootstrap resources, not per-environment application resources. They
-are created once in the AWS account and documented separately. Floci validates
+The state bucket, KMS key/alias, account-wide GitHub OIDC provider, deployment
+role, three scoped managed deployment policies, and managed runtime permissions
+boundary are account bootstrap resources, not application-stack resources.
+The boundary is created before production runtime roles; existing execution/task
+roles must carry that exact boundary before deployment access is enabled.
+They are created once in the AWS account and documented separately. Floci validates
 the application stack; GitHub/AWS federation is validated by the protected
 production deployment workflow.
 

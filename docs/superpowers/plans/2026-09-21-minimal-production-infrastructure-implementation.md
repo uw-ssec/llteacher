@@ -1,5 +1,11 @@
 # Minimal Production Infrastructure Implementation Plan
 
+> **Backend supersession (2026-09-22):** This historical implementation chronology
+> retains its original commands and results. Its Pulumi Cloud/token/qualified-stack
+> instructions are superseded by the [S3 backend design](../specs/2026-09-22-s3-pulumi-backend-design.md)
+> and [current operations guide](../../../infra/README.md). Do not execute historical
+> backend instructions; production now uses the S3 backend and stack `production`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
 
 **Goal:** Replace the current oversized/divergent infrastructure with one minimal ECS/Fargate application stack in us-west-2, validate it locally through Floci, and provide an AWS-only GitHub release workflow that builds, tests, migrates, and deploys without exposing application secrets to GitHub.

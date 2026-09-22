@@ -8,6 +8,24 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 const require = createRequire(import.meta.url);
 const workflow = require('js-yaml').load(readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8'));
+test('production operations use the S3 backend and historical instructions explicitly defer to the new design', () => {
+  const read = path => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
+  for (const path of ['infra/README.md', 'docs/superpowers/specs/2026-09-21-minimal-production-infrastructure-design.md']) {
+    const document = read(path);
+    for (const identity of ['s3://llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra',
+      'alias/llteacher-pulumi-state', 'repo:uw-ssec/llteacher:environment:production', '`production`']) {
+      assert(document.includes(identity), `${path}: missing ${identity}`);
+    }
+    assert.doesNotMatch(document, /PULUMI_ACCESS_TOKEN|organization\/llteacher-infra\/production|pulumi:cloud/);
+  }
+  for (const path of ['docs/superpowers/plans/2026-09-21-minimal-production-infrastructure-implementation.md',
+    'docs/superpowers/plans/2026-09-21-infrastructure-implementation-handoff.md']) {
+    assert.match(read(path).slice(0, 900), /Backend supersession[\s\S]*2026-09-22-s3-pulumi-backend-design\.md/);
+  }
+  const scripts = JSON.parse(read('infra/package.json')).scripts;
+  assert.equal(scripts['pulumi:cloud'], undefined);
+  assert.equal(scripts['pulumi:production'], 'npm run build && PULUMI_BACKEND_URL=s3://llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra AWS_REGION=us-west-2 pulumi --stack production');
+});
 test('production uses the reviewed S3 backend without a Pulumi Cloud token', () => {
   const env = workflow.jobs.production.env;
   assert.equal(env.STACK, '${{ vars.PULUMI_STACK }}');

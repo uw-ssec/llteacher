@@ -8,7 +8,7 @@
     "test": "vitest run && node --test scripts/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "pulumi:local": "npm run build && PULUMI_BACKEND_URL=file://$PWD/.pulumi/local pulumi --stack local",
-    "pulumi:cloud": "npm run build && PULUMI_BACKEND_URL=https://api.pulumi.com pulumi"
+    "pulumi:production": "npm run build && PULUMI_BACKEND_URL=s3://llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra AWS_REGION=us-west-2 pulumi --stack production"
   },
   "dependencies": {
     "@pulumi/aws": "7.46.0",

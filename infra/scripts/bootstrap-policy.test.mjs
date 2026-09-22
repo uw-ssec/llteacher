@@ -1,6 +1,31 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+
+test('bootstrap guide covers fail-closed identity, policy and boundary checks without inline deploy policies', () => {
+  const guide = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+  const bootstrap = guide.split('### One-time account/stack bootstrap')[1]?.split('### Rollback and rotation')[0];
+  assert(bootstrap, 'bootstrap procedure exists');
+  for (const command of ['umask 077', 'mktemp -d', 'get-caller-identity --profile default',
+    'get-key-rotation-status', 'get-bucket-ownership-controls', 'get-public-access-block',
+    'get-bucket-versioning', 'get-bucket-encryption', 'get-bucket-policy', 'get-bucket-tagging',
+    'get-bucket-lifecycle-configuration', 'get-open-id-connect-provider', 'list-roles',
+    'PermissionsBoundary.PermissionsBoundaryArn', 'create-policy-version', 'list-attached-role-policies',
+    'github-compute-policy.json', 'github-data-policy.json', 'runtime-permissions-boundary.json',
+    'llteacher-production-runtime-boundary', 'jq --arg',
+    'awskms://alias/llteacher-pulumi-state?region=us-west-2&awssdk=v2&profile=default']) {
+    assert(bootstrap.includes(command), `missing bootstrap safeguard: ${command}`);
+  }
+  assert.doesNotMatch(bootstrap, /put-role-policy|pulumi[^\n]*\bup\b|--show-secrets|--debug/);
+  assert.match(bootstrap, /privileged migration\/replacement/);
+  assert.match(bootstrap, /No Pulumi access token is used/);
+  assert.match(bootstrap, /Read-only check[\s\S]*Mutation[\s\S]*Verification/);
+  for (const [, shell] of bootstrap.matchAll(/```bash\n([\s\S]*?)```/g)) {
+    const parsed = spawnSync('bash', ['-n'], { input: shell, encoding: 'utf8' });
+    assert.equal(parsed.status, 0, parsed.stderr);
+  }
+});
 
 const account = '055237683908';
 const region = 'us-west-2';

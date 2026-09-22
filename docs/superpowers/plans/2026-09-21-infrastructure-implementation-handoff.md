@@ -1,5 +1,11 @@
 # Infrastructure implementation handoff — 2026-09-21
 
+> **Backend supersession (2026-09-22):** This historical handoff retains its original
+> chronology and test results. Its Pulumi Cloud/token/qualified-stack instructions
+> are superseded by the [S3 backend design](../specs/2026-09-22-s3-pulumi-backend-design.md)
+> and [current operations guide](../../../infra/README.md). Do not execute historical
+> backend instructions; production now uses the S3 backend and stack `production`.
+
 Branch: `ksdani/infra-production-simplification`.
 
 ## Implemented

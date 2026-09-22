@@ -158,16 +158,17 @@ Required GitHub configuration:
 
 | Kind | Name | Value |
 | --- | --- | --- |
-| Environment secret | `PULUMI_ACCESS_TOKEN` | Access to the protected Pulumi Cloud stack. |
 | Environment variable | `AWS_DEPLOY_ROLE_ARN` | ARN of the GitHub OIDC deployment role. |
-| Environment variable | `PULUMI_STACK` | Fully qualified `organization/llteacher-infra/production`. |
+| Environment variable | `PULUMI_BACKEND_URL` | `s3://llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra` |
+| Environment variable | `PULUMI_STACK` | `production` |
 
 No AWS access keys, database URL, WorkOS keys, provider keys or application
 cryptographic keys belong in GitHub secrets. The separate test job uses
 disposable PostgreSQL credentials and ephemeral test encryption keys.
 
-The deployment job installs/builds Pulumi, refreshes encrypted Cloud stack
-configuration, authenticates through GitHub OIDC, bootstraps ECR only if absent,
+The deployment job installs/builds Pulumi, authenticates through GitHub OIDC,
+validates the AWS account and exact S3 backend, selects stack `production`,
+refreshes encrypted stack configuration, bootstraps ECR only if absent,
 loads the test job's checksum-verified image artifact, publishes that same image
 and resolves its digest. It previews/registers a
 candidate while retaining the current service task definition, runs that exact
@@ -176,18 +177,19 @@ for stability and checks that health reports the expected commit. Failed
 migration stops activation. Releases are serialized.
 
 After refresh and before the first AWS mutation, the workflow verifies that the
-Cloud stack still says `aws:region=us-west-2`, `environment=production`, and has
+S3 stack still says `aws:region=us-west-2`, `environment=production`, and has
 a valid `domainName` with `domainReady=true`. Base infrastructure may be
 bootstrapped without a domain while `deployApp=false`; the production app cannot
 be activated until HTTPS is ready. Local Floci remains HTTP-capable.
 
 `run-aws-migrations.sh` now requires exactly two positional arguments: the
-fully qualified stack and the immutable candidate task-definition ARN:
+stack `production` and the immutable candidate task-definition ARN. Use the
+verified production AWS session and backend from the bootstrap procedure:
 
 ```sh
 bash infra/scripts/run-aws-migrations.sh \
-  organization/llteacher-infra/production \
-  arn:aws:ecs:us-west-2:123456789012:task-definition/llteacher-production-app:7
+  production \
+  arn:aws:ecs:us-west-2:055237683908:task-definition/llteacher-production-app:7
 ```
 
 There is no legacy environment-variable fallback. A terminal task whose app
@@ -201,7 +203,10 @@ Before the first workflow run against a stack created by an older revision,
 refresh and inspect it without changing configuration:
 
 ```sh
-export STACK=organization/llteacher-infra/production
+export AWS_PROFILE=default AWS_REGION=us-west-2 STACK=production
+export PULUMI_BACKEND_URL=s3://llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra
+test "$(aws sts get-caller-identity --profile default --region us-west-2 --query Account --output text)" = 055237683908 || exit 1
+pulumi login "$PULUMI_BACKEND_URL"
 pulumi -C infra config refresh --stack "$STACK" --non-interactive
 pulumi -C infra config get aws:region --stack "$STACK"
 pulumi -C infra stack --stack "$STACK" --show-urns
@@ -217,31 +222,675 @@ reconfigured directly to `us-west-2`.
 
 ### One-time account/stack bootstrap (after explicit approval)
 
-1. Create the account's GitHub OIDC provider for
-   `https://token.actions.githubusercontent.com`, audience `sts.amazonaws.com`.
-2. Create a deployment role trusted only for that provider and subject
-   `repo:uw-ssec/llteacher:environment:production`. GitHub's protected
-   environment and tag restrictions are part of the authorization boundary.
-3. Supply a reviewed deployment policy covering only the app's EC2 networking,
-   ECS/ECR, RDS, S3, Secrets Manager, CloudWatch Logs, Route 53/ACM and IAM
-   lifecycle operations. Scope concrete ARNs and `iam:PassRole` to
-   `llteacher-production-*` execution/task roles and `ecs-tasks.amazonaws.com`.
-   Some create/list/describe actions require wildcard resources; do not replace
-   the policy review with AdministratorAccess. Restrict regional actions to
-   us-west-2 while accommodating global IAM/Route 53 APIs.
-4. Initialize/select `organization/llteacher-infra/production` in Pulumi Cloud.
-   Set environment, region, bootstrap image tag and encrypted secrets, keeping
-   `provisionService=false` and `deployApp=false` for base bootstrap.
-   Save the initial stack/configuration in the backend before the workflow's
-   `config refresh`. First-time bootstrap requires operator credentials and
-   must not be attempted without approval.
-5. Configure production HTTPS before an application release. Select a domain,
-   set `domainName`, apply zone/certificate/records, delegate the exported
-   `hostedZoneNameServers` at the registrar, then set `domainReady=true` and
-   apply validation/TLS. Domain purchase and registrar changes are not
-   automated; domainless HTTP is for base-infrastructure bootstrap only.
-6. Review preview, cost, backup/deletion protection, OIDC policy, domain and
-   WorkOS callbacks. Authorize the first tag release separately.
+The [2026-09-22 design](../docs/superpowers/specs/2026-09-22-s3-pulumi-backend-design.md)
+is authoritative. These are reviewed operator commands, not an unattended
+bootstrap script. Run blocks in order from the repository root in a dedicated
+Bash session. Each **Read-only check**, **Mutation**, and **Verification** is a
+separate operator step. Execute mutations only after reviewing the preceding
+check. A mismatch or partial creation means **stop**, preserve the resources,
+and reconcile with the release owner; never delete/recreate to retry. Do not
+enable release tags until all verifications below succeed.
+
+#### 1. Fixed names and caller identity
+
+Start a fresh Bash session, turn off tracing, and prepare owner-only files.
+All AWS commands below use `default`; the `aws_bootstrap` shorthand fixes both
+profile and region, including for global IAM APIs. No credentials are printed.
+Remove inherited endpoint/credential overrides so local emulator settings or
+ambient credentials cannot silently change the target.
+
+```bash
+bash
+```
+
+```bash
+set +x
+set -euo pipefail
+umask 077
+export AWS_PROFILE=default AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2
+export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true AWS_PAGER=''
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
+unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_KMS AWS_ENDPOINT_URL_IAM
+unset AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN PULUMI_CONFIG_PASSPHRASE PULUMI_CONFIG_PASSPHRASE_FILE
+export ACCOUNT_ID=055237683908 STATE_BUCKET=llteacher-pulumi-state-055237683908-us-west-2
+export KMS_ALIAS=alias/llteacher-pulumi-state DEPLOY_ROLE=llteacher-production-deploy
+export PULUMI_BACKEND_URL=s3://llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra
+export PULUMI_STACK=production
+export OIDC_ARN=arn:aws:iam::055237683908:oidc-provider/token.actions.githubusercontent.com
+export BOUNDARY_ARN=arn:aws:iam::055237683908:policy/llteacher-production-runtime-boundary
+BOOTSTRAP_TMP=$(mktemp -d "${TMPDIR:-/tmp}/llteacher-bootstrap.XXXXXXXX")
+chmod 700 "$BOOTSTRAP_TMP"
+aws_bootstrap() { aws --profile default --region us-west-2 --output json "$@"; }
+stop() { printf '%s\n' "$*" >&2; exit 1; }
+# Read helper: only the named absence code is allowed; denial/network errors stop.
+read_optional() {
+  local absence=$1 destination=$2
+  shift 2
+  if aws_bootstrap "$@" >"$destination" 2>"$BOOTSTRAP_TMP/read-error"; then
+    return 0
+  fi
+  if grep -Fq "($absence)" "$BOOTSTRAP_TMP/read-error"; then
+    return 1
+  fi
+  cat "$BOOTSTRAP_TMP/read-error" >&2
+  stop 'Read failed; do not interpret this as absence.'
+}
+same_json() { diff -u <(jq -S . "$1") <(jq -S . "$2"); }
+```
+
+**Read-only check and verification:** confirm the configured region before any
+mutation; explicitly selecting a region is not a substitute for this check.
+
+```bash
+test "$(aws configure get region --profile default)" = us-west-2 || stop 'Wrong configured region.'
+aws sts get-caller-identity --profile default --region us-west-2 --output json >"$BOOTSTRAP_TMP/caller.json"
+jq -e '.Account == "055237683908"' "$BOOTSTRAP_TMP/caller.json"
+jq '{Account, Arn}' "$BOOTSTRAP_TMP/caller.json"
+test "$PULUMI_BACKEND_URL" = s3://llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra
+test "$PULUMI_STACK" = production
+```
+
+Confirm that the displayed principal is the approved bootstrap operator. Stop
+for the wrong account, profile, region, backend, stack, or unexpected principal.
+
+#### 2. Read-only inventory before creation
+
+Only `NotFoundException`, `404`, and `NoSuchEntity` from their respective
+checks mean absent. A bucket `403` can mean a foreign bucket: stop, do not
+choose another name or try to take it over. A newly approved name would require
+re-review of the backend, policies, and workflow.
+
+```bash
+if read_optional NotFoundException "$BOOTSTRAP_TMP/key.json" kms describe-key --key-id "$KMS_ALIAS"; then KMS_EXISTS=true; else KMS_EXISTS=false; fi
+if read_optional 404 "$BOOTSTRAP_TMP/bucket.json" s3api head-bucket --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID"; then BUCKET_EXISTS=true; else BUCKET_EXISTS=false; fi
+if read_optional NoSuchEntity "$BOOTSTRAP_TMP/oidc.json" iam get-open-id-connect-provider --open-id-connect-provider-arn "$OIDC_ARN"; then OIDC_EXISTS=true; else OIDC_EXISTS=false; fi
+if read_optional NoSuchEntity "$BOOTSTRAP_TMP/role.json" iam get-role --role-name "$DEPLOY_ROLE"; then ROLE_EXISTS=true; else ROLE_EXISTS=false; fi
+for policy_name in llteacher-production-runtime-boundary llteacher-production-deploy-state llteacher-production-deploy-compute llteacher-production-deploy-data; do
+  if read_optional NoSuchEntity "$BOOTSTRAP_TMP/$policy_name.json" iam get-policy --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$policy_name"; then
+    jq '.Policy | {Arn, DefaultVersionId, AttachmentCount}' "$BOOTSTRAP_TMP/$policy_name.json"
+  else
+    printf 'Absent managed policy: %s\n' "$policy_name"
+  fi
+done
+```
+
+If the bucket exists but the alias does not, or another resource suggests a
+partially completed bootstrap, stop and reconcile existing key IDs and policy
+versions. Do not mint a replacement key for active state. A KMS alias alone
+does not establish that its target is the intended key: reconcile its ARN with
+the bootstrap record and existing bucket encryption before reuse.
+
+#### 3. KMS key and alias
+
+**Read-only check:** review the inventory, existing key metadata (when present),
+and `infra/bootstrap/pulumi-state-kms-key-policy.json`. For an existing key,
+set `KMS_KEY_ARN` from the metadata and proceed directly to verification.
+
+```bash
+jq . infra/bootstrap/pulumi-state-kms-key-policy.json
+if test "$KMS_EXISTS" = true; then
+  KMS_KEY_ARN=$(jq -er '.KeyMetadata.Arn' "$BOOTSTRAP_TMP/key.json")
+fi
+```
+
+**Mutation — only if the alias and key are confirmed absent:**
+
+```bash
+if test "$KMS_EXISTS" = false; then
+  test "$BUCKET_EXISTS" = false || stop 'Existing bucket without known key: reconcile first.'
+  aws_bootstrap kms create-key --description 'LLTeacher production Pulumi state and secrets' \
+    --key-usage ENCRYPT_DECRYPT --key-spec SYMMETRIC_DEFAULT \
+    --policy file://infra/bootstrap/pulumi-state-kms-key-policy.json \
+    --tags TagKey=Project,TagValue=llteacher TagKey=Environment,TagValue=production TagKey=ManagedBy,TagValue=bootstrap \
+    >"$BOOTSTRAP_TMP/created-key.json"
+  KMS_KEY_ARN=$(jq -er '.KeyMetadata.Arn' "$BOOTSTRAP_TMP/created-key.json")
+fi
+```
+
+**Verification:** persist this non-secret ARN in the bootstrap record immediately;
+if any later step fails, use it to reconcile rather than creating another key.
+
+```bash
+export KMS_KEY_ARN
+[[ "$KMS_KEY_ARN" == arn:aws:kms:us-west-2:055237683908:key/* ]] || stop 'Wrong key ARN.'
+aws_bootstrap kms describe-key --key-id "$KMS_KEY_ARN" >"$BOOTSTRAP_TMP/key.json"
+jq -e --arg arn "$KMS_KEY_ARN" '.KeyMetadata | .Arn == $arn and .AWSAccountId == "055237683908" and .KeyState == "Enabled" and .KeyManager == "CUSTOMER" and .KeyUsage == "ENCRYPT_DECRYPT" and .KeySpec == "SYMMETRIC_DEFAULT"' "$BOOTSTRAP_TMP/key.json"
+printf 'Record KMS key ARN: %s\n' "$KMS_KEY_ARN"
+```
+
+**Read-only check:** enumerate aliases and confirm either an exact target match
+or absence. A different target is a stop condition, never an alias update.
+
+```bash
+aws_bootstrap kms list-aliases >"$BOOTSTRAP_TMP/aliases.json"
+jq --arg alias "$KMS_ALIAS" '.Aliases[] | select(.AliasName == $alias)' "$BOOTSTRAP_TMP/aliases.json"
+```
+
+**Mutation — only for the new key:**
+
+```bash
+if test "$KMS_EXISTS" = false; then
+  jq -e --arg alias "$KMS_ALIAS" '[.Aliases[] | select(.AliasName == $alias)] | length == 0' "$BOOTSTRAP_TMP/aliases.json"
+  aws_bootstrap kms create-alias --alias-name "$KMS_ALIAS" --target-key-id "$KMS_KEY_ARN"
+fi
+```
+
+**Verification:**
+
+```bash
+test "$(aws_bootstrap kms describe-key --key-id "$KMS_ALIAS" --query KeyMetadata.Arn --output text)" = "$KMS_KEY_ARN" || stop 'Mismatched key/alias.'
+```
+
+**Read-only check:**
+
+```bash
+aws_bootstrap kms get-key-rotation-status --key-id "$KMS_KEY_ARN" >"$BOOTSTRAP_TMP/rotation.json"
+```
+
+**Mutation — enable rotation for a new key; existing unexpected settings stop:**
+
+```bash
+if test "$KMS_EXISTS" = false; then
+  aws_bootstrap kms enable-key-rotation --key-id "$KMS_KEY_ARN"
+else
+  jq -e '.KeyRotationEnabled == true' "$BOOTSTRAP_TMP/rotation.json" || stop 'Review existing key rotation mismatch.'
+fi
+```
+
+**Verification — rotation and exact policy:**
+
+```bash
+aws_bootstrap kms get-key-rotation-status --key-id "$KMS_KEY_ARN" | jq -e '.KeyRotationEnabled == true'
+aws_bootstrap kms get-key-policy --key-id "$KMS_KEY_ARN" --policy-name default --query Policy --output text >"$BOOTSTRAP_TMP/key-policy.json"
+same_json infra/bootstrap/pulumi-state-kms-key-policy.json "$BOOTSTRAP_TMP/key-policy.json" || stop 'Unexpected key policy.'
+```
+
+#### 4. State bucket
+
+**Read-only check:** review the `head-bucket` inventory from step 2. Recheck
+immediately before creation to catch a changed or foreign bucket.
+
+```bash
+if read_optional 404 "$BOOTSTRAP_TMP/bucket.json" s3api head-bucket --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID"; then
+  test "$BUCKET_EXISTS" = true || stop 'Bucket appeared after inventory; reconcile.'
+else
+  test "$BUCKET_EXISTS" = false || stop 'Bucket disappeared after inventory.'
+fi
+```
+
+**Mutation — create only if absent:**
+
+```bash
+if test "$BUCKET_EXISTS" = false; then
+  aws_bootstrap s3api create-bucket --bucket "$STATE_BUCKET" \
+    --create-bucket-configuration LocationConstraint=us-west-2 --object-ownership BucketOwnerEnforced
+fi
+```
+
+**Verification:**
+
+```bash
+aws_bootstrap s3api head-bucket --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID"
+test "$(aws_bootstrap s3api get-bucket-location --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" --query LocationConstraint --output text)" = us-west-2 || stop 'Wrong bucket region.'
+```
+
+For each setting below, check first, mutate **only a bucket created in this
+session**, then verify independently. Existing buckets must already match;
+stop for any mismatch and obtain a reviewed repair. The grouped blocks have
+separate check/mutation/verification portions; do not skip a failed check.
+
+```bash
+# Read-only check
+aws_bootstrap s3api get-bucket-ownership-controls --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" >"$BOOTSTRAP_TMP/ownership.json"
+
+# Mutation (new bucket only)
+if test "$BUCKET_EXISTS" = false; then
+  aws_bootstrap s3api put-bucket-ownership-controls --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" --ownership-controls 'Rules=[{ObjectOwnership=BucketOwnerEnforced}]'
+fi
+
+# Verification
+aws_bootstrap s3api get-bucket-ownership-controls --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" | jq -e '.OwnershipControls.Rules == [{"ObjectOwnership":"BucketOwnerEnforced"}]'
+```
+
+```bash
+# Read-only check (a new bucket may have no explicit block configuration)
+if read_optional NoSuchPublicAccessBlockConfiguration "$BOOTSTRAP_TMP/public-access.json" s3api get-public-access-block --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID"; then :; else test "$BUCKET_EXISTS" = false || stop 'Missing public access block.'; fi
+
+# Mutation (new bucket only)
+if test "$BUCKET_EXISTS" = false; then
+  aws_bootstrap s3api put-public-access-block --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+fi
+
+# Verification
+aws_bootstrap s3api get-public-access-block --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" | jq -e '.PublicAccessBlockConfiguration == {"BlockPublicAcls":true,"IgnorePublicAcls":true,"BlockPublicPolicy":true,"RestrictPublicBuckets":true}'
+```
+
+```bash
+# Read-only check
+aws_bootstrap s3api get-bucket-versioning --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID"
+
+# Mutation (new bucket only)
+if test "$BUCKET_EXISTS" = false; then
+  aws_bootstrap s3api put-bucket-versioning --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" --versioning-configuration Status=Enabled
+fi
+
+# Verification
+aws_bootstrap s3api get-bucket-versioning --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" | jq -e '.Status == "Enabled"'
+```
+
+```bash
+# Read-only check
+aws_bootstrap s3api get-bucket-encryption --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID"
+jq -n --arg key "$KMS_KEY_ARN" '{Rules:[{ApplyServerSideEncryptionByDefault:{SSEAlgorithm:"aws:kms",KMSMasterKeyID:$key},BucketKeyEnabled:false}]}' >"$BOOTSTRAP_TMP/encryption.json"
+
+# Mutation (new bucket only)
+if test "$BUCKET_EXISTS" = false; then
+  aws_bootstrap s3api put-bucket-encryption --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" --server-side-encryption-configuration "file://$BOOTSTRAP_TMP/encryption.json"
+fi
+
+# Verification
+aws_bootstrap s3api get-bucket-encryption --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" | jq '.ServerSideEncryptionConfiguration' >"$BOOTSTRAP_TMP/live-encryption.json"
+same_json "$BOOTSTRAP_TMP/encryption.json" "$BOOTSTRAP_TMP/live-encryption.json" || stop 'Wrong bucket key/encryption.'
+```
+
+```bash
+# Read-only check
+if read_optional NoSuchBucketPolicy "$BOOTSTRAP_TMP/bucket-policy-response.json" s3api get-bucket-policy --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID"; then :; else test "$BUCKET_EXISTS" = false || stop 'Missing TLS policy.'; fi
+jq . infra/bootstrap/pulumi-state-bucket-policy.json
+
+# Mutation (new bucket only)
+if test "$BUCKET_EXISTS" = false; then
+  aws_bootstrap s3api put-bucket-policy --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" --policy file://infra/bootstrap/pulumi-state-bucket-policy.json
+fi
+
+# Verification
+aws_bootstrap s3api get-bucket-policy --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" --query Policy --output text >"$BOOTSTRAP_TMP/live-bucket-policy.json"
+same_json infra/bootstrap/pulumi-state-bucket-policy.json "$BOOTSTRAP_TMP/live-bucket-policy.json" || stop 'Unexpected bucket policy.'
+```
+
+```bash
+# Read-only check
+if read_optional NoSuchTagSet "$BOOTSTRAP_TMP/bucket-tags.json" s3api get-bucket-tagging --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID"; then :; else test "$BUCKET_EXISTS" = false || stop 'Missing bootstrap tags.'; fi
+
+# Mutation (new bucket only)
+if test "$BUCKET_EXISTS" = false; then
+  aws_bootstrap s3api put-bucket-tagging --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" --tagging 'TagSet=[{Key=Project,Value=llteacher},{Key=Environment,Value=production},{Key=ManagedBy,Value=bootstrap}]'
+fi
+
+# Verification
+aws_bootstrap s3api get-bucket-tagging --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID" | jq -e '(.TagSet | from_entries) as $tags | $tags.Project == "llteacher" and $tags.Environment == "production" and $tags.ManagedBy == "bootstrap"'
+if read_optional NoSuchLifecycleConfiguration "$BOOTSTRAP_TMP/lifecycle.json" s3api get-bucket-lifecycle-configuration --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID"; then
+  stop 'Unexpected lifecycle configuration; review before continuing.'
+fi
+```
+
+Do not add lifecycle expiration for current/noncurrent state versions. Never
+delete state versions, locks, or the bucket as a recovery shortcut.
+
+#### 5. Account-wide GitHub OIDC provider
+
+**Read-only check:** inspect the existing provider when present. Reuse it;
+other applications may share it. Require the exact issuer and STS audience;
+review any extra client IDs without removing them.
+
+```bash
+if test "$OIDC_EXISTS" = true; then
+  jq -e '.Url == "token.actions.githubusercontent.com" and (.ClientIDList | index("sts.amazonaws.com") != null)' "$BOOTSTRAP_TMP/oidc.json" || stop 'Mismatched OIDC provider.'
+  jq '{Url, ClientIDList, ThumbprintList}' "$BOOTSTRAP_TMP/oidc.json"
+fi
+```
+
+**Mutation — only if absent:**
+
+```bash
+if test "$OIDC_EXISTS" = false; then
+  aws_bootstrap iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com
+fi
+```
+
+**Verification:**
+
+```bash
+aws_bootstrap iam get-open-id-connect-provider --open-id-connect-provider-arn "$OIDC_ARN" >"$BOOTSTRAP_TMP/oidc.json"
+jq -e '.Url == "token.actions.githubusercontent.com" and (.ClientIDList | index("sts.amazonaws.com") != null)' "$BOOTSTRAP_TMP/oidc.json" || stop 'Mismatched OIDC provider.'
+```
+
+The [AWS CLI provider command](https://docs.aws.amazon.com/cli/latest/reference/iam/create-open-id-connect-provider.html)
+can retrieve the thumbprint when omitted; do not paste a guessed certificate
+thumbprint. An existing provider mismatch requires account-owner review.
+
+#### 6. Render and review all four managed policies
+
+There are **three deployment policies** (state, compute, data/global), each
+below AWS's 6,144-character managed-policy limit, plus the separate runtime
+permissions boundary. Do not combine them into an inline deployment policy.
+The boundary `llteacher-production-runtime-boundary` must exist **before any
+Pulumi production role creation**. It is never attached as a deploy-role grant.
+
+Only `${KMS_KEY_ARN}` is substituted in the state template. These files contain
+non-secret permission JSON; displaying them is required for policy review.
+
+```bash
+jq --arg key "$KMS_KEY_ARN" 'walk(if type == "string" and . == "${KMS_KEY_ARN}" then $key else . end)' \
+  infra/bootstrap/github-deploy-policy.template.json >"$BOOTSTRAP_TMP/deploy-state.json"
+jq -e '[.. | strings | select(contains("${"))] | length == 0' "$BOOTSTRAP_TMP/deploy-state.json"
+POLICY_NAMES=(llteacher-production-runtime-boundary llteacher-production-deploy-state llteacher-production-deploy-compute llteacher-production-deploy-data)
+POLICY_FILES=(infra/bootstrap/runtime-permissions-boundary.json "$BOOTSTRAP_TMP/deploy-state.json" infra/bootstrap/github-compute-policy.json infra/bootstrap/github-data-policy.json)
+for policy_file in "${POLICY_FILES[@]}"; do
+  test "$(jq -c . "$policy_file" | tr -d '\n' | wc -m | tr -d ' ')" -le 6144 || stop 'Oversized managed policy.'
+  jq . "$policy_file"
+done
+```
+
+Review the EC2 discovery actions scoped to `us-west-2` with wildcard resources
+and the Route 53 hosted-zone wildcard `arn:aws:route53:::hostedzone/*` as
+explicit scope exceptions. Route 53 permits changes across the account's hosted
+zones and cannot be restricted by the application's zone name here. IAM
+lifecycle and `iam:PassRole` cover only `llteacher-production-execution-role-*`
+and `llteacher-production-task-role-*`, excluding the deployment role.
+
+Repeat the following check/mutation/verification blocks for `POLICY_INDEX=0`,
+then `1`, `2`, and `3`, in that order. Do not run them as an unattended loop.
+
+**Read-only check:**
+
+```bash
+POLICY_INDEX=0 # repeat with 1, 2, then 3 only after verifying the preceding policy
+POLICY_NAME=${POLICY_NAMES[$POLICY_INDEX]}
+POLICY_FILE=${POLICY_FILES[$POLICY_INDEX]}
+POLICY_ARN="arn:aws:iam::$ACCOUNT_ID:policy/$POLICY_NAME"
+if read_optional NoSuchEntity "$BOOTSTRAP_TMP/policy.json" iam get-policy --policy-arn "$POLICY_ARN"; then
+  POLICY_EXISTS=true
+  VERSION_ID=$(jq -er '.Policy.DefaultVersionId' "$BOOTSTRAP_TMP/policy.json")
+  aws_bootstrap iam get-policy-version --policy-arn "$POLICY_ARN" --version-id "$VERSION_ID" --query PolicyVersion.Document >"$BOOTSTRAP_TMP/live-policy.json"
+  same_json "$POLICY_FILE" "$BOOTSTRAP_TMP/live-policy.json" || stop 'Unexpected managed policy; review a privileged update before resuming.'
+else
+  POLICY_EXISTS=false
+fi
+```
+
+**Mutation — create only if absent; identical policies are reused:**
+
+```bash
+if test "$POLICY_EXISTS" = false; then
+  aws_bootstrap iam create-policy --policy-name "$POLICY_NAME" --policy-document "file://$POLICY_FILE"
+fi
+```
+
+**Verification — attachment is done later:**
+
+```bash
+VERSION_ID=$(aws_bootstrap iam get-policy --policy-arn "$POLICY_ARN" --query Policy.DefaultVersionId --output text)
+aws_bootstrap iam get-policy-version --policy-arn "$POLICY_ARN" --version-id "$VERSION_ID" --query PolicyVersion.Document >"$BOOTSTRAP_TMP/live-policy.json"
+same_json "$POLICY_FILE" "$BOOTSTRAP_TMP/live-policy.json" || stop 'Policy version verification failed.'
+```
+
+If a mismatched policy needs an explicitly reviewed update, stop the normal
+bootstrap. An authorized owner may use this separate repair sequence after
+reviewing the diff and all entities affected by the policy. Never silently
+replace a boundary already used by running roles.
+
+**Read-only check for an approved policy repair:**
+
+```bash
+aws_bootstrap iam list-entities-for-policy --policy-arn "$POLICY_ARN"
+aws_bootstrap iam list-policy-versions --policy-arn "$POLICY_ARN" >"$BOOTSTRAP_TMP/versions.json"
+jq -e '.Versions | length < 5' "$BOOTSTRAP_TMP/versions.json" || stop 'Five policy versions exist; review retention separately.'
+jq . "$POLICY_FILE"
+```
+
+**Mutation — approved repair only:**
+
+```bash
+aws_bootstrap iam create-policy-version --policy-arn "$POLICY_ARN" --policy-document "file://$POLICY_FILE" --set-as-default
+```
+
+**Verification:** repeat the default-version read and exact comparison above,
+then restart inventory. Do not delete policy versions to make room automatically.
+
+#### 7. Audit runtime boundaries before granting deployment access
+
+**Read-only check and verification:** enumerate all existing roles with either
+runtime prefix and retrieve each exact boundary. An unbounded or differently
+bounded role means **stop for privileged migration/replacement**. The deploy
+role intentionally cannot add, replace, or remove permissions boundaries.
+
+```bash
+aws_bootstrap iam get-policy --policy-arn "$BOUNDARY_ARN" >"$BOOTSTRAP_TMP/boundary.json"
+aws_bootstrap iam list-roles >"$BOOTSTRAP_TMP/all-roles.json"
+jq -r '.Roles[] | select((.RoleName | startswith("llteacher-production-execution-role-")) or (.RoleName | startswith("llteacher-production-task-role-"))) | .RoleName' "$BOOTSTRAP_TMP/all-roles.json" >"$BOOTSTRAP_TMP/runtime-role-names"
+while IFS= read -r runtime_role; do
+  aws_bootstrap iam get-role --role-name "$runtime_role" >"$BOOTSTRAP_TMP/runtime-role.json"
+  jq -e --arg boundary "$BOUNDARY_ARN" '.Role.PermissionsBoundary.PermissionsBoundaryArn == $boundary' "$BOOTSTRAP_TMP/runtime-role.json" || stop 'Runtime role requires privileged migration/replacement.'
+done <"$BOOTSTRAP_TMP/runtime-role-names"
+```
+
+#### 8. Deployment role trust and grants
+
+**Read-only check:** trust must match the checked-in policy with subject
+`repo:uw-ssec/llteacher:environment:production` and audience `sts.amazonaws.com`.
+Unexpected existing trust is a stop condition. Compare before considering an
+owner-reviewed update; never automatically broaden trust.
+
+```bash
+jq . infra/bootstrap/github-oidc-trust-policy.json
+if test "$ROLE_EXISTS" = true; then
+  aws_bootstrap iam get-role --role-name "$DEPLOY_ROLE" --query Role.AssumeRolePolicyDocument >"$BOOTSTRAP_TMP/live-trust.json"
+  same_json infra/bootstrap/github-oidc-trust-policy.json "$BOOTSTRAP_TMP/live-trust.json" || stop 'Unexpected role trust; owner review required.'
+fi
+```
+
+**Mutation — create only if absent:**
+
+```bash
+if test "$ROLE_EXISTS" = false; then
+  aws_bootstrap iam create-role --role-name "$DEPLOY_ROLE" --assume-role-policy-document file://infra/bootstrap/github-oidc-trust-policy.json
+fi
+```
+
+**Verification:**
+
+```bash
+aws_bootstrap iam get-role --role-name "$DEPLOY_ROLE" --query Role.AssumeRolePolicyDocument >"$BOOTSTRAP_TMP/live-trust.json"
+same_json infra/bootstrap/github-oidc-trust-policy.json "$BOOTSTRAP_TMP/live-trust.json" || stop 'Trust verification failed.'
+```
+
+For an existing mismatched trust, the normal flow has stopped. After an owner
+has reviewed the live/checked-in diff and explicitly approved that repair:
+
+```bash
+# Read-only check
+aws_bootstrap iam get-role --role-name "$DEPLOY_ROLE" --query Role.AssumeRolePolicyDocument
+jq . infra/bootstrap/github-oidc-trust-policy.json
+
+# Mutation (approved repair only)
+aws_bootstrap iam update-assume-role-policy --role-name "$DEPLOY_ROLE" --policy-document file://infra/bootstrap/github-oidc-trust-policy.json
+
+# Verification
+aws_bootstrap iam get-role --role-name "$DEPLOY_ROLE" --query Role.AssumeRolePolicyDocument >"$BOOTSTRAP_TMP/live-trust.json"
+same_json infra/bootstrap/github-oidc-trust-policy.json "$BOOTSTRAP_TMP/live-trust.json" || stop 'Trust verification failed.'
+```
+
+**Read-only check:** no inline policies or unrelated managed policies may be
+present. Review any existing deploy-role boundary as well; stop if unexpected.
+
+```bash
+aws_bootstrap iam get-role --role-name "$DEPLOY_ROLE" | jq -e '.Role.PermissionsBoundary == null'
+aws_bootstrap iam list-role-policies --role-name "$DEPLOY_ROLE" | jq -e '.PolicyNames | length == 0'
+aws_bootstrap iam list-attached-role-policies --role-name "$DEPLOY_ROLE" >"$BOOTSTRAP_TMP/attachments.json"
+jq -e --arg prefix "arn:aws:iam::$ACCOUNT_ID:policy/llteacher-production-deploy-" 'all(.AttachedPolicies[]; .PolicyArn == ($prefix + "state") or .PolicyArn == ($prefix + "compute") or .PolicyArn == ($prefix + "data"))' "$BOOTSTRAP_TMP/attachments.json"
+```
+
+**Mutation — after the runtime-role audit succeeds:** attach the three reviewed
+policies; repeating an existing attachment is harmless.
+
+```bash
+for policy_name in llteacher-production-deploy-state llteacher-production-deploy-compute llteacher-production-deploy-data; do
+  aws_bootstrap iam attach-role-policy --role-name "$DEPLOY_ROLE" --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/$policy_name"
+done
+```
+
+**Verification:** check the complete attachment set and each current default
+version against the reviewed JSON. Re-run step 7 before enabling releases.
+
+```bash
+aws_bootstrap iam list-attached-role-policies --role-name "$DEPLOY_ROLE" >"$BOOTSTRAP_TMP/attachments.json"
+jq -e --arg prefix "arn:aws:iam::$ACCOUNT_ID:policy/llteacher-production-deploy-" '([.AttachedPolicies[].PolicyArn] | sort) == ([$prefix + "state", $prefix + "compute", $prefix + "data"] | sort)' "$BOOTSTRAP_TMP/attachments.json"
+for index in 1 2 3; do
+  POLICY_ARN="arn:aws:iam::$ACCOUNT_ID:policy/${POLICY_NAMES[$index]}"
+  VERSION_ID=$(aws_bootstrap iam get-policy --policy-arn "$POLICY_ARN" --query Policy.DefaultVersionId --output text)
+  aws_bootstrap iam get-policy-version --policy-arn "$POLICY_ARN" --version-id "$VERSION_ID" --query PolicyVersion.Document >"$BOOTSTRAP_TMP/live-policy.json"
+  same_json "${POLICY_FILES[$index]}" "$BOOTSTRAP_TMP/live-policy.json" || stop 'Attached policy changed.'
+done
+```
+
+#### 9. Protected GitHub environment
+
+**Read-only check:** in `uw-ssec/llteacher`, inspect the `production` environment,
+required reviewers, tag deployment rules, and existing variables. Stop for
+unexpected settings. **Mutation:** configure the protected environment using
+GitHub settings, with required reviewers and version-tag restrictions, and set:
+
+| Environment variable | Exact value |
+| --- | --- |
+| `AWS_DEPLOY_ROLE_ARN` | `arn:aws:iam::055237683908:role/llteacher-production-deploy` |
+| `PULUMI_BACKEND_URL` | `s3://llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra` |
+| `PULUMI_STACK` | `production` |
+
+**Verification:** reload settings and check all three values, required reviewers,
+and tag restrictions. No Pulumi access token is used. Do not add AWS credentials
+or application secrets to GitHub. This step does not authorize a release tag.
+
+#### 10. Initialize the S3 stack with KMS secrets
+
+Retain the old empty Cloud stack; do not transfer or delete it. Start fresh on
+S3. Keep local Floci containers, volumes, keys, and encrypted state untouched.
+
+**Read-only check:** repeat caller/account, alias, bucket, and backend checks
+above. Install/build the infrastructure locally before Pulumi commands:
+
+```bash
+export AWS_PROFILE=default AWS_REGION=us-west-2
+export PULUMI_BACKEND_URL=s3://llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra
+export PULUMI_STACK=production
+test "$(aws sts get-caller-identity --profile default --region us-west-2 --query Account --output text)" = "$ACCOUNT_ID"
+npm run build --workspace=infra
+```
+
+**Mutation — local backend selection, then read-only stack inventory:**
+
+```bash
+pulumi login "$PULUMI_BACKEND_URL"
+test "$(pulumi whoami --verbose --json | jq -r '.url')" = "$PULUMI_BACKEND_URL" || stop 'Wrong Pulumi backend.'
+pulumi -C infra stack ls --json >"$BOOTSTRAP_TMP/stacks.json"
+jq . "$BOOTSTRAP_TMP/stacks.json"
+```
+
+**Mutation — only if `production` is absent:** inspect the inventory and stop
+if it already exists; that is a resume/reconciliation task, not a fresh init.
+
+```bash
+jq -e 'all(.[]; .name != "production" and (.name | endswith("/production") | not))' "$BOOTSTRAP_TMP/stacks.json"
+test ! -e infra/Pulumi.production.yaml || stop 'Existing production config: reconcile before init.'
+pulumi -C infra stack init production --secrets-provider 'awskms://alias/llteacher-pulumi-state?region=us-west-2&awssdk=v2&profile=default'
+```
+
+**Verification:**
+
+```bash
+pulumi -C infra stack --stack production --show-urns
+node --input-type=module -e 'import fs from "node:fs"; import yaml from "js-yaml"; const c=yaml.load(fs.readFileSync("infra/Pulumi.production.yaml","utf8")); if(c.secretsprovider !== "awskms://alias/llteacher-pulumi-state?region=us-west-2&awssdk=v2&profile=default") process.exit(1);'
+```
+
+#### 11. Production configuration and secure secret entry
+
+**Read-only check:** inspect masked configuration before setting anything:
+
+```bash
+pulumi -C infra config --stack production
+```
+
+**Mutation — non-secret initial configuration:**
+
+```bash
+pulumi -C infra config set aws:region us-west-2 --stack production
+pulumi -C infra config set environment production --stack production
+pulumi -C infra config set imageTag bootstrap --stack production
+pulumi -C infra config set provisionService false --stack production
+pulumi -C infra config set deployApp false --stack production
+pulumi -C infra config set domainReady false --stack production
+```
+
+**Verification:**
+
+```bash
+test "$(pulumi -C infra config get aws:region --stack production)" = us-west-2
+test "$(pulumi -C infra config get environment --stack production)" = production
+test "$(pulumi -C infra config get provisionService --stack production)" = false
+test "$(pulumi -C infra config get deployApp --stack production)" = false
+pulumi -C infra config --stack production
+```
+
+Generate fresh production database and cryptographic secrets in an approved
+password manager. Obtain production WorkOS and LLM credentials from approved
+production sources. Never copy local development credentials automatically.
+Do not enable shell tracing, display secret files, put values on the command
+line, or use a terminal recorder during secret entry.
+
+**Read-only check:** verify the masked config above has no unexpected existing
+secret values before adding new ones. **Mutation — hidden interactive input:**
+
+```bash
+pulumi -C infra config set --secret databasePassword --stack production
+pulumi -C infra config set --secret runtimeSecrets --stack production
+```
+
+At the second hidden prompt, paste the complete JSON object containing the
+eight keys listed in “Secrets and normal configuration.” For multiline JSON,
+use secure stdin from an owner-only file provided through your approved secret
+workflow instead of the second prompt:
+
+```bash
+# Populate this owner-only path through the approved secret workflow first.
+test -f "$BOOTSTRAP_TMP/runtime-secrets.json" || stop 'Secure secret file missing.'
+chmod 600 "$BOOTSTRAP_TMP/runtime-secrets.json"
+jq -e 'type == "object" and (["WORKOS_API_KEY","WORKOS_CLIENT_ID","WORKOS_WEBHOOK_SECRET","OPENROUTER_API_KEY","LLMOXIE_API_KEY","SESSION_SECRET","ENCRYPTION_KEY","BLIND_INDEX_KEY"] - keys | length == 0) and all(.[]; type == "string" and length > 0)' "$BOOTSTRAP_TMP/runtime-secrets.json" >/dev/null 2>&1 || stop 'Invalid runtime secret JSON or missing required keys.'
+pulumi -C infra config set --secret runtimeSecrets --stack production <"$BOOTSTRAP_TMP/runtime-secrets.json"
+```
+
+**Verification:** masked config only; never run a secret-specific config read.
+
+```bash
+pulumi -C infra config --stack production
+```
+
+The [Pulumi config command](https://www.pulumi.com/docs/iac/cli/commands/pulumi_config_set/)
+accepts omitted values through prompting or stdin. Remove the temporary plaintext
+secret file using your approved secret-file cleanup procedure after encryption;
+retain only non-secret bootstrap records. Do not commit plaintext secrets.
+
+#### 12. Preview and stop
+
+**Read-only verification:**
+
+```bash
+test "$(pulumi whoami --verbose --json | jq -r '.url')" = "$PULUMI_BACKEND_URL"
+test "$(aws sts get-caller-identity --profile default --region us-west-2 --query Account --output text)" = 055237683908
+pulumi -C infra preview --stack production --non-interactive
+```
+
+Stop after preview for cost/security review and explicit apply authorization.
+Review resource counts, network exposure, exact IAM roles/boundaries, backups,
+deletion protection, and recurring ALB/RDS/KMS/storage costs. Any unexpected
+resource, account, region, backend, stack, replacement, or deletion stops the
+process. Preview may use backend locks, but does not create application resources.
+Do not use a release workflow as a substitute for the separate first-apply gate.
+
+After separately authorized base infrastructure creation, configure `domainName`,
+delegate the exported Route 53 nameservers, verify DNS and ACM, and separately
+preview/review HTTPS activation with `domainReady=true`. Register the WorkOS
+callback `https://<domain>/api/auth/callback`. The first application release needs
+its own approval; domainless HTTP is allowed only while the app is inactive.
 
 ### Rollback and rotation
 
@@ -255,8 +904,11 @@ After confirming schema compatibility, copy the values from the workflow's
 rollback summary and run:
 
 ```sh
-export STACK=organization/llteacher-infra/production
-export PREVIOUS_TASK=arn:aws:ecs:us-west-2:123456789012:task-definition/llteacher-production-app:6
+export AWS_PROFILE=default AWS_REGION=us-west-2 STACK=production
+export PULUMI_BACKEND_URL=s3://llteacher-pulumi-state-055237683908-us-west-2/llteacher-infra
+test "$(aws sts get-caller-identity --profile default --region us-west-2 --query Account --output text)" = 055237683908 || exit 1
+pulumi login "$PULUMI_BACKEND_URL"
+export PREVIOUS_TASK=arn:aws:ecs:us-west-2:055237683908:task-definition/llteacher-production-app:6
 pulumi -C infra config set --stack "$STACK" serviceTaskDefinition "$PREVIOUS_TASK"
 pulumi -C infra config set --stack "$STACK" provisionService true
 pulumi -C infra config set --stack "$STACK" deployApp true
