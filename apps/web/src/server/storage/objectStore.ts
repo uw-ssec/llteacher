@@ -2,7 +2,7 @@
  * AWS uses the default refreshing credential chain; explicit endpoint credentials
  * support local emulators. Missing objects return null, while other failures
  * remain errors so callers cannot mistake an outage for an empty course. */
-import { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, HeadObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 
 export interface StoredObject {
   key: string;
@@ -58,6 +58,22 @@ export interface S3StoreConfig {
   region?: string;
 }
 
+/** Missing GET/HEAD can be 403 when bucket listing is prefix-restricted.
+ * An explicit bounded LIST supplies the prefix IAM condition. Never infer
+ * absence from access denial alone or from an incomplete/invalid response.
+ * This applies to current objects only, never an explicitly selected version. */
+export async function isMissingS3Object(client: S3Client, bucket: string, key: string, error: unknown): Promise<boolean> {
+  const status = (error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
+  if (status === 404) return true;
+  if (status !== 403) return false;
+  const listing = await client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: key, MaxKeys: 1 }));
+  const objects = listing.Contents === undefined ? [] : listing.Contents;
+  if (listing.IsTruncated !== false || !Array.isArray(objects) || objects.length > 1 || listing.KeyCount !== objects.length
+    || (listing.Prefix !== undefined && listing.Prefix !== key) || (listing.CommonPrefixes?.length ?? 0) !== 0
+    || objects.some(object => !object || typeof object.Key !== "string" || !object.Key.startsWith(key))) return false;
+  return !objects.some(object => object.Key === key);
+}
+
 export function s3ObjectStore(config: S3StoreConfig): ObjectStore {
   const client = new S3Client({
     endpoint: config.endpoint,
@@ -69,10 +85,11 @@ export function s3ObjectStore(config: S3StoreConfig): ObjectStore {
       credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
     } : {}),
   });
-  async function run<T>(operation: "put" | "get" | "delete" | "head", fn: () => Promise<T>): Promise<T | null> {
+  async function run<T>(operation: "put" | "get" | "delete" | "head", fn: () => Promise<T>, key?: string): Promise<T | null> {
     try { return await fn(); } catch (error) {
       const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
       if (status === 404 && operation !== "put") return null;
+      if ((operation === "get" || operation === "head") && key !== undefined && await isMissingS3Object(client, config.bucket, key, error)) return null;
       if (status) throw new StorageError(operation, status);
       throw error;
     }
@@ -83,7 +100,7 @@ export function s3ObjectStore(config: S3StoreConfig): ObjectStore {
       await run("put", () => client.send(new PutObjectCommand({ Bucket: config.bucket, Key: key, Body: new Uint8Array(body), ContentType: opts.contentType })));
     },
     async get(key) {
-      const result = await run("get", () => client.send(new GetObjectCommand({ Bucket: config.bucket, Key: key })));
+      const result = await run("get", () => client.send(new GetObjectCommand({ Bucket: config.bucket, Key: key })), key);
       if (!result?.Body) return null;
       return new Uint8Array(await result.Body.transformToByteArray()).buffer;
     },
@@ -91,7 +108,7 @@ export function s3ObjectStore(config: S3StoreConfig): ObjectStore {
       await run("delete", () => client.send(new DeleteObjectCommand({ Bucket: config.bucket, Key: key })));
     },
     async head(key) {
-      const result = await run("head", () => client.send(new HeadObjectCommand({ Bucket: config.bucket, Key: key })));
+      const result = await run("head", () => client.send(new HeadObjectCommand({ Bucket: config.bucket, Key: key })), key);
       return result ? { key, size: result.ContentLength ?? 0, contentType: result.ContentType ?? null } : null;
     },
   };

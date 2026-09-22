@@ -31,10 +31,19 @@ version or initializes an empty replacement after corruption.
 
 Run this **from an authenticated operator checkout**, not inside the production
 image. Use an operator role scoped to this bucket/course with `s3:ListBucketVersions`
-on the bucket (course prefix condition), `s3:GetBucketVersioning` on the bucket,
+and `s3:ListBucket` on the bucket, each restricted by the `s3:prefix` condition
+`courses/<UUID>/knowledge/*`, `s3:GetBucketVersioning` on the bucket,
 and `s3:GetObject`, `s3:GetObjectVersion`, `s3:PutObject` on
 `courses/<UUID>/knowledge/*`. The application role does not need version reads.
 Use the normal AWS credential chain; never put credentials in command arguments.
+
+A missing current object can return HTTP 403 when listing permission is scoped
+by prefix. Runtime and recovery explicitly probe that exact key with
+`ListObjectsV2` (`Prefix` equal to the full key, `MaxKeys=1`). Only a complete,
+valid result without the exact key establishes absence; a listed prefix neighbor
+is not the object itself. Existing objects, denied listings and inconclusive
+responses fail closed. Failure to read the explicitly selected source version
+always stops recovery and never invokes this current-object existence fallback.
 
 1. Stop the ECS service and verify every application writer has stopped. Preserve
    the local course directory for investigation. Keep S3 bucket versioning enabled.

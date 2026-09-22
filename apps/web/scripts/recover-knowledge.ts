@@ -2,7 +2,7 @@ import { GetBucketVersioningCommand, GetObjectCommand, PutObjectCommand, S3Clien
 import { pathToFileURL } from "node:url";
 import { recoverKnowledge } from "../src/server/knowledge/recovery";
 import { KnowledgePersistenceError, knowledgeManifestKey, knowledgeSnapshotKey } from "../src/server/knowledge/persistence-format";
-import type { ObjectStore } from "../src/server/storage/objectStore";
+import { isMissingS3Object, type ObjectStore } from "../src/server/storage/objectStore";
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
   const flags = new Map<string, string>();
@@ -41,7 +41,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         if (!result.Body) throw new Error("S3 object has no body");
         return Uint8Array.from(await result.Body.transformToByteArray()).buffer;
       } catch (error) {
-        if ((error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode !== 404) throw error;
+        if (!await isMissingS3Object(client, bucket, objectKey, error)) throw error;
         if (objectKey === manifestKey) { currentEtag = undefined; observedCurrent = true; }
         return null;
       }
