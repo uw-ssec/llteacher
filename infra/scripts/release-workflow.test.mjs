@@ -8,6 +8,25 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 const require = createRequire(import.meta.url);
 const workflow = require('js-yaml').load(readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8'));
+test('production uses the reviewed S3 backend without a Pulumi Cloud token', () => {
+  const env = workflow.jobs.production.env;
+  assert.equal(env.STACK, '${{ vars.PULUMI_STACK }}');
+  assert.equal(env.PULUMI_BACKEND_URL, '${{ vars.PULUMI_BACKEND_URL }}');
+  assert.equal(env.PULUMI_ACCESS_TOKEN, undefined);
+  assert(!readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8').includes('PULUMI_ACCESS_TOKEN'));
+});
+test('AWS identity and S3 backend are selected before stack reads or mutations', () => {
+  const steps = workflow.jobs.production.steps;
+  const oidc = steps.findIndex(s => s.uses?.startsWith('aws-actions/configure-aws-credentials'));
+  const select = steps.findIndex(s => s.name === 'Validate AWS identity and select Pulumi backend');
+  const refresh = steps.findIndex(s => s.name === 'Refresh encrypted stack configuration');
+  const mutate = steps.findIndex(s => s.name === 'Bootstrap base infrastructure only when ECR is absent');
+  assert(oidc >= 0 && select > oidc && refresh > select && mutate > refresh);
+  assert.match(steps[select].run, /aws sts get-caller-identity/);
+  assert.match(steps[select].run, /validate_aws_account/);
+  assert.match(steps[select].run, /pulumi login "\$PULUMI_BACKEND_URL"/);
+  assert.match(steps[select].run, /stack select "\$STACK" --non-interactive/);
+});
 test('production runner installs and builds infrastructure before any Pulumi use', () => {
   const steps = workflow.jobs.production.steps;
   const firstPulumi = steps.findIndex(s => s.uses?.startsWith('pulumi/') || s.run?.includes('pulumi '));

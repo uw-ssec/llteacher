@@ -106,7 +106,7 @@ jobs:
     env:
       AWS_REGION: us-west-2
       STACK: ${{ vars.PULUMI_STACK }}
-      PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+      PULUMI_BACKEND_URL: ${{ vars.PULUMI_BACKEND_URL }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -131,6 +131,14 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-west-2
+      - name: Validate AWS identity and select Pulumi backend
+        run: |
+          source infra/scripts/aws-release-common.sh
+          validate_release_target "$STACK"
+          account=$(aws sts get-caller-identity --query Account --output text)
+          validate_aws_account "$account"
+          pulumi login "$PULUMI_BACKEND_URL"
+          pulumi -C infra stack select "$STACK" --non-interactive
       - uses: actions/download-artifact@v4
         with:
           name: release-image-${{ github.sha }}
