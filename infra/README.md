@@ -35,6 +35,11 @@ working copy. Scaling to multiple app tasks is not supported by this release.
 Replacement stops the old app before starting the new one, so releases cause
 brief downtime. Migrations complete before that replacement.
 
+When switching an existing filesystem knowledge store to S3, migrate it
+explicitly first. A nonempty local course without a remote snapshot is refused
+rather than silently deleted or uploaded. Fresh temporary working roots restore
+normally; do not point production at an unreviewed legacy directory.
+
 ## Run locally
 
 Prerequisites: Docker Desktop, Node 24/npm, Pulumi CLI, AWS CLI v2, jq, curl,
@@ -131,7 +136,8 @@ disposable PostgreSQL credentials and ephemeral test encryption keys.
 
 The deployment job installs/builds Pulumi, refreshes encrypted Cloud stack
 configuration, authenticates through GitHub OIDC, bootstraps ECR only if absent,
-publishes the commit image and resolves its digest. It previews/registers a
+loads the test job's checksum-verified image artifact, publishes that same image
+and resolves its digest. It previews/registers a
 candidate while retaining the current service task definition, runs that exact
 candidate as a one-off ECS migration, activates it only after success, waits
 for stability and checks that health reports the expected commit. Failed
