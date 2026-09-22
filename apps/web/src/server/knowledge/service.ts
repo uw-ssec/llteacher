@@ -1,6 +1,6 @@
 import { promises as fs, realpathSync } from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { zipSync, strToU8 } from "fflate";
 import { runOkf } from "./okfCli";
 import { withWriteLock } from "./writeLock";
@@ -8,6 +8,8 @@ import { isValidConceptId } from "./conceptId";
 import { parseFrontmatter, setFrontmatterKeys } from "./frontmatter";
 import { parseLinks } from "./parseLinks";
 import { appendLogEntry, type IndexEntry } from "./bundle";
+import { storageFromEnv } from "../storage/objectStore";
+import { PersistentKnowledgeService } from "./persistent-service";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DIR_RE = /^[a-z0-9-]+(?:\/[a-z0-9-]+)*$/;
@@ -684,14 +686,14 @@ async function walkMarkdown(dir: string, rel: string): Promise<string[]> {
   return out;
 }
 
-/** I-2 (final review): one service instance per (root, binary), reused for
+/** I-2 (final review): one service instance per (root, binary, storage config), reused for
  *  the life of the process. The instance owns the list() cache, so building
  *  a new one per request -- as this factory used to -- meant that cache was
  *  born and died inside a single request and could never once be hit. Keyed
  *  on the root AS GIVEN, before the constructor's realpath: two envs naming
  *  the same directory differently are rare, and resolving here would mean a
  *  filesystem call on the request path just to look up a cache. */
-const serviceInstances = new Map<string, OkfKnowledgeService>();
+const serviceInstances = new Map<string, KnowledgeService>();
 
 /** Thrown when KNOWLEDGE_ROOT is unset (#81 has not mounted the bundle
  *  filesystem yet). Chat already degrades to "no knowledge" on any failure
@@ -707,10 +709,21 @@ export function knowledgeServiceFromEnv(env: Env): KnowledgeService {
   const root = env.KNOWLEDGE_ROOT;
   if (!root) throw new KnowledgeNotConfiguredError();
   const binary = env.OKF_BINARY ?? "okf";
-  const key = `${root}|${binary}`;
+  const storageConfig = env.STORAGE_BUCKET
+    ? createHash("sha256").update(JSON.stringify([
+        env.STORAGE_BUCKET,
+        env.STORAGE_ENDPOINT ?? "",
+        env.AWS_REGION ?? "",
+        env.STORAGE_ACCESS_KEY_ID ?? "",
+        env.STORAGE_SECRET_ACCESS_KEY ?? "",
+      ])).digest("hex")
+    : "filesystem";
+  const key = `${root}|${binary}|${storageConfig}`;
   let service = serviceInstances.get(key);
   if (!service) {
-    service = new OkfKnowledgeService({ root, binary });
+    service = env.STORAGE_BUCKET
+      ? new PersistentKnowledgeService({ root, binary, storage: storageFromEnv(env) })
+      : new OkfKnowledgeService({ root, binary });
     serviceInstances.set(key, service);
   }
   return service;
