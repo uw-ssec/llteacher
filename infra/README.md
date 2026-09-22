@@ -35,6 +35,13 @@ working copy. Scaling to multiple app tasks is not supported by this release.
 Replacement stops the old app before starting the new one, so releases cause
 brief downtime. Migrations complete before that replacement.
 
+The public app subnets, public task IP, and unrestricted outbound security-group
+rule are an intentional NAT-free cost tradeoff for this first production shape.
+Ingress still flows only through the ALB, and RDS remains private. This does not
+provide an outbound network choke point; VPC endpoints, Flow Logs, and tighter
+egress remain deferred compensating controls that must be revisited before the
+threat model or scale changes.
+
 When switching an existing filesystem knowledge store to S3, migrate it
 explicitly first. A nonempty local course without a remote snapshot is refused
 rather than silently deleted or uploaded. Fresh temporary working roots restore
@@ -111,8 +118,22 @@ ECS reads these values using the **execution role**, which has
 `secretsmanager:GetSecretValue` for exactly those two secret ARNs. The app
 receives normal environment variables and does not fetch the secrets itself.
 The **task role** accesses S3 through the AWS SDK credential chain; production
-has no static storage access keys. Production database connections verify the
-RDS TLS certificate using the regional CA bundle included in the image.
+has no static storage access keys. Its object access and bucket listing are
+limited to `courses/*/materials/*` and `courses/*/knowledge/*`. This is one
+shared application role across every course, not an IAM tenant boundary and not
+per-course isolation. Course authorization remains an application concern.
+Production database connections verify the RDS TLS certificate using the
+regional CA bundle included in the image.
+
+Normal app tasks do not receive `s3:GetObjectVersion` or
+`s3:ListBucketVersions`. An operator performing recovery should assume a
+separate, temporary role limited to the production materials bucket. Grant
+`s3:GetBucketVersioning` on that bucket; grant `s3:ListBucket` and
+`s3:ListBucketVersions` on the bucket conditioned to the affected
+`courses/<course-id>/knowledge/*` prefix; and grant `s3:GetObject`,
+`s3:GetObjectVersion`, and `s3:PutObject` only on objects under that prefix.
+Remove the temporary grant after the reviewed recovery. Do not add
+version-history access to the shared app task role.
 
 `APP_URL`, `AWS_REGION`, `STORAGE_BUCKET`, `KNOWLEDGE_ROOT`, `PORT`
 and `BUILD_SHA` are ordinary configuration. WorkOS builds the authorization
@@ -127,6 +148,11 @@ build/tests and deploys to AWS, never Floci. Production runs only from release
 tags (including manual dispatch on a tag) and uses a protected GitHub
 `production` environment. Configure required reviewers and tag restrictions
 in GitHub before enabling the first release.
+
+This intentionally removes the former push-to-`staging` auto-deploy path:
+branch pushes do not deploy any AWS environment. Automated release support is
+production-only; adding another environment requires a separately reviewed
+release design rather than changing `STACK`.
 
 Required GitHub configuration:
 
@@ -149,6 +175,46 @@ candidate as a one-off ECS migration, activates it only after success, waits
 for stability and checks that health reports the expected commit. Failed
 migration stops activation. Releases are serialized.
 
+After refresh and before the first AWS mutation, the workflow verifies that the
+Cloud stack still says `aws:region=us-west-2`, `environment=production`, and has
+a valid `domainName` with `domainReady=true`. Base infrastructure may be
+bootstrapped without a domain while `deployApp=false`; the production app cannot
+be activated until HTTPS is ready. Local Floci remains HTTP-capable.
+
+`run-aws-migrations.sh` now requires exactly two positional arguments: the
+fully qualified stack and the immutable candidate task-definition ARN:
+
+```sh
+bash infra/scripts/run-aws-migrations.sh \
+  organization/llteacher-infra/production \
+  arn:aws:ecs:us-west-2:123456789012:task-definition/llteacher-production-app:7
+```
+
+There is no legacy environment-variable fallback. A terminal task whose app
+container never started is diagnosed and retried within the configured bound.
+A waiter timeout or any task not confirmed `STOPPED` aborts without launching a
+second migration task.
+
+### Existing-stack region precheck
+
+Before the first workflow run against a stack created by an older revision,
+refresh and inspect it without changing configuration:
+
+```sh
+export STACK=organization/llteacher-infra/production
+pulumi -C infra config refresh --stack "$STACK" --non-interactive
+pulumi -C infra config get aws:region --stack "$STACK"
+pulumi -C infra stack --stack "$STACK" --show-urns
+```
+
+If the region is `us-east-1` and the stack has resources, stop. Do **not** run a
+blind `pulumi config set aws:region us-west-2`: that changes provider targeting
+without migrating the existing regional resources. Inventory the state and AWS
+resources, decide whether to retain/import or replace each resource, preserve
+the database and S3 data explicitly, and execute a reviewed migration plan with
+rollback before enabling release automation. Only an empty stack may be safely
+reconfigured directly to `us-west-2`.
+
 ### One-time account/stack bootstrap (after explicit approval)
 
 1. Create the account's GitHub OIDC provider for
@@ -169,10 +235,11 @@ migration stops activation. Releases are serialized.
    Save the initial stack/configuration in the backend before the workflow's
    `config refresh`. First-time bootstrap requires operator credentials and
    must not be attempted without approval.
-5. Select a domain manually if HTTPS is required. Set `domainName`, apply
-   zone/certificate/records, delegate the exported `hostedZoneNameServers`
-   at the registrar, then set `domainReady=true` and apply validation/TLS.
-   Domain purchase and registrar changes are not automated.
+5. Configure production HTTPS before an application release. Select a domain,
+   set `domainName`, apply zone/certificate/records, delegate the exported
+   `hostedZoneNameServers` at the registrar, then set `domainReady=true` and
+   apply validation/TLS. Domain purchase and registrar changes are not
+   automated; domainless HTTP is for base-infrastructure bootstrap only.
 6. Review preview, cost, backup/deletion protection, OIDC policy, domain and
    WorkOS callbacks. Authorize the first tag release separately.
 
@@ -183,6 +250,23 @@ A code rollback can select the previous task definition after reviewing schema
 compatibility; migrations are not automatically reversed. Never blindly roll
 back across an incompatible migration. Keep the previous ECR image/task
 definition available. A task replacement is required after secret rotation.
+
+After confirming schema compatibility, copy the values from the workflow's
+rollback summary and run:
+
+```sh
+export STACK=organization/llteacher-infra/production
+export PREVIOUS_TASK=arn:aws:ecs:us-west-2:123456789012:task-definition/llteacher-production-app:6
+pulumi -C infra config set --stack "$STACK" serviceTaskDefinition "$PREVIOUS_TASK"
+pulumi -C infra config set --stack "$STACK" provisionService true
+pulumi -C infra config set --stack "$STACK" deployApp true
+pulumi -C infra preview --stack "$STACK" --non-interactive
+pulumi -C infra up --stack "$STACK" --yes --non-interactive
+```
+
+Then wait for `llteacher-production-app` to stabilize and verify
+`https://<domain>/api/health`. These commands roll back application code only;
+they do not reverse database migrations or restore S3 versions.
 
 ## Verification boundaries and deferred work
 

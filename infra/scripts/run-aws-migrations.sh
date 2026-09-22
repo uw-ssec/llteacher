@@ -10,6 +10,8 @@ validate_task_definition "$task_definition"
 read_outputs
 cluster=$(jq -er '.clusterName' <<<"$outputs")
 validate_name "$cluster"
+log_group=$(jq -er '.logGroupName' <<<"$outputs")
+validate_log_group "$log_group"
 attempts="${LLTEACHER_AWS_MIGRATION_ATTEMPTS:-6}"
 delay_seconds="${LLTEACHER_AWS_MIGRATION_DELAY_SECONDS:-10}"
 wait_seconds="${LLTEACHER_AWS_MIGRATION_WAIT_SECONDS:-600}"
@@ -28,6 +30,18 @@ wait_for_stop() {
   else
     aws ecs wait tasks-stopped --cluster "$cluster" --tasks "$1"
   fi
+}
+
+report_terminal_failure() {
+  local task="$1" description="$2" stopped_reason container_reason task_id expected_log_stream
+  stopped_reason=$(jq -r '.tasks[0].stoppedReason // "not reported"' <<<"$description")
+  container_reason=$(jq -r '[.tasks[0].containers[] | select(.name == "app")] | .[0].reason // "not reported"' <<<"$description")
+  task_id="${task##*/}"
+  expected_log_stream="app/app/$task_id"
+  echo "Migration task $task stopped without success." >&2
+  echo "Stopped reason: $stopped_reason" >&2
+  echo "App container reason: $container_reason" >&2
+  echo "CloudWatch Logs: group '$log_group', expected stream '$expected_log_stream' (it may not exist when the container failed before startup)." >&2
 }
 
 for ((attempt = 1; attempt <= attempts; attempt++)); do
@@ -49,12 +63,13 @@ for ((attempt = 1; attempt <= attempts; attempt++)); do
     # an operator must resolve the task before another release is attempted.
     wait_for_stop "$task" || die "Migration waiter failed for $task; refusing overlapping retry."
     description=$(aws ecs describe-tasks --cluster "$cluster" --tasks "$task" --output json)
-    jq -e 'select((.failures | length) == 0) | .tasks | length == 1 and .[0].lastStatus == "STOPPED"' <<<"$description" >/dev/null || die 'Migration is not confirmed terminal; refusing retry.'
-    exit_code=$(jq -er '[.tasks[0].containers[] | select(.name == "app")] | select(length == 1) | .[0].exitCode | select(type == "number")' <<<"$description")
+    jq -e 'select((.failures | length) == 0) | .tasks | length == 1 and .[0].lastStatus == "STOPPED"' <<<"$description" >/dev/null || die "Migration task $task is not confirmed STOPPED; refusing overlapping retry."
+    jq -e '[.tasks[0].containers[] | select(.name == "app")] | length == 1' <<<"$description" >/dev/null || die "Migration task $task has no unique app container; refusing retry."
+    exit_code=$(jq -r '[.tasks[0].containers[] | select(.name == "app")][0].exitCode // empty' <<<"$description")
     if [[ "$exit_code" == "0" ]]; then
       exit 0
     fi
-    jq '.tasks[0] | {lastStatus, stoppedReason, containers: [.containers[] | {name, exitCode, reason}]}' <<<"$description" >&2
+    report_terminal_failure "$task" "$description"
   fi
 
   if (( attempt < attempts )); then

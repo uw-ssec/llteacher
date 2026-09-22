@@ -52,6 +52,9 @@ export function loadInfraConfig(config: ConfigReader = new pulumi.Config(), awsC
   const region = awsConfig.require("region");
   if (region !== "us-west-2") throw new Error("All stacks must use aws:region us-west-2.");
   const domainName = config.get("domainName") || undefined;
+  if (domainName && (domainName.length > 253 || !/^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/.test(domainName))) {
+    throw new Error("domainName must be a DNS hostname such as learn.example.edu.");
+  }
   const appOrigin = config.get("appOrigin");
   if (appOrigin) {
     const url = new URL(appOrigin);
@@ -65,6 +68,9 @@ export function loadInfraConfig(config: ConfigReader = new pulumi.Config(), awsC
   if (imageDigest && !/^sha256:[a-f0-9]{64}$/.test(imageDigest)) throw new Error("imageDigest must be a sha256 digest.");
   const deployApp = config.get("deployApp") !== "false";
   const provisionService = config.get("provisionService") !== "false";
+  if (environment === "production" && deployApp && !domainReady) {
+    throw new Error("Production app activation requires domainReady=true and an HTTPS domain.");
+  }
 
   if (environment === "local" && !flociEndpoint) {
     throw new Error('The local stack requires a "flociEndpoint" configuration value.');

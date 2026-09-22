@@ -35,7 +35,13 @@ wait_for_local_service() {
   return 1
 }
 
-wait_for_local_service
+if ! wait_for_local_service; then
+  echo "Local app did not become healthy at $local_app_url after ${LLTEACHER_LOCAL_HEALTH_ATTEMPTS:-90} attempt(s)." >&2
+  echo "Run npm run aws:local:up, then retry verification. Scoped container status follows (no environment or logs are displayed):" >&2
+  docker ps -a --filter label=io.floci.service=ecs --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' >&2 || true
+  docker ps -a --filter name=llteacher-floci --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' >&2 || true
+  exit 1
+fi
 curl "${curl_args[@]}" "$local_app_url/"
 curl "${curl_args[@]}" "$local_app_url/admin"
 curl "${curl_args[@]}" "$local_app_url/api/health"

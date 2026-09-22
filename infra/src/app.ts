@@ -46,8 +46,17 @@ export function createApplication(name: string, config: InfraConfig, network: Ne
     policy: pulumi.all([data.materialsBucket.arn]).apply(([bucketArn]) => JSON.stringify({
       Version: "2012-10-17",
       Statement: [
-        { Effect: "Allow", Action: "s3:ListBucket", Resource: bucketArn },
-        { Effect: "Allow", Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], Resource: `${bucketArn}/*` },
+        {
+          Effect: "Allow",
+          Action: "s3:ListBucket",
+          Resource: bucketArn,
+          Condition: { StringLike: { "s3:prefix": ["courses/*/materials/*", "courses/*/knowledge/*"] } },
+        },
+        {
+          Effect: "Allow",
+          Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+          Resource: [`${bucketArn}/courses/*/materials/*`, `${bucketArn}/courses/*/knowledge/*`],
+        },
       ],
     })),
     role: taskRole.id,
@@ -110,6 +119,9 @@ export function createApplication(name: string, config: InfraConfig, network: Ne
   if (config.provisionService) {
     service = new aws.ecs.Service(`${name}-app-service`, {
       cluster: cluster.arn,
+      // Durable knowledge has one in-process writer and no cross-task concurrency
+      // control. Keep exactly one desired task and stop it before its replacement;
+      // resources.test.ts locks these three settings together.
       desiredCount: config.deployApp ? 1 : 0,
       deploymentMinimumHealthyPercent: 0,
       deploymentMaximumPercent: 100,

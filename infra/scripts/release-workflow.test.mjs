@@ -38,6 +38,19 @@ test('migration receives same qualified stack and rollback summary survives cand
   assert.equal(summary.if,'always()');
   assert.match(summary.env.PREVIOUS_DIGEST,/steps.candidate.outputs.previous_digest/);
 });
+test('production release remains tag-only and does not restore staging auto-deploy', () => {
+  assert.deepEqual(workflow.on.push.tags, ['v*']);
+  assert.equal(workflow.on.push.branches, undefined);
+  assert.equal(workflow.jobs.production.environment, 'production');
+});
+test('refreshed stack is validated before the first AWS mutation', () => {
+  const steps=workflow.jobs.production.steps;
+  const refresh=steps.findIndex(s=>s.name==='Refresh encrypted stack configuration');
+  const validate=steps.findIndex(s=>s.name==='Validate refreshed production configuration');
+  const mutate=steps.findIndex(s=>s.name==='Bootstrap base infrastructure only when ECR is absent');
+  assert(refresh >= 0 && validate > refresh && mutate > validate);
+  assert.match(steps[validate].run,/validate_refreshed_stack_config/);
+});
 test('all workflow shell steps parse under bash', () => {
   for (const job of Object.values(workflow.jobs)) for (const step of job.steps) if (step.run) {
     const result=spawnSync('bash',['-n'],{input:step.run,encoding:'utf8'});
@@ -52,6 +65,8 @@ test('artifact verification loads exactly the tested image and refuses altered b
     const dir=mkdtempSync(join(tmpdir(),'release-artifact-test-'));
     t.after(()=>rmSync(dir,{recursive:true,force:true}));
     const artifact=join(dir,'release-artifact'); mkdirSync(artifact);
+    mkdirSync(join(dir,'infra','scripts'),{recursive:true});
+    writeFileSync(join(dir,'infra','scripts','aws-release-common.sh'),readFileSync(new URL('./aws-release-common.sh', import.meta.url)));
     const contents={'image.tar':'saved image fixture','image.id':`${id}\n`,'commit.sha':`${scenario==='wrong-commit'?'a'.repeat(40):sha}\n`};
     for(const [name,data] of Object.entries(contents)) writeFileSync(join(artifact,name),data);
     writeFileSync(join(artifact,'checksums.txt'),Object.entries(contents).map(([name,data])=>`${createHash('sha256').update(data).digest('hex')}  ${name}`).join('\n')+'\n');
@@ -64,7 +79,12 @@ else console.log(process.env.SCENARIO==='wrong-label'?'wrong':process.env.GITHUB
 `,{mode:0o755});
     const result=spawnSync('bash',['-euo','pipefail','-c',step.run],{cwd:dir,encoding:'utf8',env:{...process.env,PATH:`${dir}:${process.env.PATH}`,FIXTURE:dir,GITHUB_SHA:sha,IMAGE_ID:id,SCENARIO:scenario}});
     if(scenario==='valid') assert.equal(result.status,0,result.stderr);
-    else assert.notEqual(result.status,0,scenario);
+    else {
+      assert.notEqual(result.status,0,scenario);
+      if (scenario==='wrong-commit') assert.match(result.stderr,/Artifact commit does not match GITHUB_SHA/);
+      if (scenario==='wrong-image') assert.match(result.stderr,/Loaded image ID does not match the tested artifact/);
+      if (scenario==='wrong-label') assert.match(result.stderr,/Loaded image revision label does not match GITHUB_SHA/);
+    }
     if(scenario==='tamper'||scenario==='wrong-commit') assert.equal(existsSync(join(dir,'loaded')),false);
   }
 });

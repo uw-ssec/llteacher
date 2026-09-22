@@ -73,7 +73,7 @@ image_id=$(docker image inspect --format '{{.Id}}' "$image_uri")
 # registry proxy address, not the local-image lookup key.
 pulumi -C "$root/infra" config set --stack local provisionService true
 pulumi -C "$root/infra" config set --stack local imageTag "$image_tag"
-pulumi -C "$root/infra" config set --stack local buildSha "$(docker image inspect --format '{{.Id}}' "$image_uri")"
+pulumi -C "$root/infra" config set --stack local buildSha "$image_id"
 pulumi -C "$root/infra" config set --stack local deployApp false
 pulumi -C "$root/infra" up --stack local --yes
 # Floci resolves local tags when it creates Docker-backed tasks. Remove any

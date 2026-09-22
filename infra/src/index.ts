@@ -1,4 +1,3 @@
-import * as pulumi from "@pulumi/pulumi";
 import { createApplication } from "./app.js";
 import { loadInfraConfig } from "./config.js";
 import { createDataResources } from "./database.js";
@@ -15,7 +14,6 @@ const app = createApplication(name, config, network, data, provider);
 export const appUrl = app.appUrl;
 export const ecrRepositoryUrl = app.repository.repositoryUrl;
 export const materialsBucketName = data.materialsBucket.bucket;
-export const logGroupNames = pulumi.all([app.logGroup.name]);
 export const logGroupName = app.logGroup.name;
 export const candidateTaskDefinitionArn = app.taskDefinition.arn;
 export const clusterName = app.cluster.name;

@@ -200,9 +200,17 @@ describe("production resource graph", () => {
     expect(resource("aws:s3/bucket:Bucket", "llteacher-production-materials").inputs.serverSideEncryptionConfiguration).toBeDefined();
     const policy = JSON.parse(String(resource("aws:iam/rolePolicy:RolePolicy", "llteacher-production-materials-policy").inputs.policy));
     expect(policy.Statement).toEqual([
-      { Effect: "Allow", Action: "s3:ListBucket", Resource: "arn:aws:test:us-east-1:000000000000:llteacher-production-materials" },
-      { Effect: "Allow", Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], Resource: "arn:aws:test:us-east-1:000000000000:llteacher-production-materials/*" },
+      { Effect: "Allow", Action: "s3:ListBucket", Resource: "arn:aws:test:us-east-1:000000000000:llteacher-production-materials", Condition: { StringLike: { "s3:prefix": ["courses/*/materials/*", "courses/*/knowledge/*"] } } },
+      { Effect: "Allow", Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], Resource: ["arn:aws:test:us-east-1:000000000000:llteacher-production-materials/courses/*/materials/*", "arn:aws:test:us-east-1:000000000000:llteacher-production-materials/courses/*/knowledge/*"] },
     ]);
+  });
+
+  it("keeps exactly one durable-knowledge writer during deployments", () => {
+    expect(resource("aws:ecs/service:Service", "llteacher-production-app-service").inputs).toMatchObject({
+      desiredCount: 1,
+      deploymentMinimumHealthyPercent: 0,
+      deploymentMaximumPercent: 100,
+    });
   });
 
   it("only permits ALB-to-app and app-to-database ingress", () => {

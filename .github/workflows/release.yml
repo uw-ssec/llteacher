@@ -71,7 +71,8 @@ jobs:
         env:
           RELEASE_IMAGE: llteacher-release:${{ github.sha }}
         run: |
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          source infra/scripts/aws-release-common.sh
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || die 'Smoke-test checkout does not match GITHUB_SHA.'
           docker run --rm --entrypoint node "$RELEASE_IMAGE" -e "const fs=require('node:fs'); for (const p of ['apps/web/dist/client/index.html','apps/admin/dist/admin/index.html','apps/web/scripts/migrate.ts',process.env.NODE_EXTRA_CA_CERTS]) fs.accessSync(p); require.resolve('tsx'); require.resolve('pg');"
           docker run --rm --entrypoint okf "$RELEASE_IMAGE" --version
       - name: Save tested release image
@@ -118,9 +119,9 @@ jobs:
         run: |
           source infra/scripts/aws-release-common.sh
           validate_release_target "$STACK"
-          [[ "$DEPLOY_ROLE" =~ ^arn:aws:iam::[0-9]{12}:role/.+ ]] || exit 1
-          [[ "$GITHUB_SHA" =~ ^[a-f0-9]{40}$ ]] || exit 1
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          validate_deploy_role "$DEPLOY_ROLE"
+          validate_release_sha "$GITHUB_SHA"
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || die 'Checked-out commit does not match GITHUB_SHA.'
       - name: Install and build infrastructure on deployment runner
         run: npm ci && npm run build --workspace=infra
       - uses: pulumi/actions@v6
@@ -136,14 +137,24 @@ jobs:
           path: release-artifact/
       - name: Verify and load tested release image
         run: |
+          source infra/scripts/aws-release-common.sh
           cd release-artifact
           sha256sum -c checksums.txt
-          test "$(cat commit.sha)" = "$GITHUB_SHA"
+          [[ "$(cat commit.sha)" == "$GITHUB_SHA" ]] || die 'Artifact commit does not match GITHUB_SHA.'
           docker load --input image.tar
-          test "$(docker image inspect --format '{{.Id}}' "llteacher-release:$GITHUB_SHA")" = "$(cat image.id)"
-          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "llteacher-release:$GITHUB_SHA")" = "$GITHUB_SHA"
+          [[ "$(docker image inspect --format '{{.Id}}' "llteacher-release:$GITHUB_SHA")" == "$(cat image.id)" ]] || die 'Loaded image ID does not match the tested artifact.'
+          [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "llteacher-release:$GITHUB_SHA")" == "$GITHUB_SHA" ]] || die 'Loaded image revision label does not match GITHUB_SHA.'
       - name: Refresh encrypted stack configuration
         run: pulumi -C infra config refresh --stack "$STACK" --non-interactive
+      - name: Validate refreshed production configuration
+        run: |
+          source infra/scripts/aws-release-common.sh
+          validate_release_target "$STACK"
+          region=$(pulumi -C infra config get aws:region --stack "$STACK" 2>/dev/null || true)
+          environment=$(pulumi -C infra config get environment --stack "$STACK" 2>/dev/null || true)
+          domain_ready=$(pulumi -C infra config get domainReady --stack "$STACK" 2>/dev/null || true)
+          domain_name=$(pulumi -C infra config get domainName --stack "$STACK" 2>/dev/null || true)
+          validate_refreshed_stack_config "$region" "$environment" "$domain_ready" "$domain_name"
       - name: Bootstrap base infrastructure only when ECR is absent
         id: base
         run: bash infra/scripts/prepare-aws-release.sh "$STACK" repository
@@ -159,9 +170,9 @@ jobs:
           docker tag "llteacher-release:$GITHUB_SHA" "$REPOSITORY:$GITHUB_SHA"
           docker push "$REPOSITORY:${GITHUB_SHA}"
           digest=$(aws ecr describe-images --repository-name llteacher-production/app --image-ids imageTag="$GITHUB_SHA" --query 'imageDetails[0].imageDigest' --output text)
-          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || exit 1
+          validate_image_digest "$digest"
           docker pull "$REPOSITORY@$digest"
-          test "$(docker image inspect --format '{{.Id}}' "$REPOSITORY@$digest")" = "$(cat release-artifact/image.id)"
+          [[ "$(docker image inspect --format '{{.Id}}' "$REPOSITORY@$digest")" == "$(cat release-artifact/image.id)" ]] || die 'Registry image ID does not match the tested release artifact.'
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Register candidate while retaining the current service
         id: candidate
@@ -198,7 +209,7 @@ jobs:
           read_outputs
           app_url=$(jq -er '.appUrl | select(type == "string" and test("^https?://[A-Za-z0-9.-]+/?$"))' <<< "$outputs")
           version=$(curl --fail --retry 12 --retry-delay 5 --silent "$app_url/api/health" | jq -er '.version')
-          test "$version" = "$GITHUB_SHA"
+          [[ "$version" == "$GITHUB_SHA" ]] || die "Deployed version '$version' does not match release '$GITHUB_SHA'."
       - name: Record rollback reference
         if: always()
         env:
@@ -210,4 +221,17 @@ jobs:
             echo "Previous task definition: ${PREVIOUS_TASK:-not captured (or first release)}"
             echo "Previous image digest: ${PREVIOUS_DIGEST:-not captured (or first release)}"
             echo "Rotating an ECS secret requires a forced deployment/new task revision."
+            if [[ -n "${PREVIOUS_TASK:-}" ]]; then
+              echo
+              echo "After reviewing schema compatibility, run:"
+              echo '```bash'
+              printf 'export STACK=%q\n' "$STACK"
+              printf 'export PREVIOUS_TASK=%q\n' "$PREVIOUS_TASK"
+              echo 'pulumi -C infra config set --stack "$STACK" serviceTaskDefinition "$PREVIOUS_TASK"'
+              echo 'pulumi -C infra config set --stack "$STACK" provisionService true'
+              echo 'pulumi -C infra config set --stack "$STACK" deployApp true'
+              echo 'pulumi -C infra preview --stack "$STACK" --non-interactive'
+              echo 'pulumi -C infra up --stack "$STACK" --yes --non-interactive'
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
