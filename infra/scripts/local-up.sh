@@ -74,6 +74,11 @@ pulumi -C "$root/infra" up --stack local --yes
 # tasks cannot reuse a stale image behind the stable local tag.
 "$root/infra/scripts/wait-for-local-ecs-stop.sh"
 "$root/infra/scripts/local-image-cleanup.sh" "$image_id" images-only
+# Floci 2.1.0 also caches the first Docker image ID resolved for a stable ECS
+# image URI in memory. Restart only the emulator control plane (persistent RDS
+# and S3 backing data remain intact), then wait for it before launching tasks.
+docker restart llteacher-floci >/dev/null
+"$root/infra/scripts/floci-up.sh"
 "$root/infra/scripts/run-local-migrations.sh"
 pulumi -C "$root/infra" config set --stack local deployApp true
 pulumi -C "$root/infra" up --stack local --yes
