@@ -16,6 +16,12 @@ results belong in the implementation handoff and PR response, not in this plan.
 3. Restrict task-role S3 access to course material and knowledge prefixes and
    test the one-task, stop-before-start deployment invariant. A shared task role
    is not per-tenant IAM isolation; application authorization remains necessary.
+   Missing-object handling also uses a bounded exact-prefix list after GET/HEAD
+   access denial: only a complete listing proving absence returns "missing".
+   Existing objects and uncertain/denied listings fail closed. Selected recovery
+   version failures remain fatal. This accounts for S3's documented
+   [403-versus-404 behavior](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html)
+   without broadening bucket listing or treating every 403 as absence.
 
 ## Additional corrections
 

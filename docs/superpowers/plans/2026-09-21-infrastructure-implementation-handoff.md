@@ -48,6 +48,29 @@ No real AWS resources were applied. The branch was subsequently pushed as
 passed its artifact job and skipped production deployment. This does not verify
 AWS permissions or prove a real production release succeeds.
 
+## PR review fix verification
+
+For fixes through `4f39ef1`:
+
+- Full five-workspace test run: 3,268 Vitest tests passed, 12 intentionally
+  skipped; 23 native Node tests passed, with one optional image test skipped.
+- All five type checks and all three build tasks passed.
+- Every shell contract test passed (the functional image check runs separately).
+- Independent scoped review of `26a5b7d..4f39ef1` found no outstanding actionable
+  findings after the S3 missing-object permission correction.
+- The isolated test database was removed after verification; the user's Floci
+  database was not reset or reseeded.
+- Floci rebuilt and deployed image
+  `sha256:5d1c04d75ba37a02ba8793b82b6f29e2703094043268215d676a8ae0d84c3f23`
+  (278,423,322 bytes); the running ECS container uses that exact image. The
+  migration gate, image assertions, and actual workflow image-smoke block passed.
+- Live S3 smoke passed changed-file persistence, fresh-root restore, worker ZIP
+  export/decode, legacy migration retaining the ZIP, and durable deletion. Smoke
+  fixtures used new random course prefixes, not the user's course data.
+- `/`, `/admin`, and `/api/health` return HTTP 200 at `http://localhost:8080`.
+  The original 6 users, 2 courses, and 4 homeworks remain. The idle dedicated
+  Docker builder is stopped.
+
 ## Limits before public testing
 
 Local WorkOS and LiteLLM credentials have been loaded from the owner's existing
