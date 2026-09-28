@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 import {
+  addCourseMemberHandler,
   addCourseTasHandler,
   listCourseTasHandler,
   removeCourseTaHandler,
@@ -20,6 +21,7 @@ const listCourseTasMock = vi.fn();
 const setTaCapabilitiesMock = vi.fn();
 const addTasByNetidMock = vi.fn();
 const removeCourseTaMock = vi.fn();
+const addCourseMemberMock = vi.fn();
 const getOrgScopeForCourseMock = vi.fn();
 const auditBestEffortMock = vi.fn();
 
@@ -28,6 +30,7 @@ vi.mock("../repositories/courseMemberships", () => ({
   setTaCapabilities: (...a: unknown[]) => setTaCapabilitiesMock(...a),
   addTasByNetid: (...a: unknown[]) => addTasByNetidMock(...a),
   removeCourseTa: (...a: unknown[]) => removeCourseTaMock(...a),
+  addCourseMember: (...a: unknown[]) => addCourseMemberMock(...a),
 }));
 vi.mock("../repositories/organizations", () => ({
   getOrgScopeForCourse: (...a: unknown[]) => getOrgScopeForCourseMock(...a),
@@ -54,6 +57,7 @@ function buildApp(authContext: AuthContext | undefined) {
   );
   app.post("/api/courses/:courseId/tas", (c) => addCourseTasHandler(c));
   app.delete("/api/courses/:courseId/tas/:membershipId", (c) => removeCourseTaHandler(c));
+  app.post("/api/courses/:courseId/members", (c) => addCourseMemberHandler(c));
   return app;
 }
 
@@ -61,6 +65,7 @@ const instructorOfA = () =>
   fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] });
 const taOfA = () =>
   fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "ta" })] });
+const superAdmin = () => fakeAuthContext({ isSuperAdmin: true });
 
 function patch(authContext: AuthContext | undefined, body: unknown, membershipId = MEMBERSHIP_ID) {
   return buildApp(authContext).request(
@@ -81,6 +86,11 @@ beforeEach(() => {
   getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
   auditBestEffortMock.mockReset().mockResolvedValue(undefined);
   addTasByNetidMock.mockReset().mockResolvedValue([]);
+  addCourseMemberMock.mockReset().mockResolvedValue({
+    email: "new-instructor@uw.edu",
+    status: "added",
+    membershipId: MEMBERSHIP_ID,
+  });
   removeCourseTaMock.mockReset().mockResolvedValue({
     membershipId: MEMBERSHIP_ID,
     userId: "u-ta",
@@ -372,6 +382,117 @@ describe("DELETE /api/courses/:courseId/tas/:membershipId (#210)", () => {
     removeCourseTaMock.mockResolvedValue(null);
     const res = await del(buildApp(instructorOfA()));
     expect(res.status).toBe(404);
+    expect(auditBestEffortMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/courses/:courseId/members (#316)", () => {
+  const post = (authContext: AuthContext | undefined, body: unknown) =>
+    buildApp(authContext).request(
+      "/api/courses/course-a/members",
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+      TEST_ENV,
+    );
+
+  it("adds a member and audits the grant against the course's org", async () => {
+    const res = await post(superAdmin(), { email: "new-instructor@uw.edu", role: "instructor" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      email: "new-instructor@uw.edu",
+      status: "added",
+      membershipId: MEMBERSHIP_ID,
+    });
+    expect(addCourseMemberMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "course-a",
+      expect.anything(),
+      { email: "new-instructor@uw.edu", role: "instructor" },
+    );
+    expect(auditBestEffortMock).toHaveBeenCalledTimes(1);
+    expect(auditBestEffortMock.mock.calls[0][1]).toEqual(["org-1"]);
+    expect(auditBestEffortMock.mock.calls[0][2].action).toBe("membership.course_member_added");
+  });
+
+  // #316's own privilege-escalation concern: an ordinary instructor of the
+  // TARGET course must not be able to grant instructor/admin access, even
+  // though requireInstructorOf would admit them to every other route here.
+  it("denies an instructor of the course -- only a super admin may grant instructor access", async () => {
+    const res = await post(instructorOfA(), { email: "x@uw.edu", role: "instructor" });
+    expect(res.status).toBe(403);
+    expect(addCourseMemberMock).not.toHaveBeenCalled();
+  });
+
+  it("denies a TA of the course", async () => {
+    const res = await post(taOfA(), { email: "x@uw.edu", role: "instructor" });
+    expect(res.status).toBe(403);
+    expect(addCourseMemberMock).not.toHaveBeenCalled();
+  });
+
+  it("denies when there is no authContext at all", async () => {
+    const res = await post(undefined, { email: "x@uw.edu", role: "instructor" });
+    expect(res.status).toBe(403);
+    expect(addCourseMemberMock).not.toHaveBeenCalled();
+  });
+
+  it("400s malformed JSON", async () => {
+    const res = await buildApp(superAdmin()).request(
+      "/api/courses/course-a/members",
+      { method: "POST", headers: { "content-type": "application/json" }, body: "{not json" },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("400s a missing email", async () => {
+    const res = await post(superAdmin(), { role: "instructor" });
+    expect(res.status).toBe(400);
+    expect(addCourseMemberMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["", "principal", "TEACHER", 42, null])(
+    "400s an invalid role (%j)",
+    async (role) => {
+      const res = await post(superAdmin(), { email: "x@uw.edu", role });
+      expect(res.status).toBe(400);
+      expect(addCourseMemberMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["instructor", "ta", "student", "observer", "admin"] as const)(
+    "accepts every valid course role (%s)",
+    async (role) => {
+      const res = await post(superAdmin(), { email: "x@uw.edu", role });
+      expect(res.status).toBe(200);
+      expect(addCourseMemberMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "course-a",
+        expect.anything(),
+        { email: "x@uw.edu", role },
+      );
+    },
+  );
+
+  it("maps a disallowed-domain result to 400 without auditing it", async () => {
+    addCourseMemberMock.mockResolvedValue({
+      email: "outsider@gmail.com",
+      status: "disallowed_domain",
+      message: 'Domain "gmail.com" is not allowed. Allowed domains: uw.edu',
+    });
+    const res = await post(superAdmin(), { email: "outsider@gmail.com", role: "instructor" });
+    expect(res.status).toBe(400);
+    expect(auditBestEffortMock).not.toHaveBeenCalled();
+  });
+
+  it("does not audit a role_conflict -- nothing was written", async () => {
+    addCourseMemberMock.mockResolvedValue({
+      email: "existing-student@uw.edu",
+      status: "role_conflict",
+      existingRole: "student",
+      membershipId: MEMBERSHIP_ID,
+    });
+    const res = await post(superAdmin(), { email: "existing-student@uw.edu", role: "instructor" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: "role_conflict", existingRole: "student" });
     expect(auditBestEffortMock).not.toHaveBeenCalled();
   });
 });

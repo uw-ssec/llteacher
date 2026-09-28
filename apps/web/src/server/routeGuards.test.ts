@@ -43,6 +43,10 @@ const ENV = {
   WORKOS_CLIENT_ID: "client_x",
   SESSION_SECRET,
   DATABASE_URL: "ignored",
+  // #316: rolesMiddleware now loads the identity cipher on every
+  // authenticated request to check super-admin status.
+  ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+  BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
 } as unknown as Env;
 
 /** One spy per handler #172 touches. `ok` is what a guard admitting the
@@ -64,6 +68,8 @@ const handlers = {
   updateTaCapabilities: ok("updateTaCapabilities"),
   addCourseTas: ok("addCourseTas"),
   removeCourseTa: ok("removeCourseTa"),
+  addCourseMember: ok("addCourseMember"),
+  grantPlatformInstructor: ok("grantPlatformInstructor"),
   listLlmConfigs: ok("listLlmConfigs"),
   createLlmConfig: ok("createLlmConfig"),
   getLlmConfig: ok("getLlmConfig"),
@@ -126,6 +132,10 @@ vi.mock("./routes/courseMemberships", () => ({
   updateTaCapabilitiesHandler: (c: Context) => handlers.updateTaCapabilities(c),
   addCourseTasHandler: (c: Context) => handlers.addCourseTas(c),
   removeCourseTaHandler: (c: Context) => handlers.removeCourseTa(c),
+  addCourseMemberHandler: (c: Context) => handlers.addCourseMember(c),
+}));
+vi.mock("./routes/platformInstructors", () => ({
+  grantPlatformInstructorHandler: (c: Context) => handlers.grantPlatformInstructor(c),
 }));
 
 const findMany = vi.fn();
@@ -144,7 +154,10 @@ const { app } = await import("./index");
 
 beforeEach(() => {
   findMany.mockReset();
-  findFirst.mockReset().mockResolvedValue({ isActive: true, sessionEpoch: 0 });
+  // #316: emailBlindIndex is a dummy value -- none of the PERSONAS below are
+  // a configured super admin, so this file keeps pinning ordinary
+  // membership-based guard behavior exactly as before.
+  findFirst.mockReset().mockResolvedValue({ isActive: true, sessionEpoch: 0, emailBlindIndex: new Uint8Array(32), platformInstructorGrantedAt: null });
   for (const spy of Object.values(handlers)) spy.mockClear();
 });
 
@@ -220,6 +233,21 @@ const ROUTES: { method: string; path: string; handler: HandlerName; admits: Pers
     admits: ["instructor", "admin"] },
   { method: "DELETE", path: `/api/courses/course-a/tas/${HW}`, handler: "removeCourseTa",
     admits: ["instructor", "admin"] },
+
+  // #316: granting instructor/admin access is a platform-wide privilege
+  // escalation, not course authoring authority -- deliberately admits NO
+  // persona in this table, including the course-scoped "admin" role that
+  // every other admin-tier row above admits alongside instructor. Only
+  // requireSuperAdmin's isSuperAdmin flag (not exercised by any PERSONA
+  // here) can reach this handler; see routes/courseMemberships.test.ts and
+  // utils/guards.test.ts for the super-admin-admitted case.
+  { method: "POST", path: "/api/courses/course-a/members", handler: "addCourseMember",
+    admits: [] },
+
+  // #316: courseless -- not under /api/courses at all. Same admits-nobody-
+  // in-this-table reasoning as addCourseMember above.
+  { method: "POST", path: "/api/platform/instructors", handler: "grantPlatformInstructor",
+    admits: [] },
 
   // #31/#170: repointing the organization at a different model, or changing
   // what the tutor is told it is, is authoring authority of the widest kind

@@ -36,6 +36,7 @@ import { TaCapabilitiesView } from "./views/TaCapabilitiesView";
 import { LLMConfigsDataLoader, type ConfigScreen } from "./views/LLMConfigsDataLoader";
 import { StudentsView } from "./views/StudentsView";
 import { CanvasIntegrationView } from "./views/CanvasIntegrationView";
+import { AddInstructorView } from "./views/AddInstructorView";
 import { GradingPanel } from "./views/GradingPanel";
 import { ExportView } from "./views/ExportView";
 import { KnowledgeView } from "./views/KnowledgeView";
@@ -122,6 +123,8 @@ type View =
   | { kind: "ta-permissions" }
   | { kind: "canvas" }
   | { kind: "exports" }
+  // #316: courseless, unlike every other kind above -- no courseId param.
+  | { kind: "add-instructor" }
   /* #75: carries the identity the panel displays alongside the id it acts
      on. Threaded through the view state rather than refetched, because the
      dashboard the instructor came from already decrypted both -- and a
@@ -174,6 +177,7 @@ const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "ta-permissions":     "Instructor Console · TA permissions",
   "canvas":             "Instructor Console · Canvas",
   "exports":            "Instructor Console · Export",
+  "add-instructor":     "Instructor Console · Add Instructor",
   "grade":              "Instructor Console · Grading",
   "knowledge":          "Instructor Console · Knowledge",
   "knowledge-document": "Instructor Console · Knowledge · Document",
@@ -189,6 +193,8 @@ export default function App() {
     displayName,
     login,
     logout,
+    isSuperAdmin,
+    isPlatformInstructor,
   } = useAuth();
 
   // Stopgap: this app assumes exactly one course everywhere else today
@@ -319,7 +325,14 @@ export default function App() {
 
   if (authLoading) return null;
   if (!isAuthenticated) return <UnauthenticatedAdmin onLogin={login} error={authError} />;
-  if (!role || !CONSOLE_ROLE_SET.has(role)) return <Forbidden userInitials={initials} onLogout={logout} />;
+  // #316: a super admin or a granted platform instructor may have ZERO real
+  // course_memberships (role is null), so the ordinary CONSOLE_ROLE_SET
+  // check alone would wrongly show Forbidden for the exact people this
+  // grant exists to admit. Neither flag widens what they see beyond the
+  // gate itself -- canAuthor and every course-scoped view below are still
+  // derived from CURRENT_COURSE exactly as before.
+  const hasConsoleAccess = (role !== null && CONSOLE_ROLE_SET.has(role)) || isSuperAdmin || isPlatformInstructor;
+  if (!hasConsoleAccess) return <Forbidden userInitials={initials} onLogout={logout} />;
 
   /* .page-frame (not a bespoke admin wrapper) — the 100vh/overflow-hidden
      outer shell the student app uses. Without it the sidebar has no height
@@ -347,6 +360,7 @@ export default function App() {
           isCollapsed={isSidebarCollapsed}
           onToggleCollapse={() => setIsSidebarCollapsed((c) => !c)}
           canAuthor={canAuthor}
+          isSuperAdmin={isSuperAdmin}
           onNewHomework={() => setView({ kind: "create-homework" })}
           onNewLLMConfig={() => setView({ kind: "create-llm-config" })}
         />
@@ -639,6 +653,23 @@ export default function App() {
                   <CanvasIntegrationView courseId={CURRENT_COURSE_ID} courseTitle={CURRENT_COURSE.title} />
                 ) : (
                   <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
+                )
+              )}
+
+              {/* #316: courseless -- gated on isSuperAdmin, never canAuthor
+                  (a course-scoped "admin" role must not reach this; granting
+                  instructor access is platform-wide, not course
+                  authorship), and does NOT fall back to the "No course
+                  found" empty state the way every course-scoped view above
+                  does -- there is no courseId this view needs at all. */}
+              {view.kind === "add-instructor" && (
+                isSuperAdmin ? (
+                  <AddInstructorView />
+                ) : (
+                  <EmptyView
+                    label="Only super admins can grant instructor access"
+                    body={NOT_INSTRUCTOR_BODY}
+                  />
                 )
               )}
 

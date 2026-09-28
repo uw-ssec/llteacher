@@ -39,6 +39,16 @@ export type AuthState = AuthSessionState & {
    *  saw the same initials in the top nav of a tool whose whole purpose is
    *  acting on their behalf. */
   displayName: string | null;
+  /** #316: full elevated access everywhere server-side. Gates the "Add
+   *  Instructor" tab and widens the console-wide gate (App.tsx) so a super
+   *  admin with zero real course_memberships isn't shown Forbidden. */
+  isSuperAdmin: boolean;
+  /** #316: a courseless, platform-wide "recognized as an instructor" grant
+   *  -- deliberately narrower than isSuperAdmin. Widens ONLY the console-
+   *  wide gate, same as isSuperAdmin; grants no course-scoped UI access on
+   *  its own (there is none to grant server-side either -- see
+   *  rolesMiddleware's AuthContext doc comment). */
+  isPlatformInstructor: boolean;
 };
 
 /** Runtime-validated rather than cast (#124).
@@ -93,9 +103,17 @@ export const { AuthProvider, useAuth } = createAuthProvider<{
   role: CourseRole | null;
   courses: CourseOption[];
   displayName: string | null;
+  isSuperAdmin: boolean;
+  isPlatformInstructor: boolean;
 }>({
   parseExtra: (body) => {
-    const raw = body as { role?: unknown; courses?: unknown; displayName?: unknown } | null;
+    const raw = body as {
+      role?: unknown;
+      courses?: unknown;
+      displayName?: unknown;
+      isSuperAdmin?: unknown;
+      isPlatformInstructor?: unknown;
+    } | null;
     let role: CourseRole | null = null;
     if (raw?.role != null) {
       const parsed = parseCourseRole(raw.role);
@@ -120,7 +138,12 @@ export const { AuthProvider, useAuth } = createAuthProvider<{
       // a neutral glyph, because showing the WRONG person's initials in an
       // admin console is worse than showing none.
       displayName: typeof raw?.displayName === "string" ? raw.displayName : null,
+      // #316: absent/malformed defaults to false, same deny-by-default
+      // posture as everything else here -- a pre-#316 server (mid rolling
+      // deploy) simply never grants either.
+      isSuperAdmin: raw?.isSuperAdmin === true,
+      isPlatformInstructor: raw?.isPlatformInstructor === true,
     };
   },
-  defaultExtra: { role: null, courses: [], displayName: null },
+  defaultExtra: { role: null, courses: [], displayName: null, isSuperAdmin: false, isPlatformInstructor: false },
 });

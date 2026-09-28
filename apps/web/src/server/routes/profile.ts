@@ -6,7 +6,9 @@ import { ProfileService } from "../../lib/services/ProfileService";
 import { getOrgScopesForUser } from "../repositories/users";
 import { AUDIT_ACTIONS, auditBestEffort } from "../utils/audit";
 import { logServerError } from "../utils/errors";
+import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
+import type { ProfileResponse } from "../../shared/types";
 
 export async function getProfileHandler(c: Context<AppEnv>) {
   const session = c.get("session");
@@ -15,7 +17,18 @@ export async function getProfileHandler(c: Context<AppEnv>) {
   const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
   const db = makeDb(c.env.DATABASE_URL);
   const profile = await new ProfileService(cipher, db).getProfileWithStats(session.userId);
-  return c.json(profile);
+
+  // #316: read off AuthContext, not re-derived here -- ProfileService only
+  // ever takes a userId and has no AuthContext access, deliberately (it's a
+  // DB-only service). rolesMiddleware has already computed both booleans by
+  // the time this handler runs.
+  const authContext = c.get("authContext") as AuthContext | undefined;
+  const responseBody: ProfileResponse = {
+    ...profile,
+    isSuperAdmin: authContext?.isSuperAdmin ?? false,
+    isPlatformInstructor: authContext?.isPlatformInstructor ?? false,
+  };
+  return c.json(responseBody);
 }
 
 export async function patchProfileHandler(c: Context<AppEnv>) {

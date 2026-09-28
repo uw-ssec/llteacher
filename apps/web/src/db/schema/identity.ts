@@ -178,6 +178,19 @@ export const users = pgTable(
     isActive: boolean("is_active").notNull().default(true),
     sessionEpoch: integer("session_epoch").notNull().default(0),
     lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
+    // #316: a courseless, platform-wide "recognized as an instructor" grant --
+    // distinct from a course_memberships row, which requires a courseId that
+    // doesn't exist yet for someone being onboarded before their first course.
+    // Presence of platformInstructorGrantedAt IS the flag (same
+    // nullable-timestamp-as-flag convention course_memberships.droppedAt
+    // already uses); grantedBy is the provenance the codebase normally puts
+    // in audit_events, but that table is org-scoped and this grant has no
+    // org, so who/when live directly on the row instead. This flag does NOT
+    // widen course access -- see rolesMiddleware's AuthContext doc comment.
+    platformInstructorGrantedAt: timestamp("platform_instructor_granted_at", { withTimezone: true }),
+    platformInstructorGrantedBy: uuid("platform_instructor_granted_by").references(
+      (): AnyPgColumn => users.id,
+    ),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

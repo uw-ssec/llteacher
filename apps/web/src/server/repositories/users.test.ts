@@ -5,10 +5,13 @@ import {
   getUserActivationState,
   deactivateByWorkosUserId,
   getOrgScopesForUser,
+  grantPlatformInstructor,
 } from "./users";
 import type { Db } from "../../db/client";
 import { makeNodeDb } from "../../db/nodeClient";
 import { organizations, courses, users, courseMemberships } from "../../db/schema";
+import { IdentityCipher } from "../../lib/crypto/identity-cipher";
+import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 
 const RAW_DATABASE_URL = process.env.DATABASE_URL;
 
@@ -171,7 +174,12 @@ describe.skipIf(!DATABASE_URL)("deactivateByWorkosUserId / getUserActivationStat
 
   it("getUserActivationState returns the fresh-user defaults", async () => {
     const state = await getUserActivationState(db, userId);
-    expect(state).toEqual({ isActive: true, sessionEpoch: 0 });
+    // #316: emailBlindIndex is asserted separately from isActive/sessionEpoch
+    // -- it's projected for rolesMiddleware's super-admin check, and this
+    // fixture's "email" is filler bytes, not a real encrypted address, so
+    // only its presence/shape matters here, not its value.
+    expect(state).toMatchObject({ isActive: true, sessionEpoch: 0, platformInstructorGrantedAt: null });
+    expect(state?.emailBlindIndex).toBeInstanceOf(Uint8Array);
   });
 
   it("deactivateByWorkosUserId flips isActive false, bumps sessionEpoch, returns org scopes, and cascades the drop into course_memberships (#142)", async () => {
@@ -180,7 +188,7 @@ describe.skipIf(!DATABASE_URL)("deactivateByWorkosUserId / getUserActivationStat
     expect(result?.orgScopes).toEqual([orgId]);
 
     const state = await getUserActivationState(db, userId);
-    expect(state).toEqual({ isActive: false, sessionEpoch: 1 });
+    expect(state).toMatchObject({ isActive: false, sessionEpoch: 1 });
 
     const membership = await db.query.courseMemberships.findFirst({
       where: eq(courseMemberships.userId, userId),
@@ -201,6 +209,90 @@ describe.skipIf(!DATABASE_URL)("deactivateByWorkosUserId / getUserActivationStat
   it("returns null for an unknown workosUserId", async () => {
     const result = await deactivateByWorkosUserId(db, `workos-unknown-${crypto.randomUUID()}`);
     expect(result).toBeNull();
+  });
+});
+
+/** #316: grantPlatformInstructor is the courseless counterpart to
+ *  upsertCourseMember -- real-DB for the same reason that suite is: it
+ *  exercises findOrCreatePendingUser's blind-index find-or-create against
+ *  a genuine unique index, not a mock that would echo back whatever it was
+ *  handed. */
+describe.skipIf(!DATABASE_URL)("grantPlatformInstructor (#316, real DB)", () => {
+  let db: Db;
+  let cipher: IdentityCipher;
+  let granterId: string;
+
+  beforeAll(async () => {
+    db = makeNodeDb(DATABASE_URL!);
+    cipher = new IdentityCipher(
+      await loadIdentityCipherKeys({
+        ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+        BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+      } as Env),
+    );
+    const emailBytes = crypto.getRandomValues(new Uint8Array(32));
+    const [granter] = await db
+      .insert(users)
+      .values({ email: emailBytes as never, emailBlindIndex: emailBytes as never })
+      .returning({ id: users.id });
+    granterId = granter.id;
+  });
+
+  it("creates a pending user and stamps grantedAt/grantedBy when none exists yet", async () => {
+    const email = `new-instructor-${crypto.randomUUID()}@uw.edu`;
+    const result = await grantPlatformInstructor(db, cipher, granterId, email);
+    expect(result.status).toBe("granted");
+    if (result.status !== "granted") throw new Error("unreachable");
+
+    const row = await db.query.users.findFirst({ where: eq(users.id, result.userId) });
+    expect(row?.isPending).toBe(true);
+    expect(row?.platformInstructorGrantedAt).not.toBeNull();
+    expect(row?.platformInstructorGrantedBy).toBe(granterId);
+  });
+
+  it("grants an already-existing user without creating a duplicate row", async () => {
+    const email = `existing-${crypto.randomUUID()}@uw.edu`;
+    const emailBlindIndex = await cipher.computeBlindIndex(IdentityCipher.normalizeEmail(email));
+    const [existing] = await db
+      .insert(users)
+      .values({ email: await cipher.encryptString(email), emailBlindIndex })
+      .returning({ id: users.id });
+
+    const result = await grantPlatformInstructor(db, cipher, granterId, email);
+    expect(result.status).toBe("granted");
+    if (result.status !== "granted") throw new Error("unreachable");
+    expect(result.userId).toBe(existing.id);
+  });
+
+  it("is idempotent -- granting an already-granted user updates grantedAt/grantedBy rather than erroring", async () => {
+    const email = `regrant-${crypto.randomUUID()}@uw.edu`;
+    const first = await grantPlatformInstructor(db, cipher, granterId, email);
+    if (first.status !== "granted") throw new Error("unreachable");
+
+    const secondGranter = await db
+      .insert(users)
+      .values({
+        email: crypto.getRandomValues(new Uint8Array(32)) as never,
+        emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+      })
+      .returning({ id: users.id });
+    const second = await grantPlatformInstructor(db, cipher, secondGranter[0]!.id, email);
+    expect(second.status).toBe("granted");
+    if (second.status !== "granted") throw new Error("unreachable");
+    expect(second.userId).toBe(first.userId);
+
+    const row = await db.query.users.findFirst({ where: eq(users.id, first.userId) });
+    expect(row?.platformInstructorGrantedBy).toBe(secondGranter[0]!.id);
+  });
+
+  it("rejects an email outside the platform default allowed domains", async () => {
+    const result = await grantPlatformInstructor(db, cipher, granterId, `outsider-${crypto.randomUUID()}@gmail.com`);
+    expect(result.status).toBe("disallowed_domain");
+  });
+
+  it("rejects a malformed email", async () => {
+    const result = await grantPlatformInstructor(db, cipher, granterId, "not-an-email");
+    expect(result.status).toBe("invalid_email");
   });
 });
 

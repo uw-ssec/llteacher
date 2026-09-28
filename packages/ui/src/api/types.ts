@@ -119,6 +119,23 @@ export interface AddTaResultPayload {
   existingRole?: string;
 }
 
+/* -- #316: courseless platform-instructor grant ----------------------------- */
+
+export type GrantPlatformInstructorStatus = "granted" | "invalid_email" | "disallowed_domain";
+
+/** Mirrors apps/web's GrantPlatformInstructorResult (server/repositories/
+ *  users.ts). `userId`/`grantedAt` present only when status is "granted";
+ *  `message` present only for the two failure statuses -- same loosely-
+ *  typed-by-status convention AddTaResultPayload above already uses rather
+ *  than a strict discriminated union, since this crosses the wire as plain
+ *  JSON either way. */
+export interface GrantPlatformInstructorResultPayload {
+  status: GrantPlatformInstructorStatus;
+  userId?: string;
+  grantedAt?: IsoDateTime;
+  message?: string;
+}
+
 /* -- Roster (#32, #86) ----------------------------------------------------- */
 
 export type RosterMemberStatus = "active" | "pending" | "dropped";

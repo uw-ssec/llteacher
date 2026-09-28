@@ -107,6 +107,51 @@ export async function allowedDomainsForCourse(db: Db, scope: CourseScope): Promi
  *  the only two-statement case -- create user, then create membership --
  *  leaves at worst an unreferenced pending user that the next attempt for
  *  that address finds and reuses. */
+/** Finds the user with this (already-normalized) email, or creates a
+ *  pending one (no workos_user_id) if none exists yet --
+ *  UserIdentityService.createOrClaimUser claims it on that person's first
+ *  AuthKit login by matching this same emailBlindIndex.
+ *
+ *  Extracted from upsertCourseMember (#316): this is the "find or create
+ *  the person" half of provisioning, which the platform-instructor grant
+ *  (repositories/users.ts, courseless -- no course to enroll into) also
+ *  needs. #86's one-pipeline rule applied one layer down: two callers must
+ *  not each reimplement "create a pending user by email". */
+export async function findOrCreatePendingUser(
+  db: Db,
+  cipher: IdentityCipher,
+  normalizedEmail: string,
+  displayName?: string,
+): Promise<{ id: string }> {
+  const emailBlindIndex = await cipher.computeBlindIndex(normalizedEmail);
+  const existing = await db.query.users.findFirst({
+    where: eq(users.emailBlindIndex, emailBlindIndex),
+    columns: { id: true },
+  });
+  if (existing) return existing;
+
+  const netid = deriveNetidForEmail(normalizedEmail);
+  const [created] = await db
+    .insert(users)
+    .values({
+      email: await cipher.encryptString(normalizedEmail),
+      emailBlindIndex,
+      displayName: displayName ? await cipher.encryptString(displayName) : null,
+      // The NetID is derivable for UW addresses and is what the #210 admin
+      // search keys on, so it is written here rather than waiting for the
+      // person's first login to supply it.
+      ...(netid
+        ? {
+            netid: await cipher.encryptString(netid),
+            netidBlindIndex: await cipher.computeBlindIndex(netid),
+          }
+        : {}),
+      isPending: true,
+    })
+    .returning({ id: users.id });
+  return created!;
+}
+
 export async function upsertCourseMember(
   db: Db,
   scope: CourseScope,
@@ -129,39 +174,10 @@ export async function upsertCourseMember(
     };
   }
 
-  const emailBlindIndex = await cipher.computeBlindIndex(email);
-  let user = await db.query.users.findFirst({
-    where: eq(users.emailBlindIndex, emailBlindIndex),
-    columns: { id: true },
-  });
-
-  if (!user) {
-    // A pending user: no workos_user_id. createOrClaimUser claims it on the
-    // person's first AuthKit login by matching this same blind index.
-    const netid = deriveNetidForEmail(email);
-    const [created] = await db
-      .insert(users)
-      .values({
-        email: await cipher.encryptString(email),
-        emailBlindIndex,
-        displayName: entry.displayName ? await cipher.encryptString(entry.displayName) : null,
-        // The NetID is derivable for UW addresses and is what the #210 admin
-        // search keys on, so it is written here rather than waiting for the
-        // person's first login to supply it.
-        ...(netid
-          ? {
-              netid: await cipher.encryptString(netid),
-              netidBlindIndex: await cipher.computeBlindIndex(netid),
-            }
-          : {}),
-        isPending: true,
-      })
-      .returning({ id: users.id });
-    user = created;
-  }
+  const user = await findOrCreatePendingUser(db, cipher, email, entry.displayName);
 
   const existing = await db.query.courseMemberships.findFirst({
-    where: and(eq(courseMemberships.userId, user!.id), eq(courseMemberships.courseId, scope)),
+    where: and(eq(courseMemberships.userId, user.id), eq(courseMemberships.courseId, scope)),
     columns: { id: true, role: true, droppedAt: true },
   });
 
@@ -169,7 +185,7 @@ export async function upsertCourseMember(
     const [membership] = await db
       .insert(courseMemberships)
       .values({
-        userId: user!.id,
+        userId: user.id,
         courseId: scope,
         role: entry.role,
         canViewSolutions: false,

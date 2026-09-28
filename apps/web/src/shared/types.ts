@@ -31,6 +31,22 @@ export interface ProfileWithStats {
   courses?: CourseMembershipSummary[];
 }
 
+/** #316: what GET /api/profile actually sends over the wire --
+ *  ProfileWithStats plus the two AuthContext booleans getProfileHandler
+ *  adds. Kept separate from ProfileWithStats itself, which stays
+ *  ProfileService's own DB-only return type (it has no AuthContext access,
+ *  deliberately -- see profile.ts). */
+export interface ProfileResponse extends ProfileWithStats {
+  /** AuthContext.isSuperAdmin, echoed for apps/admin's own gating (the "Add
+   *  Instructor" tab, and the console-wide gate so a super admin with zero
+   *  real course_memberships isn't shown Forbidden). */
+  isSuperAdmin: boolean;
+  /** AuthContext.isPlatformInstructor -- deliberately narrower than
+   *  isSuperAdmin. Only widens the console-wide gate; grants no course
+   *  access on its own. See rolesMiddleware's AuthContext doc comment. */
+  isPlatformInstructor: boolean;
+}
+
 /** #172: the caller's standing in one specific course. `canViewSolutions`
  *  and `canViewDrafts` are already resolved server-side -- they are true
  *  unconditionally for instructor/admin and per-grant for `ta`, so the
@@ -98,6 +114,30 @@ export interface AddCourseTasResponse {
 export interface RemoveCourseTaResponse {
   membershipId: string;
 }
+
+/* -- #316: super-admin-only general membership add ------------------------- */
+
+import type { ProvisionResult } from "../server/repositories/roster";
+
+export interface AddCourseMemberBody {
+  email: string;
+  role: CourseRole;
+}
+
+/** Echoes upsertCourseMember's own ProvisionResult -- no membership-add-
+ *  specific response vocabulary exists, unlike AddCourseTasResponse's
+ *  NetID-shaped AddTaResult. */
+export type AddCourseMemberResponse = ProvisionResult;
+
+/* -- #316: courseless platform-instructor grant ----------------------------- */
+
+import type { GrantPlatformInstructorResult } from "../server/repositories/users";
+
+export interface GrantPlatformInstructorBody {
+  email: string;
+}
+
+export type GrantPlatformInstructorResponse = GrantPlatformInstructorResult;
 
 /* -- #31 / #98 / #170: LLM configuration authoring ------------------------- */
 

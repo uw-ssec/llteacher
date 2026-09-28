@@ -16,6 +16,10 @@ const ENV = {
   WORKOS_CLIENT_ID: "client_x",
   SESSION_SECRET,
   DATABASE_URL: "ignored",
+  // #316: rolesMiddleware now loads the identity cipher on every
+  // authenticated request to check super-admin status.
+  ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+  BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
 } as unknown as Env;
 
 const findMany = vi.fn();
@@ -72,7 +76,10 @@ vi.mock("./repositories/promptTemplates", () => ({
 beforeEach(() => {
   findMany.mockReset();
   findFirst.mockReset();
-  findFirst.mockResolvedValue({ isActive: true, sessionEpoch: 0 });
+  // #316: emailBlindIndex is a dummy value here -- not a configured super
+  // admin's, so every route below still exercises ordinary membership-based
+  // access exactly as before.
+  findFirst.mockResolvedValue({ isActive: true, sessionEpoch: 0, emailBlindIndex: new Uint8Array(32), platformInstructorGrantedAt: null });
   createConversationMock.mockReset();
   upsertCourseScopedPromptTemplateMock.mockReset();
 });

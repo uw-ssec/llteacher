@@ -5,6 +5,7 @@ import {
   requireCourseMember,
   requireInstructorOf,
   requireGraderOf,
+  requireSuperAdmin,
   releaseGatePostureOf,
 } from "./guards";
 import type { AuthContext } from "../middleware/roles";
@@ -39,6 +40,10 @@ function buildApp(authContext: AuthContext | undefined) {
       c.get("authContext")!.canViewDraftsIn(c.req.param("courseId")!);
       return c.json({ ok: true });
     }),
+  );
+  app.get(
+    "/api/super-admin-only",
+    requireSuperAdmin()(async (c) => c.json({ ok: true })),
   );
   return app;
 }
@@ -114,6 +119,26 @@ describe("requireInstructorOf", () => {
   it("denies when there is no authContext at all", async () => {
     const app = buildApp(undefined);
     const res = await app.request("/api/instructor-only/course-a");
+    expect(res.status).toBe(403);
+  });
+});
+
+describe("requireSuperAdmin (#316)", () => {
+  it("allows a super admin", async () => {
+    const app = buildApp(fakeAuthContext({ isSuperAdmin: true }));
+    const res = await app.request("/api/super-admin-only");
+    expect(res.status).toBe(200);
+  });
+
+  it("denies an ordinary instructor -- isInstructorOf is irrelevant here", async () => {
+    const app = buildApp(fakeAuthContext({ isInstructorOf: () => true }));
+    const res = await app.request("/api/super-admin-only");
+    expect(res.status).toBe(403);
+  });
+
+  it("denies when there is no authContext at all", async () => {
+    const app = buildApp(undefined);
+    const res = await app.request("/api/super-admin-only");
     expect(res.status).toBe(403);
   });
 });

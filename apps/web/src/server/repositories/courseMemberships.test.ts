@@ -5,6 +5,7 @@ import type { Db } from "../../db/client";
 import { organizations, courses, users, courseMemberships } from "../../db/schema";
 import { unsafeCourseScope } from "./scope";
 import {
+  addCourseMember,
   addTasByNetid,
   listCourseTas,
   removeCourseTa,
@@ -388,5 +389,115 @@ describe.skipIf(!DATABASE_URL)("addTasByNetid / removeCourseTa (#210)", () => {
     const [added] = await addTasByNetid(db, unsafeCourseScope(courseId), cipher, [netid]);
     await removeCourseTa(db, unsafeCourseScope(courseId), added!.membershipId!);
     expect(await removeCourseTa(db, unsafeCourseScope(courseId), added!.membershipId!)).toBeNull();
+  });
+});
+
+/* --------------------------------------------------------------------------
+   #316: addCourseMember, the super-admin-only general membership add.
+
+   A thin adapter over upsertCourseMember (roster.ts's own real-DB suite
+   already covers the upsert/role-conflict/domain-check logic itself in
+   depth) -- these tests exist to confirm the adapter actually plumbs
+   through to that pipeline correctly, especially for the role this app has
+   no other write path for at all: instructor.
+   -------------------------------------------------------------------------- */
+describe.skipIf(!DATABASE_URL)("addCourseMember (#316)", () => {
+  let db: Db;
+  let cipher: IdentityCipher;
+  let courseId: string;
+
+  beforeAll(async () => {
+    db = makeNodeDb(DATABASE_URL!);
+    cipher = new IdentityCipher(
+      await loadIdentityCipherKeys({
+        ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+        BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+      } as Env),
+    );
+    const [org] = await db
+      .insert(organizations)
+      .values({
+        slug: `cm316-${crypto.randomUUID()}`,
+        name: "Org",
+        workosOrganizationId: `w-${crypto.randomUUID()}`,
+      })
+      .returning({ id: organizations.id });
+    const [course] = await db
+      .insert(courses)
+      .values({ organizationId: org!.id, code: "A316", term: "T", title: "A" })
+      .returning({ id: courses.id });
+    courseId = course!.id;
+  });
+
+  it("adds a new instructor by email -- the write path #316 found missing entirely", async () => {
+    const email = `instructor-${crypto.randomUUID()}@uw.edu`;
+    const result = await addCourseMember(db, unsafeCourseScope(courseId), cipher, {
+      email,
+      role: "instructor",
+    });
+    expect(result.status).toBe("added");
+
+    const row = await db.query.courseMemberships.findFirst({
+      where: eq(courseMemberships.id, result.membershipId!),
+    });
+    expect(row!.role).toBe("instructor");
+    expect(row!.courseId).toBe(courseId);
+  });
+
+  it("creates a pending user for an email with no existing account", async () => {
+    const email = `pending-${crypto.randomUUID()}@uw.edu`;
+    const result = await addCourseMember(db, unsafeCourseScope(courseId), cipher, {
+      email,
+      role: "instructor",
+    });
+    const membership = await db.query.courseMemberships.findFirst({
+      where: eq(courseMemberships.id, result.membershipId!),
+    });
+    const user = await db.query.users.findFirst({ where: eq(users.id, membership!.userId) });
+    expect(user!.isPending).toBe(true);
+  });
+
+  it("restores a dropped membership under the newly requested role", async () => {
+    const email = `restore-${crypto.randomUUID()}@uw.edu`;
+    const first = await addCourseMember(db, unsafeCourseScope(courseId), cipher, {
+      email,
+      role: "student",
+    });
+    // removeCourseTa only touches role='ta' rows, and this member is a
+    // student -- drop the row directly to exercise the restore path.
+    await db
+      .update(courseMemberships)
+      .set({ droppedAt: new Date(), droppedReason: "roster_removal" })
+      .where(eq(courseMemberships.id, first.membershipId!));
+
+    const restored = await addCourseMember(db, unsafeCourseScope(courseId), cipher, {
+      email,
+      role: "instructor",
+    });
+    expect(restored.status).toBe("restored");
+    const row = await db.query.courseMemberships.findFirst({
+      where: eq(courseMemberships.id, restored.membershipId!),
+    });
+    expect(row!.role).toBe("instructor");
+    expect(row!.droppedAt).toBeNull();
+  });
+
+  it("reports a role conflict rather than silently promoting an existing member", async () => {
+    const email = `conflict-${crypto.randomUUID()}@uw.edu`;
+    await addCourseMember(db, unsafeCourseScope(courseId), cipher, { email, role: "student" });
+    const result = await addCourseMember(db, unsafeCourseScope(courseId), cipher, {
+      email,
+      role: "instructor",
+    });
+    expect(result.status).toBe("role_conflict");
+    expect(result.existingRole).toBe("student");
+  });
+
+  it("rejects an email outside the course's allowed domains", async () => {
+    const result = await addCourseMember(db, unsafeCourseScope(courseId), cipher, {
+      email: `outsider-${crypto.randomUUID()}@gmail.com`,
+      role: "instructor",
+    });
+    expect(result.status).toBe("disallowed_domain");
   });
 });

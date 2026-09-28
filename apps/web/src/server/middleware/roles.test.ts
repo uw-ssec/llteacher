@@ -1,8 +1,34 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
 import { Hono } from "hono";
 import { rolesMiddleware, type AuthContext } from "./roles";
 import type { SessionPayload } from "../../lib/session";
 import type { AppEnv } from "../context";
+import type { BlindIndex } from "../../db/types/encrypted";
+import { IdentityCipher } from "../../lib/crypto/identity-cipher";
+import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
+import { SuperAdminService } from "../../lib/services/SuperAdminService";
+
+/** Real crypto, not mocked: rolesMiddleware now loads the identity cipher to
+ *  check super-admin status (#316), and the whole point of that check is
+ *  the blind-index equality it performs -- a mocked cipher would just
+ *  assert that this test calls a mock, not that a super admin is actually
+ *  recognized. One fixed key pair for the whole file, matching
+ *  courseMemberships.test.ts's (repository) real-cipher convention. */
+const TEST_ENV = {
+  DATABASE_URL: "ignored",
+  ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+  BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+} as Env;
+
+let superAdminBlindIndex: BlindIndex;
+let nonAdminBlindIndex: BlindIndex;
+beforeAll(async () => {
+  const cipher = new IdentityCipher(await loadIdentityCipherKeys(TEST_ENV));
+  superAdminBlindIndex = await cipher.computeBlindIndex(
+    IdentityCipher.normalizeEmail(SuperAdminService.SUPER_ADMIN_EMAILS[0]!),
+  );
+  nonAdminBlindIndex = await cipher.computeBlindIndex(IdentityCipher.normalizeEmail("student@uw.edu"));
+});
 
 const DEFAULT_MEMBERSHIPS = [
   { id: "m1", userId: "u1", courseId: "course-a", role: "instructor" },
@@ -15,10 +41,9 @@ let MEMBERSHIPS: Array<Record<string, unknown>> = DEFAULT_MEMBERSHIPS;
 
 let findManyCalls = 0;
 let findFirstCalls = 0;
-let userRow: { isActive: boolean; sessionEpoch: number } | undefined = {
-  isActive: true,
-  sessionEpoch: 0,
-};
+let userRow:
+  | { isActive: boolean; sessionEpoch: number; emailBlindIndex: BlindIndex; platformInstructorGrantedAt: Date | null }
+  | undefined;
 vi.mock("../../db/client", () => ({
   makeDb: () => ({
     query: {
@@ -66,12 +91,12 @@ describe("rolesMiddleware", () => {
   beforeEach(() => {
     findManyCalls = 0;
     findFirstCalls = 0;
-    userRow = { isActive: true, sessionEpoch: 0 };
+    userRow = { isActive: true, sessionEpoch: 0, emailBlindIndex: nonAdminBlindIndex, platformInstructorGrantedAt: null };
     MEMBERSHIPS = DEFAULT_MEMBERSHIPS;
   });
 
   it("resolves memberships and exposes role-check helpers", async () => {
-    const res = await buildApp().request("/api/x", {}, { DATABASE_URL: "ignored" } as Env);
+    const res = await buildApp().request("/api/x", {}, TEST_ENV);
     const body = await res.json();
     expect(body).toEqual({
       hasInstructor: true,
@@ -83,7 +108,7 @@ describe("rolesMiddleware", () => {
   });
 
   it("queries memberships and the user row exactly once per request", async () => {
-    await buildApp().request("/api/x", {}, { DATABASE_URL: "ignored" } as Env);
+    await buildApp().request("/api/x", {}, TEST_ENV);
     expect(findManyCalls).toBe(1);
     expect(findFirstCalls).toBe(1);
   });
@@ -92,7 +117,7 @@ describe("rolesMiddleware", () => {
     const app = new Hono<AppEnv>();
     app.use("*", rolesMiddleware);
     app.get("/api/x", (c) => c.json({ authContext: c.get("authContext") ?? null }));
-    const res = await app.request("/api/x", {}, { DATABASE_URL: "ignored" } as Env);
+    const res = await app.request("/api/x", {}, TEST_ENV);
     const body = (await res.json()) as { authContext: unknown };
     expect(body.authContext).toBeNull();
   });
@@ -109,7 +134,7 @@ describe("rolesMiddleware", () => {
     const res = await app.request(
       "/api/auth/logout",
       { method: "POST" },
-      { DATABASE_URL: "ignored" } as Env,
+      TEST_ENV,
     );
     const body = (await res.json()) as { authContext: unknown };
 
@@ -122,26 +147,26 @@ describe("rolesMiddleware", () => {
   // session_epoch. Both need their own test -- either condition alone must
   // revoke an otherwise-cryptographically-valid cookie.
   it("returns 401 when the user row is deactivated (is_active = false)", async () => {
-    userRow = { isActive: false, sessionEpoch: 0 };
-    const res = await buildApp(0).request("/api/x", {}, { DATABASE_URL: "ignored" } as Env);
+    userRow = { isActive: false, sessionEpoch: 0, emailBlindIndex: nonAdminBlindIndex, platformInstructorGrantedAt: null };
+    const res = await buildApp(0).request("/api/x", {}, TEST_ENV);
     expect(res.status).toBe(401);
   });
 
   it("returns 401 when the cookie's sessionEpoch is behind the user row's current epoch", async () => {
-    userRow = { isActive: true, sessionEpoch: 3 };
-    const res = await buildApp(2).request("/api/x", {}, { DATABASE_URL: "ignored" } as Env);
+    userRow = { isActive: true, sessionEpoch: 3, emailBlindIndex: nonAdminBlindIndex, platformInstructorGrantedAt: null };
+    const res = await buildApp(2).request("/api/x", {}, TEST_ENV);
     expect(res.status).toBe(401);
   });
 
   it("returns 401 when the user row no longer exists", async () => {
     userRow = undefined;
-    const res = await buildApp(0).request("/api/x", {}, { DATABASE_URL: "ignored" } as Env);
+    const res = await buildApp(0).request("/api/x", {}, TEST_ENV);
     expect(res.status).toBe(401);
   });
 
   it("allows the request through when sessionEpoch matches and the account is active", async () => {
-    userRow = { isActive: true, sessionEpoch: 5 };
-    const res = await buildApp(5).request("/api/x", {}, { DATABASE_URL: "ignored" } as Env);
+    userRow = { isActive: true, sessionEpoch: 5, emailBlindIndex: nonAdminBlindIndex, platformInstructorGrantedAt: null };
+    const res = await buildApp(5).request("/api/x", {}, TEST_ENV);
     expect(res.status).toBe(200);
   });
 });
@@ -170,13 +195,13 @@ function buildCapabilityApp() {
 
 async function capsFor(membership: Record<string, unknown>) {
   MEMBERSHIPS = [{ id: "m1", userId: "u1", courseId: "course-a", ...membership }];
-  const res = await buildCapabilityApp().request("/api/caps", {}, { DATABASE_URL: "ignored" } as Env);
+  const res = await buildCapabilityApp().request("/api/caps", {}, TEST_ENV);
   return (await res.json()) as Record<string, boolean>;
 }
 
 describe("AuthContext capability predicates (#172)", () => {
   beforeEach(() => {
-    userRow = { isActive: true, sessionEpoch: 0 };
+    userRow = { isActive: true, sessionEpoch: 0, emailBlindIndex: nonAdminBlindIndex, platformInstructorGrantedAt: null };
     MEMBERSHIPS = DEFAULT_MEMBERSHIPS;
   });
 
@@ -254,7 +279,7 @@ describe("AuthContext capability predicates (#172)", () => {
     MEMBERSHIPS = [
       { id: "m1", userId: "u1", courseId: "course-b", role: "ta", canViewSolutions: true, canViewDrafts: true },
     ];
-    const res = await buildCapabilityApp().request("/api/caps", {}, { DATABASE_URL: "ignored" } as Env);
+    const res = await buildCapabilityApp().request("/api/caps", {}, TEST_ENV);
     expect(await res.json()).toEqual({
       isGrader: false,
       isInstructor: false,
@@ -281,7 +306,7 @@ describe("AuthContext capability predicates (#172)", () => {
  *  not have. */
 describe("course-scoped predicates describe one membership (#172 audit)", () => {
   beforeEach(() => {
-    userRow = { isActive: true, sessionEpoch: 0 };
+    userRow = { isActive: true, sessionEpoch: 0, emailBlindIndex: nonAdminBlindIndex, platformInstructorGrantedAt: null };
     MEMBERSHIPS = DEFAULT_MEMBERSHIPS;
   });
 
@@ -294,7 +319,7 @@ describe("course-scoped predicates describe one membership (#172 audit)", () => 
       { id: "m1", userId: "u1", courseId: "course-a", role: "ta", canViewSolutions: false, canViewDrafts: false },
       { id: "m2", userId: "u1", courseId: "course-a", role: "instructor", canViewSolutions: false, canViewDrafts: false },
     ];
-    const res = await buildCapabilityApp().request("/api/caps", {}, { DATABASE_URL: "ignored" } as Env);
+    const res = await buildCapabilityApp().request("/api/caps", {}, TEST_ENV);
     const caps = (await res.json()) as Record<string, boolean>;
 
     // Whichever row wins, the answers must come from that one row: an
@@ -312,9 +337,139 @@ describe("course-scoped predicates describe one membership (#172 audit)", () => 
       { id: "m1", userId: "u1", courseId: "course-a", role: "ta", canViewSolutions: false, canViewDrafts: false },
     ];
     MEMBERSHIPS = ordered;
-    const res = await buildCapabilityApp().request("/api/caps", {}, { DATABASE_URL: "ignored" } as Env);
+    const res = await buildCapabilityApp().request("/api/caps", {}, TEST_ENV);
     const caps = (await res.json()) as Record<string, boolean>;
     // Instructor row first: every predicate must read it.
     expect(caps).toEqual({ isGrader: true, isInstructor: true, solutions: true, drafts: true });
+  });
+});
+
+/** #316: a configured super admin gets full elevated access everywhere,
+ *  even holding zero real course_memberships -- this is the whole point of
+ *  the bypass (grant instructor console access before any course exists
+ *  for them, per the issue's discussion). hasRole is the one deliberate
+ *  exception: it gates student-action routes, and a super admin
+ *  impersonating a student is out of scope. */
+function buildSuperAdminApp() {
+  const app = new Hono<AppEnv>();
+  app.use("*", async (c, next) => {
+    c.set("session", sessionFor(0));
+    await next();
+  });
+  app.use("*", rolesMiddleware);
+  app.get("/api/x", (c) => {
+    const authContext = c.get("authContext") as AuthContext;
+    return c.json({
+      isSuperAdmin: authContext.isSuperAdmin,
+      hasInstructor: authContext.hasRole("instructor"),
+      isMemberOf: authContext.isMemberOf("course-nobody-has-ever-heard-of"),
+      isInstructorOf: authContext.isInstructorOf("course-nobody-has-ever-heard-of"),
+      isGraderOf: authContext.isGraderOf("course-nobody-has-ever-heard-of"),
+      solutions: authContext.canViewSolutionsIn("course-nobody-has-ever-heard-of"),
+      drafts: authContext.canViewDraftsIn("course-nobody-has-ever-heard-of"),
+    });
+  });
+  return app;
+}
+
+describe("super admin bypass (#316)", () => {
+  beforeEach(() => {
+    MEMBERSHIPS = [];
+  });
+
+  it("grants full elevated access on a course held via zero real memberships", async () => {
+    userRow = { isActive: true, sessionEpoch: 0, emailBlindIndex: superAdminBlindIndex, platformInstructorGrantedAt: null };
+    const res = await buildSuperAdminApp().request("/api/x", {}, TEST_ENV);
+    expect(await res.json()).toEqual({
+      isSuperAdmin: true,
+      hasInstructor: false,
+      isMemberOf: true,
+      isInstructorOf: true,
+      isGraderOf: true,
+      solutions: true,
+      drafts: true,
+    });
+  });
+
+  it("does not widen access for a non-super-admin with zero memberships", async () => {
+    userRow = { isActive: true, sessionEpoch: 0, emailBlindIndex: nonAdminBlindIndex, platformInstructorGrantedAt: null };
+    const res = await buildSuperAdminApp().request("/api/x", {}, TEST_ENV);
+    expect(await res.json()).toEqual({
+      isSuperAdmin: false,
+      hasInstructor: false,
+      isMemberOf: false,
+      isInstructorOf: false,
+      isGraderOf: false,
+      solutions: false,
+      drafts: false,
+    });
+  });
+});
+
+/** #316: platformInstructorGrantedAt is a fact about the resolved user row
+ *  (not a blind-index check), and -- unlike isSuperAdmin -- deliberately
+ *  does NOT widen any course-scoped predicate. It only flips a flag the
+ *  client uses to admit someone past its console-wide gate. If this ever
+ *  widened isInstructorOf the way isSuperAdmin does, every granted
+ *  instructor would silently become a de facto super admin on every course
+ *  in every org -- exactly the scope creep the design deliberately avoids. */
+describe("platform instructor grant (#316)", () => {
+  beforeEach(() => {
+    MEMBERSHIPS = [];
+  });
+
+  it("does NOT widen course access for a platform instructor with zero real memberships", async () => {
+    const app = new Hono<AppEnv>();
+    app.use("*", async (c, next) => {
+      c.set("session", sessionFor(0));
+      await next();
+    });
+    app.use("*", rolesMiddleware);
+    app.get("/api/x", (c) => {
+      const authContext = c.get("authContext") as AuthContext;
+      return c.json({
+        isSuperAdmin: authContext.isSuperAdmin,
+        isPlatformInstructor: authContext.isPlatformInstructor,
+        hasInstructor: authContext.hasRole("instructor"),
+        isMemberOf: authContext.isMemberOf("course-nobody-has-ever-heard-of"),
+        isInstructorOf: authContext.isInstructorOf("course-nobody-has-ever-heard-of"),
+        isGraderOf: authContext.isGraderOf("course-nobody-has-ever-heard-of"),
+        solutions: authContext.canViewSolutionsIn("course-nobody-has-ever-heard-of"),
+        drafts: authContext.canViewDraftsIn("course-nobody-has-ever-heard-of"),
+      });
+    });
+
+    userRow = {
+      isActive: true,
+      sessionEpoch: 0,
+      emailBlindIndex: nonAdminBlindIndex,
+      platformInstructorGrantedAt: new Date(),
+    };
+    const res = await app.request("/api/x", {}, TEST_ENV);
+    expect(await res.json()).toEqual({
+      isSuperAdmin: false,
+      isPlatformInstructor: true,
+      hasInstructor: false,
+      isMemberOf: false,
+      isInstructorOf: false,
+      isGraderOf: false,
+      solutions: false,
+      drafts: false,
+    });
+  });
+
+  it("is false when platformInstructorGrantedAt is null", async () => {
+    userRow = { isActive: true, sessionEpoch: 0, emailBlindIndex: nonAdminBlindIndex, platformInstructorGrantedAt: null };
+    const app = new Hono<AppEnv>();
+    app.use("*", async (c, next) => {
+      c.set("session", sessionFor(0));
+      await next();
+    });
+    app.use("*", rolesMiddleware);
+    app.get("/api/x", (c) =>
+      c.json({ isPlatformInstructor: (c.get("authContext") as AuthContext).isPlatformInstructor }),
+    );
+    const res = await app.request("/api/x", {}, TEST_ENV);
+    expect(await res.json()).toEqual({ isPlatformInstructor: false });
   });
 });
