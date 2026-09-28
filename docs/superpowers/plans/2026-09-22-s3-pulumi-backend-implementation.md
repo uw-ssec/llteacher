@@ -471,6 +471,11 @@ git commit -m "infra: define production bootstrap policies"
 
 ### Task 4: Document the one-time bootstrap and remove Cloud instructions
 
+> **Later change:** README steps 2–8 of this procedure are now implemented by
+> `infra/account/bootstrap.sh` (`check`/`apply`), and the policy documents moved
+> from `infra/bootstrap/` to `infra/account/`. See the updated
+> [design](../specs/2026-09-22-s3-pulumi-backend-design.md) "Bootstrap ownership".
+
 **Files:**
 - Modify: `infra/README.md`
 - Modify: `infra/package.json`

@@ -3,10 +3,14 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 
-test('bootstrap guide covers fail-closed identity, policy and boundary checks without inline deploy policies', () => {
+const accountScript = readFileSync(new URL('../account/bootstrap.sh', import.meta.url), 'utf8');
+
+test('bootstrap guide and account script cover fail-closed identity, policy and boundary checks without inline deploy policies', () => {
   const guide = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
-  const bootstrap = guide.split('### One-time account/stack bootstrap')[1]?.split('### Rollback and rotation')[0];
-  assert(bootstrap, 'bootstrap procedure exists');
+  const section = guide.split('### One-time account/stack bootstrap')[1]?.split('### Rollback and rotation')[0];
+  assert(section, 'bootstrap procedure exists');
+  assert(section.includes('bash infra/account/bootstrap.sh check') && section.includes('bash infra/account/bootstrap.sh apply'));
+  const bootstrap = section + accountScript;
   for (const command of ['umask 077', 'mktemp -d', 'get-caller-identity --profile default',
     'get-key-rotation-status', 'get-bucket-ownership-controls', 'get-public-access-block',
     'get-bucket-versioning', 'get-bucket-encryption', 'get-bucket-policy', 'get-bucket-tagging',
@@ -23,23 +27,24 @@ test('bootstrap guide covers fail-closed identity, policy and boundary checks wi
   assert.match(bootstrap, /privileged migration\/replacement/);
   assert.match(bootstrap, /No Pulumi access token is used/);
   assert.match(bootstrap, /Read-only check[\s\S]*Mutation[\s\S]*Verification/);
-  for (const [, shell] of bootstrap.matchAll(/```bash\n([\s\S]*?)```/g)) {
+  for (const [, shell] of [...section.matchAll(/```bash\n([\s\S]*?)```/g), [, accountScript]]) {
     const parsed = spawnSync('bash', ['-n'], { input: shell, encoding: 'utf8' });
     assert.equal(parsed.status, 0, parsed.stderr);
   }
 });
 
-test('bootstrap inventory, creation and attachment verification cover four deployment policies and a separate boundary', () => {
+test('account script creation and attachment verification cover four deployment policies and a separate boundary', () => {
   const guide = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
   const grants = ['state', 'compute', 'data', 'network'].map(name => `llteacher-production-deploy-${name}`);
   const managed = ['llteacher-production-runtime-boundary', ...grants];
-  assert(guide.includes(`POLICY_NAMES=(${managed.join(' ')})`));
-  assert(guide.includes(`for policy_name in ${managed.join(' ')}; do`), 'inventory includes every policy');
-  assert(guide.includes(`for policy_name in ${grants.join(' ')}; do`), 'attach only the four deployment grants');
-  assert(guide.includes('for index in 1 2 3 4; do'), 'verify all four attachments');
-  assert(guide.includes('[$prefix + "state", $prefix + "compute", $prefix + "data", $prefix + "network"]'));
-  assert.match(guide, /four deployment policies/);
-  assert.match(guide, /all five managed policies/);
+  assert(accountScript.includes(`POLICY_NAMES=(${managed.join(' ')})`));
+  assert(accountScript.includes('for index in 0 1 2 3 4; do'), 'create or verify every policy');
+  assert(accountScript.includes(`GRANT_NAMES=(${grants.join(' ')})`), 'attach only the four deployment grants');
+  assert(accountScript.includes('for name in "${GRANT_NAMES[@]}"; do'));
+  assert(accountScript.includes('for index in 1 2 3 4; do'), 'verify all four attachments');
+  assert(accountScript.includes('[$prefix + "state", $prefix + "compute", $prefix + "data", $prefix + "network"]'));
+  assert.match(guide, /Four deployment policies/);
+  assert.match(accountScript, /all five managed policies/);
 });
 
 test('persisted KMS provider URLs allow OIDC credentials without requiring a local shared profile', () => {
@@ -71,7 +76,7 @@ const kmsToken = '${KMS_KEY_ARN}';
 const boundaryFile = 'runtime-permissions-boundary.json';
 const boundaryArn = `arn:aws:iam::${account}:policy/llteacher-production-runtime-boundary`;
 const files = ['pulumi-state-kms-key-policy.json', 'pulumi-state-bucket-policy.json', 'github-oidc-trust-policy.json', 'github-deploy-policy.template.json', 'github-compute-policy.json', 'github-data-policy.json', 'github-network-policy.json'];
-const read = name => readFileSync(new URL(`../bootstrap/${name}`, import.meta.url), 'utf8');
+const read = name => readFileSync(new URL(`../account/${name}`, import.meta.url), 'utf8');
 const policy = name => JSON.parse(read(name));
 const deploy = () => files.slice(3).flatMap(file => policy(file).Statement);
 const array = value => Array.isArray(value) ? value : [value];

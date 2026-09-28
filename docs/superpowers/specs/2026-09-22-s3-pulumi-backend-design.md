@@ -54,12 +54,16 @@ the stack never owns or deletes its own state and deployment identity:
 - GitHub Actions OIDC provider, if the account does not already have it.
 - GitHub deployment role `llteacher-production-deploy` and its policies.
 
-Bootstrap uses reviewed, one-time AWS CLI commands documented in PR #461. It
-does not introduce a bootstrap script, bootstrap Pulumi project, or CloudFormation
-stack. Exact JSON trust, key, and bucket policies are checked into the repository.
-The deployment permission policy is a checked-in template because the KMS key
-ARN is not known until key creation; the documented procedure renders that one
-explicit substitution, displays the final JSON for review, and then applies it.
+An account admin creates these resources with the reviewed AWS CLI script
+`infra/account/bootstrap.sh`, not with a bootstrap Pulumi project or CloudFormation
+stack. Its read-only `check` mode inventories and verifies the resources and
+displays every policy document for review. `apply` requires typed confirmation,
+creates only absent resources, and verifies each one. Existing resources are never
+modified; a mismatch stops for an owner-reviewed repair documented in
+`infra/README.md`. Exact JSON trust, key, bucket, boundary, and deployment
+policies are checked into `infra/account/`. The deployment state policy is a
+template because the KMS key ARN is not known until key creation; the script
+renders that one explicit substitution.
 
 ### State protection and encryption
 
@@ -219,14 +223,16 @@ CI to pass again. This phase performs no AWS mutation.
 
 ### Phase 2: bootstrap state and CI identity
 
-After reviewing the exact commands and policies, reconfirm the caller is account
-`055237683908`, profile `default`, and region `us-west-2`. Then create and verify
-the KMS key, state bucket, OIDC provider if absent, and deployment role. Configure
-the GitHub protected production environment and its non-secret variables.
+Run `infra/account/bootstrap.sh check` and review its inventory and policy
+documents. The script confirms the caller is account `055237683908`, profile
+`default`, and region `us-west-2`. Then run `apply` to create and verify the KMS
+key, state bucket, OIDC provider if absent, managed policies, and deployment role.
+Configure the GitHub protected production environment and its non-secret variables.
 
-Every mutating command is preceded by a read-only existence check and followed
-by a read-only verification. If a command partially succeeds, stop and
-reconcile the resulting resource instead of deleting it and retrying blindly.
+Within the script, every mutating command is preceded by a read-only existence
+check and followed by a read-only verification. If a command partially succeeds,
+stop and reconcile the resulting resource instead of deleting it and retrying
+blindly.
 
 ### Phase 3: initialize and preview
 
