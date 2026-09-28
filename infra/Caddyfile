@@ -1,4 +1,0 @@
-https://llteacher.local {
-  tls /certs/llteacher.local.pem /certs/llteacher.local-key.pem
-  reverse_proxy host.docker.internal:8443
-}

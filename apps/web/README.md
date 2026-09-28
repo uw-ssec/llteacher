@@ -45,14 +45,19 @@ The course knowledge base is an OKF bundle on disk, searched by the pinned `okf`
   and put it earlier on your `PATH` (or point `OKF_BINARY` at it).
 - `mkdir -p .knowledge` and set `KNOWLEDGE_ROOT=$(pwd)/.knowledge` (git-ignored). okf refuses a symlinked
   root, so the app resolves it with realpath; on macOS `/tmp` is a symlink and will not work.
-- Uploads go to S3-compatible object storage: `STORAGE_ENDPOINT`, `STORAGE_BUCKET`,
-  `STORAGE_ACCESS_KEY_ID`, `STORAGE_SECRET_ACCESS_KEY`. For local dev, MinIO works
-  (`docker run -d -p 9000:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data`).
+- Uploads go to S3: `STORAGE_BUCKET` and `AWS_REGION` are normal configuration;
+  AWS credentials come from the ECS task role. Developer-local Floci supplies
+  `STORAGE_ENDPOINT` and test credentials. Use the repository's
+  `npm run aws:local:up` for infrastructure parity, not a substitute storage stack.
 - Scanned PDFs are OCR'd through the LLMoxie gateway with `OCR_MODEL` (optional); page renders need
   `poppler-utils`, which the runtime image installs.
-- Production mounts EFS at `/mnt/knowledge` (`KNOWLEDGE_ROOT`) and runs a single task, because a course
-  bundle has one writer and okf has no locking beyond the app's own lock file. In-flight extraction jobs
-  drain for up to 20 seconds on shutdown, and interrupted ones are marked on the next start.
+- With `STORAGE_BUCKET` configured, per-course knowledge snapshots (including
+  pre-edit originals) are persisted in that same bucket. `KNOWLEDGE_ROOT` is
+  a temporary working copy restored on first use; no EFS is provisioned.
+  Pure filesystem development without a bucket retains the original behavior.
+  The first release is single-task/single-writer, with stop-before-start
+  replacement and brief downtime. In-flight extraction jobs drain for up to
+  20 seconds on shutdown; interrupted ones become retryable on the next start.
 
 ## Deploying
 
@@ -79,9 +84,16 @@ as a one-off migration task using the new image and production environment,
 confirm that migration succeeds, then update the ECS service to the new image.
 Do not update the service before its database migration has completed.
 
-The web server does not run the overdue-submission sweep. Schedule it as a
-separate one-off ECS task using the same image and environment configuration
-as the service.
+The web server runs the overdue-submission sweep once at startup and hourly.
+A session-scoped PostgreSQL advisory lock prevents overlapping sweeps, and
+shutdown waits for active background work before closing the database pool.
+No EventBridge rule or separate scheduled ECS task is needed.
+
+The migration runner detects invalid concurrent indexes named by repository
+migrations and rebuilds those exact indexes outside a transaction. A failed
+migration must stop activation; rollback of application code does not reverse
+schema changes. See [the infrastructure operations guide](../../infra/README.md)
+for GitHub OIDC, Secrets Manager, domain/TLS setup and release ordering.
 
 ## Seeding a dev dataset
 

@@ -1,0 +1,155 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Ec2Discovery",
+      "Effect": "Allow",
+      "Action": "ec2:Describe*",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2CreateVpc",
+      "Effect": "Allow",
+      "Action": "ec2:CreateVpc",
+      "Resource": "arn:aws:ec2:us-west-2:055237683908:vpc/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2",
+          "aws:RequestTag/LLTeacherStack": "production"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2CreateNetwork",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateInternetGateway",
+        "ec2:CreateRouteTable",
+        "ec2:CreateSubnet",
+        "ec2:CreateSecurityGroup"
+      ],
+      "Resource": [
+        "arn:aws:ec2:us-west-2:055237683908:internet-gateway/*",
+        "arn:aws:ec2:us-west-2:055237683908:route-table/*",
+        "arn:aws:ec2:us-west-2:055237683908:subnet/*",
+        "arn:aws:ec2:us-west-2:055237683908:security-group/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2",
+          "aws:RequestTag/LLTeacherStack": "production"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2CreateInOwnedVpc",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateRouteTable",
+        "ec2:CreateSubnet",
+        "ec2:CreateSecurityGroup"
+      ],
+      "Resource": "arn:aws:ec2:us-west-2:055237683908:vpc/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2",
+          "aws:ResourceTag/LLTeacherStack": "production"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2OwnedNetwork",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:ModifyVpcAttribute",
+        "ec2:DeleteVpc",
+        "ec2:AttachInternetGateway",
+        "ec2:DetachInternetGateway",
+        "ec2:DeleteInternetGateway",
+        "ec2:DeleteRouteTable",
+        "ec2:CreateRoute",
+        "ec2:ReplaceRoute",
+        "ec2:DeleteRoute",
+        "ec2:AssociateRouteTable",
+        "ec2:DisassociateRouteTable",
+        "ec2:ModifySubnetAttribute",
+        "ec2:DeleteSubnet",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:DeleteSecurityGroup"
+      ],
+      "Resource": [
+        "arn:aws:ec2:us-west-2:055237683908:vpc/*",
+        "arn:aws:ec2:us-west-2:055237683908:internet-gateway/*",
+        "arn:aws:ec2:us-west-2:055237683908:route-table/*",
+        "arn:aws:ec2:us-west-2:055237683908:subnet/*",
+        "arn:aws:ec2:us-west-2:055237683908:security-group/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2",
+          "aws:ResourceTag/LLTeacherStack": "production"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2TagOnCreate",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": [
+        "arn:aws:ec2:us-west-2:055237683908:vpc/*",
+        "arn:aws:ec2:us-west-2:055237683908:internet-gateway/*",
+        "arn:aws:ec2:us-west-2:055237683908:route-table/*",
+        "arn:aws:ec2:us-west-2:055237683908:subnet/*",
+        "arn:aws:ec2:us-west-2:055237683908:security-group/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2",
+          "aws:RequestTag/LLTeacherStack": "production",
+          "ec2:CreateAction": [
+            "CreateVpc",
+            "CreateInternetGateway",
+            "CreateRouteTable",
+            "CreateSubnet",
+            "CreateSecurityGroup"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "Ec2MaintainTags",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateTags",
+        "ec2:DeleteTags"
+      ],
+      "Resource": [
+        "arn:aws:ec2:us-west-2:055237683908:vpc/*",
+        "arn:aws:ec2:us-west-2:055237683908:internet-gateway/*",
+        "arn:aws:ec2:us-west-2:055237683908:route-table/*",
+        "arn:aws:ec2:us-west-2:055237683908:subnet/*",
+        "arn:aws:ec2:us-west-2:055237683908:security-group/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-west-2",
+          "aws:ResourceTag/LLTeacherStack": "production"
+        },
+        "ForAllValues:StringNotEquals": {
+          "aws:TagKeys": "LLTeacherStack"
+        },
+        "Null": {
+          "aws:TagKeys": "false"
+        }
+      }
+    }
+  ]
+}

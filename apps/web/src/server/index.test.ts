@@ -78,6 +78,16 @@ beforeEach(() => {
 });
 
 describe("app composition", () => {
+  it("reports the release build SHA from the public health endpoint", async () => {
+    const previous = process.env.BUILD_SHA;
+    process.env.BUILD_SHA = "abc123";
+    const res = await app.request("/api/health", {}, ENV);
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ status: "ok", version: "abc123" });
+    if (previous === undefined) delete process.env.BUILD_SHA;
+    else process.env.BUILD_SHA = previous;
+  });
+
   it("does not require a session for /api/auth/login", async () => {
     const res = await app.request("/api/auth/login", {}, ENV);
     expect(res.status).not.toBe(401);

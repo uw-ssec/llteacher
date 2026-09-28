@@ -36,6 +36,31 @@ export function makeDb(databaseUrl: string): Db {
   return db;
 }
 
+/** Runs work while holding a session-scoped PostgreSQL advisory lock. */
+export async function withSessionAdvisoryLock<T>(
+  key: number,
+  work: () => Promise<T>,
+): Promise<{ acquired: boolean; value?: T }> {
+  if (!pool) throw new Error("Database pool is not initialized");
+  const client = await pool.connect();
+  let acquired = false;
+  try {
+    const result = await client.query<{ acquired: boolean }>(
+      "SELECT pg_try_advisory_lock($1) AS acquired",
+      [key],
+    );
+    acquired = result.rows[0]?.acquired === true;
+    if (!acquired) return { acquired: false };
+    return { acquired: true, value: await work() };
+  } finally {
+    try {
+      if (acquired) await client.query("SELECT pg_advisory_unlock($1)", [key]);
+    } finally {
+      client.release();
+    }
+  }
+}
+
 /** Releases the process-owned pool during Node server shutdown. */
 export async function closeDb(): Promise<void> {
   const currentPool = pool;

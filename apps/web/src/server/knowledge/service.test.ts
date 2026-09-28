@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { okfAvailable } from "./okfCli";
 import { OkfKnowledgeService, ConceptIdError, ConceptExistsError, knowledgeServiceFromEnv } from "./service";
+import { PersistentKnowledgeService } from "./persistent-service";
 
 const OKF = process.env.OKF_BINARY ?? "okf";
 const COURSE_A = "11111111-2222-4333-8444-555555555555";
@@ -341,5 +342,19 @@ describe("knowledgeServiceFromEnv", () => {
     const withDefault = knowledgeServiceFromEnv({ KNOWLEDGE_ROOT: root } as unknown as Env);
     const withOverride = knowledgeServiceFromEnv({ KNOWLEDGE_ROOT: root, OKF_BINARY: "/usr/local/bin/okf" } as unknown as Env);
     expect(withOverride).not.toBe(withDefault);
+  });
+
+  it("preserves the filesystem-only service when storage is not configured", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "kb-env-fs-"));
+    expect(knowledgeServiceFromEnv({ KNOWLEDGE_ROOT: root, OKF_BINARY: OKF } as unknown as Env)).toBeInstanceOf(OkfKnowledgeService);
+  });
+
+  it("memoizes a persistent service by root, binary, and storage configuration", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "kb-env-persistent-"));
+    const env = { KNOWLEDGE_ROOT: root, OKF_BINARY: OKF, STORAGE_BUCKET: "knowledge-a", AWS_REGION: "us-west-2" } as unknown as Env;
+    const first = knowledgeServiceFromEnv(env);
+    expect(first).toBeInstanceOf(PersistentKnowledgeService);
+    expect(knowledgeServiceFromEnv({ ...env } as unknown as Env)).toBe(first);
+    expect(knowledgeServiceFromEnv({ ...env, STORAGE_BUCKET: "knowledge-b" } as unknown as Env)).not.toBe(first);
   });
 });

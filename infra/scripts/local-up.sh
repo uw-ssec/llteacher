@@ -3,7 +3,6 @@ set -euo pipefail
 if [[ "${PULUMI_STACK:-local}" != "local" ]]; then echo "Refusing non-local stack" >&2; exit 2; fi
 root=$(cd "$(dirname "$0")/../.." && pwd)
 "$root/infra/scripts/floci-up.sh"
-"$root/infra/scripts/tls-proxy-up.sh"
 export PULUMI_BACKEND_URL="file://$root/.pulumi/local"
 # Keep the local backend decryptable across normal up/down cycles without
 # requiring a developer to remember a manually chosen passphrase. This file is
@@ -23,6 +22,16 @@ fi
 pulumi -C "$root/infra" config set --stack local environment local
 pulumi -C "$root/infra" config set --stack local domainName llteacher.local
 pulumi -C "$root/infra" config set --stack local flociEndpoint http://localhost:4566
+pulumi -C "$root/infra" config set --stack local aws:region us-west-2
+pulumi -C "$root/infra" config set --stack local flociTaskEndpoint http://host.docker.internal:4566
+# Floci exposes its modeled HTTP and HTTPS listeners as plaintext host sockets.
+# Preserve an explicitly enabled domain graph while keeping HTTP bootstrap the
+# default; verification derives the same socket from domainReady.
+local_app_port=8080
+if [[ "$(pulumi -C "$root/infra" config get domainReady --stack local 2>/dev/null || true)" == "true" ]]; then
+  local_app_port=8443
+fi
+pulumi -C "$root/infra" config set --stack local appOrigin "http://localhost:$local_app_port"
 if ! pulumi -C "$root/infra" config get imageTag --stack local >/dev/null 2>&1; then
   pulumi -C "$root/infra" config set --stack local imageTag local-bootstrap
 fi
@@ -54,23 +63,31 @@ if ! repo=$(pulumi -C "$root/infra" stack output ecrRepositoryUrl --stack local 
   pulumi -C "$root/infra" up --stack local --yes
   repo=$(pulumi -C "$root/infra" stack output ecrRepositoryUrl --stack local)
 fi
-image_tag="local-$(date +%s)"
-image_uri="000000000000.dkr.ecr.us-east-1.amazonaws.com/${repo#*/}:$image_tag"
-docker_build=(docker build)
-if [[ "${CI:-}" == "true" ]]; then
-  docker_build=(docker buildx build --load \
-    --cache-from type=gha,scope=llteacher-aws \
-    --cache-to type=gha,mode=max,scope=llteacher-aws)
-fi
-"${docker_build[@]}" --tag "$image_uri" --file "$root/Dockerfile.aws" "$root"
+image_tag="local"
+image_uri="000000000000.dkr.ecr.us-west-2.amazonaws.com/llteacher-local/app:$image_tag"
+docker buildx inspect llteacher-local-builder >/dev/null 2>&1 || docker buildx create --name llteacher-local-builder --driver docker-container --use
+docker buildx build --builder llteacher-local-builder --load --label org.llteacher.local=true --tag "$image_uri" --file "$root/Dockerfile.aws" "$root"
+image_id=$(docker image inspect --format '{{.Id}}' "$image_uri")
 # Floci resolves this canonical ECR-shaped image directly from the local Docker
 # daemon. Its CreateRepository URI is intentionally not used here: that is the
 # registry proxy address, not the local-image lookup key.
 pulumi -C "$root/infra" config set --stack local provisionService true
 pulumi -C "$root/infra" config set --stack local imageTag "$image_tag"
+pulumi -C "$root/infra" config set --stack local buildSha "$image_id"
 pulumi -C "$root/infra" config set --stack local deployApp false
 pulumi -C "$root/infra" up --stack local --yes
+# Floci resolves local tags when it creates Docker-backed tasks. Remove any
+# superseded labelled image after the service is stopped so migration and app
+# tasks cannot reuse a stale image behind the stable local tag.
+"$root/infra/scripts/wait-for-local-ecs-stop.sh"
+"$root/infra/scripts/local-image-cleanup.sh" "$image_id" images-only
+# Floci 2.1.0 also caches the first Docker image ID resolved for a stable ECS
+# image URI in memory. Restart only the emulator control plane (persistent RDS
+# and S3 backing data remain intact), then wait for it before launching tasks.
+docker restart llteacher-floci >/dev/null
+"$root/infra/scripts/floci-up.sh"
 "$root/infra/scripts/run-local-migrations.sh"
 pulumi -C "$root/infra" config set --stack local deployApp true
 pulumi -C "$root/infra" up --stack local --yes
+"$root/infra/scripts/local-image-cleanup.sh" "$image_id"
 echo "Local ECS service deployed. Run npm run aws:local:verify after the ALB becomes healthy."
