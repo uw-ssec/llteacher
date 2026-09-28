@@ -427,7 +427,8 @@ if it already exists; that is a resume/reconciliation task, not a fresh init.
 
 ```bash
 jq -e 'all(.[]; .name != "production" and (.name | endswith("/production") | not))' "$BOOTSTRAP_TMP/stacks.json"
-test ! -e infra/Pulumi.production.yaml || stop 'Existing production config: reconcile before init.'
+# The committed file holds only non-secret config; init adds secretsprovider/encryptedkey.
+! grep -Eq '^(secretsprovider|encryptedkey|encryptionsalt):' infra/Pulumi.production.yaml || stop 'Production config already initialized: reconcile before init.'
 pulumi -C infra stack init production --secrets-provider 'awskms://alias/llteacher-pulumi-state?region=us-west-2&awssdk=v2'
 ```
 
