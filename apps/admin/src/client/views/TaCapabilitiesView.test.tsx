@@ -332,7 +332,7 @@ describe("TaCapabilitiesView (#172)", () => {
     await waitFor(() => screen.getByText(/No teaching assistants/i));
     // Focus is on the alert saying why, not on <body>.
     const alert = screen.getByRole("alert");
-    expect(document.activeElement).toBe(alert);
+    await waitFor(() => expect(document.activeElement).toBe(alert));
     expect(alert.textContent).toMatch(/no longer in this course/i);
   });
 
