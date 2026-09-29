@@ -137,6 +137,32 @@ function resource(type: string, name: string): RecordedResource {
   return match;
 }
 
+function expectTaskRoleHasOnlyStoragePolicy(graph: RecordedResource[]) {
+  const taskRole = "llteacher-production-task-role";
+  const roleTargets = new Set([taskRole, `${taskRole}-id`]);
+  const role = graph.find(({ name, type }) => name === taskRole && type === "aws:iam/role:Role");
+  expect(role).toBeDefined();
+  expect(role!.inputs.inlinePolicies ?? []).toEqual([]);
+  expect(role!.inputs.managedPolicyArns ?? []).toEqual([]);
+  const taskPolicies = graph.filter(({ type, inputs }) =>
+    type === "aws:iam/rolePolicy:RolePolicy" && roleTargets.has(String(inputs.role)));
+  expect(taskPolicies.map(({ name }) => name)).toEqual(["llteacher-production-materials-policy"]);
+  for (const { inputs } of taskPolicies) {
+    const policy = JSON.parse(String(inputs.policy));
+    for (const statement of policy.Statement) {
+      const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+      expect(actions.every((action: string) => action.startsWith("s3:"))).toBe(true);
+    }
+  }
+  const taskAttachments = graph.filter(({ type, inputs }) =>
+    (type === "aws:iam/rolePolicyAttachment:RolePolicyAttachment" && roleTargets.has(String(inputs.role)))
+    || (type === "aws:iam/policyAttachment:PolicyAttachment"
+      && Array.isArray(inputs.roles) && inputs.roles.some((target) => roleTargets.has(String(target))))
+    || (type === "aws:iam/rolePolicyAttachmentsExclusive:RolePolicyAttachmentsExclusive"
+      && roleTargets.has(String(inputs.roleName)) && Array.isArray(inputs.policyArns) && inputs.policyArns.length > 0));
+  expect(taskAttachments).toEqual([]);
+}
+
 describe("production resource graph", () => {
   it("tags every production network resource at creation for policy ownership", () => {
     const ownedTypes = new Set([
@@ -258,20 +284,66 @@ describe("production resource graph", () => {
   });
 
   it("does not grant Secrets Manager access to the production task role", () => {
-    const taskRole = "llteacher-production-task-role";
-    const taskPolicies = resources.filter(({ name, type, inputs }) =>
-      name.startsWith("llteacher-production-") && type === "aws:iam/rolePolicy:RolePolicy" && inputs.role === `${taskRole}-id`);
-    expect(taskPolicies.map(({ name }) => name)).toEqual(["llteacher-production-materials-policy"]);
-    for (const { inputs } of taskPolicies) {
-      const policy = JSON.parse(String(inputs.policy));
-      for (const statement of policy.Statement) {
-        const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
-        expect(actions.every((action: string) => action.startsWith("s3:"))).toBe(true);
-      }
-    }
-    const taskAttachments = resources.filter(({ name, type, inputs }) =>
-      name.startsWith("llteacher-production-") && type === "aws:iam/rolePolicyAttachment:RolePolicyAttachment" && inputs.role === taskRole);
-    expect(taskAttachments).toEqual([]);
+    expectTaskRoleHasOnlyStoragePolicy(resources);
+  });
+
+  it.each([
+    {
+      kind: "inline policy",
+      type: "aws:iam/rolePolicy:RolePolicy",
+      inputs: {
+        role: "llteacher-production-task-role-id",
+        policy: JSON.stringify({ Statement: [{ Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: "*" }] }),
+      },
+    },
+    {
+      kind: "managed policy attachment",
+      type: "aws:iam/rolePolicyAttachment:RolePolicyAttachment",
+      inputs: { role: "llteacher-production-task-role", policyArn: "arn:aws:iam::055237683908:policy/rogue-secrets" },
+    },
+    {
+      kind: "inline policy targeting the role name",
+      type: "aws:iam/rolePolicy:RolePolicy",
+      inputs: {
+        role: "llteacher-production-task-role",
+        policy: JSON.stringify({ Statement: [{ Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: "*" }] }),
+      },
+    },
+    {
+      kind: "managed policy attachment targeting the role ID",
+      type: "aws:iam/rolePolicyAttachment:RolePolicyAttachment",
+      inputs: { role: "llteacher-production-task-role-id", policyArn: "arn:aws:iam::055237683908:policy/rogue-secrets" },
+    },
+    {
+      kind: "multi-role policy attachment",
+      type: "aws:iam/policyAttachment:PolicyAttachment",
+      inputs: { roles: ["llteacher-production-task-role"], policyArn: "arn:aws:iam::055237683908:policy/rogue-secrets" },
+    },
+    {
+      kind: "exclusive managed policy attachment",
+      type: "aws:iam/rolePolicyAttachmentsExclusive:RolePolicyAttachmentsExclusive",
+      inputs: { roleName: "llteacher-production-task-role", policyArns: ["arn:aws:iam::055237683908:policy/rogue-secrets"] },
+    },
+  ])("rejects a differently named task-role $kind", ({ type, inputs }) => {
+    const rogueGrant = { name: "rogue-secrets-grant", type, inputs };
+    expect(() => expectTaskRoleHasOnlyStoragePolicy([...resources, rogueGrant])).toThrow();
+  });
+
+  it.each([
+    {
+      kind: "inline policy",
+      field: "inlinePolicies",
+      value: [{ name: "rogue-secrets", policy: JSON.stringify({ Statement: [{ Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: "*" }] }) }],
+    },
+    {
+      kind: "managed policy ARN",
+      field: "managedPolicyArns",
+      value: ["arn:aws:iam::055237683908:policy/rogue-secrets"],
+    },
+  ])("rejects a $kind declared directly on the task role", ({ field, value }) => {
+    const role = resource("aws:iam/role:Role", "llteacher-production-task-role");
+    const graph = resources.map((entry) => entry === role ? { ...role, inputs: { ...role.inputs, [field]: value } } : entry);
+    expect(() => expectTaskRoleHasOnlyStoragePolicy(graph)).toThrow();
   });
 
   it("requires the bootstrap-owned runtime boundary on both production IAM roles", () => {
