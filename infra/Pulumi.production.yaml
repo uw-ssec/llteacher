@@ -6,3 +6,5 @@ config:
   llteacher-infra:imageTag: bootstrap
   llteacher-infra:provisionService: "false"
   llteacher-infra:deployApp: "false"
+secretsprovider: awskms://alias/llteacher-pulumi-state?region=us-west-2&awssdk=v2
+encryptedkey: AQICAHgVZtY7d8yTF3BQokXOCXwVUTYGvARbo2UJgd+LVESO2wGyUS/cvQUfWCMVn/SJIaSLAAAAfjB8BgkqhkiG9w0BBwagbzBtAgEAMGgGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQM9XXCLuU36wJ/knG3AgEQgDvCSn6rrBjaiynIWcPK7VwripAy4Oyhz8tKpkwAZpreOjEW9kbRnrUoASb4pk81eTzaP0Z9hkXbyWqc1A==
