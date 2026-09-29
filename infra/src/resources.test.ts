@@ -251,8 +251,27 @@ describe("production resource graph", () => {
   });
 
   it("limits secret retrieval to both exact secret ARNs", () => {
-    const policy = JSON.parse(String(resource("aws:iam/rolePolicy:RolePolicy", "llteacher-production-secrets-policy").inputs.policy));
+    const secretPolicy = resource("aws:iam/rolePolicy:RolePolicy", "llteacher-production-secrets-policy");
+    expect(secretPolicy.inputs.role).toBe("llteacher-production-execution-role-id");
+    const policy = JSON.parse(String(secretPolicy.inputs.policy));
     expect(policy.Statement).toEqual([{ Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: ["arn:aws:test:us-east-1:000000000000:llteacher-production-database-url", "arn:aws:test:us-east-1:000000000000:llteacher-production-runtime"] }]);
+  });
+
+  it("does not grant Secrets Manager access to the production task role", () => {
+    const taskRole = "llteacher-production-task-role";
+    const taskPolicies = resources.filter(({ name, type, inputs }) =>
+      name.startsWith("llteacher-production-") && type === "aws:iam/rolePolicy:RolePolicy" && inputs.role === `${taskRole}-id`);
+    expect(taskPolicies.map(({ name }) => name)).toEqual(["llteacher-production-materials-policy"]);
+    for (const { inputs } of taskPolicies) {
+      const policy = JSON.parse(String(inputs.policy));
+      for (const statement of policy.Statement) {
+        const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+        expect(actions.every((action: string) => action.startsWith("s3:"))).toBe(true);
+      }
+    }
+    const taskAttachments = resources.filter(({ name, type, inputs }) =>
+      name.startsWith("llteacher-production-") && type === "aws:iam/rolePolicyAttachment:RolePolicyAttachment" && inputs.role === taskRole);
+    expect(taskAttachments).toEqual([]);
   });
 
   it("requires the bootstrap-owned runtime boundary on both production IAM roles", () => {
