@@ -153,7 +153,14 @@ jobs:
           [[ "$(docker image inspect --format '{{.Id}}' "llteacher-release:$GITHUB_SHA")" == "$(cat image.id)" ]] || die 'Loaded image ID does not match the tested artifact.'
           [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "llteacher-release:$GITHUB_SHA")" == "$GITHUB_SHA" ]] || die 'Loaded image revision label does not match GITHUB_SHA.'
       - name: Refresh encrypted stack configuration
-        run: pulumi -C infra config refresh --stack "$STACK" --non-interactive
+        run: |
+          history=$(pulumi -C infra stack history --stack "$STACK" --json)
+          history_count=$(jq -er 'if type == "array" then length else error("Pulumi stack history must be a JSON array") end' <<<"$history")
+          if (( history_count > 0 )); then
+            pulumi -C infra config refresh --stack "$STACK" --non-interactive
+          else
+            echo "No previous deployment; using checked-in stack configuration."
+          fi
       - name: Validate refreshed production configuration
         run: |
           source infra/scripts/aws-release-common.sh
