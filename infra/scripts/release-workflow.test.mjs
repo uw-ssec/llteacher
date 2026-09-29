@@ -8,6 +8,117 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 const require = createRequire(import.meta.url);
 const workflow = require('js-yaml').load(readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8'));
+const productionInputNames = [
+  'DATABASE_PASSWORD', 'WORKOS_API_KEY', 'WORKOS_CLIENT_ID', 'WORKOS_WEBHOOK_SECRET',
+  'OPENROUTER_API_KEY', 'LLMOXIE_API_KEY', 'SESSION_SECRET', 'ENCRYPTION_KEY',
+  'BLIND_INDEX_KEY', 'LLMOXIE_BASE_URL',
+];
+const expectedProductionInputs = {
+  DATABASE_PASSWORD: '${{ secrets.DATABASE_PASSWORD }}',
+  WORKOS_API_KEY: '${{ secrets.WORKOS_API_KEY }}',
+  WORKOS_CLIENT_ID: '${{ secrets.WORKOS_CLIENT_ID }}',
+  WORKOS_WEBHOOK_SECRET: '${{ secrets.WORKOS_WEBHOOK_SECRET }}',
+  OPENROUTER_API_KEY: '${{ secrets.OPENROUTER_API_KEY }}',
+  LLMOXIE_API_KEY: '${{ secrets.LLMOXIE_API_KEY }}',
+  SESSION_SECRET: '${{ secrets.SESSION_SECRET }}',
+  ENCRYPTION_KEY: '${{ secrets.ENCRYPTION_KEY }}',
+  BLIND_INDEX_KEY: '${{ secrets.BLIND_INDEX_KEY }}',
+  LLMOXIE_BASE_URL: '${{ vars.LLMOXIE_BASE_URL }}',
+};
+const productionInputSteps = [
+  'Validate production deployment inputs',
+  'Bootstrap base infrastructure only when ECR is absent',
+  'Register candidate while retaining the current service',
+  'Activate migrated candidate',
+];
+
+test('validates production deployment inputs before the first AWS mutation', () => {
+  const steps = workflow.jobs.production.steps;
+  const install = steps.findIndex(step => step.name === 'Install and build infrastructure on deployment runner');
+  const validation = steps.findIndex(step => step.name === 'Validate production deployment inputs');
+  const oidc = steps.findIndex(step => step.uses?.startsWith('aws-actions/configure-aws-credentials'));
+  const bootstrap = steps.findIndex(step => step.name === 'Bootstrap base infrastructure only when ECR is absent');
+  const publication = steps.findIndex(step => step.name === 'Push tested application image');
+  assert(install >= 0 && validation > install && oidc > validation && bootstrap > validation && publication > validation);
+  assert.equal(steps[validation].run.trim(), 'node infra/dist/validate-production-inputs.js');
+});
+
+test('scopes the complete GitHub input set to validation and Pulumi update steps', () => {
+  const steps = workflow.jobs.production.steps;
+  const byName = name => steps.find(step => step.name === name);
+  assert.deepEqual(byName(productionInputSteps[0])?.env, expectedProductionInputs);
+  assert.deepEqual(byName(productionInputSteps[1])?.env, expectedProductionInputs);
+  assert.deepEqual(byName(productionInputSteps[2])?.env, {
+    IMAGE_DIGEST: '${{ steps.image.outputs.digest }}', ...expectedProductionInputs,
+  });
+  assert.deepEqual(byName(productionInputSteps[3])?.env, {
+    CANDIDATE: '${{ steps.candidate.outputs.candidate }}', ...expectedProductionInputs,
+  });
+});
+
+test('does not expose production secrets to tests artifacts Docker migrations identity checks or verification', () => {
+  for (const job of Object.values(workflow.jobs)) {
+    for (const name of productionInputNames) assert.equal(job.env?.[name], undefined, `job env exposes ${name}`);
+    for (const step of job.steps) {
+      if (job === workflow.jobs.production && productionInputSteps.includes(step.name)) continue;
+      for (const name of productionInputNames) {
+        assert.equal(step.env?.[name], undefined, `${step.name ?? step.uses} exposes ${name}`);
+        assert(!JSON.stringify(step).includes(`secrets.${name}`), `${step.name ?? step.uses} references secret ${name}`);
+      }
+    }
+  }
+});
+
+test('does not copy secret values through GitHub environment outputs arguments or artifacts', () => {
+  for (const step of workflow.jobs.production.steps) {
+    if (!step.run) continue;
+    for (const name of productionInputNames) {
+      assert(!step.run.includes(`secrets.${name}`), `${step.name} interpolates ${name} in run`);
+      for (const line of step.run.split('\n')) {
+        if (/\$GITHUB_ENV|\$GITHUB_OUTPUT|pulumi\b[^\n]*\bconfig set\b/.test(line)) {
+          assert(!new RegExp(`\\b${name}\\b`).test(line), `${step.name} transports ${name}`);
+        }
+      }
+    }
+  }
+});
+
+test('validator CLI prints one safe success line and redacts rejected values', () => {
+  const root = new URL('../..', import.meta.url);
+  const build = spawnSync('npm', ['run', 'build', '--workspace=infra'], { cwd: root, encoding: 'utf8' });
+  assert.equal(build.status, 0, build.stderr);
+  const fake = {
+    DATABASE_PASSWORD: 'FakePass123!', WORKOS_API_KEY: 'sk_fake', WORKOS_CLIENT_ID: 'client_fake',
+    WORKOS_WEBHOOK_SECRET: 'fake-webhook', OPENROUTER_API_KEY: 'sk-or-fake', LLMOXIE_API_KEY: 'fake-llmoxie',
+    SESSION_SECRET: Buffer.alloc(32, 1).toString('base64'),
+    ENCRYPTION_KEY: Buffer.alloc(32, 2).toString('base64'),
+    BLIND_INDEX_KEY: Buffer.alloc(32, 3).toString('base64'),
+    LLMOXIE_BASE_URL: 'https://llmoxie.example.test/api/v1',
+  };
+  const cli = 'infra/dist/validate-production-inputs.js';
+  const valid = spawnSync(process.execPath, [cli], { cwd: root, encoding: 'utf8', env: fake });
+  assert.equal(valid.status, 0, valid.stderr);
+  assert.equal(valid.stdout, 'Production deployment inputs are valid.\n');
+  assert.equal(valid.stderr, '');
+  const rejected = 'fake rejected value with spaces';
+  const invalid = spawnSync(process.execPath, [cli], {
+    cwd: root, encoding: 'utf8', env: { ...fake, DATABASE_PASSWORD: rejected },
+  });
+  assert.notEqual(invalid.status, 0);
+  assert.equal(invalid.stdout, '');
+  assert.match(invalid.stderr, /DATABASE_PASSWORD/);
+  assert(!invalid.stderr.includes(rejected));
+});
+
+test('retains the empty-stack configuration refresh guard', () => {
+  const steps = workflow.jobs.production.steps;
+  const refresh = steps.find(step => step.name === 'Refresh encrypted stack configuration');
+  assert(refresh);
+  assert.match(refresh.run, /stack history --stack "\$STACK" --json/);
+  assert.match(refresh.run, /if \(\( history_count > 0 \)\); then\s+pulumi -C infra config refresh/);
+  assert.match(refresh.run, /No previous deployment; using checked-in stack configuration/);
+  for (const name of productionInputNames) assert.equal(refresh.env?.[name], undefined);
+});
 test('production operations use the S3 backend and historical instructions explicitly defer to the new design', () => {
   const read = path => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
   for (const path of ['infra/README.md', 'docs/superpowers/specs/2026-09-21-minimal-production-infrastructure-design.md']) {

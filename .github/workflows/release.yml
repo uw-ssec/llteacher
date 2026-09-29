@@ -124,6 +124,19 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || die 'Checked-out commit does not match GITHUB_SHA.'
       - name: Install and build infrastructure on deployment runner
         run: npm ci && npm run build --workspace=infra
+      - name: Validate production deployment inputs
+        env:
+          DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
+          WORKOS_API_KEY: ${{ secrets.WORKOS_API_KEY }}
+          WORKOS_CLIENT_ID: ${{ secrets.WORKOS_CLIENT_ID }}
+          WORKOS_WEBHOOK_SECRET: ${{ secrets.WORKOS_WEBHOOK_SECRET }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LLMOXIE_API_KEY: ${{ secrets.LLMOXIE_API_KEY }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          BLIND_INDEX_KEY: ${{ secrets.BLIND_INDEX_KEY }}
+          LLMOXIE_BASE_URL: ${{ vars.LLMOXIE_BASE_URL }}
+        run: node infra/dist/validate-production-inputs.js
       - uses: pulumi/actions@v6
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -173,6 +186,17 @@ jobs:
           validate_refreshed_stack_config "$region" "$environment" "$domain_ready" "$domain_name" "$certificate_arn"
       - name: Bootstrap base infrastructure only when ECR is absent
         id: base
+        env:
+          DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
+          WORKOS_API_KEY: ${{ secrets.WORKOS_API_KEY }}
+          WORKOS_CLIENT_ID: ${{ secrets.WORKOS_CLIENT_ID }}
+          WORKOS_WEBHOOK_SECRET: ${{ secrets.WORKOS_WEBHOOK_SECRET }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LLMOXIE_API_KEY: ${{ secrets.LLMOXIE_API_KEY }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          BLIND_INDEX_KEY: ${{ secrets.BLIND_INDEX_KEY }}
+          LLMOXIE_BASE_URL: ${{ vars.LLMOXIE_BASE_URL }}
         run: bash infra/scripts/prepare-aws-release.sh "$STACK" repository
       - name: Push tested application image
         id: image
@@ -194,6 +218,16 @@ jobs:
         id: candidate
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
+          WORKOS_API_KEY: ${{ secrets.WORKOS_API_KEY }}
+          WORKOS_CLIENT_ID: ${{ secrets.WORKOS_CLIENT_ID }}
+          WORKOS_WEBHOOK_SECRET: ${{ secrets.WORKOS_WEBHOOK_SECRET }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LLMOXIE_API_KEY: ${{ secrets.LLMOXIE_API_KEY }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          BLIND_INDEX_KEY: ${{ secrets.BLIND_INDEX_KEY }}
+          LLMOXIE_BASE_URL: ${{ vars.LLMOXIE_BASE_URL }}
         run: bash infra/scripts/prepare-aws-release.sh "$STACK" candidate
       - name: Run candidate migrations
         env:
@@ -202,6 +236,16 @@ jobs:
       - name: Activate migrated candidate
         env:
           CANDIDATE: ${{ steps.candidate.outputs.candidate }}
+          DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
+          WORKOS_API_KEY: ${{ secrets.WORKOS_API_KEY }}
+          WORKOS_CLIENT_ID: ${{ secrets.WORKOS_CLIENT_ID }}
+          WORKOS_WEBHOOK_SECRET: ${{ secrets.WORKOS_WEBHOOK_SECRET }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LLMOXIE_API_KEY: ${{ secrets.LLMOXIE_API_KEY }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          BLIND_INDEX_KEY: ${{ secrets.BLIND_INDEX_KEY }}
+          LLMOXIE_BASE_URL: ${{ vars.LLMOXIE_BASE_URL }}
         run: |
           source infra/scripts/aws-release-common.sh
           validate_release_target "$STACK"
