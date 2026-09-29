@@ -69,17 +69,45 @@ test('does not expose production secrets to tests artifacts Docker migrations id
   }
 });
 
-test('does not copy secret values through GitHub environment outputs arguments or artifacts', () => {
-  for (const step of workflow.jobs.production.steps) {
-    if (!step.run) continue;
-    for (const name of productionInputNames) {
-      assert(!step.run.includes(`secrets.${name}`), `${step.name} interpolates ${name} in run`);
-      for (const line of step.run.split('\n')) {
-        if (/\$GITHUB_ENV|\$GITHUB_OUTPUT|pulumi\b[^\n]*\bconfig set\b/.test(line)) {
-          assert(!new RegExp(`\\b${name}\\b`).test(line), `${step.name} transports ${name}`);
+function assertNoProductionInputTransport(candidateWorkflow) {
+  const stringValues = value => {
+    if (typeof value === 'string') return [value];
+    if (Array.isArray(value)) return value.flatMap(stringValues);
+    if (value && typeof value === 'object') return Object.values(value).flatMap(stringValues);
+    return [];
+  };
+  for (const [jobName, job] of Object.entries(candidateWorkflow.jobs)) {
+    for (const step of job.steps) {
+      const { env: _approvedStepEnvironment, ...otherStepFields } = step;
+      const approvedInputStep = jobName === 'production' && productionInputSteps.includes(step.name);
+      for (const value of stringValues(approvedInputStep ? otherStepFields : step)) {
+        for (const name of productionInputNames) {
+          const protectedExpression = new RegExp(`\\$\\{\\{\\s*(?:secrets|vars)\\s*(?:\\.\\s*${name}\\b|\\[\\s*['"]${name}['"]\\s*\\])`);
+          assert(!protectedExpression.test(value), `${step.name ?? step.uses} interpolates ${name} outside approved step env`);
+          if (jobName === 'production') {
+            assert(!new RegExp(`\\b${name}\\b`).test(value), `${step.name ?? step.uses} transports ${name} outside approved step env`);
+          }
         }
       }
     }
+  }
+}
+
+test('does not copy secret values through GitHub environment outputs arguments or artifacts', () => {
+  assertNoProductionInputTransport(workflow);
+});
+
+test('rejects command argument and artifact transport mutations', () => {
+  for (const mutate of [
+    candidate => { candidate.jobs.production.steps.find(step => step.id === 'candidate').run += '\nnode tool.js "$DATABASE_PASSWORD"'; },
+    candidate => { candidate.jobs.production.steps.find(step => step.id === 'candidate').run += '\nprintf "%s" "$WORKOS_API_KEY" > release-artifact/input.txt'; },
+    candidate => { candidate.jobs.test.steps.find(step => step.uses?.startsWith('actions/upload-artifact')).with.path = '${{ secrets.ENCRYPTION_KEY }}'; },
+    candidate => { candidate.jobs.test.steps.find(step => step.uses?.startsWith('actions/upload-artifact')).with.path = '${{ vars.LLMOXIE_BASE_URL }}'; },
+    candidate => { candidate.jobs.test.steps.find(step => step.uses?.startsWith('actions/upload-artifact')).env = { UPLOAD_PATH: '${{ vars.LLMOXIE_BASE_URL }}' }; },
+  ]) {
+    const candidate = structuredClone(workflow);
+    mutate(candidate);
+    assert.throws(() => assertNoProductionInputTransport(candidate), { name: 'AssertionError' });
   }
 });
 
