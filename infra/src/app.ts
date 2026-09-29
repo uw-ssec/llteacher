@@ -2,6 +2,7 @@ import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 import type { InfraConfig } from "./config.js";
 import type { Database } from "./database.js";
+import type { DeploymentInputs } from "./deployment-inputs.js";
 import type { Network } from "./network.js";
 import { resolveApplicationImage } from "./provider.js";
 import { createDnsResources, type DnsResources } from "./dns.js";
@@ -24,7 +25,7 @@ const assumeRolePolicy = JSON.stringify({
   Statement: [{ Action: "sts:AssumeRole", Effect: "Allow", Principal: { Service: "ecs-tasks.amazonaws.com" } }],
 });
 
-export function createApplication(name: string, config: InfraConfig, network: Network, data: Database, provider: aws.Provider): Application {
+export function createApplication(name: string, config: InfraConfig, network: Network, data: Database, provider: aws.Provider, deploymentInputs: DeploymentInputs): Application {
   const options = { provider };
   const repository = new aws.ecr.Repository(`${name}-app`, { forceDelete: config.isLocal, name: `${name}/app` }, options);
   const logGroup = new aws.cloudwatch.LogGroup(`${name}-app-logs`, { retentionInDays: config.isLocal ? 7 : 30 }, options);
@@ -79,10 +80,11 @@ export function createApplication(name: string, config: InfraConfig, network: Ne
     networkMode: "awsvpc",
     requiresCompatibilities: ["FARGATE"],
     taskRoleArn: taskRole.arn,
-    containerDefinitions: pulumi.all([repository.repositoryUrl, logGroup.name, data.databaseUrlSecret.arn, data.runtimeSecret.arn, data.materialsBucket.bucket, appUrl]).apply(([repositoryUrl, logGroupName, databaseSecretArn, runtimeSecretArn, bucket, origin]) => JSON.stringify([{
+    containerDefinitions: pulumi.all([repository.repositoryUrl, logGroup.name, data.databaseUrlSecret.arn, data.runtimeSecret.arn, data.materialsBucket.bucket, appUrl, data.databaseUrlSecretVersion.versionId, data.runtimeSecretVersion.versionId]).apply(([repositoryUrl, logGroupName, databaseSecretArn, runtimeSecretArn, bucket, origin, databaseVersionId, runtimeVersionId]) => JSON.stringify([{
       name: "app",
       image: resolveApplicationImage(config, name, repositoryUrl),
       essential: true,
+      dockerLabels: { "llteacher.secret-versions": `${databaseVersionId}:${runtimeVersionId}` },
       environment: [
         { name: "APP_URL", value: origin },
         { name: "AWS_REGION", value: config.region },
@@ -90,6 +92,7 @@ export function createApplication(name: string, config: InfraConfig, network: Ne
         { name: "PORT", value: "8080" },
         { name: "BUILD_SHA", value: config.buildSha ?? config.imageTag },
         { name: "KNOWLEDGE_ROOT", value: "/tmp/llteacher-knowledge" },
+        ...(deploymentInputs.llmoxieBaseUrl === undefined ? [] : [{ name: "LLMOXIE_BASE_URL", value: deploymentInputs.llmoxieBaseUrl }]),
         ...(config.isLocal ? [
           { name: "STORAGE_ENDPOINT", value: config.storageEndpoint ?? "http://host.docker.internal:4566" },
           { name: "STORAGE_ACCESS_KEY_ID", value: "test" },

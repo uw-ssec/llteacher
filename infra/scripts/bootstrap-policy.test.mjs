@@ -98,8 +98,8 @@ function globMatches(pattern, value) {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*').replaceAll('?', '.');
   return new RegExp(`^${escaped}$`).test(value);
 }
-function policyAllows(action, resource, context = {}) {
-  return deploy().some(s => s.Effect === 'Allow'
+function policyAllows(action, resource, context = {}, statements = deploy()) {
+  return statements.some(s => s.Effect === 'Allow'
     && actions(s).some(a => globMatches(a, action))
     && resources(s).some(r => globMatches(r, resource))
     && Object.entries(s.Condition ?? {}).every(([operator, entries]) => Object.entries(entries).every(([key, expected]) => {
@@ -335,6 +335,27 @@ test('runtime boundary permits only image pulls, app log writes, app secret read
   }
 });
 
+test('runtime boundary reads only the runtime and database URL secret families', () => {
+  const statements = policy(boundaryFile).Statement;
+  const context = { 'aws:RequestedRegion': region };
+  for (const family of ['runtime', 'database-url']) {
+    const secret = `arn:aws:secretsmanager:${region}:${account}:secret:llteacher-production-${family}-abc123`;
+    assert(policyAllows('secretsmanager:GetSecretValue', secret, context, statements), family);
+    for (const action of ['secretsmanager:DescribeSecret', 'secretsmanager:PutSecretValue']) {
+      assert.equal(policyAllows(action, secret, context, statements), false, `${action} ${family}`);
+    }
+    assert.equal(policyAllows('secretsmanager:GetSecretValue', secret, { 'aws:RequestedRegion': 'us-east-1' }, statements), false);
+  }
+  for (const secret of [
+    `arn:aws:secretsmanager:${region}:${account}:secret:llteacher-production-other-abc123`,
+    `arn:aws:secretsmanager:${region}:${account}:secret:llteacher-staging-runtime-abc123`,
+    `arn:aws:secretsmanager:${region}:000000000000:secret:llteacher-production-runtime-abc123`,
+    `arn:aws:secretsmanager:us-east-1:${account}:secret:llteacher-production-runtime-abc123`,
+  ]) {
+    assert.equal(policyAllows('secretsmanager:GetSecretValue', secret, context, statements), false, secret);
+  }
+});
+
 test('four focused deployment policies fit the AWS managed-policy size limit after substitution', () => {
   for (const file of files.slice(3)) {
     const rendered = JSON.parse(read(file).replace(kmsToken, `arn:aws:kms:${region}:${account}:key/12345678-1234-1234-1234-123456789abc`));
@@ -415,6 +436,32 @@ test('provider refresh can read only production secrets', () => {
   const readers = withAction(deploy(), 'secretsmanager:GetSecretValue');
   assert.equal(readers.length, 1);
   assert.deepEqual(resources(readers[0]), [`arn:aws:secretsmanager:${region}:${account}:secret:llteacher-production-*`]);
+});
+
+test('deploy role can manage only LLTeacher production secrets in its account and region', () => {
+  const grants = deploy().filter(s => actions(s).some(a => a.startsWith('secretsmanager:')));
+  assert.equal(grants.length, 1);
+  sameMembers(actions(grants[0]), [
+    'secretsmanager:CreateSecret', 'secretsmanager:DeleteSecret', 'secretsmanager:DescribeSecret',
+    'secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue', 'secretsmanager:TagResource',
+    'secretsmanager:UntagResource', 'secretsmanager:GetResourcePolicy',
+    'secretsmanager:PutResourcePolicy', 'secretsmanager:DeleteResourcePolicy',
+  ]);
+  assert.deepEqual(resources(grants[0]), [`arn:aws:secretsmanager:${region}:${account}:secret:llteacher-production-*`]);
+  const context = { 'aws:RequestedRegion': region };
+  const productionSecret = `arn:aws:secretsmanager:${region}:${account}:secret:llteacher-production-runtime-abc123`;
+  for (const action of actions(grants[0])) {
+    assert(policyAllows(action, productionSecret, context), action);
+    for (const forbidden of [
+      `arn:aws:secretsmanager:${region}:${account}:secret:other-production-runtime-abc123`,
+      `arn:aws:secretsmanager:${region}:000000000000:secret:llteacher-production-runtime-abc123`,
+      `arn:aws:secretsmanager:us-east-1:${account}:secret:llteacher-production-runtime-abc123`,
+    ]) {
+      assert.equal(policyAllows(action, forbidden, context), false, `${action} ${forbidden}`);
+    }
+    assert.equal(policyAllows(action, productionSecret, { 'aws:RequestedRegion': 'us-east-1' }), false, action);
+  }
+  assert.equal(policyAllows('secretsmanager:RotateSecret', productionSecret, context), false);
 });
 
 test('RDS may use PostgreSQL 16 default groups during creation without modifying them', () => {

@@ -1,9 +1,11 @@
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
+import { isRpcSecret } from "@pulumi/pulumi/runtime/rpc.js";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createApplication } from "./app.js";
 import type { InfraConfig } from "./config.js";
 import { createDataResources } from "./database.js";
+import { loadDeploymentInputs, type DeploymentInputs } from "./deployment-inputs.js";
 import { createNetwork, type Network } from "./network.js";
 import { createAwsProvider } from "./provider.js";
 import { createDnsResources } from "./dns.js";
@@ -16,6 +18,21 @@ type RecordedResource = {
 };
 
 const resources: RecordedResource[] = [];
+const operatorRuntimeSecrets = {
+  WORKOS_API_KEY: "operator-workos-api",
+  WORKOS_CLIENT_ID: "operator-workos-client",
+  WORKOS_WEBHOOK_SECRET: "operator-workos-webhook",
+  OPENROUTER_API_KEY: "operator-openrouter-api",
+  LLMOXIE_API_KEY: "operator-llmoxie-api",
+  SESSION_SECRET: "operator-session-secret",
+  ENCRYPTION_KEY: "operator-encryption-key",
+  BLIND_INDEX_KEY: "operator-blind-index-key",
+};
+const productionDeploymentInputs: DeploymentInputs = {
+  databasePassword: pulumi.secret("operator/pass"),
+  runtimeSecretValue: pulumi.secret(JSON.stringify(operatorRuntimeSecrets)),
+  llmoxieBaseUrl: "https://llmoxie.example.test/api/v1",
+};
 
 beforeAll(() => {
   pulumi.runtime.setMocks({
@@ -41,6 +58,9 @@ beforeAll(() => {
       }
       if (args.type === "aws:route53/zone:Zone") state.zoneId = `${args.name}-id`;
       if (args.type === "aws:s3/bucket:Bucket") state.bucket = `${args.name}-bucket`;
+      if (args.type === "aws:secretsmanager/secretVersion:SecretVersion") {
+        state.versionId = `${args.name}-version-id`;
+      }
       if (args.type === "aws:acm/certificate:Certificate") {
         if (args.id) Object.assign(state, { arn: args.id, domainName: "llteacher.example.edu", status: "ISSUED", tags: { LLTeacherStack: "production" } });
         state.domainValidationOptions = [{
@@ -88,21 +108,34 @@ async function createProductionGraph() {
     provider: aws.Provider,
     config: InfraConfig,
   ) => Network)("llteacher-production", provider, productionConfig);
-  const data = createDataResources("llteacher-production", productionConfig, network, provider);
-  const app = createApplication("llteacher-production", productionConfig, network, data, provider);
+  const data = createDataResources("llteacher-production", productionConfig, network, provider, productionDeploymentInputs);
+  const app = createApplication("llteacher-production", productionConfig, network, data, provider, productionDeploymentInputs);
   const localConfig = { ...productionConfig, environment: "local", isLocal: true, endpoints: { floci: "http://localhost:4566" } } as const;
   const localProvider = createAwsProvider(localConfig);
   const localNetwork = createNetwork("llteacher-local", localProvider, localConfig);
-  const localData = createDataResources("llteacher-local", localConfig, localNetwork, localProvider);
-  createApplication("llteacher-local", localConfig, localNetwork, localData, localProvider);
+  const localDeploymentInputs = loadDeploymentInputs("local");
+  const localData = createDataResources("llteacher-local", localConfig, localNetwork, localProvider, localDeploymentInputs);
+  createApplication("llteacher-local", localConfig, localNetwork, localData, localProvider, localDeploymentInputs);
   const pendingConfig = { ...productionConfig, certificateArn: undefined, domainReady: false, serviceTaskDefinition: "arn:previous-task" };
   const pendingNetwork = createNetwork("pending", provider, pendingConfig);
-  const pendingData = createDataResources("pending", pendingConfig, pendingNetwork, provider);
-  createApplication("pending", pendingConfig, pendingNetwork, pendingData, provider);
+  const pendingData = createDataResources("pending", pendingConfig, pendingNetwork, provider, productionDeploymentInputs);
+  createApplication("pending", pendingConfig, pendingNetwork, pendingData, provider, productionDeploymentInputs);
+  const pinnedConfig = { ...productionConfig, serviceTaskDefinition: "arn:previous-task" };
+  const rotatedRuntimeVersion = new aws.secretsmanager.SecretVersion("revision-probe-runtime-rotated", {
+    secretId: data.runtimeSecret.id,
+    secretString: pulumi.secret(JSON.stringify({ ...operatorRuntimeSecrets, WORKOS_API_KEY: "operator-workos-api-rotated" })),
+  }, { provider });
+  const rotatedDatabaseUrlVersion = new aws.secretsmanager.SecretVersion("revision-probe-database-url-rotated", {
+    secretId: data.databaseUrlSecret.id,
+    secretString: pulumi.secret("postgres://llteacher:rotated@database.test:5432/llteacher"),
+  }, { provider });
+  createApplication("revision-probe", pinnedConfig, network, data, provider, productionDeploymentInputs);
+  createApplication("revision-probe", pinnedConfig, network, { ...data, runtimeSecretVersion: rotatedRuntimeVersion }, provider, productionDeploymentInputs);
+  createApplication("revision-probe", pinnedConfig, network, { ...data, databaseUrlSecretVersion: rotatedDatabaseUrlVersion }, provider, productionDeploymentInputs);
   const bootstrapConfig = { ...productionConfig, domainReady: false, domainName: undefined, provisionService: false, deployApp: false };
   const bootstrapNetwork = createNetwork("bootstrap", provider, bootstrapConfig);
-  const bootstrapData = createDataResources("bootstrap", bootstrapConfig, bootstrapNetwork, provider);
-  createApplication("bootstrap", bootstrapConfig, bootstrapNetwork, bootstrapData, provider);
+  const bootstrapData = createDataResources("bootstrap", bootstrapConfig, bootstrapNetwork, provider, productionDeploymentInputs);
+  createApplication("bootstrap", bootstrapConfig, bootstrapNetwork, bootstrapData, provider, productionDeploymentInputs);
   const stagingAlb = new aws.lb.LoadBalancer("staging-dns-alb", { subnets: ["subnet-test"] }, { provider });
   createDnsResources("staging", { ...productionConfig, environment: "staging", certificateArn: undefined }, stagingAlb, provider);
   await pulumi.runtime.disconnect();
@@ -117,6 +150,32 @@ function resource(type: string, name: string): RecordedResource {
   const match = resources.find((candidate) => candidate.type === type && candidate.name === name);
   if (!match) throw new Error(`Missing ${type} resource ${name}`);
   return match;
+}
+
+function expectTaskRoleHasOnlyStoragePolicy(graph: RecordedResource[]) {
+  const taskRole = "llteacher-production-task-role";
+  const roleTargets = new Set([taskRole, `${taskRole}-id`]);
+  const role = graph.find(({ name, type }) => name === taskRole && type === "aws:iam/role:Role");
+  expect(role).toBeDefined();
+  expect(role!.inputs.inlinePolicies ?? []).toEqual([]);
+  expect(role!.inputs.managedPolicyArns ?? []).toEqual([]);
+  const taskPolicies = graph.filter(({ type, inputs }) =>
+    type === "aws:iam/rolePolicy:RolePolicy" && roleTargets.has(String(inputs.role)));
+  expect(taskPolicies.map(({ name }) => name)).toEqual(["llteacher-production-materials-policy"]);
+  for (const { inputs } of taskPolicies) {
+    const policy = JSON.parse(String(inputs.policy));
+    for (const statement of policy.Statement) {
+      const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+      expect(actions.every((action: string) => action.startsWith("s3:"))).toBe(true);
+    }
+  }
+  const taskAttachments = graph.filter(({ type, inputs }) =>
+    (type === "aws:iam/rolePolicyAttachment:RolePolicyAttachment" && roleTargets.has(String(inputs.role)))
+    || (type === "aws:iam/policyAttachment:PolicyAttachment"
+      && Array.isArray(inputs.roles) && inputs.roles.some((target) => roleTargets.has(String(target))))
+    || (type === "aws:iam/rolePolicyAttachmentsExclusive:RolePolicyAttachmentsExclusive"
+      && roleTargets.has(String(inputs.roleName)) && Array.isArray(inputs.policyArns) && inputs.policyArns.length > 0));
+  expect(taskAttachments).toEqual([]);
 }
 
 describe("production resource graph", () => {
@@ -150,6 +209,30 @@ describe("production resource graph", () => {
     expect(resource("aws:route53/zone:Zone", "pending-zone")).toBeDefined();
     expect(resource("aws:lb/listener:Listener", "pending-listener").inputs).toMatchObject({ port: 80, protocol: "HTTP" });
     expect(resource("aws:ecs/service:Service", "pending-app-service").inputs).toMatchObject({ desiredCount: 1, taskDefinition: "arn:previous-task" });
+  });
+
+  it("registers a distinct candidate for each secret version change while the service stays pinned", () => {
+    const candidates = resources.filter(({ name, type }) => name === "revision-probe-app-task" && type === "aws:ecs/taskDefinition:TaskDefinition");
+    const services = resources.filter(({ name, type }) => name === "revision-probe-app-service" && type === "aws:ecs/service:Service");
+    expect(candidates).toHaveLength(3);
+    expect(services).toHaveLength(3);
+    expect(candidates.every(({ inputs }) => !isRpcSecret(inputs.containerDefinitions))).toBe(true);
+    const containers = candidates.map(({ inputs }) => JSON.parse(String(inputs.containerDefinitions))[0]);
+    expect(containers.map(({ image }) => image)).toEqual([containers[0].image, containers[0].image, containers[0].image]);
+    expect(containers.map(({ environment }) => environment)).toEqual([containers[0].environment, containers[0].environment, containers[0].environment]);
+    expect(containers.map(({ secrets }) => secrets)).toEqual([containers[0].secrets, containers[0].secrets, containers[0].secrets]);
+    expect(new Set(candidates.map(({ inputs }) => inputs.containerDefinitions)).size).toBe(3);
+    expect(containers.map(({ dockerLabels }) => dockerLabels["llteacher.secret-versions"]).sort()).toEqual([
+      "llteacher-production-database-url-value-version-id:llteacher-production-runtime-value-version-id",
+      "llteacher-production-database-url-value-version-id:revision-probe-runtime-rotated-version-id",
+      "revision-probe-database-url-rotated-version-id:llteacher-production-runtime-value-version-id",
+    ].sort());
+    expect(services.map(({ inputs }) => inputs.taskDefinition)).toEqual([
+      "arn:previous-task", "arn:previous-task", "arn:previous-task",
+    ]);
+    for (const value of ["operator/pass", ...Object.values(operatorRuntimeSecrets), "operator-workos-api-rotated", "postgres://llteacher:rotated"]) {
+      expect(JSON.stringify(containers)).not.toContain(value);
+    }
   });
 
   it("bootstraps an ALB and candidate without starting an unavailable image", () => {
@@ -187,13 +270,35 @@ describe("production resource graph", () => {
     });
   });
 
+  it("stores exactly the eight operator runtime values in one managed production secret version", () => {
+    const runtimeSecrets = resources.filter(({ name, type }) => name === "llteacher-production-runtime" && type === "aws:secretsmanager/secret:Secret");
+    const runtimeVersions = resources.filter(({ name, type }) => name === "llteacher-production-runtime-value" && type === "aws:secretsmanager/secretVersion:SecretVersion");
+    expect(runtimeSecrets).toHaveLength(1);
+    expect(runtimeVersions).toHaveLength(1);
+    expect(runtimeVersions[0].inputs.secretId).toBe("llteacher-production-runtime-id");
+    expect(isRpcSecret(runtimeVersions[0].inputs.secretString)).toBe(true);
+    expect(JSON.parse((runtimeVersions[0].inputs.secretString as { value: string }).value)).toEqual(operatorRuntimeSecrets);
+    expect(Object.keys(JSON.parse((runtimeVersions[0].inputs.secretString as { value: string }).value))).toHaveLength(8);
+  });
+
+  it("passes the operator password as a secret to RDS and the derived database URL", () => {
+    const password = resource("aws:rds/instance:Instance", "llteacher-production-postgres").inputs.password;
+    expect(isRpcSecret(password)).toBe(true);
+    expect(password).toMatchObject({ value: "operator/pass" });
+    const url = resource("aws:secretsmanager/secretVersion:SecretVersion", "llteacher-production-database-url-value").inputs.secretString;
+    expect(isRpcSecret(url)).toBe(true);
+    expect(url).toMatchObject({
+      value: "postgres://llteacher:operator%2Fpass@llteacher-production-postgres.database.test:5432/llteacher?sslmode=verify-full",
+    });
+  });
+
   it("percent-encodes the database password in the connection URL secret", async () => {
     const secretString = resource(
       "aws:secretsmanager/secretVersion:SecretVersion",
       "llteacher-production-database-url-value",
     ).inputs.secretString as { value: string };
     expect(secretString.value).toBe(
-      "postgres://llteacher:database%2Fpass@llteacher-production-postgres.database.test:5432/llteacher?sslmode=verify-full",
+      "postgres://llteacher:operator%2Fpass@llteacher-production-postgres.database.test:5432/llteacher?sslmode=verify-full",
     );
     expect((resource("aws:secretsmanager/secretVersion:SecretVersion", "llteacher-local-database-url-value").inputs.secretString as { value: string }).value).toBe("postgres://llteacher:database%2Fpass@llteacher-local-postgres.database.test:5432/llteacher");
   });
@@ -211,8 +316,73 @@ describe("production resource graph", () => {
   });
 
   it("limits secret retrieval to both exact secret ARNs", () => {
-    const policy = JSON.parse(String(resource("aws:iam/rolePolicy:RolePolicy", "llteacher-production-secrets-policy").inputs.policy));
+    const secretPolicy = resource("aws:iam/rolePolicy:RolePolicy", "llteacher-production-secrets-policy");
+    expect(secretPolicy.inputs.role).toBe("llteacher-production-execution-role-id");
+    const policy = JSON.parse(String(secretPolicy.inputs.policy));
     expect(policy.Statement).toEqual([{ Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: ["arn:aws:test:us-east-1:000000000000:llteacher-production-database-url", "arn:aws:test:us-east-1:000000000000:llteacher-production-runtime"] }]);
+  });
+
+  it("does not grant Secrets Manager access to the production task role", () => {
+    expectTaskRoleHasOnlyStoragePolicy(resources);
+  });
+
+  it.each([
+    {
+      kind: "inline policy",
+      type: "aws:iam/rolePolicy:RolePolicy",
+      inputs: {
+        role: "llteacher-production-task-role-id",
+        policy: JSON.stringify({ Statement: [{ Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: "*" }] }),
+      },
+    },
+    {
+      kind: "managed policy attachment",
+      type: "aws:iam/rolePolicyAttachment:RolePolicyAttachment",
+      inputs: { role: "llteacher-production-task-role", policyArn: "arn:aws:iam::055237683908:policy/rogue-secrets" },
+    },
+    {
+      kind: "inline policy targeting the role name",
+      type: "aws:iam/rolePolicy:RolePolicy",
+      inputs: {
+        role: "llteacher-production-task-role",
+        policy: JSON.stringify({ Statement: [{ Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: "*" }] }),
+      },
+    },
+    {
+      kind: "managed policy attachment targeting the role ID",
+      type: "aws:iam/rolePolicyAttachment:RolePolicyAttachment",
+      inputs: { role: "llteacher-production-task-role-id", policyArn: "arn:aws:iam::055237683908:policy/rogue-secrets" },
+    },
+    {
+      kind: "multi-role policy attachment",
+      type: "aws:iam/policyAttachment:PolicyAttachment",
+      inputs: { roles: ["llteacher-production-task-role"], policyArn: "arn:aws:iam::055237683908:policy/rogue-secrets" },
+    },
+    {
+      kind: "exclusive managed policy attachment",
+      type: "aws:iam/rolePolicyAttachmentsExclusive:RolePolicyAttachmentsExclusive",
+      inputs: { roleName: "llteacher-production-task-role", policyArns: ["arn:aws:iam::055237683908:policy/rogue-secrets"] },
+    },
+  ])("rejects a differently named task-role $kind", ({ type, inputs }) => {
+    const rogueGrant = { name: "rogue-secrets-grant", type, inputs };
+    expect(() => expectTaskRoleHasOnlyStoragePolicy([...resources, rogueGrant])).toThrow();
+  });
+
+  it.each([
+    {
+      kind: "inline policy",
+      field: "inlinePolicies",
+      value: [{ name: "rogue-secrets", policy: JSON.stringify({ Statement: [{ Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: "*" }] }) }],
+    },
+    {
+      kind: "managed policy ARN",
+      field: "managedPolicyArns",
+      value: ["arn:aws:iam::055237683908:policy/rogue-secrets"],
+    },
+  ])("rejects a $kind declared directly on the task role", ({ field, value }) => {
+    const role = resource("aws:iam/role:Role", "llteacher-production-task-role");
+    const graph = resources.map((entry) => entry === role ? { ...role, inputs: { ...role.inputs, [field]: value } } : entry);
+    expect(() => expectTaskRoleHasOnlyStoragePolicy(graph)).toThrow();
   });
 
   it("requires the bootstrap-owned runtime boundary on both production IAM roles", () => {
@@ -230,10 +400,42 @@ describe("production resource graph", () => {
 
   it("injects secrets separately from ordinary task configuration", () => {
     const [container] = JSON.parse(String(resource("aws:ecs/taskDefinition:TaskDefinition", "llteacher-production-app-task").inputs.containerDefinitions));
-    expect(container.secrets.map((s: { name: string }) => s.name).sort()).toEqual(["DATABASE_URL", "WORKOS_API_KEY", "WORKOS_CLIENT_ID", "WORKOS_WEBHOOK_SECRET", "OPENROUTER_API_KEY", "LLMOXIE_API_KEY", "SESSION_SECRET", "ENCRYPTION_KEY", "BLIND_INDEX_KEY"].sort());
+    expect(container.secrets).toEqual([
+      { name: "DATABASE_URL", valueFrom: "arn:aws:test:us-east-1:000000000000:llteacher-production-database-url" },
+      ...["WORKOS_API_KEY", "WORKOS_CLIENT_ID", "OPENROUTER_API_KEY", "LLMOXIE_API_KEY", "SESSION_SECRET", "ENCRYPTION_KEY", "BLIND_INDEX_KEY", "WORKOS_WEBHOOK_SECRET"].map((name) => ({
+        name,
+        valueFrom: `arn:aws:test:us-east-1:000000000000:llteacher-production-runtime:${name}::`,
+      })),
+    ]);
     expect(container.environment).toEqual(expect.arrayContaining([{ name: "AWS_REGION", value: "us-west-2" }, { name: "APP_URL", value: "https://llteacher.example.edu" }]));
     expect(container.environment.map((v: { name: string }) => v.name)).toContain("STORAGE_BUCKET");
     expect(container.environment.map((v: { name: string }) => v.name)).not.toContain("STORAGE_ENDPOINT");
+    expect(container.environment.filter((entry: { name: string }) => entry.name === "LLMOXIE_BASE_URL")).toEqual([
+      { name: "LLMOXIE_BASE_URL", value: "https://llmoxie.example.test/api/v1" },
+    ]);
+    const ordinaryEnvironment = JSON.stringify(container.environment);
+    for (const value of ["operator/pass", ...Object.values(operatorRuntimeSecrets)]) {
+      expect(ordinaryEnvironment).not.toContain(value);
+    }
+  });
+
+  it("keeps local secrets in Pulumi config and omits the production LLMoxie override", () => {
+    const localPassword = resource("aws:rds/instance:Instance", "llteacher-local-postgres").inputs.password;
+    expect(isRpcSecret(localPassword)).toBe(true);
+    expect(localPassword).toMatchObject({ value: "database/pass" });
+    expect(isRpcSecret(resource("aws:secretsmanager/secretVersion:SecretVersion", "llteacher-local-runtime-value").inputs.secretString)).toBe(true);
+    expect(JSON.parse((resource("aws:secretsmanager/secretVersion:SecretVersion", "llteacher-local-runtime-value").inputs.secretString as { value: string }).value)).toEqual({
+      WORKOS_API_KEY: "workos-api-key",
+      WORKOS_CLIENT_ID: "workos-client-id",
+      OPENROUTER_API_KEY: "openrouter-api-key",
+      LLMOXIE_API_KEY: "llmoxie-api-key",
+      SESSION_SECRET: "session-secret",
+      ENCRYPTION_KEY: "encryption-key",
+      BLIND_INDEX_KEY: "blind-index-key",
+      WORKOS_WEBHOOK_SECRET: "webhook-secret",
+    });
+    const [container] = JSON.parse(String(resource("aws:ecs/taskDefinition:TaskDefinition", "llteacher-local-app-task").inputs.containerDefinitions));
+    expect(container.environment.map((entry: { name: string }) => entry.name)).not.toContain("LLMOXIE_BASE_URL");
   });
 
   it("keeps S3 private and recoverable with least-privilege object access", () => {
