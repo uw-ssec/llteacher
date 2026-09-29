@@ -32,6 +32,29 @@ const productionInputSteps = [
   'Activate migrated candidate',
 ];
 
+test('production runbook identifies GitHub production inputs and their release behavior', () => {
+  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+  const production = readme.slice(readme.indexOf('## GitHub Actions: AWS releases only'));
+  assert.match(production, /GitHub [`']production[`'] environment secrets/);
+  for (const name of productionInputNames.slice(0, -1)) {
+    assert.match(production, new RegExp(`\\| \\x60${name}\\x60 \\|`), `${name} missing from production secret table`);
+  }
+  assert.match(production, /\| Environment variable \| `LLMOXIE_BASE_URL` \|/);
+  assert.match(production, /\$\{APP_URL\}\/api\/auth\/callback/);
+  assert.match(production, /\$\{APP_URL\}\/api\/webhooks\/workos/);
+  assert.match(production, /next (?:successful )?tagged release/);
+  assert.match(production, /RDS-managed master credentials/);
+});
+
+test('production runbook keeps generated AWS secrets out of operator entry and warns on migration', () => {
+  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+  const production = readme.slice(readme.indexOf('## GitHub Actions: AWS releases only'));
+  assert.doesNotMatch(production, /pulumi(?: -C infra)? config set --secret (?:databasePassword|runtimeSecrets)/);
+  assert.match(production, /do not manually edit[^\n]*Secrets Manager/i);
+  assert.match(production, /redacted (?:validation )?failure/i);
+  assert.match(production, /coordinated (?:data )?migration/i);
+});
+
 test('validates production deployment inputs before the first AWS mutation', () => {
   const steps = workflow.jobs.production.steps;
   const install = steps.findIndex(step => step.name === 'Install and build infrastructure on deployment runner');
