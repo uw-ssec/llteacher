@@ -34,6 +34,7 @@ function required(env: Record<string, string | undefined>, name: string): string
   const value = env[name];
   if (!value) invalid(name, "a non-empty value is required.");
   if (value !== value.trim()) invalid(name, "surrounding whitespace is not allowed.");
+  if (/[\x00-\x20\x7f]/.test(value)) invalid(name, "ASCII whitespace or control characters are not allowed.");
   return value;
 }
 

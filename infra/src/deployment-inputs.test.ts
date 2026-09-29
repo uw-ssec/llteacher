@@ -93,7 +93,7 @@ describe("production deployment inputs", () => {
   });
 
   it("requires an HTTPS LLMoxie v1 URL without credentials query or fragment", () => {
-    for (const value of ["http://llmoxie.example.test/v1", "//llmoxie.example.test/v1", "https://llmoxie.example.test/", "https://llmoxie.example.test/v1/", "https://user:pass@llmoxie.example.test/v1", "https://llmoxie.example.test/v1?token=x", "https://llmoxie.example.test/v1#fragment"]) {
+    for (const value of ["http://llmoxie.example.test/v1", "//llmoxie.example.test/v1", "https://llmoxie.example.test/", "https://llmoxie.example.test/v1/", "https://llmoxie.example.test/\tv1", "https://user:pass@llmoxie.example.test/v1", "https://llmoxie.example.test/v1?token=x", "https://llmoxie.example.test/v1#fragment"]) {
       rejectsSetting("LLMOXIE_BASE_URL", value);
     }
   });
