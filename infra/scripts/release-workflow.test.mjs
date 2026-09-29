@@ -104,6 +104,38 @@ test('refreshed stack is validated before the first AWS mutation', () => {
   assert(refresh >= 0 && validate > refresh && mutate > validate);
   assert.match(steps[validate].run,/validate_refreshed_stack_config/);
 });
+test('configuration refresh skips a stack without deployment history and refreshes an established stack', t => {
+  const step=workflow.jobs.production.steps.find(s=>s.name==='Refresh encrypted stack configuration');
+  assert(step);
+  for (const scenario of [
+    { name: 'new-stack', history: '[]', succeeds: true, expectedRefreshes: 0 },
+    { name: 'established-stack', history: '[{"version":1}]', succeeds: true, expectedRefreshes: 1 },
+    { name: 'malformed-history', history: 'not-json', succeeds: false, expectedRefreshes: 0 },
+  ]) {
+    const dir=mkdtempSync(join(tmpdir(),'release-config-refresh-test-'));
+    t.after(()=>rmSync(dir,{recursive:true,force:true}));
+    const calls=join(dir,'calls');
+    writeFileSync(join(dir,'pulumi'),`#!/usr/bin/env node
+const fs=require('node:fs');
+const args=process.argv.slice(2);
+fs.appendFileSync(process.env.CALLS,args.join(' ')+'\\n');
+if(args.includes('history')) process.stdout.write(process.env.PULUMI_HISTORY+'\\n');
+else if(args.includes('refresh') && process.env.PULUMI_HISTORY==='[]') {
+  process.stderr.write('error: getting latest configuration: no previous deployment\\n');
+  process.exit(1);
+}
+`,{mode:0o755});
+    const result=spawnSync('bash',['-euo','pipefail','-c',step.run],{
+      cwd:new URL('../..',import.meta.url),
+      encoding:'utf8',
+      env:{...process.env,PATH:`${dir}:${process.env.PATH}`,STACK:'production',CALLS:calls,PULUMI_HISTORY:scenario.history},
+    });
+    assert.equal(result.status===0,scenario.succeeds,`${scenario.name}: ${result.stderr}`);
+    const invocations=readFileSync(calls,'utf8').trim().split('\n');
+    assert.equal(invocations.filter(call=>call.includes('stack history')).length,1,scenario.name);
+    assert.equal(invocations.filter(call=>call.includes('config refresh')).length,scenario.expectedRefreshes,scenario.name);
+  }
+});
 test('all workflow shell steps parse under bash', () => {
   for (const job of Object.values(workflow.jobs)) for (const step of job.steps) if (step.run) {
     const result=spawnSync('bash',['-n'],{input:step.run,encoding:'utf8'});
