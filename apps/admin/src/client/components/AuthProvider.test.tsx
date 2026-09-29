@@ -14,6 +14,14 @@ function Probe() {
   return <span>{isAuthenticated ? `authed:${role ?? "none"}` : "anon"}</span>;
 }
 
+/** #316 */
+function SuperAdminProbe() {
+  const { isAuthenticated, loading, isSuperAdmin, isPlatformInstructor } = useAuth();
+  if (loading) return <span>loading</span>;
+  if (!isAuthenticated) return <span>anon</span>;
+  return <span>{`superAdmin:${isSuperAdmin} platformInstructor:${isPlatformInstructor}`}</span>;
+}
+
 function profileResponse(role: string | null) {
   return new Response(JSON.stringify({ userId: "u1", role }), { status: 200 });
 }
@@ -65,5 +73,69 @@ describe("AuthProvider / useAuth (admin)", () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("grader"));
 
     warnSpy.mockRestore();
+  });
+});
+
+/** #316 */
+describe("AuthProvider / useAuth isSuperAdmin/isPlatformInstructor", () => {
+  it("parses both booleans true from a successful response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ userId: "u1", role: null, isSuperAdmin: true, isPlatformInstructor: true }),
+            { status: 200 },
+          ),
+      ),
+    );
+    render(
+      <AuthProvider>
+        <SuperAdminProbe />
+      </AuthProvider>,
+    );
+    await waitFor(() => screen.getByText("superAdmin:true platformInstructor:true"));
+  });
+
+  it("defaults both to false when the response omits them (pre-#316 server)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ userId: "u1", role: "instructor" }), { status: 200 })),
+    );
+    render(
+      <AuthProvider>
+        <SuperAdminProbe />
+      </AuthProvider>,
+    );
+    await waitFor(() => screen.getByText("superAdmin:false platformInstructor:false"));
+  });
+
+  it("defaults both to false when signed out", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 401 })));
+    render(
+      <AuthProvider>
+        <SuperAdminProbe />
+      </AuthProvider>,
+    );
+    await waitFor(() => screen.getByText("anon"));
+  });
+
+  it("does not trust a non-boolean value for either flag", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ userId: "u1", role: null, isSuperAdmin: "true", isPlatformInstructor: 1 }),
+            { status: 200 },
+          ),
+      ),
+    );
+    render(
+      <AuthProvider>
+        <SuperAdminProbe />
+      </AuthProvider>,
+    );
+    await waitFor(() => screen.getByText("superAdmin:false platformInstructor:false"));
   });
 });

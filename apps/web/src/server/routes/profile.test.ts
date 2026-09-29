@@ -3,7 +3,9 @@ import { Hono } from "hono";
 import { getProfileHandler, patchProfileHandler } from "./profile";
 import { auditEvents } from "../../db/schema";
 import type { SessionPayload } from "../../lib/session";
+import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
+import { fakeAuthContext } from "../testing/authContext";
 
 const TEST_ENV = {
   ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
@@ -62,10 +64,11 @@ vi.mock("../../lib/services/ProfileService", () => ({
   },
 }));
 
-function buildApp(session: SessionPayload | undefined) {
+function buildApp(session: SessionPayload | undefined, authContext?: AuthContext) {
   const app = new Hono<AppEnv>();
   app.use("*", async (c, next) => {
     if (session) c.set("session", session);
+    if (authContext) c.set("authContext", authContext);
     await next();
   });
   app.get("/api/profile", getProfileHandler);
@@ -95,6 +98,29 @@ describe("GET /api/profile", () => {
     const body = (await res.json()) as { email: string };
     expect(body.email).toBe("cdcore@uw.edu");
     expect(getProfileWithStats).toHaveBeenCalledWith("u1");
+  });
+
+  // #316: both booleans read off AuthContext (rolesMiddleware), not
+  // re-derived by ProfileService -- these pin that the route layer actually
+  // wires them onto the response, in both directions.
+  it("echoes isSuperAdmin/isPlatformInstructor from AuthContext", async () => {
+    getProfileWithStats.mockResolvedValue({ userId: "u1", email: "x@uw.edu", displayName: null, role: null, courseCount: 0 });
+    const res = await buildApp(SESSION, fakeAuthContext({ isSuperAdmin: true, isPlatformInstructor: true })).request(
+      "/api/profile",
+      {},
+      TEST_ENV,
+    );
+    const body = (await res.json()) as { isSuperAdmin: boolean; isPlatformInstructor: boolean };
+    expect(body.isSuperAdmin).toBe(true);
+    expect(body.isPlatformInstructor).toBe(true);
+  });
+
+  it("defaults both booleans to false when there is no AuthContext (e.g. rolesMiddleware skipped it)", async () => {
+    getProfileWithStats.mockResolvedValue({ userId: "u1", email: "x@uw.edu", displayName: null, role: null, courseCount: 0 });
+    const res = await buildApp(SESSION).request("/api/profile", {}, TEST_ENV);
+    const body = (await res.json()) as { isSuperAdmin: boolean; isPlatformInstructor: boolean };
+    expect(body.isSuperAdmin).toBe(false);
+    expect(body.isPlatformInstructor).toBe(false);
   });
 });
 

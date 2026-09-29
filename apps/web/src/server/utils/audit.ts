@@ -77,6 +77,12 @@ export const AUDIT_ACTIONS = {
    *  dropped_at set, so this event and the row it names both remain
    *  reviewable afterwards. */
   COURSE_TA_REMOVED: "membership.course_ta_removed",
+  /** #316: a super admin put someone on a course under an explicit role
+   *  (most notably instructor) through the platform-wide add-member
+   *  endpoint. Audited for the same reason COURSE_TA_ADDED is -- this grants
+   *  access to a course's student work -- and doubly so here, since the
+   *  role can be instructor/admin, not just TA. */
+  COURSE_MEMBER_ADDED: "membership.course_member_added",
   /** #31: LLM configuration lifecycle. Audited because a config decides which
    *  model every student in the organization talks to and what it is told to
    *  be -- and because the default is changeable by any instructor in the

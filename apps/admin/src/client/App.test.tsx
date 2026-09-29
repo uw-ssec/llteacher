@@ -39,6 +39,53 @@ describe("App auth gate", () => {
   });
 });
 
+/** #316: a super admin or a granted platform instructor may have ZERO real
+ *  course_memberships (role: null, no courses), which is exactly the case
+ *  this grant exists to admit. Neither flag should widen what a non-admin
+ *  sees, so the plain-student 403 above must keep working unmodified. */
+describe("App auth gate (#316 courseless admission)", () => {
+  function stubProfile(overrides: Record<string, unknown>) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ userId: "u1", role: null, courses: [], ...overrides }), { status: 200 }),
+      ),
+    );
+  }
+
+  it("admits a super admin with zero courses to the console instead of 403", async () => {
+    stubProfile({ isSuperAdmin: true });
+    renderApp();
+    await waitFor(() => screen.getByText(/Instructor Console/i));
+  });
+
+  it("admits a platform instructor with zero courses to the console instead of 403", async () => {
+    stubProfile({ isPlatformInstructor: true });
+    renderApp();
+    await waitFor(() => screen.getByText(/Instructor Console/i));
+  });
+
+  it("still shows the 403 for a plain user with zero courses and neither flag", async () => {
+    stubProfile({});
+    renderApp();
+    await waitFor(() => screen.getByText(/403/));
+  });
+
+  it("shows the Add Instructor tab to a super admin", async () => {
+    stubProfile({ isSuperAdmin: true });
+    renderApp();
+    await waitFor(() => screen.getByText("Add Instructor"));
+  });
+
+  it("does not show the Add Instructor tab to a platform instructor who is not also a super admin", async () => {
+    stubProfile({ isPlatformInstructor: true });
+    renderApp();
+    await waitFor(() => screen.getByText(/Instructor Console/i));
+    expect(screen.queryByText("Add Instructor")).toBeNull();
+  });
+});
+
 describe("Submissions sidebar shortcut", () => {
   it("navigates using the real homework list, not the HOMEWORKS fixture's non-UUID ids", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {

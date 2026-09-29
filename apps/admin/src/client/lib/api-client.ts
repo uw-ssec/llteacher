@@ -40,6 +40,7 @@ import type {
   ExportRequestBody,
   GradeDraftPayload,
   GradeListPayload,
+  GrantPlatformInstructorResultPayload,
   KnowledgeDocumentListPayload,
   KnowledgeDocumentPayload,
   LlmConfigListPayload,
@@ -527,6 +528,17 @@ export const apiClient = {
       }>(
         `/api/courses/${encode(courseId)}/knowledge/search?${new URLSearchParams(dir ? { q, dir } : { q })}`,
         {},
+        opts,
+      ),
+  },
+
+  // #316: courseless -- not nested under a courseId, unlike every group
+  // above. Grants platform-wide instructor recognition by email.
+  platformInstructors: {
+    grant: (email: string, opts: RequestOptions) =>
+      request<GrantPlatformInstructorResultPayload>(
+        "/api/platform/instructors",
+        { method: "POST", body: JSON.stringify({ email }) },
         opts,
       ),
   },

@@ -11,6 +11,9 @@ import {
   type TaCapabilityField,
 } from "@llteacher/ui/auth/courseRole";
 import { PUBLIC_API_PATHS } from "./auth";
+import { IdentityCipher } from "../../lib/crypto/identity-cipher";
+import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
+import { SuperAdminService } from "../../lib/services/SuperAdminService";
 
 // Re-exported for server/testing/authContext.ts, which must derive its
 // predicates from the same tiers rolesMiddleware uses. @llteacher/ui remains
@@ -40,6 +43,23 @@ type Membership = Pick<
 export interface AuthContext {
   session: SessionPayload;
   memberships: Membership[];
+  /** #316: this session's email is one of SuperAdminService's configured
+   *  addresses. Full elevated access everywhere -- see the course-scoped
+   *  predicates below, every one of which short-circuits true for a super
+   *  admin regardless of `memberships`. Deliberately NOT consulted by
+   *  hasRole: that gates student-action routes (requireRole(["student"])),
+   *  and a super admin impersonating a student is out of scope. */
+  isSuperAdmin: boolean;
+  /** #316: this session's users row has a non-null
+   *  platformInstructorGrantedAt -- a courseless, platform-wide "recognized
+   *  as an instructor" grant. Deliberately NARROW, unlike isSuperAdmin:
+   *  this does NOT widen isMemberOf/isInstructorOf/etc. It only lets the
+   *  console admit the person (see apps/admin's own console-wide gate)
+   *  instead of showing <Forbidden> before they hold any real course
+   *  membership. Course authority still comes only from a real
+   *  course_memberships row -- granting this does not make someone an
+   *  instructor of any specific course, on its own. */
+  isPlatformInstructor: boolean;
   hasRole(role: CourseRole): boolean;
   isMemberOf(courseId: string): boolean;
   /** Authoring authority: create/edit/delete/publish/hide course content. */
@@ -79,9 +99,10 @@ export async function rolesMiddleware(c: Context<AppEnv>, next: Next) {
   }
 
   const db = makeDb(c.env.DATABASE_URL);
-  const [memberships, activation] = await Promise.all([
+  const [memberships, activation, cipherKeys] = await Promise.all([
     listMembershipsForUser(db, session.userId),
     getUserActivationState(db, session.userId),
+    loadIdentityCipherKeys(c.env),
   ]);
 
   // Deprovisioned (isActive=false), or this cookie predates the account's
@@ -93,6 +114,21 @@ export async function rolesMiddleware(c: Context<AppEnv>, next: Next) {
   if (!activation || !activation.isActive || activation.sessionEpoch !== session.sessionEpoch) {
     return c.json({ error: "Unauthorized" }, 401);
   }
+
+  // #316: super-admin status is a blind-index equality check against
+  // SuperAdminService's configured allowlist, never a plaintext compare --
+  // users.email is AES-GCM ciphertext, and emailBlindIndex is the
+  // deterministic HMAC that exists precisely for this kind of lookup.
+  const cipher = new IdentityCipher(cipherKeys);
+  const superAdminBlindIndexes = await SuperAdminService.blindIndexes(cipher);
+  const isSuperAdmin = SuperAdminService.isSuperAdmin(
+    activation.emailBlindIndex,
+    superAdminBlindIndexes,
+  );
+  // #316: no blind-index check needed here -- unlike super-admin status
+  // (checked against a hardcoded list of emails), this is a fact about the
+  // already-resolved user row itself, already fetched above.
+  const isPlatformInstructor = activation.platformInstructorGrantedAt !== null;
 
   // listMembershipsForUser already filters droppedAt (#139), so every
   // predicate below reads only live memberships -- a dropped TA loses each
@@ -129,14 +165,22 @@ export async function rolesMiddleware(c: Context<AppEnv>, next: Next) {
   const authContext: AuthContext = {
     session,
     memberships,
+    isSuperAdmin,
+    isPlatformInstructor,
     // Not course-scoped: "do I hold this role anywhere" is a genuine
-    // any-membership question, so `.some()` is correct here.
+    // any-membership question, so `.some()` is correct here. Deliberately
+    // not widened by isSuperAdmin -- see the AuthContext doc comment.
     hasRole: (role) => memberships.some((m) => m.role === role),
-    isMemberOf: (courseId) => membershipIn(courseId) !== undefined,
-    isInstructorOf: (courseId) => roleIn(courseId, AUTHOR_ROLES),
-    isGraderOf: (courseId) => roleIn(courseId, GRADER_ROLES),
-    canViewSolutionsIn: (courseId) => capability(courseId, "canViewSolutions"),
-    canViewDraftsIn: (courseId) => capability(courseId, "canViewDrafts"),
+    // #316: every course-scoped predicate below short-circuits true for a
+    // super admin, regardless of `memberships` -- this is what lets
+    // requireInstructorOf/requireGraderOf/requireCourseMember and
+    // courseScopeFromAuthContext admit a super admin to a course they hold
+    // no real membership on, with no change to guards.ts or any route.
+    isMemberOf: (courseId) => isSuperAdmin || membershipIn(courseId) !== undefined,
+    isInstructorOf: (courseId) => isSuperAdmin || roleIn(courseId, AUTHOR_ROLES),
+    isGraderOf: (courseId) => isSuperAdmin || roleIn(courseId, GRADER_ROLES),
+    canViewSolutionsIn: (courseId) => isSuperAdmin || capability(courseId, "canViewSolutions"),
+    canViewDraftsIn: (courseId) => isSuperAdmin || capability(courseId, "canViewDrafts"),
   };
 
   c.set("authContext", authContext);

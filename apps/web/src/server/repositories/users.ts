@@ -2,6 +2,10 @@ import { and, eq, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { courseMemberships, courses, users } from "../../db/schema";
 import { unsafeOrgScope, type OrgScope } from "./scope";
+import type { BlindIndex } from "../../db/types/encrypted";
+import { IdentityCipher } from "../../lib/crypto/identity-cipher";
+import { DomainAllowlistService } from "../../lib/services/DomainAllowlistService";
+import { findOrCreatePendingUser } from "./roster";
 
 /** The distinct organizations a user is reachable through via their
  *  (non-dropped) course memberships. Shared by deactivateByWorkosUserId
@@ -61,11 +65,84 @@ export async function listMembershipsForUser(db: Db, userId: string) {
  *  compare the cookie's stamped sessionEpoch against. Returns undefined if
  *  the user row no longer exists -- rolesMiddleware treats that the same as
  *  a mismatch (401), not a crash. */
-export async function getUserActivationState(db: Db, userId: string) {
+/** emailBlindIndex and platformInstructorGrantedAt are projected alongside
+ *  isActive/sessionEpoch (rather than a second/third query) so
+ *  rolesMiddleware can check super-admin (#316, SuperAdminService) and
+ *  platform-instructor (#316, grantPlatformInstructor below) status on the
+ *  same per-request round trip.
+ *
+ *  Explicit return type: BlindIndex is a branded type from a private
+ *  symbol, so without this annotation, tsc's inferred return type cannot be
+ *  named by any importer of this exported function (TS4058). */
+export async function getUserActivationState(
+  db: Db,
+  userId: string,
+): Promise<
+  | {
+      isActive: boolean;
+      sessionEpoch: number;
+      emailBlindIndex: BlindIndex;
+      platformInstructorGrantedAt: Date | null;
+    }
+  | undefined
+> {
   return db.query.users.findFirst({
     where: eq(users.id, userId),
-    columns: { isActive: true, sessionEpoch: true },
+    columns: {
+      isActive: true,
+      sessionEpoch: true,
+      emailBlindIndex: true,
+      platformInstructorGrantedAt: true,
+    },
   });
+}
+
+/** #316: grants (or re-confirms) courseless, platform-wide "recognized as
+ *  an instructor" status -- see the users schema's own doc comment for why
+ *  this is columns on the row rather than a course_memberships row or an
+ *  audit_events entry. Reuses findOrCreatePendingUser (roster.ts), the same
+ *  "find or create a pending user by email" pipeline upsertCourseMember
+ *  uses, so a never-logged-in person can be granted this exactly like they
+ *  can be added to a course.
+ *
+ *  Domain-validated against the platform default (no org to pull a custom
+ *  allowlist from -- this grant precedes any course/org membership) so a
+ *  typo'd address fails loudly instead of silently creating an unreachable
+ *  pending account.
+ *
+ *  Idempotent: granting an already-granted user updates grantedBy/grantedAt
+ *  to this call rather than erroring, so re-running it is never a mistake. */
+export type GrantPlatformInstructorResult =
+  | { status: "granted"; userId: string; grantedAt: Date }
+  | { status: "invalid_email" | "disallowed_domain"; message: string };
+
+export async function grantPlatformInstructor(
+  db: Db,
+  cipher: IdentityCipher,
+  granterUserId: string,
+  rawEmail: string,
+): Promise<GrantPlatformInstructorResult> {
+  const email = IdentityCipher.normalizeEmail(rawEmail);
+  const domainCheck = DomainAllowlistService.validateEmailDomain(
+    email,
+    DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS,
+  );
+  if (!domainCheck.allowed) {
+    const malformed = domainCheck.reason === "Invalid email format";
+    return {
+      status: malformed ? "invalid_email" : "disallowed_domain",
+      message: domainCheck.reason ?? "That email address is not eligible.",
+    };
+  }
+
+  const user = await findOrCreatePendingUser(db, cipher, email);
+  const grantedAt = new Date();
+  await db
+    .update(users)
+    .set({ platformInstructorGrantedAt: grantedAt, platformInstructorGrantedBy: granterUserId })
+    .where(eq(users.id, user.id));
+
+  return { status: "granted", userId: user.id, grantedAt };
 }
 
 /** Like getOrgScopesForUser, but also counts a membership dropped

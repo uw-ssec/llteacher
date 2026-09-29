@@ -34,6 +34,23 @@ export function requireCourseMember(courseIdParam = "courseId") {
   };
 }
 
+/** #316: platform-wide authority, not course-scoped -- no courseId param.
+ *  Use for actions no course instructor should be able to reach, most
+ *  importantly granting someone else instructor/admin access (a privilege
+ *  escalation #316 explicitly calls out). Checks `isSuperAdmin` directly
+ *  rather than going through isInstructorOf/isMemberOf, which the
+ *  middleware widens for a super admin on every course -- this guard is
+ *  the one place that distinction actually matters. */
+export function requireSuperAdmin() {
+  return (handler: GuardedHandler) => async (c: Context<AppEnv>) => {
+    const authContext = getAuthContext(c);
+    if (!authContext || !authContext.isSuperAdmin) {
+      return c.json({ error: "Super admin access required" }, 403);
+    }
+    return handler(c);
+  };
+}
+
 /** Authoring authority. Keep using this for anything that mutates course
  *  content -- create/edit/delete/publish/hide. */
 export function requireInstructorOf(courseIdParam = "courseId") {

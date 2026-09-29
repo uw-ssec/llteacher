@@ -20,6 +20,7 @@ import {
   ShieldCheck,
   Sparkle,
   Users,
+  UserPlus,
   Plus,
 } from "@phosphor-icons/react";
 
@@ -32,7 +33,8 @@ export type AdminNavKey =
   | "ta-permissions"
   | "canvas"
   | "exports"
-  | "knowledge";
+  | "knowledge"
+  | "add-instructor";
 
 export type AdminSidebarProps = {
   active: AdminNavKey;
@@ -48,6 +50,13 @@ export type AdminSidebarProps = {
      "allowed" when a caller forgets to thread it fails open, silently, with
      no compile error (#172 audit, MNT-003). */
   canAuthor: boolean;
+  /** #316: true for the platform's configured super admins. Same
+     required-not-defaulted rule as canAuthor -- a caller that forgets to
+     thread it gets the safe (hidden) default, not a silent grant. Gates
+     ONLY the "Add Instructor" nav entry -- who may GRANT instructor access,
+     a platform-wide action, distinct from canAuthor (who may author THIS
+     course's content). */
+  isSuperAdmin: boolean;
   /** When true, the sidebar collapses to a 64px rail showing only icons. */
   isCollapsed?: boolean;
   /** Called when the collapse toggle is clicked. */
@@ -64,6 +73,11 @@ type NavItem = {
      the precise defect this feature exists to remove, reintroduced at a
      different nav item. */
   authorOnly?: boolean;
+  /** #316: entries whose backing endpoint is requireSuperAdmin -- reachable
+     by NO course role, including the course-scoped "admin" role that every
+     authorOnly entry above admits alongside instructor. Same #172 reasoning
+     as authorOnly: omit rather than show-then-403. */
+  superAdminOnly?: boolean;
 };
 
 const NAV_ITEMS: NavItem[] = [
@@ -95,6 +109,11 @@ const NAV_ITEMS: NavItem[] = [
   // comes from.
   { key: "canvas",       label: "Canvas",         icon: <CloudArrowDown size={15} weight="regular" />, description: "Token and roster sync", authorOnly: true },
   { key: "exports",      label: "Export",         icon: <DownloadSimple size={15} weight="regular" />, description: "Records and transcripts", authorOnly: true },
+  // #316: platform-wide, not this course's authoring tier -- superAdminOnly,
+  // not authorOnly. An instructor (even a course-scoped "admin") must not
+  // see this; only the platform's configured super admins may grant
+  // instructor access to someone else.
+  { key: "add-instructor", label: "Add Instructor", icon: <UserPlus size={15} weight="regular" />, description: "Grant instructor access", superAdminOnly: true },
 ];
 
 export function AdminSidebar({
@@ -103,6 +122,7 @@ export function AdminSidebar({
   onNewHomework,
   onNewLLMConfig,
   canAuthor,
+  isSuperAdmin,
   isCollapsed = false,
   onToggleCollapse,
 }: AdminSidebarProps) {
@@ -133,7 +153,9 @@ export function AdminSidebar({
 
       <nav className="admin-sidebar__nav">
         <ul className="admin-sidebar__nav-list">
-          {NAV_ITEMS.filter((item) => canAuthor || !item.authorOnly).map((item) => {
+          {NAV_ITEMS.filter(
+            (item) => (canAuthor || !item.authorOnly) && (isSuperAdmin || !item.superAdminOnly),
+          ).map((item) => {
             const isActive = item.key === active;
             return (
               <li key={item.key}>

@@ -3,7 +3,9 @@ import { UUID_RE } from "../utils/uuid";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { makeDb } from "../../db/client";
+import { courseRoleEnum } from "../../db/schema";
 import {
+  addCourseMember,
   addTasByNetid,
   listCourseTas,
   removeCourseTa,
@@ -16,6 +18,8 @@ import { logServerError } from "../utils/errors";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type {
+  AddCourseMemberBody,
+  AddCourseMemberResponse,
   AddCourseTasBody,
   AddCourseTasResponse,
   CourseTaListResponse,
@@ -229,6 +233,84 @@ export async function addCourseTasHandler(c: Context<AppEnv>) {
   }
 
   const responseBody: AddCourseTasResponse = { results };
+  return c.json(responseBody);
+}
+
+/** #316: adds a member to a course by email under an explicit role.
+ *
+ *  requireSuperAdmin, not requireInstructorOf -- this is the general form
+ *  issue #316 itself flags as a privilege escalation (an `instructor` grant
+ *  gives someone authoring access over an entire course), so it is reachable
+ *  only by the platform's configured super admins, never by an instructor
+ *  of the target course. The TA-only add above stays on requireInstructorOf
+ *  and is unaffected.
+ *
+ *  Reuses the same provisioning pipeline as every other enrollment path
+ *  (upsertCourseMember via the new addCourseMember adapter) -- domain check,
+ *  pending-user create-or-claim, already-enrolled/role-conflict/restore
+ *  handling, all inherited rather than reimplemented. */
+export async function addCourseMemberHandler(c: Context<AppEnv>) {
+  const courseId = c.req.param("courseId");
+  const authContext = c.get("authContext") as AuthContext | undefined;
+
+  // Defensive re-check, matching every other handler in this file.
+  if (!authContext || !courseId || !authContext.isSuperAdmin) {
+    return c.json({ error: "Super admin access required" }, 403);
+  }
+
+  let body: AddCourseMemberBody;
+  try {
+    body = await c.req.json<AddCourseMemberBody>();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+  if (typeof body.email !== "string" || body.email.trim() === "") {
+    return c.json({ error: "email is required" }, 400);
+  }
+  if (
+    typeof body.role !== "string" ||
+    !(courseRoleEnum.enumValues as readonly string[]).includes(body.role)
+  ) {
+    return c.json(
+      { error: `role must be one of: ${courseRoleEnum.enumValues.join(", ")}` },
+      400,
+    );
+  }
+
+  // #316's own guard: isSuperAdmin makes isInstructorOf/isMemberOf true for
+  // EVERY course, including one this super admin has never touched -- that
+  // is the point (granting access before any real membership exists for
+  // them). courseScopeFromAuthContext still verifies courseId is a real,
+  // syntactically-scoped id via that same bypassed predicate.
+  const scope = courseScopeFromAuthContext(authContext, courseId);
+  if (!scope) return c.json({ error: "Course access denied" }, 403);
+
+  const db = makeDb(c.env.DATABASE_URL);
+  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
+  const result = await addCourseMember(db, scope, cipher, { email: body.email, role: body.role });
+
+  if (result.status === "invalid_email" || result.status === "disallowed_domain") {
+    return c.json({ error: result.message ?? "That email address is not eligible for this course." }, 400);
+  }
+
+  // Best-effort (#147): an audit-write failure must not fail a membership
+  // grant that already succeeded.
+  if (result.status === "added" || result.status === "restored") {
+    try {
+      const courseOrgScope = await getOrgScopeForCourse(db, courseId);
+      await auditBestEffort(db, courseOrgScope ? [courseOrgScope] : [], {
+        actorUserId: authContext.session.userId,
+        action: AUDIT_ACTIONS.COURSE_MEMBER_ADDED,
+        targetType: "user",
+        targetId: result.membershipId!,
+        requestMetadata: { courseId, role: body.role, outcome: result.status },
+      });
+    } catch (err) {
+      logServerError("addCourseMemberHandler", err);
+    }
+  }
+
+  const responseBody: AddCourseMemberResponse = result;
   return c.json(responseBody);
 }
 

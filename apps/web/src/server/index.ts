@@ -38,11 +38,13 @@ import {
 import { flagResponseHandler, listCourseFeedbackHandler } from "./routes/feedback";
 import { submitWidgetResponseHandler } from "./routes/progressWidgets";
 import {
+  addCourseMemberHandler,
   addCourseTasHandler,
   listCourseTasHandler,
   removeCourseTaHandler,
   updateTaCapabilitiesHandler,
 } from "./routes/courseMemberships";
+import { grantPlatformInstructorHandler } from "./routes/platformInstructors";
 import {
   cloneLlmConfigHandler,
   createLlmConfigHandler,
@@ -104,7 +106,13 @@ import {
 } from "./routes/canvasSync";
 import { authMiddleware } from "./middleware/auth";
 import { rolesMiddleware } from "./middleware/roles";
-import { requireCourseMember, requireGraderOf, requireInstructorOf, requireRole } from "./utils/guards";
+import {
+  requireCourseMember,
+  requireGraderOf,
+  requireInstructorOf,
+  requireRole,
+  requireSuperAdmin,
+} from "./utils/guards";
 import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "./utils/errors";
 import { TenancyMismatchError, IdempotencyKeyConflictError, PromptTemplateConflictError } from "./repositories/errors";
 import type { AppEnv } from "./context";
@@ -335,6 +343,14 @@ app.delete(
   "/api/courses/:courseId/tas/:membershipId",
   requireInstructorOf()(removeCourseTaHandler),
 );
+// #316: general membership add, any role including instructor/admin -- a
+// platform-wide grant, so requireSuperAdmin, never requireInstructorOf (an
+// instructor granting themselves or anyone else `instructor` would be a
+// privilege escalation).
+app.post("/api/courses/:courseId/members", requireSuperAdmin()(addCourseMemberHandler));
+// #316: courseless -- deliberately outside /api/courses, since it grants
+// instructor status before any course exists for the person.
+app.post("/api/platform/instructors", requireSuperAdmin()(grantPlatformInstructorHandler));
 
 // #31/#170: LLM configuration authoring. Instructor-gated on the COURSE,
 // operating on that course's ORGANIZATION pool -- llm_configs is a per-org

@@ -4,7 +4,12 @@ import { courseMemberships, users } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { emailForNetid, isValidNetid } from "../../lib/netid";
-import { allowedDomainsForCourse, upsertCourseMember } from "./roster";
+import {
+  allowedDomainsForCourse,
+  upsertCourseMember,
+  type CourseRole,
+  type ProvisionResult,
+} from "./roster";
 
 /** The stored grant on one TA membership. The PATCH echo returns exactly
  *  this -- no identity, because the caller already knows who they edited and
@@ -272,6 +277,32 @@ export async function addTasByNetid(
   }
 
   return results;
+}
+
+/* --------------------------------------------------------------------------
+   #316: super-admin-only general membership add.
+
+   Thin adapter over `upsertCourseMember` (roster.ts) -- the ONE provisioning
+   pipeline #86 established, so this adds no new enrollment logic, just a new
+   authorized entry point into the existing one. Unlike addTasByNetid, `role`
+   is caller-supplied rather than hardcoded to "ta": the route restricts who
+   may call this (requireSuperAdmin), not what role it may grant, so a
+   super admin can put someone on a course as instructor/ta/student/observer/
+   admin through the one write path every other caller already uses.
+   -------------------------------------------------------------------------- */
+
+/** Adds (or restores/reports-conflict-on) one person to a course by email,
+ *  under whatever role the caller names. Returns upsertCourseMember's own
+ *  ProvisionResult unchanged -- there is no membership-specific vocabulary
+ *  to translate into, unlike addTasByNetid's NetID-shaped AddTaResult. */
+export async function addCourseMember(
+  db: Db,
+  scope: CourseScope,
+  cipher: IdentityCipher,
+  entry: { email: string; role: CourseRole },
+): Promise<ProvisionResult> {
+  const allowedDomains = await allowedDomainsForCourse(db, scope);
+  return upsertCourseMember(db, scope, cipher, entry, allowedDomains);
 }
 
 /** Removes a TA from a course. Soft: sets dropped_at + dropped_reason and

@@ -125,8 +125,6 @@ jobs:
       - name: Install and build infrastructure on deployment runner
         run: npm ci && npm run build --workspace=infra
       - uses: pulumi/actions@v6
-        with:
-          command: version
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}

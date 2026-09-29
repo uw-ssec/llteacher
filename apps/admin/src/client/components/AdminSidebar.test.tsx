@@ -9,6 +9,7 @@ const props = {
   onNavigate: vi.fn(),
   onNewHomework: vi.fn(),
   onNewLLMConfig: vi.fn(),
+  isSuperAdmin: false,
 };
 
 /** #172 (FUN-001) and its re-audit (FUN-101).
@@ -83,5 +84,35 @@ describe("AdminSidebar authoring affordances (#172)", () => {
     // something rather than hiding everything.
     expect(authorLabels.length).toBeGreaterThan(taLabels.length);
     expect(taLabels.length).toBeGreaterThan(0);
+  });
+});
+
+/** #316: superAdminOnly is a SEPARATE gate from authorOnly -- an instructor
+ *  (canAuthor=true, including the course-scoped "admin" role, which is
+ *  author-tier everywhere else in this table) must not see "Add
+ *  Instructor" just because they can author this course's content. Only
+ *  isSuperAdmin controls it. */
+describe("AdminSidebar super-admin-only entry (#316)", () => {
+  it("hides Add Instructor from a plain instructor (canAuthor, not isSuperAdmin)", () => {
+    render(<AdminSidebar {...props} canAuthor isSuperAdmin={false} />);
+    expect(screen.queryByText("Add Instructor")).toBeNull();
+  });
+
+  it("hides Add Instructor from a non-author non-super-admin (TA)", () => {
+    render(<AdminSidebar {...props} canAuthor={false} isSuperAdmin={false} />);
+    expect(screen.queryByText("Add Instructor")).toBeNull();
+  });
+
+  it("shows Add Instructor to a super admin even without canAuthor", () => {
+    // canAuthor reflects course-scoped authorship; a super admin reaching
+    // this console with zero real course memberships still has isSuperAdmin
+    // true and must see the grant tab regardless.
+    render(<AdminSidebar {...props} canAuthor={false} isSuperAdmin />);
+    expect(screen.getByText("Add Instructor")).toBeTruthy();
+  });
+
+  it("shows Add Instructor to a super admin who is also an author", () => {
+    render(<AdminSidebar {...props} canAuthor isSuperAdmin />);
+    expect(screen.getByText("Add Instructor")).toBeTruthy();
   });
 });

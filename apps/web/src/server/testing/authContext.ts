@@ -49,6 +49,7 @@ export function fakeMembership(
  *  empty suite. */
 export function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
   const memberships = overrides.memberships ?? [];
+  const isSuperAdmin = overrides.isSuperAdmin ?? false;
 
   // Mirrors rolesMiddleware's structure exactly: resolve the course's
   // membership once, then ask questions about that single row, using the
@@ -68,12 +69,23 @@ export function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthConte
   return {
     session: { userId: "u1", workosUserId: "w1", sessionEpoch: 0, issuedAt: 0, expiresAt: 0 },
     memberships,
+    isSuperAdmin,
+    // #316: deliberately not widened by anything -- a platform instructor
+    // grant is narrow by design (see AuthContext's own doc comment), so the
+    // fake has nothing to derive it from and just echoes the override.
+    isPlatformInstructor: overrides.isPlatformInstructor ?? false,
+    // Not course-scoped, and deliberately not widened by isSuperAdmin --
+    // matches rolesMiddleware exactly (see AuthContext's own doc comment).
     hasRole: (role) => memberships.some((m) => m.role === role),
-    isMemberOf: (courseId) => membershipIn(courseId) !== undefined,
-    isInstructorOf: (courseId) => roleIn(courseId, AUTHOR_ROLES),
-    isGraderOf: (courseId) => roleIn(courseId, GRADER_ROLES),
-    canViewSolutionsIn: (courseId) => capability(courseId, "canViewSolutions"),
-    canViewDraftsIn: (courseId) => capability(courseId, "canViewDrafts"),
+    // #316: every course-scoped predicate short-circuits true for a super
+    // admin, same as rolesMiddleware, so `fakeAuthContext({ isSuperAdmin:
+    // true })` exercises a route the same way a real super-admin session
+    // would -- including on a course it holds no fixture membership for.
+    isMemberOf: (courseId) => isSuperAdmin || membershipIn(courseId) !== undefined,
+    isInstructorOf: (courseId) => isSuperAdmin || roleIn(courseId, AUTHOR_ROLES),
+    isGraderOf: (courseId) => isSuperAdmin || roleIn(courseId, GRADER_ROLES),
+    canViewSolutionsIn: (courseId) => isSuperAdmin || capability(courseId, "canViewSolutions"),
+    canViewDraftsIn: (courseId) => isSuperAdmin || capability(courseId, "canViewDrafts"),
     ...overrides,
   };
 }
