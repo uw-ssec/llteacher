@@ -76,7 +76,10 @@ describe("KnowledgeDocumentView", () => {
     const saved = vi.fn();
     stubFetch(saved);
     render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
-    const editor = (await screen.findByLabelText(/document body/i)) as HTMLTextAreaElement;
+    // Wait for the seeded body, not just the textarea: the editor mounts
+    // before the effect that sets savedBody, and editing earlier leaves Save
+    // disabled (not dirty).
+    const editor = (await screen.findByDisplayValue(/Welcome to lecture one/)) as HTMLTextAreaElement;
 
     fireEvent.change(editor, { target: { value: "edited" } });
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
