@@ -1,6 +1,7 @@
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 import type { InfraConfig } from "./config.js";
+import type { DeploymentInputs } from "./deployment-inputs.js";
 import type { Network } from "./network.js";
 
 export interface Database {
@@ -12,12 +13,12 @@ export interface Database {
   runtimeSecretVersion: aws.secretsmanager.SecretVersion;
 }
 
-export function createDataResources(name: string, config: InfraConfig, network: Network, provider: aws.Provider): Database {
+export function createDataResources(name: string, config: InfraConfig, network: Network, provider: aws.Provider, deploymentInputs: DeploymentInputs): Database {
   const options = { provider };
   const subnetGroup = new aws.rds.SubnetGroup(`${name}-db-subnets`, {
     subnetIds: network.databaseSubnetIds,
   }, options);
-  const password = new pulumi.Config().requireSecret("databasePassword");
+  const password = deploymentInputs.databasePassword;
   const instance = new aws.rds.Instance(`${name}-postgres`, {
     allocatedStorage: 20,
     dbName: "llteacher",
@@ -45,13 +46,12 @@ export function createDataResources(name: string, config: InfraConfig, network: 
     secretId: databaseUrlSecret.id,
     secretString: pulumi.interpolate`postgres://llteacher:${encodedPassword}@${instance.address}:${instance.port}/llteacher${config.isLocal ? "" : "?sslmode=verify-full"}`,
   }, options);
-  const runtimeSecretValue = new pulumi.Config().requireSecret("runtimeSecrets");
   const runtimeSecret = new aws.secretsmanager.Secret(`${name}-runtime`, {
     description: "LLTeacher WorkOS, LLM provider, and application encryption settings.",
   }, options);
   const runtimeSecretVersion = new aws.secretsmanager.SecretVersion(`${name}-runtime-value`, {
     secretId: runtimeSecret.id,
-    secretString: runtimeSecretValue!,
+    secretString: deploymentInputs.runtimeSecretValue,
   }, options);
   const materialsBucket = new aws.s3.Bucket(`${name}-materials`, {
     forceDestroy: false,

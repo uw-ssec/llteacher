@@ -1,9 +1,11 @@
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
+import { isRpcSecret } from "@pulumi/pulumi/runtime/rpc.js";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createApplication } from "./app.js";
 import type { InfraConfig } from "./config.js";
 import { createDataResources } from "./database.js";
+import { loadDeploymentInputs, type DeploymentInputs } from "./deployment-inputs.js";
 import { createNetwork, type Network } from "./network.js";
 import { createAwsProvider } from "./provider.js";
 import { createDnsResources } from "./dns.js";
@@ -16,6 +18,21 @@ type RecordedResource = {
 };
 
 const resources: RecordedResource[] = [];
+const operatorRuntimeSecrets = {
+  WORKOS_API_KEY: "operator-workos-api",
+  WORKOS_CLIENT_ID: "operator-workos-client",
+  WORKOS_WEBHOOK_SECRET: "operator-workos-webhook",
+  OPENROUTER_API_KEY: "operator-openrouter-api",
+  LLMOXIE_API_KEY: "operator-llmoxie-api",
+  SESSION_SECRET: "operator-session-secret",
+  ENCRYPTION_KEY: "operator-encryption-key",
+  BLIND_INDEX_KEY: "operator-blind-index-key",
+};
+const productionDeploymentInputs: DeploymentInputs = {
+  databasePassword: pulumi.secret("operator/pass"),
+  runtimeSecretValue: pulumi.secret(JSON.stringify(operatorRuntimeSecrets)),
+  llmoxieBaseUrl: "https://llmoxie.example.test/api/v1",
+};
 
 beforeAll(() => {
   pulumi.runtime.setMocks({
@@ -88,21 +105,22 @@ async function createProductionGraph() {
     provider: aws.Provider,
     config: InfraConfig,
   ) => Network)("llteacher-production", provider, productionConfig);
-  const data = createDataResources("llteacher-production", productionConfig, network, provider);
-  const app = createApplication("llteacher-production", productionConfig, network, data, provider);
+  const data = createDataResources("llteacher-production", productionConfig, network, provider, productionDeploymentInputs);
+  const app = createApplication("llteacher-production", productionConfig, network, data, provider, productionDeploymentInputs);
   const localConfig = { ...productionConfig, environment: "local", isLocal: true, endpoints: { floci: "http://localhost:4566" } } as const;
   const localProvider = createAwsProvider(localConfig);
   const localNetwork = createNetwork("llteacher-local", localProvider, localConfig);
-  const localData = createDataResources("llteacher-local", localConfig, localNetwork, localProvider);
-  createApplication("llteacher-local", localConfig, localNetwork, localData, localProvider);
+  const localDeploymentInputs = loadDeploymentInputs("local");
+  const localData = createDataResources("llteacher-local", localConfig, localNetwork, localProvider, localDeploymentInputs);
+  createApplication("llteacher-local", localConfig, localNetwork, localData, localProvider, localDeploymentInputs);
   const pendingConfig = { ...productionConfig, certificateArn: undefined, domainReady: false, serviceTaskDefinition: "arn:previous-task" };
   const pendingNetwork = createNetwork("pending", provider, pendingConfig);
-  const pendingData = createDataResources("pending", pendingConfig, pendingNetwork, provider);
-  createApplication("pending", pendingConfig, pendingNetwork, pendingData, provider);
+  const pendingData = createDataResources("pending", pendingConfig, pendingNetwork, provider, productionDeploymentInputs);
+  createApplication("pending", pendingConfig, pendingNetwork, pendingData, provider, productionDeploymentInputs);
   const bootstrapConfig = { ...productionConfig, domainReady: false, domainName: undefined, provisionService: false, deployApp: false };
   const bootstrapNetwork = createNetwork("bootstrap", provider, bootstrapConfig);
-  const bootstrapData = createDataResources("bootstrap", bootstrapConfig, bootstrapNetwork, provider);
-  createApplication("bootstrap", bootstrapConfig, bootstrapNetwork, bootstrapData, provider);
+  const bootstrapData = createDataResources("bootstrap", bootstrapConfig, bootstrapNetwork, provider, productionDeploymentInputs);
+  createApplication("bootstrap", bootstrapConfig, bootstrapNetwork, bootstrapData, provider, productionDeploymentInputs);
   const stagingAlb = new aws.lb.LoadBalancer("staging-dns-alb", { subnets: ["subnet-test"] }, { provider });
   createDnsResources("staging", { ...productionConfig, environment: "staging", certificateArn: undefined }, stagingAlb, provider);
   await pulumi.runtime.disconnect();
@@ -187,13 +205,35 @@ describe("production resource graph", () => {
     });
   });
 
+  it("stores exactly the eight operator runtime values in one managed production secret version", () => {
+    const runtimeSecrets = resources.filter(({ name, type }) => name === "llteacher-production-runtime" && type === "aws:secretsmanager/secret:Secret");
+    const runtimeVersions = resources.filter(({ name, type }) => name === "llteacher-production-runtime-value" && type === "aws:secretsmanager/secretVersion:SecretVersion");
+    expect(runtimeSecrets).toHaveLength(1);
+    expect(runtimeVersions).toHaveLength(1);
+    expect(runtimeVersions[0].inputs.secretId).toBe("llteacher-production-runtime-id");
+    expect(isRpcSecret(runtimeVersions[0].inputs.secretString)).toBe(true);
+    expect(JSON.parse((runtimeVersions[0].inputs.secretString as { value: string }).value)).toEqual(operatorRuntimeSecrets);
+    expect(Object.keys(JSON.parse((runtimeVersions[0].inputs.secretString as { value: string }).value))).toHaveLength(8);
+  });
+
+  it("passes the operator password as a secret to RDS and the derived database URL", () => {
+    const password = resource("aws:rds/instance:Instance", "llteacher-production-postgres").inputs.password;
+    expect(isRpcSecret(password)).toBe(true);
+    expect(password).toMatchObject({ value: "operator/pass" });
+    const url = resource("aws:secretsmanager/secretVersion:SecretVersion", "llteacher-production-database-url-value").inputs.secretString;
+    expect(isRpcSecret(url)).toBe(true);
+    expect(url).toMatchObject({
+      value: "postgres://llteacher:operator%2Fpass@llteacher-production-postgres.database.test:5432/llteacher?sslmode=verify-full",
+    });
+  });
+
   it("percent-encodes the database password in the connection URL secret", async () => {
     const secretString = resource(
       "aws:secretsmanager/secretVersion:SecretVersion",
       "llteacher-production-database-url-value",
     ).inputs.secretString as { value: string };
     expect(secretString.value).toBe(
-      "postgres://llteacher:database%2Fpass@llteacher-production-postgres.database.test:5432/llteacher?sslmode=verify-full",
+      "postgres://llteacher:operator%2Fpass@llteacher-production-postgres.database.test:5432/llteacher?sslmode=verify-full",
     );
     expect((resource("aws:secretsmanager/secretVersion:SecretVersion", "llteacher-local-database-url-value").inputs.secretString as { value: string }).value).toBe("postgres://llteacher:database%2Fpass@llteacher-local-postgres.database.test:5432/llteacher");
   });
@@ -230,10 +270,42 @@ describe("production resource graph", () => {
 
   it("injects secrets separately from ordinary task configuration", () => {
     const [container] = JSON.parse(String(resource("aws:ecs/taskDefinition:TaskDefinition", "llteacher-production-app-task").inputs.containerDefinitions));
-    expect(container.secrets.map((s: { name: string }) => s.name).sort()).toEqual(["DATABASE_URL", "WORKOS_API_KEY", "WORKOS_CLIENT_ID", "WORKOS_WEBHOOK_SECRET", "OPENROUTER_API_KEY", "LLMOXIE_API_KEY", "SESSION_SECRET", "ENCRYPTION_KEY", "BLIND_INDEX_KEY"].sort());
+    expect(container.secrets).toEqual([
+      { name: "DATABASE_URL", valueFrom: "arn:aws:test:us-east-1:000000000000:llteacher-production-database-url" },
+      ...["WORKOS_API_KEY", "WORKOS_CLIENT_ID", "OPENROUTER_API_KEY", "LLMOXIE_API_KEY", "SESSION_SECRET", "ENCRYPTION_KEY", "BLIND_INDEX_KEY", "WORKOS_WEBHOOK_SECRET"].map((name) => ({
+        name,
+        valueFrom: `arn:aws:test:us-east-1:000000000000:llteacher-production-runtime:${name}::`,
+      })),
+    ]);
     expect(container.environment).toEqual(expect.arrayContaining([{ name: "AWS_REGION", value: "us-west-2" }, { name: "APP_URL", value: "https://llteacher.example.edu" }]));
     expect(container.environment.map((v: { name: string }) => v.name)).toContain("STORAGE_BUCKET");
     expect(container.environment.map((v: { name: string }) => v.name)).not.toContain("STORAGE_ENDPOINT");
+    expect(container.environment.filter((entry: { name: string }) => entry.name === "LLMOXIE_BASE_URL")).toEqual([
+      { name: "LLMOXIE_BASE_URL", value: "https://llmoxie.example.test/api/v1" },
+    ]);
+    const ordinaryEnvironment = JSON.stringify(container.environment);
+    for (const value of ["operator/pass", ...Object.values(operatorRuntimeSecrets)]) {
+      expect(ordinaryEnvironment).not.toContain(value);
+    }
+  });
+
+  it("keeps local secrets in Pulumi config and omits the production LLMoxie override", () => {
+    const localPassword = resource("aws:rds/instance:Instance", "llteacher-local-postgres").inputs.password;
+    expect(isRpcSecret(localPassword)).toBe(true);
+    expect(localPassword).toMatchObject({ value: "database/pass" });
+    expect(isRpcSecret(resource("aws:secretsmanager/secretVersion:SecretVersion", "llteacher-local-runtime-value").inputs.secretString)).toBe(true);
+    expect(JSON.parse((resource("aws:secretsmanager/secretVersion:SecretVersion", "llteacher-local-runtime-value").inputs.secretString as { value: string }).value)).toEqual({
+      WORKOS_API_KEY: "workos-api-key",
+      WORKOS_CLIENT_ID: "workos-client-id",
+      OPENROUTER_API_KEY: "openrouter-api-key",
+      LLMOXIE_API_KEY: "llmoxie-api-key",
+      SESSION_SECRET: "session-secret",
+      ENCRYPTION_KEY: "encryption-key",
+      BLIND_INDEX_KEY: "blind-index-key",
+      WORKOS_WEBHOOK_SECRET: "webhook-secret",
+    });
+    const [container] = JSON.parse(String(resource("aws:ecs/taskDefinition:TaskDefinition", "llteacher-local-app-task").inputs.containerDefinitions));
+    expect(container.environment.map((entry: { name: string }) => entry.name)).not.toContain("LLMOXIE_BASE_URL");
   });
 
   it("keeps S3 private and recoverable with least-privilege object access", () => {

@@ -1,15 +1,17 @@
 import { createApplication } from "./app.js";
 import { loadInfraConfig } from "./config.js";
 import { createDataResources } from "./database.js";
+import { loadDeploymentInputs } from "./deployment-inputs.js";
 import { createNetwork } from "./network.js";
 import { createAwsProvider } from "./provider.js";
 
 const config = loadInfraConfig();
+const deploymentInputs = loadDeploymentInputs(config.environment);
 const name = `llteacher-${config.environment}`;
 const provider = createAwsProvider(config);
 const network = createNetwork(name, provider, config);
-const data = createDataResources(name, config, network, provider);
-const app = createApplication(name, config, network, data, provider);
+const data = createDataResources(name, config, network, provider, deploymentInputs);
+const app = createApplication(name, config, network, data, provider, deploymentInputs);
 
 export const appUrl = app.appUrl;
 export const ecrRepositoryUrl = app.repository.repositoryUrl;
