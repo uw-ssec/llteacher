@@ -62,6 +62,11 @@ test('production runner installs and builds infrastructure before any Pulumi use
   assert(steps.slice(0,firstPulumi).some(s => s.run?.includes('npm ci')));
   assert(steps.slice(0,firstPulumi).some(s => s.run?.includes('npm run build --workspace=infra')));
 });
+test('Pulumi installation does not invoke an unsupported operation', () => {
+  const installer = workflow.jobs.production.steps.find(s => s.uses?.startsWith('pulumi/actions@'));
+  assert(installer);
+  assert.equal(installer.with?.command, undefined);
+});
 test('OIDC belongs exclusively to protected tag-only production job', () => {
   assert.equal(workflow.permissions['id-token'], undefined);
   assert.equal(workflow.jobs.production.permissions['id-token'], 'write');
