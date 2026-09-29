@@ -15,10 +15,10 @@ environment secrets: `DATABASE_PASSWORD`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`,
 stacks retain their encrypted Pulumi `databasePassword` and `runtimeSecrets`
 configuration; production does not use those config keys.
 
-A successful tagged release validates these inputs, gives them only to the
-steps that run Pulumi, and uses Pulumi to create or update the two generated
-AWS Secrets Manager runtime secrets. Pulumi sets the RDS master password,
-derives the percent-encoded database connection URL, and writes that URL to
+A successful tagged release gives these inputs only to the validation and
+Pulumi steps. Validation runs before AWS mutation. Pulumi creates or updates
+the two generated AWS Secrets Manager runtime secrets. It sets the RDS master
+password, derives the percent-encoded database connection URL, and writes it to
 one generated secret. It writes the eight application credentials and keys
 to the other generated secret as JSON. ECS obtains both through its execution
 role when a task starts. The application task role has no Secrets Manager

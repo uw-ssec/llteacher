@@ -59,6 +59,7 @@ test('accepted production secrets ADR names GitHub as source and AWS as generate
   const adr = readFileSync(new URL('../../docs/adr/0001-operator-owned-production-secrets.md', import.meta.url), 'utf8');
   assert.match(adr, /status: accepted/);
   assert.match(adr, /GitHub [`']production[`'] environment[^\n]*source of truth/i);
+  assert.match(adr, /gives (?:them|these inputs) only to the\s+validation and\s+Pulumi steps/);
   assert.match(adr, /Pulumi[\s\S]{0,100}generated\s+AWS Secrets Manager runtime/i);
   assert.doesNotMatch(adr, /Secrets Manager as the source of truth|operator-owned runtime secret|may read[^\n]*database-password source secret/i);
   assert.match(adr, /RDS-managed master credentials/);
