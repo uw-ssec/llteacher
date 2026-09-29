@@ -55,12 +55,15 @@ function requireLlmoxieUrl(value: string): void {
   } catch {
     invalid("LLMOXIE_BASE_URL", "must be an absolute HTTPS URL ending in /v1.");
   }
-  const authority = value.slice("https://".length).split(/[/?#]/, 1)[0];
+  const authority = /^https:\/\/([^/\\?#]+)(?:\/|$)/.exec(value)?.[1];
   if (
-    !value.startsWith("https://") ||
+    !authority ||
     url.protocol !== "https:" ||
     !url.hostname ||
     authority.includes("@") ||
+    url.username !== "" ||
+    url.password !== "" ||
+    value.includes("\\") ||
     value.includes("?") ||
     value.includes("#") ||
     !url.pathname.endsWith("/v1")

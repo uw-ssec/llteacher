@@ -98,6 +98,19 @@ describe("production deployment inputs", () => {
     }
   });
 
+  it("rejects non-canonical URL authorities before credentials can be normalized", () => {
+    for (const value of [
+      "https:///fake-user:fake-password@example.test/v1",
+      "https:////fake-user:fake-password@example.test/v1",
+      "https://\\fake-user:fake-password@example.test/v1",
+      "https:\\\\fake-user:fake-password@example.test/v1",
+      "https:///llmoxie.example.test/v1",
+      "https://\\llmoxie.example.test/v1",
+    ]) {
+      rejectsSetting("LLMOXIE_BASE_URL", value);
+    }
+  });
+
   it("applies only provider-guaranteed credential prefixes", () => {
     rejectsSetting("WORKOS_API_KEY", "wrong-fake-workos-key");
     rejectsSetting("WORKOS_CLIENT_ID", "wrong-fake-client-id");
