@@ -58,6 +58,9 @@ beforeAll(() => {
       }
       if (args.type === "aws:route53/zone:Zone") state.zoneId = `${args.name}-id`;
       if (args.type === "aws:s3/bucket:Bucket") state.bucket = `${args.name}-bucket`;
+      if (args.type === "aws:secretsmanager/secretVersion:SecretVersion") {
+        state.versionId = `${args.name}-version-id`;
+      }
       if (args.type === "aws:acm/certificate:Certificate") {
         if (args.id) Object.assign(state, { arn: args.id, domainName: "llteacher.example.edu", status: "ISSUED", tags: { LLTeacherStack: "production" } });
         state.domainValidationOptions = [{
@@ -117,6 +120,18 @@ async function createProductionGraph() {
   const pendingNetwork = createNetwork("pending", provider, pendingConfig);
   const pendingData = createDataResources("pending", pendingConfig, pendingNetwork, provider, productionDeploymentInputs);
   createApplication("pending", pendingConfig, pendingNetwork, pendingData, provider, productionDeploymentInputs);
+  const pinnedConfig = { ...productionConfig, serviceTaskDefinition: "arn:previous-task" };
+  const rotatedRuntimeVersion = new aws.secretsmanager.SecretVersion("revision-probe-runtime-rotated", {
+    secretId: data.runtimeSecret.id,
+    secretString: pulumi.secret(JSON.stringify({ ...operatorRuntimeSecrets, WORKOS_API_KEY: "operator-workos-api-rotated" })),
+  }, { provider });
+  const rotatedDatabaseUrlVersion = new aws.secretsmanager.SecretVersion("revision-probe-database-url-rotated", {
+    secretId: data.databaseUrlSecret.id,
+    secretString: pulumi.secret("postgres://llteacher:rotated@database.test:5432/llteacher"),
+  }, { provider });
+  createApplication("revision-probe", pinnedConfig, network, data, provider, productionDeploymentInputs);
+  createApplication("revision-probe", pinnedConfig, network, { ...data, runtimeSecretVersion: rotatedRuntimeVersion }, provider, productionDeploymentInputs);
+  createApplication("revision-probe", pinnedConfig, network, { ...data, databaseUrlSecretVersion: rotatedDatabaseUrlVersion }, provider, productionDeploymentInputs);
   const bootstrapConfig = { ...productionConfig, domainReady: false, domainName: undefined, provisionService: false, deployApp: false };
   const bootstrapNetwork = createNetwork("bootstrap", provider, bootstrapConfig);
   const bootstrapData = createDataResources("bootstrap", bootstrapConfig, bootstrapNetwork, provider, productionDeploymentInputs);
@@ -194,6 +209,30 @@ describe("production resource graph", () => {
     expect(resource("aws:route53/zone:Zone", "pending-zone")).toBeDefined();
     expect(resource("aws:lb/listener:Listener", "pending-listener").inputs).toMatchObject({ port: 80, protocol: "HTTP" });
     expect(resource("aws:ecs/service:Service", "pending-app-service").inputs).toMatchObject({ desiredCount: 1, taskDefinition: "arn:previous-task" });
+  });
+
+  it("registers a distinct candidate for each secret version change while the service stays pinned", () => {
+    const candidates = resources.filter(({ name, type }) => name === "revision-probe-app-task" && type === "aws:ecs/taskDefinition:TaskDefinition");
+    const services = resources.filter(({ name, type }) => name === "revision-probe-app-service" && type === "aws:ecs/service:Service");
+    expect(candidates).toHaveLength(3);
+    expect(services).toHaveLength(3);
+    expect(candidates.every(({ inputs }) => !isRpcSecret(inputs.containerDefinitions))).toBe(true);
+    const containers = candidates.map(({ inputs }) => JSON.parse(String(inputs.containerDefinitions))[0]);
+    expect(containers.map(({ image }) => image)).toEqual([containers[0].image, containers[0].image, containers[0].image]);
+    expect(containers.map(({ environment }) => environment)).toEqual([containers[0].environment, containers[0].environment, containers[0].environment]);
+    expect(containers.map(({ secrets }) => secrets)).toEqual([containers[0].secrets, containers[0].secrets, containers[0].secrets]);
+    expect(new Set(candidates.map(({ inputs }) => inputs.containerDefinitions)).size).toBe(3);
+    expect(containers.map(({ dockerLabels }) => dockerLabels["llteacher.secret-versions"]).sort()).toEqual([
+      "llteacher-production-database-url-value-version-id:llteacher-production-runtime-value-version-id",
+      "llteacher-production-database-url-value-version-id:revision-probe-runtime-rotated-version-id",
+      "revision-probe-database-url-rotated-version-id:llteacher-production-runtime-value-version-id",
+    ].sort());
+    expect(services.map(({ inputs }) => inputs.taskDefinition)).toEqual([
+      "arn:previous-task", "arn:previous-task", "arn:previous-task",
+    ]);
+    for (const value of ["operator/pass", ...Object.values(operatorRuntimeSecrets), "operator-workos-api-rotated", "postgres://llteacher:rotated"]) {
+      expect(JSON.stringify(containers)).not.toContain(value);
+    }
   });
 
   it("bootstraps an ALB and candidate without starting an unavailable image", () => {

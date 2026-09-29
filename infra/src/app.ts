@@ -80,10 +80,11 @@ export function createApplication(name: string, config: InfraConfig, network: Ne
     networkMode: "awsvpc",
     requiresCompatibilities: ["FARGATE"],
     taskRoleArn: taskRole.arn,
-    containerDefinitions: pulumi.all([repository.repositoryUrl, logGroup.name, data.databaseUrlSecret.arn, data.runtimeSecret.arn, data.materialsBucket.bucket, appUrl]).apply(([repositoryUrl, logGroupName, databaseSecretArn, runtimeSecretArn, bucket, origin]) => JSON.stringify([{
+    containerDefinitions: pulumi.all([repository.repositoryUrl, logGroup.name, data.databaseUrlSecret.arn, data.runtimeSecret.arn, data.materialsBucket.bucket, appUrl, data.databaseUrlSecretVersion.versionId, data.runtimeSecretVersion.versionId]).apply(([repositoryUrl, logGroupName, databaseSecretArn, runtimeSecretArn, bucket, origin, databaseVersionId, runtimeVersionId]) => JSON.stringify([{
       name: "app",
       image: resolveApplicationImage(config, name, repositoryUrl),
       essential: true,
+      dockerLabels: { "llteacher.secret-versions": `${databaseVersionId}:${runtimeVersionId}` },
       environment: [
         { name: "APP_URL", value: origin },
         { name: "AWS_REGION", value: config.region },
