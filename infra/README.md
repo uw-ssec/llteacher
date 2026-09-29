@@ -727,8 +727,19 @@ definition available. A changed GitHub production secret takes effect on the
 next successful tagged release; a task replacement is required after rotation.
 Do not manually edit generated AWS Secrets Manager values during rollback.
 
+Every rollback or recovery Pulumi preview/update requires all nine GitHub
+`production` environment secrets (`DATABASE_PASSWORD`, `WORKOS_API_KEY`,
+`WORKOS_CLIENT_ID`, `WORKOS_WEBHOOK_SECRET`, `OPENROUTER_API_KEY`,
+`LLMOXIE_API_KEY`, `SESSION_SECRET`, `ENCRYPTION_KEY`, `BLIND_INDEX_KEY`) plus
+the `LLMOXIE_BASE_URL` environment variable in an approved secret-handling
+session or the current GitHub production workflow. Their values must represent
+the intended current secret state, including any coordinated rotation already
+completed. Selecting an older task definition does not restore older secret values:
+new ECS tasks consume the currently generated Secrets Manager versions. Do not
+copy the old release's credentials into the shell to attempt a code rollback.
+
 After confirming schema compatibility, copy the values from the workflow's
-rollback summary and run:
+rollback summary and run from that approved secret-handling session:
 
 ```sh
 export AWS_PROFILE=default AWS_REGION=us-west-2 STACK=production

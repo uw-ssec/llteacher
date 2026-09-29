@@ -281,6 +281,11 @@ jobs:
             echo "Previous task definition: ${PREVIOUS_TASK:-not captured (or first release)}"
             echo "Previous image digest: ${PREVIOUS_DIGEST:-not captured (or first release)}"
             echo "Rotating an ECS secret requires a forced deployment/new task revision."
+            echo "Rollback/recovery Pulumi operations require these nine GitHub production environment secrets:"
+            echo "DATABASE_PASSWORD, WORKOS_API_KEY, WORKOS_CLIENT_ID, WORKOS_WEBHOOK_SECRET, OPENROUTER_API_KEY, LLMOXIE_API_KEY, SESSION_SECRET, ENCRYPTION_KEY, BLIND_INDEX_KEY."
+            echo "They also require the LLMOXIE_BASE_URL production environment variable."
+            echo "Run only in an approved secret-handling session or current GitHub production workflow; values must represent the intended current secret state."
+            echo "Selecting an older task definition does not restore older secret values; new ECS tasks consume current Secrets Manager versions."
             if [[ -n "${PREVIOUS_TASK:-}" ]]; then
               echo
               echo "After reviewing schema compatibility, run:"

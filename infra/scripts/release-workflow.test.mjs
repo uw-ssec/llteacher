@@ -55,6 +55,41 @@ test('production runbook keeps generated AWS secrets out of operator entry and w
   assert.match(production, /coordinated (?:data )?migration/i);
 });
 
+test('accepted production secrets ADR names GitHub as source and AWS as generated runtime sink', () => {
+  const adr = readFileSync(new URL('../../docs/adr/0001-operator-owned-production-secrets.md', import.meta.url), 'utf8');
+  assert.match(adr, /status: accepted/);
+  assert.match(adr, /GitHub [`']production[`'] environment[^\n]*source of truth/i);
+  assert.match(adr, /Pulumi[\s\S]{0,100}generated\s+AWS Secrets Manager runtime/i);
+  assert.doesNotMatch(adr, /Secrets Manager as the source of truth|operator-owned runtime secret|may read[^\n]*database-password source secret/i);
+  assert.match(adr, /RDS-managed master credentials/);
+});
+
+test('rollback guidance and generated summary require current production inputs and disclaim secret restoration', t => {
+  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+  const rollback = readme.slice(readme.indexOf('### Rollback and rotation'), readme.indexOf('## Verification boundaries'));
+  const step = workflow.jobs.production.steps.find(s => s.name === 'Record rollback reference');
+  assert(step);
+  const dir = mkdtempSync(join(tmpdir(), 'release-rollback-summary-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const summaryPath = join(dir, 'summary.md');
+  const result = spawnSync('bash', ['-euo', 'pipefail', '-c', step.run], {
+    encoding: 'utf8',
+    env: { ...process.env, GITHUB_STEP_SUMMARY: summaryPath, STACK: 'production',
+      PREVIOUS_TASK: 'arn:aws:ecs:us-west-2:055237683908:task-definition/llteacher-production-app:6',
+      PREVIOUS_DIGEST: `sha256:${'a'.repeat(64)}`,
+      ...Object.fromEntries(productionInputNames.map(name => [name, `SENTINEL_${name}`])) },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const summary = readFileSync(summaryPath, 'utf8');
+  assert.doesNotMatch(summary, /SENTINEL_/);
+  for (const document of [rollback, summary]) {
+    for (const name of productionInputNames) assert.match(document, new RegExp(`\\b${name}\\b`));
+    assert.match(document, /approved secret-handling session/i);
+    assert.match(document, /intended current secret state/i);
+    assert.match(document, /older task definition[^\n]*not restore older secret values/i);
+  }
+});
+
 test('validates production deployment inputs before the first AWS mutation', () => {
   const steps = workflow.jobs.production.steps;
   const install = steps.findIndex(step => step.name === 'Install and build infrastructure on deployment runner');
@@ -107,7 +142,9 @@ function assertNoProductionInputTransport(candidateWorkflow) {
         for (const name of productionInputNames) {
           const protectedExpression = new RegExp(`\\$\\{\\{\\s*(?:secrets|vars)\\s*(?:\\.\\s*${name}\\b|\\[\\s*['"]${name}['"]\\s*\\])`);
           assert(!protectedExpression.test(value), `${step.name ?? step.uses} interpolates ${name} outside approved step env`);
-          if (jobName === 'production') {
+          if (jobName === 'production' && step.name === 'Record rollback reference') {
+            assert(!new RegExp(`\\$(?:\\{)?${name}(?:\\}|\\b)`).test(value), `${step.name} expands ${name}`);
+          } else if (jobName === 'production') {
             assert(!new RegExp(`\\b${name}\\b`).test(value), `${step.name ?? step.uses} transports ${name} outside approved step env`);
           }
         }
@@ -127,6 +164,7 @@ test('rejects command argument and artifact transport mutations', () => {
     candidate => { candidate.jobs.test.steps.find(step => step.uses?.startsWith('actions/upload-artifact')).with.path = '${{ secrets.ENCRYPTION_KEY }}'; },
     candidate => { candidate.jobs.test.steps.find(step => step.uses?.startsWith('actions/upload-artifact')).with.path = '${{ vars.LLMOXIE_BASE_URL }}'; },
     candidate => { candidate.jobs.test.steps.find(step => step.uses?.startsWith('actions/upload-artifact')).env = { UPLOAD_PATH: '${{ vars.LLMOXIE_BASE_URL }}' }; },
+    candidate => { candidate.jobs.production.steps.find(step => step.name === 'Record rollback reference').run += '\necho "$DATABASE_PASSWORD" >> "$GITHUB_STEP_SUMMARY"'; },
   ]) {
     const candidate = structuredClone(workflow);
     mutate(candidate);
