@@ -1,6 +1,6 @@
 # LLTeacher v2
 
-> **Turborepo monorepo.** TypeScript / React 19 / Vite / Tailwind 4 / Cloudflare Workers stack.
+> **Turborepo monorepo.** TypeScript / React 19 / Vite / Tailwind 4, with a Node/Hono API on ECS Fargate.
 > Two workspaces today: `apps/web` (student-facing, port 2311) and `apps/admin` (instructor console, port 2312).
 > Django legacy (`apps/accounts`, `apps/conversations`, `apps/homeworks`, `apps/llm`, plus `src/`, `services/`)
 > remains the source of truth until cutover.
@@ -49,15 +49,16 @@ Deploy the AWS-shaped stack locally without accessing an AWS account:
 
 ```sh
 npm run aws:local:up
-export LLTEACHER_LOCAL_CA="$PWD/.floci/certs/llteacher.local.pem"
 npm run aws:local:verify
 npm run aws:local:down
 ```
 
-Open LLTeacher at [https://llteacher.local](https://llteacher.local) and the
-Floci dashboard at [http://localhost:4500](http://localhost:4500). See
-[`infra/README.md`](./infra/README.md) for prerequisites and first-time TLS
-setup.
+Open LLTeacher at [http://localhost:8080](http://localhost:8080). Floci creates
+the app and PostgreSQL containers through the same Pulumi program used for AWS.
+See [`infra/README.md`](./infra/README.md) for local limitations, encrypted
+development credentials, resource inventory and the AWS-only GitHub release
+workflow. No Floci deployment runs in GitHub Actions; production provisioning
+requires separate explicit approval.
 
 The Django stack still uses its own commands (`uv run python run_tests.py`, `python manage.py runserver`) and is unaffected by Turborepo.
 
