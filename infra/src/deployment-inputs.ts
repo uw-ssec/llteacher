@@ -13,16 +13,19 @@ export const RUNTIME_SECRET_NAMES = [
 ] as const;
 
 type RuntimeSecretName = (typeof RUNTIME_SECRET_NAMES)[number];
+type RequiredRuntimeSecretName = Exclude<RuntimeSecretName, "OPENROUTER_API_KEY">;
+type RuntimeSecrets = Record<RequiredRuntimeSecretName, string> & Partial<Record<"OPENROUTER_API_KEY", string>>;
 
 export interface PlainProductionDeploymentInputs {
   databasePassword: string;
-  runtimeSecrets: Record<RuntimeSecretName, string>;
+  runtimeSecrets: RuntimeSecrets;
   llmoxieBaseUrl: string;
 }
 
 export interface DeploymentInputs {
   databasePassword: pulumi.Output<string>;
   runtimeSecretValue: pulumi.Output<string>;
+  runtimeSecretNames: readonly RuntimeSecretName[];
   llmoxieBaseUrl?: string;
 }
 
@@ -85,19 +88,25 @@ export function parseProductionDeploymentEnvironment(
     invalid("DATABASE_PASSWORD", "must be 8–128 printable ASCII characters without /, quotes, @, or spaces.");
   }
 
-  const runtimeSecrets = {} as Record<RuntimeSecretName, string>;
+  const runtimeSecrets = {} as RuntimeSecrets;
   for (const name of RUNTIME_SECRET_NAMES) {
-    runtimeSecrets[name] = required(env, name);
+    if (name === "OPENROUTER_API_KEY") {
+      if (env[name]) runtimeSecrets[name] = required(env, name);
+    } else {
+      runtimeSecrets[name] = required(env, name);
+    }
   }
 
   for (const [name, prefix] of [
     ["WORKOS_API_KEY", "sk_"],
     ["WORKOS_CLIENT_ID", "client_"],
-    ["OPENROUTER_API_KEY", "sk-or-"],
   ] as const) {
     if (!runtimeSecrets[name].startsWith(prefix)) {
       invalid(name, "has an invalid provider credential prefix.");
     }
+  }
+  if (runtimeSecrets.OPENROUTER_API_KEY && !runtimeSecrets.OPENROUTER_API_KEY.startsWith("sk-or-")) {
+    invalid("OPENROUTER_API_KEY", "has an invalid provider credential prefix.");
   }
 
   const keyNames = ["SESSION_SECRET", "ENCRYPTION_KEY", "BLIND_INDEX_KEY"] as const;
@@ -125,6 +134,7 @@ export function loadDeploymentInputs(
     return {
       databasePassword: pulumi.secret(parsed.databasePassword),
       runtimeSecretValue: pulumi.secret(JSON.stringify(parsed.runtimeSecrets)),
+      runtimeSecretNames: Object.keys(parsed.runtimeSecrets) as RuntimeSecretName[],
       llmoxieBaseUrl: parsed.llmoxieBaseUrl,
     };
   }
@@ -133,5 +143,6 @@ export function loadDeploymentInputs(
   return {
     databasePassword: localConfig.requireSecret("databasePassword"),
     runtimeSecretValue: localConfig.requireSecret("runtimeSecrets"),
+    runtimeSecretNames: RUNTIME_SECRET_NAMES,
   };
 }

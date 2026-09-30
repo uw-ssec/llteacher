@@ -325,11 +325,18 @@ describe("POST draft (#75)", () => {
     expect(draftGradeMock).not.toHaveBeenCalled();
   });
 
-  it("still 503s on a missing OpenRouter key for the no-config default, which IS an OpenRouter model", async () => {
+  it("uses LLMoxie when no config resolves", async () => {
     resolveLlmConfigMock.mockResolvedValue(null);
-    const res = await draft({ DATABASE_URL: "ignored" } as Env);
-    expect(res.status).toBe(503);
-    expect(draftGradeMock).not.toHaveBeenCalled();
+    const res = await draft({ DATABASE_URL: "ignored", LLMOXIE_API_KEY: "sk-llmoxie" } as Env);
+
+    expect(res.status).toBe(201);
+    expect(buildProviderClientMock).toHaveBeenCalledWith("llmoxie", "sk-llmoxie", {
+      llmoxieBaseUrl: undefined,
+    });
+    expect(draftGradeMock.mock.calls[0]![0]).toMatchObject({
+      modelName: "gpt-5.3-codex",
+      model: { provider: "llmoxie", apiKey: "sk-llmoxie", model: "gpt-5.3-codex" },
+    });
   });
 
   it("404s a submission that is not in this course", async () => {

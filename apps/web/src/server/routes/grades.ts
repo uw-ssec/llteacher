@@ -41,7 +41,6 @@ import {
   LLMCredentialMissingError,
   UnsupportedLLMProviderError,
 } from "../../lib/llm-config";
-import { getOpenRouter } from "../../lib/ai";
 import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
 import { logServerError } from "../utils/errors";
 import { messageTextOf } from "../utils/messageText";
@@ -55,12 +54,8 @@ const MAX_FEEDBACK_CHARS = 20_000;
  *  one. Conventional, and only ever a starting value in a form the
  *  instructor edits before saving. */
 const DEFAULT_MAX_SCORE = 100;
-/** #365: the model a draft falls back to when no `llm_configs` row resolves
- *  for the course's org at all. Named once, because it is now consulted in
- *  two places that must not disagree -- the client built for it, and the
- *  `modelName` recorded on the draft. It IS an OpenRouter model, which is why
- *  that one branch legitimately reaches for OPENROUTER_API_KEY by name. */
-const DEFAULT_DRAFT_MODEL_NAME = "google/gemma-4-31b-it:free";
+/** The platform-default LLMoxie model used when no org config resolves. */
+const DEFAULT_DRAFT_MODEL_NAME = "gpt-5.3-codex";
 
 async function instructorContext(
   c: Context<AppEnv>,
@@ -304,15 +299,13 @@ export async function draftGradeHandler(c: Context<AppEnv>) {
         llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL,
       })(resolvedConfig.modelName);
     } else {
-      // No org scope, or no config resolvable for it. Unchanged from before:
-      // the historic hardcoded default, which IS an openrouter model and so
-      // legitimately needs an OpenRouter key -- the one case where naming
-      // that binding directly is correct rather than an assumption.
-      if (!c.env.OPENROUTER_API_KEY) {
-        logServerError("draftGradeHandler", new Error("OPENROUTER_API_KEY is not configured"));
+      if (!c.env.LLMOXIE_API_KEY) {
+        logServerError("draftGradeHandler", new Error("LLMOXIE_API_KEY is not configured"));
         return c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503);
       }
-      model = getOpenRouter(c.env.OPENROUTER_API_KEY)(DEFAULT_DRAFT_MODEL_NAME);
+      model = buildProviderClient("llmoxie", c.env.LLMOXIE_API_KEY, {
+        llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL,
+      })(DEFAULT_DRAFT_MODEL_NAME);
     }
   } catch (err) {
     if (err instanceof LLMCredentialMissingError || err instanceof UnsupportedLLMProviderError) {
@@ -377,5 +370,4 @@ export async function draftGradeHandler(c: Context<AppEnv>) {
   };
   return c.json(body, 201);
 }
-
 

@@ -41,7 +41,7 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv): Env {
     DATABASE_URL: loadDatabaseUrl(env),
     WORKOS_API_KEY: requireValue(env, "WORKOS_API_KEY"),
     WORKOS_CLIENT_ID: requireValue(env, "WORKOS_CLIENT_ID"),
-    OPENROUTER_API_KEY: requireValue(env, "OPENROUTER_API_KEY"),
+    OPENROUTER_API_KEY: env.OPENROUTER_API_KEY,
     LLMOXIE_API_KEY: requireValue(env, "LLMOXIE_API_KEY"),
     LLMOXIE_BASE_URL: env.LLMOXIE_BASE_URL,
     LLM_DEGRADED_MODEL: env.LLM_DEGRADED_MODEL,

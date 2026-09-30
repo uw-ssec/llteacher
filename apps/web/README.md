@@ -19,10 +19,10 @@ string, pagination cursors, and worked `curl` examples — see:
 
 1. `npm install`
 2. Configure the Node process environment. `DATABASE_URL` is required; the
-   production secrets are `OPENROUTER_API_KEY`, `LLMOXIE_API_KEY`,
+   required production secrets are `LLMOXIE_API_KEY`,
    `SESSION_SECRET`, `ENCRYPTION_KEY`, `BLIND_INDEX_KEY`, `WORKOS_API_KEY`,
-   `WORKOS_CLIENT_ID`, and `WORKOS_WEBHOOK_SECRET`. `LLMOXIE_BASE_URL` and
-   `LLM_DEGRADED_MODEL` are optional. Load these through your shell, a local
+   `WORKOS_CLIENT_ID`, and `WORKOS_WEBHOOK_SECRET`. `OPENROUTER_API_KEY`,
+   `LLMOXIE_BASE_URL`, and `LLM_DEGRADED_MODEL` are optional. Load these through your shell, a local
    environment manager, or the container runtime; the app does not parse a
    local environment file itself.
 3. `npm run db:migrate`.
@@ -65,7 +65,7 @@ The ECS task definition supplies the same environment configuration as the
 Node process. Set non-secret values in task configuration and inject secrets
 through the configured secrets manager before deployment. In particular:
 
-- `OPENROUTER_API_KEY` -- required from Phase 1 on.
+- `OPENROUTER_API_KEY` -- optional; required only for OpenRouter-backed configs.
 - `LLMOXIE_API_KEY` -- **required as of #178/#317's migration 0035**, not
   optional. Every org's default `llm_configs` row now points at
   `provider = 'llmoxie'` with no instructor-visible credential, so a missing

@@ -179,7 +179,7 @@ repository's production environment settings (not repository-wide secrets):
 | `WORKOS_API_KEY` | WorkOS production environment API key. |
 | `WORKOS_CLIENT_ID` | WorkOS production environment client ID. |
 | `WORKOS_WEBHOOK_SECRET` | Signing secret for the production WorkOS webhook endpoint. |
-| `OPENROUTER_API_KEY` | Dedicated LLTeacher production OpenRouter key. |
+| `OPENROUTER_API_KEY` | Optional dedicated LLTeacher production OpenRouter key. Omit it when only LLMoxie is used. |
 | `LLMOXIE_API_KEY` | Production credential issued by the SSEC/LLMoxie operator. |
 | `SESSION_SECRET` | New standard-base64 encoding of 32 random bytes. |
 | `ENCRYPTION_KEY` | A second, distinct standard-base64 encoding of 32 random bytes. |
@@ -540,11 +540,11 @@ existing stack require a reviewed migration before continuing.
 account `055237683908`, region `us-west-2`, S3 backend and `production` stack;
 the six non-secret Pulumi settings `aws:region=us-west-2`,
 `environment=production`, `imageTag=bootstrap`, `provisionService=false`,
-`deployApp=false` and `domainReady=false`; all nine individual
+`deployApp=false` and `domainReady=false`; the eight required individual
 production secrets (`DATABASE_PASSWORD`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`,
-`WORKOS_WEBHOOK_SECRET`, `OPENROUTER_API_KEY`, `LLMOXIE_API_KEY`,
+`WORKOS_WEBHOOK_SECRET`, `LLMOXIE_API_KEY`,
 `SESSION_SECRET`, `ENCRYPTION_KEY`, `BLIND_INDEX_KEY`); and the non-secret
-`LLMOXIE_BASE_URL`. The Pulumi program validates the complete input set even
+`LLMOXIE_BASE_URL`. `OPENROUTER_API_KEY` is optional. The Pulumi program validates the complete input set even
 with `deployApp=false`. A separately authorized operator preview/apply must
 receive the same values as ephemeral process environment variables through an
 approved secret-handling session; GitHub's write-only settings cannot be read
@@ -727,9 +727,9 @@ definition available. A changed GitHub production secret takes effect on the
 next successful tagged release; a task replacement is required after rotation.
 Do not manually edit generated AWS Secrets Manager values during rollback.
 
-Every rollback or recovery Pulumi preview/update requires all nine GitHub
+Every rollback or recovery Pulumi preview/update requires all eight required GitHub
 `production` environment secrets (`DATABASE_PASSWORD`, `WORKOS_API_KEY`,
-`WORKOS_CLIENT_ID`, `WORKOS_WEBHOOK_SECRET`, `OPENROUTER_API_KEY`,
+`WORKOS_CLIENT_ID`, `WORKOS_WEBHOOK_SECRET`,
 `LLMOXIE_API_KEY`, `SESSION_SECRET`, `ENCRYPTION_KEY`, `BLIND_INDEX_KEY`) plus
 the `LLMOXIE_BASE_URL` environment variable in an approved secret-handling
 session or the current GitHub production workflow. Their values must represent
@@ -737,6 +737,8 @@ the intended current secret state, including any coordinated rotation already
 completed. Selecting an older task definition does not restore older secret values:
 new ECS tasks consume the currently generated Secrets Manager versions. Do not
 copy the old release's credentials into the shell to attempt a code rollback.
+`OPENROUTER_API_KEY` is additionally required only when the deployment uses an
+OpenRouter-backed configuration.
 
 After confirming schema compatibility, copy the values from the workflow's
 rollback summary and run from that approved secret-handling session:

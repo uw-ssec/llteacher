@@ -47,7 +47,6 @@ describe("loadRuntimeConfig", () => {
     "APP_URL",
     "WORKOS_API_KEY",
     "WORKOS_CLIENT_ID",
-    "OPENROUTER_API_KEY",
     "LLMOXIE_API_KEY",
     "SESSION_SECRET",
     "ENCRYPTION_KEY",
@@ -57,6 +56,13 @@ describe("loadRuntimeConfig", () => {
     const environment: NodeJS.ProcessEnv = { ...runtimeEnvironment };
     delete environment[name];
     expect(() => loadRuntimeConfig(environment)).toThrow(`${name} is required`);
+  });
+
+  it("starts without an OpenRouter key", () => {
+    const environment: NodeJS.ProcessEnv = { ...runtimeEnvironment };
+    delete environment.OPENROUTER_API_KEY;
+
+    expect(loadRuntimeConfig(environment).OPENROUTER_API_KEY).toBeUndefined();
   });
 
   it.each(["ftp://llteacher.example.edu", "https://llteacher.example.edu/path", "not a url"])(

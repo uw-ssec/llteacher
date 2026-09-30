@@ -7,11 +7,12 @@ status: accepted
 ## Decision
 
 The GitHub `production` environment is the operator-facing source of truth for
-LLTeacher production application secrets. Operators set nine individual
+LLTeacher production application secrets. Operators set eight required individual
 environment secrets: `DATABASE_PASSWORD`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`,
-`WORKOS_WEBHOOK_SECRET`, `OPENROUTER_API_KEY`, `LLMOXIE_API_KEY`,
+`WORKOS_WEBHOOK_SECRET`, `LLMOXIE_API_KEY`,
 `SESSION_SECRET`, `ENCRYPTION_KEY`, and `BLIND_INDEX_KEY`. The non-secret
-`LLMOXIE_BASE_URL` is a production environment variable. Local and staging
+`LLMOXIE_BASE_URL` is a production environment variable. `OPENROUTER_API_KEY`
+is optional and is supplied only for OpenRouter-backed configurations. Local and staging
 stacks retain their encrypted Pulumi `databasePassword` and `runtimeSecrets`
 configuration; production does not use those config keys.
 
@@ -19,8 +20,8 @@ A successful tagged release gives these inputs only to the validation and
 Pulumi steps. Validation runs before AWS mutation. Pulumi creates or updates
 the two generated AWS Secrets Manager runtime secrets. It sets the RDS master
 password, derives the percent-encoded database connection URL, and writes it to
-one generated secret. It writes the eight application credentials and keys
-to the other generated secret as JSON. ECS obtains both through its execution
+one generated secret. It writes the seven required application credentials and
+keys, plus optional OpenRouter credentials, to the other generated secret as JSON. ECS obtains both through its execution
 role when a task starts. The application task role has no Secrets Manager
 read permission. Operators do not manually populate or edit either generated
 AWS secret.
