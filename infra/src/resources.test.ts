@@ -5,7 +5,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { createApplication } from "./app.js";
 import type { InfraConfig } from "./config.js";
 import { createDataResources } from "./database.js";
-import { loadDeploymentInputs, type DeploymentInputs } from "./deployment-inputs.js";
+import { loadDeploymentInputs, RUNTIME_SECRET_NAMES, type DeploymentInputs } from "./deployment-inputs.js";
 import { createNetwork, type Network } from "./network.js";
 import { createAwsProvider } from "./provider.js";
 import { createDnsResources } from "./dns.js";
@@ -31,6 +31,7 @@ const operatorRuntimeSecrets = {
 const productionDeploymentInputs: DeploymentInputs = {
   databasePassword: pulumi.secret("operator/pass"),
   runtimeSecretValue: pulumi.secret(JSON.stringify(operatorRuntimeSecrets)),
+  runtimeSecretNames: RUNTIME_SECRET_NAMES,
   llmoxieBaseUrl: "https://llmoxie.example.test/api/v1",
 };
 
@@ -402,7 +403,7 @@ describe("production resource graph", () => {
     const [container] = JSON.parse(String(resource("aws:ecs/taskDefinition:TaskDefinition", "llteacher-production-app-task").inputs.containerDefinitions));
     expect(container.secrets).toEqual([
       { name: "DATABASE_URL", valueFrom: "arn:aws:test:us-east-1:000000000000:llteacher-production-database-url" },
-      ...["WORKOS_API_KEY", "WORKOS_CLIENT_ID", "OPENROUTER_API_KEY", "LLMOXIE_API_KEY", "SESSION_SECRET", "ENCRYPTION_KEY", "BLIND_INDEX_KEY", "WORKOS_WEBHOOK_SECRET"].map((name) => ({
+      ...RUNTIME_SECRET_NAMES.map((name) => ({
         name,
         valueFrom: `arn:aws:test:us-east-1:000000000000:llteacher-production-runtime:${name}::`,
       })),

@@ -103,7 +103,7 @@ export function createApplication(name: string, config: InfraConfig, network: Ne
       logConfiguration: { logDriver: "awslogs", options: { "awslogs-group": logGroupName, "awslogs-region": config.region, "awslogs-stream-prefix": "app" } },
       secrets: [
         { name: "DATABASE_URL", valueFrom: databaseSecretArn },
-        ...(!runtimeSecretArn ? [] : ["WORKOS_API_KEY", "WORKOS_CLIENT_ID", "OPENROUTER_API_KEY", "LLMOXIE_API_KEY", "SESSION_SECRET", "ENCRYPTION_KEY", "BLIND_INDEX_KEY", "WORKOS_WEBHOOK_SECRET"].map((name) => ({ name, valueFrom: `${runtimeSecretArn}:${name}::` }))),
+        ...(!runtimeSecretArn ? [] : deploymentInputs.runtimeSecretNames.map((name) => ({ name, valueFrom: `${runtimeSecretArn}:${name}::` }))),
       ],
     }])),
   }, { ...options, dependsOn: [data.databaseUrlSecretVersion, data.runtimeSecretVersion, executionPolicy, secretsPolicy, materialsPolicy] });

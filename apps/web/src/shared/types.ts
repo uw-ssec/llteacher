@@ -593,7 +593,7 @@ declare global {
     DATABASE_URL: string;
     WORKOS_API_KEY: string;
     WORKOS_CLIENT_ID: string;
-    OPENROUTER_API_KEY: string;
+    OPENROUTER_API_KEY?: string;
     /* #178's gateway. Required, not optional (#317 review, #343): migration
        0035 moves the platform-default llm_configs row for every org to
        provider='llmoxie' with credential_id NULL, which routes every

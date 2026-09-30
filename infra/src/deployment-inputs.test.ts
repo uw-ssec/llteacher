@@ -58,10 +58,19 @@ describe("production deployment inputs", () => {
   });
 
   it("rejects every missing or empty required setting without echoing its value", () => {
-    for (const name of Object.keys(valid) as (keyof typeof valid)[]) {
+    for (const name of Object.keys(valid).filter((name) => name !== "OPENROUTER_API_KEY") as (keyof typeof valid)[]) {
       rejectsSetting(name, undefined);
       rejectsSetting(name, "");
     }
+  });
+
+  it.each([undefined, ""])("accepts production without an OpenRouter key (%s)", (openRouterApiKey) => {
+    const parsed = parseProductionDeploymentEnvironment({
+      ...valid,
+      OPENROUTER_API_KEY: openRouterApiKey,
+    });
+
+    expect(parsed.runtimeSecrets).not.toHaveProperty("OPENROUTER_API_KEY");
   });
 
   it("rejects whitespace-padded values rather than normalizing credentials", () => {
