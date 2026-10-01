@@ -57,7 +57,7 @@ beforeAll(() => {
         state.dnsName = `${args.name}.elb.test`;
         state.zoneId = "ZALB";
       }
-      if (args.type === "aws:route53/zone:Zone") state.zoneId = `${args.name}-id`;
+      if (args.type === "aws:route53/zone:Zone") state.zoneId = args.id ?? `${args.name}-id`;
       if (args.type === "aws:s3/bucket:Bucket") state.bucket = `${args.name}-bucket`;
       if (args.type === "aws:secretsmanager/secretVersion:SecretVersion") {
         state.versionId = `${args.name}-version-id`;
@@ -93,6 +93,7 @@ const productionConfig = {
   environment: "production",
   isLocal: false,
   domainName: "llteacher.example.edu",
+  hostedZoneId: "Z0123456789ABCDEFGHIJ",
   domainReady: true,
   certificateArn: "arn:aws:acm:us-west-2:055237683908:certificate/11111111-2222-3333-4444-555555555555",
   region: "us-west-2",
@@ -200,11 +201,17 @@ describe("production resource graph", () => {
     expect(certificates[0].id).toBe("arn:aws:acm:us-west-2:055237683908:certificate/11111111-2222-3333-4444-555555555555");
     expect(certificates[0].inputs).not.toHaveProperty("tags");
     expect(resources.filter(({ name }) => name === "llteacher-production-certificate-validation-record")).toEqual([]);
-    expect(resource("aws:route53/record:Record", "llteacher-production-app-alias").inputs).toMatchObject({ type: "A", zoneId: "llteacher-production-zone-id", aliases: [{ name: "llteacher-production-alb.elb.test", zoneId: "ZALB", evaluateTargetHealth: true }] });
+    expect(resource("aws:route53/record:Record", "llteacher-production-app-alias").inputs).toMatchObject({ type: "A", zoneId: "Z0123456789ABCDEFGHIJ", aliases: [{ name: "llteacher-production-alb.elb.test", zoneId: "ZALB", evaluateTargetHealth: true }] });
     expect(resource("aws:lb/listener:Listener", "llteacher-production-listener").inputs).toMatchObject({ port: 443, protocol: "HTTPS", certificateArn: "arn:aws:acm:us-west-2:055237683908:certificate/11111111-2222-3333-4444-555555555555" });
   });
 
-  it("allows first DNS delegation without waiting on certificate validation and preserves the serving task", () => {
+  it("references the operator-owned production hosted zone instead of creating a duplicate", () => {
+    const zones = resources.filter(({ name, type }) => name === "llteacher-production-zone" && type === "aws:route53/zone:Zone");
+    expect(zones).toHaveLength(1);
+    expect(zones[0].id).toBe("Z0123456789ABCDEFGHIJ");
+  });
+
+  it("allows inactive HTTP preparation with the existing zone before certificate validation", () => {
     expect(resources.filter(({ name, type }) => name.startsWith("pending") && type === "aws:acm/certificateValidation:CertificateValidation")).toEqual([]);
     expect(resources.filter(({ name, type }) => name.startsWith("pending") && type.startsWith("aws:acm/"))).toEqual([]);
     expect(resource("aws:route53/zone:Zone", "pending-zone")).toBeDefined();

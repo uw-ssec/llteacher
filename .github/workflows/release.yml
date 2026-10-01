@@ -182,8 +182,9 @@ jobs:
           environment=$(pulumi -C infra config get environment --stack "$STACK" 2>/dev/null || true)
           domain_ready=$(pulumi -C infra config get domainReady --stack "$STACK" 2>/dev/null || true)
           domain_name=$(pulumi -C infra config get domainName --stack "$STACK" 2>/dev/null || true)
+          hosted_zone_id=$(pulumi -C infra config get hostedZoneId --stack "$STACK" 2>/dev/null || true)
           certificate_arn=$(pulumi -C infra config get certificateArn --stack "$STACK" 2>/dev/null || true)
-          validate_refreshed_stack_config "$region" "$environment" "$domain_ready" "$domain_name" "$certificate_arn"
+          validate_refreshed_stack_config "$region" "$environment" "$domain_ready" "$domain_name" "$hosted_zone_id" "$certificate_arn"
       - name: Bootstrap base infrastructure only when ECR is absent
         id: base
         env:

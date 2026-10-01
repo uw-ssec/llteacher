@@ -1,8 +1,10 @@
 config:
   aws:region: us-west-2
   llteacher-infra:environment: production
-  # Select domainName, apply/delegate the zone, then provision an operator-owned
-  # ACM certificate. Set its certificateArn and domainReady: "true" only after issuance.
+  llteacher-infra:domainName: llteacher.org
+  llteacher-infra:hostedZoneId: Z04949392GJA8YXNAE52T
+  llteacher-infra:certificateArn: arn:aws:acm:us-west-2:055237683908:certificate/abcfe27a-3c24-4c81-9546-654720a9a108
+  llteacher-infra:domainReady: "true"
   llteacher-infra:imageTag: bootstrap
   llteacher-infra:provisionService: "false"
   llteacher-infra:deployApp: "false"

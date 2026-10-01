@@ -195,10 +195,20 @@ test('refreshed production config rejects stale regions and non-HTTPS activation
 
 test('refreshed production config requires the exact-account regional certificate ARN before release mutations', () => {
   const valid = 'arn:aws:acm:us-west-2:055237683908:certificate/11111111-2222-3333-4444-555555555555';
-  const command = `. "${join(scripts, 'aws-release-common.sh')}"; validate_refreshed_stack_config us-west-2 production true learn.example.edu "$1"`;
+  const command = `. "${join(scripts, 'aws-release-common.sh')}"; validate_refreshed_stack_config us-west-2 production true learn.example.edu Z0123456789ABCDEFGHIJ "$1"`;
   for (const arn of ['', valid.replace('us-west-2', 'us-east-1'), valid.replace('055237683908', '111111111111'), valid.replace('11111111-2222-3333-4444-555555555555', '*'), valid]) {
     const result = spawnSync('bash', ['-c', command, 'validate', arn], { env: { ...process.env, AWS_REGION: 'us-west-2' }, encoding: 'utf8' });
     if (arn === valid) assert.equal(result.status, 0, result.stderr);
     else { failure(result); assert.match(result.stderr, /certificateArn/); }
+  }
+});
+
+test('refreshed production config requires the existing Route 53 hosted zone ID before release mutations', () => {
+  const certificate = 'arn:aws:acm:us-west-2:055237683908:certificate/11111111-2222-3333-4444-555555555555';
+  const command = `. "${join(scripts, 'aws-release-common.sh')}"; validate_refreshed_stack_config us-west-2 production true llteacher.org "$1" "${certificate}"`;
+  for (const zoneId of ['', '0123456789', 'z0123456789', 'Z123/hostedzone', 'Z0123456789ABCDEFGHIJ']) {
+    const result = spawnSync('bash', ['-c', command, 'validate', zoneId], { env: { ...process.env, AWS_REGION: 'us-west-2' }, encoding: 'utf8' });
+    if (zoneId === 'Z0123456789ABCDEFGHIJ') assert.equal(result.status, 0, result.stderr);
+    else { failure(result); assert.match(result.stderr, /hostedZoneId/); }
   }
 });
