@@ -23,7 +23,7 @@ fs.appendFileSync(dir+'/calls', JSON.stringify([tool,...args])+'\\n');
 function out(x){ console.log(typeof x==='string'?x:JSON.stringify(x)); }
 if(tool==='pulumi') {
  if(cmd.includes('stack output')) { if(s.stackError) process.exit(9); out(s.outputs); }
- else if(cmd.includes(' up ') && s.upError) process.exit(8);
+ else if(cmd.includes(' up ') && s.upError) { out(s.upError); process.exit(8); }
 } else if(cmd.includes('ecr describe-repositories')) {
  if(s.ecrError){ console.error('An error occurred ('+s.ecrError+') when calling DescribeRepositories'); process.exit(254); }
  out({repositories:[{repositoryUri:s.outputs.ecrRepositoryUrl}]});
@@ -61,6 +61,12 @@ test('bootstrap creates base infrastructure only and returns repository URL', t 
   const f = fixture(t); const result = f.run('bootstrap-aws-infra.sh'); success(result);
   assert.equal(result.stdout.trim(), '123456789012.dkr.ecr.us-west-2.amazonaws.com/llteacher-production/app');
   assert(f.calls().some(c => c.includes('provisionService') && c.at(-1) === 'false'));
+});
+test('bootstrap surfaces pulumi update diagnostics', t => {
+  const f = fixture(t, { upError: 'error: reading ACM certificate: AccessDenied' });
+  const result = f.run('bootstrap-aws-infra.sh');
+  failure(result);
+  assert.match(result.stdout, /error: reading ACM certificate: AccessDenied/);
 });
 test('repository authentication errors cannot trigger bootstrap', t => {
   const f = fixture(t, { ecrError: 'AccessDeniedException' }); failure(f.run('prepare-aws-release.sh', [stack, 'repository'])); noMutation(f);
