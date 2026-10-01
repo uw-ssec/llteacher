@@ -582,18 +582,16 @@ production setting and refresh the approved ephemeral operator session before
 retrying; no AWS application resource should have been changed by validation.
 
 After separately authorized base infrastructure creation, follow the domain
-procedure below. The first application release needs its own approval;
-domainless HTTP is allowed only while the app is inactive.
+procedure below. The first application release needs its own approval.
 
 ### Production domain and operator-owned certificate
 
-The approved preview hostname is `llteacher-preview.uwssec.org`. Its parent
-`uwssec.org` zone is in Cloudflare; the subdomain currently has no NS, A or
-CNAME record. After Pulumi creates the public Route 53 hosted zone for
-`llteacher-preview.uwssec.org`, the operator will delegate that subdomain by
-adding the zone's exported NS records in Cloudflare's parent zone. Do not add a
-competing A or CNAME at the delegation name. The Route 53 zone then owns the
-application alias and the certificate-validation CNAME.
+The production hostname is `llteacher.org`. Registering it with Route 53
+automatically creates and delegates a public hosted zone. That registrar-owned
+zone is foundational infrastructure: the application stack references it by
+exact ID and manages records inside it, but never creates, imports, or deletes
+the zone. Creating another same-name zone would produce a different nameserver
+set and non-authoritative application records.
 
 Run this later, after the domain is approved. These are operator commands
 using the account/region/backend checks and `aws_bootstrap`/`stop` helpers above,
@@ -604,34 +602,22 @@ already serves traffic or state owns a certificate/validation record, stop at th
 migration gate below before changing flags or applying anything; do not toggle a
 live service back to HTTP/inactive as a migration shortcut.
 
-First configure `domainName=llteacher-preview.uwssec.org` and keep
-`domainReady=false`, `deployApp=false`. Preview the zone/alias changes, then
-stop for separate apply approval. After that authorized apply, delegate the
-exported nameservers in Cloudflare's `uwssec.org` zone. Production
-creates no ACM certificate or validation CNAME in this phase.
+After Don completes registration and registrant-email verification, obtain the
+exact public hosted-zone ID created with `llteacher.org`. Verify that the zone
+name and public nameservers match before storing its non-secret ID. Production
+creates no ACM certificate or validation CNAME by itself.
 
 ```bash
-read -r -p 'Approved production DNS hostname (llteacher-preview.uwssec.org): ' DOMAIN
-[[ "$DOMAIN" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] || stop 'Invalid domain.'
+DOMAIN=llteacher.org
+read -r -p 'Route 53 hosted-zone ID created with llteacher.org: ' ZONE_ID
+[[ "$ZONE_ID" =~ ^Z[A-Z0-9]{1,31}$ ]] || stop 'Invalid hosted-zone ID.'
+aws_bootstrap route53 get-hosted-zone --id "$ZONE_ID" >"$BOOTSTRAP_TMP/domain-zone.json"
+jq -e --arg domain "$DOMAIN." '.HostedZone.Name == $domain and .HostedZone.Config.PrivateZone == false' "$BOOTSTRAP_TMP/domain-zone.json" || stop 'Hosted-zone ID does not identify the public llteacher.org zone.'
+dig +short NS "$DOMAIN"
 pulumi -C infra config set domainName "$DOMAIN" --stack production
+pulumi -C infra config set hostedZoneId "$ZONE_ID" --stack production
 pulumi -C infra config set domainReady false --stack production
 pulumi -C infra config set deployApp false --stack production
-pulumi -C infra preview --stack production --non-interactive
-```
-
-**Read-only check after the approved zone apply and delegation:** find exactly
-one matching public zone, compare its nameservers to the stack output and public
-DNS, and inventory existing certificates. Duplicate zones, unexpected certificates,
-or mismatched nameservers mean stop and review, not automatic adoption.
-
-```bash
-DOMAIN=$(pulumi -C infra config get domainName --stack production)
-aws_bootstrap route53 list-hosted-zones-by-name --dns-name "$DOMAIN" >"$BOOTSTRAP_TMP/domain-zones.json"
-ZONE_ID=$(jq -er --arg name "$DOMAIN." '[.HostedZones[] | select(.Name == $name and .Config.PrivateZone == false)] | if length == 1 then .[0].Id else error("Expected exactly one public zone") end' "$BOOTSTRAP_TMP/domain-zones.json")
-aws_bootstrap route53 get-hosted-zone --id "$ZONE_ID" >"$BOOTSTRAP_TMP/domain-zone.json"
-pulumi -C infra stack output hostedZoneNameServers --json --stack production >"$BOOTSTRAP_TMP/stack-nameservers.json"
-jq -e --slurpfile expected "$BOOTSTRAP_TMP/stack-nameservers.json" '(.DelegationSet.NameServers | sort) == ($expected[0] | sort)' "$BOOTSTRAP_TMP/domain-zone.json" || stop 'Zone is not the reviewed stack zone.'
-dig +short NS "$DOMAIN"
 aws_bootstrap acm list-certificates --includes keyTypes=RSA_1024,RSA_2048,RSA_3072,RSA_4096,EC_prime256v1,EC_secp384r1,EC_secp521r1 >"$BOOTSTRAP_TMP/certificates.json"
 jq --arg domain "$DOMAIN" '[.CertificateSummaryList[] | select(.DomainName == $domain)]' "$BOOTSTRAP_TMP/certificates.json"
 ```
@@ -698,8 +684,8 @@ Stop for explicit HTTPS apply approval; keep `deployApp=false` until the separat
 first-release approval. The preview should only read the existing certificate,
 not create/import/delete/tag it. The ACM certificate must be issued in
 `us-west-2`. Register the WorkOS production callback
-`https://llteacher-preview.uwssec.org/api/auth/callback` and webhook endpoint
-`https://llteacher-preview.uwssec.org/api/webhooks/workos` (the derived
+`https://llteacher.org/api/auth/callback` and webhook endpoint
+`https://llteacher.org/api/webhooks/workos` (the derived
 `${APP_URL}/api/auth/callback` and `${APP_URL}/api/webhooks/workos` paths), then
 verify HTTPS after the approved apply.
 See [AWS certificate requests](https://docs.aws.amazon.com/cli/latest/reference/acm/request-certificate.html)

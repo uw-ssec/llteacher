@@ -25,7 +25,9 @@ export function validateProductionCertificate(expectedArn: string, domainName: s
 export function createDnsResources(name: string, config: InfraConfig, alb: aws.lb.LoadBalancer, provider: aws.Provider): DnsResources | undefined {
   if (!config.domainName) return undefined;
   const options = { provider };
-  const hostedZone = new aws.route53.Zone(`${name}-zone`, { name: config.domainName }, options);
+  const hostedZone = config.environment === "production"
+    ? aws.route53.Zone.get(`${name}-zone`, config.hostedZoneId!, undefined, options)
+    : new aws.route53.Zone(`${name}-zone`, { name: config.domainName }, options);
   let certificateArn: pulumi.Output<string> | undefined;
   if (config.environment === "production") {
     if (config.domainReady) {

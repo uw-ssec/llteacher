@@ -7,6 +7,7 @@ export interface InfraConfig {
   isLocal: boolean;
   region: string;
   domainName?: string;
+  hostedZoneId?: string;
   certificateArn?: string;
   domainReady: boolean;
   imageDigest?: string;
@@ -56,6 +57,13 @@ export function loadInfraConfig(config: ConfigReader = new pulumi.Config(), awsC
   if (domainName && (domainName.length > 253 || !/^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/.test(domainName))) {
     throw new Error("domainName must be a DNS hostname such as learn.example.edu.");
   }
+  const hostedZoneId = config.get("hostedZoneId") || undefined;
+  if (hostedZoneId && (environment !== "production" || !/^Z[A-Z0-9]{1,31}$/.test(hostedZoneId))) {
+    throw new Error("hostedZoneId must identify the existing production Route 53 hosted zone.");
+  }
+  if (environment === "production" && domainName && !hostedZoneId) {
+    throw new Error("Production domainName requires the existing hostedZoneId.");
+  }
   const appOrigin = config.get("appOrigin");
   if (appOrigin) {
     const url = new URL(appOrigin);
@@ -101,6 +109,7 @@ export function loadInfraConfig(config: ConfigReader = new pulumi.Config(), awsC
     isLocal: environment === "local",
     region,
     domainName,
+    hostedZoneId,
     certificateArn,
     appOrigin,
     domainReady,
