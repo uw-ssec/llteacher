@@ -40,6 +40,7 @@ const keyArn = 'arn:aws:kms:us-west-2:${account}:key/1111';
 const keyMeta = () => ({ KeyMetadata: { Arn: keyArn, AWSAccountId: '${account}', KeyState: state.key.state ?? 'Enabled', KeyManager: 'CUSTOMER', KeyUsage: 'ENCRYPT_DECRYPT', KeySpec: 'SYMMETRIC_DEFAULT' } });
 const b = state.bucket, role = state.role;
 const serviceLinkedRoleNames = {
+  'ecs.amazonaws.com': 'AWSServiceRoleForECS',
   'elasticloadbalancing.amazonaws.com': 'AWSServiceRoleForElasticLoadBalancing',
   'rds.amazonaws.com': 'AWSServiceRoleForRDS',
 };
@@ -149,7 +150,8 @@ test('check on an empty account plans every prerequisite without mutating', t =>
   assert.match(result.stdout, /"Sid": "GitHubProductionEnvironment"/);
   assert.match(result.stdout, /rendered after key creation/);
   for (const plan of ['KMS key', 'state bucket', 'GitHub OIDC provider', 'all five managed policies', 'deploy role',
-    'service-linked role AWSServiceRoleForElasticLoadBalancing', 'service-linked role AWSServiceRoleForRDS']) {
+    'service-linked role AWSServiceRoleForElasticLoadBalancing', 'service-linked role AWSServiceRoleForRDS',
+    'service-linked role AWSServiceRoleForECS']) {
     assert.match(result.stdout, new RegExp(`apply would create: ${plan}`));
   }
 });
@@ -164,7 +166,7 @@ test('apply creates everything, verifies it, and a re-run changes nothing', t =>
   assert.deepEqual(apply.state.role.attached.map(a => a.split('/').pop()).sort(),
     ['llteacher-production-deploy-compute', 'llteacher-production-deploy-data', 'llteacher-production-deploy-network', 'llteacher-production-deploy-state']);
   assert.deepEqual(apply.state.serviceLinkedRoles.sort(),
-    ['AWSServiceRoleForElasticLoadBalancing', 'AWSServiceRoleForRDS']);
+    ['AWSServiceRoleForECS', 'AWSServiceRoleForElasticLoadBalancing', 'AWSServiceRoleForRDS']);
   assert.match(apply.stdout, /AWS_DEPLOY_ROLE_ARN = arn:aws:iam::055237683908:role\/llteacher-production-deploy/);
 
   const check = run('check');
@@ -177,6 +179,7 @@ test('apply creates everything, verifies it, and a re-run changes nothing', t =>
   assert.match(check.stdout, /verified: deploy role llteacher-production-deploy with four grants/);
   assert.match(check.stdout, /verified: service-linked role AWSServiceRoleForElasticLoadBalancing/);
   assert.match(check.stdout, /verified: service-linked role AWSServiceRoleForRDS/);
+  assert.match(check.stdout, /verified: service-linked role AWSServiceRoleForECS/);
 
   const reapply = run('apply', 'yes\n');
   assert.equal(reapply.status, 0, reapply.stderr);
