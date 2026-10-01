@@ -62,11 +62,14 @@ test('bootstrap creates base infrastructure only and returns repository URL', t 
   assert.equal(result.stdout.trim(), '123456789012.dkr.ecr.us-west-2.amazonaws.com/llteacher-production/app');
   assert(f.calls().some(c => c.includes('provisionService') && c.at(-1) === 'false'));
 });
-test('bootstrap surfaces pulumi update diagnostics', t => {
-  const f = fixture(t, { upError: 'error: reading ACM certificate: AccessDenied' });
-  const result = f.run('bootstrap-aws-infra.sh');
+test('repository bootstrap surfaces pulumi update diagnostics through the wrapper', t => {
+  const f = fixture(t, {
+    ecrError: 'RepositoryNotFoundException',
+    upError: 'error: reading ACM certificate: AccessDenied',
+  });
+  const result = f.run('prepare-aws-release.sh', [stack, 'repository']);
   failure(result);
-  assert.match(result.stdout, /error: reading ACM certificate: AccessDenied/);
+  assert.match(result.stderr, /error: reading ACM certificate: AccessDenied/);
 });
 test('repository authentication errors cannot trigger bootstrap', t => {
   const f = fixture(t, { ecrError: 'AccessDeniedException' }); failure(f.run('prepare-aws-release.sh', [stack, 'repository'])); noMutation(f);
