@@ -39,6 +39,10 @@ for (const code of state.denied ?? []) if (code === service + ' ' + op) fail('Ac
 const keyArn = 'arn:aws:kms:us-west-2:${account}:key/1111';
 const keyMeta = () => ({ KeyMetadata: { Arn: keyArn, AWSAccountId: '${account}', KeyState: state.key.state ?? 'Enabled', KeyManager: 'CUSTOMER', KeyUsage: 'ENCRYPT_DECRYPT', KeySpec: 'SYMMETRIC_DEFAULT' } });
 const b = state.bucket, role = state.role;
+const serviceLinkedRoleNames = {
+  'elasticloadbalancing.amazonaws.com': 'AWSServiceRoleForElasticLoadBalancing',
+  'rds.amazonaws.com': 'AWSServiceRoleForRDS',
+};
 switch (service + ' ' + op) {
   case 'configure get': opts.output = 'text'; emit('us-west-2');
   case 'sts get-caller-identity': emit({ Account: state.account, Arn: 'arn:aws:iam::' + state.account + ':user/admin' });
@@ -81,7 +85,22 @@ switch (service + ' ' + op) {
   case 'iam get-policy-version': emit({ PolicyVersion: { Document: JSON.parse(state.policies[opts['policy-arn']]) } });
   case 'iam create-policy': state.policies['arn:aws:iam::${account}:policy/' + opts['policy-name']] = file(opts['policy-document']); emit({});
   case 'iam list-roles': emit({ Roles: [] });
-  case 'iam get-role': if (!role) fail('NoSuchEntity'); emit({ Role: { AssumeRolePolicyDocument: JSON.parse(role.trust) } });
+  case 'iam get-role': {
+    if (opts['role-name'].startsWith('AWSServiceRoleFor')) {
+      if (!(state.serviceLinkedRoles ?? []).includes(opts['role-name'])) fail('NoSuchEntity');
+      const service = Object.entries(serviceLinkedRoleNames).find(([, name]) => name === opts['role-name'])[0];
+      emit({ Role: { RoleName: opts['role-name'], Path: '/aws-service-role/' + service + '/' } });
+    }
+    if (!role) fail('NoSuchEntity');
+    emit({ Role: { AssumeRolePolicyDocument: JSON.parse(role.trust) } });
+  }
+  case 'iam create-service-linked-role': {
+    const roleName = serviceLinkedRoleNames[opts['aws-service-name']];
+    if (!roleName) fail('InvalidInput');
+    state.serviceLinkedRoles ??= [];
+    if (!state.serviceLinkedRoles.includes(roleName)) state.serviceLinkedRoles.push(roleName);
+    emit({ Role: { RoleName: roleName, Path: '/aws-service-role/' + opts['aws-service-name'] + '/' } });
+  }
   case 'iam create-role': state.role = { trust: file(opts['assume-role-policy-document']), attached: [] }; emit({});
   case 'iam list-role-policies': emit({ PolicyNames: [] });
   case 'iam list-attached-role-policies': emit({ AttachedPolicies: role.attached.map(PolicyArn => ({ PolicyArn })) });
@@ -129,7 +148,8 @@ test('check on an empty account plans every prerequisite without mutating', t =>
   for (const doc of docs) assert(result.stdout.includes(`--- ${doc}`), `missing review JSON: ${doc}`);
   assert.match(result.stdout, /"Sid": "GitHubProductionEnvironment"/);
   assert.match(result.stdout, /rendered after key creation/);
-  for (const plan of ['KMS key', 'state bucket', 'GitHub OIDC provider', 'all five managed policies', 'deploy role']) {
+  for (const plan of ['KMS key', 'state bucket', 'GitHub OIDC provider', 'all five managed policies', 'deploy role',
+    'service-linked role AWSServiceRoleForElasticLoadBalancing', 'service-linked role AWSServiceRoleForRDS']) {
     assert.match(result.stdout, new RegExp(`apply would create: ${plan}`));
   }
 });
@@ -143,6 +163,8 @@ test('apply creates everything, verifies it, and a re-run changes nothing', t =>
   assert.equal(Object.keys(apply.state.policies).length, 5);
   assert.deepEqual(apply.state.role.attached.map(a => a.split('/').pop()).sort(),
     ['llteacher-production-deploy-compute', 'llteacher-production-deploy-data', 'llteacher-production-deploy-network', 'llteacher-production-deploy-state']);
+  assert.deepEqual(apply.state.serviceLinkedRoles.sort(),
+    ['AWSServiceRoleForElasticLoadBalancing', 'AWSServiceRoleForRDS']);
   assert.match(apply.stdout, /AWS_DEPLOY_ROLE_ARN = arn:aws:iam::055237683908:role\/llteacher-production-deploy/);
 
   const check = run('check');
@@ -153,6 +175,8 @@ test('apply creates everything, verifies it, and a re-run changes nothing', t =>
   assert.match(check.stdout, /"Resource": "arn:aws:kms:us-west-2:055237683908:key\/1111"/);
   assert.doesNotMatch(apply.stdout, /--- github-compute-policy\.json/);
   assert.match(check.stdout, /verified: deploy role llteacher-production-deploy with four grants/);
+  assert.match(check.stdout, /verified: service-linked role AWSServiceRoleForElasticLoadBalancing/);
+  assert.match(check.stdout, /verified: service-linked role AWSServiceRoleForRDS/);
 
   const reapply = run('apply', 'yes\n');
   assert.equal(reapply.status, 0, reapply.stderr);
