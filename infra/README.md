@@ -306,7 +306,7 @@ stages in order:
    `bash infra/account/bootstrap.sh check`, review the complete output, then run
    `bash infra/account/bootstrap.sh apply` and type `yes` when prompted. This
    creates or verifies the state backend, GitHub OIDC deployment role and
-   policies, and the ELB and RDS service-linked roles described below.
+   policies, and the ELB, RDS and ECS service-linked roles described below.
 3. **Initialize and configure Pulumi.** Complete steps 3–5 below: configure the
    protected GitHub environment, initialize the S3-backed `production` stack,
    and set the reviewed production stack configuration. Only then enable or
@@ -391,6 +391,7 @@ release workflow later use these resources but never manage them:
 | Account-wide GitHub OIDC provider (reused if present) | `token.actions.githubusercontent.com` |
 | Elastic Load Balancing service-linked role (reused if present) | `AWSServiceRoleForElasticLoadBalancing` |
 | RDS service-linked role (reused if present) | `AWSServiceRoleForRDS` |
+| ECS service-linked role (reused if present) | `AWSServiceRoleForECS` |
 | Runtime permissions boundary (never attached to the deploy role) | `llteacher-production-runtime-boundary` |
 | Four deployment policies (state, compute, data/global, network) | `llteacher-production-deploy-*` |
 | OIDC deploy role with exactly those four grants | `llteacher-production-deploy` |
@@ -412,9 +413,10 @@ Guarantees:
 - It verifies the account and configured region before reading anything else.
 - Only the named absence codes (`NotFoundException`, `404`, `NoSuchEntity`)
   count as "absent". An access denial or network error stops the script.
-- It creates the standard Elastic Load Balancing and RDS service-linked roles
-  when absent, then verifies their fixed AWS role names and service paths. The
-  GitHub deploy role therefore does not need `iam:CreateServiceLinkedRole`.
+- It creates the standard Elastic Load Balancing, RDS and ECS service-linked
+  roles when absent, then verifies their fixed AWS role names and service
+  paths. The GitHub deploy role therefore does not need
+  `iam:CreateServiceLinkedRole`.
 - Absent resources are created. Existing ones are compared exactly (key
   metadata, rotation and policy; bucket settings; OIDC issuer and audience;
   managed-policy default versions; role trust, boundary, inline policies and

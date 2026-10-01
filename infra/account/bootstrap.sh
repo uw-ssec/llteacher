@@ -161,10 +161,10 @@ oidc_provider() {
 
 service_linked_roles() {
   local service role path index
-  local services=(elasticloadbalancing.amazonaws.com rds.amazonaws.com)
-  local roles=(AWSServiceRoleForElasticLoadBalancing AWSServiceRoleForRDS)
+  local services=(elasticloadbalancing.amazonaws.com rds.amazonaws.com ecs.amazonaws.com)
+  local roles=(AWSServiceRoleForElasticLoadBalancing AWSServiceRoleForRDS AWSServiceRoleForECS)
 
-  for index in 0 1; do
+  for index in "${!services[@]}"; do
     service=${services[$index]}
     role=${roles[$index]}
     path="/aws-service-role/$service/"
