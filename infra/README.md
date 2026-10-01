@@ -289,6 +289,33 @@ check. A mismatch or partial creation means **stop**, preserve the resources,
 and reconcile with the release owner; never delete/recreate to retry. Do not
 enable release tags until all verifications below succeed.
 
+#### Operator handoff checklist
+
+Manual setup is deliberately limited because undocumented manual steps are easy
+to miss. A collaborator preparing a new production account completes these
+stages in order:
+
+1. **Prepare the administrator account, domain and certificate.** Configure the
+   AWS CLI `default` profile for an approved administrator in account
+   `055237683908`. Register or transfer the production domain, create its Route
+   53 hosted zone, and request and validate the production ACM certificate in
+   `us-west-2`. Tag the certificate `LLTeacherStack=production`, then record the
+   domain name, hosted-zone ID and certificate ARN. Domain registration and ACM
+   certificate issuance/validation are the only AWS resources created manually.
+2. **Run the account bootstrap.** From the repository root, run
+   `bash infra/account/bootstrap.sh check`, review the complete output, then run
+   `bash infra/account/bootstrap.sh apply` and type `yes` when prompted. This
+   creates or verifies the state backend, GitHub OIDC deployment role and
+   policies, and the ELB and RDS service-linked roles described below.
+3. **Initialize and configure Pulumi.** Complete steps 3–5 below: configure the
+   protected GitHub environment, initialize the S3-backed `production` stack,
+   and set the reviewed production stack configuration. Only then enable or
+   trigger a tagged production release.
+
+Checking in bootstrap changes does not run them. An approved administrator must
+run the two commands in stage 2 whenever new account-level prerequisites are
+added.
+
 #### 1. Operator session: fixed names and caller identity
 
 Start a fresh Bash session, turn off tracing, and prepare owner-only files.
@@ -362,6 +389,8 @@ release workflow later use these resources but never manage them:
 | State KMS key (rotation on) | `alias/llteacher-pulumi-state` |
 | State bucket (versioned, SSE-KMS, TLS-only, public access blocked) | `llteacher-pulumi-state-055237683908-us-west-2` |
 | Account-wide GitHub OIDC provider (reused if present) | `token.actions.githubusercontent.com` |
+| Elastic Load Balancing service-linked role (reused if present) | `AWSServiceRoleForElasticLoadBalancing` |
+| RDS service-linked role (reused if present) | `AWSServiceRoleForRDS` |
 | Runtime permissions boundary (never attached to the deploy role) | `llteacher-production-runtime-boundary` |
 | Four deployment policies (state, compute, data/global, network) | `llteacher-production-deploy-*` |
 | OIDC deploy role with exactly those four grants | `llteacher-production-deploy` |
@@ -383,6 +412,9 @@ Guarantees:
 - It verifies the account and configured region before reading anything else.
 - Only the named absence codes (`NotFoundException`, `404`, `NoSuchEntity`)
   count as "absent". An access denial or network error stops the script.
+- It creates the standard Elastic Load Balancing and RDS service-linked roles
+  when absent, then verifies their fixed AWS role names and service paths. The
+  GitHub deploy role therefore does not need `iam:CreateServiceLinkedRole`.
 - Absent resources are created. Existing ones are compared exactly (key
   metadata, rotation and policy; bucket settings; OIDC issuer and audience;
   managed-policy default versions; role trust, boundary, inline policies and

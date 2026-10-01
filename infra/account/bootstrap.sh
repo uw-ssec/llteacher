@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Account-level prerequisites for the production Pulumi stack: state KMS key,
-# state bucket, GitHub OIDC provider, managed policies and the deploy role.
+# state bucket, GitHub OIDC provider, service-linked roles, managed policies and
+# the deploy role.
 # Run rarely, by an account admin, with the `default` AWS profile.
 #
 #   infra/account/bootstrap.sh check   # read-only inventory, verification and policy JSON for review
@@ -158,6 +159,26 @@ oidc_provider() {
   say 'verified: GitHub OIDC provider'
 }
 
+service_linked_roles() {
+  local service role path index
+  local services=(elasticloadbalancing.amazonaws.com rds.amazonaws.com)
+  local roles=(AWSServiceRoleForElasticLoadBalancing AWSServiceRoleForRDS)
+
+  for index in 0 1; do
+    service=${services[$index]}
+    role=${roles[$index]}
+    path="/aws-service-role/$service/"
+    if ! read_optional NoSuchEntity "$tmp/service-role-$index.json" iam get-role --role-name "$role"; then
+      will_create "service-linked role $role for $service" || continue
+      aws_bootstrap iam create-service-linked-role --aws-service-name "$service" >"$tmp/service-role-$index.json"
+    fi
+    jq -e --arg role "$role" --arg path "$path" \
+      '.Role.RoleName == $role and .Role.Path == $path' "$tmp/service-role-$index.json" >/dev/null || \
+      stop "Unexpected service-linked role $role."
+    say "verified: service-linked role $role"
+  done
+}
+
 # Compares a managed policy's default version with its reviewed file.
 policy_matches() {
   local arn=$1 file=$2 version
@@ -286,6 +307,7 @@ kms_key
 if [[ $mode == check ]]; then review_documents; fi
 state_bucket
 oidc_provider
+service_linked_roles
 managed_policies
 audit_runtime_roles
 ownership_inventory
