@@ -9,7 +9,7 @@ read_outputs
 assert_no_service
 pulumi -C "$root/infra" config set --stack "$stack" deployApp false
 pulumi -C "$root/infra" config set --stack "$stack" provisionService false
-pulumi -C "$root/infra" up --stack "$stack" --yes --non-interactive
+pulumi -C "$root/infra" up --stack "$stack" --yes --non-interactive 1>&2
 read_outputs
 repository=$(jq -er '.ecrRepositoryUrl' <<<"$outputs")
 validate_repository "$repository"
