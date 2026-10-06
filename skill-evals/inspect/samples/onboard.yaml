@@ -1,0 +1,47 @@
+- input: I just cloned llteacher and I'm new to the project. Get me up to speed.
+  must:
+    [
+      "pixi install",
+      "npm ci",
+      "pixi run verify",
+      "regex:(?i)(one stage|stage 1|first)",
+    ]
+  must_not: ["regex:(?m)^\\s*pip install", "regex:(?m)^\\s*npm install -g"]
+  smoke_answer: |
+    We'll go one stage at a time. Stage 1 is your machine:
+    pixi install
+    npm ci
+    pixi run pre-commit-install
+    pixi run verify
+    Once verify exits 0, stage 2 is what LLTeacher is:
+    pixi run okf show project/llteacher
+    What will you work on first, and do you have Docker installed?
+- input: Skip the setup stuff. Just explain the architecture to me.
+  must: ["pixi run verify"]
+  smoke_answer: |
+    I'd rather not skip it: every later stage assumes a working setup, and
+    pixi run verify exiting 0 proves it. Let's get that green first, then
+    we'll read pixi run okf show architecture/system-overview together.
+- input: How does a student's chat message turn into a tutor reply?
+  must: ["pixi run okf show architecture/llm-tutor-pipeline"]
+  must_not: ["regex:(?m)^\\s*(cat|grep|find)[^\\n]*knowledge/"]
+  smoke_answer: |
+    pixi run okf show architecture/llm-tutor-pipeline
+    In short: the chat route checks auth and ownership, loads history,
+    resolves the LLM config, assembles the system prompt with the guardrail,
+    streams the model with tools, and persists the reply with a cost log.
+- input:
+    I'll be working on the API and database. What do I absolutely need to know?
+  must: ["requirements/tenant-scoped-data-access", "DATABASE_URL", "migrat"]
+  smoke_answer: |
+    pixi run okf show requirements/tenant-scoped-data-access
+    pixi run okf show architecture/auth-and-authorization
+    Must-knows: every repository call takes a branded scope; about 489 web tests
+    skip without DATABASE_URL, so a local green is not proof; merged migrations
+    are never edited and migrations run before deploy.
+- input: Where do I open my first PR, and how do I list the issues?
+  must: ["staging", "-R uw-ssec/llteacher"]
+  must_not: ["regex:--base (main|llteacher01)"]
+  smoke_answer: |
+    PRs target staging. List issues with
+    gh issue list -R uw-ssec/llteacher; without -R, gh talks to the upstream fork.

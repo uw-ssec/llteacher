@@ -71,6 +71,7 @@ Load the rule file whose trigger matches what you are about to do.
 
 | Skill                                                                | Use when                                                                |
 | -------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `onboard`                                                            | New to LLTeacher: machine setup, what it does, architecture, must-knows |
 | `verify`                                                             | Before committing, opening a PR, or claiming a change is done           |
 | `run-tests`                                                          | Running TypeScript, infra, or legacy Django tests, or reading a failure |
 | `db-migration`                                                       | Changing the Drizzle schema or touching `apps/web/src/db/migrations/`   |
