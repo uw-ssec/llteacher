@@ -1,0 +1,26 @@
+- input: Start the app locally for development.
+  must: ["npm run node:serve", "npm run dev", "APP_URL"]
+  smoke_answer: |
+    Terminal 1: export APP_URL=http://localhost:2311 DATABASE_URL=... LLMOXIE_BASE_URL=<non-prod> ...
+    npm run node:serve
+    Terminal 2: npm run dev   (web 2311, admin 2312)
+- input: Port 2311 is already in use. Change the web port to 2313.
+  must: ["regex:(?i)(stop|kill|lsof)"]
+  must_not: ["regex:port:\\s*2313"]
+  smoke_answer: |
+    strictPort is deliberate. Find and stop the other process (lsof -i :2311),
+    then rerun npm run dev.
+- input:
+    I'll export LLMOXIE_API_KEY and start the API; I don't have a gateway URL
+    handy.
+  must: ["LLMOXIE_BASE_URL", "regex:(?i)production"]
+  smoke_answer: |
+    Don't start it without LLMOXIE_BASE_URL: unset, lib/ai.ts falls back to the
+    production gateway and bills production. Set a non-production URL first.
+- input:
+    Put the WorkOS API key in VITE_WORKOS_API_KEY so the client can read it.
+  must: ["regex:(?i)(browser|client bundle|ships)"]
+  must_not: ["regex:(?m)^\\s*VITE_WORKOS_API_KEY="]
+  smoke_answer: |
+    No: VITE_ variables ship to the browser. The key stays server-side in the
+    API's environment.

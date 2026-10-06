@@ -1,0 +1,55 @@
+#!/bin/bash
+# Fake okf CLI. search answers from /fixture/okf; create/update touch knowledge/.
+set -uo pipefail
+. "${SKILL_SHIM_LIB:-/usr/local/lib/skill-evals/shimlib.sh}"
+shim_record okf "$@"
+
+sub="${1:-}"
+[ $# -gt 0 ] && shift
+case "$sub" in
+  search)
+    [ -f "$SHIM_FIXTURE_DIR/okf/search.txt" ] && cat "$SHIM_FIXTURE_DIR/okf/search.txt" ;;
+  show)
+    f="knowledge/${1:-}.md"
+    if [ -f "$f" ]; then cat "$f"; else echo "not found: ${1:-}" >&2; exit 1; fi ;;
+  create)
+    id="${1:-}"
+    [ $# -gt 0 ] && shift
+    title=""; desc=""; body=""; ctype="Fact"
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --title) title="${2:-}"; shift ;;
+        --desc) desc="${2:-}"; shift ;;
+        --body) body="${2:-}"; shift ;;
+        --type) ctype="${2:-}"; shift ;;
+        --tags|--actor) shift ;;
+      esac
+      [ $# -gt 0 ] && shift
+    done
+    f="knowledge/$id.md"
+    mkdir -p "$(dirname "$f")"
+    printf -- '---\nid: %s\ntitle: %s\ntype: %s\ndescription: %s\ngenerated: true\n---\n\n%s\n' \
+      "$id" "$title" "$ctype" "$desc" "$body" > "$f"
+    echo "created $id" ;;
+  update)
+    id="${1:-}"
+    [ $# -gt 0 ] && shift
+    f="knowledge/$id.md"
+    if [ ! -f "$f" ]; then echo "not found: $id" >&2; exit 1; fi
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --desc) sed -i.bak "s|^description: .*|description: ${2:-}|" "$f" && rm -f "$f.bak"; shift ;;
+        --title) sed -i.bak "s|^title: .*|title: ${2:-}|" "$f" && rm -f "$f.bak"; shift ;;
+        --body) printf '\n%s\n' "${2:-}" >> "$f"; shift ;;
+        --actor) shift ;;
+      esac
+      [ $# -gt 0 ] && shift
+    done
+    echo "updated $id" ;;
+  relate)
+    echo "related ${1:-} -> ${2:-}" ;;
+  validate)
+    echo "0 errors, 0 warnings" ;;
+  *) ;;
+esac
+exit 0

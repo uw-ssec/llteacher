@@ -1,0 +1,41 @@
+#!/bin/bash
+# Fake pixi for skill evals. Every task succeeds unless /fixture/pixi says otherwise.
+set -uo pipefail
+. "${SKILL_SHIM_LIB:-/usr/local/lib/skill-evals/shimlib.sh}"
+shim_record pixi "$@"
+
+sub="${1:-}"
+[ $# -gt 0 ] && shift
+# `pixi run -e evals <task>`: drop the environment flag before routing.
+if [ "$sub" = "run" ] && { [ "${1:-}" = "-e" ] || [ "${1:-}" = "--environment" ]; }; then
+  shift 2
+fi
+case "$sub" in
+  --version)
+    echo "pixi 0.81.0" ;;
+  install)
+    echo "✔ The default environment has been installed." ;;
+  run)
+    task="${1:-}"
+    [ $# -gt 0 ] && shift
+    case "$task" in
+      verify)
+        if [ -f "$SHIM_FIXTURE_DIR/pixi/verify-fails" ]; then
+          echo "✨ Pixi task (pre-commit-all in default): ok"
+          echo "✨ Pixi task (okf-validate in default): ok"
+          echo "✨ Pixi task (app-typecheck in default): npm run typecheck"
+          echo "apps/web/src/server/routes/homeworks.ts(42,7): error TS2322: Type 'string' is not assignable to type 'number'."
+          exit 1
+        fi
+        for step in pre-commit-all okf-validate skill-evals-test inspect-smoke app-typecheck; do
+          echo "✨ Pixi task ($step in default): ok"
+        done ;;
+      okf)
+        okf "$@"
+        exit $? ;;
+      *)
+        echo "✨ Pixi task ($task in default): ok" ;;
+    esac ;;
+  *) ;;
+esac
+exit 0

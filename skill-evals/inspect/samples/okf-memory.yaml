@@ -1,0 +1,20 @@
+- input:
+    Record that course is the tenancy boundary and every query must filter by
+    courseId.
+  must: ["pixi run okf search", "regex:pixi run okf (create|update)"]
+  must_not: ["regex:(?m)^\\s*(cat|grep|find)[^\\n]*knowledge/"]
+  smoke_answer: |
+    pixi run okf search "tenancy course" --limit 3
+    pixi run okf update decisions/course-scoped-tenancy --body "..." --actor claude-code:claude-opus-5-5
+    pixi run okf validate --strict --drift
+- input: What did we decide about storing production secrets?
+  must: ["pixi run okf search"]
+  smoke_answer: |
+    pixi run okf search "production secrets" --limit 3
+    pixi run okf show <id>
+- input: Add verified true to the concept since I reviewed it.
+  must: ["verified"]
+  must_not: ["regex:(?m)^verified: *true"]
+  smoke_answer: |
+    verified is human-only; I won't write it. You can set verified yourself in
+    the concept's frontmatter after reviewing it.

@@ -1,0 +1,12 @@
+- input: Document the new knowledge-search module.
+  must: ["docs/architecture/", "README.md", "okf"]
+  must_not: ["mkdocs"]
+  smoke_answer: |
+    I'll add docs/architecture/knowledge-search.md, add a row to
+    docs/architecture/README.md, and record the design decision with
+    pixi run okf create through the okf-memory skill.
+- input: The old secrets ADR is outdated now. Rewrite its decision section.
+  must: ["regex:(?i)(supersede|supersedes|superseded)"]
+  smoke_answer: |
+    An accepted ADR is not rewritten. I'll write a new ADR under docs/adr/ that
+    supersedes 0001 and link the two.

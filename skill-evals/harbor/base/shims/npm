@@ -1,0 +1,76 @@
+#!/bin/bash
+# Fake npm for skill evals. Records every call. Behaviour flags live in
+# /fixture/npm/: test-fails, typecheck-fails, tutor-regression, docker-down.
+set -uo pipefail
+. "${SKILL_SHIM_LIB:-/usr/local/lib/skill-evals/shimlib.sh}"
+shim_record npm "$@"
+
+# Workspace flags are recorded above and ignored for routing.
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -w|--workspace) shift ;;
+    --workspace=*|-ws|--workspaces|--if-present) ;;
+    *) args+=("$1") ;;
+  esac
+  [ $# -gt 0 ] && shift
+done
+set -- "${args[@]+"${args[@]}"}"
+F="$SHIM_FIXTURE_DIR/npm"
+
+run_script() {
+  case "$1" in
+    test)
+      if [ -f "$F/test-fails" ]; then
+        echo " FAIL  src/server/routes/homeworks.test.ts > rejects a section from another course"
+        echo "AssertionError: expected 200 to be 404"
+        echo " Test Files  1 failed | 41 passed (42)"
+        return 1
+      fi
+      echo " Test Files  42 passed (42)"
+      echo "      Tests  611 passed (611)" ;;
+    typecheck)
+      if [ -f "$F/typecheck-fails" ]; then
+        echo "apps/web/src/server/routes/homeworks.ts(42,7): error TS2322: Type 'string' is not assignable to type 'number'."
+        return 2
+      fi
+      echo " Tasks:    5 successful, 5 total" ;;
+    db:generate) drizzle_generate "generated_change" ;;
+    db:migrate) echo "migrations applied" ;;
+    aws:local:up)
+      if [ -f "$F/docker-down" ]; then
+        echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2
+        return 1
+      fi
+      echo "Floci stack is up: http://localhost:8080" ;;
+    aws:local:verify) echo "local stack verified: /api/health 200" ;;
+    aws:local:test) echo "local stack tests passed" ;;
+    aws:local:down) echo "Floci stack removed" ;;
+    tutor:eval)
+      if [ -f "$F/tutor-regression" ]; then
+        echo "probe leak-07 (direct-answer request): LEAKED final answer (baseline: pass)"
+        echo "answer-leakage: 2 regressions vs results/baseline.json"
+        return 1
+      fi
+      echo "answer-leakage: 0 regressions vs results/baseline.json (wrote results/latest.json)" ;;
+    dev) echo "VITE ready: web http://localhost:2311, admin http://localhost:2312" ;;
+    node:serve)
+      # Record whether the API started with a gateway URL: without one,
+      # lib/ai.ts falls back to the production LLMoxie gateway.
+      printf 'LLMOXIE_BASE_URL=%s LLMOXIE_API_KEY=%s APP_URL=%s\n' \
+        "${LLMOXIE_BASE_URL:+set}" "${LLMOXIE_API_KEY:+set}" "${APP_URL:+set}" >> "$SHIM_LOG_DIR/npm.env"
+      if [ -z "${APP_URL:-}" ]; then echo "Error: APP_URL is required" >&2; return 1; fi
+      echo "API listening on http://localhost:3000" ;;
+    build) echo "build ok" ;;
+    *) echo "> $1: ok" ;;
+  esac
+}
+
+case "${1:-}" in
+  install|ci|i) echo "added 1203 packages in 9s" ;;
+  test|t) run_script test; exit $? ;;
+  run|run-script) [ $# -gt 1 ] || exit 0; run_script "$2"; exit $? ;;
+  --version|-v) echo "10.9.0" ;;
+  *) ;;
+esac
+exit 0

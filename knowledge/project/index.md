@@ -1,0 +1,6 @@
+# Project
+* [Implementation plan: the milestone sequence as it actually ran (M1 to M13)](implementation-plan.md) - How the Django-to-TypeScript port actually executed: June master plans, the July bootstrap, M1-M5 parity, then knowledge (M7), Canvas (M11) and AWS infrastructure (M12), with what landed and what is still open.
+* [LLTeacher v2 project overview](llteacher.md) - LLTeacher v2: UW AI tutoring platform being ported from a Django app to a TypeScript Turborepo on AWS; real tracker is uw-ssec/llteacher, not upstream RedBeardLab, so always pass -R to gh.
+* [Milestones M1-M13 and what each delivered](milestones.md) - All 13 GitHub milestones (created 2026-07-30) with state, open/closed counts as of 2026-10-06, due dates, and the PRs that delivered them.
+* [Project state as of 2026-10-06](current-state.md) - As of 2026-10-06: parity milestones M1-M5 and M11 are delivered on staging; the first AWS production release is being brought up; RAG, analytics, FERPA, branding, course self-service and Django cutover are still open.
+* [Stakeholders and CDI shared-platform context](stakeholders-and-context.md) - LLTeacher is SSEC's candidate base for a shared platform serving four UW CDI-funded AI tutoring projects (stats, economics, clinical informatics, engineering code tutoring) with fall-quarter pilots; roles, not names.

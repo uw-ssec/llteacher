@@ -1,0 +1,32 @@
+schema_version = "1.4"
+artifacts = []
+
+[task]
+name = "llteacher/tutor-eval"
+version = "1.0.0"
+description = "Run the tutor-behavior eval and its tests after a guardrail change, leaving the baseline alone"
+keywords = ["skill", "tutor-eval"]
+[[task.authors]]
+name = "Cordero Core"
+
+[metadata]
+
+[verifier]
+timeout_sec = 120.0
+collect = []
+
+[verifier.env]
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 600.0
+os = "linux"
+mcp_servers = []
+skills_dir = "/skills"
+
+[environment.env]
+
+[solution.env]

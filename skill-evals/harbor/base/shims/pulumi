@@ -1,0 +1,8 @@
+#!/bin/bash
+# Fake pulumi. Records every call so verifiers can prove no production stack
+# was touched; never contacts a backend.
+set -uo pipefail
+. "${SKILL_SHIM_LIB:-/usr/local/lib/skill-evals/shimlib.sh}"
+shim_record pulumi "$@"
+echo "pulumi (fake): $*"
+exit 0

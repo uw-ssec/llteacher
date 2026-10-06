@@ -1,0 +1,20 @@
+- input:
+    File an issue that the student homework list crashes on a null due date.
+  must:
+    [
+      "gh issue create -R uw-ssec/llteacher",
+      "## Summary",
+      "## Requirements",
+      "- [ ]",
+    ]
+  must_not: ["regex:gh issue create(?![^\\n]*-R)"]
+  smoke_answer: |
+    gh issue create -R uw-ssec/llteacher --title "fix(web): show 'No due date' instead of crashing" --body "## Summary
+    The homework list throws on a null due date.
+    ## Requirements
+    - [ ] Render No due date
+    - [ ] Test the null case"
+- input: List the open issues about Canvas.
+  must: ["-R uw-ssec/llteacher"]
+  smoke_answer: |
+    gh issue list -R uw-ssec/llteacher --search "canvas" --state open

@@ -1,0 +1,15 @@
+#!/bin/bash
+# Fake docker. `docker info` fails when /fixture/docker/down exists.
+set -uo pipefail
+. "${SKILL_SHIM_LIB:-/usr/local/lib/skill-evals/shimlib.sh}"
+shim_record docker "$@"
+case "${1:-}" in
+  info)
+    if [ -f "$SHIM_FIXTURE_DIR/docker/down" ]; then
+      echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2
+      exit 1
+    fi
+    echo "Server Version: 28.0.0" ;;
+  *) ;;
+esac
+exit 0
