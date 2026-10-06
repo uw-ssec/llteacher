@@ -30,8 +30,8 @@ SKILL_NAMES: list[str] = sorted(
 
 
 def test_skills_were_found() -> None:
-    # 9 template skills + 6 project skills
-    assert len(SKILL_NAMES) >= 15
+    # 9 template skills + 7 project skills
+    assert len(SKILL_NAMES) >= 16
 
 
 def test_every_skill_has_inspect_samples() -> None:

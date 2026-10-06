@@ -3,7 +3,7 @@ type: Decision
 title: Adopt uw-ssec/project-template with pixi scoped to developer tooling
 description: "On 2026-10-06 llteacher adopted the SSEC project template: AGENTS.md, rules, skills, OKF knowledge/ bundle, skill evals; pixi owns tooling only, npm and uv keep the app, hooks scope to the template surface."
 tags: [project-template, pixi, agents, skills, pre-commit, okf]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-06T22:32:36Z" }
+generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-06T23:02:01Z" }
 status: stable
 governance: constraint
 code_refs: [pixi.toml, .pre-commit-config.yaml, AGENTS.md, CLAUDE.md, ".agents/rules/**", ".agents/skills/**", .gitignore]
@@ -33,7 +33,7 @@ The root `CLAUDE.md` (a stale Django-era guide) was replaced by `@AGENTS.md`.
 
 ## Project-specific skills
 
-`verify`, `run-tests`, `db-migration`, `local-aws`, `tutor-eval`, `dev-server`, each with Inspect samples and a Harbor task (plus guards for NEVER rules).
+`verify`, `run-tests`, `db-migration`, `local-aws`, `tutor-eval`, `dev-server`, and (added later the same day) `onboard`, a staged newcomer session: setup gate, what the product is, architecture, must-knows, how work gets done, each with Inspect samples and a Harbor task (plus guards for NEVER rules).
 
 ## Two okf versions
 

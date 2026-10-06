@@ -1,4 +1,6 @@
 ## 2026-10-06
+* **Update**: Updated concept `decisions/project-template-adoption.md`.
+* **Update**: Updated concept `architecture/skill-evals.md`.
 * **Update**: Updated concept `facts/code-turbo-evals-typecheck-race.md`.
 * **Update**: Linked `architecture/skill-evals.md` to `architecture/eval-harness.md` (Not to be confused with the product's tutor eval).
 * **Update**: Linked `architecture/skill-evals.md` to `facts/skill-evals-authoring-lessons.md` (Rules for writing its verifiers and samples).

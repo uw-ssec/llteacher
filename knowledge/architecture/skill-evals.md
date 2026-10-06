@@ -3,7 +3,7 @@ type: Architecture
 title: Agent-skill evaluation with Inspect and Harbor
 description: "Every skill in .agents/skills is checked twice: Inspect replays SKILL.md-in-context samples scored by must/must_not rules, and Harbor runs agents in Docker against an llteacher lookalike with fake CLIs that log every call."
 tags: [skill-evals, inspect, harbor, skills, testing]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-06T22:32:36Z" }
+generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-06T23:02:01Z" }
 status: stable
 governance: context
 code_refs: ["skill-evals/**", .github/workflows/skill-evals.yml]
@@ -30,6 +30,8 @@ The fixture (`ts_scaffold`) is an llteacher lookalike on branch `staging` with a
 ## Baseline (2026-10-06)
 
 23 tasks (15 happy-path, 8 guards): oracle 23/23 reward 1.0; nop 23/23 reward 0.0. Inspect smoke: 48 samples, accuracy 1.0. No real-model run yet.
+
+Added 2026-10-06 with the `onboard` skill: 24 tasks, 53 Inspect samples; the `onboard` task scores 1.0 under oracle and 0.0 under nop.
 
 # Related Concepts
 - [Lessons for writing skill-eval verifiers, samples and shims](../facts/skill-evals-authoring-lessons.md): Rules for writing its verifiers and samples

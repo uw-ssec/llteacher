@@ -3,6 +3,10 @@
 **Load when:** setting up this repository for the first time, or helping a new
 contributor get started.
 
+For a guided first session — machine setup, what LLTeacher does, the
+architecture, and the must-knows — use the `onboard` skill; this file covers the
+SSEC onboarding tooling it calls.
+
 ## Onboarding Workflow (First-Time Setup)
 
 ```bash
