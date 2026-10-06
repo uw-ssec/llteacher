@@ -1,0 +1,69 @@
+# Hooks are scoped to the agent/project-template surface. The TypeScript and
+# Django code has its own toolchain (tsc, vitest, Django tests) and was never
+# formatted by these hooks; widening `files` means a repo-wide reformat and
+# belongs in its own PR.
+files: |
+  (?x)^(
+    AGENTS\.md|CLAUDE\.md|AI_POLICY\.md|CODE_OF_CONDUCT\.md|CONTRIBUTING\.md|
+    pixi\.toml|\.pre-commit-config\.yaml|\.gitignore|
+    \.agents/(rules|skills)/.*|\.claude/(settings\.json|hooks/.*)|
+    \.devcontainer/.*|\.github/.*|knowledge/.*|skill-evals/.*
+  )$
+exclude: |
+  (?x)^(
+    pixi.lock|onboarded.md|\.secrets\.baseline
+  )$
+
+ci:
+  autoupdate_commit_msg: "chore: update pre-commit hooks"
+  autofix_commit_msg: "style: pre-commit fixes"
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: "v4.6.0"
+    hooks:
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: check-yaml
+      - id: debug-statements
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: "v3.1.0"
+    hooks:
+      - id: prettier
+        types_or: [yaml, markdown, html, css, scss, javascript, json]
+        args: [--prose-wrap=always]
+        # knowledge/: okf owns this format; prettier folds frontmatter.
+        # test.yml/release.yml: pre-existing workflows never formatted by
+        # prettier; reflowing them belongs in its own reviewed change.
+        exclude: ^(knowledge/|\.github/workflows/(test|release)\.yml$)
+
+  - repo: https://github.com/codespell-project/codespell
+    rev: "v2.3.0"
+    hooks:
+      - id: codespell
+
+  - repo: local
+    hooks:
+      - id: disallow-caps
+        name: Disallow improper capitalization
+        language: pygrep
+        entry: Github
+        exclude: .pre-commit-config.yaml
+
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: "0.28.4"
+    hooks:
+      - id: check-dependabot
+      - id: check-github-workflows
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: "v1.5.0"
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]

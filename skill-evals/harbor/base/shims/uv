@@ -1,0 +1,10 @@
+#!/bin/bash
+# Fake uv for the legacy Django suite.
+set -uo pipefail
+. "${SKILL_SHIM_LIB:-/usr/local/lib/skill-evals/shimlib.sh}"
+shim_record uv "$@"
+case "$*" in
+  *run_tests.py*) echo "Ran 149 tests in 0.061s"; echo "OK" ;;
+  *) ;;
+esac
+exit 0

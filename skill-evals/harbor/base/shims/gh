@@ -1,0 +1,49 @@
+#!/bin/bash
+# Fake GitHub CLI for skill evals. Records every call; answers from /fixture/gh.
+# `-R/--repo <owner/name>` is recorded (verifiers check it) but ignored for
+# routing, so `gh pr create -R uw-ssec/llteacher ...` works like the real CLI.
+set -uo pipefail
+. "${SKILL_SHIM_LIB:-/usr/local/lib/skill-evals/shimlib.sh}"
+shim_record gh "$@"
+
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -R|--repo) shift ;;
+    --repo=*) ;;
+    *) args+=("$1") ;;
+  esac
+  [ $# -gt 0 ] && shift
+done
+set -- "${args[@]+"${args[@]}"}"
+
+case "${1:-} ${2:-}" in
+  "issue create")
+    echo "https://github.com/uw-ssec/llteacher/issues/500" ;;
+  "pr create")
+    echo "https://github.com/uw-ssec/llteacher/pull/501" ;;
+  "pr view")
+    [ -f "$SHIM_FIXTURE_DIR/gh/pr.json" ] && cat "$SHIM_FIXTURE_DIR/gh/pr.json" ;;
+  "pr list")
+    [ -f "$SHIM_FIXTURE_DIR/gh/merged.txt" ] && cat "$SHIM_FIXTURE_DIR/gh/merged.txt" ;;
+  "pr merge")
+    # Simulate the squash merge landing: fast-forward remote staging to the PR
+    # head, then delete the head branch on the remote (as --delete-branch does).
+    head="$(sed -n 's/.*"headRefName": *"\([^"]*\)".*/\1/p' "$SHIM_FIXTURE_DIR/gh/pr.json" 2>/dev/null | head -1)"
+    base="$(sed -n 's/.*"baseRefName": *"\([^"]*\)".*/\1/p' "$SHIM_FIXTURE_DIR/gh/pr.json" 2>/dev/null | head -1)"
+    base="${base:-staging}"
+    if [ -n "$head" ] && [ -d "$SHIM_REMOTE" ]; then
+      "$SHIM_GIT" --git-dir="$SHIM_REMOTE" update-ref "refs/heads/$base" "refs/heads/$head"
+      "$SHIM_GIT" --git-dir="$SHIM_REMOTE" branch -D "$head" >/dev/null 2>&1
+    fi
+    echo "✓ Squashed and merged pull request #501" ;;
+  "run list")
+    if [ -f "$SHIM_FIXTURE_DIR/gh/runs.txt" ]; then cat "$SHIM_FIXTURE_DIR/gh/runs.txt"
+    else printf 'completed\tsuccess\tCI\ttest\tstaging\tpush\t9001\t3m\t2026-10-01T00:00:00Z\n'; fi ;;
+  "run watch")
+    echo "✓ Run 9001 completed with 'success'" ;;
+  "release create")
+    echo "https://github.com/uw-ssec/llteacher/releases/tag/${3:-}" ;;
+  *) ;;
+esac
+exit 0

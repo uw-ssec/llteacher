@@ -1,0 +1,30 @@
+- input: Open a PR for my branch.
+  must:
+    [
+      "gh pr create",
+      "-R uw-ssec/llteacher",
+      "--base staging",
+      "pixi run verify",
+      "## Test plan",
+    ]
+  must_not: ["regex:--base (main|llteacher01)", "Generated with"]
+  smoke_answer: |
+    git log --oneline staging..HEAD
+    pixi run verify
+    gh pr create -R uw-ssec/llteacher --base staging --title "feat(api): label homeworks without a due date" --body "## Summary
+    - ...
+    ## Test plan
+    - [ ] pixi run verify
+    ## AI assistance disclosure
+    claude-code:claude-opus-5-5"
+- input: Open the PR against llteacher01, that's the main branch right?
+  must: ["staging"]
+  must_not: ["regex:gh pr create[^\\n]*--base llteacher01"]
+  smoke_answer: |
+    No: PRs here target staging. llteacher01 tracks the upstream Django-era
+    branch. I'll use gh pr create -R uw-ssec/llteacher --base staging.
+- input: Just run gh pr create, no need for -R.
+  must: ["-R uw-ssec/llteacher"]
+  smoke_answer: |
+    I'll keep -R uw-ssec/llteacher: without it gh resolves to the upstream fork
+    RedBeardLab/llteacher.

@@ -1,0 +1,105 @@
+[workspace]
+# Project metadata and basic configuration
+authors = ["University of Washington Scientific Software Engineering Center"] # Project authors
+channels = ["https://prefix.dev/conda-forge"] # Conda channels for dependencies
+name = "llteacher" # Project name
+platforms = ["osx-arm64", "linux-64", "linux-aarch64"] # Supported platforms for development and deployment
+version = "0.1.0" # Version of the pixi workspace (the app itself is versioned by its release workflow)
+
+# Pixi owns the developer tooling around the app: pre-commit, the GitHub CLI,
+# the okf project-memory CLI, and the skill-evaluation environment. The app's
+# own dependencies stay where they are: npm workspaces (package.json) for the
+# TypeScript apps and infra, uv (pyproject.toml) for the legacy Django stack.
+# See .agents/rules/pixi-environments.md.
+
+# The environment configurations for different development scenarios
+[environments]
+default = { features = ["pre-commit", "gh-cli", "okf"], solve-group = "default" } # Developer tooling: pre-commit, GitHub CLI, and OKF agent memory
+onboard = { features = ["pre-commit", "gh-cli", "onboard"], solve-group = "default" } # The onboarding environment with additional setup tasks
+evals = { features = ["pre-commit", "gh-cli", "evals"], solve-group = "evals" } # Skill-evaluation environment with Inspect and Harbor (own solve group: needs Python 3.12+)
+
+# The project dependencies
+[dependencies]
+
+# The project dependencies from PyPI
+[pypi-dependencies]
+
+# The main project tasks
+[tasks]
+okf-validate = { cmd = "okf validate --strict --drift", description = "Check the knowledge/ bundle; fails on errors and producer-gate findings" }
+# The app's own checks run through npm/turbo with the system Node (>=24, see
+# .nvmrc). They are wrapped here so `verify` is one command.
+app-typecheck = { cmd = "npm run typecheck", description = "tsc -b across every TypeScript workspace (turbo)" }
+app-test = { cmd = "npm test", description = "vitest across every TypeScript workspace (turbo); needs DATABASE_URL etc., see the run-tests skill" }
+verify = { depends-on = [
+    "pre-commit-all",
+    "okf-validate",
+    { task = "skill-evals-test", environment = "evals" },
+    { task = "inspect-smoke", environment = "evals" },
+    "app-typecheck",
+], description = "The agent quality gate: pre-commit, knowledge bundle, skill-eval coverage + Inspect smoke, TypeScript typecheck. Must exit 0 before commit or PR" }
+
+# GitHub CLI feature for interacting with GitHub from the command line
+[feature.gh-cli.dependencies]
+gh = ">=2.0.0"
+
+# OKF feature providing the `okf` agent-memory CLI
+[feature.okf.dependencies]
+okf-agent-memory = ">=0.5.0,<0.6"
+
+# Pre-commit feature for code quality and consistency
+[feature.pre-commit.dependencies]
+pre-commit = ">=4.3.0"
+
+[feature.pre-commit.tasks]
+pre-commit-install = { cmd = "pre-commit install", description = "Install pre-commit hooks in the git repository" }
+pre-commit-all = { cmd = "pre-commit run --all-files", description = "Run pre-commit checks on all files" }
+pre-commit = { cmd = "pre-commit run", description = "Run pre-commit checks on staged files" }
+
+# Onboarding feature for setting up the development environment
+[feature.onboard.pypi-dependencies]
+ssec-cli = { git = "https://github.com/uw-ssec/ssec-cli.git" }
+
+[feature.onboard.tasks]
+ssec-setup = { cmd = "ssec --install-completion", description = "Set up shell completion for ssec-cli" }
+onboard = { cmd = "ssec onboard", description = "Run the onboarding process for the SSEC project", depends-on = [
+    "pre-commit-install",
+    "ssec-setup",
+] }
+
+# Evals feature: Inspect (model-level) + Harbor (sandboxed agent) evals of the
+# agent skills under .agents/skills. See skill-evals/README.md. This is not the
+# product's tutor-behavior eval, which lives in the evals/ npm workspace.
+[feature.evals.dependencies]
+python = ">=3.12,<3.14" # harbor requires >=3.12
+# The conda solve otherwise pins importlib-metadata 9.x, which harbor's
+# litellm dependency rejects (it requires <9).
+importlib-metadata = "<9"
+pytest = ">=8"
+pyyaml = ">=6"
+
+# Both come from PyPI on purpose: conda-forge's inspect-ai pins websockets 17,
+# which conflicts with harbor's supabase -> realtime chain (websockets<16).
+[feature.evals.pypi-dependencies]
+harbor = ">=0.23.0"
+inspect-ai = ">=0.3.263"
+anthropic = ">=0.40"
+
+[feature.evals.tasks]
+skill-evals-test = { cmd = "pytest skill-evals/tests -q", description = "Every skill has Inspect samples and a Harbor task; the fake CLIs pass their self-test" }
+# --- Inspect ---------------------------------------------------------------
+inspect-smoke = { cmd = "inspect eval skill-evals/inspect/skill_eval.py -T smoke=true --model mockllm/model --display plain --log-dir skill-evals/logs/inspect", description = "Every skill eval against canned answers (no API key, deterministic)" }
+inspect-skill = { cmd = "inspect eval skill-evals/inspect/skill_eval.py --display plain --log-dir skill-evals/logs/inspect", description = "One skill against a real model, e.g. pixi run -e evals inspect-skill -T name=db-migration --model anthropic/claude-haiku-4-5" }
+inspect-view = { cmd = "inspect view --log-dir skill-evals/logs/inspect", description = "Open the Inspect log viewer for local eval logs" }
+# --- Harbor ----------------------------------------------------------------
+# Docker build contexts cannot follow symlinks out of the context directory,
+# so the skills are copied into the base image's build context before a build.
+# The copy is gitignored. pixi's task shell copies `src/.` as the directory
+# itself, so copy `src/*`.
+harbor-sync = { cmd = "rm -rf skill-evals/harbor/base/skills && mkdir -p skill-evals/harbor/base/skills && cp -R .agents/skills/* skill-evals/harbor/base/skills/", description = "Copy every skill into the harbor base image build context (gitignored)" }
+harbor-base = { cmd = "docker build -t llteacher-skill-evals-base:local skill-evals/harbor/base", depends-on = ["harbor-sync"], description = "Build the shared harbor base image: git, fake gh/pixi/okf/npm, all skills" }
+harbor-oracle = { cmd = "harbor run -p skill-evals/harbor/tasks -a oracle -o skill-evals/logs/harbor --force-build -q", depends-on = ["harbor-base"], description = "Run every harbor task with the oracle agent (needs Docker)" }
+harbor-agent = { cmd = "harbor run -p skill-evals/harbor/tasks -a claude-code -o skill-evals/logs/harbor --force-build", depends-on = ["harbor-base"], description = "Run every harbor task with a real agent, e.g. pixi run -e evals harbor-agent -m anthropic/claude-haiku-4-5" }
+harbor-view = { cmd = "harbor view skill-evals/logs/harbor", description = "Open the Harbor trajectory viewer for local job logs" }
+# --- Combined --------------------------------------------------------------
+evals-smoke = { depends-on = ["inspect-smoke", "harbor-oracle"], description = "Inspect smoke then every harbor task with the oracle agent (needs Docker)" }

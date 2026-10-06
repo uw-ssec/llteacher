@@ -1,0 +1,7 @@
+#!/bin/bash
+# Stand-in for package managers this repository forbids. Records the call, fails.
+. "${SKILL_SHIM_LIB:-/usr/local/lib/skill-evals/shimlib.sh}"
+name="$(basename "$0")"
+shim_record "$name" "$@"
+echo "$name: not available in this environment; use pixi" >&2
+exit 127

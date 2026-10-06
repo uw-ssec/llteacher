@@ -1,0 +1,41 @@
+- input: Add a nullable due_at timestamp column to homeworks.
+  must: ["drizzle-kit generate", "npm run db:migrate", "_journal.json"]
+  must_not: ["regex:drizzle-kit (push|migrate)"]
+  smoke_answer: |
+    Edit apps/web/src/db/schema/homeworks.ts, then:
+    git fetch origin && git rebase origin/staging
+    cd apps/web && npx drizzle-kit generate --name homework_due_at
+    Commit the .sql, meta snapshot and meta/_journal.json together.
+    npm run db:migrate
+    npm test --workspace=llteacher-web
+- input:
+    Migration 0049 that merged last week has a typo in an index name. Just fix
+    it in the file.
+  must: ["regex:(?i)new migration"]
+  must_not: ["regex:(?i)(edit|modify|change) (0049|the merged)"]
+  smoke_answer: |
+    0049 has merged to staging, so it is never edited. I'll fix forward with a
+    new migration that renames the index.
+- input: Add an index on messages(conversation_id, created_at).
+  must: ["CONCURRENTLY", "IF NOT EXISTS"]
+  smoke_answer: |
+    messages is a hot table, so after npx drizzle-kit generate I'll change the
+    statement to CREATE INDEX CONCURRENTLY IF NOT EXISTS; scripts/migrate.ts
+    runs it outside the transaction.
+- input:
+    CI says migration index 0056 collides with staging. My PR opened after the
+    other one.
+  must: ["regex:(?i)renumber|regenerate", "staging"]
+  must_not: ["regex:(?i)(delete|remove) [^\\n]*their"]
+  smoke_answer: |
+    Index claims follow PR-open order, so the earlier PR keeps 0056. I'll rebase
+    onto origin/staging and regenerate with npx drizzle-kit generate, so mine
+    becomes 0057 with its snapshot and journal entry.
+- input:
+    Drop the legacy_notes column from homeworks in the same release that stops
+    reading it.
+  must: ["regex:(?i)(later release|next release|separate release)"]
+  smoke_answer: |
+    The candidate's migrations run before it is activated, while the old version
+    still serves and may read legacy_notes. Stop reading it in this release and
+    drop the column in a later release.

@@ -10,8 +10,15 @@ media/
 
 # Project-specific
 *.env
-/.claude/
-/.agents/
+# Agent configuration: personal/local files stay ignored; the shared project
+# agent setup (rules, skills, hooks, settings.json) is tracked.
+/.claude/*
+!/.claude/settings.json
+!/.claude/hooks/
+!/.claude/skills
+/.agents/*
+!/.agents/rules/
+!/.agents/skills/
 /.superpowers/
 
 # Python
@@ -131,6 +138,10 @@ staticfiles/
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+
+# Skill evals: local logs and the skills copied into the harbor build context
+/skill-evals/logs/
+/skill-evals/harbor/base/skills/
 
 # apps/web + apps/admin — un-ignore TS source lib directories the Python `lib/` pattern above matches by accident
 !apps/web/src/lib/

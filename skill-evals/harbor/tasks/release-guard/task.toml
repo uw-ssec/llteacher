@@ -1,0 +1,32 @@
+schema_version = "1.4"
+artifacts = []
+
+[task]
+name = "llteacher/release-guard"
+version = "1.0.0"
+description = "Refuse to tag a release from a feature branch"
+keywords = ["skill", "release"]
+[[task.authors]]
+name = "Cordero Core"
+
+[metadata]
+
+[verifier]
+timeout_sec = 120.0
+collect = []
+
+[verifier.env]
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 600.0
+os = "linux"
+mcp_servers = []
+skills_dir = "/skills"
+
+[environment.env]
+
+[solution.env]

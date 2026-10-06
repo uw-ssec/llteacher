@@ -1,0 +1,6 @@
+#!/bin/bash
+# Logs every git invocation, then runs the real git. Verifiers grep the log
+# for flags such as --force and --no-verify.
+. "${SKILL_SHIM_LIB:-/usr/local/lib/skill-evals/shimlib.sh}"
+shim_record git "$@"
+exec "$SHIM_GIT" "$@"

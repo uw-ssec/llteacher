@@ -43,6 +43,25 @@ npx turbo test             # run all TS test suites
 
 Or scope to one workspace: `npm run dev --workspace=llteacher-web`.
 
+### Developer tooling, project memory, and agents
+
+The repository follows [uw-ssec/project-template](https://github.com/uw-ssec/project-template):
+
+```bash
+pixi install                      # pre-commit, gh, okf (developer tooling only)
+pixi run verify                   # the quality gate: hooks, knowledge bundle, skill evals, typecheck
+pixi run okf search "<topic>"     # project memory: decisions, history, known traps (knowledge/)
+```
+
+- [`AGENTS.md`](./AGENTS.md) is the entry point for AI assistants; rules live in
+  `.agents/rules/` and repeatable workflows in `.agents/skills/`.
+- [`knowledge/`](./knowledge/index.md) is the OKF project-memory bundle: spec
+  decisions, the plan as implemented, and lessons from issues and PRs.
+- [`skill-evals/`](./skill-evals/README.md) evaluates every agent skill with
+  Inspect (model level) and Harbor (sandboxed agent level).
+- Contribution rules: [`CONTRIBUTING.md`](./CONTRIBUTING.md),
+  [`AI_POLICY.md`](./AI_POLICY.md).
+
 ### Deploy locally with Floci
 
 Deploy the AWS-shaped stack locally without accessing an AWS account:

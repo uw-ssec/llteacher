@@ -1,0 +1,32 @@
+#!/bin/bash
+# Fake npx: drizzle-kit generate writes a real migration file and journal
+# entry; turbo delegates to the fake npm's scripts; vitest passes.
+set -uo pipefail
+. "${SKILL_SHIM_LIB:-/usr/local/lib/skill-evals/shimlib.sh}"
+shim_record npx "$@"
+[ "${1:-}" = "--yes" ] || [ "${1:-}" = "-y" ] && shift
+case "${1:-} ${2:-}" in
+  "drizzle-kit generate")
+    shift 2
+    name=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --name) name="${2:-}"; shift ;;
+        --name=*) name="${1#--name=}" ;;
+      esac
+      [ $# -gt 0 ] && shift
+    done
+    drizzle_generate "${name:-generated_change}" ;;
+  "drizzle-kit migrate"|"drizzle-kit push")
+    echo "drizzle-kit: use npm run db:migrate in this repository" >&2; exit 1 ;;
+  turbo\ *)
+    task="${2:-}"
+    case "$task" in
+      run) task="${3:-}" ;;
+    esac
+    SKILL_SHIM_NO_RECORD=1 npm run "$task"; exit $? ;;
+  vitest\ *)
+    echo " Test Files  1 passed (1)" ;;
+  *) ;;
+esac
+exit 0
