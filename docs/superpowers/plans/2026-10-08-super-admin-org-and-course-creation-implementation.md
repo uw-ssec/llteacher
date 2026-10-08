@@ -132,23 +132,23 @@ git commit -m "feat(admin): add first-run institution setup API"
 - Modify: `packages/ui/src/api.ts`
 - Modify: `apps/web/src/server/services/AuditService.ts` (only if a new typed action is required)
 
-- [ ] **Step 1: Write failing contract tests**
+- [x] **Step 1: Write failing contract tests**
 
 Test trimmed/lowercased email input, valid title/code/term, missing-organization conflict, unauthorized callers, existing and pending instructor reuse, no acting-admin membership, duplicate-shell conflict, and a response containing the new course and assigned instructor.
 
-- [ ] **Step 2: Write the failing real-DB rollback test**
+- [x] **Step 2: Write the failing real-DB rollback test**
 
 Force the final membership insert to fail and assert that no pending user, platform instructor grant, or course survived. Also prove a happy path atomically creates/reuses the user, grants platform instructor access, creates the course, and inserts the instructor membership.
 
-- [ ] **Step 3: Run the tests and confirm failure for the missing repository/route**
+- [x] **Step 3: Run the tests and confirm failure for the missing repository/route**
 
 Run: `npm --workspace apps/web test -- --run src/server/repositories/courseProvisioning.test.ts src/server/routes/courseProvisioning.test.ts`
 
-- [ ] **Step 4: Implement one atomic provisioning operation**
+- [x] **Step 4: Implement one atomic provisioning operation**
 
 Generate ids in the application, blind-index/encrypt the instructor email using the existing identity utilities, and build all writes against the transaction handle passed to `runAtomically`. Use conflict-safe inserts/upserts where the repository already permits reuse, but surface a duplicate course shell as 409. Keep the audit event outside the transaction, matching the repository's existing best-effort audit policy, and never include PII beyond the established audit convention.
 
-- [ ] **Step 5: Run focused and real-DB tests**
+- [x] **Step 5: Run focused and real-DB tests**
 
 Run: `npm --workspace apps/web test -- --run src/server/repositories/courseProvisioning.test.ts src/server/routes/courseProvisioning.test.ts`
 
@@ -156,7 +156,7 @@ Run with isolated PostgreSQL: `npm --workspace apps/web test -- --run src/server
 
 Expected: PASS, including the forced rollback.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add apps/web/src/server/repositories/courseProvisioning.ts apps/web/src/server/repositories/courseProvisioning.test.ts apps/web/src/server/repositories/courseProvisioning.db.test.ts apps/web/src/server/routes/courseProvisioning.ts apps/web/src/server/routes/courseProvisioning.test.ts apps/web/src/server/index.ts packages/ui/src/api.ts apps/web/src/server/services/AuditService.ts

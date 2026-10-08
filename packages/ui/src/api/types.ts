@@ -47,6 +47,25 @@ export interface CreateOrganizationBody {
   allowedDomains: string[];
 }
 
+export interface ProvisionCourseBody {
+  instructorEmail: string;
+  title: string;
+  code: string;
+  term: string;
+}
+
+export interface ProvisionedCoursePayload {
+  id: string;
+  title: string;
+  code: string;
+  term: string;
+}
+
+export interface ProvisionCourseResponse {
+  course: ProvisionedCoursePayload;
+  instructor: { userId: string; email: string };
+}
+
 /* -- LLM configuration (#31, #98, #170) ------------------------------------ */
 
 export type LlmProvider =
