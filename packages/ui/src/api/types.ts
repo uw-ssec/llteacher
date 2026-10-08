@@ -239,7 +239,7 @@ export interface GradeDraftPayload {
 /* -- Export (#91) ---------------------------------------------------------- */
 
 export type ExportFormat = "csv" | "json";
-export type ExportSubject = "submissions" | "grades" | "transcripts";
+export type ExportSubject = "submissions" | "grades" | "transcripts" | "self_assessments";
 
 export interface ExportRequestBody {
   subject: ExportSubject;

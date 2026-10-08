@@ -1,3 +1,4 @@
 @import "./packages/ui/styles.css";
 @import "./apps/web/src/client/components/account.css";
 @import "./apps/admin/src/client/views/knowledge-cleanup.css";
+@import "./apps/web/src/client/components/self-assessment.css";

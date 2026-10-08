@@ -11,6 +11,7 @@ import { ResponseFeedback } from "./components/ResponseFeedback";
 import { TutorConversationsList } from "./views/TutorConversationsList";
 import { useTutorConversations } from "./hooks/useTutorConversations";
 import { useStudentHomework } from "./hooks/useStudentHomework";
+import { SelfAssessmentCheck, type SelfAssessmentPhase } from "./components/SelfAssessmentCheck";
 import { useLocalStoragePreference } from "./hooks/useLocalStoragePreference";
 import { useConversationSurface, toChatResponseError } from "./hooks/useConversationSurface";
 import { trackTutorTurnCompletion } from "./hooks/trackTutorTurnCompletion";
@@ -183,12 +184,54 @@ function StudentApp() {
     setSections,
     sectionMetaByOrder,
     setSectionMetaByOrder,
+    widgets,
+    setWidgets,
     hwTitle,
     courseId,
     courseName,
     loading: homeworkLoading,
     loadError,
   } = useStudentHomework();
+
+  /* #165: the before/after self-assessment. "Before" is asked only while the
+     homework is untouched -- once any section has a conversation or a
+     submission, the moment has passed and asking would record a value that
+     isn't "before" at all. "After" is asked once every section is submitted.
+     Either can be skipped; partial completion is a valid state, and a skip
+     lasts for this visit only. */
+  const [skippedSelfAssessment, setSkippedSelfAssessment] = useState<{ pre: boolean; post: boolean }>({
+    pre: false,
+    post: false,
+  });
+  const homeworkStarted =
+    sections.some((s) => s.status !== "pending")
+    || [...sectionMetaByOrder.values()].some((m) => m.conversationId !== null);
+  const allSectionsSubmitted = sections.length > 0 && sections.every((s) => s.status === "submitted");
+  const selfAssessmentPhase: SelfAssessmentPhase | null =
+    !skippedSelfAssessment.pre && !homeworkStarted && widgets.some((w) => w.preValue === null)
+      ? "pre"
+      : !skippedSelfAssessment.post && allSectionsSubmitted && widgets.some((w) => w.postValue === null)
+        ? "post"
+        : null;
+
+  const saveSelfAssessment = async (
+    phase: SelfAssessmentPhase,
+    values: Array<{ widgetId: string; value: number }>,
+  ) => {
+    // Sequential, one widget at a time: each call is its own upsert, and a
+    // failure part-way leaves the ones already saved reflected below.
+    for (const { widgetId, value } of values) {
+      const res = await fetch(`/api/widgets/${widgetId}/response`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ which: phase, value }),
+      });
+      if (!res.ok) throw new Error(`self-assessment save failed: ${res.status}`);
+      setWidgets((prev) =>
+        prev.map((w) => (w.id === widgetId ? { ...w, [phase === "pre" ? "preValue" : "postValue"]: value } : w)),
+      );
+    }
+  };
 
   // #271: mirrors sectionMetaByOrder for chatFetch's closure below, which is
   // captured once at mount (via the transport) and would otherwise never
@@ -819,6 +862,9 @@ function StudentApp() {
   }, [sectionSurface.status, conversationId]);
 
   useEffect(() => {
+    // #165: hold the first section until the "before" check is answered or
+    // skipped -- opening it is what starts the homework.
+    if (selfAssessmentPhase === "pre") return;
     if (!hasAutoSelectedSection.current && sections.length > 0) {
       const first = sections[0]!.number;
       // #214/#252: resume the section's own conversation if it already has
@@ -830,7 +876,7 @@ function StudentApp() {
       );
       hasAutoSelectedSection.current = true;
     }
-  }, [sections, sectionMetaByOrder]);
+  }, [sections, sectionMetaByOrder, selfAssessmentPhase]);
 
   /* #80: real hint usage. Fetched from GET .../hints for the active section
      whenever it changes, and again once an in-flight hint request settles.
@@ -981,6 +1027,9 @@ function StudentApp() {
   /* Selecting a homework section always means "I want the section chat" --
      switches back out of the tutor surface if one was showing. */
   const handleSectionSelect = (sectionNumber: number) => {
+    // #165: choosing a section from the sidebar during the "before" check
+    // is a skip -- the student has decided to start.
+    if (selfAssessmentPhase === "pre") setSkippedSelfAssessment((prev) => ({ ...prev, pre: true }));
     void loadSectionConversation(
       sectionNumber,
       sectionMetaByOrder.get(sectionNumber)?.conversationId ?? undefined,
@@ -1195,6 +1244,14 @@ function StudentApp() {
                  so `ConversationView`'s feedback slot never renders here. */
             />
           </ErrorBoundary>
+        ) : selfAssessmentPhase ? (
+          <SelfAssessmentCheck
+            key={selfAssessmentPhase}
+            phase={selfAssessmentPhase}
+            widgets={widgets.filter((w) => (selfAssessmentPhase === "pre" ? w.preValue : w.postValue) === null)}
+            onSubmit={(values) => saveSelfAssessment(selfAssessmentPhase, values)}
+            onSkip={() => setSkippedSelfAssessment((prev) => ({ ...prev, [selfAssessmentPhase]: true }))}
+          />
         ) : (
           <ErrorBoundary key="section">
             <ConversationView
