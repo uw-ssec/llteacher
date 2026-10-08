@@ -3,7 +3,7 @@ type: Decision
 title: "LLM calls go through the Vercel AI SDK to OpenAI-compatible providers, with LLMoxie as the platform default"
 description: "Each LLM config names a provider (llmoxie or openrouter) built via @ai-sdk/openai; migration 0035 made SSEC's LiteLLM gateway LLMoxie every org's default, with documented degradation to OpenRouter and pre-first-token failover."
 tags: [llm, providers, reliability, configuration]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-06T22:32:35Z" }
+generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-08T20:52:12Z" }
 status: stable
 governance: constraint
 code_refs: [apps/web/src/lib/ai.ts, apps/web/src/lib/llm-config.ts, apps/web/src/server/llm/streamWithFallback.ts, apps/web/src/server/routes/chat.ts, apps/web/src/db/migrations/0035_llmoxie_default_config.sql, apps/web/src/server/routes/llmConfigs.ts]
@@ -75,6 +75,10 @@ This fits the CDI model in which each project pays for its own inference from gr
 ## Authority gap
 
 LLM configs are an **org-level pool** edited through a **course-level** guard (see facts/authority-and-provisioning-gaps, #367).
+
+## Gap on AWS: LLM_DEGRADED_MODEL cannot be turned on in production (as of 2026-10-08)
+
+The degraded-fallback opt-in (#343, landed with the M4 closeout in 9743dd7; PR #412 was closed as superseded) is read by `apps/web/src/runtime/config.ts`, but nothing in `infra/` or `release.yml` sets it on the ECS task, because the feature predates the AWS re-platform. Wiring it means adding a production deployment input: validate it in `infra/src/deployment-inputs.ts` (and require `OPENROUTER_API_KEY` when it is set), add it to the container environment in `infra/src/app.ts`, pass `vars.LLM_DEGRADED_MODEL` in `release.yml`, and update the infra README runbook and `infra/scripts/release-workflow.test.mjs`. That changes the reviewed production input set (ADR 0001), so it needs the owner's sign-off as its own PR; it was deliberately not folded into #412.
 
 # Related Concepts
 - [LLM tutor chat pipeline](../architecture/llm-tutor-pipeline.md): Provider calls in the tutor pipeline

@@ -176,7 +176,9 @@ const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "transcript-detail":  "Instructor Console · Transcript",
   "llm-configs":        "Instructor Console · LLM Configs",
   "create-llm-config":  "Instructor Console · New LLM Config",
-  "edit-llm-config":    "Instructor Console · Edit LLM Config",
+  // #367: also the view for a shared config a non-admin cannot edit, so the
+  // crumb names the record, not the action; the page heading says which.
+  "edit-llm-config":    "Instructor Console · LLM Config",
   "students":           "Instructor Console · Roster",
   "ta-permissions":     "Instructor Console · TA permissions",
   "canvas":             "Instructor Console · Canvas",
