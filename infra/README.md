@@ -78,6 +78,12 @@ the conditional listener graph only; it does not establish local or AWS TLS.
 
 Local state lives in ignored `.floci/data`, `.pulumi/local`,
 `infra/Pulumi.local.yaml`, and the owner-only `.floci/pulumi-passphrase`.
+
+### Clean acceptance deployment
+
+First-run organization and course provisioning must be tested against an empty database. Use a separately named Floci container with a new state directory or Docker volume, different host ports, and a new Pulumi stack. Do not reuse, reset, or mount the normal `llteacher-floci` container, `.floci/data`, the `local` Pulumi stack, or any existing RDS volume.
+
+Before opening the UI, run migrations against the new RDS endpoint and verify that `organizations`, `courses`, and `course_memberships` each contain zero rows. Reuse local development secrets only for application authentication/encryption; this workflow does not require or authorize any WorkOS configuration change.
 Retain them together. Do not delete volumes/state or run `pulumi destroy` as
 a troubleshooting shortcut.
 

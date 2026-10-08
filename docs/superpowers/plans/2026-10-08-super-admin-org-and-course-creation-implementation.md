@@ -335,19 +335,19 @@ git commit -m "feat(admin): separate Canvas account and course linking"
 - Create: `docs/super-admin-onboarding.md`
 - Modify: `infra/README.md`
 
-- [ ] **Step 1: Record implementation-time decisions**
+- [x] **Step 1: Record implementation-time decisions**
 
 Append a dated implementation-decisions section to the approved design for any concrete choices discovered while coding, especially migration handling, conflict semantics, and the exact course-selection persistence policy. Do not rewrite the approved product decisions.
 
-- [ ] **Step 2: Write the super-admin runbook**
+- [x] **Step 2: Write the super-admin runbook**
 
 Document the exact flow: sign in; initialize the one institution; grant/provision the instructor through Course Setup; instructor signs in; selects their course; optionally configures their Canvas account; links the Canvas course; imports the roster; adds TAs; uploads course materials through Knowledge. Explicitly state that deployments for other institutions enter their own local institution and make no WorkOS change.
 
-- [ ] **Step 3: Document clean Floci acceptance deployments**
+- [x] **Step 3: Document clean Floci acceptance deployments**
 
 Add a short procedure for using a new Floci container/state path and a new Pulumi stack so acceptance testing never reuses or deletes an existing RDS volume/database.
 
-- [ ] **Step 4: Check links and formatting, then commit**
+- [x] **Step 4: Check links and formatting, then commit**
 
 Run: `git diff --check`
 

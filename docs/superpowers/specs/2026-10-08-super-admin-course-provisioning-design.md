@@ -280,3 +280,13 @@ development, then the complete repository test suite before completion.
 - Automatic or scheduled Canvas roster synchronization.
 - Canvas grade passback.
 - A general organization-administration console beyond first-run setup.
+
+## Implementation decisions — 2026-10-08
+
+- The deployment institution is identified by `organizations.deployment_singleton = true`. A partial unique index permits at most one such row while leaving ordinary non-deployment organization fixtures possible. The migration marks the oldest existing organization as the deployment institution; a clean database marks none until first-run setup.
+- `workos_organization_id` is nullable. When AuthKit supplies one during first-run setup it is stored as provenance, but LLTeacher never creates or updates a WorkOS organization.
+- Course code and term are unique case-insensitively within the institution. A duplicate provisioning request returns `409` rather than silently reassigning the existing course.
+- Course provisioning uses the Node PostgreSQL driver's interactive transaction and a transaction-scoped advisory lock on normalized instructor email. This makes pending-user creation, instructor grant, course creation, and membership creation all-or-nothing under concurrent requests.
+- The admin console stores its selected course in `llteacher:admin-selected-course`. A missing or stale value falls back to the first authorized profile course; changing it resets nested view state to Homeworks before new course-scoped requests run.
+- Canvas credentials carry nullable `owner_user_id`. New writes always set the authenticated instructor. Existing null-owner Canvas rows remain legacy records and produce reconnect-required UI; ownership is never inferred from memberships or an existing course link.
+- Course roster sync loads the exact `lms_integrations.api_credential_id` and requires its owner to match the caller. A co-instructor must explicitly reconnect/relink with their own credential before they can sync.
