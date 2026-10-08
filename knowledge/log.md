@@ -1,3 +1,7 @@
+## 2026-10-08
+* **Update**: Linked `decisions/effect-typed-request-pipeline.md` to `bugs/partial-stream-persisted-as-complete.md` (Same chat turn-finalization path: the Effect migration found that a provider rejection before any stream existed left the turn unfinalized and its lock held, returning false 409 in_progress on retry.).
+* **Creation**: Documented concept `decisions/effect-typed-request-pipeline.md` (API handlers run as Effect 4 programs with typed errors).
+
 ## 2026-10-07
 * **Update**: Linked `decisions/design-system-lint.md` to `architecture/system-overview.md` (The shared UI package and two clients are governed by this design-system lint policy.).
 * **Update**: Updated concept `decisions/design-system-lint.md`.

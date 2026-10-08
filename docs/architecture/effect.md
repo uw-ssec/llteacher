@@ -101,3 +101,79 @@ Rules:
   Postgres (`DATABASE_URL`). It drives real requests through each error
   class end to end, then repeats them against an unreachable database to
   check the `DatabaseError` path.
+
+## What typing the error channels found
+
+Converting every handler meant listing every way each call can fail. The
+handler types are now the inventory: hover a handler's Effect to see its
+`E`. The list below is what that exercise turned up that nobody had
+written down.
+
+**Bugs: an outage reported as a routine answer**
+
+- `PATCH /api/sections/:id/answer` and `PATCH /api/widgets/:id/response`
+  had a bare `catch`, so a dropped database connection answered 403. It
+  now answers a logged 503.
+- `createCollection` had a bare `catch` that turned every failure into 409
+  "name already exists". Now only the unique-name violation
+  (`CollectionNameExistsError`) is a 409.
+- After a successful Canvas sync, a database failure was reported as 502
+  "Could not reach Canvas" and the run was marked failed. It is now a 503
+  and the sync status is left alone.
+
+**Bugs: a client error reported as an outage, or the reverse**
+
+- Deleting a submitted conversation hit a plain `throw` and answered 503.
+  It is now `ConversationHasSubmissionError`, a 409.
+- An unknown widget id on homework update answered 503. It is now
+  `ContentDiffError`, a 422.
+- On homework update, the old `/order|section/` message regex echoed raw
+  Postgres text in a 422. Now:
+  - out-of-range order is a `ContentDiffError` with a readable message;
+  - section or widget values Postgres refuses (SQLSTATE 22xxx, 23502,
+    23514) answer 422 "Section or widget content is invalid.";
+  - everything else is a 503.
+- `createDocument`: an invalid path now gets its 400 even when knowledge
+  storage is not configured.
+- An unparseable multipart upload, or a malformed `%` escape in a path,
+  now answers 400 instead of 503.
+- When storage is unconfigured, best-effort upload cleanup no longer
+  answers 503 after the deletion has already happened.
+
+**Bug: a chat turn left locked**
+
+- When the LLM provider rejected a request before any stream existed,
+  `onFinish` never finalized the turn. The turn lock stayed held for 90
+  seconds, and every Retry in that window got a false 409 `in_progress`.
+  The turn is now finalized with `errorFlag`, and a real-SDK integration
+  test covers it.
+
+**Hidden refusals, now tagged classes**
+
+Each was previously a plain `throw new Error(...)` that request input
+could reach:
+
+- `SectionAnswerSectionNotFoundError`, `SectionNotAnswerableError`,
+  `SectionAnswerHomeworkClosedError`
+- `WidgetNotFoundError`
+- `ConversationHasSubmissionError`
+- `ContentDiffError`
+- `CollectionNameExistsError`
+
+**Leak fixed**
+
+- A `requestHint` tool failure used to send the raw driver message to the
+  model, where it was persisted with the turn. The tool now sends a fixed
+  sentence and the failure is logged with its classification.
+
+**Deliberately left as they are**
+
+These were noted but not changed:
+
+- Missing `ENCRYPTION_KEY` or `BLIND_INDEX_KEY` at request time is a
+  defect: a logged 503, the same as before.
+- The 413, 422, 429 (with `Retry-After`), 502 and custom-body 503
+  responses are built in the route; they have no `HttpError` member.
+- Non-UUID material and collection ids still reach Postgres (503).
+- A WorkOS outage at the login callback still answers 401, which an
+  existing test pins; it is now logged with `service: "workos"`.
