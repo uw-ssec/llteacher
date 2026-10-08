@@ -103,6 +103,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Enforce design system
+        run: npm run lint:design-system && npm run test:design-system
+
       # Ephemeral, generated per run -- not repo secrets. The seed script's
       # encrypted output never needs to survive past this job (the DB is
       # torn down with the runner), so there's nothing to lose by not

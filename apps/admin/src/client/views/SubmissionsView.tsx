@@ -204,7 +204,7 @@ export function SubmissionsView({ data, onBack, onOpenTranscript, onGrade }: Sub
           <span className="admin-alert__icon" aria-hidden="true"><Warning size={16} weight="regular" /></span>
           <span>
             {data.missingSectionWarnings.map((w) => (
-              <span key={w.sectionId} style={{ display: "block" }}>
+              <span key={w.sectionId} className="block">
                 <strong>{w.missingStudentCount}</strong> {w.missingStudentCount === 1 ? "student hasn't" : "students haven't"} started "{w.sectionTitle}"
               </span>
             ))}
@@ -264,7 +264,7 @@ export function SubmissionsView({ data, onBack, onOpenTranscript, onGrade }: Sub
         </header>
 
         {visible.map((row, idx) => (
-          <article key={row.studentId} className="admin-submission-row admin-record-row--enterable" style={{ animationDelay: `${idx * 40}ms` }}>
+          <article key={row.studentId} className="admin-submission-row admin-record-row--enterable" style={{ "--row-delay": `${idx * 40}ms` } as React.CSSProperties}>
             <div className="admin-submission-row__avatar">
               <span aria-hidden="true">{initialsFor(row.displayName)}</span>
             </div>
@@ -412,4 +412,3 @@ export function SubmissionsView({ data, onBack, onOpenTranscript, onGrade }: Sub
     </div>
   );
 }
-

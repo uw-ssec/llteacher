@@ -218,7 +218,7 @@ export function KnowledgeSearchResults({
                   </div>
                   <div className="admin-knowledge__result-side">
                     <span className="admin-knowledge__score" title={`Relevance ${hit.score.toFixed(1)}`}>
-                      <span className="admin-knowledge__score-bar"><i style={{ width: `${Math.round((hit.score / topScore) * 100)}%` }} /></span>
+                      <span className="admin-knowledge__score-bar"><i style={{ "--score-width": `${Math.round((hit.score / topScore) * 100)}%` } as React.CSSProperties} /></span>
                       {hit.score.toFixed(1)}
                     </span>
                     <KnowledgeDownloadTools courseId={courseId} documentPath={hit.conceptId} title={hit.title} sourceMaterialId={doc?.sourceMaterialId ?? null} />

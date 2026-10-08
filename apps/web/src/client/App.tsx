@@ -1075,7 +1075,7 @@ function StudentApp() {
         <p>Your submission for this section will be undone — you&apos;ll need to resubmit when you&apos;re ready.</p>
       )}
       {restartError && (
-        <p role="alert" style={{ color: "var(--color-error)" }}>
+        <p role="alert" className="text-error">
           {restartError}
         </p>
       )}

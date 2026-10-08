@@ -98,7 +98,7 @@ export function TranscriptListView({
           <article
             key={item.conversationId}
             className="admin-record-row admin-record-row--enterable"
-            style={{ animationDelay: `${idx * 40}ms` }}
+            style={{ "--row-delay": `${idx * 40}ms` } as React.CSSProperties}
           >
             <div className="admin-record-row__body">
               <button

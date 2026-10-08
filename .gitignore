@@ -182,3 +182,4 @@ node_modules/
 /evals/datasets/flagged-feedback-export.json
 .claude/checkpoints/
 .codex/checkpoints/
+/artifacts/design-system/

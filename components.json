@@ -1,0 +1,4 @@
+{
+  "tailwind": { "css": "design-system.lint.css" },
+  "aliases": { "ui": "@llteacher/ui" }
+}

@@ -127,16 +127,12 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
         {loading ? (
           <span
             aria-hidden="true"
-            style={{
-              display: "inline-block",
-              animation: "llteacher-spin 1s linear infinite",
-              marginInlineEnd: "0.3em",
-            }}
+            className="btn__loading"
           >
             *
           </span>
         ) : leadingIcon ? (
-          <span aria-hidden="true" style={{ marginInlineEnd: "0.25em" }}>
+          <span aria-hidden="true" className="btn__leading-icon">
             {leadingIcon}
           </span>
         ) : null}
@@ -144,7 +140,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
         <span>{children}</span>
 
         {!loading && trailingIcon ? (
-          <span aria-hidden="true" style={{ marginInlineStart: "0.25em" }}>
+          <span aria-hidden="true" className="btn__trailing-icon">
             {trailingIcon}
           </span>
         ) : null}

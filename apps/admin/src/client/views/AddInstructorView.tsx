@@ -126,7 +126,7 @@ export function AddInstructorView() {
           // confirmation: a plain hint line with an inline check icon,
           // not a colored banner.
           <p className="admin-form-hint">
-            <CheckCircle size={14} weight="fill" aria-hidden="true" style={{ marginRight: 4 }} />
+            <CheckCircle size={14} weight="fill" aria-hidden="true" className="mr-1" />
             {OUTCOME_COPY.granted}
           </p>
         )}

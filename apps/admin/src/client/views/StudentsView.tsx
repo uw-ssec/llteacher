@@ -280,7 +280,7 @@ export function StudentsView({
           </span>
           <span>{canvasError.message}</span>
           {canvasError.offerCanvasLink && (
-            <button type="button" className="admin-link-button" onClick={onGoToCanvas} style={{ marginLeft: 8 }}>
+            <button type="button" className="admin-link-button ml-2" onClick={onGoToCanvas}>
               Go to Canvas
             </button>
           )}
@@ -427,7 +427,7 @@ export function StudentsView({
                                   .admin-source-badge (styles.css), not
                                   .admin-chip. */}
                               {m.fromCanvas && (
-                                <span className="admin-source-badge" style={{ marginLeft: 6 }}>
+                                <span className="admin-source-badge ml-1.5">
                                   Canvas
                                 </span>
                               )}

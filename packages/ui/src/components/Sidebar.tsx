@@ -187,10 +187,10 @@ export function Sidebar({
           <span>worker: checking…</span>
         )}
         {!workerLoading && workerStatus && (
-          <span>worker: ok · <span style={{ opacity: 0.7 }}>{workerStatus}</span></span>
+          <span>worker: ok · <span className="sidebar__worker-status">{workerStatus}</span></span>
         )}
         {!workerLoading && !workerStatus && (
-          <span style={{ opacity: 0.5 }}>worker: —</span>
+          <span className="sidebar__worker-missing">worker: —</span>
         )}
       </div>
     </nav>

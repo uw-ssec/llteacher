@@ -155,9 +155,8 @@ export function TopNav({
             {userInitials || "\u00B7"}
           </span>
           <span
-            className="top-nav__user-chevron"
+            className={`top-nav__user-chevron${menuOpen ? " top-nav__user-chevron--open" : ""}`}
             aria-hidden="true"
-            style={{ transform: menuOpen ? "rotate(90deg)" : "rotate(0deg)" }}
           >
             <CaretRight size={14} weight="regular" />
           </span>

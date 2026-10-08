@@ -219,10 +219,7 @@ export function FeedbackDashboard({
            shortened to match rather than repeating the qualifier twice in
            two different wordings for AT users alone. */
         <div className="admin-filter-row" role="group" aria-label="Reason breakdown">
-          {/* Plain style prop, not a new CSS class -- this task's brief scopes
-              edits to this file and App.tsx only, so a modifier class with no
-              stylesheet to back it isn't an option here. */}
-          <span className="admin-record-row__meta-chip" style={{ opacity: 0.7 }}>
+          <span className="admin-record-row__meta-chip opacity-70">
             This page:
           </span>
           {(Object.keys(REASON_LABELS) as FeedbackReason[]).map((reason) => (
@@ -238,7 +235,7 @@ export function FeedbackDashboard({
           <article
             key={item.id}
             className="admin-record-row admin-record-row--enterable"
-            style={{ animationDelay: `${idx * 40}ms` }}
+            style={{ "--row-delay": `${idx * 40}ms` } as React.CSSProperties}
           >
             <div className="admin-record-row__body">
               <button
@@ -315,7 +312,7 @@ export function FeedbackDashboard({
               from happens to still be focused. `aria-live="polite"` so a
               screen-reader user hears it without anything being forced into
               focus. */}
-          <span role="status" aria-live="polite" className="admin-record-row__meta-chip" style={{ opacity: isFetching ? 1 : 0 }}>
+          <span role="status" aria-live="polite" className={`admin-record-row__meta-chip ${isFetching ? "opacity-100" : "opacity-0"}`}>
             {isFetching ? "Loading…" : ""}
           </span>
           <button
