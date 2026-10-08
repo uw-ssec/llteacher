@@ -4367,6 +4367,14 @@ body {
 
 .admin-record-row__meta-chip--mono {
   color: var(--color-text);
+  /* A model id is the one meta value with no length bound
+     ("google/gemma-4-31b-it:free"), and it has no spaces to wrap at. Let only
+     this chip break mid-id, so at 320px it stays inside the row instead of
+     overflowing it; at desktop widths it fits on one line as before. Found by
+     the design-system screenshot review (admin-configs-320). */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 .admin-record-row__desc {
