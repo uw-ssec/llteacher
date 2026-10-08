@@ -23,8 +23,8 @@ export function OrganizationSetupView({ onCreated }: { onCreated: () => void }) 
   }
 
   return (
-    <main className="admin-view" style={{ maxWidth: 720, margin: "64px auto" }}>
-      <p className="page-header__eyebrow">FIRST-RUN SETUP</p>
+    <main className="admin-view admin-view--setup">
+      <p className="admin-page-header__eyebrow">FIRST-RUN SETUP</p>
       <h1>Set up your institution</h1>
       <p className="admin-form-hint">This creates LLTeacher's local institution. It does not change WorkOS.</p>
       <form className="admin-accession" onSubmit={submit}>

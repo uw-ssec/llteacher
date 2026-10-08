@@ -372,7 +372,7 @@ export default function App() {
   if (!hasConsoleAccess) return <Forbidden userInitials={initials} onLogout={logout} />;
   if (isSuperAdmin && organizationResource.loading) return null;
   if (isSuperAdmin && organizationResource.error) {
-    return <main className="admin-view" style={{ maxWidth: 720, margin: "64px auto" }}>
+    return <main className="admin-view admin-view--setup">
       <div className="admin-alert" role="alert">{organizationResource.error.message}</div>
       {organizationResource.canRetry && <button type="button" className="admin-accession__submit" onClick={organizationResource.reload}>Try again</button>}
     </main>;

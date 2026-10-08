@@ -145,9 +145,9 @@ export function TopNav({
               aria-label="Current course"
               value={selectedCourseId}
               onChange={(event) => onCourseChange(event.target.value)}
-              style={{ background: "transparent", color: "inherit", border: "1px solid currentColor", borderRadius: 4, marginRight: 10 }}
+              className="top-nav__course-select"
             >
-              {courseOptions.map((option) => <option key={option.id} value={option.id} style={{ color: "black" }}>{option.label}</option>)}
+              {courseOptions.map((option) => <option key={option.id} value={option.id} className="top-nav__course-option">{option.label}</option>)}
             </select>
             {[term, homework].filter(Boolean).map((segment) => String(segment).toUpperCase()).join(" · ")}
           </>
