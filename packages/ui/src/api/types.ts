@@ -28,6 +28,53 @@
  *  was a Date or a string. */
 export type IsoDateTime = string;
 
+/* -- Deployment institution and course setup ------------------------------ */
+
+export interface OrganizationPayload {
+  id: string;
+  name: string;
+  slug: string;
+  allowedDomains: string[];
+}
+
+export interface OrganizationResponse {
+  organization: OrganizationPayload | null;
+}
+
+export interface CreateOrganizationBody {
+  name: string;
+  slug: string;
+  allowedDomains: string[];
+}
+
+export interface ProvisionCourseBody {
+  instructorEmail: string;
+  title: string;
+  code: string;
+  term: string;
+}
+
+export interface ProvisionedCoursePayload {
+  id: string;
+  title: string;
+  code: string;
+  term: string;
+}
+
+export interface ProvisionCourseResponse {
+  course: ProvisionedCoursePayload;
+  instructor: { userId: string; email: string };
+}
+
+export interface PlatformCourseListItem extends ProvisionedCoursePayload {
+  status: "active" | "inactive";
+  instructors: Array<{ userId: string; email: string }>;
+}
+
+export interface PlatformCourseListResponse {
+  courses: PlatformCourseListItem[];
+}
+
 /* -- LLM configuration (#31, #98, #170) ------------------------------------ */
 
 export type LlmProvider =
@@ -147,6 +194,18 @@ export interface GrantPlatformInstructorResultPayload {
   userId?: string;
   grantedAt?: IsoDateTime;
   message?: string;
+}
+
+export interface PlatformInstructorListItem {
+  userId: string;
+  email: string;
+  status: "pending" | "signed_in";
+  grantedAt: IsoDateTime;
+  assignedCourseCount: number;
+}
+
+export interface PlatformInstructorListResponse {
+  instructors: PlatformInstructorListItem[];
 }
 
 /* -- Roster (#32, #86) ----------------------------------------------------- */
@@ -447,6 +506,7 @@ export interface CanvasCredentialSummary {
 
 export interface CanvasCredentialResponse {
   credential: CanvasCredentialSummary | null;
+  reconnectRequired?: boolean;
 }
 
 export interface CanvasCredentialBody {

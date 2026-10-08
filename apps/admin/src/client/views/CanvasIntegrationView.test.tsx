@@ -44,6 +44,19 @@ const IDLE_STATUS = {
 const renderView = () => render(<CanvasIntegrationView courseId="c1" courseTitle="STATS 311" />);
 
 describe("CanvasIntegrationView -- token settings (#73)", () => {
+  it("explains that a legacy organization token must be reconnected by this instructor", async () => {
+    stub((url, init) => {
+      if (url.endsWith("/canvas/credential") && (!init.method || init.method === "GET")) {
+        return jsonRes({ credential: null, reconnectRequired: true });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    renderView();
+
+    await waitFor(() => expect(screen.getAllByText(/legacy organization Canvas token cannot be assigned safely/i).length).toBeGreaterThan(0));
+    expect(screen.getByLabelText("API token")).toBeTruthy();
+  });
+
   it("offers the token form when none is set, and never renders a saved token in full", async () => {
     const fetchMock = stub((url, init) => {
       if (url.endsWith("/canvas/credential") && (!init.method || init.method === "GET")) {
@@ -207,7 +220,7 @@ describe("CanvasIntegrationView -- token settings (#73)", () => {
   // stated the org-wide blast radius (every course, not just this one)
   // or the undo path -- both now match every sibling confirm dialog in
   // this codebase (StudentsView/TaCapabilitiesView).
-  it("states the org-wide blast radius and undo path in the removal confirmation", async () => {
+  it("states the instructor-owned blast radius and undo path in the removal confirmation", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     stub((url, init) => {
       if (url.endsWith("/canvas/credential") && (!init.method || init.method === "GET")) {
@@ -223,7 +236,8 @@ describe("CanvasIntegrationView -- token settings (#73)", () => {
 
     expect(confirmSpy).toHaveBeenCalled();
     const message = confirmSpy.mock.calls[0]![0] as string;
-    expect(message).toMatch(/every course/i);
+    expect(message).toMatch(/courses you linked/i);
+    expect(message).toMatch(/no other instructor/i);
     expect(message).toMatch(/enter a new token/i);
     confirmSpy.mockRestore();
   });

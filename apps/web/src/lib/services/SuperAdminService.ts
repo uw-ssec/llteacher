@@ -1,11 +1,10 @@
 import { IdentityCipher } from "../crypto/identity-cipher";
 import type { BlindIndex } from "../../db/types/encrypted";
 
-/** Platform-wide super admins (issue #316): a hardcoded, readable allowlist
- *  rather than a database row, matching DomainAllowlistService's own
- *  DEFAULT_ALLOWED_DOMAINS pattern. This is deliberately the smallest thing
- *  that works -- issue #316 recommends a real org-level role table as the
- *  long-term design, which is a separate decision this does not make.
+/** Platform-wide super admins (issue #316): a deployment-configured,
+ *  readable allowlist rather than a database row. The constant preserves
+ *  UW compatibility when SUPER_ADMIN_EMAILS is absent; other institutions
+ *  override it through ordinary deployment configuration.
  *
  *  A super admin bypasses every course-scoped guard everywhere in the app
  *  (see rolesMiddleware). Edit this list only with the same care as editing
@@ -15,14 +14,23 @@ import type { BlindIndex } from "../../db/types/encrypted";
 export class SuperAdminService {
   static readonly SUPER_ADMIN_EMAILS: readonly string[] = ["ksdani@uw.edu", "cdcore@uw.edu"];
 
+  static configuredEmails(configured?: string): string[] {
+    if (!configured) return [...SuperAdminService.SUPER_ADMIN_EMAILS];
+    const emails = [...new Set(configured.split(",").map(IdentityCipher.normalizeEmail).filter(Boolean))];
+    if (emails.length === 0 || emails.some((email) => !/^\S+@\S+\.\S+$/.test(email))) {
+      throw new Error("SUPER_ADMIN_EMAILS must contain comma-separated email addresses");
+    }
+    return emails;
+  }
+
   /** Blind indexes for every configured super admin, under the caller's own
    *  IdentityCipher keys. Emails are never compared as plaintext -- `users`
    *  only stores AES-GCM ciphertext -- so this is the only way to check
    *  "is this user's email one of the configured admins" without decrypting
    *  the user's row. */
-  static async blindIndexes(cipher: IdentityCipher): Promise<BlindIndex[]> {
+  static async blindIndexes(cipher: IdentityCipher, configured?: string): Promise<BlindIndex[]> {
     return Promise.all(
-      SuperAdminService.SUPER_ADMIN_EMAILS.map((email) =>
+      SuperAdminService.configuredEmails(configured).map((email) =>
         cipher.computeBlindIndex(IdentityCipher.normalizeEmail(email)),
       ),
     );

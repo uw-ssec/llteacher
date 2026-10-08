@@ -21,6 +21,7 @@ import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
 
 const getDecryptedMock = vi.fn();
+const getDecryptedByIdMock = vi.fn();
 const getOrgScopeForCourseMock = vi.fn();
 const getLmsIntegrationMock = vi.fn();
 const linkCanvasCourseMock = vi.fn();
@@ -33,6 +34,7 @@ const syncCanvasRosterMock = vi.fn();
 
 vi.mock("../repositories/organizationCredentials", () => ({
   getDecryptedCanvasCredential: (...a: unknown[]) => getDecryptedMock(...a),
+  getDecryptedCanvasCredentialById: (...a: unknown[]) => getDecryptedByIdMock(...a),
 }));
 vi.mock("../repositories/organizations", () => ({
   getOrgScopeForCourse: (...a: unknown[]) => getOrgScopeForCourseMock(...a),
@@ -79,6 +81,10 @@ function buildApp(authContext: AuthContext | undefined) {
 
 const instructorOfA = () =>
   fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] });
+const instructorOfAAndB = () => fakeAuthContext({ memberships: [
+  fakeMembership({ courseId: "course-a", role: "instructor" }),
+  fakeMembership({ courseId: "course-b", role: "instructor" }),
+] });
 const taOfA = () => fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "ta" })] });
 
 const url = (suffix: string) => `/api/courses/course-a/canvas${suffix}`;
@@ -101,6 +107,7 @@ const INTEGRATION = {
 
 beforeEach(() => {
   getDecryptedMock.mockReset().mockResolvedValue(CREDENTIAL);
+  getDecryptedByIdMock.mockReset().mockResolvedValue(CREDENTIAL);
   getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
   getLmsIntegrationMock.mockReset().mockResolvedValue(INTEGRATION);
   linkCanvasCourseMock.mockReset().mockResolvedValue({ outcome: "linked", lmsIntegrationId: "lms-1" });
@@ -142,7 +149,7 @@ describe("GET courses (course picker)", () => {
     const res = await buildApp(instructorOfA()).request(url("/courses"), {}, TEST_ENV);
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toMatch(/Canvas API token/i);
+    expect(body.error).toMatch(/Canvas account/i);
   });
 
   it("reports a 503 with an actionable message when Canvas can't be reached", async () => {
@@ -189,6 +196,21 @@ describe("PUT link", () => {
     );
   });
 
+  it("reuses one instructor-owned credential when linking two of their courses", async () => {
+    listCanvasCoursesMock.mockResolvedValue([
+      { canvasCourseId: "canvas-a", name: "Course A", courseCode: "A", term: "Fall" },
+      { canvasCourseId: "canvas-b", name: "Course B", courseCode: "B", term: "Winter" },
+    ]);
+    getOrgScopeForCourseMock.mockResolvedValue("org-1");
+    const app = buildApp(instructorOfAAndB());
+    expect((await app.request("/api/courses/course-a/canvas/link", json("PUT", { canvasCourseId: "canvas-a" }), TEST_ENV)).status).toBe(200);
+    expect((await app.request("/api/courses/course-b/canvas/link", json("PUT", { canvasCourseId: "canvas-b" }), TEST_ENV)).status).toBe(200);
+
+    expect(getDecryptedMock).toHaveBeenCalledTimes(2);
+    expect(getDecryptedMock.mock.calls.every((call) => call[3] === "u1")).toBe(true);
+    expect(linkCanvasCourseMock.mock.calls.map((call) => call[3].credentialId)).toEqual(["cred-1", "cred-1"]);
+  });
+
   it("409s when another course already claims that Canvas course", async () => {
     linkCanvasCourseMock.mockResolvedValue({ outcome: "canvas_course_already_linked" });
     const res = await buildApp(instructorOfA()).request(
@@ -232,6 +254,14 @@ describe("PUT link", () => {
 });
 
 describe("POST sync", () => {
+  it("refuses to spend a credential owned by another instructor", async () => {
+    getDecryptedByIdMock.mockResolvedValue(null);
+    const res = await buildApp(instructorOfA()).request(url("/sync"), { method: "POST" }, TEST_ENV);
+    expect(res.status).toBe(409);
+    expect(syncCanvasRosterMock).not.toHaveBeenCalled();
+    expect(getDecryptedByIdMock).toHaveBeenCalledWith({}, expect.anything(), "org-1", "u1", "cred-1");
+  });
+
   it("runs the sync, records success status, and audits", async () => {
     const res = await buildApp(instructorOfA()).request(url("/sync"), { method: "POST" }, TEST_ENV);
     expect(res.status).toBe(200);
@@ -356,7 +386,7 @@ describe("dependency failures (Effect error channel)", () => {
   });
 
   it("releases the sync claim when the credential is gone (409)", async () => {
-    getDecryptedMock.mockResolvedValue(null);
+    getDecryptedByIdMock.mockResolvedValue(null);
     const res = await buildApp(instructorOfA()).request(url("/sync"), { method: "POST" }, TEST_ENV);
     expect(res.status).toBe(409);
     expect(updateSyncStatusMock).toHaveBeenCalledWith({}, "lms-1", expect.objectContaining({ status: "error" }));

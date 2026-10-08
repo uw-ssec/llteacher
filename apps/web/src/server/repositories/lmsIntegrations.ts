@@ -69,8 +69,8 @@ export type LinkCanvasCourseOutcome =
   | { outcome: "linked"; lmsIntegrationId: string }
   | { outcome: "canvas_course_already_linked" };
 
-/** Points this llteacher course at a Canvas course id, using the org's
- *  current Canvas credential. Idempotent: re-linking the same course
+/** Points this llteacher course at a Canvas course id, using the linking
+ *  instructor's current Canvas credential. Idempotent: re-linking the same course
  *  (e.g. to pick a different Canvas course, or after the credential was
  *  rotated) updates the existing row rather than erroring. */
 export async function linkCanvasCourse(

@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import {
   listMembershipsForUser,
   getUserActivationState,
   deactivateByWorkosUserId,
   getOrgScopesForUser,
   grantPlatformInstructor,
+  allowedDomainsForPlatformInstructor,
 } from "./users";
 import type { Db } from "../../db/client";
 import { makeNodeDb } from "../../db/nodeClient";
@@ -59,6 +60,23 @@ describe("users repository", () => {
 
     expect(result).toEqual([{ id: "m1", userId: "u1", courseId: "course-a", role: "instructor" }]);
     expect(findMany).toHaveBeenCalledOnce();
+  });
+
+  it("uses the singleton institution domains for non-UW instructor grants", async () => {
+    const findFirst = vi.fn().mockResolvedValue({ allowedDomains: ["example.edu"] });
+    const db = { query: { organizations: { findFirst } } } as unknown as Db;
+
+    await expect(allowedDomainsForPlatformInstructor(db, "uw.edu")).resolves.toEqual(["example.edu"]);
+    expect(findFirst).toHaveBeenCalledOnce();
+  });
+
+  it("uses configured bootstrap domains before the institution exists", async () => {
+    const db = {
+      query: { organizations: { findFirst: vi.fn().mockResolvedValue(undefined) } },
+    } as unknown as Db;
+
+    await expect(allowedDomainsForPlatformInstructor(db, "example.edu,school.test"))
+      .resolves.toEqual(["example.edu", "school.test"]);
   });
 });
 
@@ -221,6 +239,7 @@ describe.skipIf(!DATABASE_URL)("grantPlatformInstructor (#316, real DB)", () => 
   let db: Db;
   let cipher: IdentityCipher;
   let granterId: string;
+  const extraUserIds = new Set<string>();
 
   beforeAll(async () => {
     db = makeNodeDb(DATABASE_URL!);
@@ -238,6 +257,12 @@ describe.skipIf(!DATABASE_URL)("grantPlatformInstructor (#316, real DB)", () => 
     granterId = granter.id;
   });
 
+  afterAll(async () => {
+    await db.delete(users).where(eq(users.platformInstructorGrantedBy, granterId));
+    if (extraUserIds.size > 0) await db.delete(users).where(inArray(users.id, [...extraUserIds]));
+    await db.delete(users).where(eq(users.id, granterId));
+  });
+
   it("creates a pending user and stamps grantedAt/grantedBy when none exists yet", async () => {
     const email = `new-instructor-${crypto.randomUUID()}@uw.edu`;
     const result = await grantPlatformInstructor(db, cipher, granterId, email);
@@ -248,6 +273,7 @@ describe.skipIf(!DATABASE_URL)("grantPlatformInstructor (#316, real DB)", () => 
     expect(row?.isPending).toBe(true);
     expect(row?.platformInstructorGrantedAt).not.toBeNull();
     expect(row?.platformInstructorGrantedBy).toBe(granterId);
+    expect(result.grantCreated).toBe(true);
   });
 
   it("grants an already-existing user without creating a duplicate row", async () => {
@@ -262,12 +288,14 @@ describe.skipIf(!DATABASE_URL)("grantPlatformInstructor (#316, real DB)", () => 
     expect(result.status).toBe("granted");
     if (result.status !== "granted") throw new Error("unreachable");
     expect(result.userId).toBe(existing.id);
+    expect(result.grantCreated).toBe(true);
   });
 
-  it("is idempotent -- granting an already-granted user updates grantedAt/grantedBy rather than erroring", async () => {
+  it("is idempotent -- re-granting preserves the original timestamp and granter", async () => {
     const email = `regrant-${crypto.randomUUID()}@uw.edu`;
     const first = await grantPlatformInstructor(db, cipher, granterId, email);
     if (first.status !== "granted") throw new Error("unreachable");
+    expect(first.grantCreated).toBe(true);
 
     const secondGranter = await db
       .insert(users)
@@ -276,13 +304,54 @@ describe.skipIf(!DATABASE_URL)("grantPlatformInstructor (#316, real DB)", () => 
         emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
       })
       .returning({ id: users.id });
+    extraUserIds.add(secondGranter[0]!.id);
     const second = await grantPlatformInstructor(db, cipher, secondGranter[0]!.id, email);
     expect(second.status).toBe("granted");
     if (second.status !== "granted") throw new Error("unreachable");
     expect(second.userId).toBe(first.userId);
+    expect(second.grantedAt).toEqual(first.grantedAt);
+    expect(second.grantCreated).toBe(false);
 
     const row = await db.query.users.findFirst({ where: eq(users.id, first.userId) });
-    expect(row?.platformInstructorGrantedBy).toBe(secondGranter[0]!.id);
+    expect(row?.platformInstructorGrantedBy).toBe(granterId);
+    expect(row?.platformInstructorGrantedAt).toEqual(first.grantedAt);
+  });
+
+  it("is race-safe when two grants create the same pending instructor", async () => {
+    const email = `racing-instructor-${crypto.randomUUID()}@uw.edu`;
+    const racingCipher = new IdentityCipher(
+      await loadIdentityCipherKeys({
+        ENCRYPTION_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+        BLIND_INDEX_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+      } as Env),
+    );
+    const originalEncrypt = racingCipher.encryptString.bind(racingCipher);
+    let arrivals = 0;
+    let release!: () => void;
+    const bothSelectedMissing = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(racingCipher, "encryptString").mockImplementation(async (value) => {
+      arrivals += 1;
+      if (arrivals === 2) release();
+      await bothSelectedMissing;
+      return originalEncrypt(value);
+    });
+
+    const outcomes = await Promise.allSettled([
+      grantPlatformInstructor(db, racingCipher, granterId, email),
+      grantPlatformInstructor(db, racingCipher, granterId, email),
+    ]);
+    expect(outcomes.every((outcome) => outcome.status === "fulfilled")).toBe(true);
+    if (outcomes[0]?.status !== "fulfilled" || outcomes[1]?.status !== "fulfilled") {
+      throw new Error("one concurrent grant failed");
+    }
+    const [first, second] = [outcomes[0].value, outcomes[1].value];
+
+    expect(first.status).toBe("granted");
+    expect(second.status).toBe("granted");
+    if (first.status !== "granted" || second.status !== "granted") throw new Error("unreachable");
+    expect(second.userId).toBe(first.userId);
+    expect(second.grantedAt).toEqual(first.grantedAt);
+    expect([first.grantCreated, second.grantCreated].filter(Boolean)).toHaveLength(1);
   });
 
   it("rejects an email outside the platform default allowed domains", async () => {

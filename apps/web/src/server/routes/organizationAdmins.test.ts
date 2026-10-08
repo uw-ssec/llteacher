@@ -31,6 +31,7 @@ describe.skipIf(!DATABASE_URL)("Org Admin provisioning (#367, real DB)", () => {
   let db: Db;
   let orgId: string;
   let otherOrgId: string;
+  let nonUwOrgId: string;
   /** A real users row: the grant records who granted it (a uuid FK), so the
    *  caller's session must name a real user, as it always does in production. */
   let granterId: string;
@@ -73,6 +74,13 @@ describe.skipIf(!DATABASE_URL)("Org Admin provisioning (#367, real DB)", () => {
       )[0]!.id;
     orgId = await make("main");
     otherOrgId = await make("other");
+    const [nonUwOrg] = await db.insert(organizations).values({
+      slug: `oa-non-uw-${crypto.randomUUID()}`,
+      name: "Example University",
+      workosOrganizationId: `w-${crypto.randomUUID()}`,
+      allowedDomains: ["example.edu"],
+    }).returning({ id: organizations.id });
+    nonUwOrgId = nonUwOrg!.id;
     const [granter] = await db
       .insert(users)
       .values({
@@ -86,6 +94,7 @@ describe.skipIf(!DATABASE_URL)("Org Admin provisioning (#367, real DB)", () => {
   afterAll(async () => {
     await db.delete(organizations).where(eq(organizations.id, orgId));
     await db.delete(organizations).where(eq(organizations.id, otherOrgId));
+    await db.delete(organizations).where(eq(organizations.id, nonUwOrgId));
     await db.delete(users).where(eq(users.id, granterId));
   });
 
@@ -127,6 +136,21 @@ describe.skipIf(!DATABASE_URL)("Org Admin provisioning (#367, real DB)", () => {
     expect(remaining).toHaveLength(0);
     const again = await app(orgAdmin()).request(`/api/organizations/${orgId}/admins/${userId}`, { method: "DELETE" }, ENV());
     expect(again.status).toBe(404);
+  });
+
+  it("uses the target organization's allowlist for a non-UW deployment", async () => {
+    const response = await grant(superAdmin(), nonUwOrgId, `admin-${crypto.randomUUID()}@example.edu`);
+    expect(response.status).toBe(201);
+    expect(await adminRows(nonUwOrgId)).toHaveLength(1);
+  });
+
+  it("returns not found for a missing organization instead of creating a pending user", async () => {
+    const missingOrganizationId = crypto.randomUUID();
+    const before = await db.select({ id: users.id }).from(users);
+    const response = await grant(superAdmin(), missingOrganizationId, `orphan-${crypto.randomUUID()}@uw.edu`);
+    expect(response.status).toBe(404);
+    const after = await db.select({ id: users.id }).from(users);
+    expect(after).toHaveLength(before.length);
   });
 
   it("refuses a course instructor, who has no organization-level authority", async () => {

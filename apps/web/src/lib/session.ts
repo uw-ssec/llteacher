@@ -17,6 +17,11 @@ export interface SessionPayload {
    *  Absent for sessions created before this field existed. Used solely to
    *  build the WorkOS logout URL -- never used for authorization. */
   workosSessionId?: string;
+  /** WorkOS organization selected during authentication. Retained only as
+   *  provenance for first-run local institution setup; it is never used as
+   *  authorization and never causes a WorkOS mutation. Older cookies omit
+   *  it and remain valid. */
+  workosOrganizationId?: string;
   /** Snapshot of users.session_epoch at login time (issue #95). Required,
    *  not optional -- a cookie sealed before this field existed has no valid
    *  value to fall back to, and treating "missing" as "always valid" would
@@ -39,11 +44,13 @@ export function createSessionPayload(
   sessionEpoch: number,
   now: number = Date.now(),
   workosSessionId?: string,
+  workosOrganizationId?: string,
 ): SessionPayload {
   return {
     userId,
     workosUserId,
     workosSessionId,
+    workosOrganizationId,
     sessionEpoch,
     issuedAt: now,
     expiresAt: now + SESSION_TTL_SECONDS * 1000,
@@ -113,6 +120,8 @@ async function decryptAndValidateShape(
     if (
       typeof payload.userId !== "string" ||
       typeof payload.workosUserId !== "string" ||
+      (payload.workosOrganizationId !== undefined &&
+        typeof payload.workosOrganizationId !== "string") ||
       typeof payload.expiresAt !== "number" ||
       typeof payload.sessionEpoch !== "number"
     ) {

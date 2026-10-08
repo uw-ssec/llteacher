@@ -43,10 +43,10 @@ describe.skipIf(!RAW_DATABASE_URL)("ProfileService (real DB, #172 re-audit)", ()
     return user.id;
   }
 
-  async function makeCourse(title: string) {
+  async function makeCourse(title: string, code = `C-${crypto.randomUUID().slice(0, 8)}`) {
     const [course] = await db
       .insert(courses)
-      .values({ organizationId: orgId, code: `C-${crypto.randomUUID().slice(0, 8)}`, term: "T", title })
+      .values({ organizationId: orgId, code, term: "T", title })
       .returning({ id: courses.id });
     return course.id;
   }
@@ -184,7 +184,7 @@ describe.skipIf(!RAW_DATABASE_URL)("ProfileService (real DB, #172 re-audit)", ()
 
   it("resolves a TA's stored grants onto their course entry", async () => {
     const userId = await makeUser(`ta-${crypto.randomUUID()}@uw.edu`);
-    const courseId = await makeCourse("TA Course");
+    const courseId = await makeCourse("TA Course", "TA 101");
 
     await db.insert(courseMemberships).values({
       userId,
@@ -196,7 +196,7 @@ describe.skipIf(!RAW_DATABASE_URL)("ProfileService (real DB, #172 re-audit)", ()
 
     const profile = await new ProfileService(cipher, db).getProfileWithStats(userId);
     expect(profile.courses).toEqual([
-      { id: courseId, title: "TA Course", role: "ta", canViewSolutions: true, canViewDrafts: false },
+      { id: courseId, title: "TA Course", code: "TA 101", term: "T", role: "ta", canViewSolutions: true, canViewDrafts: false },
     ]);
   });
 

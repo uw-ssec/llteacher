@@ -136,7 +136,7 @@ export async function rolesMiddleware(c: Context<AppEnv>, next: Next) {
   // users.email is AES-GCM ciphertext, and emailBlindIndex is the
   // deterministic HMAC that exists precisely for this kind of lookup.
   const cipher = new IdentityCipher(cipherKeys);
-  const superAdminBlindIndexes = await SuperAdminService.blindIndexes(cipher);
+  const superAdminBlindIndexes = await SuperAdminService.blindIndexes(cipher, c.env.SUPER_ADMIN_EMAILS);
   const isSuperAdmin = SuperAdminService.isSuperAdmin(
     activation.emailBlindIndex,
     superAdminBlindIndexes,

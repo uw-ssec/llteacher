@@ -1,4 +1,6 @@
 ## 2026-10-08
+* **Update**: Linked `bugs/hint-test-initial-hydration-race.md` to `bugs/chat-rerender-per-token.md` (Both depend on the lifecycle and rendering of the real streaming chat surface.).
+* **Creation**: Documented concept `bugs/hint-test-initial-hydration-race.md` (Hint suppression tests must wait for initial history).
 * **Update**: Updated concept `decisions/design-system-lint.md`.
 * **Update**: Linked `project/current-state.md` to `facts/check-for-concurrent-work.md` (Read before picking up open work).
 * **Update**: Linked `facts/code-test-suite-quirks.md` to `decisions/org-admin-role-and-course-scoped-configs.md` (The change that surfaced these quirks).

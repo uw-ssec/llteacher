@@ -21,6 +21,7 @@ import {
   Sparkle,
   Users,
   UserPlus,
+  ChalkboardTeacher,
   Plus,
 } from "@phosphor-icons/react";
 
@@ -34,7 +35,8 @@ export type AdminNavKey =
   | "canvas"
   | "exports"
   | "knowledge"
-  | "add-instructor";
+  | "add-instructor"
+  | "course-setup";
 
 export type AdminSidebarProps = {
   active: AdminNavKey;
@@ -114,6 +116,7 @@ const NAV_ITEMS: NavItem[] = [
   // see this; only the platform's configured super admins may grant
   // instructor access to someone else.
   { key: "add-instructor", label: "Add Instructor", icon: <UserPlus size={15} weight="regular" />, description: "Grant instructor access", superAdminOnly: true },
+  { key: "course-setup", label: "Course Setup", icon: <ChalkboardTeacher size={15} weight="regular" />, description: "Create a course shell", superAdminOnly: true },
 ];
 
 export function AdminSidebar({

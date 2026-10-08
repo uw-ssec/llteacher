@@ -156,11 +156,44 @@ describe("DomainAllowlistService.resolveAllowedDomains", () => {
     );
   });
 
+  it("uses deployment-specific bootstrap domains before an institution exists", async () => {
+    const db = { query: { organizations: { findFirst: async () => undefined } } } as unknown as Db;
+    expect(await DomainAllowlistService.resolveAllowedDomains(undefined, db, "example.edu, cs.example.edu")).toEqual([
+      "example.edu", "cs.example.edu",
+    ]);
+  });
+
+  it("uses the deployment institution domains after setup when AuthKit supplies no organizationId", async () => {
+    const db = {
+      query: {
+        organizations: {
+          findFirst: async () => ({ id: "org1", allowedDomains: ["stored.example.edu"] }),
+        },
+      },
+    } as unknown as Db;
+    expect(await DomainAllowlistService.resolveAllowedDomains(undefined, db, "bootstrap.example.edu")).toEqual([
+      "stored.example.edu",
+    ]);
+  });
+
   it("falls back to the default when no org matches the workosOrganizationId", async () => {
     const db = { query: { organizations: { findFirst: async () => undefined } } } as unknown as Db;
     expect(await DomainAllowlistService.resolveAllowedDomains("unknown_org", db)).toEqual(
       DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS,
     );
+  });
+
+  it("uses the deployment institution when the WorkOS organizationId has no local match", async () => {
+    const db = {
+      query: {
+        organizations: {
+          findFirst: queuedFindFirst(undefined, { id: "org1", allowedDomains: ["stored.example.edu"] }),
+        },
+      },
+    } as unknown as Db;
+    expect(await DomainAllowlistService.resolveAllowedDomains("unknown_org", db, "bootstrap.example.edu")).toEqual([
+      "stored.example.edu",
+    ]);
   });
 
   it("returns the empty array as-is (deny all) when the org row has an explicit empty allowedDomains -- distinct from no row at all", async () => {

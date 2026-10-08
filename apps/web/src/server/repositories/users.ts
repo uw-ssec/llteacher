@@ -1,6 +1,6 @@
 import { and, eq, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { courseMemberships, courses, organizationMemberships, users } from "../../db/schema";
+import { courseMemberships, courses, organizationMemberships, organizations, users } from "../../db/schema";
 import { unsafeOrgScope, type OrgScope } from "./scope";
 import type { BlindIndex } from "../../db/types/encrypted";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
@@ -112,33 +112,45 @@ export async function getUserActivationState(
 
 /** #316: grants (or re-confirms) courseless, platform-wide "recognized as
  *  an instructor" status -- see the users schema's own doc comment for why
- *  this is columns on the row rather than a course_memberships row or an
- *  audit_events entry. Reuses findOrCreatePendingUser (roster.ts), the same
+ *  these columns are the durable authority rather than a course_memberships
+ *  or audit_events row. Reuses findOrCreatePendingUser (roster.ts), the same
  *  "find or create a pending user by email" pipeline upsertCourseMember
  *  uses, so a never-logged-in person can be granted this exactly like they
  *  can be added to a course.
  *
- *  Domain-validated against the platform default (no org to pull a custom
- *  allowlist from -- this grant precedes any course/org membership) so a
- *  typo'd address fails loudly instead of silently creating an unreachable
- *  pending account.
+ *  Domain-validated against the deployment's singleton organization, or the
+ *  configured bootstrap domains before that organization exists.
  *
- *  Idempotent: granting an already-granted user updates grantedBy/grantedAt
- *  to this call rather than erroring, so re-running it is never a mistake. */
+ *  Idempotent: re-granting keeps the original grantedBy/grantedAt provenance
+ *  and returns the stored grant rather than rewriting its history. */
 export type GrantPlatformInstructorResult =
-  | { status: "granted"; userId: string; grantedAt: Date }
+  | { status: "granted"; userId: string; grantedAt: Date; grantCreated: boolean }
   | { status: "invalid_email" | "disallowed_domain"; message: string };
+
+export async function allowedDomainsForPlatformInstructor(
+  db: Db,
+  bootstrapDomains?: string,
+): Promise<string[]> {
+  const organization = await db.query.organizations.findFirst({
+    where: eq(organizations.deploymentSingleton, true),
+    columns: { allowedDomains: true },
+  });
+  return organization?.allowedDomains
+    ?? DomainAllowlistService.bootstrapAllowedDomains(bootstrapDomains);
+}
 
 export async function grantPlatformInstructor(
   db: Db,
   cipher: IdentityCipher,
   granterUserId: string,
   rawEmail: string,
+  bootstrapDomains?: string,
 ): Promise<GrantPlatformInstructorResult> {
   const email = IdentityCipher.normalizeEmail(rawEmail);
+  const allowedDomains = await allowedDomainsForPlatformInstructor(db, bootstrapDomains);
   const domainCheck = DomainAllowlistService.validateEmailDomain(
     email,
-    DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS,
+    allowedDomains,
   );
   if (!domainCheck.allowed) {
     const malformed = domainCheck.reason === "Invalid email format";
@@ -150,12 +162,39 @@ export async function grantPlatformInstructor(
 
   const user = await findOrCreatePendingUser(db, cipher, email);
   const grantedAt = new Date();
-  await db
+  const [createdGrant] = await db
     .update(users)
-    .set({ platformInstructorGrantedAt: grantedAt, platformInstructorGrantedBy: granterUserId })
-    .where(eq(users.id, user.id));
+    .set({
+      platformInstructorGrantedAt: grantedAt,
+      platformInstructorGrantedBy: granterUserId,
+      updatedAt: grantedAt,
+    })
+    .where(and(eq(users.id, user.id), isNull(users.platformInstructorGrantedAt)))
+    .returning({ grantedAt: users.platformInstructorGrantedAt });
 
-  return { status: "granted", userId: user.id, grantedAt };
+  if (createdGrant?.grantedAt) {
+    return {
+      status: "granted",
+      userId: user.id,
+      grantedAt: createdGrant.grantedAt,
+      grantCreated: true,
+    };
+  }
+
+  const existingGrant = await db.query.users.findFirst({
+    where: eq(users.id, user.id),
+    columns: { platformInstructorGrantedAt: true },
+  });
+  if (!existingGrant?.platformInstructorGrantedAt) {
+    throw new Error("Platform instructor grant was not readable after update");
+  }
+
+  return {
+    status: "granted",
+    userId: user.id,
+    grantedAt: existingGrant.platformInstructorGrantedAt,
+    grantCreated: false,
+  };
 }
 
 /** Like getOrgScopesForUser, but also counts a membership dropped
@@ -272,6 +311,7 @@ export async function deactivateByWorkosUserId(db: Db, workosUserId: string) {
 
 export type GrantOrgAdminResult =
   | { status: "granted"; userId: string }
+  | { status: "organization_missing"; message: string }
   | { status: "invalid_email" | "disallowed_domain"; message: string };
 
 /** Grants Org Admin in one organization, by email. Same identity path as
@@ -287,9 +327,16 @@ export async function grantOrgAdmin(
   rawEmail: string,
 ): Promise<GrantOrgAdminResult> {
   const email = IdentityCipher.normalizeEmail(rawEmail);
+  const organization = await db.query.organizations.findFirst({
+    where: eq(organizations.id, organizationId),
+    columns: { allowedDomains: true },
+  });
+  if (!organization) {
+    return { status: "organization_missing", message: "Organization not found" };
+  }
   const domainCheck = DomainAllowlistService.validateEmailDomain(
     email,
-    DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS,
+    organization.allowedDomains,
   );
   if (!domainCheck.allowed) {
     const malformed = domainCheck.reason === "Invalid email format";
@@ -333,4 +380,3 @@ export async function listOrgAdmins(
   }
   return out;
 }
-

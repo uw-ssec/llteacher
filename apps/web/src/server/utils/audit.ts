@@ -13,7 +13,9 @@ import { logServerError } from "./errors";
  *  makes `WHERE target_type = ...` a reliable query for the #50 audit
  *  viewer. */
 export const AUDIT_TARGET_TYPES = {
+  ORGANIZATION: "organization",
   USER: "user",
+  MEMBERSHIP: "membership",
   /** #31: an LLM configuration. Org-level blast radius -- the default is what
    *  every course without an explicit choice runs on. */
   LLM_CONFIG: "llm_config",
@@ -33,11 +35,17 @@ export const AUDIT_TARGET_TYPES = {
 /** The action vocabulary for audit_events (#147). One place so M3+ handlers
  *  reuse these instead of ad-hoc strings drifting apart. */
 export const AUDIT_ACTIONS = {
+  ORGANIZATION_INITIALIZED: "organization.initialized",
   USER_LOGIN: "user.login",
   USER_LOGOUT: "user.logout",
   USER_PROVISIONED: "user.provisioned",
   USER_DEPROVISIONED: "user.deprovisioned",
   PROFILE_UPDATED: "profile.updated",
+  /** A super admin created a local course shell and assigned its initial
+   *  instructor. Canvas linking is deliberately a separate, optional event. */
+  COURSE_CREATED: "course.created",
+  PLATFORM_INSTRUCTOR_GRANTED: "user.platform_instructor_granted",
+  COURSE_INSTRUCTOR_ADDED: "membership.course_instructor_added",
   HOMEWORK_PUBLISHED: "homework.published",
   HOMEWORK_UNPUBLISHED: "homework.unpublished",
   HOMEWORK_HIDDEN: "homework.hidden",

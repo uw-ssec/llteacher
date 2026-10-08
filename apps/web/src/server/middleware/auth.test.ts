@@ -49,7 +49,14 @@ describe("authMiddleware", () => {
 
   it("attaches the session and allows the request through when valid", async () => {
     const key = await loadSessionKey(TEST_ENV);
-    const payload = createSessionPayload("user-1", "workos-1", 7);
+    const payload = createSessionPayload(
+      "user-1",
+      "workos-1",
+      7,
+      undefined,
+      undefined,
+      "workos-org-1",
+    );
     const sealed = await sealSession(payload, key);
     const res = await buildApp().request(
       "/api/protected",
@@ -57,8 +64,11 @@ describe("authMiddleware", () => {
       TEST_ENV,
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { session: { userId: string } };
+    const body = (await res.json()) as {
+      session: { userId: string; workosOrganizationId?: string };
+    };
     expect(body.session.userId).toBe("user-1");
+    expect(body.session.workosOrganizationId).toBe("workos-org-1");
   });
 
   it("does not require a session for /api/auth/* routes", async () => {

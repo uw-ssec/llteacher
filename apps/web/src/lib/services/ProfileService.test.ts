@@ -41,6 +41,14 @@ describe("ProfileService.getProfileWithStats", () => {
               droppedAt: null,
               course: { id: "c1", title: "STATS 311" },
             },
+            {
+              id: "m2",
+              userId: "u4",
+              courseId: "c2",
+              role: "instructor",
+              droppedAt: null,
+              course: { id: "c2", title: "Archived course", isActive: false },
+            },
           ],
         },
         homeworks: {
@@ -66,6 +74,7 @@ describe("ProfileService.getProfileWithStats", () => {
       // than on the priority-ranked primary role.
       { id: "c1", title: "STATS 311", role: "instructor", canViewSolutions: true, canViewDrafts: true },
     ]);
+    expect(profile.courses?.some((course) => course.id === "c2")).toBe(false);
   });
 
   // #172 audit (FUN-007): dropped memberships are now filtered in SQL rather

@@ -37,6 +37,8 @@ import { LLMConfigsDataLoader, type ConfigScreen } from "./views/LLMConfigsDataL
 import { StudentsView } from "./views/StudentsView";
 import { CanvasIntegrationView } from "./views/CanvasIntegrationView";
 import { AddInstructorView } from "./views/AddInstructorView";
+import { OrganizationSetupView } from "./views/OrganizationSetupView";
+import { CourseSetupView } from "./views/CourseSetupView";
 import { GradingPanel } from "./views/GradingPanel";
 import { ExportView } from "./views/ExportView";
 import { KnowledgeView } from "./views/KnowledgeView";
@@ -60,6 +62,7 @@ const AUTHOR_ROLE_SET: ReadonlySet<CourseRole> = new Set(AUTHOR_ROLES);
    different optimal default. The "llteacher:" prefix avoids colliding
    with any other app on the same origin. */
 const SIDEBAR_COLLAPSED_KEY = "llteacher:admin-sidebar-collapsed";
+const selectedCourseKey = (userId: string) => `llteacher:admin-selected-course:${userId}`;
 
 /* The view-state machine. Adding a view = adding a discriminated case. */
 type View =
@@ -125,6 +128,7 @@ type View =
   | { kind: "exports" }
   // #316: courseless, unlike every other kind above -- no courseId param.
   | { kind: "add-instructor" }
+  | { kind: "course-setup" }
   /* #75: carries the identity the panel displays alongside the id it acts
      on. Threaded through the view state rather than refetched, because the
      dashboard the instructor came from already decrypted both -- and a
@@ -180,6 +184,7 @@ const NAV_BREADCRUMB: Record<View["kind"], string> = {
   "canvas":             "Instructor Console · Canvas",
   "exports":            "Instructor Console · Export",
   "add-instructor":     "Instructor Console · Add Instructor",
+  "course-setup":       "Instructor Console · Course Setup",
   "grade":              "Instructor Console · Grading",
   "knowledge":          "Instructor Console · Knowledge",
   "knowledge-document": "Instructor Console · Knowledge · Document",
@@ -197,19 +202,51 @@ export default function App() {
     logout,
     isSuperAdmin,
     isPlatformInstructor,
+    userId,
   } = useAuth();
 
-  // Stopgap: this app assumes exactly one course everywhere else today
-  // (TopNav's hardcoded course="STATS 311" string) -- courses[0] matches
-  // that existing assumption rather than inventing a switcher here. Real
-  // multi-course support (picker, deep-linked course context, persisted
-  // selection) is issue #70; when that lands, replace this with real
-  // course-scoped navigation. See Resolved Design Decision 8 in the M3 plan
-  // for the full reasoning. An instructor with zero courses (a genuine edge
-  // case, e.g. a brand-new admin account before any course assignment)
-  // sees the "No course found" empty state below rather than a broken form.
-  const CURRENT_COURSE = courses[0];
+  const organizationResource = useApiResource(
+    (opts) => isAuthenticated && isSuperAdmin
+      ? apiClient.platformOrganization.get(opts)
+      : Promise.resolve({ organization: null }),
+    [isAuthenticated, isSuperAdmin],
+  );
+
+  // The selected course owns every course-scoped loader below. A stale saved
+  // id falls back to the first current membership, and changeCourse resets a
+  // detail/form view before any new-course request can reuse an old id.
+  const [selectedCourseId, setSelectedCourseId] = useState<string | null>(() => {
+    return null;
+  });
+  const [selectionHydratedForUser, setSelectionHydratedForUser] = useState<string | null>(null);
+  useEffect(() => {
+    if (!userId || typeof window === "undefined") return;
+    try { setSelectedCourseId(window.localStorage.getItem(selectedCourseKey(userId))); } catch { setSelectedCourseId(null); }
+    setSelectionHydratedForUser(userId);
+  }, [userId]);
+  const selectionReady = Boolean(userId && selectionHydratedForUser === userId);
+  // Render the first membership while the user-specific preference hydrates,
+  // but do not persist that temporary fallback. This avoids a "no course"
+  // flash without recreating the overwrite race the hydration gate prevents.
+  const CURRENT_COURSE = selectionReady
+    ? courses.find((course) => course.id === selectedCourseId) ?? courses[0]
+    : courses[0];
   const CURRENT_COURSE_ID = CURRENT_COURSE?.id;
+
+  useEffect(() => {
+    if (!selectionReady || !CURRENT_COURSE_ID || selectedCourseId === CURRENT_COURSE_ID) return;
+    setSelectedCourseId(CURRENT_COURSE_ID);
+  }, [CURRENT_COURSE_ID, selectedCourseId, selectionReady]);
+
+  useEffect(() => {
+    if (!selectionReady || !userId || !CURRENT_COURSE_ID || typeof window === "undefined") return;
+    try { window.localStorage.setItem(selectedCourseKey(userId), CURRENT_COURSE_ID); } catch { /* storage unavailable */ }
+  }, [CURRENT_COURSE_ID, selectionReady, userId]);
+
+  const changeCourse = (courseId: string) => {
+    setSelectedCourseId(courseId);
+    setView({ kind: "homeworks" });
+  };
 
   /* #172: authoring is decided per course, not by the priority-ranked
      top-level `role`. Someone who instructs course A and assists on course B
@@ -335,6 +372,16 @@ export default function App() {
   // derived from CURRENT_COURSE exactly as before.
   const hasConsoleAccess = (role !== null && CONSOLE_ROLE_SET.has(role)) || isSuperAdmin || isPlatformInstructor;
   if (!hasConsoleAccess) return <Forbidden userInitials={initials} onLogout={logout} />;
+  if (isSuperAdmin && organizationResource.loading) return null;
+  if (isSuperAdmin && organizationResource.error) {
+    return <main className="admin-view admin-view--setup">
+      <div className="admin-alert" role="alert">{organizationResource.error.message}</div>
+      {organizationResource.canRetry && <button type="button" className="admin-accession__submit" onClick={organizationResource.reload}>Try again</button>}
+    </main>;
+  }
+  if (isSuperAdmin && organizationResource.data?.organization === null) {
+    return <OrganizationSetupView onCreated={organizationResource.reload} />;
+  }
 
   /* .page-frame (not a bespoke admin wrapper) — the 100vh/overflow-hidden
      outer shell the student app uses. Without it the sidebar has no height
@@ -346,9 +393,12 @@ export default function App() {
           marker in the affiliation tag is the at-a-glance "instructor
           console" cue; the trailing breadcrumb segment names the view. */}
       <TopNav
-        course="STATS 311"
-        term="Autumn 2026"
+        course={CURRENT_COURSE?.code}
+        term={CURRENT_COURSE?.term}
         homework={NAV_BREADCRUMB[view.kind]}
+        courseOptions={courses.map((course) => ({ id: course.id, label: `${course.code} · ${course.term}` }))}
+        selectedCourseId={CURRENT_COURSE_ID}
+        onCourseChange={changeCourse}
         userInitials={initials}
         admin
         isAuthenticated={isAuthenticated}
@@ -383,6 +433,8 @@ export default function App() {
                 CURRENT_COURSE_ID ? (
                   <HomeworksDataLoader
                     courseId={CURRENT_COURSE_ID}
+                    courseCode={CURRENT_COURSE.code}
+                    term={CURRENT_COURSE.term}
                     onOpenHomework={(id) => setView({ kind: "edit-homework", homeworkId: id })}
                     onOpenSubmissions={(id) => setView({ kind: "submissions", homeworkId: id })}
                     canAuthor={canAuthor}
@@ -675,6 +727,14 @@ export default function App() {
                 )
               )}
 
+              {view.kind === "course-setup" && (
+                isSuperAdmin ? (
+                  <CourseSetupView />
+                ) : (
+                  <EmptyView label="Only super admins can create courses" body={NOT_INSTRUCTOR_BODY} />
+                )
+              )}
+
               {/* #75: grading one submitted section. Reached from the
                   submissions dashboard, which is where an instructor is
                   already looking at who has submitted what. */}
@@ -788,6 +848,8 @@ export default function App() {
 
 function HomeworksDataLoader({
   courseId,
+  courseCode,
+  term,
   onOpenHomework,
   onOpenSubmissions,
   onNewHomework,
@@ -795,6 +857,8 @@ function HomeworksDataLoader({
   canViewDrafts,
 }: {
   courseId: string;
+  courseCode: string;
+  term: string;
   onOpenHomework: (id: string) => void;
   onOpenSubmissions: (id: string) => void;
   onNewHomework: () => void;
@@ -828,6 +892,8 @@ function HomeworksDataLoader({
   if (!homeworks) return null;
   return (
     <HomeworksView
+      courseCode={courseCode}
+      term={term}
       homeworks={homeworks}
       onOpenHomework={onOpenHomework}
       onOpenSubmissions={onOpenSubmissions}

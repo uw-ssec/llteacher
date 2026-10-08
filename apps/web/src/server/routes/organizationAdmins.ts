@@ -66,6 +66,9 @@ export const grantOrgAdminHandler = effectHandler((c) => Effect.gen(function* ()
     "grantOrgAdmin",
     (db) => grantOrgAdmin(db, cipher, authContext.session.userId, organizationId, email),
   );
+  if (result.status === "organization_missing") {
+    return yield* new NotFound({ message: result.message });
+  }
   if (result.status !== "granted") return yield* new BadRequest({ message: result.message });
 
   yield* audit(authContext, organizationId, AUDIT_ACTIONS.ORG_ADMIN_GRANTED, result.userId);

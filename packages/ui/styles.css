@@ -527,6 +527,18 @@ body {
     padding-inline: var(--space-4);
   }
 
+  .top-nav__course-select {
+    margin-inline-end: 10px;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    color: inherit;
+    background: transparent;
+  }
+
+  .top-nav__course-option {
+    color: var(--color-text-primary);
+  }
+
   .top-nav__user-group {
     position: relative;
     flex-shrink: 0;
@@ -4021,6 +4033,11 @@ body {
   flex-direction: column;
   gap: var(--space-6);
   padding-block-end: var(--space-8);
+}
+
+.admin-view--setup {
+  max-width: 45rem;
+  margin: 4rem auto;
 }
 
 /* -- Page header ----------------------------------------------------------- */

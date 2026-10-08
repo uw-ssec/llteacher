@@ -50,6 +50,9 @@ export interface TopNavProps {
   onProfileClick?: () => void;
   /** Shown as "Log out" when `isAuthenticated` is true. */
   onLogout?: () => void;
+  courseOptions?: Array<{ id: string; label: string }>;
+  selectedCourseId?: string;
+  onCourseChange?: (courseId: string) => void;
 }
 
 export function TopNav({
@@ -62,6 +65,9 @@ export function TopNav({
   onLogin,
   onProfileClick,
   onLogout,
+  courseOptions,
+  selectedCourseId,
+  onCourseChange,
 }: TopNavProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const userGroupRef = useRef<HTMLDivElement>(null);
@@ -131,7 +137,21 @@ export function TopNav({
 
       {/* Center: course breadcrumb */}
       <div className="top-nav__breadcrumb" aria-label="Current context">
-        {breadcrumbText}
+        {courseOptions && courseOptions.length > 1 && onCourseChange ? (
+          <>
+            <label htmlFor="top-nav-course" className="sr-only">Current course</label>
+            <select
+              id="top-nav-course"
+              aria-label="Current course"
+              value={selectedCourseId}
+              onChange={(event) => onCourseChange(event.target.value)}
+              className="top-nav__course-select"
+            >
+              {courseOptions.map((option) => <option key={option.id} value={option.id} className="top-nav__course-option">{option.label}</option>)}
+            </select>
+            {[term, homework].filter(Boolean).map((segment) => String(segment).toUpperCase()).join(" · ")}
+          </>
+        ) : breadcrumbText}
       </div>
 
       {/* Right: user menu chip -- a plain disclosure (button + list of
