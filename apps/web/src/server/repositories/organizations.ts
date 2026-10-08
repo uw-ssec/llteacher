@@ -59,7 +59,11 @@ export async function createDeploymentOrganization(
     allowedDomains: string[];
     workosOrganizationId?: string;
   },
-): Promise<{ created: boolean; organization: OrganizationPayload }> {
+): Promise<
+  | { created: true; organization: OrganizationPayload }
+  | { created: false; reason: "already_initialized"; organization: OrganizationPayload }
+  | { created: false; reason: "conflict"; organization: null }
+> {
   const rows = await db.insert(organizations).values({
     name: input.name,
     deploymentSingleton: true,
@@ -69,6 +73,6 @@ export async function createDeploymentOrganization(
   }).onConflictDoNothing().returning();
   if (rows[0]) return { created: true, organization: payload(rows[0]) };
   const existing = await getDeploymentOrganization(db);
-  if (!existing) throw new Error("Organization initialization conflicted without an existing row");
-  return { created: false, organization: existing };
+  if (!existing) return { created: false, reason: "conflict", organization: null };
+  return { created: false, reason: "already_initialized", organization: existing };
 }

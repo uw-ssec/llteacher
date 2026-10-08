@@ -53,7 +53,7 @@ describe.skipIf(!DATABASE_URL)("provisionInstructorCourse atomicity (real DB)", 
     await db.delete(users).where(eq(users.id, actorUserId));
   });
 
-  it("uses the marked deployment institution, not an unrelated organization row", async () => {
+  it("uses the marked deployment institution and preserves an existing platform grant", async () => {
     const result = await provisionInstructorCourse(db, cipher, actorUserId, {
       instructorEmail: `prof-success-${suffix}@uw.edu`,
       title: "Statistics",
@@ -65,6 +65,27 @@ describe.skipIf(!DATABASE_URL)("provisionInstructorCourse atomicity (real DB)", 
     const [created] = await db.select({ organizationId: courses.organizationId })
       .from(courses).where(eq(courses.id, result.course.id));
     expect(created!.organizationId).toBe(deploymentOrgId);
+    expect(result.platformInstructorGrantCreated).toBe(true);
+    const [firstGrant] = await db.select({
+      grantedAt: users.platformInstructorGrantedAt,
+      grantedBy: users.platformInstructorGrantedBy,
+    }).from(users).where(eq(users.id, result.instructor.userId));
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `prof-success-${suffix}@uw.edu`,
+      title: "Statistics II",
+      code: `STAT2-${suffix}`,
+      term: "Winter 2027",
+    });
+    expect(second.status).toBe("created");
+    if (second.status !== "created") return;
+    expect(second.platformInstructorGrantCreated).toBe(false);
+    const [secondGrant] = await db.select({
+      grantedAt: users.platformInstructorGrantedAt,
+      grantedBy: users.platformInstructorGrantedBy,
+    }).from(users).where(eq(users.id, result.instructor.userId));
+    expect(secondGrant).toEqual(firstGrant);
   });
 
   it("rolls back user, grant, course, and membership when the final membership write fails", async () => {

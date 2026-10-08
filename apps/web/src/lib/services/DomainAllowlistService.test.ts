@@ -156,6 +156,13 @@ describe("DomainAllowlistService.resolveAllowedDomains", () => {
     );
   });
 
+  it("uses deployment-specific bootstrap domains before an institution exists", async () => {
+    const db = { query: { organizations: { findFirst: async () => undefined } } } as unknown as Db;
+    expect(await DomainAllowlistService.resolveAllowedDomains(undefined, db, "example.edu, cs.example.edu")).toEqual([
+      "example.edu", "cs.example.edu",
+    ]);
+  });
+
   it("falls back to the default when no org matches the workosOrganizationId", async () => {
     const db = { query: { organizations: { findFirst: async () => undefined } } } as unknown as Db;
     expect(await DomainAllowlistService.resolveAllowedDomains("unknown_org", db)).toEqual(

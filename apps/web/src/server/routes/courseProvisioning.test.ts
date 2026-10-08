@@ -31,6 +31,8 @@ describe("POST /api/platform/courses", () => {
     provisionMock.mockReset().mockResolvedValue({
       status: "created", course: { id: "course-1", title: "Statistics", code: "STAT 311", term: "Autumn 2026" },
       instructor: { userId: "user-2", email: "prof@uw.edu" },
+      membershipId: "membership-1",
+      platformInstructorGrantCreated: true,
     });
     getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
     auditBestEffortMock.mockReset().mockResolvedValue(undefined);
@@ -47,13 +49,41 @@ describe("POST /api/platform/courses", () => {
     expect(provisionMock).toHaveBeenCalledWith(expect.anything(), expect.anything(), "u1", {
       instructorEmail: "prof@uw.edu", title: "Statistics", code: "STAT 311", term: "Autumn 2026",
     });
-    expect(auditBestEffortMock).toHaveBeenCalledWith(expect.anything(), ["org-1"], {
+    expect(auditBestEffortMock).toHaveBeenNthCalledWith(1, expect.anything(), ["org-1"], {
       actorUserId: "u1",
       action: "course.created",
       targetType: "course",
       targetId: "course-1",
       requestMetadata: { instructorUserId: "user-2" },
     });
+    expect(auditBestEffortMock).toHaveBeenNthCalledWith(2, expect.anything(), ["org-1"], {
+      actorUserId: "u1",
+      action: "user.platform_instructor_granted",
+      targetType: "user",
+      targetId: "user-2",
+    });
+    expect(auditBestEffortMock).toHaveBeenNthCalledWith(3, expect.anything(), ["org-1"], {
+      actorUserId: "u1",
+      action: "membership.course_instructor_added",
+      targetType: "membership",
+      targetId: "membership-1",
+      requestMetadata: { courseId: "course-1", instructorUserId: "user-2" },
+    });
+  });
+
+  it("does not claim a new platform grant when the instructor was already granted", async () => {
+    provisionMock.mockResolvedValue({
+      status: "created", course: { id: "course-2", title: "Statistics II", code: "STAT 312", term: "Winter 2027" },
+      instructor: { userId: "user-2", email: "prof@uw.edu" },
+      membershipId: "membership-2",
+      platformInstructorGrantCreated: false,
+    });
+    expect((await post(true, { instructorEmail: "prof@uw.edu", title: "Statistics II", code: "STAT 312", term: "Winter 2027" })).status).toBe(201);
+    expect(auditBestEffortMock).toHaveBeenCalledTimes(2);
+    expect(auditBestEffortMock.mock.calls.map((call) => call[2].action)).toEqual([
+      "course.created",
+      "membership.course_instructor_added",
+    ]);
   });
 
   it.each([

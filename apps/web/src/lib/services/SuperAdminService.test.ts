@@ -24,6 +24,15 @@ describe("SuperAdminService", () => {
     expect(SuperAdminService.isSuperAdmin(userIndex, admins)).toBe(true);
   });
 
+  it("uses a deployment-specific administrator list when configured", async () => {
+    const cipher = await testCipher();
+    const admins = await SuperAdminService.blindIndexes(cipher, " Admin@Example.edu ");
+    const configured = await cipher.computeBlindIndex("admin@example.edu");
+    const uwDefault = await cipher.computeBlindIndex("ksdani@uw.edu");
+    expect(SuperAdminService.isSuperAdmin(configured, admins)).toBe(true);
+    expect(SuperAdminService.isSuperAdmin(uwDefault, admins)).toBe(false);
+  });
+
   it("matches regardless of case or surrounding whitespace, same as normalizeEmail", async () => {
     const cipher = await testCipher();
     const admins = await SuperAdminService.blindIndexes(cipher);

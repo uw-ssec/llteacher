@@ -37,7 +37,18 @@ describe.skipIf(!DATABASE_URL)("deployment organization initialization (real DB)
     expect(results.filter((result) => result.created)).toHaveLength(1);
     const rows = await db.select().from(organizations).where(eq(organizations.deploymentSingleton, true));
     expect(rows).toHaveLength(1);
-    expect(results.every((result) => result.organization.id === rows[0]!.id)).toBe(true);
+    expect(results.every((result) => result.organization?.id === rows[0]!.id)).toBe(true);
+  });
+
+  it("returns a conflict instead of throwing when a legacy row already owns the slug", async () => {
+    await db.delete(organizations).where(eq(organizations.deploymentSingleton, true));
+    const slug = `legacy-${crypto.randomUUID()}`;
+    const [legacy] = await db.insert(organizations).values({ name: "Legacy", slug }).returning({ id: organizations.id });
+    const result = await createDeploymentOrganization(db, {
+      name: "New institution", slug, allowedDomains: ["example.edu"],
+    });
+    expect(result).toEqual({ created: false, reason: "conflict", organization: null });
+    await db.delete(organizations).where(eq(organizations.id, legacy!.id));
   });
 });
 

@@ -92,6 +92,8 @@ export function createApplication(name: string, config: InfraConfig, network: Ne
         { name: "PORT", value: "8080" },
         { name: "BUILD_SHA", value: config.buildSha ?? config.imageTag },
         { name: "KNOWLEDGE_ROOT", value: "/tmp/llteacher-knowledge" },
+        { name: "BOOTSTRAP_ALLOWED_DOMAINS", value: config.bootstrapAllowedDomains ?? "uw.edu" },
+        { name: "SUPER_ADMIN_EMAILS", value: config.superAdminEmails ?? "ksdani@uw.edu,cdcore@uw.edu" },
         ...(deploymentInputs.llmoxieBaseUrl === undefined ? [] : [{ name: "LLMOXIE_BASE_URL", value: deploymentInputs.llmoxieBaseUrl }]),
         ...(config.isLocal ? [
           { name: "STORAGE_ENDPOINT", value: config.storageEndpoint ?? "http://host.docker.internal:4566" },

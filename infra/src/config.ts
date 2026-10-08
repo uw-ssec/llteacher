@@ -18,6 +18,8 @@ export interface InfraConfig {
   deployApp: boolean;
   provisionService: boolean;
   imageTag: string;
+  bootstrapAllowedDomains?: string;
+  superAdminEmails?: string;
   endpoints: {
     floci?: string;
   };
@@ -77,6 +79,16 @@ export function loadInfraConfig(config: ConfigReader = new pulumi.Config(), awsC
   if (imageDigest && !/^sha256:[a-f0-9]{64}$/.test(imageDigest)) throw new Error("imageDigest must be a sha256 digest.");
   const deployApp = config.get("deployApp") !== "false";
   const provisionService = config.get("provisionService") !== "false";
+  const bootstrapAllowedDomains = config.get("bootstrapAllowedDomains") ?? "uw.edu";
+  const superAdminEmails = config.get("superAdminEmails") ?? "ksdani@uw.edu,cdcore@uw.edu";
+  const domains = bootstrapAllowedDomains.split(",").map((value) => value.trim());
+  const adminEmails = superAdminEmails.split(",").map((value) => value.trim());
+  if (domains.some((value) => !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(value))) {
+    throw new Error("bootstrapAllowedDomains must contain comma-separated DNS domains.");
+  }
+  if (adminEmails.some((value) => !/^\S+@\S+\.\S+$/.test(value))) {
+    throw new Error("superAdminEmails must contain comma-separated email addresses.");
+  }
   if (environment === "production" && deployApp && !domainReady) {
     throw new Error("Production app activation requires domainReady=true and an HTTPS domain.");
   }
@@ -120,6 +132,8 @@ export function loadInfraConfig(config: ConfigReader = new pulumi.Config(), awsC
     deployApp,
     provisionService,
     imageTag: config.require("imageTag"),
+    bootstrapAllowedDomains,
+    superAdminEmails,
     endpoints: flociEndpoint === undefined ? {} : { floci: flociEndpoint },
   };
 }

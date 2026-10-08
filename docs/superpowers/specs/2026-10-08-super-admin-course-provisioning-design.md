@@ -1,6 +1,6 @@
 # Super-admin course provisioning and instructor-owned Canvas credentials
 
-**Date:** 2026-10-08  
+**Date:** 2026-10-08
 **Status:** Approved design
 
 ## Purpose
@@ -287,6 +287,10 @@ development, then the complete repository test suite before completion.
 - `workos_organization_id` is nullable. When AuthKit supplies one during first-run setup it is stored as provenance, but LLTeacher never creates or updates a WorkOS organization.
 - Course code and term are unique case-insensitively within the institution. A duplicate provisioning request returns `409` rather than silently reassigning the existing course.
 - Course provisioning uses the Node PostgreSQL driver's interactive transaction and a transaction-scoped advisory lock on normalized instructor email. This makes pending-user creation, instructor grant, course creation, and membership creation all-or-nothing under concurrent requests.
-- The admin console stores its selected course in `llteacher:admin-selected-course`. A missing or stale value falls back to the first authorized profile course; changing it resets nested view state to Homeworks before new course-scoped requests run.
+- The admin console stores its selected course in `llteacher:admin-selected-course:<userId>`. A missing or stale value falls back to the first active authorized profile course; changing it resets nested view state to Homeworks before new course-scoped requests run.
 - Canvas credentials carry nullable `owner_user_id`. New writes always set the authenticated instructor. Existing null-owner Canvas rows remain legacy records and produce reconnect-required UI; ownership is never inferred from memberships or an existing course link.
 - Course roster sync loads the exact `lms_integrations.api_credential_id` and requires its owner to match the caller. A co-instructor must explicitly reconnect/relink with their own credential before they can sync.
+- `superAdminEmails` and `bootstrapAllowedDomains` are deployment settings injected into the application without calling WorkOS. UW values remain backward-compatible defaults; another institution sets both before its first login.
+- Provisioning preserves an existing platform-instructor grant's original actor and timestamp. The result identifies whether this operation created that grant so audit events never claim a repeated grant.
+- Institution initialization, new platform grants, course creation, and initial instructor membership each receive distinct best-effort audit events after the provisioning transaction commits.
+- Migration `0058` strengthens normalized course identity to trim and lowercase code/term. It detects whitespace-only duplicates before replacing the index, raises actionable remediation guidance, and can be safely rerun after the operator repairs the conflicting shell.

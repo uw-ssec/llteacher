@@ -87,6 +87,17 @@ Before opening the UI, run migrations against the new RDS endpoint and verify th
 Retain them together. Do not delete volumes/state or run `pulumi destroy` as
 a troubleshooting shortcut.
 
+Each institution must set its first-run identities before deploying:
+
+```bash
+pulumi -C infra config set superAdminEmails "operator@example.edu"
+pulumi -C infra config set bootstrapAllowedDomains "example.edu"
+```
+
+The values are comma-separated when multiple administrators or domains are
+needed. They are injected as ordinary ECS configuration, not written to
+WorkOS. UW values remain the backward-compatible defaults for existing stacks.
+
 `aws:local:down` stops local runtime containers without deleting database
 volumes. The launcher uses a replaceable `:local` image, a dedicated build
 cache with a 2 GiB retention target, and scoped unused-image cleanup. It never

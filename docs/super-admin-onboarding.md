@@ -4,11 +4,25 @@ This deployment owns one local institution. WorkOS continues to handle sign-in o
 
 ## First deployment setup
 
+Before starting a non-UW deployment, configure who may perform first-run setup
+and which email domains may sign in before the institution row exists:
+
+```bash
+pulumi -C infra config set superAdminEmails "operator@example.edu"
+pulumi -C infra config set bootstrapAllowedDomains "example.edu"
+```
+
+Both settings accept comma-separated values. Existing UW deployments retain
+the current UW defaults, but a new institution should set them explicitly.
+These are LLTeacher runtime settings; they do not update WorkOS.
+
 1. Open the instructor admin portal and sign in with a configured super-admin email.
 2. On **Set up your institution**, enter the institution name, URL-safe slug, and allowed sign-in domains. For UW, use a name such as `University of Washington`, slug `uw`, and domain `uw.edu`.
 3. Select **Create institution**. This is a one-time action enforced by the database.
 
-Another institution deploying this code follows the same screen and enters its own name, slug, and domains. There is no UW organization baked into WorkOS or created automatically.
+Another institution deploying this code first sets its bootstrap values above,
+then follows the same screen and enters its own name, slug, and domains. There
+is no UW organization baked into WorkOS or created automatically.
 
 ## Create a course and hand it to an instructor
 

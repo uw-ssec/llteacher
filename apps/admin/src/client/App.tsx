@@ -62,7 +62,7 @@ const AUTHOR_ROLE_SET: ReadonlySet<CourseRole> = new Set(AUTHOR_ROLES);
    different optimal default. The "llteacher:" prefix avoids colliding
    with any other app on the same origin. */
 const SIDEBAR_COLLAPSED_KEY = "llteacher:admin-sidebar-collapsed";
-const SELECTED_COURSE_KEY = "llteacher:admin-selected-course";
+const selectedCourseKey = (userId: string) => `llteacher:admin-selected-course:${userId}`;
 
 /* The view-state machine. Adding a view = adding a discriminated case. */
 type View =
@@ -200,6 +200,7 @@ export default function App() {
     logout,
     isSuperAdmin,
     isPlatformInstructor,
+    userId,
   } = useAuth();
 
   const organizationResource = useApiResource(
@@ -213,9 +214,12 @@ export default function App() {
   // id falls back to the first current membership, and changeCourse resets a
   // detail/form view before any new-course request can reuse an old id.
   const [selectedCourseId, setSelectedCourseId] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    try { return window.localStorage.getItem(SELECTED_COURSE_KEY); } catch { return null; }
+    return null;
   });
+  useEffect(() => {
+    if (!userId || typeof window === "undefined") return;
+    try { setSelectedCourseId(window.localStorage.getItem(selectedCourseKey(userId))); } catch { setSelectedCourseId(null); }
+  }, [userId]);
   const CURRENT_COURSE = courses.find((course) => course.id === selectedCourseId) ?? courses[0];
   const CURRENT_COURSE_ID = CURRENT_COURSE?.id;
 
@@ -225,9 +229,9 @@ export default function App() {
   }, [CURRENT_COURSE_ID, selectedCourseId]);
 
   useEffect(() => {
-    if (!CURRENT_COURSE_ID || typeof window === "undefined") return;
-    try { window.localStorage.setItem(SELECTED_COURSE_KEY, CURRENT_COURSE_ID); } catch { /* storage unavailable */ }
-  }, [CURRENT_COURSE_ID]);
+    if (!userId || !CURRENT_COURSE_ID || typeof window === "undefined") return;
+    try { window.localStorage.setItem(selectedCourseKey(userId), CURRENT_COURSE_ID); } catch { /* storage unavailable */ }
+  }, [CURRENT_COURSE_ID, userId]);
 
   const changeCourse = (courseId: string) => {
     setSelectedCourseId(courseId);

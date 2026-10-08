@@ -291,8 +291,8 @@ export const courses = pgTable(
       .where(sql`${t.canvasCourseId} IS NOT NULL`),
     uniqueIndex("courses_org_code_term_uq").on(
       t.organizationId,
-      sql`lower(${t.code})`,
-      sql`lower(${t.term})`,
+      sql`lower(btrim(${t.code}))`,
+      sql`lower(btrim(${t.term}))`,
     ),
   ],
 );

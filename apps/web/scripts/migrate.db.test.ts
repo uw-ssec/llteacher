@@ -222,6 +222,45 @@ describe.skipIf(!DATABASE_URL)("scripts/migrate.ts two-stage split (real DB, #34
   );
 
   it(
+    "0058 stops with remediation guidance before normalizing duplicate course identities",
+    async () => {
+      const dbName = `llteacher_migrate_test_course_identity_${crypto.randomUUID().replace(/-/g, "")}`;
+      dbNames.push(dbName);
+      const scratchUrl = await createScratchDatabase(adminPool, dbName);
+      const through0057 = buildFolderThrough("0057_uneven_bloodaxe");
+      const pool = new Pool({ connectionString: scratchUrl });
+      const db = drizzle(pool);
+      try {
+        await applyMigrationsFolder(pool, db, through0057);
+        await db.execute(sql`
+          INSERT INTO organizations (id, slug, name)
+          VALUES ('55555555-5555-4555-8555-555555555555', 'course-identity-org', 'Course Identity Org')
+        `);
+        await db.execute(sql`
+          INSERT INTO courses (id, organization_id, title, code, term)
+          VALUES
+            ('66666666-6666-4666-8666-666666666661', '55555555-5555-4555-8555-555555555555', 'One', 'STAT 311', 'Autumn 2026'),
+            ('66666666-6666-4666-8666-666666666662', '55555555-5555-4555-8555-555555555555', 'Two', ' STAT 311 ', ' Autumn 2026 ')
+        `);
+      } finally {
+        fs.rmSync(through0057, { recursive: true, force: true });
+        await pool.end();
+      }
+
+      await expect(runMigrations(scratchUrl)).rejects.toThrow(/duplicate organization\/code\/term/i);
+
+      const repairPool = new Pool({ connectionString: scratchUrl });
+      try {
+        await repairPool.query("UPDATE courses SET code = 'STAT 312' WHERE title = 'Two'");
+      } finally {
+        await repairPool.end();
+      }
+      await expect(runMigrations(scratchUrl)).resolves.not.toThrow();
+    },
+    60_000,
+  );
+
+  it(
     "runs a CREATE INDEX CONCURRENTLY statement outside drizzle's batched transaction (#372)",
     async () => {
       // `CREATE INDEX CONCURRENTLY` is a hard Postgres error inside a

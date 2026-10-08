@@ -137,7 +137,11 @@ export const callbackHandler = effectHandler((c) => Effect.gen(function* () {
 
     const allowedDomains = yield* query(
       "resolveAllowedDomains",
-      (db) => DomainAllowlistService.resolveAllowedDomains(workosOrganizationId, db),
+      (db) => DomainAllowlistService.resolveAllowedDomains(
+        workosOrganizationId,
+        db,
+        c.env.BOOTSTRAP_ALLOWED_DOMAINS,
+      ),
     );
     const domainCheck = DomainAllowlistService.validateEmailDomain(
       workosUser.email,

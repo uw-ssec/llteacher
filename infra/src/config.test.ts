@@ -12,6 +12,18 @@ const settings = { environment: "local", flociEndpoint: "http://localhost:4566",
 const certificateArn = "arn:aws:acm:us-west-2:055237683908:certificate/11111111-2222-3333-4444-555555555555";
 const hostedZoneId = "Z0123456789ABCDEFGHIJ";
 describe("deployment config", () => {
+  it("supports institution-specific first-run identity configuration", () => {
+    expect(loadInfraConfig(reader({
+      ...settings,
+      bootstrapAllowedDomains: "example.edu,cs.example.edu",
+      superAdminEmails: "operator@example.edu",
+    }), aws)).toMatchObject({
+      bootstrapAllowedDomains: "example.edu,cs.example.edu",
+      superAdminEmails: "operator@example.edu",
+    });
+    expect(() => loadInfraConfig(reader({ ...settings, bootstrapAllowedDomains: "not a domain" }), aws)).toThrow("bootstrapAllowedDomains");
+    expect(() => loadInfraConfig(reader({ ...settings, superAdminEmails: "not-an-email" }), aws)).toThrow("superAdminEmails");
+  });
   it("requires an existing certificate only for production HTTPS activation", () => {
     const production = { environment: "production", domainName: "learn.example.edu", hostedZoneId, imageTag: "release", deployApp: "false" };
     expect(loadInfraConfig(reader(production), aws).domainReady).toBe(false);

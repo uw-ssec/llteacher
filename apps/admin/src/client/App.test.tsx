@@ -62,13 +62,15 @@ describe("App selected-course context", () => {
   }
 
   it("falls back from a stale saved id and persists the first current course", async () => {
-    window.localStorage.setItem("llteacher:admin-selected-course", "removed-course");
+    window.localStorage.setItem("llteacher:admin-selected-course:u1", "removed-course");
+    window.localStorage.setItem("llteacher:admin-selected-course:u2", "course-b");
     stubMultiCourseProfile();
     renderApp();
 
     const picker = await screen.findByRole("combobox", { name: "Current course" }) as HTMLSelectElement;
     expect(picker.value).toBe("course-a");
-    await waitFor(() => expect(window.localStorage.getItem("llteacher:admin-selected-course")).toBe("course-a"));
+    await waitFor(() => expect(window.localStorage.getItem("llteacher:admin-selected-course:u1")).toBe("course-a"));
+    expect(window.localStorage.getItem("llteacher:admin-selected-course:u2")).toBe("course-b");
     window.localStorage.clear();
   });
 

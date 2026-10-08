@@ -36,12 +36,28 @@ export async function provisionCourseHandler(c: Context<AppEnv>) {
   if (result.status === "duplicate_course") return c.json({ error: "That course code and term already exist" }, 409);
   if (result.status === "invalid_email") return c.json({ error: result.message }, 400);
   const orgScope = await getOrgScopeForCourse(db, result.course.id);
-  await auditBestEffort(db, orgScope ? [orgScope] : [], {
-    actorUserId: auth.session.userId,
-    action: AUDIT_ACTIONS.COURSE_CREATED,
-    targetType: AUDIT_TARGET_TYPES.COURSE,
-    targetId: result.course.id,
-    requestMetadata: { instructorUserId: result.instructor.userId },
-  });
+  const scopes = orgScope ? [orgScope] : [];
+  await Promise.all([
+    auditBestEffort(db, scopes, {
+      actorUserId: auth.session.userId,
+      action: AUDIT_ACTIONS.COURSE_CREATED,
+      targetType: AUDIT_TARGET_TYPES.COURSE,
+      targetId: result.course.id,
+      requestMetadata: { instructorUserId: result.instructor.userId },
+    }),
+    ...(result.platformInstructorGrantCreated ? [auditBestEffort(db, scopes, {
+      actorUserId: auth.session.userId,
+      action: AUDIT_ACTIONS.PLATFORM_INSTRUCTOR_GRANTED,
+      targetType: AUDIT_TARGET_TYPES.USER,
+      targetId: result.instructor.userId,
+    })] : []),
+    auditBestEffort(db, scopes, {
+      actorUserId: auth.session.userId,
+      action: AUDIT_ACTIONS.COURSE_INSTRUCTOR_ADDED,
+      targetType: AUDIT_TARGET_TYPES.MEMBERSHIP,
+      targetId: result.membershipId,
+      requestMetadata: { courseId: result.course.id, instructorUserId: result.instructor.userId },
+    }),
+  ]);
   return c.json({ course: result.course, instructor: result.instructor } satisfies ProvisionCourseResponse, 201);
 }

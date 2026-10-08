@@ -414,6 +414,13 @@
       "when": 1791492374281,
       "tag": "0058_naive_impossible_man",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1791492488423,
+      "tag": "0059_magical_hawkeye",
+      "breakpoints": true
     }
   ]
 }

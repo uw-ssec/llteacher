@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { courseMemberships, courses, organizations, users } from "../../db/schema";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
@@ -19,6 +19,8 @@ export type CourseProvisioningResult =
       status: "created";
       course: { id: string; title: string; code: string; term: string };
       instructor: { userId: string; email: string };
+      membershipId: string;
+      platformInstructorGrantCreated: boolean;
     };
 
 function constraintName(error: unknown): string | undefined {
@@ -60,8 +62,9 @@ export async function provisionInstructorCourse(
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`course-provision:${email}`}))`);
       let user = await tx.query.users.findFirst({
         where: eq(users.emailBlindIndex, emailBlindIndex),
-        columns: { id: true },
+        columns: { id: true, platformInstructorGrantedAt: true },
       });
+      let platformInstructorGrantCreated = false;
       if (!user) {
         const [created] = await tx.insert(users).values({
           id: crypto.randomUUID(),
@@ -70,14 +73,16 @@ export async function provisionInstructorCourse(
           isPending: true,
           platformInstructorGrantedAt: grantedAt,
           platformInstructorGrantedBy: actorUserId,
-        }).returning({ id: users.id });
+        }).returning({ id: users.id, platformInstructorGrantedAt: users.platformInstructorGrantedAt });
         user = created;
-      } else {
+        platformInstructorGrantCreated = true;
+      } else if (user.platformInstructorGrantedAt === null) {
         await tx.update(users).set({
           platformInstructorGrantedAt: grantedAt,
           platformInstructorGrantedBy: actorUserId,
           updatedAt: grantedAt,
-        }).where(eq(users.id, user.id));
+        }).where(and(eq(users.id, user.id), isNull(users.platformInstructorGrantedAt)));
+        platformInstructorGrantCreated = true;
       }
 
       const [course] = await tx.insert(courses).values({
@@ -88,11 +93,16 @@ export async function provisionInstructorCourse(
         term: input.term,
       }).returning({ id: courses.id, title: courses.title, code: courses.code, term: courses.term });
 
-      await tx.insert(courseMemberships).values({
-        id: crypto.randomUUID(), userId: user!.id, courseId: course!.id, role: "instructor",
-      });
+      const membershipId = crypto.randomUUID();
+      await tx.insert(courseMemberships).values({ id: membershipId, userId: user!.id, courseId: course!.id, role: "instructor" });
 
-      return { status: "created", course: course!, instructor: { userId: user!.id, email } } as const;
+      return {
+        status: "created",
+        course: course!,
+        instructor: { userId: user!.id, email },
+        membershipId,
+        platformInstructorGrantCreated,
+      } as const;
     });
   } catch (error) {
     if (constraintName(error) === "courses_org_code_term_uq") return { status: "duplicate_course" };

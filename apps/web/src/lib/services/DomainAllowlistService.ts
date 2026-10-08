@@ -13,10 +13,18 @@ export interface DomainCheckResult {
  *  (apps/accounts/src/accounts/utils.py) plus grandfathering for
  *  existing users whose domain is no longer allowed. */
 export class DomainAllowlistService {
-  /** v0 single-tenant fallback: used when the WorkOS org has no matching
+  /** Backward-compatible UW fallback: used when the WorkOS org has no matching
    *  `organizations` row (e.g. local dev with no org provisioned) or its
-   *  organizationId wasn't present on the authentication response. */
+   *  organizationId wasn't present on the authentication response and the
+   *  deployment did not configure BOOTSTRAP_ALLOWED_DOMAINS. */
   static readonly DEFAULT_ALLOWED_DOMAINS = ["uw.edu"];
+
+  static bootstrapAllowedDomains(configured?: string): string[] {
+    if (!configured) return [...DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS];
+    const domains = [...new Set(configured.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean))];
+    if (domains.length === 0) throw new Error("BOOTSTRAP_ALLOWED_DOMAINS must contain at least one domain");
+    return domains;
+  }
 
   static validateEmailDomain(email: string, allowedDomains: string[]): DomainCheckResult {
     const atIndex = email.lastIndexOf("@");
@@ -83,8 +91,10 @@ export class DomainAllowlistService {
   static async resolveAllowedDomains(
     organizationId: string | undefined,
     db: Db,
+    bootstrapDomains?: string,
   ): Promise<string[]> {
-    if (!organizationId) return DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS;
+    const fallback = DomainAllowlistService.bootstrapAllowedDomains(bootstrapDomains);
+    if (!organizationId) return fallback;
 
     let org;
     try {
@@ -96,7 +106,7 @@ export class DomainAllowlistService {
       throw err;
     }
 
-    if (!org) return DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS;
+    if (!org) return fallback;
     return org.allowedDomains;
   }
 }
