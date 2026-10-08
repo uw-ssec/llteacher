@@ -13,12 +13,6 @@ export interface SpinnerProps {
   className?: string;
 }
 
-const SIZE_STYLE: Record<SpinnerSize, React.CSSProperties> = {
-  sm: { width: "5px",  height: "5px" },
-  md: { width: "7px",  height: "7px" },
-  lg: { width: "9px",  height: "9px" },
-};
-
 export function Spinner({
   size = "md",
   label = "Loading…",
@@ -27,14 +21,14 @@ export function Spinner({
   return (
     <span
       role="status"
-      className={className}
-      style={{ display: "inline-flex", alignItems: "center" }}
+      className={`spinner ${className}`}
     >
       <span
         aria-hidden="true"
         className="streaming-dot"
-        style={SIZE_STYLE[size]}
-      />
+      >
+        <span className={`spinner--${size}`} />
+      </span>
       <span className="sr-only">{label}</span>
     </span>
   );

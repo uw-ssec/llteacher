@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
+import type { Schema } from "ai";
 import { chatHandler, classifyTurn, TOOLS, toolsForConversation } from "./chat";
 import type { AuthContext } from "../middleware/roles";
 import { fakeAuthContext as buildFakeAuthContext, fakeMembership } from "../testing/authContext";
@@ -392,7 +393,7 @@ describe("TOOLS.executeRCode", () => {
   });
 
   it("requires `code` and rejects unknown properties in its input schema", () => {
-    const schema = (TOOLS.executeRCode!.inputSchema as { jsonSchema: Record<string, unknown> }).jsonSchema;
+    const schema = (TOOLS.executeRCode!.inputSchema as Schema<unknown>).jsonSchema;
     expect(schema.required).toEqual(["code"]);
     expect(schema.additionalProperties).toBe(false);
     expect((schema.properties as Record<string, unknown>).code).toBeDefined();
@@ -4205,7 +4206,7 @@ describe("TOOLS.requestHint (#80)", () => {
   });
 
   it("takes no arguments -- an empty object schema, rejecting unknown properties", () => {
-    const schema = (TOOLS.requestHint!.inputSchema as { jsonSchema: Record<string, unknown> }).jsonSchema;
+    const schema = (TOOLS.requestHint!.inputSchema as Schema<unknown>).jsonSchema;
     expect(schema.properties).toEqual({});
     expect(schema.additionalProperties).toBe(false);
   });
@@ -4249,7 +4250,7 @@ describe("TOOLS.markSectionComplete (#168)", () => {
   });
 
   it("takes no arguments -- an empty object schema, rejecting unknown properties (no confidence/reasoning parameter, per the issue's own explicit design guidance)", () => {
-    const schema = (TOOLS.markSectionComplete!.inputSchema as { jsonSchema: Record<string, unknown> }).jsonSchema;
+    const schema = (TOOLS.markSectionComplete!.inputSchema as Schema<unknown>).jsonSchema;
     expect(schema.properties).toEqual({});
     expect(schema.additionalProperties).toBe(false);
     expect(schema.required ?? []).toEqual([]);

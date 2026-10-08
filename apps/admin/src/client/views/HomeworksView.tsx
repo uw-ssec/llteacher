@@ -219,7 +219,7 @@ export function HomeworksView({
           <article
             key={hw.id}
             className="admin-record-row admin-record-row--enterable"
-            style={{ animationDelay: `${idx * 55}ms` }}
+            style={{ "--row-delay": `${idx * 55}ms` } as React.CSSProperties}
           >
             <div className="admin-record-row__id">
               {/* Numbered from the record's place in the FULL list, not the

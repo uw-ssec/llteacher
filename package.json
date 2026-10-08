@@ -22,11 +22,21 @@
     "aws:local:down": "PULUMI_STACK=local ./infra/scripts/floci-down.sh",
     "aws:local:verify": "PULUMI_STACK=local ./infra/scripts/verify-local-stack.sh",
     "typecheck": "turbo run typecheck",
+    "lint": "npm run lint:design-system",
+    "lint:design-system": "eslint apps/web/src/client apps/admin/src/client packages/ui/src --max-warnings=0",
+    "test:design-system": "node --test scripts/design-system-lint.test.mjs",
+    "screenshots:design-system": "node scripts/design-system-screenshots.mjs",
     "test": "turbo run test",
     "clean": "turbo run clean && rm -rf node_modules",
     "tutor:eval": "npm run tutor:eval --workspace=evals"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@shadcn/lint": "^0.2.0",
+    "@typescript-eslint/parser": "^8.71.1",
+    "eslint": "^10.12.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "pngjs": "^7.0.0",
     "turbo": "^2.3.0"
   },
   "packageManager": "npm@10.0.0",

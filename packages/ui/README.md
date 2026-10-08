@@ -29,3 +29,7 @@ No build step required — `exports` points at TypeScript source. Vite handles c
 ## Design system docs
 
 See `docs/design-system/` at the repo root.
+
+Run `npm run lint:design-system` from the repository root to enforce the shared
+tokens and component contracts. See `docs/design-system/lint.md` for the policy
+and screenshot review workflow.

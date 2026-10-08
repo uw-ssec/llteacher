@@ -25,22 +25,9 @@ export interface BadgeProps {
 const VARIANT_CLASSES: Record<BadgeVariant, string> = {
   neutral: "badge",
   accent:  "badge badge--accent",
-  success: "badge",
-  warning: "badge",
-  danger:  "badge",
-};
-
-const VARIANT_STYLE: Record<BadgeVariant, React.CSSProperties> = {
-  neutral: {},
-  accent:  {},
-  success: { color: "var(--color-success)" },
-  warning: { color: "var(--color-warning)" },
-  danger:  { color: "var(--color-error)" },
-};
-
-const SIZE_STYLE: Record<BadgeSize, React.CSSProperties> = {
-  sm: { fontSize: "0.6875rem" },
-  md: { fontSize: "var(--font-size-xs)" },
+  success: "badge badge--success",
+  warning: "badge badge--warning",
+  danger:  "badge badge--danger",
 };
 
 export function Badge({
@@ -52,6 +39,7 @@ export function Badge({
 }: BadgeProps) {
   const classes = [
     VARIANT_CLASSES[variant],
+    `badge--${size}`,
     outlined ? "badge--outlined" : "",
     className,
   ]
@@ -61,7 +49,6 @@ export function Badge({
   return (
     <span
       className={classes}
-      style={{ ...SIZE_STYLE[size], ...VARIANT_STYLE[variant] }}
     >
       {children}
     </span>

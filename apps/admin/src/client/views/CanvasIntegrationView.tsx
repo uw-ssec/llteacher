@@ -572,7 +572,7 @@ export function CanvasIntegrationView({
                 over" -- Retry re-runs the same load rather than routing
                 into the destructive-feeling blank entry form below. */}
             {credentialLoadFailed && (
-              <button type="button" className="admin-link-button" onClick={loadCredential} style={{ marginLeft: 8 }}>
+              <button type="button" className="admin-link-button ml-2" onClick={loadCredential}>
                 Retry
               </button>
             )}
@@ -595,7 +595,7 @@ export function CanvasIntegrationView({
               const expiry = expiryStateText(credential.expiresAt);
               return (
                 <p className={expiry.overdue ? "admin-field-error" : "admin-form-hint"}>
-                  {expiry.overdue && <Warning size={14} weight="regular" aria-hidden="true" style={{ marginRight: 4 }} />}
+                  {expiry.overdue && <Warning size={14} weight="regular" aria-hidden="true" className="mr-1" />}
                   {expiry.text}
                 </p>
               );
@@ -603,7 +603,7 @@ export function CanvasIntegrationView({
             {validation && (
               <p className={validation.ok ? "admin-form-hint" : "admin-field-error"}>
                 {validation.ok && (
-                  <CheckCircle size={14} weight="fill" aria-hidden="true" style={{ marginRight: 4 }} />
+                  <CheckCircle size={14} weight="fill" aria-hidden="true" className="mr-1" />
                 )}
                 {validation.message}
               </p>
@@ -816,7 +816,7 @@ export function CanvasIntegrationView({
                   className="admin-button admin-button--primary"
                   onClick={runSync}
                 >
-                  <CloudArrowDown size={14} weight="regular" aria-hidden="true" style={{ marginRight: 4 }} />
+                  <CloudArrowDown size={14} weight="regular" aria-hidden="true" className="mr-1" />
                   {syncing ? "Syncing…" : "Sync from Canvas"}
                 </button>
                 <button

@@ -113,7 +113,7 @@ export function LLMConfigsView({
           <article
             key={cfg.id}
             className="admin-record-row admin-record-row--enterable"
-            style={{ animationDelay: `${idx * 55}ms` }}
+            style={{ "--row-delay": `${idx * 55}ms` } as React.CSSProperties}
           >
             <div className="admin-record-row__id">
               <RecordId prefix="CFG" index={cfg.recordNumber} />

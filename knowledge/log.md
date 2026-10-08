@@ -1,3 +1,9 @@
+## 2026-10-07
+* **Update**: Linked `decisions/design-system-lint.md` to `architecture/system-overview.md` (The shared UI package and two clients are governed by this design-system lint policy.).
+* **Update**: Updated concept `decisions/design-system-lint.md`.
+* **Update**: Linked `decisions/design-system-lint.md` to `architecture/system-overview.md` (The shared UI package and two clients are governed by this design-system lint policy.).
+* **Creation**: Documented concept `decisions/design-system-lint.md` (ShadCN lint enforces the shared UW design system).
+
 ## 2026-10-06
 * **Update**: Updated concept `decisions/project-template-adoption.md`.
 * **Update**: Updated concept `architecture/skill-evals.md`.

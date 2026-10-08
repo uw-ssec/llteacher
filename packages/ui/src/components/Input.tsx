@@ -54,26 +54,17 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
       .join(" ");
 
     return (
-      <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-1)" }}>
+      <div className="input-group">
         {/* Label — mono small-caps */}
         <label
           htmlFor={id}
-          style={{
-            display: "block",
-            fontFamily: "var(--font-mono)",
-            fontSize: "var(--font-size-xs)",
-            fontVariant: "small-caps",
-            letterSpacing: "0.06em",
-            textTransform: "uppercase",
-            color: "var(--color-text-secondary)",
-            marginBlockEnd: "var(--space-1)",
-          }}
+          className="input-group__label"
         >
           {label}
           {required && (
             <span
               aria-hidden="true"
-              style={{ marginInlineStart: "0.2em", color: "var(--color-error)" }}
+              className="input-group__required"
               title="Required"
             >
               *
@@ -95,12 +86,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
         {helperText && !hasError && (
           <p
             id={helperId}
-            style={{
-              fontFamily: "var(--font-sans)",
-              fontSize: "var(--font-size-xs)",
-              color: "var(--color-text-muted)",
-              margin: 0,
-            }}
+            className="input-group__helper"
           >
             {helperText}
           </p>
@@ -110,12 +96,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
           <p
             id={errorId}
             role="alert"
-            style={{
-              fontFamily: "var(--font-sans)",
-              fontSize: "var(--font-size-xs)",
-              color: "var(--color-error)",
-              margin: 0,
-            }}
+            className="input-group__error"
           >
             {error}
           </p>
