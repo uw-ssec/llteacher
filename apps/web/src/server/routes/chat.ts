@@ -80,7 +80,6 @@
    -------------------------------------------------------------------------- */
 
 import { getKnowledgeInstruction } from "../repositories/courses";
-import type { Context } from "hono";
 import {
   streamText,
   convertToModelMessages,
@@ -171,7 +170,6 @@ import { streamWithFallback } from "../llm/streamWithFallback";
 // React, same cross-boundary pattern as @llteacher/ui/auth/courseRole).
 import { isRenderableToolPartType } from "@llteacher/ui/generative/renderableTools";
 import type { AuthContext } from "../middleware/roles";
-import type { AppEnv } from "../context";
 // #41: the course knowledge base -- searchKnowledge/showKnowledge (TOOLS,
 // below) read through this service, scoped to the course the conversation
 // belongs to. knowledgeServiceFromEnv is called once per request
