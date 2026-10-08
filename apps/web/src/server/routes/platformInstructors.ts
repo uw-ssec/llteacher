@@ -3,6 +3,9 @@ import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { grantPlatformInstructor } from "../repositories/users";
 import { listPlatformInstructors } from "../repositories/platformListings";
+import { getDeploymentOrganization } from "../repositories/organizations";
+import { unsafeOrgScope } from "../repositories/scope";
+import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
 import type { AuthContext } from "../middleware/roles";
 import type { GrantPlatformInstructorBody, GrantPlatformInstructorResponse } from "../../shared/types";
 import { BadRequest, Forbidden } from "../effect/errors";
@@ -61,6 +64,24 @@ export const grantPlatformInstructorHandler = effectHandler((c) => Effect.gen(fu
     return yield* new BadRequest({ message: result.message });
   }
 
-  const responseBody: GrantPlatformInstructorResponse = result;
+  if (result.grantCreated) {
+    const organization = yield* query("getDeploymentOrganization", (db) => getDeploymentOrganization(db));
+    if (organization) {
+      yield* query("auditBestEffort", (db) =>
+        auditBestEffort(db, [unsafeOrgScope(organization.id)], {
+          actorUserId: authContext.session.userId,
+          action: AUDIT_ACTIONS.PLATFORM_INSTRUCTOR_GRANTED,
+          targetType: AUDIT_TARGET_TYPES.USER,
+          targetId: result.userId,
+        }),
+      );
+    }
+  }
+
+  const responseBody: GrantPlatformInstructorResponse = {
+    status: "granted",
+    userId: result.userId,
+    grantedAt: result.grantedAt,
+  };
   return c.json(responseBody);
 }));

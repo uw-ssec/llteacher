@@ -74,10 +74,20 @@ export async function provisionInstructorCourse(
           isPending: true,
           platformInstructorGrantedAt: grantedAt,
           platformInstructorGrantedBy: actorUserId,
-        }).returning({ id: users.id, platformInstructorGrantedAt: users.platformInstructorGrantedAt });
-        user = created;
-        platformInstructorGrantCreated = true;
-      } else if (user.platformInstructorGrantedAt === null) {
+        }).onConflictDoNothing({ target: users.emailBlindIndex })
+          .returning({ id: users.id, platformInstructorGrantedAt: users.platformInstructorGrantedAt });
+        if (created) {
+          user = created;
+          platformInstructorGrantCreated = true;
+        } else {
+          user = await tx.query.users.findFirst({
+            where: eq(users.emailBlindIndex, emailBlindIndex),
+            columns: { id: true, platformInstructorGrantedAt: true },
+          });
+          if (!user) throw new Error("User identity conflict was not readable after insert");
+        }
+      }
+      if (!platformInstructorGrantCreated && user.platformInstructorGrantedAt === null) {
         await tx.update(users).set({
           platformInstructorGrantedAt: grantedAt,
           platformInstructorGrantedBy: actorUserId,

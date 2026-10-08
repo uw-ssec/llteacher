@@ -116,7 +116,9 @@ export async function allowedDomainsForCourse(db: Db, scope: CourseScope): Promi
  *  the person" half of provisioning, which the platform-instructor grant
  *  (repositories/users.ts, courseless -- no course to enroll into) also
  *  needs. #86's one-pipeline rule applied one layer down: two callers must
- *  not each reimplement "create a pending user by email". */
+ *  not each reimplement "create a pending user by email". The insert is
+ *  conflict-safe and re-reads the winner, so overlapping grants/imports do
+ *  not turn the email blind-index uniqueness guarantee into a 500. */
 export async function findOrCreatePendingUser(
   db: Db,
   cipher: IdentityCipher,
@@ -148,8 +150,16 @@ export async function findOrCreatePendingUser(
         : {}),
       isPending: true,
     })
+    .onConflictDoNothing({ target: users.emailBlindIndex })
     .returning({ id: users.id });
-  return created!;
+  if (created) return created;
+
+  const raced = await db.query.users.findFirst({
+    where: eq(users.emailBlindIndex, emailBlindIndex),
+    columns: { id: true },
+  });
+  if (!raced) throw new Error("User identity conflict was not readable after insert");
+  return raced;
 }
 
 export async function upsertCourseMember(

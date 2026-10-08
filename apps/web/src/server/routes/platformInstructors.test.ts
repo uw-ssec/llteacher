@@ -10,11 +10,21 @@ const TEST_ENV = { DATABASE_URL: "ignored", BOOTSTRAP_ALLOWED_DOMAINS: "example.
 
 const grantPlatformInstructorMock = vi.fn();
 const listPlatformInstructorsMock = vi.fn();
+const getDeploymentOrganizationMock = vi.fn();
+const auditBestEffortMock = vi.fn();
 vi.mock("../repositories/users", () => ({
   grantPlatformInstructor: (...a: unknown[]) => grantPlatformInstructorMock(...a),
 }));
 vi.mock("../repositories/platformListings", () => ({
   listPlatformInstructors: (...a: unknown[]) => listPlatformInstructorsMock(...a),
+}));
+vi.mock("../repositories/organizations", () => ({
+  getDeploymentOrganization: (...a: unknown[]) => getDeploymentOrganizationMock(...a),
+}));
+vi.mock("../utils/audit", () => ({
+  AUDIT_ACTIONS: { PLATFORM_INSTRUCTOR_GRANTED: "user.platform_instructor_granted" },
+  AUDIT_TARGET_TYPES: { USER: "user" },
+  auditBestEffort: (...a: unknown[]) => auditBestEffortMock(...a),
 }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 vi.mock("../../lib/secrets-loader", () => ({ loadIdentityCipherKeys: async () => ({}) }));
@@ -51,8 +61,11 @@ beforeEach(() => {
     status: "granted",
     userId: "u-new",
     grantedAt: new Date("2026-01-01T00:00:00Z"),
+    grantCreated: true,
   });
   listPlatformInstructorsMock.mockReset().mockResolvedValue([]);
+  getDeploymentOrganizationMock.mockReset().mockResolvedValue({ id: "org-1" });
+  auditBestEffortMock.mockReset().mockResolvedValue(undefined);
 });
 
 describe("POST /api/platform/instructors (#316)", () => {
@@ -71,6 +84,29 @@ describe("POST /api/platform/instructors (#316)", () => {
       "new-instructor@uw.edu",
       "example.edu",
     );
+    expect(auditBestEffortMock).toHaveBeenCalledWith(expect.anything(), ["org-1"], {
+      actorUserId: "u1",
+      action: "user.platform_instructor_granted",
+      targetType: "user",
+      targetId: "u-new",
+    });
+  });
+
+  it("does not invent another grant audit when access already existed", async () => {
+    grantPlatformInstructorMock.mockResolvedValue({
+      status: "granted",
+      userId: "u-existing",
+      grantedAt: new Date("2026-01-01T00:00:00Z"),
+      grantCreated: false,
+    });
+    expect((await post(superAdmin(), { email: "existing@uw.edu" })).status).toBe(200);
+    expect(auditBestEffortMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps a pre-institution grant successful when there is no org scope to audit yet", async () => {
+    getDeploymentOrganizationMock.mockResolvedValue(null);
+    expect((await post(superAdmin(), { email: "early@example.edu" })).status).toBe(200);
+    expect(auditBestEffortMock).not.toHaveBeenCalled();
   });
 
   it("passes a non-UW deployment allowlist to first-run instructor provisioning", async () => {

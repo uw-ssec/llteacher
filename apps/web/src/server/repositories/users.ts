@@ -112,8 +112,8 @@ export async function getUserActivationState(
 
 /** #316: grants (or re-confirms) courseless, platform-wide "recognized as
  *  an instructor" status -- see the users schema's own doc comment for why
- *  this is columns on the row rather than a course_memberships row or an
- *  audit_events entry. Reuses findOrCreatePendingUser (roster.ts), the same
+ *  these columns are the durable authority rather than a course_memberships
+ *  or audit_events row. Reuses findOrCreatePendingUser (roster.ts), the same
  *  "find or create a pending user by email" pipeline upsertCourseMember
  *  uses, so a never-logged-in person can be granted this exactly like they
  *  can be added to a course.
@@ -121,10 +121,10 @@ export async function getUserActivationState(
  *  Domain-validated against the deployment's singleton organization, or the
  *  configured bootstrap domains before that organization exists.
  *
- *  Idempotent: granting an already-granted user updates grantedBy/grantedAt
- *  to this call rather than erroring, so re-running it is never a mistake. */
+ *  Idempotent: re-granting keeps the original grantedBy/grantedAt provenance
+ *  and returns the stored grant rather than rewriting its history. */
 export type GrantPlatformInstructorResult =
-  | { status: "granted"; userId: string; grantedAt: Date }
+  | { status: "granted"; userId: string; grantedAt: Date; grantCreated: boolean }
   | { status: "invalid_email" | "disallowed_domain"; message: string };
 
 export async function allowedDomainsForPlatformInstructor(
@@ -162,12 +162,39 @@ export async function grantPlatformInstructor(
 
   const user = await findOrCreatePendingUser(db, cipher, email);
   const grantedAt = new Date();
-  await db
+  const [createdGrant] = await db
     .update(users)
-    .set({ platformInstructorGrantedAt: grantedAt, platformInstructorGrantedBy: granterUserId })
-    .where(eq(users.id, user.id));
+    .set({
+      platformInstructorGrantedAt: grantedAt,
+      platformInstructorGrantedBy: granterUserId,
+      updatedAt: grantedAt,
+    })
+    .where(and(eq(users.id, user.id), isNull(users.platformInstructorGrantedAt)))
+    .returning({ grantedAt: users.platformInstructorGrantedAt });
 
-  return { status: "granted", userId: user.id, grantedAt };
+  if (createdGrant?.grantedAt) {
+    return {
+      status: "granted",
+      userId: user.id,
+      grantedAt: createdGrant.grantedAt,
+      grantCreated: true,
+    };
+  }
+
+  const existingGrant = await db.query.users.findFirst({
+    where: eq(users.id, user.id),
+    columns: { platformInstructorGrantedAt: true },
+  });
+  if (!existingGrant?.platformInstructorGrantedAt) {
+    throw new Error("Platform instructor grant was not readable after update");
+  }
+
+  return {
+    status: "granted",
+    userId: user.id,
+    grantedAt: existingGrant.platformInstructorGrantedAt,
+    grantCreated: false,
+  };
 }
 
 /** Like getOrgScopesForUser, but also counts a membership dropped

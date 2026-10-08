@@ -133,13 +133,13 @@ export type AddCourseMemberResponse = ProvisionResult;
 
 /* -- #316: courseless platform-instructor grant ----------------------------- */
 
-import type { GrantPlatformInstructorResult } from "../server/repositories/users";
-
 export interface GrantPlatformInstructorBody {
   email: string;
 }
 
-export type GrantPlatformInstructorResponse = GrantPlatformInstructorResult;
+export type GrantPlatformInstructorResponse =
+  | { status: "granted"; userId: string; grantedAt: Date }
+  | { status: "invalid_email" | "disallowed_domain"; message: string };
 
 /* -- #31 / #98 / #170: LLM configuration authoring ------------------------- */
 
