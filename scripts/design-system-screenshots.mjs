@@ -15,6 +15,15 @@ const messages = [
   { id: "message-ai", seq: 1, role: "assistant", parts: [{ type: "text", text: "A **random variable** assigns a numerical value to each outcome. What values could the number of heads take when you toss two coins?" }], createdAt: "2026-10-06T12:00:00Z" },
   { id: "message-student", seq: 2, role: "user", parts: [{ type: "text", text: "It could be 0, 1, or 2 heads." }], createdAt: "2026-10-06T12:01:00Z" },
 ];
+// #367: a course instructor who is NOT an Org Admin sees the shared pool as
+// reference (View, Copy to this course) and their own course's configs as
+// editable; a shared config opens read-only with its test panel still live.
+const configBase = { provider: "openrouter", temperature: 0.7, maxCompletionTokens: 1000, fallbackLlmConfigId: null, isActive: true, knowledgeEnabled: true, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z" };
+const llmConfigs = [
+  { ...configBase, id: "cfg-shared-default", recordNumber: 1, name: "Socratic default", modelName: "gpt-5.3-codex", basePrompt: "You are a patient Socratic tutor. Ask one guiding question at a time and never give the final answer.", isDefault: true, scopeCourseId: null },
+  { ...configBase, id: "cfg-shared-free", recordNumber: 2, name: "Free tier", modelName: "google/gemma-4-31b-it:free", basePrompt: "Short answers, plain language.", isDefault: false, scopeCourseId: null },
+  { ...configBase, id: "cfg-course-own", recordNumber: 3, name: "STATS 311 R-heavy tutor", modelName: "gpt-5.3-codex", basePrompt: "Prefer worked R examples the student runs themselves.", isDefault: false, scopeCourseId: course.id },
+];
 const browser = await chromium.launch();
 async function expectInsideViewport(page, locator) {
   await expect(locator).toBeVisible();
@@ -28,7 +37,7 @@ async function expectInsideViewport(page, locator) {
 }
 try {
   for (const viewport of [{ width: 1440, height: 1000 }, { width: 768, height: 1024 }, { width: 390, height: 844 }, { width: 320, height: 568 }]) {
-    for (const screen of ["student", "profile", "admin", "admin-form", "signed-out", "components", "components-dark"]) {
+    for (const screen of ["student", "profile", "admin", "admin-form", "admin-configs", "admin-config-shared", "signed-out", "components", "components-dark"]) {
       const context = await browser.newContext({ viewport, reducedMotion: "reduce", locale: "en-US", timezoneId: "UTC", permissions: ["local-network-access"] });
       const page = await context.newPage();
       const errors = [];
@@ -53,7 +62,9 @@ try {
         } else if (pathname === "/api/hello") body = { message: "ok", ping_id: "visual-review" };
         else if (pathname === "/api/student/homeworks") body = { homeworks: [{ ...homework, courseId: course.id, courseName: course.title, sections }] };
         else if (pathname.endsWith("/homeworks")) body = { homeworks: [homework] };
-        else if (pathname.endsWith("/llm-configs")) body = { configs: [] };
+        else if (pathname.endsWith("/llm-configs")) {
+          body = screen.startsWith("admin-config") ? { configs: llmConfigs, canManageOrgPool: false } : { configs: [], canManageOrgPool: false };
+        }
         else if (pathname.endsWith("/messages")) body = messages;
         else if (pathname.endsWith("/hints")) body = { hints: [] };
         else if (pathname === "/api/conversations") body = { items: [], nextCursor: null };
@@ -71,6 +82,21 @@ try {
         await page.getByRole("heading", { name: "Shared component states" }).waitFor();
         await page.getByRole("button", { name: /account/i }).click();
       }
+      if (screen.startsWith("admin-config")) {
+        await page.getByRole("button", { name: /LLM configs/ }).first().click();
+        await page.getByRole("heading", { name: "Tutor configurations" }).waitFor();
+        await expect(page.getByRole("button", { name: "Copy Free tier to this course" })).toBeVisible();
+        await expect(page.getByRole("button", { name: "Deactivate Free tier" })).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "Deactivate STATS 311 R-heavy tutor" })).toBeVisible();
+      }
+      if (screen === "admin-config-shared") {
+        await page.getByRole("button", { name: "View" }).nth(1).click();
+        await page.getByRole("heading", { name: "Shared configuration" }).waitFor();
+        if (!(await page.getByLabel("Name").evaluate((element) => element.matches(":disabled")))) {
+          throw new Error("admin-config-shared: shared configuration is editable for a non-admin");
+        }
+        await expect(page.getByRole("button", { name: /Save changes/ })).toHaveCount(0);
+      }
       if (screen === "admin-form") {
         await page.getByRole("button", { name: "New homework", exact: true }).click();
         await page.getByRole("button", { name: /add section/i }).waitFor();
@@ -84,7 +110,23 @@ try {
       if (screen.startsWith("admin")) {
         await expectInsideViewport(page, page.locator(".admin-main"));
         const overflow = await page.locator(".admin-inner").evaluate((element) => element.scrollWidth > element.clientWidth);
-        if (overflow) throw new Error(`${screen}: admin content overflows horizontally`);
+        if (overflow) {
+          // Name the leaf elements past the content edge, so the failure says
+          // what to fix rather than only that something overflowed.
+          const culprits = await page.locator(".admin-inner").evaluate((inner) => {
+            const edge = inner.getBoundingClientRect().right;
+            const past = [...inner.querySelectorAll("*")].filter((element) => element.getBoundingClientRect().right > edge + 1);
+            // Deepest offenders first: a container is only listed if none of
+            // its descendants is past the edge itself.
+            const deepest = past.filter((element) => !past.some((other) => other !== element && element.contains(other)));
+            return [
+              `scrollWidth=${inner.scrollWidth} clientWidth=${inner.clientWidth}`,
+              ...deepest.slice(0, 5).map((element) =>
+                `${element.tagName.toLowerCase()}.${element.className} right=${Math.round(element.getBoundingClientRect().right)} edge=${Math.round(edge)} "${(element.textContent ?? "").trim().slice(0, 40)}"`),
+            ];
+          });
+          throw new Error(`${screen}: admin content overflows horizontally: ${culprits.join("; ")}`);
+        }
       }
       if (screen.startsWith("components")) {
         for (const [size, diameter] of [["sm", 5], ["md", 7], ["lg", 9]]) {
