@@ -4,6 +4,39 @@ import { sections, homeworks, courses, courseMemberships, sectionAnswers } from 
 import type { OrgScope, CourseScope } from "./scope";
 import { deriveHomeworkStatus, isHomeworkHidden } from "./homeworks";
 
+/* upsertSectionAnswer's refusals. Typed (they were plain Errors) so the route
+   can translate exactly these and let anything else -- a dropped connection
+   -- reach the 503 path instead of a bare catch reporting it as a refusal.
+   Kept distinct here; the route decides what to collapse. */
+
+/** The section is absent, in another org, or the caller holds no live
+ *  student membership in its course. */
+export class SectionAnswerSectionNotFoundError extends Error {
+  readonly _tag = "SectionAnswerSectionNotFoundError" as const;
+  constructor() {
+    super("Section not found in this org scope");
+    this.name = "SectionAnswerSectionNotFoundError";
+  }
+}
+
+/** The section is a conversation section, not a non_interactive one. */
+export class SectionNotAnswerableError extends Error {
+  readonly _tag = "SectionNotAnswerableError" as const;
+  constructor() {
+    super("Section does not accept a direct answer");
+    this.name = "SectionNotAnswerableError";
+  }
+}
+
+/** #177: the parent homework is hidden or past its expiry. */
+export class SectionAnswerHomeworkClosedError extends Error {
+  readonly _tag = "SectionAnswerHomeworkClosedError" as const;
+  constructor() {
+    super("Homework is hidden or expired");
+    this.name = "SectionAnswerHomeworkClosedError";
+  }
+}
+
 /** #164: verifies (via the real parent chain, never trusting the caller)
  *  that sectionId resolves to a non_interactive section within scope's org
  *  before writing -- same rationale as createSubmission/submitSection's
@@ -36,13 +69,13 @@ export async function upsertSectionAnswer(db: Db, scope: OrgScope, sectionId: st
     )
     .where(and(eq(sections.id, sectionId), eq(courses.organizationId, scope)));
   if (!owned) {
-    throw new Error("Section not found in this org scope");
+    throw new SectionAnswerSectionNotFoundError();
   }
   if (owned.type !== "non_interactive") {
-    throw new Error("Section does not accept a direct answer");
+    throw new SectionNotAnswerableError();
   }
   if (isHomeworkHidden(owned)) {
-    throw new Error("Homework is hidden or expired");
+    throw new SectionAnswerHomeworkClosedError();
   }
 
   const [existing] = await db

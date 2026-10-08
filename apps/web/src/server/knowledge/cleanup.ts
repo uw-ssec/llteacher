@@ -6,7 +6,9 @@ import remarkMath from "remark-math";
 import { LLMOXIE_DEFAULT_BASE_URL } from "../../lib/ai";
 
 export const CLEANUP_MAX_CHARS = 60_000;
-export class CleanupError extends Error {}
+export class CleanupError extends Error {
+  readonly _tag = "CleanupError" as const;
+}
 const processor = unified().use(remarkParse).use(remarkGfm).use(remarkMath)
   .use(remarkStringify, { bullet: "-", fences: true });
 

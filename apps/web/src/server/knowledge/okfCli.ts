@@ -4,6 +4,7 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_STDOUT_BYTES = 4 * 1024 * 1024;
 
 export class OkfError extends Error {
+  readonly _tag = "OkfError" as const;
   constructor(
     readonly args: string[],
     readonly exitCode: number | null,

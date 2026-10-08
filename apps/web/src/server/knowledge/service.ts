@@ -25,14 +25,18 @@ export const SEARCH_LIMIT_DEFAULT = 8;
 export const SEARCH_LIMIT_MAX = 20;
 
 export class ConceptIdError extends Error {
+  readonly _tag = "ConceptIdError" as const;
   constructor(message: string) {
     super(message);
     this.name = "ConceptIdError";
   }
 }
-export class ConceptConflictError extends Error {}
+export class ConceptConflictError extends Error {
+  readonly _tag = "ConceptConflictError" as const;
+}
 
 export class ConceptExistsError extends Error {
+  readonly _tag = "ConceptExistsError" as const;
   constructor(id: string) {
     super(`A concept already exists at ${id}`);
     this.name = "ConceptExistsError";
@@ -700,6 +704,7 @@ const serviceInstances = new Map<string, KnowledgeService>();
  *  filesystem yet). Chat already degrades to "no knowledge" on any failure
  *  here; the console's knowledge routes report it rather than a generic 503. */
 export class KnowledgeNotConfiguredError extends Error {
+  readonly _tag = "KnowledgeNotConfiguredError" as const;
   constructor() {
     super("The knowledge base is not configured: set KNOWLEDGE_ROOT to the bundle directory.");
     this.name = "KnowledgeNotConfiguredError";

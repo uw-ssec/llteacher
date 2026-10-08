@@ -247,6 +247,19 @@ export async function countActiveConversationsForOwner(
 // submissions.ts), which voids the submission in the same atomic group.
 // Tutor conversations can never have a submission (the composite FK added in
 // #128 makes that structural), so they are unaffected by this check.
+//
+// Reachable from request input: DELETE /api/conversations/:id resolves any
+// conversation the caller owns, section-kind included, so a student can
+// name their own submitted section conversation. Typed so the route answers
+// it as a refusal instead of a 503.
+export class ConversationHasSubmissionError extends Error {
+  readonly _tag = "ConversationHasSubmissionError" as const;
+  constructor() {
+    super("Conversation has a submission; use restartSectionConversation to void it (#128)");
+    this.name = "ConversationHasSubmissionError";
+  }
+}
+
 export async function softDeleteConversation(db: Db, scope: CourseScope, conversationId: string) {
   const [blocking] = await db
     .select({ id: submissions.id })
@@ -254,9 +267,7 @@ export async function softDeleteConversation(db: Db, scope: CourseScope, convers
     .innerJoin(conversations, eq(submissions.conversationId, conversations.id))
     .where(and(eq(conversations.id, conversationId), eq(conversations.courseId, scope)));
   if (blocking) {
-    throw new Error(
-      "Conversation has a submission; use restartSectionConversation to void it (#128)",
-    );
+    throw new ConversationHasSubmissionError();
   }
 
   return db

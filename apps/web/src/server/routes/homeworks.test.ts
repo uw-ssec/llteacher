@@ -10,6 +10,7 @@ import {
   updateHomeworkHideHandler,
 } from "./homeworks";
 import { auditEvents } from "../../db/schema";
+import { ContentDiffError } from "../repositories/sections";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
@@ -151,6 +152,17 @@ function buildApp(authContext: AuthContext | undefined) {
 }
 
 describe("GET /api/courses/:courseId/homeworks", () => {
+  it("answers 503 (not an empty list or 404) when the database is unreachable", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    findManyHomeworks.mockReset().mockRejectedValue(
+      Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+    );
+    const res = await buildApp(
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "student" })] }),
+    ).request("/api/courses/course-a/homeworks", {}, TEST_ENV);
+    expect(res.status).toBe(503);
+  });
+
   it("denies a non-member with 403", async () => {
     findManyHomeworks.mockReset();
     const res = await buildApp(fakeAuthContext()).request(
@@ -591,7 +603,9 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
   });
 
   it("returns 422 with a friendly message when the diff violates the order constraint", async () => {
-    updateHomeworkMock.mockReset().mockRejectedValue(new Error("duplicate order 1 in incoming sections"));
+    // A ContentDiffError, not a bare Error: the route now matches the typed
+    // refusal (Effect migration) rather than regex-sniffing any message.
+    updateHomeworkMock.mockReset().mockRejectedValue(new ContentDiffError("duplicate order 1 in incoming sections"));
     const res = await buildApp(
       fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
     ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {
@@ -601,6 +615,58 @@ describe("PATCH /api/courses/:courseId/homeworks/:homeworkId", () => {
     expect(res.status).toBe(422);
     const body = (await res.json()) as { error: string };
     expect(body.error).toMatch(/order/i);
+  });
+
+  // Previously 503: "unknown widget id ..." matched neither "order" nor
+  // "section", so the old message regex let a client-input refusal fall
+  // through to the outage path. Typed now, so it is a 422 like its siblings.
+  it("returns 422 for an unknown widget id", async () => {
+    updateHomeworkMock.mockReset().mockRejectedValue(
+      new ContentDiffError('unknown widget id "w-x" -- not part of this homework'),
+    );
+    const res = await buildApp(
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ widgets: [{ id: "w-x", prePrompt: "a", postPrompt: "b", order: 1 }] }),
+    }, TEST_ENV);
+    expect(res.status).toBe(422);
+    expect(((await res.json()) as { error: string }).error).toMatch(/unknown widget id/);
+  });
+
+  // The old regex surfaced ANY error mentioning "section" as a 422 with its
+  // raw message -- a Postgres failure included. Now only ContentDiffError
+  // is a 422; anything else is a logged 503 with the generic body.
+  it("answers an unexpected updateHomework failure with 503, not a 422 echoing its message", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    updateHomeworkMock.mockReset().mockRejectedValue(
+      new Error('duplicate key value violates unique constraint "sections_homework_order_uq"'),
+    );
+    const res = await buildApp(
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sections: [{ title: "A", content: "a", order: 1 }] }),
+    }, TEST_ENV);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "Something went wrong. Please try again later." });
+  });
+
+  // Content Postgres refuses (NOT NULL 23502, CHECK 23514, data exception
+  // 22xxx -- e.g. an unknown section type) is the client's input: 422 with a
+  // fixed message, never the driver's text and never a 503.
+  it.each(["23502", "23514", "22P02"])("answers a %s content refusal with 422 and no driver text", async (code) => {
+    updateHomeworkMock.mockReset().mockRejectedValue(
+      Object.assign(new Error('null value in column "title" of relation "sections"'), { code }),
+    );
+    const res = await buildApp(
+      fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] }),
+    ).request("/api/courses/course-a/homeworks/11111111-2222-4333-8444-555555555555", {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sections: [{ content: "a", order: 1 }] }),
+    }, TEST_ENV);
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: "Section or widget content is invalid." });
   });
 
   it("applies a valid update and returns 200", async () => {

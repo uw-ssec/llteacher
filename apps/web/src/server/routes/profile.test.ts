@@ -248,3 +248,25 @@ describe("PATCH /api/profile", () => {
     expect(updateDisplayName).not.toHaveBeenCalled();
   });
 });
+
+describe("/api/profile -- database failure", () => {
+  it("GET answers 503 when getProfileWithStats fails", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    getProfileWithStats.mockRejectedValueOnce(new Error("Connection terminated unexpectedly"));
+    const res = await buildApp(SESSION).request("/api/profile", {}, TEST_ENV);
+    expect(res.status).toBe(503);
+    consoleSpy.mockRestore();
+  });
+
+  it("PATCH answers 503 when updateDisplayName fails", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    updateDisplayName.mockRejectedValueOnce(new Error("Connection terminated unexpectedly"));
+    const res = await buildApp(SESSION).request(
+      "/api/profile",
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ displayName: "x" }) },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(503);
+    consoleSpy.mockRestore();
+  });
+});

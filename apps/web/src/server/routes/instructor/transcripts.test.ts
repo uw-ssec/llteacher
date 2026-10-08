@@ -238,6 +238,19 @@ describe("GET /api/courses/:courseId/instructor/transcripts", () => {
     );
     expect(res.status).toBe(503);
   });
+
+  // Missing key material is a deployment fault, not a request outcome: a
+  // logged 503 (the bridge's defect path), and no query runs without it.
+  it("answers 503 and runs no query when the identity-cipher keys are missing", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await buildApp(instructor()).request(
+      `/api/courses/${COURSE}/instructor/transcripts`,
+      {},
+      { ...TEST_ENV, ENCRYPTION_KEY: "" } as Env,
+    );
+    expect(res.status).toBe(503);
+    expect(listMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("GET /api/courses/:courseId/instructor/transcripts/:conversationId — access matrix (#29, #246)", () => {

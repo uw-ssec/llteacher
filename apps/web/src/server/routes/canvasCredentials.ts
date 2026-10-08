@@ -14,7 +14,7 @@
    -------------------------------------------------------------------------- */
 
 import { type Context } from "hono";
-import { makeDb } from "../../db/client";
+import { Effect } from "effect";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { CanvasRateLimitedError, validateCanvasToken } from "../../lib/canvas-api";
@@ -31,20 +31,39 @@ import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { OrgScope } from "../repositories/scope";
 import type { CanvasCredentialBody } from "../../shared/types";
+import { BadRequest, DatabaseError, Forbidden, NotFound } from "../effect/errors";
+import { effectHandler } from "../effect/http";
+import { external, query, type Database } from "../effect/services";
 
 const TOKEN_MAX = 4_000;
 const BASE_URL_MAX = 500;
 
-async function orgScopeForInstructor(
+type InstructorOrgCtx = { scope: OrgScope; courseId: string; authContext: AuthContext };
+
+function orgScopeForInstructor(
   c: Context<AppEnv>,
-): Promise<{ scope: OrgScope; courseId: string; authContext: AuthContext } | null> {
-  const courseId = c.req.param("courseId");
-  const authContext = c.get("authContext") as AuthContext | undefined;
-  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) return null;
-  const db = makeDb(c.env.DATABASE_URL);
-  const scope = await getOrgScopeForCourse(db, courseId);
-  return scope ? { scope, courseId, authContext } : null;
+): Effect.Effect<InstructorOrgCtx, Forbidden | DatabaseError, Database> {
+  return Effect.gen(function* () {
+    const denied = () => new Forbidden({ message: "Instructor access denied" });
+    const courseId = c.req.param("courseId");
+    const authContext = c.get("authContext") as AuthContext | undefined;
+    if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) return yield* denied();
+    const scope = yield* query("getOrgScopeForCourse", (db) => getOrgScopeForCourse(db, courseId));
+    if (!scope) return yield* denied();
+    return { scope, courseId, authContext };
+  });
 }
+
+/** The identity cipher the stored token is encrypted under. Missing or
+ *  malformed ENCRYPTION_KEY/BLIND_INDEX_KEY is a deployment fault, not a
+ *  request outcome: it is a defect, logged and answered with the generic
+ *  503 (as app.onError answered the throw before). A token that fails to
+ *  decrypt under a valid key surfaces from inside the repository call as a
+ *  DatabaseError -- also 503, never a "no token on file" 404. */
+const loadCipher = (env: Env) =>
+  Effect.promise(async () => new IdentityCipher(await loadIdentityCipherKeys(env)));
+
+const NO_TOKEN_MESSAGE = "No Canvas token is on file for this organization.";
 
 /** Rejects anything that isn't an https URL with no path -- the base URL
  *  is used to build every subsequent Canvas API request
@@ -112,129 +131,146 @@ function parseExpiresAt(raw: unknown): { expiresAt: Date | null } | { error: str
   return { expiresAt: parsed };
 }
 
-export async function getCanvasCredentialHandler(c: Context<AppEnv>) {
-  const ctx = await orgScopeForInstructor(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+export const getCanvasCredentialHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* orgScopeForInstructor(c);
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
-  const credential = await getCanvasCredentialSummary(db, cipher, ctx.scope);
+  const cipher = yield* loadCipher(c.env);
+  const credential = yield* query(
+    "getCanvasCredentialSummary",
+    (db) => getCanvasCredentialSummary(db, cipher, ctx.scope),
+  );
   return c.json({ credential });
-}
+}));
 
-export async function setCanvasCredentialHandler(c: Context<AppEnv>) {
-  const ctx = await orgScopeForInstructor(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+export const setCanvasCredentialHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* orgScopeForInstructor(c);
 
-  let body: CanvasCredentialBody;
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+  const body = yield* Effect.tryPromise({
+    try: () => c.req.json<CanvasCredentialBody>(),
+    catch: () => new BadRequest({ message: "Request body must be valid JSON" }),
+  });
   const token = typeof body.token === "string" ? body.token.trim() : "";
-  if (!token) return c.json({ error: "Paste your Canvas API token." }, 400);
-  if (token.length > TOKEN_MAX) return c.json({ error: "That token is longer than expected. Check what you pasted." }, 400);
+  if (!token) return yield* new BadRequest({ message: "Paste your Canvas API token." });
+  if (token.length > TOKEN_MAX) {
+    return yield* new BadRequest({ message: "That token is longer than expected. Check what you pasted." });
+  }
 
   const baseUrlResult = parseCanvasBaseUrl(body.canvasBaseUrl);
-  if ("error" in baseUrlResult) return c.json({ error: baseUrlResult.error }, 400);
+  if ("error" in baseUrlResult) return yield* new BadRequest({ message: baseUrlResult.error });
   const expiresAtResult = parseExpiresAt(body.expiresAt);
-  if ("error" in expiresAtResult) return c.json({ error: expiresAtResult.error }, 400);
+  if ("error" in expiresAtResult) return yield* new BadRequest({ message: expiresAtResult.error });
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
+  const cipher = yield* loadCipher(c.env);
   // Read-before-write, purely to pick the right audit action (#73: "set" vs
   // "replace" are distinguishable log entries) -- setCanvasCredential's own
   // upsert is what actually decides create-vs-update at the database level.
-  const existed = (await getCanvasCredentialSummary(db, cipher, ctx.scope)) !== null;
-  await setCanvasCredential(db, cipher, ctx.scope, {
-    token,
-    canvasBaseUrl: baseUrlResult.baseUrl,
-    expiresAt: expiresAtResult.expiresAt,
-  });
+  const existed =
+    (yield* query("getCanvasCredentialSummary", (db) => getCanvasCredentialSummary(db, cipher, ctx.scope))) !==
+    null;
+  yield* query("setCanvasCredential", (db) =>
+    setCanvasCredential(db, cipher, ctx.scope, {
+      token,
+      canvasBaseUrl: baseUrlResult.baseUrl,
+      expiresAt: expiresAtResult.expiresAt,
+    }),
+  );
 
-  await auditCredentialChange(
-    c,
+  yield* auditCredentialChange(
     ctx,
     existed ? AUDIT_ACTIONS.CANVAS_TOKEN_REPLACED : AUDIT_ACTIONS.CANVAS_TOKEN_SET,
     { canvasBaseUrl: baseUrlResult.baseUrl },
   );
 
-  const credential = await getCanvasCredentialSummary(db, cipher, ctx.scope);
+  const credential = yield* query(
+    "getCanvasCredentialSummary",
+    (db) => getCanvasCredentialSummary(db, cipher, ctx.scope),
+  );
   return c.json({ credential });
-}
+}));
 
-export async function deleteCanvasCredentialHandler(c: Context<AppEnv>) {
-  const ctx = await orgScopeForInstructor(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+export const deleteCanvasCredentialHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* orgScopeForInstructor(c);
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const result = await deleteCanvasCredential(db, ctx.scope);
-  if (!result.deleted) {
-    return c.json({ error: "No Canvas token is on file for this organization." }, 404);
-  }
+  const result = yield* query("deleteCanvasCredential", (db) => deleteCanvasCredential(db, ctx.scope));
+  if (!result.deleted) return yield* new NotFound({ message: NO_TOKEN_MESSAGE });
 
-  await auditCredentialChange(c, ctx, AUDIT_ACTIONS.CANVAS_TOKEN_DELETED, {});
+  yield* auditCredentialChange(ctx, AUDIT_ACTIONS.CANVAS_TOKEN_DELETED, {});
   return c.json({ credential: null });
-}
+}));
 
 /** #73's "Validate" button: the cheapest real Canvas call this token can
  *  make. Reports ok:false (200) rather than an error status for an
  *  ordinary "this token doesn't work" outcome -- same reasoning as
  *  testLlmConfigHandler's own 200/ok:false shape: the *request* succeeded
- *  and produced a result the instructor needs to read. */
-export async function validateCanvasCredentialHandler(c: Context<AppEnv>) {
-  const ctx = await orgScopeForInstructor(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+ *  and produced a result the instructor needs to read. That includes
+ *  Canvas itself being unreachable or rate-limiting: those are results
+ *  about the instance URL/token the instructor is checking, so they are
+ *  answered 200 ok:false too, never the generic 503. */
+export const validateCanvasCredentialHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* orgScopeForInstructor(c);
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
-  const decrypted = await getDecryptedCanvasCredential(db, cipher, ctx.scope);
-  if (!decrypted) {
-    return c.json({ error: "No Canvas token is on file for this organization." }, 404);
-  }
+  const cipher = yield* loadCipher(c.env);
+  const decrypted = yield* query(
+    "getDecryptedCanvasCredential",
+    (db) => getDecryptedCanvasCredential(db, cipher, ctx.scope),
+  );
+  if (!decrypted) return yield* new NotFound({ message: NO_TOKEN_MESSAGE });
 
-  let result;
-  try {
-    result = await validateCanvasToken(decrypted.canvasBaseUrl, decrypted.token);
-  } catch (err) {
-    logServerError("validateCanvasCredentialHandler", err);
-    // #11 (compatibility review, PR #457): distinct from the generic
-    // unreachable-instance message below -- a rate limit means the token
-    // and instance are both fine, just to try again shortly.
-    if (err instanceof CanvasRateLimitedError) {
-      return c.json({ ok: false, message: "Canvas is rate-limiting this request. Wait a moment and try again." }, 200);
-    }
-    return c.json(
-      { ok: false, message: "Could not reach Canvas. Check the instance URL and try again." },
-      200,
-    );
-  }
+  const outcome = yield* external(
+    "canvas",
+    "validateCanvasToken",
+    () => validateCanvasToken(decrypted.canvasBaseUrl, decrypted.token),
+    [CanvasRateLimitedError],
+  ).pipe(
+    Effect.map((result) => ({ result })),
+    Effect.catchTags({
+      // #11 (compatibility review, PR #457): distinct from the generic
+      // unreachable-instance message below -- a rate limit means the token
+      // and instance are both fine, just to try again shortly.
+      CanvasRateLimitedError: (err) => {
+        logServerError("validateCanvasCredentialHandler", err);
+        return Effect.succeed({
+          response: c.json({ ok: false, message: "Canvas is rate-limiting this request. Wait a moment and try again." }, 200),
+        });
+      },
+      ExternalServiceError: (err) => {
+        logServerError("validateCanvasCredentialHandler", err.cause);
+        return Effect.succeed({
+          response: c.json(
+            { ok: false, message: "Could not reach Canvas. Check the instance URL and try again." },
+            200,
+          ),
+        });
+      },
+    }),
+  );
+  if ("response" in outcome) return outcome.response;
+  const { result } = outcome;
 
-  await auditCredentialChange(c, ctx, AUDIT_ACTIONS.CANVAS_TOKEN_VALIDATED, { ok: result.ok });
+  yield* auditCredentialChange(ctx, AUDIT_ACTIONS.CANVAS_TOKEN_VALIDATED, { ok: result.ok });
 
   if (!result.ok) return c.json({ ok: false, message: result.message });
   return c.json({ ok: true, canvasUserId: result.canvasUserId, name: result.name });
-}
+}));
 
 /** Best-effort (#147), scoped to the course's org. Never includes the
- *  token itself -- callers pass only non-secret metadata. */
-async function auditCredentialChange(
-  c: Context<AppEnv>,
-  ctx: { scope: OrgScope; courseId: string; authContext: AuthContext },
+ *  token itself -- callers pass only non-secret metadata. A DatabaseError
+ *  here is logged and swallowed: an audit outage must not fail a change
+ *  that already landed. */
+function auditCredentialChange(
+  ctx: InstructorOrgCtx,
   action: string,
   metadata: Record<string, unknown>,
-): Promise<void> {
-  try {
-    const db = makeDb(c.env.DATABASE_URL);
-    await auditBestEffort(db, [ctx.scope], {
+): Effect.Effect<void, never, Database> {
+  return query("auditBestEffort", (db) =>
+    auditBestEffort(db, [ctx.scope], {
       actorUserId: ctx.authContext.session.userId,
       action,
       targetType: AUDIT_TARGET_TYPES.CREDENTIAL,
       targetId: ctx.scope,
       requestMetadata: { courseId: ctx.courseId, ...metadata },
-    });
-  } catch (err) {
-    logServerError("auditCredentialChange", err);
-  }
+    }),
+  ).pipe(
+    Effect.catchTag("DatabaseError", (err) => Effect.sync(() => logServerError("auditCredentialChange", err.cause))),
+  );
 }

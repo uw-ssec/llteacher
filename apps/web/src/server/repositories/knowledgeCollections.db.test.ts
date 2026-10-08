@@ -6,6 +6,7 @@ import { unsafeCourseScope, type CourseScope } from "./scope";
 import { createDocument } from "./knowledgeDocuments";
 import {
   attachCollection,
+  CollectionNameExistsError,
   createCollection,
   deleteCollection,
   getCollectionItems,
@@ -15,6 +16,7 @@ import {
   resolveForTarget,
   sectionBelongsToCourse,
   setCollectionItems,
+  updateCollection,
 } from "./knowledgeCollections";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -110,6 +112,17 @@ describe.skipIf(!DATABASE_URL)("knowledgeCollections repository", () => {
   it("does not list another course's collections", async () => {
     await createCollection(db, courseA, { name: "A only", createdById: membershipA });
     expect((await listCollections(db, courseB)).map((c) => c.name)).not.toContain("A only");
+  });
+
+  it("refuses a duplicate name, on create and on rename, with CollectionNameExistsError", async () => {
+    await createCollection(db, courseA, { name: "Taken", createdById: membershipA });
+    await expect(createCollection(db, courseA, { name: "Taken", createdById: membershipA }))
+      .rejects.toBeInstanceOf(CollectionNameExistsError);
+    const other = await createCollection(db, courseA, { name: "Free", createdById: membershipA });
+    await expect(updateCollection(db, courseA, other.id, { name: "Taken" }))
+      .rejects.toBeInstanceOf(CollectionNameExistsError);
+    // Names are unique per course, not globally.
+    await expect(createCollection(db, courseB, { name: "Taken", createdById: membershipA })).resolves.toBeTruthy();
   });
 
   it("resolves a directory item to its subtree, live", async () => {

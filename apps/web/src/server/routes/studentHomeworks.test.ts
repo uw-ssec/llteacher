@@ -45,3 +45,15 @@ describe("GET /api/student/homeworks", () => {
     expect(body.homeworks).toHaveLength(1);
   });
 });
+
+describe("GET /api/student/homeworks -- database failure", () => {
+  it("answers 503 when getStudentHomeworksForUser fails", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    getStudentHomeworksForUser.mockReset().mockRejectedValue(new Error("Connection terminated unexpectedly"));
+    const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
+      "/api/student/homeworks", {}, TEST_ENV,
+    );
+    expect(res.status).toBe(503);
+    consoleSpy.mockRestore();
+  });
+});

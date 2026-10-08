@@ -45,7 +45,10 @@ vi.mock("./repositories/conversations", () => ({
   // to "no active conversations" so the #141 test below (the only test in
   // this file that reaches POST /api/conversations) doesn't need to know
   // about the cap to exercise the TenancyMismatchError mapping it's after.
-  countActiveConversationsForOwner: vi.fn().mockResolvedValue(0),
+  // A plain async function, not vi.fn().mockResolvedValue: vitest.config's
+  // restoreMocks resets a vi.fn() to return undefined before each test, and
+  // the Effect handler's query() needs a real promise back.
+  countActiveConversationsForOwner: async () => 0,
   updateConversationTitle: vi.fn(),
   softDeleteConversation: vi.fn(),
   getConversationById: vi.fn(),
@@ -56,7 +59,7 @@ vi.mock("./repositories/conversations", () => ({
 // #219/#265 counter) -- stubbed the same way chat.test.ts stubs it, real db
 // calls would throw against this file's fake `db` (no `.insert`/`.batch`).
 vi.mock("./repositories/rateLimits", () => ({
-  reserveRateLimitSlot: vi.fn().mockResolvedValue(1),
+  reserveRateLimitSlot: async () => 1,
   RATE_LIMIT_MAX_PER_MINUTE: 20,
   RATE_LIMIT_WINDOW_MS: 60_000,
 }));

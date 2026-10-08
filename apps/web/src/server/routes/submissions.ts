@@ -1,5 +1,4 @@
-import { type Context } from "hono";
-import { makeDb } from "../../db/client";
+import { Effect } from "effect";
 import { UUID_RE } from "../utils/uuid";
 import {
   submitSection,
@@ -14,13 +13,19 @@ import { getOrgScopesForUser } from "../repositories/users";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
-import type { AuthContext } from "../middleware/roles";
-import type { AppEnv } from "../context";
 import type { SubmissionResponse } from "../../shared/types";
+import { Conflict, Forbidden, NotFound } from "../effect/errors";
+import { effectHandler } from "../effect/http";
+import { query } from "../effect/services";
 
-export async function submitSectionHandler(c: Context<AppEnv>) {
+/** The uniform refusal both submitSection ownership refusals collapse to --
+ *  see submitSectionHandler's own comments for why they must match. */
+const notAccessible = () => new Forbidden({ message: "Conversation not found or not accessible" });
+const homeworkNotFound = () => new NotFound({ message: "Homework not found" });
+
+export const submitSectionHandler = effectHandler((c) => Effect.gen(function* () {
   const conversationId = c.req.param("id");
-  const authContext = c.get("authContext") as AuthContext | undefined;
+  const authContext = c.get("authContext");
 
   // requireRole(["student"]) already verified authContext exists and has the
   // student role when this handler is reached via the guarded production
@@ -29,7 +34,7 @@ export async function submitSectionHandler(c: Context<AppEnv>) {
   // even if reached unguarded, rather than throwing past this point (e.g.
   // on the getOrgScopesForUser call below) into the generic 503 handler.
   if (!authContext || !authContext.hasRole("student")) {
-    return c.json({ error: "Insufficient permissions" }, 403);
+    return yield* new Forbidden({ message: "Insufficient permissions" });
   }
 
   // #267 fixed this class of bug on every other `:id` route in the app --
@@ -45,10 +50,9 @@ export async function submitSectionHandler(c: Context<AppEnv>) {
   // distinct status or message for a malformed id would reopen that split
   // from the other side.
   if (!conversationId || !UUID_RE.test(conversationId)) {
-    return c.json({ error: "Conversation not found or not accessible" }, 403);
+    return yield* notAccessible();
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
   // A student's conversation belongs to exactly one org via its course;
   // getOrgScopesForUser (existing, repositories/users.ts) returns every org
   // scope reachable through the caller's own non-dropped memberships --
@@ -56,53 +60,53 @@ export async function submitSectionHandler(c: Context<AppEnv>) {
   // actually narrows this to the right one, this is just picking an org to
   // scope the query by (a student only ever belongs to one org in the
   // current single-org-per-user model this repo assumes elsewhere).
-  const orgScopes = await getOrgScopesForUser(db, authContext.session.userId);
+  const orgScopes = yield* query(
+    "getOrgScopesForUser",
+    (db) => getOrgScopesForUser(db, authContext.session.userId),
+  );
   const orgScope = orgScopes[0];
-  if (!orgScope) return c.json({ error: "No organization membership found" }, 403);
+  if (!orgScope) return yield* new Forbidden({ message: "No organization membership found" });
 
-  try {
-    const result = await submitSection(db, orgScope, conversationId, authContext.session.userId);
-    const body: SubmissionResponse = {
-      id: result.id,
-      conversationId: result.conversationId,
-      submittedAt: result.submittedAt.toISOString(),
-      isResubmission: result.isResubmission,
-    };
-    return c.json(body, result.isResubmission ? 200 : 201);
-  } catch (err) {
+  const result = yield* query(
+    "submitSection",
+    (db) => submitSection(db, orgScope, conversationId, authContext.session.userId),
+    [
+      TeacherTestNotSubmittableError,
+      HomeworkClosedError,
+      ConversationNotSubmittableError,
+      NotSubmissionOwnerError,
+    ],
+  ).pipe(Effect.catchTags({
     // #242: the caller owns this conversation -- it is their own test run --
     // so naming the real reason leaks nothing, and "not found or not
     // accessible" would be simply false.
-    if (err instanceof TeacherTestNotSubmittableError) {
-      return c.json({ error: err.message }, 409);
-    }
+    TeacherTestNotSubmittableError: (err) => Effect.fail(new Conflict({ message: err.message })),
     // #251: the homework closing is a state the student can act on and
     // already had access to -- "not found" would send them hunting a bug
     // that isn't there.
-    if (err instanceof HomeworkClosedError) {
-      return c.json({ error: err.message }, 409);
-    }
+    HomeworkClosedError: (err) => Effect.fail(new Conflict({ message: err.message })),
     // submitSection throws these two distinctly -- deliberately mapped to the
     // same uniform 403 here rather than distinguished, so a non-owner can't
     // use a 404-vs-403 split to learn a conversation exists.
-    if (
-      err instanceof ConversationNotSubmittableError ||
-      err instanceof NotSubmissionOwnerError
-    ) {
-      return c.json({ error: "Conversation not found or not accessible" }, 403);
-    }
-    // #251: anything else is not a refusal this route knows how to translate.
-    // Rethrow so app.onError logs it and answers 503 -- the same standard
-    // #236 applied to the section-conversation handlers, which this catch
-    // was missing even after being edited for #242.
-    throw err;
-  }
-}
+    ConversationNotSubmittableError: () => Effect.fail(notAccessible()),
+    NotSubmissionOwnerError: () => Effect.fail(notAccessible()),
+  }));
+  // #251: anything else is not a refusal this route knows how to translate --
+  // a DatabaseError (effect/services.ts's query), logged and answered 503 --
+  // the same standard #236 applied to the section-conversation handlers.
+  const body: SubmissionResponse = {
+    id: result.id,
+    conversationId: result.conversationId,
+    submittedAt: result.submittedAt.toISOString(),
+    isResubmission: result.isResubmission,
+  };
+  return c.json(body, result.isResubmission ? 200 : 201);
+}));
 
-export async function getHomeworkSubmissionsHandler(c: Context<AppEnv>) {
+export const getHomeworkSubmissionsHandler = effectHandler((c) => Effect.gen(function* () {
   const courseId = c.req.param("courseId");
   const homeworkId = c.req.param("homeworkId");
-  const authContext = c.get("authContext") as AuthContext | undefined;
+  const authContext = c.get("authContext");
 
   // Guarded again here even though production routing already wraps this
   // handler in requireGraderOf() -- mirrors submitSectionHandler's own
@@ -111,17 +115,18 @@ export async function getHomeworkSubmissionsHandler(c: Context<AppEnv>) {
   // middleware) still 403s rather than throwing past this point.
   // #172: grading authority, not authoring -- a TA may read this dashboard.
   if (!authContext || !courseId || !authContext.isGraderOf(courseId)) {
-    return c.json({ error: "Grader access denied" }, 403);
+    return yield* new Forbidden({ message: "Grader access denied" });
   }
 
   const scope = courseScopeFromAuthContext(authContext, courseId);
-  if (!scope) return c.json({ error: "Course access denied" }, 403);
+  if (!scope) return yield* new Forbidden({ message: "Course access denied" });
 
-  const db = makeDb(c.env.DATABASE_URL);
   // Constructed exactly as profile.ts's getProfileHandler/patchProfileHandler
   // already do -- the one existing precedent for building a cipher from
-  // c.env at the route layer.
-  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
+  // c.env at the route layer. A missing/invalid key is a deployment fault,
+  // not a request outcome: Effect.promise makes it a defect (logged, 503),
+  // as app.onError answered it before.
+  const cipher = new IdentityCipher(yield* Effect.promise(() => loadIdentityCipherKeys(c.env)));
   // #206 (#172 re-audit, SEC-020): shape-checked before the id reaches a
   // uuid-typed column comparison. Postgres raises `invalid input syntax for
   // type uuid` on a malformed value, app.onError maps any throw to a generic
@@ -134,18 +139,21 @@ export async function getHomeworkSubmissionsHandler(c: Context<AppEnv>) {
   // message here would distinguish "malformed" from "no such row" and hand
   // back an existence oracle.
   if (!homeworkId || !UUID_RE.test(homeworkId)) {
-    return c.json({ error: "Homework not found" }, 404);
+    return yield* homeworkNotFound();
   }
 
-  const matrix = await getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId);
-  if (!matrix) return c.json({ error: "Homework not found" }, 404);
+  const matrix = yield* query(
+    "getHomeworkSubmissionsMatrix",
+    (db) => getHomeworkSubmissionsMatrix(db, scope, cipher, homeworkId),
+  );
+  if (!matrix) return yield* homeworkNotFound();
   // #172 audit (SEC-001): grading authority does not imply access to
   // unreleased content. A TA the instructor denied `can_view_drafts` must
   // not read a draft/scheduled/hidden homework's title, due date or section
   // titles here after the detail route already 404s them for it. Same 404
   // shape, so the two routes stay indistinguishable to a prober.
   if (!authContext.canViewDraftsIn(courseId) && isUnreleased(matrix.homeworkStatus)) {
-    return c.json({ error: "Homework not found" }, 404);
+    return yield* homeworkNotFound();
   }
   return c.json(matrix);
-}
+}));

@@ -9,7 +9,7 @@ import {
   SectionNotFoundError,
   SectionNotInteractiveError,
 } from "../repositories/sectionConversations";
-import { IdempotencyKeyConflictError } from "../repositories/errors";
+import { IdempotencyKeyConflictError, TenancyMismatchError } from "../repositories/errors";
 import {
   HINT_INSTRUCTION,
   DEFAULT_MARK_COMPLETE_INSTRUCTION,
@@ -132,6 +132,16 @@ let mockWarnings: unknown[] | undefined = undefined;
 // (via vi.useFakeTimers, not a real 5s wait) instead of only ever seeing
 // the fast-resolving path.
 let mockHangUsageFetch = false;
+// When set, totalUsage/response/warnings REJECT with this error -- what
+// ai@5.0.195 does (NoOutputGeneratedError) when the provider call failed
+// before any step was recorded. Pre-handled so the eager rejection is not
+// reported as unhandled before onFinish awaits it.
+let mockRejectUsageFetch: Error | undefined;
+function rejectedUsage(err: Error) {
+  const p = Promise.reject(err);
+  p.catch(() => {});
+  return p;
+}
 // #364: `fullStream` is what streamWithFallback probes to decide whether the
 // primary committed any content before failing (see that module's header for
 // why it is not `await result.response` -- against ai@5.0.195 that promise
@@ -159,9 +169,15 @@ const streamTextMock = vi.fn((_args: Record<string, unknown>) => {
     get fullStream() {
       return chunkStream(mockPrimaryStreamChunks);
     },
-    totalUsage: mockHangUsageFetch ? new Promise<never>(() => {}) : Promise.resolve(mockUsage),
-    response: mockHangUsageFetch ? new Promise<never>(() => {}) : Promise.resolve(mockResponseMeta),
-    warnings: mockHangUsageFetch ? new Promise<never>(() => {}) : Promise.resolve(mockWarnings),
+    totalUsage: mockRejectUsageFetch
+      ? rejectedUsage(mockRejectUsageFetch)
+      : mockHangUsageFetch ? new Promise<never>(() => {}) : Promise.resolve(mockUsage),
+    response: mockRejectUsageFetch
+      ? rejectedUsage(mockRejectUsageFetch)
+      : mockHangUsageFetch ? new Promise<never>(() => {}) : Promise.resolve(mockResponseMeta),
+    warnings: mockRejectUsageFetch
+      ? rejectedUsage(mockRejectUsageFetch)
+      : mockHangUsageFetch ? new Promise<never>(() => {}) : Promise.resolve(mockWarnings),
     toUIMessageStreamResponse: (opts?: {
       headers?: Record<string, string>;
       onFinish?: (event: FakeOnFinishEvent) => void | Promise<void>;
@@ -428,6 +444,7 @@ describe("POST /api/chat", () => {
     mockResponseMeta = { id: "provider-resp-1" };
     mockWarnings = undefined;
     mockHangUsageFetch = false;
+    mockRejectUsageFetch = undefined;
     startSectionConversationMock.mockReset();
     getActiveSectionConversationMock.mockReset();
     streamTextMock.mockClear();
@@ -984,19 +1001,27 @@ describe("POST /api/chat", () => {
     });
 
     // ...but on the path that DOES consume the read, the failure still
-    // escapes the handler exactly as it did when the call was awaited
-    // inline -- here into Hono's own error handler (a 500), which in
-    // production is server/index.ts's onError. The capture-and-rethrow
-    // above must not have swallowed it into a "conversation not found".
+    // surfaces -- as the typed DatabaseError the Effect bridge answers 503
+    // (the same status server/index.ts's onError gave the thrown error in
+    // production; this test app has no onError, so it used to see Hono's
+    // bare 500). The capture-and-re-raise above must not have swallowed it
+    // into a "conversation not found".
     it("still propagates a conversation-read failure on the non-429 path", async () => {
       getOwnedConversationOrNullMock.mockRejectedValue(new Error("neon blip"));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
       const res = await postChat(buildApp(fakeAuthContext()), {
         messages: [userUiMessage],
         conversationId: CONV_ID,
       });
 
-      expect(res.status).toBe(500);
+      expect(res.status).toBe(503);
+      expect(JSON.parse(errorSpy.mock.calls[0]![0] as string)).toMatchObject({
+        tag: "DatabaseError",
+        operation: "getOwnedConversationOrNull",
+        message: "neon blip",
+      });
+      errorSpy.mockRestore();
       expect(acquireConversationTurnLockMock).not.toHaveBeenCalled();
       expect(streamTextMock).not.toHaveBeenCalled();
     });
@@ -4193,6 +4218,188 @@ describe("POST /api/chat", () => {
     ]);
   });
   });
+
+  /* Effect migration: chatHandler's request phase runs as an Effect, so every
+     dependency failure is a typed DatabaseError/ExternalServiceError answered
+     with the generic 503 and logged with its classification, and every
+     refusal a repository documents is declared and translated. These pin the
+     paths that were untyped (or untested) before. */
+  describe("typed failures (Effect request phase)", () => {
+    const CONV_ID = "22222222-2222-2222-2222-222222222222";
+    const COURSE_ID = "55555555-5555-5555-5555-555555555555";
+    const SECTION_ID = "66666666-6666-6666-6666-666666666666";
+    const existingConv = {
+      id: CONV_ID,
+      ownerUserId: "u1",
+      courseId: COURSE_ID,
+      sectionId: null,
+      promptTemplateId: null,
+      isDeleted: false,
+      organizationId: "org-a",
+      courseLlmConfigId: null,
+    };
+    let errorSpy: ReturnType<typeof vi.spyOn>;
+    const loggedErrors = () =>
+      errorSpy.mock.calls.map((call) => JSON.parse(call[0] as string) as Record<string, unknown>);
+
+    beforeEach(() => {
+      errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      getOwnedConversationOrNullMock.mockResolvedValue(existingConv);
+      getLastMessagesMock.mockResolvedValue([]);
+    });
+    afterEach(() => {
+      errorSpy.mockRestore();
+    });
+
+    it("a database outage in the request phase answers the generic 503, logged as DatabaseError/unavailable", async () => {
+      reserveRateLimitSlotMock.mockRejectedValue(
+        Object.assign(new Error("connect ECONNREFUSED 10.0.0.5:5432"), { code: "ECONNREFUSED" }),
+      );
+
+      const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], conversationId: CONV_ID });
+
+      expect(res.status).toBe(503);
+      // The generic body only -- the driver's message (a host and port here)
+      // never reaches the client.
+      expect(await res.json()).toEqual({ error: "Something went wrong. Please try again later." });
+      expect(loggedErrors()).toContainEqual(
+        expect.objectContaining({ tag: "DatabaseError", operation: "reserveRateLimitSlot", reason: "unavailable" }),
+      );
+      expect(acquireConversationTurnLockMock).not.toHaveBeenCalled();
+      expect(streamTextMock).not.toHaveBeenCalled();
+    });
+
+    it("a database failure while the turn lock is held answers 503 and releases the lock exactly once", async () => {
+      getLastMessagesMock.mockRejectedValue(
+        Object.assign(new Error("terminating connection due to administrator command"), { code: "57P01" }),
+      );
+
+      const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], conversationId: CONV_ID });
+
+      expect(res.status).toBe(503);
+      expect(releaseConversationTurnLockMock).toHaveBeenCalledTimes(1);
+      expect(loggedErrors()).toContainEqual(
+        expect.objectContaining({ tag: "DatabaseError", operation: "getLastMessages", reason: "unavailable" }),
+      );
+      expect(streamTextMock).not.toHaveBeenCalled();
+    });
+
+    it("a lock release that fails on that path is logged and never replaces the 503", async () => {
+      getLastMessagesMock.mockRejectedValue(new Error("neon blip"));
+      releaseConversationTurnLockMock.mockRejectedValue(new Error("release failed too"));
+
+      const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], conversationId: CONV_ID });
+
+      expect(res.status).toBe(503);
+      expect(loggedErrors()).toContainEqual(
+        expect.objectContaining({
+          context: "chatHandler.releaseLock.onFailure",
+          message: "release failed too",
+          tag: "DatabaseError",
+          conversationId: CONV_ID,
+        }),
+      );
+    });
+
+    it("a refusal under the lock (duplicate clientMessageId) keeps its 409 body and releases the lock once", async () => {
+      appendMessageMock.mockRejectedValueOnce(
+        new IdempotencyKeyConflictError("A message with this clientMessageId already exists with different content"),
+      );
+
+      const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], conversationId: CONV_ID });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: "A message with this clientMessageId already exists with different content",
+        code: "duplicate_message",
+      });
+      expect(releaseConversationTurnLockMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("createConversation's TenancyMismatchError is the honest 404, not a 503", async () => {
+      createConversationMock.mockRejectedValue(new TenancyMismatchError("Owner is not a member of this course scope"));
+
+      const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], courseId: COURSE_ID });
+
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "Not found" });
+      expect(loggedErrors()).toEqual([]);
+    });
+
+    it("a section race whose winning conversation cannot be read back is a logged defect (503), not a refusal", async () => {
+      startSectionConversationMock.mockRejectedValue(new SectionConversationExistsError());
+      getActiveSectionConversationMock.mockResolvedValue(null);
+
+      const res = await postChat(buildApp(fakeAuthContext()), {
+        messages: [userUiMessage],
+        courseId: COURSE_ID,
+        kind: "section",
+        sectionId: SECTION_ID,
+      });
+
+      expect(res.status).toBe(503);
+      expect(loggedErrors()).toContainEqual(expect.objectContaining({ tag: "Defect" }));
+      expect(streamTextMock).not.toHaveBeenCalled();
+    });
+
+    it("a failing knowledge-instruction read degrades to the default instruction instead of failing the turn", async () => {
+      getKnowledgeInstructionMock.mockRejectedValue(new Error("neon blip"));
+      knowledgeList.mockResolvedValue([{ id: "lectures/intro", title: "Intro", type: "Lecture", description: "d" }]);
+
+      const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], conversationId: CONV_ID });
+
+      expect(res.status).toBe(200);
+      expect(streamTextMock).toHaveBeenCalledTimes(1);
+      expect(loggedErrors()).toContainEqual(
+        expect.objectContaining({
+          context: "chatHandler.knowledgeInstruction",
+          tag: "DatabaseError",
+          operation: "getKnowledgeInstruction",
+        }),
+      );
+    });
+
+    // ai@5.0.195 rejects totalUsage/response/warnings with
+    // NoOutputGeneratedError when the provider call failed outright (a
+    // network error, or a 429/5xx thrown by doStream) -- no step recorded.
+    // That rejection used to skip finalizeAssistantTurn entirely: no
+    // llm_call_logs row, and the turn lock held for LOCK_STALE_MS, so the
+    // student's Retry got a false 409 in_progress.
+    it("a rejected usage fetch still finalizes the turn (null usage, errorFlag), releasing the lock", async () => {
+      mockRejectUsageFetch = new Error("No output generated. Check the stream for errors.");
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage], conversationId: CONV_ID });
+      await capturedOnFinish!({
+        responseMessage: { id: "resp-1", role: "assistant", parts: [{ type: "step-start" }] },
+        isAborted: false,
+        finishReason: "error",
+      });
+
+      expect(finalizeAssistantTurnMock).toHaveBeenCalledWith(
+        expect.anything(),
+        CONV_ID,
+        null,
+        expect.objectContaining({
+          providerRequestId: null,
+          inputTokens: null,
+          outputTokens: null,
+          costCents: null,
+          errorFlag: true,
+        }),
+        [],
+      );
+      expect(loggedErrors()).toContainEqual(
+        expect.objectContaining({
+          context: "chatHandler.onFinish.usageFetchFailed",
+          tag: "ExternalServiceError",
+          service: "llm",
+          conversationId: CONV_ID,
+        }),
+      );
+      warnSpy.mockRestore();
+    });
+  });
 });
 
 // #80: requestHint -- the secondary, model-mediated hint path (see
@@ -4238,6 +4445,44 @@ describe("TOOLS.requestHint (#80)", () => {
       promptTemplateId: "tpl-1",
     });
     expect(result).toEqual({ status: "hint_provided", remainingHints: 4 });
+  });
+
+  // A tool throw becomes a tool-output-error whose errorText is the error's
+  // message, handed to the model and persisted with the turn -- so the
+  // driver's text must not be what is thrown.
+  it("a recordHintRequest failure is logged with its classification and reaches the model only as a fixed sentence", async () => {
+    recordHintRequestMock
+      .mockReset()
+      .mockRejectedValue(Object.assign(new Error("connect ECONNREFUSED 10.0.0.5:5432"), { code: "ECONNREFUSED" }));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const execute = TOOLS.requestHint!.execute as (
+      input: Record<string, never>,
+      options: { experimental_context?: unknown },
+    ) => Promise<unknown>;
+
+    await expect(
+      execute(
+        {},
+        {
+          experimental_context: {
+            db: {},
+            orgScope: "org-a",
+            conversationId: "conv-1",
+            sectionId: "sec-1",
+            studentId: "u1",
+            promptTemplateId: null,
+          },
+        },
+      ),
+    ).rejects.toThrow(/^The hint service is unavailable right now\.$/);
+    expect(JSON.parse(errorSpy.mock.calls[0]![0] as string)).toMatchObject({
+      context: "requestHint",
+      message: "connect ECONNREFUSED 10.0.0.5:5432",
+      conversationId: "conv-1",
+      tag: "DatabaseError",
+      reason: "unavailable",
+    });
+    errorSpy.mockRestore();
   });
 });
 

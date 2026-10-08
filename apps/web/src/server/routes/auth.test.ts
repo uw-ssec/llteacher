@@ -13,6 +13,7 @@ import {
 import { auditEvents } from "../../db/schema";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
+import { GenericServerException, OauthException } from "@workos-inc/node";
 
 const TEST_ENV = {
   APP_URL: "https://llteacher.example.edu",
@@ -496,3 +497,77 @@ function fakeAccessToken(sid = "session_fake123"): string {
 function base64UrlJson(obj: Record<string, unknown>): string {
   return Buffer.from(JSON.stringify(obj)).toString("base64url");
 }
+
+/* Effect migration: WorkOS and configuration failures, typed. */
+describe("dependency failures (Effect error channel)", () => {
+  it("answers a code WorkOS rejects (OauthException) 401 without logging it as a server error", async () => {
+    authenticateWithCode.mockRejectedValue(
+      new OauthException(400, "req_1", "invalid_grant", "The code has expired.", {}),
+    );
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { path, headers } = await loginThenBuildCallbackRequest("code=bad");
+    const res = await auth.request(path, { headers }, TEST_ENV);
+    expect(res.status).toBe(401);
+    expect(await res.text()).toBe("Sign-in failed. Please try again.");
+    expect(consoleSpy).not.toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
+  it("keeps a WorkOS outage at 401 for the browser, but logs it as a workos dependency failure", async () => {
+    authenticateWithCode.mockRejectedValue(new GenericServerException(502, "Bad gateway", {}, "req_2"));
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { path, headers } = await loginThenBuildCallbackRequest();
+    const res = await auth.request(path, { headers }, TEST_ENV);
+    expect(res.status).toBe(401);
+    expect(res.headers.get("set-cookie")).not.toContain(SESSION_COOKIE_NAME);
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+    const logged = JSON.parse(consoleSpy.mock.calls[0]![0] as string) as { service: string; operation: string };
+    expect(logged).toMatchObject({ service: "workos", operation: "authenticateWithCode" });
+    consoleSpy.mockRestore();
+  });
+
+  it("shows the sign-in-unavailable page (503 HTML) when SESSION_SECRET is missing at callback", async () => {
+    authenticateWithCode.mockResolvedValue({
+      user: { id: "workos_1", email: "cdcore@uw.edu", firstName: "Cordero" },
+      accessToken: fakeAccessToken(),
+    });
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { path, headers } = await loginThenBuildCallbackRequest();
+    const res = await auth.request(path, { headers }, { ...TEST_ENV, SESSION_SECRET: undefined } as unknown as Env);
+    expect(res.status).toBe(503);
+    expect(res.headers.get("content-type")).toMatch(/text\/html/);
+    expect(res.headers.get("set-cookie")).not.toContain(`${SESSION_COOKIE_NAME}=`);
+    expect(await res.text()).not.toMatch(/SESSION_SECRET/);
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+    consoleSpy.mockRestore();
+  });
+
+  it("shows the sign-in-unavailable page when the domain-policy lookup fails (fails closed)", async () => {
+    dbOrgFindFirstImpl = async () => {
+      throw new Error("column allowed_domains does not exist");
+    };
+    authenticateWithCode.mockResolvedValue({
+      user: { id: "workos_1", email: "cdcore@uw.edu", firstName: "Cordero" },
+      accessToken: fakeAccessToken(),
+      organizationId: "workos_org_1",
+    });
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { path, headers } = await loginThenBuildCallbackRequest();
+    const res = await auth.request(path, { headers }, TEST_ENV);
+    expect(res.status).toBe(503);
+    expect(res.headers.get("set-cookie")).not.toContain(`${SESSION_COOKIE_NAME}=`);
+    consoleSpy.mockRestore();
+  });
+
+  it("503s the login redirect when the WorkOS client cannot build an authorization URL", async () => {
+    getAuthorizationUrl.mockImplementationOnce(() => {
+      throw new Error("clientId is required");
+    });
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await auth.request("/login", {}, TEST_ENV);
+    expect(res.status).toBe(503);
+    const logged = JSON.parse(consoleSpy.mock.calls[0]![0] as string) as { service: string };
+    expect(logged.service).toBe("workos");
+    consoleSpy.mockRestore();
+  });
+});

@@ -5,6 +5,7 @@ import type { Db } from "../../db/client";
 import { organizations, courses, users, homeworks, homeworkProgressWidgets, courseMemberships } from "../../db/schema";
 import { unsafeOrgScope } from "./scope";
 import { planWidgetDiff, submitWidgetResponse, type ExistingWidget } from "./progressWidgets";
+import { ContentDiffError } from "./sections";
 
 const existing: ExistingWidget[] = [
   { id: "w1", order: 1, prePrompt: "How confident before?", postPrompt: "How confident after?" },
@@ -70,6 +71,13 @@ describe("planWidgetDiff", () => {
     expect(() =>
       planWidgetDiff(existing, [{ id: "does-not-exist", prePrompt: "x", postPrompt: "x", order: 1 }]),
     ).toThrow(/unknown widget id/i);
+  });
+
+  it("throws ContentDiffError for an unknown id and an out-of-range order", () => {
+    expect(() =>
+      planWidgetDiff(existing, [{ id: "does-not-exist", prePrompt: "x", postPrompt: "x", order: 1 }]),
+    ).toThrow(ContentDiffError);
+    expect(() => planWidgetDiff([], [{ prePrompt: "x", postPrompt: "x", order: 21 }])).toThrow(ContentDiffError);
   });
 });
 

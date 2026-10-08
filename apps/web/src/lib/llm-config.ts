@@ -46,6 +46,7 @@ export type LlmProvider = "openai" | "anthropic" | "claude_for_education" | "ope
  *  logged id the client can quote to an administrator, without leaking
  *  which org/homework/config lookup actually failed. */
 export class LLMConfigNotFoundError extends Error {
+  readonly _tag = "LLMConfigNotFoundError" as const;
   readonly referenceId: string;
   constructor() {
     const referenceId = crypto.randomUUID();
@@ -60,6 +61,7 @@ export class LLMConfigNotFoundError extends Error {
  *  set. Distinct from LLMConfigNotFoundError (no row found at all) so a
  *  route can log which failure mode actually happened. */
 export class LLMCredentialMissingError extends Error {
+  readonly _tag = "LLMCredentialMissingError" as const;
   constructor(message: string) {
     super(message);
     this.name = "LLMCredentialMissingError";
@@ -73,6 +75,7 @@ export class LLMCredentialMissingError extends Error {
  *  handle gracefully (stub/error for now)" guidance -- never a silent
  *  misroute to a different provider than what the config says. */
 export class UnsupportedLLMProviderError extends Error {
+  readonly _tag = "UnsupportedLLMProviderError" as const;
   constructor(readonly provider: string) {
     super(`LLM provider "${provider}" is not yet supported by this deployment`);
     this.name = "UnsupportedLLMProviderError";

@@ -24,6 +24,7 @@ import {
   updateCollectionHandler,
 } from "./knowledgeCollections";
 import type { AppEnv } from "../context";
+import { CollectionNameExistsError } from "../repositories/knowledgeCollections";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
 
 const COURSE_ID = "11111111-2222-4333-8444-555555555555";
@@ -52,7 +53,11 @@ const repo = {
   listDocumentsInCollections: vi.fn(),
 };
 
-vi.mock("../repositories/knowledgeCollections", () => ({
+vi.mock("../repositories/knowledgeCollections", async (importOriginal) => ({
+  // The real refusal class, so the route's catchTags sees what the
+  // repository would throw.
+  CollectionNameExistsError: (await importOriginal<typeof import("../repositories/knowledgeCollections")>())
+    .CollectionNameExistsError,
   listCollections: (...a: unknown[]) => repo.listCollections(...a),
   createCollection: (...a: unknown[]) => repo.createCollection(...a),
   updateCollection: (...a: unknown[]) => repo.updateCollection(...a),
@@ -146,9 +151,26 @@ describe("collection routes", () => {
   });
 
   it("reports a duplicate collection name as a conflict", async () => {
-    repo.createCollection.mockRejectedValue(new Error("unique violation"));
+    repo.createCollection.mockRejectedValue(new CollectionNameExistsError());
     const res = await app().request(`${base}/collections`, json({ name: "Week 1" }), TEST_ENV);
     expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "A collection with that name already exists." });
+  });
+
+  it("reports a database failure on create as 503, not as a name conflict", async () => {
+    // The handler used to answer every createCollection failure with the
+    // 409 above, so an outage told the instructor to pick another name.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    repo.createCollection.mockRejectedValue(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }));
+    const res = await app().request(`${base}/collections`, json({ name: "Week 1" }), TEST_ENV);
+    expect(res.status).toBe(503);
+  });
+
+  it("reports a rename onto a taken name as a conflict", async () => {
+    repo.updateCollection.mockRejectedValue(new CollectionNameExistsError());
+    const res = await app().request(`${base}/collections/${COL_ID}`, json({ name: "Week 2" }, "PUT"), TEST_ENV);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "A collection with that name already exists." });
   });
 
   it("updates a collection", async () => {

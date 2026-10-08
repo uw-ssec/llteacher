@@ -5,15 +5,32 @@ import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { SectionAnswerResponse } from "../../shared/types";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
+import {
+  SectionAnswerSectionNotFoundError,
+  SectionNotAnswerableError,
+  SectionAnswerHomeworkClosedError,
+} from "../repositories/sectionAnswers";
 
 const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
+/** A syntactically valid section id. These tests used to pass "sec-1", which
+ *  only reached the (mocked) repository because the handler had no UUID
+ *  guard; in production it raised Postgres's `invalid input syntax`. */
+const SECTION_ID = "11111111-2222-4333-8444-555555555555";
+const ANSWER_PATH = `/api/sections/${SECTION_ID}/answer`;
 
 const upsertSectionAnswerMock = vi.fn();
 const getSectionAnswerMock = vi.fn();
-vi.mock("../repositories/sectionAnswers", () => ({
-  upsertSectionAnswer: (...a: unknown[]) => upsertSectionAnswerMock(...a),
-  getSectionAnswer: (...a: unknown[]) => getSectionAnswerMock(...a),
-}));
+// importOriginal, not a bare factory: the handler now names the typed
+// refusal classes upsertSectionAnswer throws, and a factory that omits them
+// leaves `instanceof undefined` to throw inside query's classifier.
+vi.mock("../repositories/sectionAnswers", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../repositories/sectionAnswers")>();
+  return {
+    ...actual,
+    upsertSectionAnswer: (...a: unknown[]) => upsertSectionAnswerMock(...a),
+    getSectionAnswer: (...a: unknown[]) => getSectionAnswerMock(...a),
+  };
+});
 const getOrgScopesForUserMock = vi.fn();
 vi.mock("../repositories/users", () => ({ getOrgScopesForUser: (...a: unknown[]) => getOrgScopesForUserMock(...a) }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
@@ -30,7 +47,7 @@ function buildApp(authContext: AuthContext | undefined) {
 describe("PATCH /api/sections/:sectionId/answer", () => {
   it("denies a non-student with 403", async () => {
     const res = await buildApp(fakeAuthContext({ hasRole: () => false })).request(
-      "/api/sections/sec-1/answer",
+      ANSWER_PATH,
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: "x" }) },
       TEST_ENV,
     );
@@ -39,7 +56,7 @@ describe("PATCH /api/sections/:sectionId/answer", () => {
 
   it("returns 400 when content is missing or empty", async () => {
     const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
-      "/api/sections/sec-1/answer",
+      ANSWER_PATH,
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: "   " }) },
       TEST_ENV,
     );
@@ -53,7 +70,7 @@ describe("PATCH /api/sections/:sectionId/answer", () => {
       submittedAt: new Date("2026-01-01T00:00:00.000Z"), updatedAt: new Date("2026-01-01T00:00:00.000Z"), homeworkStatus: "active",
     });
     const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
-      "/api/sections/sec-1/answer",
+      ANSWER_PATH,
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: "my answer" }) },
       TEST_ENV,
     );
@@ -65,9 +82,9 @@ describe("PATCH /api/sections/:sectionId/answer", () => {
 
   it("maps a conversation-type-section repository error to 403", async () => {
     getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
-    upsertSectionAnswerMock.mockReset().mockRejectedValue(new Error("Section does not accept a direct answer"));
+    upsertSectionAnswerMock.mockReset().mockRejectedValue(new SectionNotAnswerableError());
     const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
-      "/api/sections/sec-1/answer",
+      ANSWER_PATH,
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: "x" }) },
       TEST_ENV,
     );
@@ -77,11 +94,75 @@ describe("PATCH /api/sections/:sectionId/answer", () => {
   it("returns 403 when the caller has no organization membership", async () => {
     getOrgScopesForUserMock.mockReset().mockResolvedValue([]);
     const res = await buildApp(fakeAuthContext({ hasRole: (r) => r === "student" })).request(
-      "/api/sections/sec-1/answer",
+      ANSWER_PATH,
       { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: "x" }) },
       TEST_ENV,
     );
     expect(res.status).toBe(403);
+  });
+});
+
+/** The refusals upsertSectionAnswer throws are now typed (they were plain
+ *  Errors behind a bare catch), so the route translates exactly them and an
+ *  outage is no longer reported as a refusal. */
+describe("PATCH /api/sections/:sectionId/answer -- typed refusals", () => {
+  const student = () => fakeAuthContext({ hasRole: (r) => r === "student" });
+  const patch = (path = ANSWER_PATH, body: string = JSON.stringify({ content: "x" })) =>
+    buildApp(student()).request(
+      path,
+      { method: "PATCH", headers: { "content-type": "application/json" }, body },
+      TEST_ENV,
+    );
+
+  it.each([
+    ["SectionAnswerSectionNotFoundError", () => new SectionAnswerSectionNotFoundError()],
+    ["SectionNotAnswerableError", () => new SectionNotAnswerableError()],
+    ["SectionAnswerHomeworkClosedError", () => new SectionAnswerHomeworkClosedError()],
+  ] as const)("collapses %s into the same uniform 403", async (_name, make) => {
+    getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
+    upsertSectionAnswerMock.mockReset().mockRejectedValue(make());
+    const res = await patch();
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "Section not found or does not accept a direct answer" });
+  });
+
+  it("answers 503, not the refusal 403, when the database fails", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    getOrgScopesForUserMock.mockReset().mockResolvedValue(["org-1"]);
+    upsertSectionAnswerMock.mockReset().mockRejectedValue(
+      Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+    );
+    const res = await patch();
+    expect(res.status).toBe(503);
+    consoleSpy.mockRestore();
+  });
+
+  it("refuses a malformed sectionId with the same 403, without touching the database", async () => {
+    getOrgScopesForUserMock.mockReset();
+    upsertSectionAnswerMock.mockReset();
+    const res = await patch("/api/sections/not-a-uuid/answer");
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "Section not found or does not accept a direct answer" });
+    expect(getOrgScopesForUserMock).not.toHaveBeenCalled();
+    expect(upsertSectionAnswerMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for a malformed JSON body", async () => {
+    const res = await patch(ANSWER_PATH, "not json");
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "Request body must be valid JSON" });
+  });
+});
+
+describe("GET .../answers/:studentId -- database failure", () => {
+  it("answers 503 when getSectionAnswer fails", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    getSectionAnswerMock.mockReset().mockRejectedValue(new Error("Connection terminated unexpectedly"));
+    const res = await buildApp(fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] })).request(
+      "/api/courses/course-a/sections/11111111-2222-4333-8444-555555555556/answers/11111111-2222-4333-8444-555555555557", {}, TEST_ENV,
+    );
+    expect(res.status).toBe(503);
+    consoleSpy.mockRestore();
   });
 });
 

@@ -1,9 +1,10 @@
 import { CLEANUP_MAX_CHARS, CleanupError, proposeCleanup } from "../knowledge/cleanup";
 import type { Context } from "hono";
+import { Effect } from "effect";
 import { z } from "zod";
 import type { AppEnv } from "../context";
 import { instructorScope } from "../utils/guards";
-import { makeDb } from "../../db/client";
+import type { CourseScope } from "../repositories/scope";
 import { getCourseTitle, getKnowledgeInstructionParts, setKnowledgeInstruction, setKnowledgeInstructionDefault } from "../repositories/courses";
 import { getOrgScopeForCourse } from "../repositories/organizations";
 import { KNOWLEDGE_INSTRUCTION } from "../../lib/prompts";
@@ -13,8 +14,11 @@ import { logServerError } from "../utils/errors";
 import { isValidConceptId } from "../knowledge/conceptId";
 import {
   ConceptConflictError, ConceptExistsError, ConceptIdError, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, isValidDirectory, knowledgeServiceFromEnv,
-  type Concept, type ConceptSummary,
+  type Concept, type ConceptSummary, type KnowledgeService,
 } from "../knowledge/service";
+import { BadRequest, Conflict, Forbidden, NotFound } from "../effect/errors";
+import { effectHandler } from "../effect/http";
+import { external, query } from "../effect/services";
 import type { DocumentLinksPayload, KnowledgeDocumentListPayload, KnowledgeDocumentPayload } from "@llteacher/ui/api";
 
 const DIR_RE = /^[a-z0-9-]+(?:\/[a-z0-9-]+)*$/;
@@ -41,161 +45,188 @@ function toSummaryPayload(c: ConceptSummary) {
 function toDocumentPayload(c: Concept): KnowledgeDocumentPayload {
   return { ...toSummaryPayload(c), body: c.body, bodyOriginal: c.bodyOriginal ?? null, frontmatter: c.frontmatter, editedAt: null };
 }
-function conceptIdParam(c: Context<AppEnv>): string | null {
+function conceptIdParam(c: Context<AppEnv>): Effect.Effect<string, BadRequest> {
   const raw = c.req.param("documentId");
-  if (!raw) return null;
-  return isValidConceptId(raw) ? raw : null;
-}
-function idError(err: unknown) {
-  return err instanceof ConceptIdError;
+  return raw && isValidConceptId(raw)
+    ? Effect.succeed(raw)
+    : Effect.fail(new BadRequest({ message: "Invalid document id." }));
 }
 
-export async function listDocumentsHandler(c: Context<AppEnv>) {
+/** instructorScope() as a typed refusal. */
+function requireInstructorScope(c: Context<AppEnv>): Effect.Effect<CourseScope, Forbidden> {
   const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-  const documents = (await knowledgeServiceFromEnv(c.env).list(scope)).map(toSummaryPayload);
+  return scope ? Effect.succeed(scope) : Effect.fail(new Forbidden({ message: "Not permitted." }));
+}
+
+type ErrorClass = abstract new (...args: any[]) => Error;
+
+/** One call to the knowledge service. Building the service is inside the
+ *  call: KnowledgeNotConfiguredError (KNOWLEDGE_ROOT unset), like an okf CLI
+ *  failure (OkfError), a write-lock timeout (WriteLockTimeoutError) or a
+ *  persistence fault, is an ExternalServiceError -- logged, answered 503. */
+function knowledge<A, const Expected extends readonly ErrorClass[] = []>(
+  c: Context<AppEnv>,
+  operation: string,
+  run: (svc: KnowledgeService) => Promise<A>,
+  expected?: Expected,
+) {
+  return external("knowledge", operation, async () => run(knowledgeServiceFromEnv(c.env)), expected);
+}
+
+export const listDocumentsHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const concepts = yield* knowledge(c, "list", (svc) => svc.list(scope));
+  const documents = concepts.map(toSummaryPayload);
   return c.json({ documents } satisfies KnowledgeDocumentListPayload);
-}
+}));
 
-export async function createDocumentHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-  const parsed = createSchema.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return c.json({ error: "Invalid document." }, 400);
+export const createDocumentHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const parsed = createSchema.safeParse(yield* Effect.promise(() => c.req.json().catch(() => null)));
+  if (!parsed.success) return yield* new BadRequest({ message: "Invalid document." });
   const input = parsed.data;
-  const svc = knowledgeServiceFromEnv(c.env);
-  try {
-    if (input.kind === "index") {
-      if (!DIR_RE.test(input.path)) return c.json({ error: "Folder names use lowercase letters, digits, and hyphens." }, 400);
-      await svc.createDirectory(scope, input.path);
-      return c.json({ id: `${input.path}/index`, path: `${input.path}/index`, kind: "index" }, 201);
+  const invalidPath = () => Effect.fail(new BadRequest({ message: "Invalid path." }));
+  if (input.kind === "index") {
+    if (!DIR_RE.test(input.path)) {
+      return yield* new BadRequest({ message: "Folder names use lowercase letters, digits, and hyphens." });
     }
-    if (!isValidConceptId(input.path)) return c.json({ error: "Paths use lowercase letters, digits, hyphens, and slashes; index and log are reserved." }, 400);
-    if (!input.type) return c.json({ error: "A concept needs a type." }, 400);
-    const created = await svc.create(scope, {
-      id: input.path, type: input.type, title: input.title ?? input.path,
+    yield* knowledge(c, "createDirectory", (svc) => svc.createDirectory(scope, input.path), [ConceptIdError]).pipe(
+      Effect.catchTags({ ConceptIdError: invalidPath }),
+    );
+    return c.json({ id: `${input.path}/index`, path: `${input.path}/index`, kind: "index" }, 201);
+  }
+  if (!isValidConceptId(input.path)) {
+    return yield* new BadRequest({ message: "Paths use lowercase letters, digits, hyphens, and slashes; index and log are reserved." });
+  }
+  const type = input.type;
+  if (!type) return yield* new BadRequest({ message: "A concept needs a type." });
+  const created = yield* knowledge(
+    c,
+    "create",
+    (svc) => svc.create(scope, {
+      id: input.path, type, title: input.title ?? input.path,
       description: input.description ?? "", body: input.body,
-    });
-    return c.json(toDocumentPayload(created), 201);
-  } catch (err) {
-    if (err instanceof ConceptExistsError) return c.json({ error: "A document already exists at that path." }, 409);
-    if (idError(err)) return c.json({ error: "Invalid path." }, 400);
-    throw err;
-  }
-}
+    }),
+    [ConceptExistsError, ConceptIdError],
+  ).pipe(Effect.catchTags({
+    ConceptExistsError: () => Effect.fail(new Conflict({ message: "A document already exists at that path." })),
+    ConceptIdError: invalidPath,
+  }));
+  return c.json(toDocumentPayload(created), 201);
+}));
 
-export async function getDocumentHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-  const id = conceptIdParam(c);
-  if (!id) return c.json({ error: "Invalid document id." }, 400);
-  const doc = await knowledgeServiceFromEnv(c.env).show(scope, id);
-  return doc ? c.json(toDocumentPayload(doc)) : c.json({ error: "No such document." }, 404);
-}
+export const getDocumentHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const id = yield* conceptIdParam(c);
+  const doc = yield* knowledge(c, "show", (svc) => svc.show(scope, id));
+  return doc ? c.json(toDocumentPayload(doc)) : yield* new NotFound({ message: "No such document." });
+}));
 
-export async function updateDocumentHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-  const id = conceptIdParam(c);
-  if (!id) return c.json({ error: "Invalid document id." }, 400);
-  const parsed = updateSchema.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return c.json({ error: "Invalid document body." }, 400);
-  try {
-    const updated = await knowledgeServiceFromEnv(c.env).update(scope, id, parsed.data);
-    return updated ? c.json(toDocumentPayload(updated)) : c.json({ error: "No such document." }, 404);
-  } catch (err) {
-    if (err instanceof ConceptConflictError) return c.json({ error: err.message }, 409);
-    throw err;
-  }
-}
+export const updateDocumentHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const id = yield* conceptIdParam(c);
+  const parsed = updateSchema.safeParse(yield* Effect.promise(() => c.req.json().catch(() => null)));
+  if (!parsed.success) return yield* new BadRequest({ message: "Invalid document body." });
+  const updated = yield* knowledge(c, "update", (svc) => svc.update(scope, id, parsed.data), [ConceptConflictError]).pipe(
+    Effect.catchTags({
+      ConceptConflictError: (err) => Effect.fail(new Conflict({ message: err.message })),
+    }),
+  );
+  return updated ? c.json(toDocumentPayload(updated)) : yield* new NotFound({ message: "No such document." });
+}));
 
-export async function deleteDocumentHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-  const id = conceptIdParam(c);
-  if (!id) return c.json({ error: "Invalid document id." }, 400);
-  const removed = await knowledgeServiceFromEnv(c.env).remove(scope, id);
-  if (!removed) return c.json({ error: "No such document." }, 404);
+export const deleteDocumentHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const id = yield* conceptIdParam(c);
+  const removed = yield* knowledge(c, "remove", (svc) => svc.remove(scope, id));
+  if (!removed) return yield* new NotFound({ message: "No such document." });
   // ?withUpload=1: take the upload that produced this document with it, so
   // it does not sit at "ready" pointing at nothing, ready to be re-extracted
   // by a Retry. The default keeps it, for an instructor who wants to redo
   // the extraction later.
   if (flag(c.req.query("withUpload"))) {
-    const material = await deleteMaterialByDocumentPath(makeDb(c.env.DATABASE_URL), scope, id);
-    await dropStoredFiles(c, material ? [material] : []);
+    const material = yield* query("deleteMaterialByDocumentPath", async (db) => deleteMaterialByDocumentPath(db, scope, id));
+    yield* dropStoredFiles(c, material ? [material] : []);
   }
   return c.body(null, 204);
-}
+}));
 
 function flag(value: string | undefined): boolean {
   return value === "1" || value === "true";
 }
 
 /** Best effort: a stored file that will not delete is logged, not fatal --
- *  the rows are already gone and the console has nothing left to show. */
-async function dropStoredFiles(c: Context<AppEnv>, rows: Array<{ storageKey: string | null }>): Promise<void> {
-  const store = storageFromEnv(c.env);
-  for (const row of rows) {
-    if (!row.storageKey) continue;
-    try {
-      await store.delete(row.storageKey);
-    } catch (error) {
-      logServerError("knowledge.delete.storage", error);
-    }
-  }
+ *  the rows are already gone and the console has nothing left to show.
+ *  The store is built per row, inside the guarded call, so an unconfigured
+ *  store (StorageNotConfiguredError) is logged like any other storage
+ *  failure rather than failing a delete that already happened. */
+function dropStoredFiles(c: Context<AppEnv>, rows: Array<{ storageKey: string | null }>): Effect.Effect<void> {
+  return Effect.forEach(rows, (row) => {
+    const storageKey = row.storageKey;
+    if (!storageKey) return Effect.void;
+    return external("storage", "deleteMaterial", async () => storageFromEnv(c.env).delete(storageKey)).pipe(
+      Effect.catchTag("ExternalServiceError", (error) =>
+        Effect.sync(() => logServerError("knowledge.delete.storage", error.cause))),
+    );
+  }, { discard: true });
 }
 
 /** A folder and everything under it. `?withUploads=1` also removes the
  *  uploads whose documents lived there. */
-export async function deleteDirectoryHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-  const directory = decodeURIComponent(c.req.param("directory") ?? "");
-  if (!isValidDirectory(directory)) return c.json({ error: "Invalid directory." }, 400);
-  const result = await knowledgeServiceFromEnv(c.env).removeDirectory(scope, directory);
-  if (!result) return c.json({ error: "No such folder." }, 404);
+export const deleteDirectoryHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const invalidDirectory = () => new BadRequest({ message: "Invalid directory." });
+  // Hono has already decoded the param once; a literal "%" left over (sent
+  // as %25) makes this second decode throw URIError. That is a malformed
+  // path, not an outage.
+  const directory = yield* Effect.try({
+    try: () => decodeURIComponent(c.req.param("directory") ?? ""),
+    catch: invalidDirectory,
+  });
+  if (!isValidDirectory(directory)) return yield* invalidDirectory();
+  const result = yield* knowledge(c, "removeDirectory", (svc) => svc.removeDirectory(scope, directory));
+  if (!result) return yield* new NotFound({ message: "No such folder." });
   let uploads = 0;
   if (flag(c.req.query("withUploads"))) {
-    const rows = await deleteMaterialsByDocumentPrefix(makeDb(c.env.DATABASE_URL), scope, `${directory}/`);
-    await dropStoredFiles(c, rows);
+    const rows = yield* query(
+      "deleteMaterialsByDocumentPrefix",
+      async (db) => deleteMaterialsByDocumentPrefix(db, scope, `${directory}/`),
+    );
+    yield* dropStoredFiles(c, rows);
     uploads = rows.length;
   }
   return c.json({ documents: result.removed.length, uploads });
-}
+}));
 
 const DELETE_PHRASE = "DELETE";
 
 /** The whole knowledge base. Guarded by a typed phrase in the body, because
  *  it is the one action here the console cannot undo. */
-export async function deleteKnowledgeBaseHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
+export const deleteKnowledgeBaseHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
   const parsed = z
     .object({ confirm: z.string(), withUploads: z.boolean().optional() })
-    .safeParse(await c.req.json().catch(() => null));
+    .safeParse(yield* Effect.promise(() => c.req.json().catch(() => null)));
   if (!parsed.success || parsed.data.confirm !== DELETE_PHRASE) {
-    return c.json({ error: `Type ${DELETE_PHRASE} to confirm.` }, 400);
+    return yield* new BadRequest({ message: `Type ${DELETE_PHRASE} to confirm.` });
   }
-  const result = await knowledgeServiceFromEnv(c.env).removeBundle(scope);
-  if (!result) return c.json({ error: "This course has no knowledge base yet." }, 404);
+  const result = yield* knowledge(c, "removeBundle", (svc) => svc.removeBundle(scope));
+  if (!result) return yield* new NotFound({ message: "This course has no knowledge base yet." });
   let uploads = 0;
   if (parsed.data.withUploads) {
-    const rows = await deleteAllMaterials(makeDb(c.env.DATABASE_URL), scope);
-    await dropStoredFiles(c, rows);
+    const rows = yield* query("deleteAllMaterials", async (db) => deleteAllMaterials(db, scope));
+    yield* dropStoredFiles(c, rows);
     uploads = rows.length;
   }
   return c.json({ documents: result.removed, uploads });
-}
+}));
 
-export async function documentLinksHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-  const id = conceptIdParam(c);
-  if (!id) return c.json({ error: "Invalid document id." }, 400);
-  const svc = knowledgeServiceFromEnv(c.env);
-  const doc = await svc.show(scope, id);
-  if (!doc) return c.json({ error: "No such document." }, 404);
-  const report = await svc.validate(scope);
+export const documentLinksHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const id = yield* conceptIdParam(c);
+  const doc = yield* knowledge(c, "show", (svc) => svc.show(scope, id));
+  if (!doc) return yield* new NotFound({ message: "No such document." });
+  const report = yield* knowledge(c, "validate", (svc) => svc.validate(scope));
   const broken = report.brokenLinks.filter((b) => b.source === id).map((b) => b.target);
   const payload: DocumentLinksPayload = {
     outbound: [
@@ -205,85 +236,85 @@ export async function documentLinksHandler(c: Context<AppEnv>) {
     backlinks: doc.inbound.map((s) => ({ sourceDocumentId: s, sourcePath: s })),
   };
   return c.json(payload);
-}
+}));
 
-export async function searchKnowledgeHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
+export const searchKnowledgeHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
   const q = (c.req.query("q") ?? "").trim();
-  if (q === "") return c.json({ error: "q is required." }, 400);
+  if (q === "") return yield* new BadRequest({ message: "q is required." });
   const limitRaw = Number(c.req.query("limit") ?? SEARCH_LIMIT_DEFAULT);
   const limit = Number.isInteger(limitRaw) ? Math.min(SEARCH_LIMIT_MAX, Math.max(1, limitRaw)) : SEARCH_LIMIT_DEFAULT;
   const dirRaw = (c.req.query("dir") ?? "").trim();
-  if (dirRaw !== "" && !isValidDirectory(dirRaw)) return c.json({ error: "Invalid dir." }, 400);
+  if (dirRaw !== "" && !isValidDirectory(dirRaw)) return yield* new BadRequest({ message: "Invalid dir." });
   const dir = dirRaw === "" ? undefined : dirRaw;
-  const hits = await knowledgeServiceFromEnv(c.env).search(scope, q, limit, dir);
+  const hits = yield* knowledge(c, "search", (svc) => svc.search(scope, q, limit, dir));
   return c.json({ hits });
-}
+}));
 
-export async function cleanupDocumentHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-  const id = conceptIdParam(c);
-  if (!id) return c.json({ error: "Invalid document id." }, 400);
-  const parsed = z.object({ body: z.string().min(1).max(CLEANUP_MAX_CHARS) }).safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success || !parsed.data.body.trim()) return c.json({ error: "Cleanup supports nonempty documents up to 60,000 characters." }, 400);
-  const doc = await knowledgeServiceFromEnv(c.env).show(scope, id, { includeInbound: false });
-  if (!doc) return c.json({ error: "No such document." }, 404);
-  try { return c.json(await proposeCleanup(parsed.data.body, c.env)); }
-  catch (err) {
-    if (err instanceof CleanupError) return c.json({ error: err.message }, 502);
-    throw err;
+export const cleanupDocumentHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const id = yield* conceptIdParam(c);
+  const parsed = z.object({ body: z.string().min(1).max(CLEANUP_MAX_CHARS) })
+    .safeParse(yield* Effect.promise(() => c.req.json().catch(() => null)));
+  if (!parsed.success || !parsed.data.body.trim()) {
+    return yield* new BadRequest({ message: "Cleanup supports nonempty documents up to 60,000 characters." });
   }
-}
+  const doc = yield* knowledge(c, "show", (svc) => svc.show(scope, id, { includeInbound: false }));
+  if (!doc) return yield* new NotFound({ message: "No such document." });
+  // CleanupError is every way the model call can fail (unreachable, non-2xx,
+  // invalid output); its message is written for the instructor. 502 is not
+  // one of the bridge's request outcomes, so it stays a Response.
+  return yield* external("llm", "proposeCleanup", () => proposeCleanup(parsed.data.body, c.env), [CleanupError]).pipe(
+    Effect.map((proposal) => c.json(proposal)),
+    Effect.catchTag("CleanupError", (err) => Effect.succeed(c.json({ error: err.message }, 502))),
+  );
+}));
 
 /** One document as a Markdown attachment. Named after the last path segment
  *  so "lectures/module-1/intro" saves as intro.md; the folder is what the
  *  instructor was already looking at. */
-export async function downloadDocumentHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-  const id = conceptIdParam(c);
-  if (!id) return c.json({ error: "Invalid document id." }, 400);
-  const raw = await knowledgeServiceFromEnv(c.env).readRaw(scope, id);
-  if (raw === null) return c.json({ error: "No such document." }, 404);
+export const downloadDocumentHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const id = yield* conceptIdParam(c);
+  const raw = yield* knowledge(c, "readRaw", (svc) => svc.readRaw(scope, id));
+  if (raw === null) return yield* new NotFound({ message: "No such document." });
   const name = `${id.split("/").pop() ?? id}.md`;
   return c.body(raw, 200, {
     "Content-Type": "text/markdown; charset=utf-8",
     "Content-Disposition": `attachment; filename="${name}"`,
     "Cache-Control": "no-store",
   });
-}
+}));
 
 /** "<course>-knowledge-<YYYY-MM-DD>-<HHMM>Z": the course by name and the
  *  moment of download to the minute (UTC, marked as such), so a folder of
  *  these stays legible without opening any of them. */
-async function exportBaseName(c: Context<AppEnv>, scope: string): Promise<string> {
-  const title = await getCourseTitle(makeDb(c.env.DATABASE_URL), scope);
-  const slug = title
-    ? title.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
-    : "";
-  const course = slug || `course-${scope.slice(0, 8)}`;
-  const now = new Date();
-  const stamp = `${now.toISOString().slice(0, 10)}-${now.toISOString().slice(11, 13)}${now.toISOString().slice(14, 16)}Z`;
-  return `${course}-knowledge-${stamp}`;
+function exportBaseName(scope: CourseScope) {
+  return query("getCourseTitle", async (db) => getCourseTitle(db, scope)).pipe(Effect.map((title) => {
+    const slug = title
+      ? title.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+      : "";
+    const course = slug || `course-${scope.slice(0, 8)}`;
+    const now = new Date();
+    const stamp = `${now.toISOString().slice(0, 10)}-${now.toISOString().slice(11, 13)}${now.toISOString().slice(14, 16)}Z`;
+    return `${course}-knowledge-${stamp}`;
+  }));
 }
 
 /** The whole bundle as a zip of its Markdown files. Originals are not
  *  included: pulling every stored upload through the server per request is
  *  a queued job, not a click. */
-export async function exportKnowledgeHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-  const zip = await knowledgeServiceFromEnv(c.env).exportBundle(scope);
-  if (zip === null) return c.json({ error: "This course has no knowledge base yet." }, 404);
-  const name = `${await exportBaseName(c, scope)}.zip`;
+export const exportKnowledgeHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const zip = yield* knowledge(c, "exportBundle", (svc) => svc.exportBundle(scope));
+  if (zip === null) return yield* new NotFound({ message: "This course has no knowledge base yet." });
+  const name = `${yield* exportBaseName(scope)}.zip`;
   return c.body(zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.byteLength) as ArrayBuffer, 200, {
     "Content-Type": "application/zip",
     "Content-Disposition": `attachment; filename="${name}"`,
     "Cache-Control": "no-store",
   });
-}
+}));
 
 /** Cap on the instructor's own instruction: it is one paragraph in the
  *  system prompt, not a second prompt. */
@@ -303,41 +334,37 @@ function instructionPayload(parts: { instruction: string | null; orgDefault: str
 
 const instructionBody = z.object({ instruction: z.string().max(KNOWLEDGE_INSTRUCTION_MAX_CHARS).nullable() });
 
-export async function getKnowledgeInstructionHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-  const parts = await getKnowledgeInstructionParts(makeDb(c.env.DATABASE_URL), scope);
+const invalidInstruction = () =>
+  new BadRequest({ message: `The instruction must be text of at most ${KNOWLEDGE_INSTRUCTION_MAX_CHARS} characters.` });
+
+export const getKnowledgeInstructionHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const parts = yield* query("getKnowledgeInstructionParts", async (db) => getKnowledgeInstructionParts(db, scope));
   return c.json(instructionPayload(parts));
-}
+}));
 
 /** Null or blank means "back to the default". The guard sentence is not
  *  stored here; the prompt assembly appends it whatever this says. */
-export async function putKnowledgeInstructionHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-  const parsed = instructionBody.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) {
-    return c.json({ error: `The instruction must be text of at most ${KNOWLEDGE_INSTRUCTION_MAX_CHARS} characters.` }, 400);
-  }
-  const db = makeDb(c.env.DATABASE_URL);
+export const putKnowledgeInstructionHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const parsed = instructionBody.safeParse(yield* Effect.promise(() => c.req.json().catch(() => null)));
+  if (!parsed.success) return yield* invalidInstruction();
   const text = parsed.data.instruction?.trim() || null;
-  await setKnowledgeInstruction(db, scope, text);
-  return c.json(instructionPayload(await getKnowledgeInstructionParts(db, scope)));
-}
+  yield* query("setKnowledgeInstruction", async (db) => setKnowledgeInstruction(db, scope, text));
+  const parts = yield* query("getKnowledgeInstructionParts", async (db) => getKnowledgeInstructionParts(db, scope));
+  return c.json(instructionPayload(parts));
+}));
 
 /** Makes the given text the default for every course in the organisation
  *  that has no text of its own. Null clears it back to the built-in. */
-export async function putKnowledgeInstructionDefaultHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-  const db = makeDb(c.env.DATABASE_URL);
-  const orgScope = await getOrgScopeForCourse(db, scope);
-  if (!orgScope) return c.json({ error: "Not permitted." }, 403);
-  const parsed = instructionBody.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) {
-    return c.json({ error: `The instruction must be text of at most ${KNOWLEDGE_INSTRUCTION_MAX_CHARS} characters.` }, 400);
-  }
+export const putKnowledgeInstructionDefaultHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const orgScope = yield* query("getOrgScopeForCourse", async (db) => getOrgScopeForCourse(db, scope));
+  if (!orgScope) return yield* new Forbidden({ message: "Not permitted." });
+  const parsed = instructionBody.safeParse(yield* Effect.promise(() => c.req.json().catch(() => null)));
+  if (!parsed.success) return yield* invalidInstruction();
   const text = parsed.data.instruction?.trim() || null;
-  await setKnowledgeInstructionDefault(db, orgScope, text);
-  return c.json(instructionPayload(await getKnowledgeInstructionParts(db, scope)));
-}
+  yield* query("setKnowledgeInstructionDefault", async (db) => setKnowledgeInstructionDefault(db, orgScope, text));
+  const parts = yield* query("getKnowledgeInstructionParts", async (db) => getKnowledgeInstructionParts(db, scope));
+  return c.json(instructionPayload(parts));
+}));

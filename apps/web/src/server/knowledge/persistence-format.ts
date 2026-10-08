@@ -32,6 +32,7 @@ export function safeSnapshotPath(name: string): boolean {
 /** Only identifiers and fixed diagnostics: never include document names/content
  * or raw SDK error messages in operator-facing corruption reports. */
 export class KnowledgePersistenceError extends Error {
+  readonly _tag = "KnowledgePersistenceError" as const;
   constructor(readonly code: "KNOWLEDGE_CORRUPT_MANIFEST" | "KNOWLEDGE_CORRUPT_BLOB" | "KNOWLEDGE_CORRUPT_LEGACY", readonly courseId: string, readonly key: string, reason: string) {
     super(`${code}: ${reason}; course=${courseId}; key=${key}; operator recovery required`);
     this.name = "KnowledgePersistenceError";

@@ -14,7 +14,8 @@ import { SubmissionNotInCourseError } from "../repositories/grades";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
-import { LLMCredentialMissingError } from "../../lib/llm-config";
+import { LLMCredentialMissingError, UnsupportedLLMProviderError } from "../../lib/llm-config";
+import { SERVICE_UNAVAILABLE_MESSAGE } from "../utils/errors";
 
 const TEST_ENV = { DATABASE_URL: "ignored", OPENROUTER_API_KEY: "sk-test" } as Env;
 const SUBMISSION_ID = "11111111-2222-4333-8444-555555555555";
@@ -30,12 +31,13 @@ const getOrgScopeForCourseMock = vi.fn();
  *  expectations unchanged. */
 const getCourseLlmConfigIdMock = vi.fn<() => string | null>(() => null);
 const auditBestEffortMock = vi.fn();
+const recordAiDraftMock = vi.fn();
 
 vi.mock("../repositories/grades", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../repositories/grades")>()),
   listGradesForSubmission: (...a: unknown[]) => listGradesMock(...a),
   recordHumanGrade: (...a: unknown[]) => recordHumanGradeMock(...a),
-  recordAiDraft: async () => GRADE_ID,
+  recordAiDraft: (...a: unknown[]) => recordAiDraftMock(...a),
   graderMembershipFor: (...a: unknown[]) => graderMembershipForMock(...a),
   getSubmissionInCourse: (...a: unknown[]) => getSubmissionInCourseMock(...a),
 }));
@@ -132,6 +134,7 @@ beforeEach(() => {
   getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
   getCourseLlmConfigIdMock.mockReset().mockReturnValue(null);
   auditBestEffortMock.mockReset().mockResolvedValue(undefined);
+  recordAiDraftMock.mockReset().mockResolvedValue(GRADE_ID);
   vi.spyOn(console, "error").mockImplementation(() => {});
 
   // #365: the draft path's two queries, in the order the handler issues them
@@ -344,5 +347,60 @@ describe("POST draft (#75)", () => {
     expect((await buildApp(instructorOfA()).request(url("/draft"), json({}), TEST_ENV)).status).toBe(
       404,
     );
+  });
+});
+
+/* Effect migration: the failure paths the typed error channel now names. */
+describe("grading failure paths (Effect migration)", () => {
+  const draft = (env: Env = TEST_ENV) => buildApp(instructorOfA()).request(url("/draft"), json({}), env);
+
+  it("answers a database failure with the generic 503, never a 404", async () => {
+    listGradesMock.mockRejectedValue(new Error("connection terminated"));
+    const res = await buildApp(instructorOfA()).request(url(), undefined, TEST_ENV);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: SERVICE_UNAVAILABLE_MESSAGE });
+  });
+
+  it("404s a draft whose submission left the course before it was recorded", async () => {
+    // recordAiDraft re-checks the course; this refusal used to escape as a 503.
+    recordAiDraftMock.mockRejectedValue(new SubmissionNotInCourseError());
+    const res = await draft();
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "That submission no longer exists." });
+  });
+
+  it("503s with the not-configured sentence for a provider this deployment cannot build", async () => {
+    buildProviderClientMock.mockImplementation(() => {
+      throw new UnsupportedLLMProviderError("anthropic");
+    });
+    const res = await draft();
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      error: "The model gateway is not configured. Contact an administrator.",
+    });
+    expect(draftGradeMock).not.toHaveBeenCalled();
+  });
+
+  it("503s with the not-configured sentence when no config resolves and LLMOXIE_API_KEY is unset", async () => {
+    resolveLlmConfigMock.mockResolvedValue(null);
+    const res = await draft({ DATABASE_URL: "ignored" } as Env);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      error: "The model gateway is not configured. Contact an administrator.",
+    });
+  });
+
+  it("503s with the try-again sentence when the credential read fails (#425)", async () => {
+    resolveApiKeyMock.mockRejectedValue(new Error("connection terminated"));
+    const res = await draft();
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      error: "The model gateway could not be reached. Try again shortly.",
+    });
+  });
+
+  it("502s when the model produced no usable draft", async () => {
+    draftGradeMock.mockResolvedValue(null);
+    expect((await draft()).status).toBe(502);
   });
 });

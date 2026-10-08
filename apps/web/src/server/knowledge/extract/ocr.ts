@@ -8,7 +8,9 @@ import { LLMOXIE_DEFAULT_BASE_URL } from "../../../lib/ai";
 const run = promisify(execFile);
 export const OCR_MAX_PAGES = 64;
 const MAX_TEXT_CHARS = 4_000_000;
-export class OcrError extends Error {}
+export class OcrError extends Error {
+  readonly _tag = "OcrError" as const;
+}
 export interface OcrOptions { apiKey: string; baseUrl: string; model: string }
 export function ocrOptionsFromEnv(env: Env): OcrOptions {
   return { apiKey: env.LLMOXIE_API_KEY, baseUrl: env.LLMOXIE_BASE_URL || LLMOXIE_DEFAULT_BASE_URL,

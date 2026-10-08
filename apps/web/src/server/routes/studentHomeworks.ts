@@ -1,12 +1,12 @@
-import { type Context } from "hono";
-import { makeDb } from "../../db/client";
+import { Effect } from "effect";
 import { getStudentHomeworksForUser } from "../repositories/studentHomeworks";
-import type { AuthContext } from "../middleware/roles";
-import type { AppEnv } from "../context";
 import type { StudentHomeworkListResponse } from "../../shared/types";
+import { Forbidden } from "../effect/errors";
+import { effectHandler } from "../effect/http";
+import { query } from "../effect/services";
 
-export async function studentHomeworksHandler(c: Context<AppEnv>) {
-  const authContext = c.get("authContext") as AuthContext | undefined;
+export const studentHomeworksHandler = effectHandler((c) => Effect.gen(function* () {
+  const authContext = c.get("authContext");
 
   // requireRole(["student"]) already verified authContext exists and has the
   // student role when this handler is reached via the guarded production
@@ -15,11 +15,13 @@ export async function studentHomeworksHandler(c: Context<AppEnv>) {
   // closed with a 403 even if reached unguarded, rather than throwing past
   // this point into the generic 503 handler.
   if (!authContext || !authContext.hasRole("student")) {
-    return c.json({ error: "Course access denied" }, 403);
+    return yield* new Forbidden({ message: "Course access denied" });
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const homeworksList = await getStudentHomeworksForUser(db, authContext.session.userId);
+  const homeworksList = yield* query(
+    "getStudentHomeworksForUser",
+    (db) => getStudentHomeworksForUser(db, authContext.session.userId),
+  );
   const body: StudentHomeworkListResponse = { homeworks: homeworksList };
   return c.json(body);
-}
+}));

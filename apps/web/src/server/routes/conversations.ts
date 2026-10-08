@@ -22,13 +22,13 @@
    isn't the caller's. A separate 404 path: createConversation
    (repositories/conversations.ts) throws a typed TenancyMismatchError on
    its own tenancy check (owner/section not in scope), mapped to 404 by
-   app.onError (server/index.ts, #141) -- a single app-layer mapping point,
-   not a per-route catch here.
+   effect/http.ts's errorResponse (#141) -- a single app-layer mapping
+   point, not a per-route catch here.
    -------------------------------------------------------------------------- */
 
 import { Hono, type Context } from "hono";
+import { Effect } from "effect";
 import { z } from "zod";
-import { makeDb } from "../../db/client";
 import { UUID_RE } from "../utils/uuid";
 import {
   listConversationsForOwner,
@@ -39,8 +39,10 @@ import {
   getOwnedConversationOrNull,
   getMessagesForConversation,
   getConversationMessageCount,
+  ConversationHasSubmissionError,
   DEFAULT_CONVERSATIONS_PAGE_SIZE,
 } from "../repositories/conversations";
+import { TenancyMismatchError } from "../repositories/errors";
 import type { ConversationKind } from "../../db/schema";
 import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
 import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from "../repositories/rateLimits";
@@ -50,7 +52,6 @@ import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS }
 // caller that needs to create a title-less row, or decide whether a row is
 // still safe to auto-title, agrees on exactly one string.
 import { DEFAULT_TUTOR_CONVERSATION_TITLE, MAX_CONVERSATION_TITLE_UTF16_LENGTH } from "../../shared/tutorConversationTitle";
-import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type {
   ConversationSummary,
@@ -58,6 +59,9 @@ import type {
   ConversationListResponse,
   ConversationMessageResponse,
 } from "../../shared/types";
+import { BadRequest, Conflict, Forbidden, NotFound } from "../effect/errors";
+import { effectHandler, requireAuthContext } from "../effect/http";
+import { query } from "../effect/services";
 
 // #281: an opaque cursor -- the client only ever echoes this back as
 // `before`, never parses or reconstructs it. Encoding (updatedAt, id)
@@ -122,20 +126,30 @@ function toConversationSummary(row: {
   };
 }
 
-export async function listConversationsHandler(c: Context<AppEnv>) {
+/** Shared shape for every "not found or not owned" answer in this file --
+ *  one body whether the id is malformed, unknown, someone else's, or
+ *  soft-deleted, so the response is never an existence oracle. */
+const conversationNotFound = () => new NotFound({ message: "Conversation not found" });
+
+/** A body that isn't JSON at all is a client error, not an outage. */
+function readJsonBody(c: Context<AppEnv>): Effect.Effect<unknown, BadRequest> {
+  return Effect.tryPromise({
+    try: () => c.req.json<unknown>(),
+    catch: () => new BadRequest({ message: "Request body must be valid JSON" }),
+  });
+}
+
+export const listConversationsHandler = effectHandler((c) => Effect.gen(function* () {
   // authMiddleware/rolesMiddleware already gate every /api/* route (this
   // route is wired in unguarded via app.get("/api/conversations", ...) in
   // server/index.ts, same as chat.ts) -- re-checked here so a direct call to
   // this handler (as the unit tests below do) fails closed with a 401
   // instead of throwing on authContext.session below.
-  const authContext = c.get("authContext") as AuthContext | undefined;
-  if (!authContext) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
+  const authContext = yield* requireAuthContext(c);
 
   const courseId = c.req.query("courseId");
   if (!courseId) {
-    return c.json({ error: "courseId is required" }, 400);
+    return yield* new BadRequest({ message: "courseId is required" });
   }
 
   // Defaults to "tutor": this route's own doc comment above and the client
@@ -145,7 +159,7 @@ export async function listConversationsHandler(c: Context<AppEnv>) {
   // rather than passed through unchecked to the repository's `eq`.
   const kind = c.req.query("kind") ?? "tutor";
   if (kind !== "tutor" && kind !== "section") {
-    return c.json({ error: "kind must be 'tutor' or 'section'" }, 400);
+    return yield* new BadRequest({ message: "kind must be 'tutor' or 'section'" });
   }
 
   // #224: optional pagination. `limit` clamped to a sane range rather than
@@ -159,7 +173,7 @@ export async function listConversationsHandler(c: Context<AppEnv>) {
   if (limitParam !== undefined) {
     const parsed = Number(limitParam);
     if (!Number.isInteger(parsed) || parsed < 1 || parsed > 200) {
-      return c.json({ error: "limit must be an integer between 1 and 200" }, 400);
+      return yield* new BadRequest({ message: "limit must be an integer between 1 and 200" });
     }
     limit = parsed;
   }
@@ -172,7 +186,7 @@ export async function listConversationsHandler(c: Context<AppEnv>) {
   if (beforeParam !== undefined) {
     const decoded = decodeConversationsCursor(beforeParam);
     if (!decoded) {
-      return c.json({ error: "before must be a valid cursor from a prior response's nextCursor" }, 400);
+      return yield* new BadRequest({ message: "before must be a valid cursor from a prior response's nextCursor" });
     }
     before = decoded;
   }
@@ -182,11 +196,13 @@ export async function listConversationsHandler(c: Context<AppEnv>) {
   // is actually a member of courseId before this can proceed.
   const scope = courseScopeFromAuthContext(authContext, courseId);
   if (!scope) {
-    return c.json({ error: "Course access denied" }, 403);
+    return yield* new Forbidden({ message: "Course access denied" });
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const rows = await listConversationsForOwner(db, scope, authContext.session.userId, { kind, limit, before });
+  const rows = yield* query(
+    "listConversationsForOwner",
+    (db) => listConversationsForOwner(db, scope, authContext.session.userId, { kind, limit, before }),
+  );
   const items: ConversationListItemResponse[] = rows.map((r) => ({
     ...toConversationSummary(r),
     messageCount: r.messageCount,
@@ -202,34 +218,24 @@ export async function listConversationsHandler(c: Context<AppEnv>) {
     rows.length === limit && lastRow ? encodeConversationsCursor({ updatedAt: lastRow.updatedAt, id: lastRow.id }) : null;
   const body: ConversationListResponse = { items, nextCursor };
   return c.json(body);
-}
+}));
 
-export async function createConversationHandler(c: Context<AppEnv>) {
-  const authContext = c.get("authContext") as AuthContext | undefined;
-  if (!authContext) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
+export const createConversationHandler = effectHandler((c) => Effect.gen(function* () {
+  const authContext = yield* requireAuthContext(c);
 
-  let json: unknown;
-  try {
-    json = await c.req.json();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+  const json = yield* readJsonBody(c);
   // safeParse + a hand-written message (not the raw zod issue) -- matches
   // chat.ts's inboundUserMessageSchema convention rather than surfacing zod's
   // internal error shape to the client.
   const parsed = createConversationSchema.safeParse(json);
   if (!parsed.success) {
-    return c.json({ error: "courseId (uuid) is required; title, if present, must be 1-100 chars" }, 400);
+    return yield* new BadRequest({ message: "courseId (uuid) is required; title, if present, must be 1-100 chars" });
   }
 
   const scope = courseScopeFromAuthContext(authContext, parsed.data.courseId);
   if (!scope) {
-    return c.json({ error: "Course access denied" }, 403);
+    return yield* new Forbidden({ message: "Course access denied" });
   }
-
-  const db = makeDb(c.env.DATABASE_URL);
 
   // #308: this route had no rate limit at all -- only /api/chat did (#219).
   // Reuses the exact same per-user counter/budget rather than standing up a
@@ -237,7 +243,12 @@ export async function createConversationHandler(c: Context<AppEnv>) {
   // "New conversation" button) next to chat's per-message volume, so
   // sharing one generous per-minute budget between the two costs a normal
   // user nothing while still bounding a scripted create-loop.
-  const requestCount = await reserveRateLimitSlot(db, authContext.session.userId, new Date(), RATE_LIMIT_WINDOW_MS);
+  const requestCount = yield* query(
+    "reserveRateLimitSlot",
+    (db) => reserveRateLimitSlot(db, authContext.session.userId, new Date(), RATE_LIMIT_WINDOW_MS),
+  );
+  // 429 (and its Retry-After header) has no HttpError outcome, so it stays a
+  // directly-built response -- a successful answer of "not now", not a failure.
   if (requestCount > RATE_LIMIT_MAX_PER_MINUTE) {
     return c.json(
       { error: "You're sending requests too quickly. Please wait a moment and try again." },
@@ -248,7 +259,10 @@ export async function createConversationHandler(c: Context<AppEnv>) {
 
   // #308: unbounded row creation otherwise -- see MAX_TUTOR_CONVERSATIONS_PER_COURSE's
   // doc comment above.
-  const activeCount = await countActiveConversationsForOwner(db, scope, authContext.session.userId, "tutor");
+  const activeCount = yield* query(
+    "countActiveConversationsForOwner",
+    (db) => countActiveConversationsForOwner(db, scope, authContext.session.userId, "tutor"),
+  );
   if (activeCount >= MAX_TUTOR_CONVERSATIONS_PER_COURSE) {
     return c.json(
       {
@@ -261,19 +275,23 @@ export async function createConversationHandler(c: Context<AppEnv>) {
   // createConversation (repositories/conversations.ts, #3) re-verifies
   // course membership itself (courseScopeFromAuthContext already did, but
   // the repository doesn't trust callers to have checked) and throws a
-  // typed TenancyMismatchError on a mismatch -- app.onError (server/
-  // index.ts) maps that to a 404 (#141), not the generic 503 every other
-  // uncaught error gets. Same call shape as chatHandler's new-conversation
-  // branch (routes/chat.ts).
-  const created = await createConversation(db, scope, {
-    ownerUserId: authContext.session.userId,
-    sectionId: null,
-    kind: "tutor",
-    title: parsed.data.title || DEFAULT_TUTOR_CONVERSATION_TITLE,
-  });
+  // typed TenancyMismatchError on a mismatch -- left untranslated here:
+  // effect/http.ts's errorResponse maps it to a 404 (#141), not the generic
+  // 503 a DatabaseError gets. Same call shape as chatHandler's
+  // new-conversation branch (routes/chat.ts).
+  const created = yield* query(
+    "createConversation",
+    (db) => createConversation(db, scope, {
+      ownerUserId: authContext.session.userId,
+      sectionId: null,
+      kind: "tutor",
+      title: parsed.data.title || DEFAULT_TUTOR_CONVERSATION_TITLE,
+    }),
+    [TenancyMismatchError],
+  );
 
   return c.json(toConversationSummary(created), 201);
-}
+}));
 
 // #438: GET /api/conversations/:id -- returns this ONE conversation's
 // current summary + messageCount. This is the reconciliation read
@@ -285,38 +303,37 @@ export async function createConversationHandler(c: Context<AppEnv>) {
 // (useTutorConversations.ts's reconcileConversationCount). Same ownership
 // pattern as PATCH/DELETE/GET-messages below (getOwnedConversationOrNull ->
 // 404, never 403, on "doesn't exist or isn't yours").
-export async function getConversationHandler(c: Context<AppEnv>) {
-  const authContext = c.get("authContext") as AuthContext | undefined;
-  if (!authContext) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
+export const getConversationHandler = effectHandler((c) => Effect.gen(function* () {
+  const authContext = yield* requireAuthContext(c);
 
   const id = c.req.param("id");
   // #267: same reasoning as updateConversationHandler's guard below.
   if (!id || !UUID_RE.test(id)) {
-    return c.json({ error: "Conversation not found" }, 404);
+    return yield* conversationNotFound();
   }
-  const db = makeDb(c.env.DATABASE_URL);
 
-  const existing = await getOwnedConversationOrNull(db, id, authContext.session.userId, authContext.isMemberOf);
+  const existing = yield* query(
+    "getOwnedConversationOrNull",
+    (db) => getOwnedConversationOrNull(db, id, authContext.session.userId, authContext.isMemberOf),
+  );
   if (!existing) {
-    return c.json({ error: "Conversation not found" }, 404);
+    return yield* conversationNotFound();
   }
 
   // Row just read back and ownership-checked -- the sanctioned case for
   // this cast per scope.ts's unsafeCourseScope docstring (same pattern as
   // updateConversationHandler below).
   const scope = unsafeCourseScope(existing.courseId);
-  const messageCount = await getConversationMessageCount(db, scope, id);
+  const messageCount = yield* query(
+    "getConversationMessageCount",
+    (db) => getConversationMessageCount(db, scope, id),
+  );
   const body: ConversationListItemResponse = { ...toConversationSummary(existing), messageCount };
   return c.json(body);
-}
+}));
 
-export async function updateConversationHandler(c: Context<AppEnv>) {
-  const authContext = c.get("authContext") as AuthContext | undefined;
-  if (!authContext) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
+export const updateConversationHandler = effectHandler((c) => Effect.gen(function* () {
+  const authContext = yield* requireAuthContext(c);
 
   const id = c.req.param("id");
   // #267: a malformed id would otherwise reach getOwnedConversationOrNull's
@@ -327,57 +344,55 @@ export async function updateConversationHandler(c: Context<AppEnv>) {
   // response so a malformed id and an unknown-but-valid one stay
   // indistinguishable (same reasoning as the 404-not-403 convention below).
   if (!id || !UUID_RE.test(id)) {
-    return c.json({ error: "Conversation not found" }, 404);
+    return yield* conversationNotFound();
   }
-  let json: unknown;
-  try {
-    json = await c.req.json();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+  const json = yield* readJsonBody(c);
   const parsed = updateConversationSchema.safeParse(json);
   if (!parsed.success) {
-    return c.json({ error: "title is required and must be 1-100 chars after trimming" }, 400);
+    return yield* new BadRequest({ message: "title is required and must be 1-100 chars after trimming" });
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-
-  const existing = await getOwnedConversationOrNull(db, id, authContext.session.userId, authContext.isMemberOf);
+  const existing = yield* query(
+    "getOwnedConversationOrNull",
+    (db) => getOwnedConversationOrNull(db, id, authContext.session.userId, authContext.isMemberOf),
+  );
   if (!existing) {
-    return c.json({ error: "Conversation not found" }, 404);
+    return yield* conversationNotFound();
   }
 
   // Row just read back and ownership-checked -- the sanctioned case for
   // this cast per scope.ts's unsafeCourseScope docstring.
   const scope = unsafeCourseScope(existing.courseId);
-  const updated = await updateConversationTitle(db, scope, id, parsed.data.title);
+  const updated = yield* query(
+    "updateConversationTitle",
+    (db) => updateConversationTitle(db, scope, id, parsed.data.title),
+  );
   // updateConversationTitle also excludes soft-deleted rows -- a
   // conversation deleted between the check above and this write (or one
   // that was already soft-deleted) 404s here too, same bucket as "not
   // found".
   if (!updated) {
-    return c.json({ error: "Conversation not found" }, 404);
+    return yield* conversationNotFound();
   }
 
   return c.json(toConversationSummary(updated));
-}
+}));
 
-export async function deleteConversationHandler(c: Context<AppEnv>) {
-  const authContext = c.get("authContext") as AuthContext | undefined;
-  if (!authContext) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
+export const deleteConversationHandler = effectHandler((c) => Effect.gen(function* () {
+  const authContext = yield* requireAuthContext(c);
 
   const id = c.req.param("id");
   // #267: same reasoning as updateConversationHandler's guard above.
   if (!id || !UUID_RE.test(id)) {
-    return c.json({ error: "Conversation not found" }, 404);
+    return yield* conversationNotFound();
   }
-  const db = makeDb(c.env.DATABASE_URL);
 
-  const existing = await getOwnedConversationOrNull(db, id, authContext.session.userId, authContext.isMemberOf);
+  const existing = yield* query(
+    "getOwnedConversationOrNull",
+    (db) => getOwnedConversationOrNull(db, id, authContext.session.userId, authContext.isMemberOf),
+  );
   if (!existing) {
-    return c.json({ error: "Conversation not found" }, 404);
+    return yield* conversationNotFound();
   }
 
   const scope = unsafeCourseScope(existing.courseId);
@@ -394,10 +409,21 @@ export async function deleteConversationHandler(c: Context<AppEnv>) {
   // soft-deleted conversation once its parent conversation is filtered out,
   // and the FK is ON DELETE CASCADE from conversations.id for the day a
   // real hard-delete/purge path is added.
-  await softDeleteConversation(db, scope, id);
+  yield* query(
+    "softDeleteConversation",
+    (db) => softDeleteConversation(db, scope, id),
+    [ConversationHasSubmissionError],
+  ).pipe(Effect.catchTags({
+    // #128: the caller owns it (this route resolves section conversations
+    // too, not only tutor ones) but it has been submitted -- deleting it
+    // would orphan the submission. 409: well-formed and allowed, the
+    // resource's state refuses it. Previously an untyped throw -> 503.
+    ConversationHasSubmissionError: () =>
+      Effect.fail(new Conflict({ message: "This conversation has been submitted and cannot be deleted." })),
+  }));
 
   return c.body(null, 204);
-}
+}));
 
 // #4: GET /api/conversations/:id/messages -- the only way a client that
 // selects an *existing* conversation can reseed its chat, and that is not
@@ -408,22 +434,21 @@ export async function deleteConversationHandler(c: Context<AppEnv>) {
 // conversation must hydrate through this route first. Same ownership pattern
 // as PATCH/DELETE above (getOwnedConversationOrNull -> 404, never 403, on
 // "doesn't exist or isn't yours") rather than a new one.
-export async function listConversationMessagesHandler(c: Context<AppEnv>) {
-  const authContext = c.get("authContext") as AuthContext | undefined;
-  if (!authContext) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
+export const listConversationMessagesHandler = effectHandler((c) => Effect.gen(function* () {
+  const authContext = yield* requireAuthContext(c);
 
   const id = c.req.param("id");
   // #267: same reasoning as updateConversationHandler's guard above.
   if (!id || !UUID_RE.test(id)) {
-    return c.json({ error: "Conversation not found" }, 404);
+    return yield* conversationNotFound();
   }
-  const db = makeDb(c.env.DATABASE_URL);
 
-  const existing = await getOwnedConversationOrNull(db, id, authContext.session.userId, authContext.isMemberOf);
+  const existing = yield* query(
+    "getOwnedConversationOrNull",
+    (db) => getOwnedConversationOrNull(db, id, authContext.session.userId, authContext.isMemberOf),
+  );
   if (!existing) {
-    return c.json({ error: "Conversation not found" }, 404);
+    return yield* conversationNotFound();
   }
 
   // #215: bounded page (limit/before -- a seq cursor), not the entire
@@ -433,7 +458,7 @@ export async function listConversationMessagesHandler(c: Context<AppEnv>) {
   if (limitParam !== undefined) {
     const parsed = Number(limitParam);
     if (!Number.isInteger(parsed) || parsed < 1 || parsed > 500) {
-      return c.json({ error: "limit must be an integer between 1 and 500" }, 400);
+      return yield* new BadRequest({ message: "limit must be an integer between 1 and 500" });
     }
     limit = parsed;
   }
@@ -442,13 +467,16 @@ export async function listConversationMessagesHandler(c: Context<AppEnv>) {
   if (beforeParam !== undefined) {
     const parsed = Number(beforeParam);
     if (!Number.isInteger(parsed)) {
-      return c.json({ error: "before must be an integer seq value" }, 400);
+      return yield* new BadRequest({ message: "before must be an integer seq value" });
     }
     before = parsed;
   }
 
   const scope = unsafeCourseScope(existing.courseId);
-  const rows = await getMessagesForConversation(db, scope, id, { limit, before });
+  const rows = yield* query(
+    "getMessagesForConversation",
+    (db) => getMessagesForConversation(db, scope, id, { limit, before }),
+  );
   // #226: the shape is checked against ConversationMessageResponse now
   // (previously an untyped literal the client asserted a different type
   // over -- neither side of the wire boundary actually enforced it). `parts`
@@ -469,7 +497,7 @@ export async function listConversationMessagesHandler(c: Context<AppEnv>) {
     createdAt: r.createdAt.toISOString(),
   }));
   return c.json(body);
-}
+}));
 
 // Sub-app preserved for direct unit testing; production routing happens via
 // app.get/post/patch/delete("/api/conversations...", ...) in server/index.ts.

@@ -51,6 +51,35 @@ export interface SectionDiffPlan {
   toDelete: SectionDeletePlan[];
 }
 
+/** A homework edit whose sections/widgets cannot be applied as sent: a
+ *  duplicate or out-of-range order, an id that is not part of this
+ *  homework, or a reorder cycle with no free slot to stage through. Client
+ *  input, not an outage -- PATCH /homeworks/:id answers it 422 with this
+ *  message. Shared by planSectionDiff, planWidgetDiff (progressWidgets.ts)
+ *  and updateHomework's write resolvers (homeworks.ts). */
+export class ContentDiffError extends Error {
+  readonly _tag = "ContentDiffError" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "ContentDiffError";
+  }
+}
+
+/** sections_order_range_chk / homework_progress_widgets_order_range_chk
+ *  (db/schema/content.ts), checked before the write so an out-of-range
+ *  order is a ContentDiffError rather than a constraint violation from the
+ *  database. */
+export const MIN_CONTENT_ORDER = 1;
+export const MAX_CONTENT_ORDER = 20;
+
+export function assertOrderInRange(order: unknown, what: "section" | "widget"): void {
+  if (!Number.isInteger(order) || (order as number) < MIN_CONTENT_ORDER || (order as number) > MAX_CONTENT_ORDER) {
+    throw new ContentDiffError(
+      `${what} order ${String(order)} is out of range -- must be an integer from ${MIN_CONTENT_ORDER} to ${MAX_CONTENT_ORDER}`,
+    );
+  }
+}
+
 /** Pure diff logic, no DB access -- repositories/homeworks.ts's updateHomework
  *  applies this plan inside a transaction. Kept separate so the diff
  *  algorithm (the trickiest part of #19, per the issue) is unit-testable
@@ -61,8 +90,9 @@ export function planSectionDiff(
 ): SectionDiffPlan {
   const orders = new Set<number>();
   for (const s of incoming) {
+    assertOrderInRange(s.order, "section");
     if (orders.has(s.order)) {
-      throw new Error(`duplicate order ${s.order} in incoming sections`);
+      throw new ContentDiffError(`duplicate order ${s.order} in incoming sections`);
     }
     orders.add(s.order);
   }
@@ -86,7 +116,7 @@ export function planSectionDiff(
     }
     const prior = existingById.get(s.id);
     if (!prior) {
-      throw new Error(`unknown section id "${s.id}" -- not part of this homework`);
+      throw new ContentDiffError(`unknown section id "${s.id}" -- not part of this homework`);
     }
     const hadSolution = prior.solutionId !== null;
     const hasSolution = s.solutionContent !== undefined;

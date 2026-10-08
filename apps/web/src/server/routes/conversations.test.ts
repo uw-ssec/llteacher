@@ -20,7 +20,11 @@ const softDeleteConversationMock = vi.fn();
 const getOwnedConversationOrNullMock = vi.fn();
 const getMessagesForConversationMock = vi.fn();
 const getConversationMessageCountMock = vi.fn();
-vi.mock("../repositories/conversations", () => ({
+vi.mock("../repositories/conversations", async (importOriginal) => ({
+  // The refusal class the DELETE route declares (query's expected list
+  // checks `instanceof` against it, so it must be the real class).
+  ConversationHasSubmissionError: (await importOriginal<typeof import("../repositories/conversations")>())
+    .ConversationHasSubmissionError,
   listConversationsForOwner: (...args: unknown[]) => listConversationsForOwnerMock(...args),
   createConversation: (...args: unknown[]) => createConversationMock(...args),
   // #308: backs createConversationHandler's per-user conversation cap.
@@ -629,6 +633,51 @@ describe("DELETE /api/conversations/:id", () => {
     const text = await res.text();
     expect(text).toBe("");
     expect(softDeleteConversationMock).toHaveBeenCalledWith(expect.anything(), "course-a", "22222222-2222-2222-2222-222222222222");
+  });
+
+  // #128 via the Effect migration: softDeleteConversation's refusal for a
+  // submitted section conversation used to be a plain Error -> 503. The
+  // caller owns it, so naming the reason leaks nothing; it is a 409.
+  it("409s (not 503) when the owned conversation has a submission", async () => {
+    const { ConversationHasSubmissionError } = await vi.importActual<typeof import("../repositories/conversations")>(
+      "../repositories/conversations",
+    );
+    getOwnedConversationOrNullMock.mockResolvedValue(fakeConversationRow({ kind: "section", sectionId: "s-1" }));
+    softDeleteConversationMock.mockRejectedValue(new ConversationHasSubmissionError());
+
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222", { method: "DELETE" });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "This conversation has been submitted and cannot be deleted." });
+  });
+});
+
+describe("dependency failures", () => {
+  it("answers 503 with the generic body when the database fails, never a routine 404", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    getOwnedConversationOrNullMock.mockRejectedValue(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }));
+
+    const res = await request(buildApp(fakeAuthContext()), "/api/conversations/22222222-2222-2222-2222-222222222222");
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "Something went wrong. Please try again later." });
+  });
+
+  it("answers createConversation's TenancyMismatchError with 404, not 503 (#141)", async () => {
+    const { TenancyMismatchError } = await import("../repositories/errors");
+    createConversationMock.mockRejectedValue(new TenancyMismatchError("Owner is not a member of this course scope"));
+
+    const authContext = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "11111111-1111-1111-1111-111111111111", role: "student" })],
+    });
+    const res = await request(buildApp(authContext), "/api/conversations", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ courseId: "11111111-1111-1111-1111-111111111111" }),
+    });
+
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "Not found" });
   });
 });
 

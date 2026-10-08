@@ -15,12 +15,13 @@
    -------------------------------------------------------------------------- */
 
 import type { Context } from "hono";
+import { Effect } from "effect";
 import { z } from "zod";
-import { makeDb } from "../../db/client";
 import type { AppEnv } from "../context";
 import { instructorScope } from "../utils/guards";
 import {
   attachCollection,
+  CollectionNameExistsError,
   createCollection,
   deleteCollection,
   detachCollection,
@@ -34,6 +35,10 @@ import {
   setCollectionItems,
   updateCollection,
 } from "../repositories/knowledgeCollections";
+import type { CourseScope } from "../repositories/scope";
+import { BadRequest, Conflict, Forbidden, NotFound } from "../effect/errors";
+import { effectHandler } from "../effect/http";
+import { query } from "../effect/services";
 import type {
   AttachmentListPayload,
   CollectionItemsPayload,
@@ -72,121 +77,129 @@ function membershipIdOf(c: Context<AppEnv>, courseId: string): string | null {
   return c.get("authContext")?.memberships.find((m) => m.courseId === courseId)?.id ?? null;
 }
 
-export async function listCollectionsHandler(c: Context<AppEnv>) {
+/** instructorScope() as a typed refusal. */
+function requireInstructorScope(c: Context<AppEnv>): Effect.Effect<CourseScope, Forbidden> {
   const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-  const collections = await listCollections(makeDb(c.env.DATABASE_URL), scope);
-  return c.json({ collections } satisfies CollectionListPayload);
+  return scope ? Effect.succeed(scope) : Effect.fail(new Forbidden({ message: "Not permitted." }));
 }
 
-export async function createCollectionHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
+const readJson = (c: Context<AppEnv>) => Effect.promise(() => c.req.json().catch(() => null));
 
-  const parsed = writeSchema.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return c.json({ error: "A collection needs a name." }, 400);
+const noSuchCollection = () => new NotFound({ message: "No such collection." });
+
+const nameTaken = () => Effect.fail(new Conflict({ message: "A collection with that name already exists." }));
+
+export const listCollectionsHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const collections = yield* query("listCollections", async (db) => listCollections(db, scope));
+  return c.json({ collections } satisfies CollectionListPayload);
+}));
+
+export const createCollectionHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+
+  const parsed = writeSchema.safeParse(yield* readJson(c));
+  if (!parsed.success) return yield* new BadRequest({ message: "A collection needs a name." });
 
   const membershipId = membershipIdOf(c, scope);
-  if (!membershipId) return c.json({ error: "Not permitted." }, 403);
+  if (!membershipId) return yield* new Forbidden({ message: "Not permitted." });
 
-  try {
-    const created = await createCollection(makeDb(c.env.DATABASE_URL), scope, {
+  // Only the unique-name violation is a 409. This used to be a bare catch
+  // that answered every failure -- an outage included -- as "name taken".
+  const created = yield* query(
+    "createCollection",
+    async (db) => createCollection(db, scope, {
       name: parsed.data.name,
       description: parsed.data.description ?? null,
       createdById: membershipId,
-    });
-    return c.json(created, 201);
-  } catch {
-    return c.json({ error: "A collection with that name already exists." }, 409);
-  }
-}
+    }),
+    [CollectionNameExistsError],
+  ).pipe(Effect.catchTags({ CollectionNameExistsError: nameTaken }));
+  return c.json(created, 201);
+}));
 
-export async function updateCollectionHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
+export const updateCollectionHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
 
   const collectionId = c.req.param("collectionId");
-  if (!collectionId) return c.json({ error: "No such collection." }, 404);
+  if (!collectionId) return yield* noSuchCollection();
 
-  const parsed = writeSchema.partial().safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return c.json({ error: "Invalid collection." }, 400);
+  const parsed = writeSchema.partial().safeParse(yield* readJson(c));
+  if (!parsed.success) return yield* new BadRequest({ message: "Invalid collection." });
 
-  const updated = await updateCollection(makeDb(c.env.DATABASE_URL), scope, collectionId, parsed.data);
-  return updated ? c.json(updated) : c.json({ error: "No such collection." }, 404);
-}
+  const updated = yield* query(
+    "updateCollection",
+    async (db) => updateCollection(db, scope, collectionId, parsed.data),
+    [CollectionNameExistsError],
+  ).pipe(Effect.catchTags({ CollectionNameExistsError: nameTaken }));
+  return updated ? c.json(updated) : yield* noSuchCollection();
+}));
 
-export async function deleteCollectionHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
+export const deleteCollectionHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
 
   const collectionId = c.req.param("collectionId");
-  if (!collectionId) return c.json({ error: "No such collection." }, 404);
+  if (!collectionId) return yield* noSuchCollection();
 
-  const removed = await deleteCollection(makeDb(c.env.DATABASE_URL), scope, collectionId);
-  return removed ? c.body(null, 204) : c.json({ error: "No such collection." }, 404);
-}
+  const removed = yield* query("deleteCollection", async (db) => deleteCollection(db, scope, collectionId));
+  return removed ? c.body(null, 204) : yield* noSuchCollection();
+}));
 
 /** The read half of setCollectionItemsHandler. The editor needs this to
  *  restore exactly what was selected before it can safely PUT again --
  *  without it, a save that only meant to add one folder would wholesale
  *  replace the collection's contents with just that folder. */
-export async function getCollectionItemsHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
+export const getCollectionItemsHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
 
   const collectionId = c.req.param("collectionId");
-  if (!collectionId) return c.json({ error: "No such collection." }, 404);
+  if (!collectionId) return yield* noSuchCollection();
 
-  const items = await getCollectionItems(makeDb(c.env.DATABASE_URL), scope, collectionId);
-  return items ? c.json({ items } satisfies CollectionItemsPayload) : c.json({ error: "No such collection." }, 404);
-}
+  const items = yield* query("getCollectionItems", async (db) => getCollectionItems(db, scope, collectionId));
+  return items ? c.json({ items } satisfies CollectionItemsPayload) : yield* noSuchCollection();
+}));
 
-export async function setCollectionItemsHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
+export const setCollectionItemsHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
 
   const collectionId = c.req.param("collectionId");
-  if (!collectionId) return c.json({ error: "No such collection." }, 404);
+  if (!collectionId) return yield* noSuchCollection();
 
-  const parsed = itemsSchema.safeParse(await c.req.json().catch(() => null));
+  const parsed = itemsSchema.safeParse(yield* readJson(c));
   if (!parsed.success) {
-    return c.json({ error: "Each item names exactly one of documentId or directoryPath." }, 400);
+    return yield* new BadRequest({ message: "Each item names exactly one of documentId or directoryPath." });
   }
 
-  const ok = await setCollectionItems(
-    makeDb(c.env.DATABASE_URL),
+  const ok = yield* query("setCollectionItems", async (db) => setCollectionItems(
+    db,
     scope,
     collectionId,
     parsed.data.items as Parameters<typeof setCollectionItems>[3],
-  );
-  return ok ? c.body(null, 204) : c.json({ error: "No such collection." }, 404);
-}
+  ));
+  return ok ? c.body(null, 204) : yield* noSuchCollection();
+}));
 
-export async function listAttachmentsHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-  const attachments = await listAttachments(makeDb(c.env.DATABASE_URL), scope);
+export const listAttachmentsHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const attachments = yield* query("listAttachments", async (db) => listAttachments(db, scope));
   return c.json({ attachments } satisfies AttachmentListPayload);
-}
+}));
 
-export async function attachCollectionHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
+export const attachCollectionHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
 
   const collectionId = c.req.param("collectionId");
-  if (!collectionId) return c.json({ error: "No such collection." }, 404);
+  if (!collectionId) return yield* noSuchCollection();
 
-  const parsed = scopeSchema.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return c.json({ error: "Invalid attachment scope." }, 400);
+  const parsed = scopeSchema.safeParse(yield* readJson(c));
+  if (!parsed.success) return yield* new BadRequest({ message: "Invalid attachment scope." });
   const attachmentScope = parsed.data.scope;
-
-  const db = makeDb(c.env.DATABASE_URL);
 
   // A course-scoped attachment may only name THIS course. Without this the
   // scope column would be a caller-supplied course id that the tenancy guard
   // on course_id never sees.
   if (attachmentScope.kind === "course" && attachmentScope.courseId !== scope) {
-    return c.json({ error: "A course attachment must name this course." }, 400);
+    return yield* new BadRequest({ message: "A course attachment must name this course." });
   }
 
   // homework and section ids are foreign keys, but a foreign key only
@@ -197,12 +210,14 @@ export async function attachCollectionHandler(c: Context<AppEnv>) {
   // the day something resolves by homeworkId/sectionId alone, that row
   // activates.
   if (attachmentScope.kind === "homework") {
-    const belongs = await homeworkBelongsToCourse(db, scope, attachmentScope.homeworkId);
-    if (!belongs) return c.json({ error: "That homework does not belong to this course." }, 400);
+    const homeworkId = attachmentScope.homeworkId;
+    const belongs = yield* query("homeworkBelongsToCourse", async (db) => homeworkBelongsToCourse(db, scope, homeworkId));
+    if (!belongs) return yield* new BadRequest({ message: "That homework does not belong to this course." });
   }
   if (attachmentScope.kind === "section") {
-    const belongs = await sectionBelongsToCourse(db, scope, attachmentScope.sectionId);
-    if (!belongs) return c.json({ error: "That section does not belong to this course." }, 400);
+    const sectionId = attachmentScope.sectionId;
+    const belongs = yield* query("sectionBelongsToCourse", async (db) => sectionBelongsToCourse(db, scope, sectionId));
+    if (!belongs) return yield* new BadRequest({ message: "That section does not belong to this course." });
   }
   // llmConfig is deliberately NOT checked here: llm_configs is scoped by
   // organization_id, not course_id -- it has no course to belong to. A
@@ -210,38 +225,38 @@ export async function attachCollectionHandler(c: Context<AppEnv>) {
   // course-equality check would be encoding a misunderstanding of the data
   // model, not closing a gap.
 
-  const ok = await attachCollection(db, scope, collectionId, attachmentScope);
-  return ok ? c.body(null, 204) : c.json({ error: "No such collection." }, 404);
-}
+  const ok = yield* query("attachCollection", async (db) => attachCollection(db, scope, collectionId, attachmentScope));
+  return ok ? c.body(null, 204) : yield* noSuchCollection();
+}));
 
-export async function detachCollectionHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
+export const detachCollectionHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
 
   const attachmentId = c.req.param("attachmentId");
-  if (!attachmentId) return c.json({ error: "No such attachment." }, 404);
+  if (!attachmentId) return yield* new NotFound({ message: "No such attachment." });
 
-  const ok = await detachCollection(makeDb(c.env.DATABASE_URL), scope, attachmentId);
-  return ok ? c.body(null, 204) : c.json({ error: "No such attachment." }, 404);
-}
+  const ok = yield* query("detachCollection", async (db) => detachCollection(db, scope, attachmentId));
+  return ok ? c.body(null, 204) : yield* new NotFound({ message: "No such attachment." });
+}));
 
-export async function resolveKnowledgeHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
+export const resolveKnowledgeHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const resolution = await resolveForTarget(db, scope, {
+  const resolution = yield* query("resolveForTarget", async (db) => resolveForTarget(db, scope, {
     courseId: scope,
     homeworkId: c.req.query("homeworkId") ?? null,
     sectionId: c.req.query("sectionId") ?? null,
     llmConfigId: c.req.query("llmConfigId") ?? null,
-  });
+  }));
 
   // No attachments means no documents; skip the expansion query entirely.
   const documents =
     resolution.collectionIds.length === 0
       ? []
-      : await listDocumentsInCollections(db, scope, resolution.collectionIds);
+      : yield* query(
+          "listDocumentsInCollections",
+          async (db) => listDocumentsInCollections(db, scope, resolution.collectionIds),
+        );
 
   return c.json({ ...resolution, documents } as ResolutionPayload);
-}
+}));

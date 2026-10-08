@@ -25,6 +25,21 @@ import {
   type ResolutionTarget,
 } from "../knowledge/resolveCollections";
 import type { CourseScope } from "./scope";
+import { isUniqueViolation } from "./errors";
+
+/** A course's collection names are unique (material_collections_course_name_uq).
+ *  createCollection/updateCollection translate that unique violation into this
+ *  refusal, so the route answers 409 for it and nothing else -- an outage is
+ *  not "that name is taken". */
+export class CollectionNameExistsError extends Error {
+  readonly _tag = "CollectionNameExistsError" as const;
+  constructor() {
+    super("A collection with that name already exists.");
+    this.name = "CollectionNameExistsError";
+  }
+}
+
+const COLLECTION_NAME_UQ = "material_collections_course_name_uq";
 
 export interface CollectionRecord {
   id: string;
@@ -123,15 +138,21 @@ export async function createCollection(
   scope: CourseScope,
   input: CreateCollectionInput,
 ): Promise<CollectionRecord> {
-  const [row] = await db
-    .insert(materialCollections)
-    .values({
-      courseId: scope,
-      name: input.name,
-      description: input.description ?? null,
-      createdById: input.createdById,
-    })
-    .returning(COLLECTION_COLUMNS);
+  let row;
+  try {
+    [row] = await db
+      .insert(materialCollections)
+      .values({
+        courseId: scope,
+        name: input.name,
+        description: input.description ?? null,
+        createdById: input.createdById,
+      })
+      .returning(COLLECTION_COLUMNS);
+  } catch (err) {
+    if (isUniqueViolation(err, COLLECTION_NAME_UQ)) throw new CollectionNameExistsError();
+    throw err;
+  }
   return {
     ...row,
     createdAt: row.createdAt.toISOString(),
@@ -147,16 +168,23 @@ export async function updateCollection(
   collectionId: string,
   input: { name?: string; description?: string | null },
 ): Promise<CollectionRecord | null> {
-  const [row] = await db
-    .update(materialCollections)
-    .set({ ...input, updatedAt: new Date() })
-    .where(
-      and(
-        eq(materialCollections.id, collectionId),
-        eq(materialCollections.courseId, scope),
-      ),
-    )
-    .returning({ id: materialCollections.id });
+  let row;
+  try {
+    [row] = await db
+      .update(materialCollections)
+      .set({ ...input, updatedAt: new Date() })
+      .where(
+        and(
+          eq(materialCollections.id, collectionId),
+          eq(materialCollections.courseId, scope),
+        ),
+      )
+      .returning({ id: materialCollections.id });
+  } catch (err) {
+    // A rename onto a sibling's name hits the same index as a create.
+    if (isUniqueViolation(err, COLLECTION_NAME_UQ)) throw new CollectionNameExistsError();
+    throw err;
+  }
   return row ? getCollection(db, scope, row.id) : null;
 }
 

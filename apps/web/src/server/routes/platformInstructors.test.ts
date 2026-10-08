@@ -4,6 +4,7 @@ import { grantPlatformInstructorHandler } from "./platformInstructors";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import { fakeAuthContext } from "../testing/authContext";
+import { SERVICE_UNAVAILABLE_MESSAGE } from "../utils/errors";
 
 const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
 
@@ -106,5 +107,15 @@ describe("POST /api/platform/instructors (#316)", () => {
     });
     const res = await post(superAdmin(), { email: "not-an-email" });
     expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /api/platform/instructors failure paths (Effect migration)", () => {
+  it("answers a database failure with the generic 503", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    grantPlatformInstructorMock.mockRejectedValue(new Error("connection terminated"));
+    const res = await post(superAdmin(), { email: "new@uw.edu" });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: SERVICE_UNAVAILABLE_MESSAGE });
   });
 });

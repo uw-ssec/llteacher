@@ -168,6 +168,7 @@ export class SubmissionError extends Error {}
  *  org. Kept distinct from NotSubmissionOwnerError at the repository layer so
  *  the route chooses what to collapse -- it deliberately collapses both. */
 export class ConversationNotSubmittableError extends SubmissionError {
+  readonly _tag = "ConversationNotSubmittableError" as const;
   constructor() {
     super("Conversation not found or not accessible");
     this.name = "ConversationNotSubmittableError";
@@ -175,6 +176,7 @@ export class ConversationNotSubmittableError extends SubmissionError {
 }
 
 export class NotSubmissionOwnerError extends SubmissionError {
+  readonly _tag = "NotSubmissionOwnerError" as const;
   constructor() {
     super("Conversation is not owned by requester");
     this.name = "NotSubmissionOwnerError";
@@ -185,6 +187,7 @@ export class NotSubmissionOwnerError extends SubmissionError {
  *  legitimate access, so naming the reason leaks nothing they did not
  *  already know -- and "not found" would send them looking for a bug. */
 export class HomeworkClosedError extends SubmissionError {
+  readonly _tag = "HomeworkClosedError" as const;
   constructor() {
     super("Homework is hidden or expired");
     this.name = "HomeworkClosedError";
@@ -196,6 +199,7 @@ export class HomeworkClosedError extends SubmissionError {
  *  uniform "not found or not accessible" 403 -- the caller owns the
  *  conversation, so naming the real reason leaks nothing. */
 export class TeacherTestNotSubmittableError extends SubmissionError {
+  readonly _tag = "TeacherTestNotSubmittableError" as const;
   constructor() {
     super("Teacher test conversations cannot be submitted");
     this.name = "TeacherTestNotSubmittableError";
@@ -203,6 +207,7 @@ export class TeacherTestNotSubmittableError extends SubmissionError {
 }
 
 export class SubmissionGradedError extends SubmissionError {
+  readonly _tag = "SubmissionGradedError" as const;
   constructor() {
     super("Submission has already been graded and cannot be restarted");
     this.name = "SubmissionGradedError";

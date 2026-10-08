@@ -1,7 +1,8 @@
 import { Hono, type Context } from "hono";
 import { setCookie, getCookie, deleteCookie } from "hono/cookie";
+import { Effect } from "effect";
+import { BadRequestException, NotFoundException, OauthException, UnprocessableEntityException } from "@workos-inc/node";
 import { getWorkOS } from "../../lib/workos";
-import { makeDb } from "../../db/client";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { DomainAllowlistService } from "../../lib/services/DomainAllowlistService";
@@ -30,14 +31,26 @@ import { decodeJwt } from "jose";
 import { extractSession } from "../middleware/auth";
 import type { AppEnv } from "../context";
 import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "../utils/errors";
+import { ExternalServiceError, RuntimeConfigError } from "../effect/errors";
+import { effectHandler } from "../effect/http";
+import { external, query } from "../effect/services";
 
-export async function loginHandler(c: Context<AppEnv>) {
-  const workos = getWorkOS(c.env.WORKOS_API_KEY);
+/** A secret this flow needs (ENCRYPTION_KEY/BLIND_INDEX_KEY, SESSION_SECRET)
+ *  is missing or unusable -- a deployment fault, typed so the callback can
+ *  answer it with its own sign-in-unavailable page. */
+function fromConfig<A>(run: () => Promise<A>): Effect.Effect<A, RuntimeConfigError> {
+  return Effect.tryPromise({
+    try: run,
+    catch: (cause) => new RuntimeConfigError({ problems: [cause instanceof Error ? cause.message : String(cause)] }),
+  });
+}
+
+export const loginHandler = effectHandler((c) => Effect.gen(function* () {
   const secureCookie = c.env.APP_URL.startsWith("https://");
 
   const state = generateState();
   const verifier = generatePkceVerifier();
-  const codeChallenge = await computeCodeChallenge(verifier);
+  const codeChallenge = yield* Effect.promise(() => computeCodeChallenge(verifier));
 
   const oauthCookieOptions = {
     httpOnly: true,
@@ -49,18 +62,28 @@ export async function loginHandler(c: Context<AppEnv>) {
   const returnTo = safeReturnTo(c.req.query("returnTo"));
   setCookie(c, OAUTH_TRANSACTION_COOKIE, serializeOAuthTransaction({ state, verifier, returnTo }), oauthCookieOptions);
 
-  const authorizationUrl = workos.userManagement.getAuthorizationUrl({
-    clientId: c.env.WORKOS_CLIENT_ID,
-    redirectUri: callbackUrl(c),
-    provider: "authkit",
-    state,
-    codeChallenge,
-    codeChallengeMethod: "S256",
-  });
+  // Local URL construction, but it is the WorkOS client doing it: a missing
+  // WORKOS_API_KEY/WORKOS_CLIENT_ID fails here, as ExternalServiceError(workos)
+  // -> the generic 503.
+  const authorizationUrl = yield* external("workos", "getAuthorizationUrl", async () =>
+    getWorkOS(c.env.WORKOS_API_KEY).userManagement.getAuthorizationUrl({
+      clientId: c.env.WORKOS_CLIENT_ID,
+      redirectUri: callbackUrl(c),
+      provider: "authkit",
+      state,
+      codeChallenge,
+      codeChallengeMethod: "S256",
+    }),
+  );
   return c.redirect(authorizationUrl);
-}
+}));
 
-export async function callbackHandler(c: Context<AppEnv>) {
+/** WorkOS's answers to a code it will not exchange (invalid_grant, an
+ *  expired or replayed code, a verifier mismatch): the sign-in attempt
+ *  failed, not WorkOS. */
+const CODE_REJECTIONS = [OauthException, BadRequestException, NotFoundException, UnprocessableEntityException] as const;
+
+export const callbackHandler = effectHandler((c) => Effect.gen(function* () {
   const code = c.req.query("code");
   const returnedState = c.req.query("state");
   const transaction = parseOAuthTransaction(getCookie(c, OAUTH_TRANSACTION_COOKIE));
@@ -69,6 +92,8 @@ export async function callbackHandler(c: Context<AppEnv>) {
   const returnTo = safeReturnTo(transaction?.returnTo);
   deleteCookie(c, OAUTH_TRANSACTION_COOKIE, { path: "/" });
 
+  // Plain-text bodies (this is a browser navigation, not an API call), so
+  // these are answered directly rather than as BadRequest's JSON.
   if (!code) {
     return c.text("Missing authorization code", 400);
   }
@@ -78,53 +103,63 @@ export async function callbackHandler(c: Context<AppEnv>) {
     return c.text("Invalid or expired sign-in request. Please try again.", 400);
   }
 
-  const workos = getWorkOS(c.env.WORKOS_API_KEY);
-  let workosUser: WorkOSProfile;
-  let workosSessionId: string | undefined;
-  let workosOrganizationId: string | undefined;
-  try {
-    const result = await workos.userManagement.authenticateWithCode({
-      clientId: c.env.WORKOS_CLIENT_ID,
-      code,
-      codeVerifier: verifier,
-    });
-    workosUser = result.user;
-    workosOrganizationId = result.organizationId;
-    workosSessionId = decodeSessionId(result.accessToken);
-  } catch {
-    return c.text("Sign-in failed. Please try again.", 401);
-  }
+  const authenticated = yield* external(
+    "workos",
+    "authenticateWithCode",
+    () =>
+      getWorkOS(c.env.WORKOS_API_KEY).userManagement.authenticateWithCode({
+        clientId: c.env.WORKOS_CLIENT_ID,
+        code,
+        codeVerifier: verifier,
+      }),
+    CODE_REJECTIONS,
+  ).pipe(
+    Effect.map((result) => ({ result })),
+    Effect.catch((err) => {
+      // A rejected code and WorkOS being unreachable both answer 401 with
+      // the same retry sentence -- the browser's only move either way is to
+      // sign in again. The difference is the log: a rejected code is
+      // routine, an unreachable WorkOS is an operator's problem and is
+      // logged as one.
+      if (err instanceof ExternalServiceError) {
+        logServerError("callbackHandler", err.cause, { tag: err._tag, service: err.service, operation: err.operation });
+      }
+      return Effect.succeed({ response: c.text("Sign-in failed. Please try again.", 401) });
+    }),
+  );
+  if ("response" in authenticated) return authenticated.response;
+  const workosUser: WorkOSProfile = authenticated.result.user;
+  const workosOrganizationId: string | undefined = authenticated.result.organizationId;
+  const workosSessionId = decodeSessionId(authenticated.result.accessToken);
 
-  try {
-    const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
-    const db = makeDb(c.env.DATABASE_URL);
+  return yield* Effect.gen(function* () {
+    const cipher = yield* fromConfig(async () => new IdentityCipher(await loadIdentityCipherKeys(c.env)));
 
-    const allowedDomains = await DomainAllowlistService.resolveAllowedDomains(
-      workosOrganizationId,
-      db,
+    const allowedDomains = yield* query(
+      "resolveAllowedDomains",
+      (db) => DomainAllowlistService.resolveAllowedDomains(workosOrganizationId, db),
     );
     const domainCheck = DomainAllowlistService.validateEmailDomain(
       workosUser.email,
       allowedDomains,
     );
     if (!domainCheck.allowed) {
-      const emailBlindIndex = await cipher.computeBlindIndex(
-        IdentityCipher.normalizeEmail(workosUser.email),
+      const emailBlindIndex = yield* Effect.promise(() =>
+        cipher.computeBlindIndex(IdentityCipher.normalizeEmail(workosUser.email)),
       );
-      const grandfathered = await DomainAllowlistService.checkGrandfathering(
-        workosUser.id,
-        emailBlindIndex,
-        db,
+      const grandfathered = yield* query(
+        "checkGrandfathering",
+        (db) => DomainAllowlistService.checkGrandfathering(workosUser.id, emailBlindIndex, db),
       );
       if (!grandfathered) {
         return c.html(disallowedDomainPage(domainCheck.reason ?? "Domain not allowed"), 403);
       }
     }
 
-    const { userId, isNew, sessionEpoch } = await new UserIdentityService(
-      cipher,
-      db,
-    ).createOrClaimUser(workosUser);
+    const { userId, isNew, sessionEpoch } = yield* query(
+      "createOrClaimUser",
+      (db) => new UserIdentityService(cipher, db).createOrClaimUser(workosUser),
+    );
 
     // Best-effort (#147): a login/provisioning audit gap must never block
     // sign-in. Scoped via the WorkOS org the user just authenticated into
@@ -132,19 +167,24 @@ export async function callbackHandler(c: Context<AppEnv>) {
     // elsewhere in this file, can't be used here -- a brand-new user has no
     // memberships yet). No-ops if no local org row matches (single-tenant
     // v0 dev path), same fallback DomainAllowlistService already makes.
-    const orgScope = await getOrgScopeByWorkosOrgId(db, workosOrganizationId);
+    const orgScope = yield* query(
+      "getOrgScopeByWorkosOrgId",
+      (db) => getOrgScopeByWorkosOrgId(db, workosOrganizationId),
+    );
     if (orgScope) {
-      await auditBestEffort(db, [orgScope], {
-        actorUserId: userId,
-        action: isNew ? AUDIT_ACTIONS.USER_PROVISIONED : AUDIT_ACTIONS.USER_LOGIN,
-        targetType: "user",
-        targetId: userId,
-      });
+      yield* query("auditBestEffort", (db) =>
+        auditBestEffort(db, [orgScope], {
+          actorUserId: userId,
+          action: isNew ? AUDIT_ACTIONS.USER_PROVISIONED : AUDIT_ACTIONS.USER_LOGIN,
+          targetType: "user",
+          targetId: userId,
+        }),
+      );
     }
 
-    const sessionKey = await loadSessionKey(c.env);
+    const sessionKey = yield* fromConfig(() => loadSessionKey(c.env));
     const payload = createSessionPayload(userId, workosUser.id, sessionEpoch, undefined, workosSessionId);
-    const sealed = await sealSession(payload, sessionKey);
+    const sealed = yield* fromConfig(() => sealSession(payload, sessionKey));
 
     setCookie(c, SESSION_COOKIE_NAME, sealed, {
       httpOnly: true,
@@ -155,17 +195,30 @@ export async function callbackHandler(c: Context<AppEnv>) {
     });
 
     return c.redirect(returnTo ?? "/");
-  } catch (err) {
+  }).pipe(
     // DB down, misconfigured secrets, etc. -- never surface the real error
-    // (e.g. a connection string) to the browser mid-login.
-    logServerError("callbackHandler", err);
+    // (e.g. a connection string) to the browser mid-login. Answered with an
+    // HTML page rather than the API's JSON 503: this is a browser
+    // navigation, not a fetch.
+    Effect.catchTags({
+      DatabaseError: (err) => signInUnavailable(c, err.cause),
+      RuntimeConfigError: (err) => signInUnavailable(c, err),
+    }),
+  );
+}));
+
+function signInUnavailable(c: Context<AppEnv>, cause: unknown) {
+  return Effect.sync(() => {
+    logServerError("callbackHandler", cause);
     return c.html(signInUnavailablePage(), 503);
-  }
+  });
 }
 
-export async function logoutHandler(c: Context<AppEnv>) {
-  const session = await extractSession(c);
-  const workosSessionId = session?.workosSessionId ?? (await recoverWorkosSessionId(c));
+export const logoutHandler = effectHandler((c) => Effect.gen(function* () {
+  // A missing SESSION_SECRET (the only way these reject) is a deployment
+  // fault: a defect, answered with the generic 503 as before.
+  const session = yield* Effect.promise(() => extractSession(c));
+  const workosSessionId = session?.workosSessionId ?? (yield* Effect.promise(() => recoverWorkosSessionId(c)));
   deleteCookie(c, SESSION_COOKIE_NAME, { path: "/" });
 
   // Best-effort and defensively wrapped (#147): logout must clear the
@@ -174,33 +227,34 @@ export async function logoutHandler(c: Context<AppEnv>) {
   // this route exists for exactly that reason. Only audited when a valid
   // (non-expired) session was present; the rare expired-cookie-but-still-
   // WorkOS-logging-out edge case recoverWorkosSessionId handles has no
-  // app-side session to audit against anyway.
+  // app-side session to audit against anyway. A DatabaseError here is
+  // logged and swallowed, never answered 503.
   if (session) {
-    try {
-      const db = makeDb(c.env.DATABASE_URL);
-      const orgScopes = await getOrgScopesForUser(db, session.userId);
-      await auditBestEffort(db, orgScopes, {
-        actorUserId: session.userId,
-        action: AUDIT_ACTIONS.USER_LOGOUT,
-        targetType: "user",
-        targetId: session.userId,
-      });
-    } catch (err) {
-      logServerError("logoutHandler", err);
-    }
+    yield* Effect.gen(function* () {
+      const orgScopes = yield* query("getOrgScopesForUser", (db) => getOrgScopesForUser(db, session.userId));
+      yield* query("auditBestEffort", (db) =>
+        auditBestEffort(db, orgScopes, {
+          actorUserId: session.userId,
+          action: AUDIT_ACTIONS.USER_LOGOUT,
+          targetType: "user",
+          targetId: session.userId,
+        }),
+      );
+    }).pipe(Effect.catchTag("DatabaseError", (err) => Effect.sync(() => logServerError("logoutHandler", err.cause))));
   }
 
   if (workosSessionId) {
-    const workos = getWorkOS(c.env.WORKOS_API_KEY);
-    const logoutUrl = workos.userManagement.getLogoutUrl({
-      sessionId: workosSessionId,
-      returnTo: `${c.env.APP_URL}/`,
-    });
+    const logoutUrl = yield* external("workos", "getLogoutUrl", async () =>
+      getWorkOS(c.env.WORKOS_API_KEY).userManagement.getLogoutUrl({
+        sessionId: workosSessionId,
+        returnTo: `${c.env.APP_URL}/`,
+      }),
+    );
     return c.redirect(logoutUrl);
   }
 
   return c.redirect("/");
-}
+}));
 
 /**
  * Fallback for logout only: `extractSession` (via `unsealSession`) returns

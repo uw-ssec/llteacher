@@ -1,6 +1,5 @@
-import { type Context } from "hono";
+import { Effect } from "effect";
 import { z } from "zod";
-import { makeDb } from "../../db/client";
 import { UUID_RE } from "../utils/uuid";
 import { feedbackReasonEnum } from "../../db/schema";
 import { getOwnedConversationOrNull } from "../repositories/conversations";
@@ -18,8 +17,9 @@ import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { getOrgScopeForCourse } from "../repositories/organizations";
 import { recordTranscriptAccess } from "../../lib/instructor-authz";
-import type { AuthContext } from "../middleware/roles";
-import type { AppEnv } from "../context";
+import { BadRequest, Conflict, Forbidden, NotFound } from "../effect/errors";
+import { effectHandler, requireAuthContext } from "../effect/http";
+import { query } from "../effect/services";
 
 /* --------------------------------------------------------------------------
    Student feedback flags on AI tutor responses (#90).
@@ -60,11 +60,10 @@ const flagResponseSchema = z.object({
     .transform((v) => (v === "" ? undefined : v)),
 });
 
-export async function flagResponseHandler(c: Context<AppEnv>) {
-  const authContext = c.get("authContext") as AuthContext | undefined;
-  if (!authContext) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
+const conversationNotFound = () => new NotFound({ message: "Conversation not found" });
+
+export const flagResponseHandler = effectHandler((c) => Effect.gen(function* () {
+  const authContext = yield* requireAuthContext(c);
 
   const conversationId = c.req.param("conversationId");
   const messageId = c.req.param("messageId");
@@ -72,24 +71,19 @@ export async function flagResponseHandler(c: Context<AppEnv>) {
   // than reaching a query unvalidated -- same "not found" bucket as an
   // unknown-but-well-formed id, so a probe can't distinguish the two.
   if (!conversationId || !UUID_RE.test(conversationId) || !messageId || !UUID_RE.test(messageId)) {
-    return c.json({ error: "Conversation not found" }, 404);
+    return yield* conversationNotFound();
   }
 
-  let json: unknown;
-  try {
-    json = await c.req.json();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+  const json = yield* Effect.tryPromise({
+    try: () => c.req.json<unknown>(),
+    catch: () => new BadRequest({ message: "Request body must be valid JSON" }),
+  });
   const parsed = flagResponseSchema.safeParse(json);
   if (!parsed.success) {
-    return c.json(
-      { error: "reason is required (incorrect | gave_away_answer | confusing | other); comment, if present, must be 2000 characters or fewer" },
-      400,
-    );
+    return yield* new BadRequest({
+      message: "reason is required (incorrect | gave_away_answer | confusing | other); comment, if present, must be 2000 characters or fewer",
+    });
   }
-
-  const db = makeDb(c.env.DATABASE_URL);
 
   // Server-hardening audit fix, Minor #1 (Security): this route had no
   // rate limit at all -- a student could spam-flag messages. Reuses the
@@ -98,7 +92,12 @@ export async function flagResponseHandler(c: Context<AppEnv>) {
   // one -- a flag is a rare, deliberate action next to chat's per-message
   // volume, so sharing one generous per-minute budget costs a normal user
   // nothing while still bounding a scripted flag-loop.
-  const requestCount = await reserveRateLimitSlot(db, authContext.session.userId, new Date(), RATE_LIMIT_WINDOW_MS);
+  const requestCount = yield* query(
+    "reserveRateLimitSlot",
+    (db) => reserveRateLimitSlot(db, authContext.session.userId, new Date(), RATE_LIMIT_WINDOW_MS),
+  );
+  // Answered directly, not failed: 429 with Retry-After is not one of the
+  // HttpError outcomes, and it is a normal answer, not a fault.
   if (requestCount > RATE_LIMIT_MAX_PER_MINUTE) {
     return c.json(
       { error: "You're sending requests too quickly. Please wait a moment and try again." },
@@ -111,14 +110,12 @@ export async function flagResponseHandler(c: Context<AppEnv>) {
   // /api/conversations/:id already use -- covers a nonexistent
   // conversation, one the caller doesn't own, a soft-deleted one, and one
   // whose course the caller has since left, all as the same 404.
-  const conversation = await getOwnedConversationOrNull(
-    db,
-    conversationId,
-    authContext.session.userId,
-    authContext.isMemberOf,
+  const conversation = yield* query(
+    "getOwnedConversationOrNull",
+    (db) => getOwnedConversationOrNull(db, conversationId, authContext.session.userId, authContext.isMemberOf),
   );
   if (!conversation) {
-    return c.json({ error: "Conversation not found" }, 404);
+    return yield* conversationNotFound();
   }
 
   // #90: only an ENROLLED STUDENT may flag -- an instructor/TA teacher-
@@ -130,7 +127,7 @@ export async function flagResponseHandler(c: Context<AppEnv>) {
   // reinventing it. 404, not 403, matching every other "this isn't yours
   // to act on" response on this route.
   if (!isStudentInCourse(authContext.memberships, conversation.courseId)) {
-    return c.json({ error: "Conversation not found" }, 404);
+    return yield* conversationNotFound();
   }
 
   // Feedback context (section/homework titles, the PR3 transcript-viewer
@@ -138,19 +135,23 @@ export async function flagResponseHandler(c: Context<AppEnv>) {
   // free-standing "tutor" surface has no section/homework to attach a flag
   // to, and is out of scope for this pilot instrument.
   if (conversation.kind !== "section") {
-    return c.json({ error: "Feedback is only available on homework-section conversations" }, 400);
+    return yield* new BadRequest({ message: "Feedback is only available on homework-section conversations" });
   }
 
   // Must exist, belong to THIS conversation (not a different or
   // nonexistent one), and actually be the tutor's own turn -- flagging a
   // student's own message or a system row isn't a case this models.
-  const message = await getFlaggableAssistantMessage(db, conversationId, messageId);
+  const message = yield* query(
+    "getFlaggableAssistantMessage",
+    (db) => getFlaggableAssistantMessage(db, conversationId, messageId),
+  );
   if (!message) {
-    return c.json({ error: "Message not found" }, 404);
+    return yield* new NotFound({ message: "Message not found" });
   }
 
-  try {
-    const flag = await flagResponse(db, {
+  const flag = yield* query(
+    "flagResponse",
+    (db) => flagResponse(db, {
       conversationId,
       courseId: conversation.courseId,
       messageId,
@@ -158,22 +159,20 @@ export async function flagResponseHandler(c: Context<AppEnv>) {
       reason: parsed.data.reason,
       comment: parsed.data.comment ?? null,
       responseSnapshot: message.parts,
-    });
-    return c.json(
-      { id: flag.id, reason: flag.reason, comment: flag.comment, flaggedAt: flag.flaggedAt.toISOString() },
-      201,
-    );
-  } catch (err) {
-    if (err instanceof ResponseAlreadyFlaggedError) {
-      return c.json({ error: err.message, code: "already_flagged" }, 409);
-    }
-    throw err;
-  }
-}
+    }),
+    [ResponseAlreadyFlaggedError],
+  ).pipe(Effect.catchTags({
+    ResponseAlreadyFlaggedError: (err) => Effect.fail(new Conflict({ message: err.message, code: "already_flagged" })),
+  }));
+  return c.json(
+    { id: flag.id, reason: flag.reason, comment: flag.comment, flaggedAt: flag.flaggedAt.toISOString() },
+    201,
+  );
+}));
 
-export async function listCourseFeedbackHandler(c: Context<AppEnv>) {
+export const listCourseFeedbackHandler = effectHandler((c) => Effect.gen(function* () {
   const courseId = c.req.param("courseId");
-  const authContext = c.get("authContext") as AuthContext | undefined;
+  const authContext = c.get("authContext");
 
   // Same shape as listInstructorTranscriptsHandler's own guard: the route
   // is also wrapped in requireGraderOf at registration (server/index.ts),
@@ -181,17 +180,17 @@ export async function listCourseFeedbackHandler(c: Context<AppEnv>) {
   // fail closed for a direct call (e.g. this file's own unit tests), not
   // only behind the guard.
   if (!authContext || !courseId || !authContext.isGraderOf(courseId)) {
-    return c.json({ error: "Grader access denied" }, 403);
+    return yield* new Forbidden({ message: "Grader access denied" });
   }
   const scope = courseScopeFromAuthContext(authContext, courseId);
-  if (!scope) return c.json({ error: "Course access denied" }, 403);
+  if (!scope) return yield* new Forbidden({ message: "Course access denied" });
 
   const limitParam = c.req.query("limit");
   let limit = 50;
   if (limitParam !== undefined) {
     const parsedLimit = Number(limitParam);
     if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 200) {
-      return c.json({ error: "limit must be an integer between 1 and 200" }, 400);
+      return yield* new BadRequest({ message: "limit must be an integer between 1 and 200" });
     }
     limit = parsedLimit;
   }
@@ -200,13 +199,15 @@ export async function listCourseFeedbackHandler(c: Context<AppEnv>) {
   if (offsetParam !== undefined) {
     const parsedOffset = Number(offsetParam);
     if (!Number.isInteger(parsedOffset) || parsedOffset < 0) {
-      return c.json({ error: "offset must be a non-negative integer" }, 400);
+      return yield* new BadRequest({ message: "offset must be a non-negative integer" });
     }
     offset = parsedOffset;
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
+  // A missing/invalid key is a deployment fault, not a request outcome:
+  // Effect.promise makes it a defect (logged, 503), as app.onError answered
+  // it before.
+  const cipher = new IdentityCipher(yield* Effect.promise(() => loadIdentityCipherKeys(c.env)));
 
   // #208/#366: the same unreleased-content gate the transcript list applies
   // to its own rows -- a flag's section/homework titles (and, via the
@@ -226,7 +227,10 @@ export async function listCourseFeedbackHandler(c: Context<AppEnv>) {
   // `items.length` summed across pages -- see listCourseFeedback's own doc
   // comment (repositories/responseFeedback.ts) for the full mechanism.
   const canSeeUnreleased = authContext.canViewDraftsIn(courseId);
-  const result = await listCourseFeedback(db, scope, cipher, { limit, offset, canViewDrafts: canSeeUnreleased });
+  const result = yield* query(
+    "listCourseFeedback",
+    (db) => listCourseFeedback(db, scope, cipher, { limit, offset, canViewDrafts: canSeeUnreleased }),
+  );
 
   // #90 review (Important #1): FERPA -- this read returns decrypted student
   // names plus flagged tutor content for a whole course, the identical
@@ -236,12 +240,12 @@ export async function listCourseFeedbackHandler(c: Context<AppEnv>) {
   // "feedback-list" action) rather than a second audit call site -- see
   // that module's own #90 doc comment. Best-effort/never blocks the
   // response, same tradeoff every other caller of this hook makes.
-  const orgScope = await getOrgScopeForCourse(db, courseId);
-  await recordTranscriptAccess(db, orgScope, {
+  const orgScope = yield* query("getOrgScopeForCourse", (db) => getOrgScopeForCourse(db, courseId));
+  yield* query("recordTranscriptAccess", (db) => recordTranscriptAccess(db, orgScope, {
     viewerId: authContext.session.userId,
     courseId,
     action: "feedback-list",
-  });
+  }));
 
   return c.json({
     items: result.items.map((item) => ({
@@ -264,4 +268,4 @@ export async function listCourseFeedbackHandler(c: Context<AppEnv>) {
     limit,
     offset,
   });
-}
+}));

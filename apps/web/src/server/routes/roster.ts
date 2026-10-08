@@ -11,8 +11,8 @@
    -------------------------------------------------------------------------- */
 
 import { type Context } from "hono";
+import { Effect } from "effect";
 import { UUID_RE } from "../utils/uuid";
-import { makeDb } from "../../db/client";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { parseRosterCsv } from "../../lib/csv";
@@ -27,13 +27,14 @@ import {
   type ProvisionResult,
 } from "../repositories/roster";
 import { getOrgScopeForCourse } from "../repositories/organizations";
-import { courseScopeFromAuthContext } from "../repositories/scope";
 import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
 import { logServerError } from "../utils/errors";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
-import type { CourseScope } from "../repositories/scope";
 import type { RosterImportRowPayload, RosterListPayload, RosterRowStatus } from "@llteacher/ui/api";
+import { BadRequest, Conflict, Forbidden, NotFound } from "../effect/errors";
+import { effectHandler, requireCourseAccess, type CourseAccess } from "../effect/http";
+import { query } from "../effect/services";
 
 /** Roles an instructor may enrol someone as from the console.
  *
@@ -57,54 +58,55 @@ function parseRole(raw: string | undefined): EnrollableRole | null {
   return null;
 }
 
-async function instructorScope(
-  c: Context<AppEnv>,
-): Promise<{ scope: CourseScope; courseId: string; authContext: AuthContext } | null> {
+/** Instructor-of-course, then the CourseScope for that course. Both refusals
+ *  carry the same body, as they always have. */
+function instructorScope(c: Context<AppEnv>): Effect.Effect<CourseAccess, Forbidden> {
   const courseId = c.req.param("courseId");
   const authContext = c.get("authContext") as AuthContext | undefined;
-  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) return null;
-  const scope = courseScopeFromAuthContext(authContext, courseId);
-  return scope ? { scope, courseId, authContext } : null;
+  return authContext && courseId && authContext.isInstructorOf(courseId)
+    ? requireCourseAccess(c, "courseId", "Instructor access denied")
+    : Effect.fail(new Forbidden({ message: "Instructor access denied" }));
 }
 
-export async function listRosterHandler(c: Context<AppEnv>) {
-  const ctx = await instructorScope(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+/** The cipher keys are process configuration, not request input: a missing
+ *  key is a deployment fault, answered as a logged 503 defect. */
+const identityCipher = (c: Context<AppEnv>) =>
+  Effect.promise(() => loadIdentityCipherKeys(c.env)).pipe(Effect.map((keys) => new IdentityCipher(keys)));
+
+const invalidJson = () => new BadRequest({ message: "Request body must be valid JSON" });
+
+export const listRosterHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* instructorScope(c);
 
   const search = c.req.query("search") ?? undefined;
-  const db = makeDb(c.env.DATABASE_URL);
-  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
-  const { members, total } = await listCourseRoster(db, ctx.scope, cipher, { search });
+  const cipher = yield* identityCipher(c);
+  const { members, total } = yield* query(
+    "listCourseRoster",
+    (db) => listCourseRoster(db, ctx.scope, cipher, { search }),
+  );
   const body: RosterListPayload = { members, total };
   return c.json(body);
-}
+}));
 
 /** #32: manual add -- one address, one membership. The single-entry door to
  *  the same pipeline the CSV importer uses in bulk. */
-export async function addRosterMemberHandler(c: Context<AppEnv>) {
-  const ctx = await instructorScope(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+export const addRosterMemberHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* instructorScope(c);
 
-  let body: { email?: unknown; displayName?: unknown; role?: unknown };
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+  const body = yield* Effect.tryPromise({
+    try: () => c.req.json<{ email?: unknown; displayName?: unknown; role?: unknown }>(),
+    catch: invalidJson,
+  });
   const email = typeof body.email === "string" ? body.email.trim() : "";
-  if (!email) return c.json({ error: "Enter an email address." }, 400);
+  if (!email) return yield* new BadRequest({ message: "Enter an email address." });
   const role = parseRole(typeof body.role === "string" ? body.role : undefined);
   if (!role) {
-    return c.json(
-      { error: `Role must be one of: ${ENROLLABLE_ROLES.join(", ")}.` },
-      400,
-    );
+    return yield* new BadRequest({ message: `Role must be one of: ${ENROLLABLE_ROLES.join(", ")}.` });
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
-  const allowedDomains = await allowedDomainsForCourse(db, ctx.scope);
-  const result = await upsertCourseMember(
+  const cipher = yield* identityCipher(c);
+  const allowedDomains = yield* query("allowedDomainsForCourse", (db) => allowedDomainsForCourse(db, ctx.scope));
+  const result = yield* query("upsertCourseMember", (db) => upsertCourseMember(
     db,
     ctx.scope,
     cipher,
@@ -114,23 +116,20 @@ export async function addRosterMemberHandler(c: Context<AppEnv>) {
       role: role as CourseRole,
     },
     allowedDomains,
-  );
+  ));
 
   if (result.status === "invalid_email" || result.status === "disallowed_domain") {
-    return c.json({ error: result.message ?? "That email address cannot be enrolled." }, 400);
+    return yield* new BadRequest({ message: result.message ?? "That email address cannot be enrolled." });
   }
   if (result.status === "role_conflict") {
-    return c.json(
-      {
-        error: `That person is already on this course as ${result.existingRole}. Remove them first if you need to change their role.`,
-      },
-      409,
-    );
+    return yield* new Conflict({
+      message: `That person is already on this course as ${result.existingRole}. Remove them first if you need to change their role.`,
+    });
   }
 
-  await auditRoster(c, ctx, result, { role });
+  yield* auditRoster(ctx, result, { role });
   return c.json(result, result.status === "already_enrolled" ? 200 : 201);
-}
+}));
 
 const MAX_IMPORT_BYTES = 1024 * 1024;
 
@@ -152,20 +151,17 @@ const MAX_IMPORT_BYTES = 1024 * 1024;
  *  Partial failure is isolated per row: valid rows land even when others do
  *  not. An all-or-nothing import of an 80-row file with four typos is a file
  *  the instructor cannot use. */
-export async function importRosterHandler(c: Context<AppEnv>) {
-  const ctx = await instructorScope(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+export const importRosterHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* instructorScope(c);
 
-  let body: { csv?: unknown; preview?: unknown };
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+  const body = yield* Effect.tryPromise({
+    try: () => c.req.json<{ csv?: unknown; preview?: unknown }>(),
+    catch: invalidJson,
+  });
   const csv = typeof body.csv === "string" ? body.csv : "";
-  if (!csv.trim()) return c.json({ error: "Choose a CSV file to import." }, 400);
+  if (!csv.trim()) return yield* new BadRequest({ message: "Choose a CSV file to import." });
   if (csv.length > MAX_IMPORT_BYTES) {
-    return c.json({ error: "That file is too large. Roster files are text, not spreadsheets." }, 400);
+    return yield* new BadRequest({ message: "That file is too large. Roster files are text, not spreadsheets." });
   }
   // Defaults to a preview. Getting this wrong in the safe direction means an
   // instructor sees rows they must confirm; getting it wrong the other way
@@ -173,14 +169,13 @@ export async function importRosterHandler(c: Context<AppEnv>) {
   const preview = body.preview !== false;
 
   const parsed = parseRosterCsv(csv);
-  if (parsed.error) return c.json({ error: parsed.error }, 400);
+  if (parsed.error) return yield* new BadRequest({ message: parsed.error });
   if (parsed.rows.length === 0) {
-    return c.json({ error: "That file has a header but no rows." }, 400);
+    return yield* new BadRequest({ message: "That file has a header but no rows." });
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
-  const allowedDomains = await allowedDomainsForCourse(db, ctx.scope);
+  const cipher = yield* identityCipher(c);
+  const allowedDomains = yield* query("allowedDomainsForCourse", (db) => allowedDomainsForCourse(db, ctx.scope));
 
   /* #355: the whole file is classified in one pass and then resolved in a
      FIXED number of queries, rather than a query per row.
@@ -237,20 +232,20 @@ export async function importRosterHandler(c: Context<AppEnv>) {
 
   if (batch.length > 0) {
     const outcomes = preview
-      ? await previewCourseMembers(
+      ? yield* query("previewCourseMembers", (db) => previewCourseMembers(
           db,
           ctx.scope,
           cipher,
           batch.map((b) => b.entry),
           allowedDomains,
-        )
-      : await upsertCourseMembers(
+        ))
+      : yield* query("upsertCourseMembers", (db) => upsertCourseMembers(
           db,
           ctx.scope,
           cipher,
           batch.map((b) => b.entry),
           allowedDomains,
-        );
+        ));
 
     outcomes.forEach((result, i) => {
       const target = batch[i]!;
@@ -276,22 +271,17 @@ export async function importRosterHandler(c: Context<AppEnv>) {
     // One event for the import, not one per row: the act being audited is
     // "an instructor imported a roster", and a 200-row file would otherwise
     // bury every other event in the org's log for that day.
-    try {
-      const orgScope = await getOrgScopeForCourse(db, ctx.courseId);
-      await auditBestEffort(db, orgScope ? [orgScope] : [], {
-        actorUserId: ctx.authContext.session.userId,
-        action: AUDIT_ACTIONS.ROSTER_IMPORTED,
-        targetType: AUDIT_TARGET_TYPES.COURSE,
-        targetId: ctx.courseId,
-        requestMetadata: { added, restored, failed, rows: rows.length },
-      });
-    } catch (err) {
-      logServerError("importRosterHandler", err);
-    }
+    yield* courseAudit("importRosterHandler", ctx.courseId, {
+      actorUserId: ctx.authContext.session.userId,
+      action: AUDIT_ACTIONS.ROSTER_IMPORTED,
+      targetType: AUDIT_TARGET_TYPES.COURSE,
+      targetId: ctx.courseId,
+      requestMetadata: { added, restored, failed, rows: rows.length },
+    });
   }
 
   return c.json({ rows, preview, added, restored, failed });
-}
+}));
 
 function toRowStatus(status: ProvisionResult["status"]): RosterRowStatus {
   switch (status) {
@@ -312,69 +302,60 @@ function toRowStatus(status: ProvisionResult["status"]): RosterRowStatus {
 
 /** #32: removes someone from the course. Soft -- the row survives because
  *  submissions, grades and audit events reference it. */
-export async function removeRosterMemberHandler(c: Context<AppEnv>) {
-  const ctx = await instructorScope(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+export const removeRosterMemberHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* instructorScope(c);
 
   const membershipId = c.req.param("membershipId");
   if (!membershipId || !UUID_RE.test(membershipId)) {
-    return c.json({ error: "That person is no longer on this course." }, 404);
+    return yield* new NotFound({ message: "That person is no longer on this course." });
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const result = await removeCourseMember(db, ctx.scope, membershipId);
+  const result = yield* query("removeCourseMember", (db) => removeCourseMember(db, ctx.scope, membershipId));
   if (result.outcome === "not_found") {
-    return c.json({ error: "That person is no longer on this course." }, 404);
+    return yield* new NotFound({ message: "That person is no longer on this course." });
   }
   if (result.outcome === "is_instructor") {
     // 409: entitled, but the course's state does not permit it. A course
     // with no instructor has nobody who can add one back -- and this route
     // is reachable by an instructor on their own membership.
-    return c.json(
-      { error: "Instructors cannot be removed from a course here. Contact your program administrator." },
-      409,
-    );
+    return yield* new Conflict({
+      message: "Instructors cannot be removed from a course here. Contact your program administrator.",
+    });
   }
 
-  try {
-    const orgScope = await getOrgScopeForCourse(db, ctx.courseId);
-    await auditBestEffort(db, orgScope ? [orgScope] : [], {
-      actorUserId: ctx.authContext.session.userId,
-      action: AUDIT_ACTIONS.ROSTER_MEMBER_REMOVED,
-      targetType: AUDIT_TARGET_TYPES.USER,
-      targetId: result.userId,
-      requestMetadata: { courseId: ctx.courseId, membershipId: result.membershipId },
-    });
-  } catch (err) {
-    logServerError("removeRosterMemberHandler", err);
-  }
+  yield* courseAudit("removeRosterMemberHandler", ctx.courseId, {
+    actorUserId: ctx.authContext.session.userId,
+    action: AUDIT_ACTIONS.ROSTER_MEMBER_REMOVED,
+    targetType: AUDIT_TARGET_TYPES.USER,
+    targetId: result.userId,
+    requestMetadata: { courseId: ctx.courseId, membershipId: result.membershipId },
+  });
 
   return c.json({ membershipId: result.membershipId });
+}));
+
+/** One audit event against the course's own org (SEC-002). Best-effort
+ *  (#147): a failure -- resolving the org or writing the row -- is logged
+ *  and never fails a roster change that already happened. */
+function courseAudit(where: string, courseId: string, input: Parameters<typeof auditBestEffort>[2]) {
+  return Effect.gen(function* () {
+    const orgScope = yield* query("getOrgScopeForCourse", (db) => getOrgScopeForCourse(db, courseId));
+    yield* query("auditBestEffort", (db) => auditBestEffort(db, orgScope ? [orgScope] : [], input));
+  }).pipe(Effect.catchTag("DatabaseError", (err) => Effect.sync(() => logServerError(where, err.cause))));
 }
 
 /** Best-effort (#147), scoped to the course's org rather than fanned out
  *  (SEC-002). Only writes that changed something are events. */
-async function auditRoster(
-  c: Context<AppEnv>,
-  ctx: { scope: CourseScope; courseId: string; authContext: AuthContext },
-  result: ProvisionResult,
-  metadata: Record<string, unknown>,
-): Promise<void> {
-  if (result.status !== "added" && result.status !== "restored") return;
-  try {
-    const db = makeDb(c.env.DATABASE_URL);
-    const orgScope = await getOrgScopeForCourse(db, ctx.courseId);
-    await auditBestEffort(db, orgScope ? [orgScope] : [], {
-      actorUserId: ctx.authContext.session.userId,
-      action: AUDIT_ACTIONS.ROSTER_MEMBER_ADDED,
-      targetType: AUDIT_TARGET_TYPES.USER,
-      // The membership, not the address: a raw email in an org-scoped audit
-      // log is directly identifying, and the membership resolves to the
-      // person for anyone entitled to look.
-      targetId: result.membershipId ?? ctx.courseId,
-      requestMetadata: { courseId: ctx.courseId, membershipId: result.membershipId, ...metadata },
-    });
-  } catch (err) {
-    logServerError("auditRoster", err);
-  }
+function auditRoster(ctx: CourseAccess, result: ProvisionResult, metadata: Record<string, unknown>) {
+  if (result.status !== "added" && result.status !== "restored") return Effect.void;
+  return courseAudit("auditRoster", ctx.courseId, {
+    actorUserId: ctx.authContext.session.userId,
+    action: AUDIT_ACTIONS.ROSTER_MEMBER_ADDED,
+    targetType: AUDIT_TARGET_TYPES.USER,
+    // The membership, not the address: a raw email in an org-scoped audit
+    // log is directly identifying, and the membership resolves to the
+    // person for anyone entitled to look.
+    targetId: result.membershipId ?? ctx.courseId,
+    requestMetadata: { courseId: ctx.courseId, membershipId: result.membershipId, ...metadata },
+  });
 }

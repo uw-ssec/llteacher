@@ -20,6 +20,7 @@
    -------------------------------------------------------------------------- */
 
 export class CanvasApiError extends Error {
+  readonly _tag: "CanvasApiError" | "CanvasRateLimitedError" = "CanvasApiError";
   constructor(
     message: string,
     public readonly status: number,
@@ -32,6 +33,7 @@ export class CanvasApiError extends Error {
 /** Thrown only after every retry in canvasFetch's own backoff is exhausted
  *  -- a caller catching this has already gotten the benefit of the doubt. */
 export class CanvasRateLimitedError extends CanvasApiError {
+  override readonly _tag = "CanvasRateLimitedError" as const;
   constructor(status: number) {
     super("Canvas rate limit exceeded; retries exhausted", status);
     this.name = "CanvasRateLimitedError";

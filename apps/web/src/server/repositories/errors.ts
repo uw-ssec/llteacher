@@ -22,6 +22,7 @@
 // convention for that specific call site, which this class doesn't
 // override.
 export class TenancyMismatchError extends Error {
+  readonly _tag = "TenancyMismatchError" as const;
   constructor(message: string) {
     super(message);
     this.name = "TenancyMismatchError";
@@ -40,6 +41,7 @@ export class TenancyMismatchError extends Error {
 // server/index.ts's app.onError, same single-chokepoint pattern as
 // TenancyMismatchError above.
 export class IdempotencyKeyConflictError extends Error {
+  readonly _tag = "IdempotencyKeyConflictError" as const;
   constructor(message: string) {
     super(message);
     this.name = "IdempotencyKeyConflictError";
@@ -82,6 +84,7 @@ export function isUniqueViolation(err: unknown, constraint: string): boolean {
 // instead of a clean, retryable response. Mapped to 409 there, same
 // single-chokepoint pattern as TenancyMismatchError/IdempotencyKeyConflictError.
 export class PromptTemplateConflictError extends Error {
+  readonly _tag = "PromptTemplateConflictError" as const;
   constructor(message: string) {
     super(message);
     this.name = "PromptTemplateConflictError";

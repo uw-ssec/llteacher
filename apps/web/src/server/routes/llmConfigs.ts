@@ -39,9 +39,9 @@
    -------------------------------------------------------------------------- */
 
 import { type Context } from "hono";
+import { Effect } from "effect";
 import { generateText } from "ai";
 import { UUID_RE } from "../utils/uuid";
-import { makeDb } from "../../db/client";
 import {
   cloneLlmConfig,
   createLlmConfig,
@@ -71,6 +71,9 @@ import type {
   LlmConfigTestBody,
   LlmConfigTestResponse,
 } from "../../shared/types";
+import { BadRequest, Conflict, DatabaseError, Forbidden, NotFound } from "../effect/errors";
+import { effectHandler } from "../effect/http";
+import { external, query, type Database } from "../effect/services";
 
 /** #31: the temperature and token bounds the form offers, restated as the
  *  server's own rule. `llm_configs_temperature_range_chk` covers temperature
@@ -101,18 +104,44 @@ function isProvider(value: unknown): value is Provider {
   return typeof value === "string" && (PROVIDERS as readonly string[]).includes(value);
 }
 
+type InstructorOrgCtx = { scope: OrgScope; courseId: string; authContext: AuthContext };
+
 /** Resolves the caller's authority (a course) into the scope these routes
- *  operate on (that course's org). Returns null for anything that should be
- *  a 403 -- no auth context, no course, not an instructor of it. */
-async function orgScopeForInstructor(
+ *  operate on (that course's org). Fails Forbidden for anything that should
+ *  be a 403 -- no auth context, no course, not an instructor of it, or a
+ *  course that resolves to no org (fails closed: an unresolvable org must
+ *  not become an unscoped query). */
+function orgScopeForInstructor(
   c: Context<AppEnv>,
-): Promise<{ scope: OrgScope; courseId: string; authContext: AuthContext } | null> {
-  const courseId = c.req.param("courseId");
-  const authContext = c.get("authContext") as AuthContext | undefined;
-  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) return null;
-  const db = makeDb(c.env.DATABASE_URL);
-  const scope = await getOrgScopeForCourse(db, courseId);
-  return scope ? { scope, courseId, authContext } : null;
+): Effect.Effect<InstructorOrgCtx, Forbidden | DatabaseError, Database> {
+  return Effect.gen(function* () {
+    const denied = () => new Forbidden({ message: "Instructor access denied" });
+    const courseId = c.req.param("courseId");
+    const authContext = c.get("authContext") as AuthContext | undefined;
+    if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) return yield* denied();
+    const scope = yield* query("getOrgScopeForCourse", (db) => getOrgScopeForCourse(db, courseId));
+    if (!scope) return yield* denied();
+    return { scope, courseId, authContext };
+  });
+}
+
+/** Unparseable JSON is the caller's fault, not a dependency failure. */
+function readJsonBody<T>(c: Context<AppEnv>): Effect.Effect<T, BadRequest> {
+  return Effect.tryPromise({
+    try: () => c.req.json<T>(),
+    catch: () => new BadRequest({ message: "Request body must be valid JSON" }),
+  });
+}
+
+/** Same sentence for a malformed id and a genuine miss (SEC-003): shape is
+ *  never an existence oracle. */
+const configNotFound = () => new NotFound({ message: "That configuration no longer exists." });
+
+/** SEC-003's shape check: a non-UUID would reach a uuid-typed comparison
+ *  and surface as a 503 for a permanently malformed request. */
+function requireConfigId(c: Context<AppEnv>): Effect.Effect<string, NotFound> {
+  const configId = c.req.param("configId");
+  return configId && UUID_RE.test(configId) ? Effect.succeed(configId) : Effect.fail(configNotFound());
 }
 
 /** Validates a create/update body into the repository's input shape, or
@@ -211,193 +240,147 @@ function isDefaultConflict(err: unknown): boolean {
   return String((err as Error)?.message ?? "").includes("llm_configs_org_default_uq");
 }
 
-export async function listLlmConfigsHandler(c: Context<AppEnv>) {
-  const ctx = await orgScopeForInstructor(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+/** query()'s DatabaseError, with the one constraint violation request input
+ *  can provoke (the default race above) translated to a 409. Any other
+ *  database failure stays a DatabaseError and is answered 503. */
+function translateDefaultRace<A, R>(
+  self: Effect.Effect<A, DatabaseError, R>,
+): Effect.Effect<A, Conflict | DatabaseError, R> {
+  return self.pipe(
+    Effect.catchTag("DatabaseError", (err): Effect.Effect<never, Conflict | DatabaseError> =>
+      isDefaultConflict(err.cause)
+        ? Effect.fail(
+            new Conflict({ message: "Someone else changed the default configuration. Reload and try again." }),
+          )
+        : Effect.fail(err),
+    ),
+  );
+}
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const configs = await listLlmConfigsForOrg(db, ctx.scope);
+/** Rejects a fallback outside the caller's org. The FK only requires the
+ *  row to exist SOMEWHERE. Same gap #161 found with homeworks.llm_config_id:
+ *  without this, a config could name another organization's config as its
+ *  fallback, and a provider outage would then quietly run students on a
+ *  tenant they have no relationship with. */
+function requireFallbackInOrg(
+  ctx: InstructorOrgCtx,
+  fallbackLlmConfigId: string | null,
+): Effect.Effect<void, BadRequest | DatabaseError, Database> {
+  return Effect.gen(function* () {
+    if (!fallbackLlmConfigId) return;
+    const fallback = yield* query("getLlmConfig", (db) => getLlmConfig(db, ctx.scope, fallbackLlmConfigId));
+    if (!fallback) return yield* new BadRequest({ message: "That fallback configuration no longer exists." });
+  });
+}
+
+export const listLlmConfigsHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* orgScopeForInstructor(c);
+  const configs = yield* query("listLlmConfigsForOrg", (db) => listLlmConfigsForOrg(db, ctx.scope));
   const body: LlmConfigListResponse = { configs };
   return c.json(body);
-}
+}));
 
-export async function getLlmConfigHandler(c: Context<AppEnv>) {
-  const ctx = await orgScopeForInstructor(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+export const getLlmConfigHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* orgScopeForInstructor(c);
+  const configId = yield* requireConfigId(c);
 
-  const configId = c.req.param("configId");
-  // SEC-003's shape check: a non-UUID would reach a uuid-typed comparison
-  // and surface as a 503 for a permanently malformed request.
-  if (!configId || !UUID_RE.test(configId)) {
-    return c.json({ error: "That configuration no longer exists." }, 404);
-  }
-
-  const db = makeDb(c.env.DATABASE_URL);
-  const config = await getLlmConfig(db, ctx.scope, configId);
-  if (!config) return c.json({ error: "That configuration no longer exists." }, 404);
+  const config = yield* query("getLlmConfig", (db) => getLlmConfig(db, ctx.scope, configId));
+  if (!config) return yield* configNotFound();
   return c.json(config);
-}
+}));
 
-export async function createLlmConfigHandler(c: Context<AppEnv>) {
-  const ctx = await orgScopeForInstructor(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+export const createLlmConfigHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* orgScopeForInstructor(c);
 
-  let raw: unknown;
-  try {
-    raw = await c.req.json<LlmConfigBody>();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+  const raw = yield* readJsonBody<LlmConfigBody>(c);
   const parsed = parseConfigBody(raw);
-  if ("error" in parsed) return c.json({ error: parsed.error }, 400);
+  if ("error" in parsed) return yield* new BadRequest({ message: parsed.error });
 
-  const db = makeDb(c.env.DATABASE_URL);
-  if (parsed.input.fallbackLlmConfigId) {
-    // The FK only requires the row to exist SOMEWHERE. Same gap #161 found
-    // with homeworks.llm_config_id: without this, a config could name
-    // another organization's config as its fallback, and a provider outage
-    // would then quietly run students on a tenant they have no relationship
-    // with.
-    const fallback = await getLlmConfig(db, ctx.scope, parsed.input.fallbackLlmConfigId);
-    if (!fallback) return c.json({ error: "That fallback configuration no longer exists." }, 400);
-  }
+  yield* requireFallbackInOrg(ctx, parsed.input.fallbackLlmConfigId);
 
-  let created;
-  try {
-    created = await createLlmConfig(db, ctx.scope, parsed.input);
-  } catch (err) {
-    if (isDefaultConflict(err)) {
-      return c.json(
-        { error: "Someone else changed the default configuration. Reload and try again." },
-        409,
-      );
-    }
-    throw err;
-  }
+  const created = yield* query("createLlmConfig", (db) => createLlmConfig(db, ctx.scope, parsed.input)).pipe(
+    translateDefaultRace,
+  );
 
-  await auditConfigChange(c, ctx, AUDIT_ACTIONS.LLM_CONFIG_CREATED, created.id, {
+  yield* auditConfigChange(ctx, AUDIT_ACTIONS.LLM_CONFIG_CREATED, created.id, {
     name: created.name,
     isDefault: created.isDefault,
   });
   return c.json(created, 201);
-}
+}));
 
-export async function updateLlmConfigHandler(c: Context<AppEnv>) {
-  const ctx = await orgScopeForInstructor(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+export const updateLlmConfigHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* orgScopeForInstructor(c);
+  const configId = yield* requireConfigId(c);
 
-  const configId = c.req.param("configId");
-  if (!configId || !UUID_RE.test(configId)) {
-    return c.json({ error: "That configuration no longer exists." }, 404);
-  }
-
-  let raw: unknown;
-  try {
-    raw = await c.req.json<LlmConfigBody>();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+  const raw = yield* readJsonBody<LlmConfigBody>(c);
   const parsed = parseConfigBody(raw);
-  if ("error" in parsed) return c.json({ error: parsed.error }, 400);
+  if ("error" in parsed) return yield* new BadRequest({ message: parsed.error });
 
   if (parsed.input.fallbackLlmConfigId === configId) {
     // The schema rejects this too (llm_configs_fallback_not_self_chk); this
     // is the sentence that says why rather than a constraint name.
-    return c.json({ error: "A configuration cannot be its own fallback." }, 400);
+    return yield* new BadRequest({ message: "A configuration cannot be its own fallback." });
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  if (parsed.input.fallbackLlmConfigId) {
-    const fallback = await getLlmConfig(db, ctx.scope, parsed.input.fallbackLlmConfigId);
-    if (!fallback) return c.json({ error: "That fallback configuration no longer exists." }, 400);
-  }
+  yield* requireFallbackInOrg(ctx, parsed.input.fallbackLlmConfigId);
 
-  let updated;
-  try {
-    updated = await updateLlmConfig(db, ctx.scope, configId, parsed.input);
-  } catch (err) {
-    if (isDefaultConflict(err)) {
-      return c.json(
-        { error: "Someone else changed the default configuration. Reload and try again." },
-        409,
-      );
-    }
-    throw err;
-  }
-  if (!updated) return c.json({ error: "That configuration no longer exists." }, 404);
+  const updated = yield* query(
+    "updateLlmConfig",
+    (db) => updateLlmConfig(db, ctx.scope, configId, parsed.input),
+  ).pipe(translateDefaultRace);
+  if (!updated) return yield* configNotFound();
 
-  await auditConfigChange(c, ctx, AUDIT_ACTIONS.LLM_CONFIG_UPDATED, updated.id, {
+  yield* auditConfigChange(ctx, AUDIT_ACTIONS.LLM_CONFIG_UPDATED, updated.id, {
     name: updated.name,
     isDefault: updated.isDefault,
     isActive: updated.isActive,
   });
   return c.json(updated);
-}
+}));
 
-export async function deactivateLlmConfigHandler(c: Context<AppEnv>) {
-  const ctx = await orgScopeForInstructor(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+export const deactivateLlmConfigHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* orgScopeForInstructor(c);
+  const configId = yield* requireConfigId(c);
 
-  const configId = c.req.param("configId");
-  if (!configId || !UUID_RE.test(configId)) {
-    return c.json({ error: "That configuration no longer exists." }, 404);
-  }
-
-  const db = makeDb(c.env.DATABASE_URL);
-  const outcome = await deactivateLlmConfig(db, ctx.scope, configId);
-  if (outcome === "not_found") {
-    return c.json({ error: "That configuration no longer exists." }, 404);
-  }
+  const outcome = yield* query("deactivateLlmConfig", (db) => deactivateLlmConfig(db, ctx.scope, configId));
+  if (outcome === "not_found") return yield* configNotFound();
   if (outcome === "is_default") {
     // 409, not 403: the caller is entitled to do this, the org's state just
     // does not permit it yet. The sentence names the unblocking step.
-    return c.json(
-      {
-        error:
-          "This is the default configuration for your organization. Make another configuration the default first, then deactivate this one.",
-      },
-      409,
-    );
+    return yield* new Conflict({
+      message:
+        "This is the default configuration for your organization. Make another configuration the default first, then deactivate this one.",
+    });
   }
 
-  await auditConfigChange(c, ctx, AUDIT_ACTIONS.LLM_CONFIG_DEACTIVATED, configId, {});
+  yield* auditConfigChange(ctx, AUDIT_ACTIONS.LLM_CONFIG_DEACTIVATED, configId, {});
   return c.json({ id: configId, isActive: false });
-}
+}));
 
-export async function cloneLlmConfigHandler(c: Context<AppEnv>) {
-  const ctx = await orgScopeForInstructor(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+export const cloneLlmConfigHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* orgScopeForInstructor(c);
+  const configId = yield* requireConfigId(c);
 
-  const configId = c.req.param("configId");
-  if (!configId || !UUID_RE.test(configId)) {
-    return c.json({ error: "That configuration no longer exists." }, 404);
-  }
-
-  let body: LlmConfigCloneBody;
-  try {
-    body = await c.req.json<LlmConfigCloneBody>();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+  const body = yield* readJsonBody<LlmConfigCloneBody>(c);
   const name = typeof body.name === "string" ? body.name.trim() : "";
-  if (!name) return c.json({ error: "Give the copy a name." }, 400);
+  if (!name) return yield* new BadRequest({ message: "Give the copy a name." });
   if (name.length > NAME_MAX) {
-    return c.json({ error: `Name must be ${NAME_MAX} characters or fewer.` }, 400);
+    return yield* new BadRequest({ message: `Name must be ${NAME_MAX} characters or fewer.` });
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const clone = await cloneLlmConfig(db, ctx.scope, configId, name);
+  const clone = yield* query("cloneLlmConfig", (db) => cloneLlmConfig(db, ctx.scope, configId, name));
   // Null covers "no such config" and "another organization's config"
   // indistinguishably -- cloning must not become a way to read across
   // tenants, not even to learn that an id exists.
-  if (!clone) return c.json({ error: "That configuration no longer exists." }, 404);
+  if (!clone) return yield* configNotFound();
 
-  await auditConfigChange(c, ctx, AUDIT_ACTIONS.LLM_CONFIG_CREATED, clone.id, {
+  yield* auditConfigChange(ctx, AUDIT_ACTIONS.LLM_CONFIG_CREATED, clone.id, {
     name: clone.name,
     clonedFrom: configId,
   });
   return c.json(clone, 201);
-}
+}));
 
 /** #31: "Test configuration" -- one non-streaming generation against the
  *  config as saved, returning the reply text and token usage.
@@ -419,28 +402,17 @@ export async function cloneLlmConfigHandler(c: Context<AppEnv>) {
 const TEST_SEND_TIMEOUT_MS = 25_000;
 const TEST_MESSAGE_MAX = 4_000;
 
-export async function testLlmConfigHandler(c: Context<AppEnv>) {
-  const ctx = await orgScopeForInstructor(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+export const testLlmConfigHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* orgScopeForInstructor(c);
+  const configId = yield* requireConfigId(c);
 
-  const configId = c.req.param("configId");
-  if (!configId || !UUID_RE.test(configId)) {
-    return c.json({ error: "That configuration no longer exists." }, 404);
-  }
-
-  let body: LlmConfigTestBody;
-  try {
-    body = await c.req.json<LlmConfigTestBody>();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+  const body = yield* readJsonBody<LlmConfigTestBody>(c);
   const message = typeof body.message === "string" ? body.message.trim() : "";
-  if (!message) return c.json({ error: "Enter a message to send." }, 400);
+  if (!message) return yield* new BadRequest({ message: "Enter a message to send." });
   if (message.length > TEST_MESSAGE_MAX) {
-    return c.json({ error: `Test messages are limited to ${TEST_MESSAGE_MAX} characters.` }, 400);
+    return yield* new BadRequest({ message: `Test messages are limited to ${TEST_MESSAGE_MAX} characters.` });
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
   // #365: `loadLLMConfigById`, not the console's own `getLlmConfig`. This
   // handler needs the row's `credentialId` (which the console's wire shape
   // deliberately does not carry) to resolve a key at all, and reading it
@@ -450,8 +422,11 @@ export async function testLlmConfigHandler(c: Context<AppEnv>) {
   // button is for, and it serves no student traffic -- the previous
   // `getLlmConfig` read didn't filter on isActive either, so this preserves
   // that behaviour rather than tightening it as a side effect.
-  const config = await loadLLMConfigById(db, ctx.scope, configId, { activeOnly: false });
-  if (!config) return c.json({ error: "That configuration no longer exists." }, 404);
+  const config = yield* query(
+    "loadLLMConfigById",
+    (db) => loadLLMConfigById(db, ctx.scope, configId, { activeOnly: false }),
+  );
+  if (!config) return yield* configNotFound();
 
   // #365: previously hardcoded `getOpenRouter(c.env.OPENROUTER_API_KEY)`
   // regardless of what the config actually said. Since migration 0035 every
@@ -475,40 +450,59 @@ export async function testLlmConfigHandler(c: Context<AppEnv>) {
   // generation. There is deliberately no second `getLlmConfig` read to pair
   // with it, so an admin editing the config mid-request cannot make this
   // handler run a hybrid of the old provider and the new model.
-  let model: ReturnType<ReturnType<typeof buildProviderClient>>;
-  try {
-    const apiKey = await resolveApiKey(c.env, db, ctx.scope, config);
-    // #333: only consulted for the llmoxie provider; ignored for every other.
-    model = buildProviderClient(config.provider, apiKey, { llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL })(
-      config.modelName,
+  const resolved = yield* Effect.gen(function* () {
+    const apiKey = yield* query(
+      "resolveApiKey",
+      (db) => resolveApiKey(c.env, db, ctx.scope, config),
+      [LLMCredentialMissingError],
     );
-  } catch (err) {
-    if (err instanceof LLMCredentialMissingError || err instanceof UnsupportedLLMProviderError) {
-      // Same 503 + sentence the missing-OPENROUTER_API_KEY branch produced,
-      // now covering every way this config can be unreachable: no credential
-      // and no fallback binding for its provider, a stale/cross-org
-      // credentialId, a secret_ref off the allowlist (#323), or a provider
-      // this deployment has no client factory for (#325). The message stays
-      // deliberately generic -- err.message names bindings and config ids,
-      // which is server-log material, not console copy.
-      logServerError("testLlmConfigHandler", err);
-      return c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503);
-    }
-    /* #425: resolveApiKey does a DB read (organization_credentials), so a
-       transient Neon failure lands here too. Narrowing the catch to the two
-       typed errors turned that into an unhandled 500 with no actionable copy
-       -- on a button whose entire purpose is to report a diagnosable result.
-       Reported as the same 503 the other unreachable cases produce: from the
-       admin's side "we could not check right now" is the honest answer, and
-       the real error is in the log. */
-    logServerError("testLlmConfigHandler", err);
-    return c.json({ error: "The model gateway could not be reached. Try again shortly." }, 503);
-  }
+    // #333: only consulted for the llmoxie provider; ignored for every other.
+    return yield* external(
+      "llm",
+      "buildProviderClient",
+      async () => buildProviderClient(config.provider, apiKey, { llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL })(
+        config.modelName,
+      ),
+      [UnsupportedLLMProviderError],
+    );
+  }).pipe(
+    Effect.map((model) => ({ model })),
+    Effect.catch((err) => {
+      if (err._tag === "LLMCredentialMissingError" || err._tag === "UnsupportedLLMProviderError") {
+        // Same 503 + sentence the missing-OPENROUTER_API_KEY branch produced,
+        // now covering every way this config can be unreachable: no credential
+        // and no fallback binding for its provider, a stale/cross-org
+        // credentialId, a secret_ref off the allowlist (#323), or a provider
+        // this deployment has no client factory for (#325). The message stays
+        // deliberately generic -- err.message names bindings and config ids,
+        // which is server-log material, not console copy.
+        logServerError("testLlmConfigHandler", err);
+        return Effect.succeed({
+          response: c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503),
+        });
+      }
+      /* #425: resolveApiKey does a DB read (organization_credentials), so a
+         transient database failure lands here too (a DatabaseError, or an
+         ExternalServiceError from building the client). Reported as the
+         same 503 the other unreachable cases produce rather than the generic
+         one: from the admin's side "we could not check right now" is the
+         honest answer, and the real error is in the log. Kept distinct from
+         the sentence above so an unrelated failure is never reported to the
+         instructor as a gateway misconfiguration they would then go and
+         "fix". */
+      logServerError("testLlmConfigHandler", err.cause);
+      return Effect.succeed({
+        response: c.json({ error: "The model gateway could not be reached. Try again shortly." }, 503),
+      });
+    }),
+  );
+  if ("response" in resolved) return resolved.response;
+  const { model } = resolved;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TEST_SEND_TIMEOUT_MS);
-  try {
-    const result = await generateText({
+  const result = yield* external("llm", "generateText", () =>
+    generateText({
       model,
       // The config's own prompt is what is under test. An empty one is a
       // legitimate state (the column defaults to ''), and sending no system
@@ -518,67 +512,67 @@ export async function testLlmConfigHandler(c: Context<AppEnv>) {
       temperature: config.temperature,
       maxOutputTokens: config.maxCompletionTokens,
       abortSignal: controller.signal,
-    });
+    }),
+  ).pipe(
+    Effect.ensuring(Effect.sync(() => clearTimeout(timer))),
+    Effect.map((generated) => ({ generated })),
+    Effect.catchTag("ExternalServiceError", (err) => {
+      // The provider's own message is NOT forwarded: it can carry request
+      // urls, org identifiers and occasionally key prefixes. Logged
+      // server-side, summarised to the instructor as the two things they can
+      // act on -- the model id was wrong, or the provider did not answer.
+      logServerError("testLlmConfigHandler", err.cause);
+      const timedOut = controller.signal.aborted;
+      const response: LlmConfigTestResponse = {
+        ok: false,
+        modelName: config.modelName,
+        error: timedOut
+          ? `The model did not answer within ${TEST_SEND_TIMEOUT_MS / 1000} seconds. It may be overloaded, or the model id may not exist.`
+          : "The model gateway rejected that request. Check the model id, then try again.",
+      };
+      // 200 with ok:false: the *request* succeeded and produced a result the
+      // instructor needs to read. A 5xx here would be indistinguishable from
+      // the console being broken, which is the opposite of what a test button
+      // is for.
+      return Effect.succeed({ response: c.json(response) });
+    }),
+  );
+  if ("response" in result) return result.response;
 
-    await auditConfigChange(c, ctx, AUDIT_ACTIONS.LLM_CONFIG_TESTED, configId, {
-      modelName: config.modelName,
-    });
+  yield* auditConfigChange(ctx, AUDIT_ACTIONS.LLM_CONFIG_TESTED, configId, {
+    modelName: config.modelName,
+  });
 
-    const response: LlmConfigTestResponse = {
-      ok: true,
-      text: result.text,
-      modelName: config.modelName,
-      usage: {
-        inputTokens: result.usage?.inputTokens ?? null,
-        outputTokens: result.usage?.outputTokens ?? null,
-      },
-    };
-    return c.json(response);
-  } catch (err) {
-    // The provider's own message is NOT forwarded: it can carry request
-    // urls, org identifiers and occasionally key prefixes. Logged
-    // server-side, summarised to the instructor as the two things they can
-    // act on -- the model id was wrong, or the provider did not answer.
-    logServerError("testLlmConfigHandler", err);
-    const timedOut = controller.signal.aborted;
-    const response: LlmConfigTestResponse = {
-      ok: false,
-      modelName: config.modelName,
-      error: timedOut
-        ? `The model did not answer within ${TEST_SEND_TIMEOUT_MS / 1000} seconds. It may be overloaded, or the model id may not exist.`
-        : "The model gateway rejected that request. Check the model id, then try again.",
-    };
-    // 200 with ok:false: the *request* succeeded and produced a result the
-    // instructor needs to read. A 5xx here would be indistinguishable from
-    // the console being broken, which is the opposite of what a test button
-    // is for.
-    return c.json(response);
-  } finally {
-    clearTimeout(timer);
-  }
-}
+  const response: LlmConfigTestResponse = {
+    ok: true,
+    text: result.generated.text,
+    modelName: config.modelName,
+    usage: {
+      inputTokens: result.generated.usage?.inputTokens ?? null,
+      outputTokens: result.generated.usage?.outputTokens ?? null,
+    },
+  };
+  return c.json(response);
+}));
 
 /** Best-effort (#147), scoped to the course's org rather than fanned out
  *  (SEC-002). A config change is an org-level act with real blast radius --
  *  the default is what every unpinned course runs on -- so it is audited,
- *  but an audit outage must not fail a save that already landed. */
-async function auditConfigChange(
-  c: Context<AppEnv>,
-  ctx: { scope: OrgScope; courseId: string; authContext: AuthContext },
+ *  but an audit outage must not fail a save that already landed: a
+ *  DatabaseError here is logged and swallowed, never answered 503. */
+function auditConfigChange(
+  ctx: InstructorOrgCtx,
   action: string,
   configId: string,
   metadata: Record<string, unknown>,
-): Promise<void> {
-  try {
-    const db = makeDb(c.env.DATABASE_URL);
-    await auditBestEffort(db, [ctx.scope], {
+): Effect.Effect<void, never, Database> {
+  return query("auditBestEffort", (db) =>
+    auditBestEffort(db, [ctx.scope], {
       actorUserId: ctx.authContext.session.userId,
       action,
       targetType: AUDIT_TARGET_TYPES.LLM_CONFIG,
       targetId: configId,
       requestMetadata: { courseId: ctx.courseId, ...metadata },
-    });
-  } catch (err) {
-    logServerError("auditConfigChange", err);
-  }
+    }),
+  ).pipe(Effect.catchTag("DatabaseError", (err) => Effect.sync(() => logServerError("auditConfigChange", err.cause))));
 }

@@ -3,6 +3,7 @@ import type { Db } from "../../db/client";
 import { homeworks, sections, sectionSolutions, conversations, homeworkProgressWidgets } from "../../db/schema";
 import type { CourseScope } from "./scope";
 import {
+  ContentDiffError,
   planSectionDiff,
   type ExistingSection,
   type IncomingSection,
@@ -324,7 +325,7 @@ async function resolveSectionWrites(
       if (!reserved.has(candidate)) { scratch = candidate; break; }
     }
     if (scratch === undefined) {
-      throw new Error(
+      throw new ContentDiffError(
         "cannot resolve section reorder: no free order slot to stage a cyclic move -- reorder in two smaller steps",
       );
     }
@@ -427,7 +428,7 @@ async function resolveWidgetWrites(
       if (!reserved.has(candidate)) { scratch = candidate; break; }
     }
     if (scratch === undefined) {
-      throw new Error(
+      throw new ContentDiffError(
         "cannot resolve widget reorder: no free order slot to stage a cyclic move -- reorder in two smaller steps",
       );
     }
@@ -454,9 +455,9 @@ async function resolveWidgetWrites(
  *  write defers into a batch array or executes immediately against `tx`
  *  differs, so real-DB tests exercise the same logic production runs.
  *  Returns null if `id` isn't found in `scope` (caller maps that to 404).
- *  Throws for constraint violations (duplicate/out-of-range order) and for
- *  the unresolvable-cycle edge case, both uncaught -- the route layer
- *  (Task 6) catches and maps those to a 422. */
+ *  Throws ContentDiffError (sections.ts) for a duplicate/out-of-range
+ *  order, an id outside this homework, and the unresolvable-cycle edge
+ *  case -- the route layer (Task 6) maps it to a 422. */
 export async function updateHomework(
   db: Db,
   scope: CourseScope,
