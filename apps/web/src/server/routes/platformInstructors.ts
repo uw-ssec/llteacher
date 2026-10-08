@@ -68,7 +68,7 @@ export const grantPlatformInstructorHandler = effectHandler((c) => Effect.gen(fu
     ),
   );
 
-  if (result.status === "invalid_email" || result.status === "disallowed_domain") {
+  if (result.status !== "granted") {
     return yield* new BadRequest({ message: result.message });
   }
 

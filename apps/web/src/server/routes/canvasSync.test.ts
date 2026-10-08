@@ -386,7 +386,7 @@ describe("dependency failures (Effect error channel)", () => {
   });
 
   it("releases the sync claim when the credential is gone (409)", async () => {
-    getDecryptedMock.mockResolvedValue(null);
+    getDecryptedByIdMock.mockResolvedValue(null);
     const res = await buildApp(instructorOfA()).request(url("/sync"), { method: "POST" }, TEST_ENV);
     expect(res.status).toBe(409);
     expect(updateSyncStatusMock).toHaveBeenCalledWith({}, "lms-1", expect.objectContaining({ status: "error" }));
